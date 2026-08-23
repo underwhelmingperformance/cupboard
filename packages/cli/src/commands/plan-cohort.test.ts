@@ -43,9 +43,7 @@ import {
 import type { RootClient } from './root.ts';
 
 function noop(): void {
-	/*
-	test double: nothing to record
-	*/
+	// Intentionally empty test callback.
 }
 
 const appPath = storePathSchema.parse(
@@ -503,7 +501,7 @@ describe('runPlanCohort', () => {
 		}
 	});
 
-	it('reports and rethrows a typed refusal when unknown paths exceed the ceiling', async () => {
+	it('emits plan-cohort-refusal before throwing UnknownPathsCeilingError', async () => {
 		const payloads: ResultPayload[] = [];
 		const missing: NixMissingPartition = {
 			willBuild: [],
@@ -561,7 +559,7 @@ describe('runPlanCohort', () => {
 				rows: [
 					{
 						label: 'Refusal',
-						value: 'One or more required store paths are unavailable to Nix'
+						value: 'Nix cannot obtain one or more required store paths'
 					},
 					{ label: 'Unavailable paths', value: '1' },
 					{ label: 'Limit', value: '0' },
@@ -571,15 +569,15 @@ describe('runPlanCohort', () => {
 							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app; ' +
 							'target packages.x86_64-linux.app ' +
 							'(/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app)\n' +
-							"The local Nix daemon's store does not contain this path, and " +
-							'no substituter the plan could query provided it.'
+							"The local Nix daemon's store does not contain this path. The " +
+							'plan queried the available substituters, but none provided it.'
 					}
 				]
 			}
 		]);
 	});
 
-	it('reports and rethrows a typed refusal when the measured bytes would not fit', async () => {
+	it('emits plan-cohort-refusal before throwing StoreCapacityError', async () => {
 		const payloads: ResultPayload[] = [];
 		const missing: NixMissingPartition = {
 			willBuild: [appPath],
@@ -629,7 +627,7 @@ describe('runPlanCohort', () => {
 		]);
 	});
 
-	it('builds a candidate the upstream confirmation refuses and records the reason', async () => {
+	it('adds a candidate to buildSet and records closure-not-served when upstream confirmation fails', async () => {
 		const payloads: ResultPayload[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
@@ -893,9 +891,9 @@ describe('plan cohort command', () => {
 	});
 });
 
-// What the plan does about the paths its first pass left unknown. A daemon
-// caches what the substituters said and drops an untrusted client's settings;
-// a store this process drives asks the substituters as the question is put.
+// Bypass cached results only when the selected store caches substituter
+// queries and honours per-command settings. Otherwise return `already-fresh`
+// or `refused` without opening the bypass.
 describe('requeryUnknownWith', () => {
 	const requeried: NixMissingPartition = {
 		...emptyMissing(),
@@ -927,7 +925,7 @@ describe('requeryUnknownWith', () => {
 		};
 	}
 
-	it('asks nothing again of a store whose answers were never cached', async () => {
+	it('skips the bypass query when the store does not cache substituter results', async () => {
 		const opened: string[] = [];
 
 		const outcome = await requeryUnknownWith(
@@ -946,7 +944,7 @@ describe('requeryUnknownWith', () => {
 		});
 	});
 
-	it('asks again through the bypass when the store honours its settings', async () => {
+	it('uses the bypass partition and sizes when the store honours per-command settings', async () => {
 		const opened: string[] = [];
 
 		const outcome = await requeryUnknownWith(
@@ -958,8 +956,6 @@ describe('requeryUnknownWith', () => {
 			[appPath]
 		);
 
-		// The sizes are asked of the same bypass the partition came from, for
-		// the paths that answer classified as substitutable.
 		expect({ outcome, opened }).toStrictEqual({
 			outcome: {
 				kind: 'answered',
@@ -1002,7 +998,7 @@ describe('requeryUnknownWith', () => {
 				'the remote transport does not pass per-command settings to the Nix daemon'
 		}
 	])(
-		'refuses, without opening a bypass, when the connection is $name',
+		'returns refused without opening the bypass when the connection is $name',
 		async ({ settings, reason }) => {
 			const opened: string[] = [];
 

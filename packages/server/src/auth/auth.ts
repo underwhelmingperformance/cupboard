@@ -18,40 +18,32 @@ import { importJWK, jwtVerify, SignJWT } from 'jose';
 
 import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 
-// A token's authority is its grant set, carried as RFC 9396
-// `authorization_details`. The owner holds a single wildcard grant; a CI token
-// holds the concrete grants its trust rule permitted.
+// Construct this value only after Cupboard verifies the token. The grants are
+// parsed from its RFC 9396 `authorization_details` claim.
 export interface AccessClaims {
 	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
-	// When the bearer token itself expires. Any credential derived from this
-	// token is capped at this instant, so it cannot outlive the token.
+	// The instant in the JWT's `exp` claim. Verification tolerance does not
+	// extend this value.
 	readonly expiresAt: Date;
 }
 
-// The issued-token type per RFC 9068, set in the header and verified on the way
-// back in. The grants are carried in the RFC 9396 claim.
+// Require the RFC 9068 access-token media type so an OIDC ID token cannot be
+// accepted here.
 const accessTokenType = 'at+jwt';
 const authorizationDetailsClaim = 'authorization_details';
 
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
 export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
-// Each refresh rotates the token with a fresh window, so a session lives as
-// long as it is used at least this often; an idle one lapses to `cupboard
-// login`.
 export const refreshTokenTtlSeconds = ttlSecondsSchema.parse(30 * 24 * 60 * 60);
 export const accessJwtClockToleranceSeconds = 30;
 export const accessJwtRetirementMarginSeconds = 5 * 60;
 
-// A public key in the verification set, addressed by its `kid` so a rotated key
-// set can hold several at once.
 export interface AuthPublicKey {
 	readonly kid: AuthKeyId;
 	readonly publicJwk: JsonWebKey;
 }
 
-// The bearer token from an `Authorization: Bearer <token>` header, or undefined
-// when the header is absent or not a bearer credential.
 export function bearerToken(request: Request): string | undefined {
 	const header = request.headers.get('authorization');
 
@@ -81,9 +73,12 @@ export abstract class AccessTokenError extends Error {}
 
 export class AccessTokenVerificationError extends AccessTokenError {
 	constructor(options: { readonly cause: unknown }) {
-		super('Access token signature, issuer, audience, or expiry is invalid', {
-			cause: options.cause
-		});
+		super(
+			'Access token is malformed or its signing key, protected header, signature, issuer, audience, or required claims are invalid',
+			{
+				cause: options.cause
+			}
+		);
 		this.name = 'AccessTokenVerificationError';
 	}
 }
@@ -109,12 +104,14 @@ export class MissingSubjectError extends AccessTokenError {
 	}
 }
 
-// cupboard signs its own access tokens with EdDSA; the same value labels the
-// public key published in the JWKS.
 export const authJwtAlgorithm = 'EdDSA';
 const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = accessJwtClockToleranceSeconds;
 
+/**
+ * Keeps the outgoing key live through the longest access-token lifetime,
+ * verifier clock tolerance, and retirement margin.
+ */
 export function scheduledAccessKeyRetireAt(rotatedAt: Date): IsoTimestamp {
 	const retireAt = new Date(
 		rotatedAt.getTime() +
@@ -151,8 +148,8 @@ export async function issueAccessJwt(
 	const key = await importJWK(privateJwk, jwtAlgorithm);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	// Audit claims are spread first so the grants claim below always wins; the
-	// registered claims set via the builder cannot be clobbered by them either.
+	// Spread caller-supplied audit claims first. The authoritative grants and
+	// registered claims must overwrite conflicting names.
 	const jwt = new SignJWT({
 		...options.auditClaims,
 		[authorizationDetailsClaim]: options.grants
@@ -212,7 +209,7 @@ export async function verifyAccessJwt(
 		throw new MissingSubjectError();
 	}
 
-	// `exp` is a required claim above, so a verified token always carries one.
+	// jose does not narrow the payload type after `requiredClaims` enforces `exp`.
 	const expiresAt = new Date((verified.payload.exp ?? 0) * 1000);
 
 	return {

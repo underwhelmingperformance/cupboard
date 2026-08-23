@@ -8,8 +8,6 @@ import {
 	retryingFetcher
 } from './retry.ts';
 
-// Stands in for a caller's typed abort reason (the CLI aborts with its own
-// error class); the wrapper must surface it unchanged.
 class TestAbortError extends Error {
 	constructor() {
 		super('aborted');
@@ -17,8 +15,6 @@ class TestAbortError extends Error {
 	}
 }
 
-// A fetcher scripted with a fixed sequence of outcomes, recording every attempt
-// so a test can assert how many times it was called and what it received.
 function scriptedFetcher(outcomes: (() => Response | Promise<Response>)[]): {
 	readonly fetcher: typeof fetch;
 	readonly attempts: () => number;
@@ -203,7 +199,6 @@ describe('retryingFetcher', () => {
 		vi.useFakeTimers();
 
 		try {
-			// One attempt plus the four retries, all refused.
 			const { fetcher, attempts } = scriptedFetcher(
 				Array.from({ length: 5 }, () => status(StatusCodes.SERVICE_UNAVAILABLE))
 			);
@@ -288,8 +283,6 @@ describe('retryingFetcher', () => {
 
 			const pending = retryingFetcher(fetcher)('https://x.test');
 
-			// The cap is 5s, so advancing past it fires the retry despite the hour-long
-			// header.
 			await vi.advanceTimersByTimeAsync(5000);
 			await pending;
 

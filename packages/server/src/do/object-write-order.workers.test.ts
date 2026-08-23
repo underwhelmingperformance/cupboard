@@ -22,14 +22,10 @@ import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const cache = '';
 
-// Resolves once the resolver-backed promise settles, the shape awaited on.
 async function settled(pending: Promise<unknown>): Promise<void> {
 	await pending;
 }
 
-// A bucket whose first delete of `stalledKey` parks until `release` is called,
-// then performs the real delete: the shape of a gated delete that outlasts its
-// deadline, is abandoned, and reaches the object store later.
 function stallingBucket(
 	target: R2Bucket,
 	stalledKey: string
@@ -89,16 +85,13 @@ async function narInfoObjectText(
 	return object === null ? undefined : object.text();
 }
 
-// A gated narinfo-object delete that outlasts its deadline is abandoned, not
-// cancelled, and the object is path-keyed with no heal on read: without
-// ordering, the abandoned delete would land after a later put at the same key
-// and destroy a live object. Every mutation orders behind the abandoned call's
-// settled-signal, so the put waits for the delete to land and the object
-// survives.
+// A timed-out R2 delete continues after the critical section releases. A later
+// put to the same path-keyed object must wait for that delete to finish, or the
+// late delete could remove the newly published narinfo.
 describe('path-keyed object write ordering', () => {
 	beforeEach(resetTestServer);
 
-	it('holds a later put back until an abandoned delete has landed', async () => {
+	it('waits for an abandoned delete before issuing a later put', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('write-order');
 		const metadata = uploadMetadata({
@@ -130,8 +123,6 @@ describe('path-keyed object write ordering', () => {
 
 			const service = new NarInfoObjectsService(context);
 
-			// The gated delete outlasts the shortened budget: the section unwinds
-			// retryably and the delete is left running, abandoned.
 			let error: unknown;
 
 			try {
@@ -169,8 +160,6 @@ describe('path-keyed object write ordering', () => {
 				return;
 			}
 
-			// The re-commit's put arrives while the abandoned delete is still in
-			// flight; it must not land first.
 			let didPutSettle = false;
 			const put = (async () => {
 				await service.putNarInfoObject(
@@ -197,8 +186,6 @@ describe('path-keyed object write ordering', () => {
 			await put;
 		});
 
-		// The put landed after the abandoned delete, so the object survives and
-		// matches the committed row.
 		expect(await narInfoObjectText(metadata.storePathHash)).toBe(committed);
 	});
 });

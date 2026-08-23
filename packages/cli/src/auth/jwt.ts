@@ -1,6 +1,6 @@
 /**
  * Decodes the unverified payload of a JWT: its middle segment is base64url JSON.
- * Returns undefined when the token carries no payload segment or it is not valid
+ * Returns undefined when the token has no payload segment or it is not valid
  * JSON. The claims are unverified, so callers must validate anything they read
  * and never trust it for a security decision.
  */

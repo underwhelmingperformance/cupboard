@@ -91,15 +91,15 @@ function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
 
 // The command-scoped logger for the run in progress, set once the invoked
 // subcommand is known (the `preAction` hook). It is held on an object so the
-// hook can replace the field; before a command begins, callers fall back to the
-// bare root logger.
+// hook can replace the field. Before the first command begins, callers fall
+// back to the bare root logger.
 const commandLoggerState: { logger?: Logger } = {};
 
 /**
  * The logger for the running command: the application root logger tagged with
  * the invoked subcommand's name, so every record it emits carries `command`.
  * Handlers call this to obtain a logger without threading one through their
- * signatures; it falls back to {@link rootLogger} before a command has begun.
+ * signatures. Before the first command begins, it returns {@link rootLogger}.
  */
 export function commandLogger(): Logger {
 	return commandLoggerState.logger ?? rootLogger();
@@ -200,8 +200,8 @@ function resultFileFromGlobals(program: Command): string | undefined {
  * The {@link CliUi} for a command: the output mode comes from `--output-mode`
  * and the environment, the colour from `--colour`/`--no-colour`, connected to
  * the program's abort signal so an interrupted command renders its active spinner,
- * bar or task as cancelled. `assumeYes` carries a command's `--yes` flag through
- * to confirmations.
+ * bar or task as cancelled. `assumeYes` passes a command's `--yes` flag to
+ * confirmations.
  */
 export function commandUi(
 	program: Command,
@@ -268,8 +268,8 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 /**
  * Reports a top-level failure through the reporter: one `{event:'error'}` in JSON
  * mode, one red marker line in terminal mode. An abort (Ctrl-C) is a
- * cancellation, not a failure, so nothing is reported and only the exit code
- * signals it.
+ * cancellation, not a failure, so no error event is emitted and only the exit
+ * code reports it.
  */
 export function reportCliFailure(reporter: Reporter, error: unknown): void {
 	if (isAbortError(error)) {

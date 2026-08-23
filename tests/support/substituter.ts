@@ -22,9 +22,6 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 const narInfoSuffix = '.narinfo';
 const cacheInfoPath = '/nix-cache-info';
 const priority = cachePrioritySchema.parse(41);
-/**
-The size this cache advertises for every path it serves.
-*/
 export const servedNarSize = 4096;
 
 /**

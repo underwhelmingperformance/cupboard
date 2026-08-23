@@ -1,9 +1,9 @@
 import { CliError, transientExitCode } from '../errors.ts';
 
 /**
- * A destination or reuse-view availability probe answered with a non-2xx
- * status or a body that does not match the shared schema. A network or
- * server condition, not a misuse of the command, so a retry may succeed.
+ * The destination or reuse-view availability probe returned a non-2xx status
+ * or a body that does not match the shared schema. The failure is transient
+ * because a retry may succeed without changing the command.
  */
 export class DestinationProbeResponseError extends CliError {
 	constructor(

@@ -10,10 +10,10 @@ import {
 
 import { baseProcedure } from './base.ts';
 
-// Named reuse views: tenant-domain configuration naming a set of caches
-// another cache's reads may substitute from. Defining, updating or removing
-// one requires tenant-domain authority, not authority over any one cache a
-// selector happens to match, so every procedure carries no resource.
+// Reuse views are tenant-wide configuration. They specify the caches that may
+// satisfy another cache's reads. Mutations require tenant-domain authority, not
+// authority over the caches in the view, so these procedures declare no
+// resource.
 export const reuseViewsContract = {
 	list: baseProcedure
 		.meta({ requires: 'reuse-view:list' })

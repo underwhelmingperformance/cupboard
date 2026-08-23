@@ -82,7 +82,7 @@ const baseline = {
 };
 
 describe('parseBaseline', () => {
-	it('reads a report an earlier run wrote', () => {
+	it('accepts a prior report as a baseline', () => {
 		const recorded = JSON.stringify(reportOf(budget));
 
 		expect(parseBaseline(recorded)).toStrictEqual(baseline);
@@ -99,7 +99,7 @@ describe('parseBaseline', () => {
 			source: JSON.stringify({ targets: [{ attr: 'app' }], groups: [] }),
 			expected: BaselineSchemaError
 		}
-	])('refuses $name', ({ source, expected }) => {
+	])('rejects $name', ({ source, expected }) => {
 		expect(() => parseBaseline(source)).toThrow(expected);
 	});
 });
@@ -114,7 +114,7 @@ describe('parseTolerance', () => {
 	});
 
 	it.each([{ value: '-0.1' }, { value: 'plenty' }, { value: '' }])(
-		'refuses $value',
+		'rejects $value',
 		({ value }) => {
 			expect(() => parseTolerance(value)).toThrow(InvalidToleranceError);
 		}
@@ -178,7 +178,7 @@ describe('checkBudgets', () => {
 		});
 	});
 
-	it('leaves a rise in unknown paths alone', () => {
+	it('does not budget the unknown-path count', () => {
 		expect(
 			checkBudgets({
 				report: reportOf({ ...budget, unknown: 500 }),

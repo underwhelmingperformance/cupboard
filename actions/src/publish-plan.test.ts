@@ -70,8 +70,6 @@ function storePathIn(
 }
 
 const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
-// A runner whose Nix is configured with another `store-dir`: the same
-// derivation graph names its paths relative to that directory.
 const alternativeStoreDirectory = storeDirectorySchema.parse('/data/nix/store');
 
 const sharedBasename = '11111111111111111111111111111111-shared';
@@ -115,11 +113,9 @@ describe('planPublish', () => {
 		});
 	});
 
-	// Cohort identity partitions the whole manifest, so a target the plan
-	// already retains keeps its place in its cohort: a future cohort job
-	// still needs to see it, since the central plan's retained check is
-	// advisory rather than authoritative for that job's own build.
-	it('keeps a retained target in its cohort alongside pending members', () => {
+	// The central retained-target check is advisory. A cohort job must still see
+	// every declared member when at least one member needs the job to run.
+	it('includes retained and pending members in the same cohort job', () => {
 		const retained = { ...target('retained'), cohort: 'shared-cohort' };
 		const first = { ...target('first'), cohort: 'shared-cohort' };
 		const evaluations = [
@@ -152,9 +148,8 @@ describe('planPublish', () => {
 		]);
 	});
 
-	// The digest is long but not injective, so the plan refuses outright if
-	// two groups ever emit one key rather than let them merge in the matrix
-	// and race one retention root.
+	// Matrix jobs are selected by key. Refuse a digest collision instead of
+	// merging two groups into one job that could race their retention updates.
 	it('rejects a plan whose groups collide on one key', () => {
 		expect(() => {
 			assertDistinctGroupKeys([{ key: 'cohort-a' }, { key: 'cohort-a' }]);
@@ -187,17 +182,17 @@ describe('planPublish', () => {
 describe('isBestEffortCohort', () => {
 	it.each([
 		{
-			name: 'every member is best-effort',
+			name: 'returns true when every member is best-effort',
 			members: [target('first'), target('second')],
 			tolerated: true
 		},
 		{
-			name: 'one member is required',
+			name: 'returns false when one member is required',
 			members: [target('first'), { ...target('second'), bestEffort: false }],
 			tolerated: false
 		},
 		{
-			name: 'every member is required',
+			name: 'returns false when every member is required',
 			members: [
 				{ ...target('first'), bestEffort: false },
 				{ ...target('second'), bestEffort: false }
@@ -205,16 +200,16 @@ describe('isBestEffortCohort', () => {
 			tolerated: false
 		},
 		{
-			name: 'the cohort holds one best-effort target',
+			name: 'returns true for one best-effort target',
 			members: [target('first')],
 			tolerated: true
 		},
 		{
-			name: 'the cohort holds one required target',
+			name: 'returns false for one required target',
 			members: [{ ...target('first'), bestEffort: false }],
 			tolerated: false
 		}
-	])('tolerates a failure when $name: $tolerated', ({ members, tolerated }) => {
+	])('$name', ({ members, tolerated }) => {
 		expect(isBestEffortCohort(members)).toBe(tolerated);
 	});
 });
@@ -224,8 +219,6 @@ describe('cohortsFor', () => {
 		{
 			name: 'gives each target its own cohort when no label is declared',
 			targets: [target('first'), target('second')],
-			// cohortsFor sorts by key, so the lower digest sorts first
-			// regardless of manifest order.
 			expected: [
 				{
 					key: 'cohort-x86_64-linux-ubuntu-latest-remote-2c2db096c3b05512',
@@ -263,7 +256,7 @@ describe('cohortsFor', () => {
 		).toStrictEqual(expected);
 	});
 
-	it('is deterministic across repeated calls over the same manifest', () => {
+	it('returns the same cohort keys in the same order on repeated calls', () => {
 		const targets = [
 			{ ...target('first'), cohort: 'group-a' },
 			{ ...target('second'), cohort: 'group-a' },
@@ -275,7 +268,7 @@ describe('cohortsFor', () => {
 		);
 	});
 
-	it('carries every member of a multi-target cohort in the build request, output lists included', () => {
+	it('includes every member and selected output in the cohort installables', () => {
 		const targets = [
 			{ ...target('first'), cohort: 'group-a', outputs: ['out', 'dev'] },
 			{ ...target('second'), cohort: 'group-a' }
@@ -286,9 +279,9 @@ describe('cohortsFor', () => {
 		).toStrictEqual([['.#first^out,dev', '.#second^out']]);
 	});
 
-	// A cohort is one job, so its members must share where that job runs; a
-	// manifest asking for one cohort across two execution contexts cannot be
-	// satisfied and is refused rather than silently split or merged.
+	// One cohort becomes one job, so every member must use the same execution
+	// context. Refuse an incompatible cohort instead of silently changing its
+	// membership.
 	it('refuses a cohort whose members span execution contexts', () => {
 		const targets = [
 			{ ...target('first'), cohort: 'group-a' },
@@ -329,7 +322,7 @@ describe('expandComponents', () => {
 		expect(expandComponents(targets)).toStrictEqual(targets);
 	});
 
-	it("replaces an aggregate with its components, inheriting the aggregate's execution context, best-effort flag and cohort", () => {
+	it('returns one target per component with the aggregate execution and failure settings', () => {
 		const aggregate: PublishTarget = {
 			...target('system'),
 			cohort: 'group-a',
@@ -364,7 +357,7 @@ describe('expandComponents', () => {
 		]);
 	});
 
-	it('never carries the aggregate itself into the result', () => {
+	it('omits the aggregate from the expanded targets', () => {
 		const aggregate: PublishTarget = {
 			...target('system'),
 			components: [component()]
@@ -375,7 +368,7 @@ describe('expandComponents', () => {
 		).toStrictEqual(['.#component-a']);
 	});
 
-	it('leaves an aggregate with no explicit cohort label uninherited, so each component keeps its own attr as its default label', () => {
+	it('does not add a cohort label when the aggregate omits it', () => {
 		const aggregate: PublishTarget = {
 			...target('system'),
 			components: [component({ attr: '.#component-a' })]
@@ -473,7 +466,7 @@ describe('publishComponentSchema', () => {
 });
 
 describe('derivationToTargetsFor', () => {
-	it('inverts a shared derivation to every target whose graph contains it', () => {
+	it('maps a shared derivation to every target graph that contains it', () => {
 		const first = target('first');
 		const second = target('second');
 		const evaluations = [
@@ -504,7 +497,7 @@ describe('evaluateTargetCoverage', () => {
 			status: 'covered' as const
 		},
 		{
-			name: 'an output the reconciled list does not carry',
+			name: 'an output absent from the reconciled list',
 			targetPaths: [firstPath, secondPath],
 			check: { retained: true, reconciledPaths: new Set([firstPath]) },
 			status: 'not-covered' as const
@@ -600,7 +593,7 @@ describe('cohortPreFilterDecision', () => {
 });
 
 describe('cacheProbePaths', () => {
-	it('carries each evaluated target output once, deduplicated', () => {
+	it('returns each evaluated target output once', () => {
 		const first = target('first');
 		const second = target('second');
 		const evaluations = [
@@ -864,7 +857,7 @@ describe('evaluationFromJson', () => {
 		}
 	);
 
-	it('leaves a content-addressed placeholder output without a path', () => {
+	it('does not resolve a content-addressed placeholder as a store path', () => {
 		const parsed = evaluationFromJson(
 			target('app'),
 			{
@@ -1074,7 +1067,7 @@ describe('runner label validation', () => {
 });
 
 describe('cohort label validation', () => {
-	it('omits the field by default, leaving the target its own cohort', () => {
+	it('does not add a cohort field by default', () => {
 		expect(publishTargetSchema.parse(target('app'))).toStrictEqual(
 			target('app')
 		);
@@ -1125,7 +1118,7 @@ describe('publishTargetsSchema', () => {
 		expect(publishTargetsSchema.parse(targets)).toStrictEqual(targets);
 	});
 
-	it('rejects a duplicate rootSuffix, naming it on the offending entry', () => {
+	it('marks the later duplicate rootSuffix as invalid', () => {
 		const targets = [
 			target('first'),
 			{ ...target('second'), rootSuffix: 'first' }
@@ -1146,9 +1139,8 @@ describe('publishTargetsSchema', () => {
 		).toStrictEqual([{ path: [1, 'rootSuffix'], code: 'custom' }]);
 	});
 
-	// `app`, `/app` and `app/` all join to the same root, so a manifest
-	// spelling one suffix two ways would let one target's ensured root stand
-	// in for the other's while only one of them is actually rooted.
+	// `app`, `/app` and `app/` produce the same root. Accepting two spellings
+	// could let one target's retention result suppress the other target's push.
 	it.each([
 		{ spelling: '/app', canonical: 'app' },
 		{ spelling: 'app/', canonical: 'app' }
@@ -1195,13 +1187,9 @@ describe('publishTargetsSchema', () => {
 	});
 });
 
-// The manifest is pull-request-controlled, so its runner labels must never
-// reach `runs-on` unchecked: every permitted label comes from the
-// operator-controlled allow-list, with nothing built in.
 describe('joinRoot', () => {
-	// The ensure calls and the push matrix both construct target roots through
-	// this one function, so every equivalent spelling of a prefix and suffix
-	// must produce one byte-identical root.
+	// Root checks and matrix jobs both use this function. Equivalent prefix and
+	// suffix spellings must therefore produce byte-identical roots.
 	it.each([
 		{ prefix: 'github:owner/repo/main', suffix: 'app' },
 		{ prefix: 'github:owner/repo/main', suffix: '/app' },
@@ -1317,11 +1305,10 @@ describe('availableCachePaths', () => {
 		});
 	});
 
-	// A query answer other than 200 is not evidence of absence:
-	// treating it as a miss would replan an available path as a fresh build
-	// and publish over it, so the query fails closed and the plan never
-	// constructs. A transient refusal is retried before that; a deterministic
-	// one fails on its first response.
+	// A non-200 response does not prove that a path is absent. Treating it as a
+	// cache miss could schedule a fresh build over an available path, so the
+	// availability check fails closed. Retry transient responses first, but fail
+	// immediately on deterministic refusals.
 	it.each([
 		{ name: 'a deterministic 500 without retrying', status: 500, attempts: 1 },
 		{ name: 'a deterministic 403 without retrying', status: 403, attempts: 1 },
@@ -1364,7 +1351,7 @@ describe('availableCachePaths', () => {
 		}
 	);
 
-	it('retries a transient probe refusal and keeps the plan alive', async () => {
+	it('retries a transient refusal and returns the successful probe result', async () => {
 		let attempts = 0;
 
 		const available = await availableCachePaths({

@@ -10,9 +10,6 @@ import { InvalidCacheUrlSegmentError } from './errors.ts';
 import { DEFAULT_CACHE, storedCacheSchema } from './scalars.ts';
 import { parseBaseUrl } from './url.ts';
 
-// Bases reach the builders through `parseBaseUrl`, so they are exercised the
-// way callers hand them over: already checked, already free of trailing path
-// slashes.
 function base(value: string): URL {
 	return parseBaseUrl(new URL(value));
 }
@@ -32,7 +29,7 @@ describe('cacheUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/'
 		},
 		{
-			name: 'a trailing slash on the base is dropped for the default cache',
+			name: 'uses the canonical path from a parsed base for the default cache',
 			value: 'https://cupboard.example.workers.dev/t/acme/',
 			cache: undefined,
 			expected: 'https://cupboard.example.workers.dev/t/acme'
@@ -50,7 +47,7 @@ describe('cacheUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		},
 		{
-			name: 'a trailing slash on the base is dropped for a named cache',
+			name: 'appends a named cache to the canonical path from a parsed base',
 			value: 'https://cupboard.example.workers.dev/t/acme/',
 			cache: storedCacheSchema.parse('builds'),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
@@ -59,9 +56,7 @@ describe('cacheUrl', () => {
 		expect(cacheUrl(base(value), cache).href).toBe(expected);
 	});
 
-	// A builder hands back a URL of its own, so a caller that goes on to edit
-	// the result cannot reach back into the base every other URL is built from.
-	it('leaves the base URL it was given untouched', () => {
+	it('does not mutate the base URL', () => {
 		const baseUrl = base('https://cupboard.example.workers.dev/t/acme');
 
 		cacheUrl(baseUrl, storedCacheSchema.parse('builds')).pathname = '/edited';
@@ -79,7 +74,7 @@ describe('tenantUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/t/acme'
 		},
 		{
-			name: 'drops a trailing slash on the base',
+			name: 'appends to the canonical path from a parsed base',
 			value: 'https://cupboard.example.workers.dev/',
 			tenant: 'acme',
 			expected: 'https://cupboard.example.workers.dev/t/acme'
@@ -133,7 +128,7 @@ describe('publicKeyUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/t/acme/pubkey'
 		},
 		{
-			name: 'drops a trailing slash on the base',
+			name: 'appends to the canonical path from a parsed base',
 			value: 'https://cupboard.example.workers.dev/t/acme/',
 			expected: 'https://cupboard.example.workers.dev/t/acme/pubkey'
 		}

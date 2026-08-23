@@ -8,26 +8,20 @@ import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
-// A committed path queued for an off-hot-path reconcile of the R2 objects its
-// narinfo points at. Negotiate persists the closure's committed paths here and
-// arms an immediate alarm; the alarm drains them in bounded chunks, so a push
-// returns without hitting R2 and a large closure spreads its probes across
-// firings within the per-invocation subrequest cap.
 export interface ReconcileTarget {
 	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
 }
 
-// DO storage KV holds one entry per (cache, store path hash) under this prefix.
-// The store path hash is a fixed-length value from a colon-free alphabet, so a
-// `<cache>:<storePathHash>` key recovers the pair unambiguously even when a cache
-// name itself contains a colon.
+// DO storage KV stores one entry per (cache, store path hash) under this prefix.
+// The store path hash is a fixed-length value from a colon-free alphabet. Its
+// suffix therefore keeps the key unique even when a cache name contains a colon.
 const reconcileEntryPrefix = 'maintenance:reconcile:';
 
-// The origin of the push that queued the current targets, kept beside the queue
-// so the reconcile can purge the edge cache exactly as the request would have.
-// The hyphen keeps it outside `reconcileEntryPrefix`, so a queue listing never
-// returns it.
+// Each enqueue overwrites this with its request origin. An alarm therefore uses
+// the most recently enqueued origin for every target it claims, including
+// targets left by an earlier enqueue. The hyphen keeps this key outside
+// `reconcileEntryPrefix`, so a queue listing never returns it.
 const reconcileOriginKey = 'maintenance:reconcile-origin';
 
 // DO storage writes at most this many KV pairs in one `put`, so a larger closure
@@ -39,10 +33,6 @@ const maxStoragePutEntries = 128;
 // large backlog converges across firings.
 const maxPathsReconciledPerRun = 200;
 
-// The durable queue of committed paths a recent negotiate asked to reconcile,
-// backed by DO storage KV so no SQLite migration is needed. Negotiate enqueues
-// and arms the alarm; the alarm claims a bounded chunk, reconciles it, clears it,
-// and re-arms while more remain.
 export class ReconcileQueueService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -50,8 +40,6 @@ export class ReconcileQueueService {
 		return `${reconcileEntryPrefix}${target.cache}:${target.storePathHash}`;
 	}
 
-	// Records the targets and the push origin, then arms an immediate alarm. Empty
-	// input neither writes nor arms.
 	async enqueue(
 		origin: RequestOrigin,
 		targets: readonly ReconcileTarget[]
@@ -72,8 +60,6 @@ export class ReconcileQueueService {
 		await this.context.ctx.storage.setAlarm(Date.now());
 	}
 
-	// A bounded chunk of queued targets keyed by their storage key, so the caller
-	// reconciles the values and then deletes exactly these keys.
 	claimChunk(
 		limit: number = maxPathsReconciledPerRun
 	): Promise<Map<string, ReconcileTarget>> {
@@ -83,9 +69,8 @@ export class ReconcileQueueService {
 		});
 	}
 
-	// A stored row holds a plain origin string, so the value is minted through
-	// the schema on read. A malformed or absent value reconciles without an edge
-	// purge.
+	// Durable storage returns the origin as an unvalidated string. Parse it before
+	// use. A missing or malformed origin reconciles without an edge purge.
 	async origin(): Promise<RequestOrigin | undefined> {
 		const stored =
 			await this.context.ctx.storage.get<string>(reconcileOriginKey);
@@ -99,8 +84,6 @@ export class ReconcileQueueService {
 		await this.context.ctx.storage.delete([...keys]);
 	}
 
-	// Whether any queued target remains, so the alarm re-arms only while there is
-	// more to drain: a chunk that empties the queue stops the loop.
 	async hasPending(): Promise<boolean> {
 		const remaining = await this.context.ctx.storage.list({
 			prefix: reconcileEntryPrefix,

@@ -82,7 +82,7 @@ describe('GitHub job window', () => {
 		).toThrow(InvalidGitHubJobUrlError);
 	});
 
-	it('reports a refused GitHub job request as its own error type', async () => {
+	it('reports a GitHub HTTP refusal as GitHubJobRequestError', async () => {
 		const reference = parseGitHubJobUrl(
 			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
 		);
@@ -194,7 +194,7 @@ describe('bucketForLog', () => {
 		).toBe('rpc verification');
 	});
 
-	it('falls back to the message', () => {
+	it('uses the message when no HTTP or RPC fields are present', () => {
 		expect(
 			bucketForLog(
 				undefined,
@@ -208,7 +208,6 @@ describe('bucketForLog', () => {
 
 describe('canonicalPath', () => {
 	it.each([
-		// A trace's outer URL collapses to the same key as the inner DO log.
 		[
 			'https://cupboard.supply/t/acme/cache/pr-144/uploads/abc123def456ghij',
 			'/cache/:cache/uploads/:id'
@@ -395,8 +394,6 @@ function tracePage(from: number, count: number): { timestamp: number }[] {
 
 describe('fetchPaged', () => {
 	it('continues past a short page and stops on the empty one', async () => {
-		// The view caps a page below the requested limit, so a short page still
-		// has older rows behind it; only the empty page ends the walk.
 		const timeframes: { from: number; to: number }[] = [];
 		const pages = [tracePage(1000, 500), tracePage(500, 100), []];
 		const query: TelemetryQuery = (parameters) => {
@@ -415,8 +412,6 @@ describe('fetchPaged', () => {
 			noSleep
 		);
 
-		// The next page's upper bound is the oldest row's own millisecond, read
-		// inclusively so same-millisecond rows past the page cap are not lost.
 		expect({ rowCount: rows.length, timeframes }).toStrictEqual({
 			rowCount: 600,
 			timeframes: [
@@ -429,8 +424,6 @@ describe('fetchPaged', () => {
 
 	it('walks through a same-millisecond boundary without dropping rows', async () => {
 		const timeframes: { from: number; to: number }[] = [];
-		// The burst at 700 spans the page boundary: the second page re-reads
-		// that millisecond, and only its unseen rows count as progress.
 		const pages = [
 			[
 				{ timestamp: 800, id: 'a' },
@@ -479,9 +472,6 @@ describe('fetchPaged', () => {
 
 	it('stops on a burst page that yields nothing new', async () => {
 		const timeframes: { from: number; to: number }[] = [];
-		// Every row shares one millisecond and the view has no cursor into it:
-		// the second page repeats the first, so the walk must stop (reporting
-		// the truncation).
 		const burst = [
 			{ timestamp: 700, id: 'a' },
 			{ timestamp: 700, id: 'b' }
@@ -595,11 +585,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('steps a truncated page down repeatedly until the body fits', async () => {
-		// A page of large rows overflows the response-body cap and comes back
-		// truncated, so the SDK throws a parse error rather than an API status.
-		// One halving is not always enough: the walk keeps stepping the page down
-		// until the body fits, refetching the same timeframe each time, and loses
-		// no rows. The last limit repeats: it is sticky for the next page.
 		const limits: number[] = [];
 		const query: TelemetryQuery = (parameters) => {
 			limits.push(parameters.limit);
@@ -634,9 +619,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('surfaces a truncation that persists at the smallest page', async () => {
-		// A body that stays truncated even at the floor is a real parse failure,
-		// not an oversized page, so the walk steps all the way down and then
-		// surfaces it rather than shrinking forever.
 		const limits: number[] = [];
 		const query: TelemetryQuery = (parameters) => {
 			limits.push(parameters.limit);
@@ -663,10 +645,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('pages a same-millisecond burst by its smallest id', async () => {
-		// The timeframe stays fixed; the offset is the smallest id of each page,
-		// not its last row, so an intra-millisecond burst the view returns out of
-		// id order is still walked strictly downwards. Here `d` trails `e` in the
-		// second page though it is the smaller id, and the offset takes `d`.
 		const requests: {
 			offset: string | undefined;
 			direction: string | undefined;
@@ -723,8 +701,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('drops rows the view replays across pages', async () => {
-		// A page whose smallest id is newer than an already-served row still
-		// carries duplicates of it; the walk keeps only the unseen rows.
 		const pages = [
 			[
 				{ timestamp: 700, id: 'g' },
@@ -757,9 +733,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('stops the timeframe walk once the collected rows bracket a gap', async () => {
-		// Session mode passes a stop gap: after the second page the collected
-		// timestamps span a gap wider than it, so the trailing session is complete
-		// and the walk stops without asking for the empty third page.
 		let requests = 0;
 		const pages = [
 			[{ timestamp: 1000 }, { timestamp: 950 }],
@@ -827,10 +800,6 @@ describe('fetchPaged', () => {
 	});
 
 	it('steps the bound below the oldest row when the cursor stalls', async () => {
-		// The view refuses to page a dense millisecond: given the offset it keeps
-		// answering the same page, its smallest id never dropping below the
-		// offset. The walk steps the upper bound below the oldest timestamp it
-		// has seen and pages on beneath it, reaching the older rows.
 		const requests: {
 			offset: string | undefined;
 			to: number;
@@ -838,8 +807,6 @@ describe('fetchPaged', () => {
 		const query: TelemetryQuery = (parameters) => {
 			requests.push({ offset: parameters.offset, to: parameters.timeframe.to });
 
-			// A burst at 700 the cursor cannot page past: the top bound always
-			// answers the same page, whatever offset it is given.
 			if (parameters.timeframe.to === 1000) {
 				return Promise.resolve({
 					events: {
@@ -851,8 +818,6 @@ describe('fetchPaged', () => {
 				});
 			}
 
-			// Below the stepped bound the older row is reachable, and a cursor
-			// past it drains the window.
 			return Promise.resolve({
 				events: {
 					events:
@@ -880,10 +845,8 @@ describe('fetchPaged', () => {
 				{ timestamp: 650, id: 'e' }
 			],
 			requests: [
-				// The full bound: a fresh page, then the stall on the replayed page.
 				{ offset: undefined, to: 1000 },
 				{ offset: 'f', to: 1000 },
-				// Stepped below the burst's millisecond; the older row, then empty.
 				{ offset: undefined, to: 699 },
 				{ offset: 'e', to: 699 }
 			]
@@ -920,7 +883,6 @@ describe('sliceWindow', () => {
 
 describe('mergeBusy', () => {
 	it.each([
-		// Overlapping intervals merge; the disjoint one adds on.
 		[
 			'merges overlaps and sums gaps',
 			[
@@ -942,7 +904,6 @@ describe('detectSession', () => {
 	});
 
 	it('keeps only the trailing cluster after a long gap', () => {
-		// Two old points, a 10s gap, then a recent cluster.
 		expect(detectSession([0, 500, 11_000, 11_400, 11_900], 1000)).toStrictEqual(
 			{
 				from: 11_000,
@@ -1053,9 +1014,6 @@ describe('analyse', () => {
 		}
 	];
 
-	// A root span per trace wraps its children, so the root is a container and is
-	// left out of the breakdown. The two r2_head leaves in t1 overlap, so their
-	// busy time merges into one interval.
 	const span = (
 		traceId: string,
 		spanId: string,
@@ -1209,7 +1167,7 @@ describe('analyse', () => {
 				label: 'PUT /cache/:cache/uploads/:id',
 				value: '1.2s · p95 800ms · 2× · 6 spans (3/call) · r/w 50/25 · 2 err'
 			},
-			{ label: '  ↳ unaccounted (idle/blocked/compute)', value: '875ms' },
+			{ label: '  ↳ outside traced leaf spans', value: '875ms' },
 			{ label: '  ↳ r2_head', value: '3× · 320ms busy' },
 			{ label: '  ↳ d1_run', value: '2× · 12ms busy' },
 			{ label: '  ↳ durable_object_storage_exec', value: '1× · 0ms busy' },
@@ -1217,7 +1175,7 @@ describe('analyse', () => {
 				label: 'POST /cache/:cache/uploads',
 				value: '100ms · p95 100ms · 1× · 2 spans (2/call) · r/w 5/0'
 			},
-			{ label: '  ↳ unaccounted (idle/blocked/compute)', value: '70ms' },
+			{ label: '  ↳ outside traced leaf spans', value: '70ms' },
 			{ label: '  ↳ r2_put', value: '1× · 30ms busy' }
 		]);
 	});
@@ -1264,7 +1222,7 @@ const fetchGroupOf = (operations: OperationStat[]): OperationGroup => ({
 });
 
 describe('buildVerdict', () => {
-	it('blames idle/blocked time when subrequests are tiny', () => {
+	it('reports time outside traced leaf spans when it dominates', () => {
 		const roots = operationStat({
 			bucket: 'PUT /cache/:cache/roots/:name',
 			traceCount: 10,
@@ -1275,11 +1233,11 @@ describe('buildVerdict', () => {
 		});
 
 		expect(buildVerdict([fetchGroupOf([roots])], true)).toBe(
-			'Push path: most time (412.0s over 10 calls, 100% of fetch) is PUT /cache/:cache/roots/:name, 411.0s not in subrequests (idle/blocked/compute).'
+			'Push path: most time (412.0s over 10 calls, 100% of fetch) is PUT /cache/:cache/roots/:name, 411.0s outside traced leaf spans.'
 		);
 	});
 
-	it('blames the busiest subrequest kind when it dominates', () => {
+	it('reports the busiest traced leaf-span kind when it dominates', () => {
 		const uploads = operationStat({
 			bucket: 'POST /cache/:cache/uploads',
 			totalMs: 5000,
@@ -1293,12 +1251,10 @@ describe('buildVerdict', () => {
 	});
 
 	it('explains an empty window', () => {
-		expect(buildVerdict([], true)).toBe('Traces carried no duration.');
+		expect(buildVerdict([], true)).toBe('No trace has a positive duration.');
 	});
 });
 
-// The fake UI records a note's rows joined the same way, so an expected note
-// body is built from the row helpers under test.
 const noteBody = (rows: readonly ResultRow[]): string =>
 	rows.map((row) => `${row.label}\t${row.value}`).join('\n');
 

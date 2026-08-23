@@ -61,7 +61,7 @@ describe('isReadAuthorised', () => {
 			authorization: `Basic ${btoa('alice')}`,
 			expected: false
 		}
-	])('rejects/accepts $name', async ({ authorization, expected }) => {
+	])('returns $expected for $name', async ({ authorization, expected }) => {
 		const verifier = await verifierFor('p:a:ss');
 
 		expect(await isReadAuthorised(request(authorization), verifier)).toBe(

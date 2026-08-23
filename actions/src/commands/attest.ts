@@ -71,17 +71,8 @@ export interface AttestOptions {
 
 export interface AttestInputs {
 	readonly receiptFile: string;
-	/**
-	Where the checksums of every path the receipt describes are written.
-	*/
 	readonly checksumsFile: string;
-	/**
-	Where the checksums of the paths this run built are written.
-	*/
 	readonly builtChecksumsFile: string;
-	/**
-	Where the build-origin predicate is written for the signing step.
-	*/
 	readonly predicateFile: string;
 	readonly url: URL;
 	readonly cache: StoredCache;
@@ -89,9 +80,6 @@ export interface AttestInputs {
 	readonly readPassword: string;
 }
 
-/**
-Live metadata read from a committed destination narinfo.
-*/
 export interface CommittedPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
@@ -99,22 +87,15 @@ export interface CommittedPathInfo {
 }
 
 interface AttestationSubjects {
-	/**
-	 * Every path the receipt describes, checked against the destination. These
-	 * are the subjects of the build-origin statement.
-	 */
 	readonly subjects: readonly StorePathDigest[];
-	/**
-	 * The paths this run built. GitHub's build-provenance statement claims that
-	 * the workflow produced its subjects, so only these belong in it.
-	 */
 	readonly built: readonly StorePathDigest[];
 	readonly skipped: readonly string[];
 }
 
 /**
-Partition path infos according to a current-run build receipt.
-*/
+ * For a version 2 receipt, treats every accepted subject as built by this run.
+ * Version 2 did not distinguish other origins.
+ */
 export function attestationSubjects(
 	infos: readonly CommittedPathInfo[],
 	receipt: BuildReceiptV2
@@ -140,24 +121,16 @@ export function attestationSubjects(
 		});
 	}
 
-	// Every version 2 subject is a path the run built.
 	return { subjects, built: subjects, skipped };
 }
 
-/**
- * Committed destination metadata for receipt subjects, keyed by store path.
- * An uncommitted path has no entry.
- */
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
- * Checks every receipt subject against the destination cache, and separates the
- * paths this run built from the rest.
- *
  * A subject is signed under this repository's identity, so the destination
- * cache must serve every subject under the NAR hash the receipt recorded, and
- * under its deriver where the receipt recorded one. An absent path fails the
- * run, as does one whose hash or deriver has moved since the receipt was
+ * cache must have committed narinfo for every subject. The narinfo must contain
+ * the NAR hash and any deriver recorded in the receipt. An absent path fails
+ * the run, as does one whose hash or deriver has changed since the receipt was
  * written.
  *
  * The build store may have garbage-collected the path since the build, so
@@ -191,8 +164,6 @@ export function provenancedSubjects(
 	return { subjects, built, skipped };
 }
 
-// Verify each checksum against committed destination metadata. The receipt does
-// not provide the bytes to sign.
 function requireBacked(
 	subject: BuildSubjectV3,
 	info: CommittedPathInfo | undefined
@@ -204,9 +175,8 @@ function requireBacked(
 	requireUnmoved(info, subject.narHash, subject.derivation);
 }
 
-// Check the destination metadata before signing under the repository's
-// identity. A subject with no deriver leaves the destination's deriver
-// unchecked, because the receipt recorded no deriver to compare it against.
+// A subject with no recorded deriver leaves the destination deriver unchecked
+// because there is no receipt value to compare it with.
 function requireUnmoved(
 	info: CommittedPathInfo,
 	narHash: string,
@@ -227,9 +197,8 @@ function requireUnmoved(
 	}
 }
 
-// One receipt subject as the statement records it. The attempt fields belong to
-// the run's own attribution, so a `built` subject is rebuilt without them. The
-// other origins carry over unchanged.
+// Attempt fields belong to run-local attribution. Rebuild a `built` subject
+// without them before writing the durable build-origin statement.
 function originSubject(subject: BuildSubjectV3): BuildOriginSubject {
 	if (subject.origin === 'built') {
 		return {
@@ -247,10 +216,10 @@ function originSubject(subject: BuildSubjectV3): BuildOriginSubject {
 }
 
 /**
- * The build-origin predicate for the subjects this run signs: one entry per
- * accepted subject, carrying the origin the receipt recorded for it. A version
- * 2 receipt records no origin, and a run may accept no subject at all; either
- * way there is no predicate to sign.
+ * Version 2 receipts record no origin, so they produce no predicate. A version
+ * 3 receipt also produces no predicate when the run accepted no subjects.
+ * Otherwise, the predicate includes the recorded origin of every accepted
+ * subject.
  */
 export function buildOriginPredicateFor(
 	receipt: ParsedBuildReceipt,
@@ -288,7 +257,7 @@ export function registerAttestCommand(
 	program
 		.command('attest')
 		.description(
-			'Resolve the subjects a current-run build receipt describes, and which of them this run built.'
+			'Resolve attestation subjects from a current-run build receipt and identify the paths built by this run.'
 		)
 		.requiredOption(
 			'--receipt-file <path>',
@@ -296,20 +265,26 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--checksums-file <path>',
-			'where to write the checksums of every path the receipt describes'
+			'where to write checksums for all accepted receipt subjects'
 		)
 		.option(
 			'--built-checksums-file <path>',
-			'where to write the checksums of the paths the run built'
+			'where to write checksums for accepted subjects built by this run'
 		)
 		.option(
 			'--predicate-file <path>',
-			'where to write the build-origin predicate for the signing step'
+			'where to write the build-origin predicate'
 		)
 		.requiredOption('--url <url>', 'destination cupboard tenant URL')
 		.option('--cache <name>', 'destination named cache')
-		.option('--read-user <user>', 'private-read username')
-		.option('--read-password <password>', 'private-read password')
+		.option(
+			'--read-user <user>',
+			'username for private destination-cache reads'
+		)
+		.option(
+			'--read-password <password>',
+			'password for private destination-cache reads'
+		)
 		.action((options: AttestOptions) => attestAction(options, environment));
 }
 
@@ -353,15 +328,9 @@ export function resolveAttestInputs(
 		readUser,
 		readPassword,
 		checksumsFile,
-		// The built checksums default to the checksums file's directory, so a
-		// caller that specifies its own checksums path keeps both lists
-		// together and needs no RUNNER_TEMP.
 		builtChecksumsFile:
 			provided(options.builtChecksumsFile) ??
 			path.join(path.dirname(checksumsFile), 'built-subjects.txt'),
-		// The predicate file defaults to the checksums file's directory, so a
-		// caller that specifies its own checksums path keeps both files together
-		// and needs no RUNNER_TEMP.
 		predicateFile:
 			provided(options.predicateFile) ??
 			path.join(path.dirname(checksumsFile), 'build-origin.json')
@@ -378,9 +347,6 @@ function readCredential(inputs: AttestInputs): BasicCredential | undefined {
 		: { user: inputs.readUser, password: inputs.readPassword };
 }
 
-// The subjects this run may attest are checked only against the destination's
-// committed narinfos. The build store may already have collected every output,
-// and the receipt on its own is never a source of bytes to sign.
 async function resolveAttestation(
 	receipt: ParsedBuildReceipt,
 	inputs: AttestInputs,

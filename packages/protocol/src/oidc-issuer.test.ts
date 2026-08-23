@@ -5,55 +5,55 @@ import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 describe('isAllowedIssuerUrl', () => {
 	it.each([
 		{
-			name: 'an https issuer',
+			name: 'an HTTPS issuer',
 			value: 'https://issuer.example.com',
 			allowed: true
 		},
 		{
-			name: 'an https issuer with a path',
+			name: 'an HTTPS issuer with a path',
 			value: 'https://issuer.example.com/realm',
 			allowed: true
 		},
 		{
-			name: 'a plain http issuer',
+			name: 'a plain HTTP issuer',
 			value: 'http://issuer.example.com',
 			allowed: false
 		},
 		{
-			name: 'http on localhost',
+			name: 'HTTP on localhost',
 			value: 'http://localhost:8788',
 			allowed: true
 		},
 		{
-			name: 'http on 127.0.0.1',
+			name: 'HTTP on 127.0.0.1',
 			value: 'http://127.0.0.1:8788',
 			allowed: true
 		},
 		{
-			name: 'http on the IPv6 loopback',
+			name: 'HTTP on the IPv6 loopback',
 			value: 'http://[::1]:8788',
 			allowed: true
 		},
 		{
-			name: 'http on a host that merely starts with localhost',
+			name: 'HTTP on a host that merely starts with localhost',
 			value: 'http://localhost.evil.com',
 			allowed: false
 		},
 		{ name: 'a non-URL string', value: 'not a url', allowed: false }
-	])('$name', ({ value, allowed }) => {
+	])('returns $allowed for $name', ({ value, allowed }) => {
 		expect(isAllowedIssuerUrl(value)).toBe(allowed);
 	});
 });
 
 describe('IssuerUrl', () => {
 	it.each([
-		{ name: 'an https issuer', raw: 'https://issuer.example.com' },
+		{ name: 'an HTTPS issuer', raw: 'https://issuer.example.com' },
 		{
-			name: 'an https issuer with a trailing slash',
+			name: 'an HTTPS issuer with a trailing slash',
 			raw: 'https://issuer.example.com/'
 		},
-		{ name: 'an http loopback issuer', raw: 'http://127.0.0.1:8788' }
-	])('parses, normalises and builds the discovery URL for $name', ({ raw }) => {
+		{ name: 'an HTTP loopback issuer', raw: 'http://127.0.0.1:8788' }
+	])('normalises $name before building its discovery URL', ({ raw }) => {
 		const issuerUrl = IssuerUrl.parse(raw);
 		const normalised = raw.replace(/\/$/, '');
 
@@ -67,7 +67,7 @@ describe('IssuerUrl', () => {
 	});
 
 	it.each([
-		{ name: 'plain http', raw: 'http://issuer.example.com' },
+		{ name: 'a plain HTTP issuer', raw: 'http://issuer.example.com' },
 		{ name: 'a non-URL string', raw: 'not a url' },
 		{ name: 'an issuer with a query', raw: 'https://issuer.example.com?t=a' },
 		{ name: 'an issuer with a fragment', raw: 'https://issuer.example.com#a' },
@@ -76,7 +76,7 @@ describe('IssuerUrl', () => {
 		expect(IssuerUrl.parse(raw)).toBeUndefined();
 	});
 
-	it('matches another issuer slash-insensitively', () => {
+	it('treats one trailing slash as insignificant when comparing issuers', () => {
 		const issuerUrl = IssuerUrl.parse('https://issuer.example.com/');
 
 		expect({

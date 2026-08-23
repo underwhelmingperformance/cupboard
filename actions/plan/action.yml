@@ -1,11 +1,10 @@
 name: Plan cupboard flake publication
 description:
-  Evaluate a typed flake target manifest, retain targets already held by the
-  cache, and emit the cohort matrix the build jobs consume.
+  Evaluate a typed flake target manifest, renew retention for targets already
+  available from the cache, and emit matrices for the build jobs.
 inputs:
   targets:
-    description:
-      JSON target manifest with each optimised target's root derivation path.
+    description: JSON target manifest to evaluate.
     required: true
   url:
     description: cupboard Worker URL.
@@ -14,7 +13,7 @@ inputs:
     description: Path to the cupboard binary installed by actions/setup.
     required: true
   root-prefix:
-    description: Retention-root prefix prepended to every target rootSuffix.
+    description: Prefix used to form each target's retention root.
     required: true
   cache:
     description: Named cache to inspect and publish to.
@@ -36,50 +35,46 @@ inputs:
     required: false
   optimise:
     description:
-      Inspect the cache and derivation graph. False emits every target directly.
+      Check the cache and derivation graph. When false, emit every target
+      directly.
     required: false
     default: 'true'
   enable-packing:
     description: >-
-      Use measured store sizes to combine cohort candidates that fit within
-      pack-capacity. Disabled by default. The action does not repartition a
-      cohort without a measurement.
+      Use measured NAR sizes to combine cohorts within pack-capacity. Disabled
+      by default. Cohorts without a measurement remain unchanged.
     required: false
     default: 'false'
   pack-capacity:
     description: >-
-      Disk budget in bytes for measured cohort packing. Required when
-      enable-packing is true.
+      Available disk capacity in bytes for measured cohort packing. Required
+      when enable-packing is true.
     required: false
   store:
     description: >-
-      URI of the remote ssh-ng store used by cohort builds. The packing
-      measurement queries that store for its missing bytes, so each candidate
-      grouping uses the costs of the store where its results will be written.
-      When this input is empty, the measurement uses the runner's store. Every
-      selected output path must be known during planning; floating
-      content-addressed outputs require a local build.
+      URI of the remote ssh-ng store for cohort builds. Packing measures against
+      this store. When this input is empty, packing uses the runner's store.
+      Remote planning requires every selected output path to be predictable;
+      floating content-addressed outputs require a local build.
     required: false
   require-provenance:
     description: >-
-      Include cached targets in the build set so this invocation executes their
-      final derivations and can attest every published target.
+      Build cached targets again so this invocation runs their final derivations
+      and can attest every published target.
     required: false
     default: 'false'
 outputs:
   plan-file:
-    description: Detailed plan consumed by the cohort jobs.
+    description: Path to the plan consumed by the cohort jobs.
     value: ${{ steps.plan.outputs.plan-file }}
   plan-artifact-name:
     description: Unique name for transferring this invocation's plan.
     value: ${{ steps.plan.outputs.plan-artifact-name }}
   target-matrix:
-    description: Dynamic matrix for independent targets.
+    description: JSON matrix for independent target jobs.
     value: ${{ steps.plan.outputs.target-matrix }}
   cohort-matrix:
-    description:
-      Dynamic matrix for surviving cohorts, pruned by the advisory destination
-      pre-filter.
+    description: JSON matrix for cohort jobs that remain after pre-filtering.
     value: ${{ steps.plan.outputs.cohort-matrix }}
   retained-count:
     description: Number of targets retained without a build.

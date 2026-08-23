@@ -34,11 +34,6 @@ interface CacheRemoveOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the cache commands use, in the
- * contract's input and output shapes. The real `tenantRpc(...).caches`
- * satisfies this interface by construction.
- */
 export interface CacheClient {
 	list(): Promise<ParsedCacheListResponse>;
 	put(input: {
@@ -77,7 +72,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('list')
-		.description('List the caches and their priority and size.')
+		.description('List the caches, their priority and their store-path count.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -133,7 +128,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('inspect')
-		.description("Show one cache's priority and size.")
+		.description("Show one cache's priority and store-path count.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'cache name')
 		.action(async (url: URL, name: string) => {

@@ -109,9 +109,8 @@ interface HarnessOptions {
 	) => ParsedUploadNegotiateResponse['uploads'];
 	readonly maxEntries?: number;
 	/**
-	 * The run's shared commit session. When it is present, the flush must commit
-	 * over it and never reach the client's own `commit`.
-	 */
+	Use this shared session for every flush instead of opening another socket.
+	*/
 	readonly commitSession?: CommitSession;
 }
 
@@ -207,8 +206,6 @@ function harness(options: HarnessOptions = {}): Harness {
 		store,
 		client,
 		runRoot,
-		// A digest matching the fabricated path info, so the metadata check
-		// passes for a fake NAR stream.
 		createNarArchive: () => emptyStream(),
 		compressNar: () => ({
 			body: emptyStream(),
@@ -409,7 +406,6 @@ describe('BuildOutputBatcher', () => {
 			outcomes: [...outcomes]
 		};
 
-		// A settled path is deduplicated by outcome; a failed one re-enters.
 		batcher.enqueue(pathA);
 		await batcher.drain();
 
@@ -461,9 +457,8 @@ describe('BuildOutputBatcher', () => {
 	});
 });
 
-// A run opens one commit session and threads it through every phase, so a
-// flush must commit over it rather than through the client. Reaching the
-// client's own `commit` here would mean a second socket per run.
+// A run shares one commit session across every phase. Calling the client's
+// `commit` method from a flush would open a second socket for the same run.
 describe('BuildOutputBatcher over a shared commit session', () => {
 	it('commits over the session and never through the client', async () => {
 		const sessionCommits: CommitSessionTarget[] = [];

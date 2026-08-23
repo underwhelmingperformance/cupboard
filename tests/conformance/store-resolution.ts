@@ -47,9 +47,6 @@ export class StoreNotResolvedError extends Error {
 	}
 }
 
-/**
-The selected store in the common representation used by both clients.
-*/
 export interface ResolvedStore {
 	readonly kind: 'daemon' | 'local' | 'ssh-ng' | 'other';
 }
@@ -79,33 +76,18 @@ function resolvedStoreOfBackend(backend: StoreBackend): ResolvedStore {
 	return { kind: backend.backend };
 }
 
-/**
-Filesystem paths reserved for one fixture.
-*/
 export interface FixtureDirectories {
 	readonly home: string;
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
-	/**
-	An unused socket path for a `unix://` store.
-	*/
 	readonly socketPath: string;
-	/**
-	An empty data home for testing Nix's per-user fallback store.
-	*/
 	readonly dataHome: string;
 }
 
-/**
-The environment variables a case adds over the isolated ones.
-*/
 export type StoreEnvironment = (
 	directories: FixtureDirectories
 ) => Readonly<Record<string, string>>;
 
-/**
-Applies one environment to both clients and reports the selected stores.
-*/
 export async function resolvedStores(
 	oracle: Oracle,
 	environmentFor: StoreEnvironment
@@ -190,6 +172,6 @@ export function chrootFallbackUnavailable(
 	const stateDirectory = '/nix/var/nix';
 
 	return existsSync(stateDirectory)
-		? `${stateDirectory} exists, which is what turns the fallback off`
+		? `${stateDirectory} exists, so Nix will not select the per-user fallback store`
 		: undefined;
 }

@@ -19,7 +19,7 @@ describe('slsaSourceCommit', () => {
 			'the source repository with a ref',
 			'git+https://github.com/owner/repo@refs/heads/main'
 		]
-	])('reads the commit from the dependency matching %s', (_name, uri) => {
+	])('returns the commit when the dependency identifies %s', (_name, uri) => {
 		expect(
 			slsaSourceCommit(
 				provenance([

@@ -26,9 +26,7 @@ import { measureRealisation, type RealisationReport } from './measurement.ts';
 import { renderBudgetResult, renderSummary } from './summary.ts';
 
 /**
- * The public substituter configured by default on Nix installations. Unless a
- * caller supplies another substituter, measurements use this list to model a
- * runner with no additional cache configuration.
+ * The substituter used when the command receives no `--substituter` option.
  */
 export const defaultSubstituters = ['https://cache.nixos.org'] as const;
 
@@ -51,7 +49,7 @@ export function createProgram(): Command {
 	return new Command()
 		.name('measure-realisation')
 		.description(
-			'Measure what realising a flake’s targets costs a cold runner, ' +
+			'Measure the work required to realise a flake’s targets, ' +
 				'each target on its own and every declared cohort together.'
 		)
 		.requiredOption(
@@ -71,7 +69,7 @@ export function createProgram(): Command {
 		)
 		.option(
 			'--report-file <path>',
-			'destination for the JSON report (use /dev/stdout to print it)'
+			'destination for the JSON report; the human summary still uses stdout'
 		)
 		.option('--baseline <path>', 'expected values a gate run measures against')
 		.option(
@@ -81,7 +79,7 @@ export function createProgram(): Command {
 		)
 		.option(
 			'--work-dir <path>',
-			'directory the diverted store is built in (default: a fresh temporary directory)'
+			'directory to reuse for the diverted store; deleted unless --keep-store is set'
 		)
 		.option(
 			'--keep-store',

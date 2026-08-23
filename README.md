@@ -12,8 +12,8 @@ a client needs to substitute from a cache.
 
 ## Two roles
 
-The commands divide along the line between running the service and using a
-tenant within it.
+The commands fall into two groups: operating the deployment and administering
+one of its tenants.
 
 An **operator** owns the deployment. They provision it, create and offboard
 tenants, and manage the control-plane signing keys. These commands address the
@@ -27,7 +27,7 @@ deployment by its bare host and are marked "operator only" in the help:
 
 A **tenant admin** owns one tenant within a deployment. They push paths, manage
 the tenant's caches and retention, and rotate the keys that sign its narinfos.
-These commands address the tenant, so their URL carries the tenant slug:
+These commands address the tenant through a URL that includes its slug:
 
 - `cupboard push` uploads store paths (their complete closure with `--closure`)
   and optionally pins them.
@@ -63,18 +63,17 @@ with `--cache <name>` where the command supports it.
 Stand up a deployment, provision a tenant, then push to it:
 
 ```sh
-# Operator: deploy, then create a tenant. The --owner-* values are the OIDC
-# identity allowed to administer the tenant: the same identity its admin
-# presents to `cupboard login`.
+# Deploy, then create a tenant. The --owner-* values identify the OIDC
+# principal that may administer it and sign in with `cupboard login`.
 cupboard init --instance-name cupboard
 cupboard tenant create https://cupboard.example.workers.dev acme \
   --owner-issuer <issuer> --owner-subject <subject> --owner-audience <audience>
 
-# Tenant admin: sign in, then push
+# Sign in as the tenant administrator, then push.
 cupboard login https://cupboard.example.workers.dev/t/acme
 cupboard push https://cupboard.example.workers.dev/t/acme ./result
 
-# Print the nix.conf a client needs to substitute from the tenant
+# Print the nix.conf required to substitute from the tenant.
 cupboard config https://cupboard.example.workers.dev/t/acme \
   "$(cupboard pubkey https://cupboard.example.workers.dev/t/acme)"
 ```
@@ -111,10 +110,10 @@ key and its unfinished work.
 
 ## Output modes
 
-Every command renders one of two ways. Attached to a terminal it shows progress
-spinners, prompts, and result tables. Piped or in CI it emits line-delimited
-JSON on stderr, with command payloads (a public key, a `nix.conf`) on stdout, so
-output can be parsed or redirected:
+Every command supports two output modes. Attached to a terminal it shows
+progress spinners, prompts, and result tables. Piped or in CI it emits
+line-delimited JSON on stderr, with command payloads (a public key, a
+`nix.conf`) on stdout, so output can be parsed or redirected:
 
 ```sh
 cupboard pubkey https://cupboard.example.workers.dev/t/acme > key.pub

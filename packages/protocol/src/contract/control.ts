@@ -33,9 +33,6 @@ import {
 
 import { type AuthzMeta } from './base.ts';
 
-// Control procedures carry the same grant metadata as tenant ones; the control
-// plane just verifies the token against its own issuer and keys first. Each
-// procedure declares the operation it requires.
 const controlProcedure = oc.$meta<AuthzMeta>({}).errors({
 	UNAUTHORIZED: {},
 	FORBIDDEN: {}

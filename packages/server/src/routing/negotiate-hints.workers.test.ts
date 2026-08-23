@@ -96,10 +96,8 @@ function probeRequest(
 	);
 }
 
-// The hint computation runs in the front Worker before the Durable Object
-// authenticates the bearer, so its D1 reads are gated on the body's signed
-// push id and bounded by the path cap; anything unexpected computes nothing
-// and the request dispatches plainly.
+// Hint computation runs before the Durable Object authenticates the request.
+// The signed push ID and path cap bound the D1 reads available at this stage.
 describe('computing negotiate hints', () => {
 	const path = uploadPathNegotiation(uploadMetadata({ fileSize: 1 }));
 
@@ -144,7 +142,7 @@ describe('computing negotiate hints', () => {
 		});
 	});
 
-	it('computes none without a bearer header', async () => {
+	it('returns no hints without a bearer header', async () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),
 			env,
@@ -155,7 +153,7 @@ describe('computing negotiate hints', () => {
 		expect(hints).toBeUndefined();
 	});
 
-	it('computes none for an unparseable body', async () => {
+	it('returns no hints for an unparseable body', async () => {
 		const hints = await computeNegotiateHints(
 			probeRequest('{not json'),
 			env,
@@ -166,7 +164,7 @@ describe('computing negotiate hints', () => {
 		expect(hints).toBeUndefined();
 	});
 
-	it('computes none past the path cap', async () => {
+	it('returns no hints past the path cap', async () => {
 		const paths = Array.from({ length: 10_001 }, () => path);
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths }),
@@ -178,7 +176,7 @@ describe('computing negotiate hints', () => {
 		expect(hints).toBeUndefined();
 	});
 
-	it('computes none when the shared-fact reads fault', async () => {
+	it('returns no hints when the shared-fact reads fail', async () => {
 		const faultyEnv = {
 			...env,
 			CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
@@ -197,10 +195,6 @@ describe('computing negotiate hints', () => {
 });
 
 describe('negotiate hints', () => {
-	// Worker-routed requests reach the shared fixture tenant's Durable Object,
-	// so the harness targets that same object for the direct half of each test.
-	// Its durable SQLite persists across the file, hence the per-test store
-	// path hashes.
 	beforeEach(async () => {
 		await resetTestServer();
 		await useTestServer(fixtureTenant);
@@ -220,7 +214,6 @@ describe('negotiate hints', () => {
 
 		await commitPath(token, committed, committedNar);
 
-		// A second path over the committed blob (a reuse) and a wholly fresh one.
 		const reuse = uploadMetadata({
 			name: 'reuse',
 			storePathHash: '2'.repeat(32),
@@ -235,8 +228,6 @@ describe('negotiate hints', () => {
 		});
 		const paths = [committed, reuse, fresh];
 
-		// Through the Worker the decisions come from staged hints; directly
-		// against the Durable Object they come from its own D1 reads.
 		const hinted = await negotiateViaWorker(token, paths);
 		const direct = await authorisedFetch('/cache/_default/uploads', token, {
 			method: 'POST',
@@ -286,11 +277,8 @@ describe('negotiate hints', () => {
 
 		const generation = await narInfoGeneration(committed.storePathHash);
 
-		// The same store path rebuilt non-reproducibly: a different NAR behind
-		// the same path. The Worker's hint reads cover only the pushed hash, so
-		// the committed row's own NAR sits outside them; its presence must still
-		// be read; its presence is not presumed lost, or the live row would be reconciled
-		// away and the path re-planned as an upload.
+		// The hints cover only the new NAR hash. The Durable Object must still read
+		// the old committed hash before deciding whether the path can skip.
 		const rebuiltNar = await verifiableNar('hints-rebuilt-other');
 		const rebuilt = uploadMetadata({
 			name: 'rebuilt',
@@ -327,8 +315,7 @@ describe('negotiate hints', () => {
 
 		await commitPath(token, committed, nar);
 
-		// The row survives but its committed edge is gone, the residue of a
-		// delete that crashed between the edge retirement and the row.
+		// Leave a narinfo row without its committed edge.
 		const generation = await narInfoGeneration(committed.storePathHash);
 
 		expect(generation).toBeDefined();
@@ -337,9 +324,6 @@ describe('negotiate hints', () => {
 			await deleteBlobReferenceEdge(committed.storePathHash, generation);
 		}
 
-		// No edge means no skip: the hinted check fails towards not-committed
-		// and the path re-plans, as a reuse commit since the tenant still holds
-		// the blob.
 		const hinted = await negotiateViaWorker(token, [committed]);
 
 		expect(actionsByPath(hinted)).toStrictEqual({
@@ -373,12 +357,10 @@ describe('negotiate hints', () => {
 			narSize: nar.narSize
 		});
 
-		// The shared blob exists (another tenant's, say) but this tenant holds no
-		// presence edge for it.
+		// A global blob without this tenant's ownership row must not be reusable.
 		await seedCanonicalBlob(nar);
 
-		// Hints claiming ownership regardless: negotiate believes its plan and
-		// offers the reuse, exactly what a stale (or hostile) hint set would do.
+		// Stage stale facts that claim ownership the tenant does not have.
 		const staged = await currentServer().stageNegotiateHints({
 			blobStates: [
 				{
@@ -415,8 +397,6 @@ describe('negotiate hints', () => {
 			metadata
 		);
 
-		// The commit re-checks ownership and refuses: the plan was advisory, and
-		// the existence oracle holds against the hint.
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 
 		expectCommitSocketError(commitError);
@@ -424,8 +404,6 @@ describe('negotiate hints', () => {
 			status: StatusCodes.NOT_FOUND
 		});
 
-		// The token was consumed by the first negotiate; replaying it falls back
-		// to the object's own facts, which offer an upload.
 		const replayed = await authorisedFetch('/cache/_default/uploads', token, {
 			method: 'POST',
 			headers: {

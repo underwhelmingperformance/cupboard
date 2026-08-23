@@ -560,7 +560,7 @@ export class UploadWaitTimeoutError extends CliError {
 export class AttestationBundleInvalidError extends CliError {
 	constructor(
 		public readonly path: string,
-		detail = 'expected a Sigstore DSSE bundle with an in-toto statement'
+		detail = 'expected a Sigstore bundle containing a DSSE envelope with an in-toto statement'
 	) {
 		super(`Invalid attestation bundle ${path}: ${detail}`);
 		this.name = 'AttestationBundleInvalidError';
@@ -573,7 +573,7 @@ export class AttestationSubjectNotPushedError extends CliError {
 		public readonly subjectDigests: readonly string[]
 	) {
 		super(
-			`Attestation bundle ${path} does not describe any path in the pushed closure`
+			`Attestation bundle ${path} has subjects outside the selected paths: ${subjectDigests.join(', ')}`
 		);
 		this.name = 'AttestationSubjectNotPushedError';
 	}
@@ -608,7 +608,7 @@ export class UnexpectedAttestationDecisionError extends CliError {
 		public readonly digest: string
 	) {
 		super(
-			`Attestation decision did not match a prepared bundle: ${storePathHash} ${digest}`
+			`No prepared attestation bundle matches the server decision: ${storePathHash} ${digest}`
 		);
 		this.name = 'UnexpectedAttestationDecisionError';
 	}
@@ -617,9 +617,6 @@ export class UnexpectedAttestationDecisionError extends CliError {
 export type AttestationNegotiationMismatch =
 	'missing' | 'duplicate' | 'unexpected';
 
-/**
-An attestation negotiate response that does not match its request.
-*/
 export class AttestationNegotiationMismatchError extends CliError {
 	constructor(
 		public readonly mismatch: AttestationNegotiationMismatch,
@@ -627,16 +624,34 @@ export class AttestationNegotiationMismatchError extends CliError {
 		public readonly digest: string
 	) {
 		super(
-			`Attestation negotiation response carried a ${mismatch} decision: ${storePathHash} ${digest}`
+			attestationNegotiationMismatchMessage(mismatch, storePathHash, digest)
 		);
 		this.name = 'AttestationNegotiationMismatchError';
 	}
 }
 
-/**
- * An attestation attach response that reports a store path hash or bundle
- * digest other than the one in the request.
- */
+function attestationNegotiationMismatchMessage(
+	mismatch: AttestationNegotiationMismatch,
+	storePathHash: string,
+	digest: string
+): string {
+	const identity = `${storePathHash} ${digest}`;
+
+	switch (mismatch) {
+		case 'missing': {
+			return `Attestation negotiation returned no decision for ${identity}`;
+		}
+
+		case 'duplicate': {
+			return `Attestation negotiation returned more than one decision for ${identity}`;
+		}
+
+		case 'unexpected': {
+			return `Attestation negotiation returned a decision for an unrequested bundle: ${identity}`;
+		}
+	}
+}
+
 export class AttestationAttachResponseMismatchError extends CliError {
 	constructor(
 		public readonly expectedStorePathHash: string,

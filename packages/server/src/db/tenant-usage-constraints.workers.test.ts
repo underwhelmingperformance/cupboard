@@ -51,29 +51,32 @@ describe('tenant_usage non-negative constraints', () => {
 				updatedAt
 			}
 		}
-	])('rejects a negative $name count, writing no row', async ({ values }) => {
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	])(
+		'rejects a negative $name value without inserting a row',
+		async ({ values }) => {
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		let error: unknown;
-		try {
-			await database.insert(d1Schema.tenantUsage).values(values).run();
-			error = 'inserted';
-		} catch (error_: unknown) {
-			error = error_;
+			let error: unknown;
+			try {
+				await database.insert(d1Schema.tenantUsage).values(values).run();
+				error = 'inserted';
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			const rows = await database
+				.select()
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, values.tenant))
+				.all();
+
+			expect({
+				rejected: error instanceof Error,
+				rows
+			}).toStrictEqual({
+				rejected: true,
+				rows: []
+			});
 		}
-
-		const rows = await database
-			.select()
-			.from(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, values.tenant))
-			.all();
-
-		expect({
-			rejected: error instanceof Error,
-			rows
-		}).toStrictEqual({
-			rejected: true,
-			rows: []
-		});
-	});
+	);
 });

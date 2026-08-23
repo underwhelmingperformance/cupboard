@@ -18,13 +18,11 @@ import {
 } from '../github/convention.ts';
 
 /**
- * The match for a `job_workflow_ref` claim value of the form
- * `owner/repo/path@ref`. When the value carries an `@ref` it is matched
- * exactly; a `refs/tags/<glob>` ref with `*` wildcards becomes a pattern
- * matching that workflow file at every tag the glob admits; without an `@ref`
- * it becomes a pattern matching the workflow file at any ref, which is the
- * shape a reusable workflow needs since its ref is the file's own, not the
- * branch that triggered the run.
+ * Builds a matcher for a `job_workflow_ref` value. A value with `@ref` matches
+ * exactly, except that a `refs/tags/<glob>` ref becomes a pattern for matching
+ * tags. A value without `@ref` accepts the workflow file at any ref. This last
+ * form supports reusable workflows because the claim contains the called
+ * workflow's ref, not the ref that triggered the caller.
  */
 export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 	if (value.includes('*')) {
@@ -38,16 +36,11 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 	return { pattern: `^${quotePatternLiteral(value)}@.+$` };
 }
 
-// The cache operations each `--allow` shorthand expands to. `push` includes
-// `upload:confirm`, which extends retention without uploading bytes, because a
-// cache-aware publication refreshes paths it can already substitute. `attest`,
-// `root` and `attach` cover their own write conversations. `root` includes
-// `root:list` because a publication reads a root's reconciled target list
-// before it replaces that list, and that read only observes the list
-// `root:set` already rewrites wholesale. `attach` is separate
-// from `push`: attaching retains paths under a name, so its grant binds a root
-// selector, and folding it into `push` would force a root binding on every push
-// rule.
+// Keep `upload:confirm` in `push`: cache-aware publication refreshes the
+// retention of paths that it can already substitute without uploading them.
+// Keep `root:list` in `root`: publication reads the reconciled target list
+// before replacing it. `attach` remains separate because attachment requires a
+// root binding, while an ordinary push does not.
 const allowExpansions = {
 	push: [
 		'upload:negotiate',
@@ -62,8 +55,8 @@ const allowExpansions = {
 
 export type AllowShorthand = keyof typeof allowExpansions;
 
-// The shorthands whose operations act on a root: their grant must bind a root
-// selector, so the builder adds a root binding whenever one is allowed.
+// Every shorthand in this set requires a root binding. Adding another
+// root-scoped shorthand to `allowExpansions` also requires adding it here.
 const rootAllowShorthands: ReadonlySet<AllowShorthand> = new Set([
 	'root',
 	'attach'
@@ -73,18 +66,14 @@ function isAllowShorthand(value: string): value is AllowShorthand {
 	return Object.hasOwn(allowExpansions, value);
 }
 
-// A named capture source baked into the CLI for a provider, so a common rule
-// needs no hand-written pattern. `github-pr` reads a GitHub Actions `ref` of the
-// form `refs/pull/<n>/merge` and binds the pull-request number to `{pr}`;
-// `github-tag` reads `refs/tags/<name>` and binds the tag to `{tag}`.
 const templateSources = {
 	'github-pr': {
 		claim: 'ref',
 		pattern: '^refs/pull/(?<pr>[0-9]+)/merge$'
 	},
-	// The capture admits only cache-name characters, so a rendered `{tag}` cache
-	// or root is always a legal name; a tag outside that set does not match and
-	// is not trusted.
+	// The capture excludes characters that would make a `{tag}` substitution
+	// invalid in a cache or root name. Tags outside this subset do not match the
+	// trust rule.
 	'github-tag': {
 		claim: 'ref',
 		pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$'
@@ -150,9 +139,6 @@ export function expandAllow(values: readonly string[]): {
 	return { cacheActions: [...cacheActions], rootActions: [...rootActions] };
 }
 
-// Each named group in a `<claim>=<pattern>` capture becomes a template variable
-// bound to that claim. `captureGroups` rejects an unanchored pattern or one with
-// no named group, so a malformed capture fails here.
 export function parseCapture(spec: string): Record<string, Substitution> {
 	const separator = spec.indexOf('=');
 
@@ -171,9 +157,8 @@ export function parseCapture(spec: string): Record<string, Substitution> {
 	return substitutions;
 }
 
-// Merge the substitutions from `--template-source` and every `--capture`,
-// rejecting a variable defined more than once so a rule never depends on which
-// flag was read last.
+// Reject duplicate variables instead of letting flag order decide which
+// capture supplies a template value.
 export function collectSubstitutions(options: {
 	readonly templateSource?: string;
 	readonly captures: readonly string[];
@@ -209,8 +194,6 @@ export function collectSubstitutions(options: {
 
 const placeholderPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/gu;
 
-// The substitutions a template actually references, so a binding carries no
-// unused entries.
 function referencedSubstitutions(
 	template: string,
 	substitutions: Record<string, Substitution>
@@ -239,9 +222,6 @@ export interface CacheGrantOptions {
 	readonly substitutions?: Record<string, Substitution>;
 }
 
-// Build the single cache grant a `--allow`/`--cache`/`--root` set describes: an
-// exact or templated cache binding, and a root binding that is the cache itself
-// (`--root same-as-cache`), an exact name, or its own template.
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	const { cacheActions, rootActions } = expandAllow(options.allow);
 	const substitutions = options.substitutions ?? {};
@@ -276,8 +256,8 @@ function cacheBinding(
 		return { exact: options.cache, validate: 'cacheName' };
 	}
 
-	// Omitting the cache scopes the grant to the tenant's default cache. The
-	// wire alias for it is never something a user has to type.
+	// An omitted cache means the tenant's default cache. `_default` is the wire
+	// value for that selection, not a cache name the user must supply.
 	return { exact: WIRE_DEFAULT_CACHE, validate: 'cacheName' };
 }
 
@@ -311,8 +291,6 @@ export interface AddBodyOptions {
 	readonly display?: OidcTrustAddBody['display'];
 }
 
-// Validate the assembled rule against the contract schema, so the CLI fails on a
-// malformed grant before the request leaves the machine.
 export function buildAddBody(options: AddBodyOptions): OidcTrustAddBody {
 	const parsed = oidcTrustAddBodySchema.safeParse({
 		issuer: options.issuer,

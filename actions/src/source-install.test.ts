@@ -118,7 +118,7 @@ afterEach(async () => {
 });
 
 describe('acquireSourceCupboard', () => {
-	it('builds the checked-out source and returns its complete Nix installation', async () => {
+	it('checks the checkout and built executables, then leaves the successful out-link in place', async () => {
 		const checkoutDirectory = await temporaryDirectory(
 			'cupboard-source-checkout-'
 		);
@@ -376,7 +376,7 @@ describe('acquireSourceCupboard', () => {
 		}
 	);
 
-	it('rejects a source result which does not identify as the resolved commit', async () => {
+	it('rejects a source build whose reported version does not match the resolved commit', async () => {
 		const checkoutDirectory = await temporaryDirectory(
 			'cupboard-source-checkout-'
 		);

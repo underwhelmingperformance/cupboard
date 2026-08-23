@@ -1,7 +1,8 @@
 # Trust rules
 
-How a CI push authenticates to a tenant, what a trust rule matches, and how to
-write rules the presets do not cover. The setup steps that create the common
+This document explains how a CI push authenticates to a tenant and what a trust
+rule matches. It also explains how to write a rule directly when no preset
+matches the required provider or claim shape. The setup steps for the common
 rules are in [docs/github-actions.md](./github-actions.md).
 
 A push from CI exchanges its GitHub Actions OIDC token for a cupboard token. The
@@ -21,9 +22,8 @@ A good rule pins identity on two axes. The repository is pinned by its immutable
 numeric ids (`repository_id` and `repository_owner_id`), so renaming the
 repository cannot silently transfer trust, and whoever later takes the freed
 name does not inherit the tenant's trust. The trigger is pinned by the `ref`
-claim, which names the branch or pull request that started the run, so only
-pushes from that branch are accepted. Optionally the workflow file is pinned
-too, by `job_workflow_ref`, as a further restriction.
+claim, which identifies the branch, tag, or pull request that started the run.
+Optionally, `job_workflow_ref` can also restrict the workflow file.
 
 ## The presets
 

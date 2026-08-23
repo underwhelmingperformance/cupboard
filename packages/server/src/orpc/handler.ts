@@ -7,10 +7,9 @@ import { type ControlOrpcContext, controlRouter } from './control-router.ts';
 import { tenantRouter } from './tenant-router.ts';
 
 /**
- * The fetch-shaped handler serving the tenant contract. Smart coercion turns
- * query-string values into the types the contract's schemas declare (a
- * `?force=true` becomes a boolean). One instance serves every Durable Object
- * in the isolate; per-request state arrives through the context.
+ * Smart coercion converts query-string values before the contract schemas
+ * validate them. This handler is shared by every Durable Object in the isolate,
+ * so request-specific state must arrive through the context.
  */
 export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
 	tenantRouter,
@@ -23,10 +22,6 @@ export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
 	}
 );
 
-/**
- * The fetch-shaped handler serving the control contract, mounted in the
- * worker's control app under the `/control` prefix.
- */
 export const controlOrpcHandler = new OpenAPIHandler<ControlOrpcContext>(
 	controlRouter,
 	{

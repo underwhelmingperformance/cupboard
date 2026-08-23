@@ -10,14 +10,9 @@ import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { Command } from 'commander';
 import { z } from 'zod';
 
-/**
- * The flake's pnpm store hash is a fixed-output hash, so Nix only notices a
- * stale one by fetching the whole store. To catch drift without a fetch, the
- * hash lives in `pnpm-deps-hash.json` next to a digest of the `pnpm-lock.yaml`
- * it was resolved from: comparing that digest against the current lockfile is
- * instant and needs no network. `check` does the comparison; `update`
- * refetches the store and refreshes the pair.
- */
+// The pnpm store is a fixed-output derivation, so Nix discovers a stale hash
+// only after fetching the store. Record the lockfile digest beside the store
+// hash so `check` can detect drift without that fetch.
 export const hashesFileName = 'pnpm-deps-hash.json';
 
 const sriSha256Hash = z.string().regex(/^sha256-[\d+/A-Za-z]{43}=$/);
@@ -29,23 +24,14 @@ const dependenciesHashesSchema = z.object({
 
 export type DependenciesHashes = z.infer<typeof dependenciesHashesSchema>;
 
-/**
-Reads and writes the files the hash pair is derived from and stored in.
-*/
 export interface Workspace {
 	readLockfile(): Uint8Array;
 	readHashesFile(): string;
 	writeHashesFile(text: string): void;
 }
 
-/**
-Which of the update's two fetches is running.
-*/
 export type FetchPurpose = 'resolve' | 'confirm';
 
-/**
-Resolves the store hash for the workspace's current lockfile.
-*/
 export interface StoreFetcher {
 	/**
 	 * Fetch the store against the recorded hash, returning the corrected hash
@@ -75,8 +61,8 @@ export class LockfileDriftError extends CodedError {
 		public readonly actual: string
 	) {
 		super(
-			`${hashesFileName} was resolved from a pnpm-lock.yaml digesting to\n` +
-				`${recorded}, but the lockfile now digests to\n` +
+			`${hashesFileName} records this pnpm-lock.yaml digest:\n` +
+				`${recorded}\nThe current lockfile has this digest:\n` +
 				`${actual}.\n` +
 				'The flake would fetch a pnpm store that no longer matches the ' +
 				'lockfile. Run `pnpm update:flake-deps` to refresh it.'
@@ -117,14 +103,13 @@ export class UnstableStoreHashError extends CodedError {
 
 export class FakeHashMatchedError extends CodedError {
 	constructor() {
-		super('the fetch succeeded against the fake hash, which cannot happen');
+		super(
+			'Nix accepted the placeholder hash, so the store hash was not resolved'
+		);
 		this.name = 'FakeHashMatchedError';
 	}
 }
 
-/**
-Digest file bytes in the SRI form Nix uses for `sha256` hashes.
-*/
 export function sriSha256(bytes: Uint8Array): string {
 	return `sha256-${createHash('sha256').update(bytes).digest('base64')}`;
 }
@@ -171,9 +156,8 @@ export type UpdateOutcome =
 	| { kind: 'store-unchanged'; store: string }
 	| { kind: 'store-updated'; store: string };
 
-/**
-A hash no fetch can produce, forcing Nix to report the real one.
-*/
+// Nix rejects this placeholder and includes the actual fixed-output hash in the
+// mismatch diagnostic.
 export const fakeStoreHash = `sha256-${'A'.repeat(43)}=`;
 
 // The fetch runs against the fake hash: building against the recorded hash

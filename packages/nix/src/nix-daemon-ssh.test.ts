@@ -65,17 +65,17 @@ class StalledHandshakeChild implements DaemonChildProcess {
 describe('parseSshNgStoreUri', () => {
 	it.each([
 		{
-			name: 'a destination with a user',
+			name: 'parses a destination with a user',
 			uri: 'ssh-ng://build@example.test',
 			expected: { destination: 'build@example.test', host: 'example.test' }
 		},
 		{
-			name: 'a bare host',
+			name: 'parses a bare host',
 			uri: 'ssh-ng://example.test',
 			expected: { destination: 'example.test', host: 'example.test' }
 		},
 		{
-			name: 'the native localhost authority',
+			name: 'parses the native localhost authority',
 			uri: 'ssh-ng://localhost',
 			expected: {
 				destination: 'localhost',
@@ -84,7 +84,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a localhost authority encoded the way Nix normalises',
+			name: 'parses a localhost authority encoded the way Nix normalises',
 			uri: 'ssh-ng://%6cocalhost:',
 			expected: {
 				destination: 'localhost',
@@ -93,7 +93,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'an IPv6 host',
+			name: 'parses an IPv6 host',
 			uri: 'ssh-ng://build@[2001:db8::1]:2222',
 			expected: {
 				destination: 'build@2001:db8::1',
@@ -102,7 +102,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a percent-encoded host',
+			name: 'parses a percent-encoded host',
 			uri: 'ssh-ng://build@%65xample.test',
 			expected: {
 				destination: 'build@example.test',
@@ -110,7 +110,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'an authority port and SSH settings',
+			name: 'parses an authority port and SSH settings',
 			uri: 'ssh-ng://build@example.test:2222?ssh-key=%2Frun%2Fkey&base64-ssh-public-host-key=c3NoLWVkMjU1MTkgQUFBQQ%3D%3D&compress=true',
 			expected: {
 				destination: 'build@example.test',
@@ -122,7 +122,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'the maximum authority port',
+			name: 'parses the maximum authority port',
 			uri: 'ssh-ng://example.test:65535',
 			expected: {
 				destination: 'example.test',
@@ -131,12 +131,12 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'an explicitly empty authority port',
+			name: 'parses an explicitly empty authority port',
 			uri: 'ssh-ng://example.test:',
 			expected: { destination: 'example.test', host: 'example.test' }
 		},
 		{
-			name: 'an ignored password subcomponent',
+			name: 'parses an authority with an ignored password subcomponent',
 			uri: 'ssh-ng://build:ignored@example.test',
 			expected: {
 				destination: 'build@example.test',
@@ -144,7 +144,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'an ignored fragment',
+			name: 'parses a URI with an ignored fragment',
 			uri: 'ssh-ng://build@example.test#not-part-of-the-store',
 			expected: {
 				destination: 'build@example.test',
@@ -152,7 +152,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a remote-program parameter',
+			name: 'parses a remote-program parameter',
 			uri: 'ssh-ng://example.test?remote-program=/opt/nix/bin/nix-daemon%20--option',
 			expected: {
 				destination: 'example.test',
@@ -161,7 +161,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'an explicitly empty remote program',
+			name: 'parses an explicitly empty remote program',
 			uri: 'ssh-ng://example.test?remote-program=',
 			expected: {
 				destination: 'example.test',
@@ -170,7 +170,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a whitespace-only remote program',
+			name: 'parses a whitespace-only remote program',
 			uri: 'ssh-ng://example.test?remote-program=%20%20',
 			expected: {
 				destination: 'example.test',
@@ -179,7 +179,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a configured connection limit',
+			name: 'parses a configured connection limit',
 			uri: 'ssh-ng://example.test?max-connections=3',
 			expected: {
 				destination: 'example.test',
@@ -188,7 +188,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a configured connection age',
+			name: 'parses a configured connection age',
 			uri: 'ssh-ng://example.test?max-connection-age=90',
 			expected: {
 				destination: 'example.test',
@@ -197,7 +197,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a non-positive connection limit',
+			name: 'clamps a non-positive connection limit to one',
 			uri: 'ssh-ng://example.test?max-connections=-2',
 			expected: {
 				destination: 'example.test',
@@ -206,7 +206,7 @@ describe('parseSshNgStoreUri', () => {
 			}
 		},
 		{
-			name: 'a remote program whose plus is literal and a remote store',
+			name: 'preserves a literal plus in the remote program and parses the remote store',
 			uri: 'ssh-ng://example.test?remote-program=nix-daemon+wrapped&remote-store=local%3Fstore%3D%2Fremote%2Fstore',
 			expected: {
 				destination: 'example.test',
@@ -215,53 +215,57 @@ describe('parseSshNgStoreUri', () => {
 				remoteStore: 'local?store=/remote/store'
 			}
 		},
-		{ name: 'an empty destination', uri: 'ssh-ng://', expected: undefined },
 		{
-			name: 'an explicit empty user',
+			name: 'refuses an empty destination',
+			uri: 'ssh-ng://',
+			expected: undefined
+		},
+		{
+			name: 'refuses an explicit empty user',
 			uri: 'ssh-ng://@example.test',
 			expected: undefined
 		},
 		{
-			name: 'an explicit empty user with a password',
+			name: 'refuses an explicit empty user with a password',
 			uri: 'ssh-ng://:ignored@example.test',
 			expected: undefined
 		},
 		{
-			name: 'a path after the authority',
+			name: 'refuses a path after the authority',
 			uri: 'ssh-ng://example.test/remote-store',
 			expected: undefined
 		},
 		{
-			name: 'a trailing authority slash',
+			name: 'refuses a trailing authority slash',
 			uri: 'ssh-ng://example.test/',
 			expected: undefined
 		},
 		{
-			name: 'port zero',
+			name: 'refuses port zero',
 			uri: 'ssh-ng://example.test:0',
 			expected: undefined
 		},
 		{
-			name: 'an authority port above the maximum',
+			name: 'refuses an authority port above the maximum',
 			uri: 'ssh-ng://example.test:65536',
 			expected: undefined
 		},
 		{
-			name: 'a host starting with an option marker',
+			name: 'refuses a host starting with an option marker',
 			uri: 'ssh-ng://-oProxyCommand=bad',
 			expected: undefined
 		},
 		{
-			name: 'a user starting with an option marker',
+			name: 'refuses a user starting with an option marker',
 			uri: 'ssh-ng://-build@example.test',
 			expected: undefined
 		},
 		{
-			name: 'a different scheme',
+			name: 'refuses a different scheme',
 			uri: 'ssh://example.test',
 			expected: undefined
 		}
-	])('parses $name', ({ uri, expected }) => {
+	])('$name', ({ uri, expected }) => {
 		expect(parseSshNgStoreUri(uri)).toStrictEqual(expected);
 	});
 
@@ -286,10 +290,20 @@ describe('parseSshNgStoreUri', () => {
 			);
 		}
 	);
+
+	it('reports an invalid base64-ssh-public-host-key value', () => {
+		expect(() =>
+			parseSshNgStoreUri(
+				'ssh-ng://example.test?base64-ssh-public-host-key=not-base64'
+			)
+		).toThrow(
+			"Nix configuration setting 'base64-ssh-public-host-key' is not valid base64"
+		);
+	});
 });
 
 describe('createSshNixDaemonConnector', () => {
-	it('gives concurrent daemon connections independently owned SSH transports', async () => {
+	it('closing one concurrent daemon connection leaves the other SSH transport open', async () => {
 		const commands: string[][] = [];
 		const disposeKnownHosts = [vi.fn(), vi.fn()];
 		let knownHostsIndex = 0;
@@ -353,7 +367,7 @@ describe('createSshNixDaemonConnector', () => {
 
 	it.each([
 		{
-			name: 'the default remote program',
+			name: 'starts nix-daemon over SSH when remote-program is absent',
 			spec: { destination: 'build@example.test' },
 			expectedCommand: 'ssh',
 			expectedArguments: [
@@ -366,7 +380,7 @@ describe('createSshNixDaemonConnector', () => {
 			]
 		},
 		{
-			name: 'a configured remote program',
+			name: 'starts the configured remote program with its remote store',
 			spec: {
 				destination: 'example.test',
 				remoteProgram: ['/opt/nix/bin/nix-daemon', '--option'],
@@ -386,7 +400,7 @@ describe('createSshNixDaemonConnector', () => {
 			]
 		},
 		{
-			name: 'an explicitly empty remote program',
+			name: 'starts --stdio as the command when remote-program is empty',
 			spec: parseSshNgStoreUri('ssh-ng://example.test?remote-program='),
 			expectedCommand: 'ssh',
 			expectedArguments: [
@@ -398,19 +412,19 @@ describe('createSshNixDaemonConnector', () => {
 			]
 		},
 		{
-			name: 'an explicitly empty remote program on native localhost',
+			name: 'starts --stdio locally for an empty native-localhost program',
 			spec: parseSshNgStoreUri('ssh-ng://localhost?remote-program=%20'),
 			expectedCommand: '--stdio',
 			expectedArguments: []
 		},
 		{
-			name: 'the native localhost fast path',
+			name: 'starts nix-daemon locally for native localhost',
 			spec: parseSshNgStoreUri('ssh-ng://localhost'),
 			expectedCommand: 'nix-daemon',
 			expectedArguments: ['--stdio']
 		},
 		{
-			name: 'a localhost authority with a user',
+			name: 'uses SSH when the localhost authority includes a user',
 			spec: parseSshNgStoreUri('ssh-ng://build@localhost'),
 			expectedCommand: 'ssh',
 			expectedArguments: [
@@ -423,13 +437,13 @@ describe('createSshNixDaemonConnector', () => {
 			]
 		},
 		{
-			name: 'a localhost authority with an explicit empty port',
+			name: 'uses the native-localhost path for an explicitly empty port',
 			spec: parseSshNgStoreUri('ssh-ng://localhost:'),
 			expectedCommand: 'nix-daemon',
 			expectedArguments: ['--stdio']
 		},
 		{
-			name: 'an uppercase localhost authority',
+			name: 'uses SSH for uppercase LOCALHOST',
 			spec: parseSshNgStoreUri('ssh-ng://LOCALHOST'),
 			expectedCommand: 'ssh',
 			expectedArguments: [
@@ -442,7 +456,7 @@ describe('createSshNixDaemonConnector', () => {
 			]
 		},
 		{
-			name: 'a localhost authority with an explicit port',
+			name: 'uses SSH when localhost has an explicit port',
 			spec: parseSshNgStoreUri('ssh-ng://localhost:22'),
 			expectedCommand: 'ssh',
 			expectedArguments: [
@@ -455,34 +469,31 @@ describe('createSshNixDaemonConnector', () => {
 				'--stdio'
 			]
 		}
-	])(
-		'starts the daemon with $name',
-		async ({ spec, expectedCommand, expectedArguments }) => {
-			if (spec === undefined) {
-				throw new Error('expected a valid ssh-ng fixture');
-			}
-
-			const commands: {
-				command: string;
-				commandArguments: readonly string[];
-			}[] = [];
-			const run: DaemonCommandRunner = (command, commandArguments) => {
-				commands.push({ command, commandArguments });
-
-				return new FakeDaemonChild(new FakeDaemonTransport({}));
-			};
-			const client = new NixDaemonStoreClient({
-				connect: createSshNixDaemonConnector(spec, run)
-			});
-
-			await expect(client.queryValidPaths([appPath])).resolves.toStrictEqual(
-				[]
+	])('$name', async ({ spec, expectedCommand, expectedArguments }) => {
+		if (spec === undefined) {
+			throw new Error(
+				'Expected parseSshNgStoreUri to accept the valid test URI'
 			);
-			expect(commands).toStrictEqual([
-				{ command: expectedCommand, commandArguments: expectedArguments }
-			]);
 		}
-	);
+
+		const commands: {
+			command: string;
+			commandArguments: readonly string[];
+		}[] = [];
+		const run: DaemonCommandRunner = (command, commandArguments) => {
+			commands.push({ command, commandArguments });
+
+			return new FakeDaemonChild(new FakeDaemonTransport({}));
+		};
+		const client = new NixDaemonStoreClient({
+			connect: createSshNixDaemonConnector(spec, run)
+		});
+
+		await expect(client.queryValidPaths([appPath])).resolves.toStrictEqual([]);
+		expect(commands).toStrictEqual([
+			{ command: expectedCommand, commandArguments: expectedArguments }
+		]);
+	});
 
 	it('caps active SSH daemon children at max-connections', async () => {
 		const spec = parseSshNgStoreUri(
@@ -490,7 +501,9 @@ describe('createSshNixDaemonConnector', () => {
 		);
 
 		if (spec?.maxConnections === undefined) {
-			throw new Error('expected a configured ssh-ng connection limit');
+			throw new Error(
+				'Expected max-connections in the parsed SSH store settings'
+			);
 		}
 
 		const firstStarted = Promise.withResolvers<undefined>();
@@ -761,16 +774,16 @@ describe('createSshNixDaemonConnector', () => {
 
 	it.each([
 		{
-			name: 'the short port option',
+			name: 'uses the URI port before an inherited -p option',
 			sshOptions: '-p 10022 -o BatchMode=yes',
 			inheritedArguments: ['-p', '10022', '-o', 'BatchMode=yes']
 		},
 		{
-			name: 'a Port setting and SSH config',
+			name: 'uses the URI port before an inherited Port setting and SSH config',
 			sshOptions: '-oPort=10023 -F "/run/ssh config"',
 			inheritedArguments: ['-oPort=10023', '-F', '/run/ssh config']
 		}
-	])('makes a URI port authoritative over $name', async (fixture) => {
+	])('$name', async (fixture) => {
 		const commands: string[][] = [];
 		const client = new NixDaemonStoreClient({
 			connect: createSshNixDaemonConnector(
@@ -888,20 +901,20 @@ describe('createSshNixDaemonConnector', () => {
 
 	it.each([
 		{
-			name: 'an explicit default port',
+			name: 'formats the default port as a bare host in known_hosts',
 			destination: 'build@example.test',
 			host: 'example.test',
 			port: 22,
 			expected: 'example.test'
 		},
 		{
-			name: 'an IPv6 host and nonstandard port',
+			name: 'formats a nonstandard IPv6 port with brackets in known_hosts',
 			destination: 'build@2001:db8::1',
 			host: '2001:db8::1',
 			port: 2222,
 			expected: '[2001:db8::1]:2222'
 		}
-	])('pins $name with known_hosts syntax', async (fixture) => {
+	])('$name', async (fixture) => {
 		const knownHosts: string[] = [];
 		const client = new NixDaemonStoreClient({
 			connect: createSshNixDaemonConnector(
@@ -963,6 +976,20 @@ describe('createSshNixDaemonConnector', () => {
 		]);
 	});
 
+	it('reports an unfinished quote in NIX_SSHOPTS', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: createSshNixDaemonConnector(
+				{ destination: 'example.test' },
+				() => new FakeDaemonChild(new FakeDaemonTransport({})),
+				{ env: { NIX_SSHOPTS: '"unfinished' } }
+			)
+		});
+
+		await expect(client.queryValidPaths([appPath])).rejects.toThrow(
+			'Could not parse NIX_SSHOPTS: a quoted value has no closing quote'
+		);
+	});
+
 	it('removes a generated host-key file when ssh cannot start', async () => {
 		const disposeKnownHosts = vi.fn();
 		const failure = new Error('ssh cannot start');
@@ -989,7 +1016,7 @@ describe('createSshNixDaemonConnector', () => {
 		expect(disposeKnownHosts.mock.calls).toStrictEqual([[]]);
 	});
 
-	it('closes a stalled pooled SSH handshake before a failed closure query settles', async () => {
+	it('cancels a stalled pooled SSH handshake before rejecting a failed closure query', async () => {
 		const failure = new Error('path query failed');
 		let operations = 0;
 		const first = new FakeDaemonChild(

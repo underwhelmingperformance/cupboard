@@ -59,9 +59,6 @@ import { type UploadStateService } from './upload-state-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 
-// The identity of a committed reference edge, so a reconcile can tell a committed
-// row from a reserved-but-unverified one (which reserve-at-commit also leaves in
-// `nar_infos`) without a per-row D1 read.
 function edgeKey(
 	cache: StoredCache,
 	storePathHash: string,
@@ -71,8 +68,6 @@ function edgeKey(
 	return `${cache}\0${storePathHash}\0${String(generation)}\0${narHash}`;
 }
 
-// The rows a reconcile would act on: a missing NAR or narinfo object. Only these
-// need the committed-edge check, so a healthy pass reads no edges at all.
 function reconcileCandidates(
 	observations: readonly (RowObservation | undefined)[]
 ): NarInfoRow[] {
@@ -85,24 +80,18 @@ function reconcileCandidates(
 		.map((observation) => observation.row);
 }
 
-// A committed row paired with what an R2 probe found for the two objects it
-// points at: its canonical NAR and its tenant narinfo object. The probe runs
-// outside the DO gate; the reconcile re-checks the row under the gate before
-// acting on it.
 interface RowObservation {
 	readonly row: NarInfoRow;
 	readonly isNarPresent: boolean;
 	readonly objectPresent: boolean;
 }
 
-// What a single row's reconcile did, so a batch can tally restores and removals.
 type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
 
 /**
- * A deferred upload claimed for verification, carrying just what the queue
- * consumer needs to fetch and decode the staging object off the DO thread. A
- * `reuse` row's bytes are the shared canonical object, already verified when it
- * was first promoted, so the consumer skips the decode for it.
+ * The consumer must fetch and verify `r2Key` unless `reuse` is true. A reuse
+ * claim refers to canonical bytes that were verified when they were promoted,
+ * so the consumer must not decode them again.
  */
 export interface PendingVerification {
 	readonly uploadId: UploadId;
@@ -112,57 +101,46 @@ export interface PendingVerification {
 	readonly reuse: boolean;
 }
 
-// One claim call's result: the chunk of rows the consumer should work now,
-// plus whether pending rows were left behind by the row or byte cap, the
-// signal to chain a continuation pass.
+// `truncated` means that claimable rows remain. The consumer requests a
+// continuation only after the current pass records progress.
 export interface PendingVerificationBatch {
 	readonly claims: readonly PendingVerification[];
 	readonly truncated: boolean;
 }
 
-// The verdict the queue consumer reached for one claimed upload off the DO
-// thread: the decoded NAR verification, that the bytes verified and the
-// consumer also promoted them (the canonical object and its `blob_state` row
-// are already durable, so the settle skips its own promote), that its staging
-// object was definitively gone, or that a transient fault made the consumer
-// abandon the claim unsettled, freeing its lease for the next pass.
+// `missing` is reserved for an object known not to exist. `abandoned` reports a
+// transient fault and releases the lease without recording a terminal result.
+// `promoted` means that the canonical object and its `blob_state` row are
+// already durable, so the Durable Object must not promote the bytes again.
 export type VerificationVerdict =
 	| { readonly kind: 'verified'; readonly verification: NarVerification }
 	| { readonly kind: 'promoted' }
 	| { readonly kind: 'missing' }
 	| { readonly kind: 'abandoned' };
 
-// Whether a verdict's apply still owes the promote, or the reporter already
-// ran it. The on-DO cron path always promotes itself.
 export type PromotionState = 'promote' | 'already-promoted';
 
-// One upload's verdict, carried back to the DO so a whole batch settles in a
-// single RPC.
 export interface VerificationResult {
 	readonly uploadId: UploadId;
 	readonly verdict: VerificationVerdict;
 }
 
-// A claimed upload that reserved, verified and promoted in a batch pass's first
-// phase, ready to materialise in the second once the batch's probe facts are read.
 interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
 	readonly metadata: ParsedUploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
 }
 
-// Whether a row is still awaiting its verdict. A terminal row is retained
-// through its observation window as the settled authority; verify passes
-// overlap, so a straggling verdict may find one and must never reopen it.
+// Terminal rows remain authoritative during their observation window. Verify
+// passes can overlap, so a straggling verdict must not reopen a settled row.
 function isAwaitingVerdict(
 	row: typeof schema.pendingUploads.$inferSelect
 ): boolean {
 	return row.verdict === 'pending' || row.verdict === 'committing';
 }
 
-// The rows a verify pass may claim: awaiting a verdict, and not leased to a
-// pass already working them. A lease older than `verifyClaimLeaseMs` belongs
-// to a pass presumed dead, so its rows are claimable again.
+// A lease older than `verifyClaimLeaseMs` belongs to a pass presumed dead, so
+// another pass can claim the row again.
 function claimableFilter(now: Date) {
 	const leasedBefore = isoTimestamp(
 		new Date(now.getTime() - verifyClaimLeaseMs)
@@ -180,13 +158,10 @@ function claimableFilter(now: Date) {
 	);
 }
 
-// Cuts one claim's chunk from the selected rows: at most `limit` rows and at
-// most `maxNarBytes` of cumulative uncompressed size over the fresh rows
-// (reuse rows decode nothing and count zero), taken as a contiguous prefix in
-// id order so the consumer's continuation drains the rest. The first fresh
-// row is admitted whatever its size, so a lone over-cap NAR cannot starve.
-// `truncated` reports that pending rows were left behind, the consumer's
-// signal to chain another pass.
+// Claims form a contiguous prefix in id order, subject to the row limit and the
+// cumulative uncompressed size of fresh rows. Reuse rows cost no decode bytes.
+// Always admit the first fresh row so a lone NAR above `maxNarBytes` cannot
+// starve. `truncated` records that claimable rows remain.
 function chunkClaims(
 	pendings: readonly (typeof schema.pendingUploads.$inferSelect)[],
 	limit: number,
@@ -234,20 +209,17 @@ export class VerificationService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService,
 		private readonly retention: RetentionService,
-		// Drops a store path from every retention root when it fails verification, so
-		// a root set at commit over a still-verifying target does not keep a dead
-		// reference. Injected because the roots service is constructed after this one.
+		// A failed verification must remove the path from every retention root. A
+		// root can include the path while its bytes are still being verified.
 		private readonly pruneRetentionTargets: (
 			cache: StoredCache,
 			storePathHash: StorePathHash
 		) => void
 	) {}
 
-	// The current session id for an upload, re-read from the row at notify time so
-	// a reconnect that re-pointed the row via `attachSession` between the settle's
-	// read and its notify receives the verdict. Falls back to `captured` when the
-	// row is already gone, which means the upload cleared while this pass was
-	// working it and the captured id is as good as any.
+	// Re-read the session after the settle's awaits because `attachSession` can
+	// move the waiter to a reconnected socket. If the row has already cleared,
+	// there is no newer session to use in place of the captured id.
 	private currentSessionId(
 		uploadId: UploadId,
 		captured: SessionId | null
@@ -261,11 +233,6 @@ export class VerificationService {
 		return row === undefined ? captured : row.sessionId;
 	}
 
-	// Routes an upload's terminal verdict to the commit session waiting on it. The
-	// session id is resolved from the live row at notify time, so a client reconnect
-	// that re-pointed the row's session id via `attachSession` between the settle
-	// reading the row and reaching this notify receives the verdict. The session
-	// stays open: it carries the other ids in the push too.
 	private notifyWaiters(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		status: ParsedUploadStatusResponse['status']
@@ -296,8 +263,8 @@ export class VerificationService {
 		}
 	}
 
-	// The deadline a servable verdict reports: the grace row its materialisation
-	// extended, read afresh so a replayed verdict reports the current deadline.
+	// Read grace at notification time so a replayed verdict reports the current
+	// deadline.
 	private servableGraceFact(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): ParsedUploadGraceFact {
@@ -313,14 +280,6 @@ export class VerificationService {
 		);
 	}
 
-	// Phase A of a batch settle, and the backstop the hourly cron runs: reserve
-	// the row, decode and hash-check the staging bytes on the Durable Object,
-	// then promote, returning the claimed upload ready to materialise. A settle
-	// that finishes here (the path was lost, already committed, its object
-	// definitively absent, or its verdict failed) returns undefined and is not
-	// carried into the materialise phase. The prompt path instead decodes in the
-	// queue consumer, off the Durable Object thread, and records its verdict
-	// through `recordVerification`.
 	private async prepareAndPromote(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<PreparedSettle | undefined> {
@@ -339,14 +298,9 @@ export class VerificationService {
 			return undefined;
 		}
 
-		// A returned `{ok:false}` (a hash/size mismatch or an undecodable frame) is a
-		// definitive content failure that reclaims the reserved row. A thrown error
-		// splits two ways: a definitively absent staging object cannot reappear, so it
-		// fails terminally; any other thrown error is a transient read fault that
-		// propagates to the per-iteration guard, leaving the row reserved and its
-		// bytes staged for the next pass. `blob_state` already holding the hash never
-		// short-circuits the verify: unverified bytes must not bind to the shared
-		// object.
+		// A content mismatch and a missing staging object are terminal. Other read
+		// failures leave the row and its staged bytes for another pass. Never use an
+		// existing `blob_state` row to accept fresh bytes that have not been verified.
 		let verification: NarVerification;
 
 		try {
@@ -378,11 +332,6 @@ export class VerificationService {
 		return { pending, metadata, generation: reserved };
 	}
 
-	// Phase A of recording a queue-consumer verdict: read the row, reserve, verify
-	// it is not already committed, and promote. Returns the upload ready to
-	// materialise, or undefined when it settled here (a vanished or already-decided
-	// row, a lost path, or a failed verdict). A batch pass collects the survivors,
-	// reads their probe facts once, then materialises them from memory.
 	private async prepareRecordedVerdict(
 		uploadId: UploadId,
 		verification: NarVerification,
@@ -427,12 +376,6 @@ export class VerificationService {
 		return { pending, metadata, generation };
 	}
 
-	// Reserves the narinfo row before committing a verified upload: a fresh deferred
-	// upload gets its first row, a crashed or re-driven commit finds its own
-	// (`mine`). A different version holding the path (`lost`) means this upload can
-	// never own it, so its row and staging bytes are dropped and waiters told
-	// `absent`; the caller stops. Returns the reserved generation, or undefined when
-	// the path was lost.
 	private async reservePendingRow(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation
@@ -455,12 +398,10 @@ export class VerificationService {
 		return reserved.generation;
 	}
 
-	// Short-circuits a re-claimed upload whose bytes already verified and
-	// materialised: only its clear-marker step was interrupted, so the whole
-	// decode/promote/materialise saga would re-run to no effect. When the reserved
-	// generation is already committed and serving, finish the bookkeeping instead,
-	// the same tail a fresh materialise's success runs. Returns whether it settled
-	// the upload here.
+	// A crash can leave a committed generation and its pending marker after the
+	// private staging bytes have been deleted. Re-decoding that row would turn a
+	// successful upload into a mismatch, so finish the remaining bookkeeping from
+	// the committed reference and narinfo object.
 	private async finaliseIfAlreadyCommitted(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
@@ -477,8 +418,8 @@ export class VerificationService {
 		}
 
 		// The flush applies captured grace only after the durable charge, so an
-		// interruption between the two leaves a committed generation whose
-		// decision still sits on the pending row. Reapply it before the waiters
+		// interruption between the two leaves a committed generation while the
+		// decision remains on the pending row. Reapply it before the waiters
 		// hear the verdict and before the row holding it is cleared; the
 		// application is identity-checked and monotonic, so re-running an
 		// already-applied decision changes nothing.
@@ -493,18 +434,16 @@ export class VerificationService {
 			graceDecision?.graceSeconds
 		);
 
-		// The row moved during the committed-edge check, so this "already
-		// committed" conclusion is stale: settling on it would report a row
-		// that no longer holds the path and drop the grant. Decline the
-		// short-circuit and let the ordinary saga re-verify against whatever
-		// holds the path now; its charge batch is the authoritative fence.
+		// The row moved during the committed-edge check, so the conclusion is
+		// stale. Settling on it would report the wrong row and drop the grant. Let
+		// the ordinary saga verify the current row under its authoritative charge
+		// fence.
 		if (!confirmed.matched) {
 			return false;
 		}
 
-		// The committed row's identity was just proven by the confirmation, so
-		// the push's run root retains the path, exactly as the flush attaches
-		// it when the settle runs uninterrupted.
+		// Attach the run root while the confirmation's identity proof still applies.
+		// The uninterrupted flush uses the same fence.
 		this.commitPipeline.attachRootTarget(
 			pending.cache,
 			pending.attachRootName,
@@ -519,10 +458,6 @@ export class VerificationService {
 		return true;
 	}
 
-	// A failed verdict reclaims the reserved row and settles the upload; a good one
-	// promotes the staging bytes into the shared CAS. Returns whether the upload
-	// survived to materialise. Split from the materialise half so a batch pass can
-	// promote its whole claim before reading the probe facts once.
 	private async promoteForCommit(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
@@ -535,12 +470,10 @@ export class VerificationService {
 			return false;
 		}
 
-		// Promote outside the critical section: streaming the staging bytes into the
-		// shared CAS must not run under `blockConcurrencyWhile`. It is idempotent and
-		// content-addressed, so a redundant promotion is harmless. A byte verification
-		// carries the file hash and size; a reuse pass-through carries none and
-		// promotes against the already-canonical object. A reporter that already
-		// promoted (the queue consumer) skips it here entirely.
+		// Streaming the staging bytes must remain outside
+		// `blockConcurrencyWhile`. Promotion is content-addressed and idempotent.
+		// Skip it when the queue consumer has already made both the canonical object
+		// and its `blob_state` row durable.
 		if (promotion === 'promote') {
 			const blob =
 				verification.fileHash !== undefined &&
@@ -553,10 +486,8 @@ export class VerificationService {
 		return true;
 	}
 
-	// Reads a whole batch's probe facts for its materialise phase, degrading to
-	// undefined on a fault so each row falls back to its own fresh probe under
-	// the per-row guards: one transient D1 blip costs the batched read, never
-	// the pass.
+	// A failed batch prefetch must fall back to per-path probes. One transient D1
+	// fault must not abort the verification pass.
 	private async prefetchedFactsFor(
 		logger: Logger,
 		ready: readonly PreparedSettle[]
@@ -576,10 +507,6 @@ export class VerificationService {
 		}
 	}
 
-	// The materialise half of the settle: probe the canonical facts and settle the
-	// reserved narinfo through the shared flush. A batch pass passes the probe facts
-	// it read for the whole claim; a lone settle passes none and the probe reads
-	// them fresh.
 	private async materialiseVerified(
 		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
@@ -587,8 +514,8 @@ export class VerificationService {
 		generation: NarInfoGeneration,
 		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<void> {
-		// Probed after the promote, which is what makes the canonical object and
-		// its `blob_state` row exist; probing earlier would read them absent.
+		// Probe only after promotion has created the canonical object and its
+		// `blob_state` row. An earlier probe would report both as absent.
 		const probe = await this.commitPipeline.probeMaterialisation(
 			metadata,
 			prefetched
@@ -602,16 +529,15 @@ export class VerificationService {
 			probe,
 			graceDecision,
 			attachRootName: pending.attachRootName ?? undefined,
-			// A deferred settle proved its bytes: a fresh decode, or a reuse row
-			// that negotiate admitted while the presence edge existed. Ownership
-			// is not re-required here, and on the first commit of a hash the
-			// tenant does not own it yet.
+			// Verification has already established the bytes, either through a fresh
+			// decode or through reuse while the presence edge existed. Do not require
+			// tenant ownership here: a tenant does not yet own a hash on its first
+			// commit.
 			mustOwnBlob: false,
-			// A vanished row was settled elsewhere; a terminal one was settled by a
-			// competing pass during this apply's promote and probe awaits. Either
-			// way the row's fate is decided and this apply must not touch it. Runs
-			// inside the flush gate, so the check and the charge cannot interleave
-			// with a competing settle.
+			// Another pass settled a missing or terminal row while this pass awaited
+			// promotion and probing. Do not modify that row. This check runs inside
+			// the flush gate, so a competing settle cannot interleave between the
+			// check and the charge.
 			isStillSettleable: () => {
 				const current = this.context.db
 					.select()
@@ -654,22 +580,16 @@ export class VerificationService {
 				}
 			});
 
-			// A concurrent pass may have settled the upload during the re-probe; its
-			// fate is decided, so this apply stops exactly as the first outcome's
-			// gone check does.
 			if (retried.kind === 'gone') {
 				return;
 			}
 
-			// Swap in the fresh outcome so the handlers below decide on it. A second
-			// over-quota falls through to the terminal block.
 			outcome = retried;
 		}
 
 		if (outcome.kind === 'over-quota') {
-			// Reclaim the reserved row and record a terminal verdict. Otherwise a later
-			// verify pass, scanning narInfos, would restore its object and make an
-			// unreferenced, uncharged path servable.
+			// Without reclaiming this reserved row, a later scan could restore its
+			// object and make an unreferenced, uncharged path servable.
 			await this.failReservedUpload(
 				pending,
 				metadata,
@@ -679,11 +599,8 @@ export class VerificationService {
 			return;
 		}
 
-		// Publishing stopped between the reserve and the gate (a suspension or
-		// offboard). The reserved row is reclaimed for the same reason as the
-		// over-quota rejection: left behind, a later scan would restore an
-		// unreferenced, uncharged object for it. The waiter hears `absent`, the
-		// same answer an inline commit's writes-stopped rejection amounts to.
+		// Publishing can stop after reservation and before the charge fence. Reclaim
+		// the row so a later scan cannot restore an unreferenced, uncharged path.
 		if (outcome.kind === 'tenant-inactive') {
 			// The grace confirmation runs inside the same gated callback as the
 			// identity proof: the input gate reopens the moment that callback
@@ -697,10 +614,9 @@ export class VerificationService {
 					metadata.narHash
 				);
 
-				// This upload lost the race, so its own captured decision never
-				// ran; apply it against the winning generation before notifying,
-				// or a positive policy would grant nothing. The push's run root
-				// retains the path for the same reason, under the same proof.
+				// This upload's captured grace decision has not been applied. Apply it
+				// to the winning generation before notifying, and attach the run root
+				// under the same identity proof.
 				if (result === 'committed-current') {
 					this.commitPipeline.attachRootTarget(
 						pending.cache,
@@ -722,8 +638,6 @@ export class VerificationService {
 				return result;
 			});
 
-			// A concurrent pass committed this generation before the tenant went
-			// inactive, so it serves; finish the bookkeeping without pruning.
 			if (reclaim === 'committed-current') {
 				this.notifyWaiters(pending, 'servable');
 				this.uploadState.clearPendingUpload(pending.id);
@@ -748,9 +662,9 @@ export class VerificationService {
 		}
 
 		if (outcome.kind === 'materialised') {
-			// The object publishes after the gate; the waiters hear the verdict and
-			// the marker clears only once it has landed, so an interruption in
-			// between stays re-drivable from the durable marker.
+			// Wait for the narinfo object to publish before notifying waiters or
+			// clearing the marker. A failure before publication must leave the upload
+			// available for another pass.
 			await this.narInfoObjects.publishNarInfoObject(
 				pending.cache,
 				metadata.storePathHash,
@@ -759,26 +673,22 @@ export class VerificationService {
 				outcome.narInfo
 			);
 
-			// The parked sockets carry the verdict, and the narinfo itself is the
-			// durable evidence of success, so a settled upload leaves no residue:
-			// the row clears and the staging bytes go.
 			this.notifyWaiters(pending, 'servable');
 			this.uploadState.clearPendingUpload(pending.id);
 			await this.deleteStagingObject(pending);
 			return;
 		}
 
-		// A concurrent recommit took the path or the blob vanished, so this upload
-		// lost: clear its marker. Any blob it promoted that no edge now references is
-		// left for the reaper to collect.
+		// A concurrent recommit took the path or the blob vanished, so clear this
+		// upload's marker. If no edge references a blob that this pass promoted,
+		// leave the blob for the reaper.
 		this.notifyWaiters(pending, 'absent');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
 	}
 
-	// Reclaims an upload's private staging object once its saga settles. A reuse
-	// row's r2Key is the shared canonical key, which the blob reaper owns and
-	// other paths reference, so it is left untouched.
+	// Never delete a reuse row's shared canonical object. Other paths can refer to
+	// it, and the blob reaper owns its lifetime.
 	private async deleteStagingObject(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
@@ -789,13 +699,9 @@ export class VerificationService {
 		await this.context.env.BLOBS.delete(pending.r2Key);
 	}
 
-	// Reclaims the reserved row a deferred upload never made servable and records its
-	// terminal verdict, so neither a stranded row nor a stuck marker survives. The
-	// verdict is `mismatch` for a failed NAR-hash check or `over-quota` for a quota
-	// rejection. If the reclaim finds the generation already committed (its edge
-	// exists, because a concurrent pass settled these bytes servable), this is not a
-	// failure: leave the row, the root and the waiter to that committer, so a
-	// straggling failure verdict never retires a path that serves.
+	// A straggling failure verdict must not retire a generation that another pass
+	// has already committed. Its edge proves that the path is servable, so leave
+	// the row, root and waiter for the committing pass to update.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
@@ -811,9 +717,6 @@ export class VerificationService {
 			)
 		);
 
-		// A concurrent saga committed this upload's own row, so the failure is
-		// stale and the path serves; the settle that committed it owns the
-		// bookkeeping.
 		if (reclaim === 'committed-current') {
 			return;
 		}
@@ -835,9 +738,9 @@ export class VerificationService {
 		this.notifyWaiters(pending, verdict);
 	}
 
-	// Restore a missing narinfo object, re-confirming the NAR inside the critical
-	// section first so a delete during the probe phase cannot leave the object
-	// pointing at a removed NAR. Returns 1 when it restored the object, else 0.
+	// Re-check the NAR under the caller's critical section before restoring the
+	// narinfo object. A delete can otherwise remove the NAR after the probe and
+	// leave the restored narinfo pointing at a missing NAR.
 	private async restoreNarInfoObject(
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<number> {
@@ -874,7 +777,7 @@ export class VerificationService {
 		row: typeof schema.narInfos.$inferSelect,
 		error: unknown
 	): void {
-		logger.warn('verification skipped a narinfo row', {
+		logger.warn('narinfo row not reconciled', {
 			cache: row.cache,
 			storePathHash: row.storePathHash,
 			error
@@ -897,13 +800,6 @@ export class VerificationService {
 			.get();
 	}
 
-	// Probes a committed row's two R2 objects outside any critical section, so the
-	// round-trips never block a concurrent commit or delete. A transient R2 fault
-	// drops the row from this pass, letting the batch continue. The narinfo object
-	// is only probed when its NAR is present: a missing NAR removes the row
-	// regardless of the narinfo object. The narinfo-object presence is resolved by
-	// the caller: a targeted probe heads it directly; a scanning batch reads it from
-	// one bulk list (see {@link presentNarInfoObjects}).
 	private async probeRow(
 		logger: Logger,
 		row: NarInfoRow,
@@ -925,8 +821,6 @@ export class VerificationService {
 		}
 	}
 
-	// Heads a single narinfo object, the per-row presence check a targeted reconcile
-	// uses where the paths are arbitrary and too few to list.
 	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
@@ -937,15 +831,10 @@ export class VerificationService {
 		return (await this.context.env.BLOBS.head(key)) !== null;
 	}
 
-	// The narinfo objects present for a scanning reconcile batch, listed from the
-	// cursor position instead of a head per row. The scan walks
-	// `(cache, storePathHash)` in order, so within a cache the objects are a
-	// contiguous key range. The listing is bounded by the batch's last key, not a
-	// row count: an orphan object in the range (a delete whose object outlived its
-	// row) must not consume a slot and push a live row's object out of the window,
-	// which would read it absent and force a redundant restore. A row whose object
-	// the range genuinely omits reads absent, at worst prompting an idempotent
-	// restore.
+	// Bound the R2 listing by the batch's last key, not by its row count. An orphan
+	// object can outlive its row; counting it against the limit could omit a live
+	// row's object and trigger a redundant restore. Within one cache, the
+	// `(cache, storePathHash)` scan covers a contiguous R2 key range.
 	private async presentNarInfoObjects(
 		logger: Logger,
 		rows: readonly NarInfoRow[],
@@ -1006,8 +895,7 @@ export class VerificationService {
 					present.add(object.key);
 				}
 
-				// A filtered object (past the batch's last key) or an untruncated page
-				// ends the scan.
+				// An object beyond the batch's last key proves that the range is complete.
 				isDone = inRange.length < listed.objects.length || !listed.truncated;
 				cursor = listed.truncated ? listed.cursor : undefined;
 			}
@@ -1024,12 +912,10 @@ export class VerificationService {
 		return present;
 	}
 
-	// The committed reference edges among `rows`, read in one chunked D1 query, so a
-	// reconcile can skip a reserved-but-unverified row. A deferred commit reserves
-	// its narinfo row before verification, so a row can sit in `nar_infos` with no
-	// edge; the verify pass, not this reconcile, owns such a row. Read outside any
-	// gate; a row that commits after this reads conservatively as uncommitted and is
-	// simply left for the next pass.
+	// A deferred commit reserves its narinfo row before creating a reference edge.
+	// Require the edge so reconciliation cannot serve a reserved, unverified row.
+	// Read outside the gate; if a commit creates the edge afterwards, this pass
+	// leaves the row for the next scan.
 	private async committedEdgeKeys(
 		rows: readonly NarInfoRow[]
 	): Promise<ReadonlySet<string>> {
@@ -1058,7 +944,6 @@ export class VerificationService {
 				.where(edgeFilter);
 		});
 
-		// One D1 round-trip covers every chunk; each stays within the parameter cap.
 		const chunkResults = await batchNonEmpty(this.context.d1, queries);
 
 		const keys = new Set<string>();
@@ -1074,12 +959,9 @@ export class VerificationService {
 		return keys;
 	}
 
-	// Applies one row's probe under the caller's critical section. The generation
-	// re-check rejects any row a commit or delete changed during the probe, so a
-	// reconcile never acts on stale state: a NAR only reappears through a commit,
-	// which bumps the generation. A missing NAR removes the dangling narinfo; a
-	// present NAR with a missing object restores the object. A row with no committed
-	// edge is reserved, not yet verified, so it is left untouched.
+	// Re-check the generation under the caller's critical section because a commit
+	// or delete can change the row while R2 is being probed. Require a committed
+	// edge as well, so a reserved row cannot become servable before verification.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	private async reconcileObservation(
@@ -1131,10 +1013,9 @@ export class VerificationService {
 		return 'unchanged';
 	}
 
-	// Takes the lease for rows a pass is about to work, synchronously with the
-	// selection that chose them, so no other claim can interleave. Only the
-	// rows actually handed out are leased: the selection's sentinel row and any
-	// rows a cap excluded stay claimable.
+	// Select and lease without yielding so no other claim can interleave. Lease
+	// only the rows returned to the caller; the sentinel and rows excluded by a
+	// cap must remain claimable.
 	private leaseRows(uploadIds: readonly UploadId[], now: Date): void {
 		if (uploadIds.length === 0) {
 			return;
@@ -1202,8 +1083,6 @@ export class VerificationService {
 		});
 	}
 
-	// One interactive verify pass: settle deferred uploads first, then run a
-	// bounded reconciling batch and report it.
 	async verify(
 		logger: Logger,
 		purgeOrigin: RequestOrigin | undefined,
@@ -1232,9 +1111,9 @@ export class VerificationService {
 		const fromCache = cursor?.cache ?? '';
 		const fromHash = cursor?.lastStorePathHash ?? '';
 
-		// Verification spans every cache, walking the (cache, store_path_hash)
-		// space in order and resuming after the composite cursor. drizzle has no
-		// tuple form of `gt`, so the row-value comparison is spelt out.
+		// Verification spans every cache and resumes after the composite
+		// `(cache, storePathHash)` cursor. Keep both parts in the predicate so a
+		// pass cannot skip the beginning of the next cache.
 		const sameCache = eq(schema.narInfos.cache, fromCache);
 		const afterHash = gt(schema.narInfos.storePathHash, sql`${fromHash}`);
 		const rows = this.context.db
@@ -1310,8 +1189,8 @@ export class VerificationService {
 				}
 			}
 
-			// A short batch means the scan reached the end; clear the cursor so the
-			// next pass starts again from the first cache's lowest hash.
+			// A short batch reaches the end of the scan. `wrapped` reports that the
+			// next pass will restart from the first cache's lowest hash.
 			const hasWrapped = rows.length < limit;
 			const last = rows.at(-1);
 			const nextCache = hasWrapped || last === undefined ? '' : last.cache;
@@ -1344,18 +1223,12 @@ export class VerificationService {
 		});
 	}
 
-	// Background verify-and-commit of uploads deferred at commit because their blob
-	// exceeded the inline budget. Each staging blob is decompressed and hash-verified
-	// outside the critical section, then promoted and committed (on a match) or its
-	// staging object deleted (on a failure) inside one, so a `pending` path becomes
-	// servable only once its bytes are confirmed. Bounded per pass; the cron drives
-	// it.
+	// The cron fallback claims unleased `pending` and `committing` rows. It verifies
+	// fresh staging bytes outside the input gate, then uses the same fenced settle
+	// path as the queue consumer. Each pass is bounded by `limit`.
 	async verifyPendingUploads(logger: Logger, limit: number): Promise<void> {
-		// Re-drive both deferred (`pending`) uploads awaiting their first verify and
-		// inline commits crashed mid-saga (`committing`); both finish through the same
-		// idempotent reserve→verify→promote→materialise path. Leased rows are a
-		// consumer pass's in-flight work: this pass claims around them, and takes
-		// the lease itself so a consumer crossing it stays off its rows too.
+		// Queue leases identify work already in progress. Claim around those rows and
+		// lease this pass's rows synchronously so a consumer cannot take them.
 		const now = new Date();
 		const pendings = this.context.db
 			.select()
@@ -1370,9 +1243,8 @@ export class VerificationService {
 			now
 		);
 
-		// Phase A: reserve, verify and promote each claimed upload, collecting the
-		// survivors that reach materialise. A per-upload failure frees its lease and
-		// leaves its marker for the next pass, so it does not starve the rest.
+		// A failure for one upload releases its lease and leaves its marker for the
+		// next pass. It must not prevent the remaining claims from settling.
 		const ready: PreparedSettle[] = [];
 
 		for (const pending of pendings) {
@@ -1391,11 +1263,10 @@ export class VerificationService {
 			return;
 		}
 
-		// Read every promoted path's canonical facts and ownership once, in two
-		// chunked queries, then materialise each from memory: the pass's per-path D1
-		// reads collapse from O(paths) to O(chunks). The facts are read once before
-		// phase B and can go stale across the batch; the charge batch remains the
-		// authoritative fence for status and quota, and the over-quota retry re-probes.
+		// Read each promoted path's canonical facts and ownership once through
+		// chunked queries. These facts can become stale while the batch settles; the
+		// charge batch remains the authoritative status and quota fence, and an
+		// over-quota result triggers a fresh probe.
 		const prefetched = await this.prefetchedFactsFor(logger, ready);
 
 		for (const item of ready) {
@@ -1413,16 +1284,10 @@ export class VerificationService {
 		}
 	}
 
-	// Claims deferred uploads for the queue consumer to verify off the DO
-	// thread, the first half of the prompt verify path. The consumer fetches,
-	// decodes and promotes each staging object, then reports the verdicts. A
-	// reuse row is flagged so the consumer skips its decode.
-	//
-	// The claim is a bounded chunk (see {@link chunkClaims}) of the claimable
-	// rows, and leases what it hands out: the selection and the lease are one
-	// synchronous step on the single-writer, so a duplicate pass (the alarm
-	// backstop's re-request, an overlapping cron) claims nothing already in
-	// flight.
+	// The queue consumer fetches and verifies fresh staging objects outside the
+	// Durable Object. A reuse claim identifies canonical bytes that need no
+	// decode. Selection and leasing are one synchronous step on the single writer,
+	// so an overlapping cron or queue pass cannot take the same row.
 	listPendingForVerify(
 		limit: number,
 		maxNarBytes: number
@@ -1479,9 +1344,6 @@ export class VerificationService {
 		let settled = 0;
 		const ready: PreparedSettle[] = [];
 
-		// Phase A: reserve and promote each reuse row against its canonical object.
-		// A row settled here (lost or already committed) counts at once; a promoted
-		// survivor is collected to materialise once the batch's facts are read.
 		for (const pending of pendings) {
 			try {
 				const prepared = await this.prepareRecordedVerdict(
@@ -1497,8 +1359,8 @@ export class VerificationService {
 				}
 			} catch (error) {
 				if (error instanceof UploadedObjectNotFoundError) {
-					// The canonical object is gone and cannot reappear: answer the
-					// waiter terminally so the lease is not wasted on a stale row.
+					// A missing canonical object cannot reappear. Record `absent`
+					// immediately rather than leave a lease on a stale row.
 					await this.recordMissingObject(pending.id);
 					settled += 1;
 					continue;
@@ -1507,7 +1369,10 @@ export class VerificationService {
 				// A transient fault: free the lease and leave the row for the next
 				// pass without starving the rest.
 				this.releaseLease(pending.id);
-				logger.warn('reuse settle failed', { uploadId: pending.id, error });
+				logger.warn('pending reuse upload not settled', {
+					uploadId: pending.id,
+					error
+				});
 			}
 		}
 
@@ -1533,7 +1398,7 @@ export class VerificationService {
 				settled += 1;
 			} catch (error) {
 				this.releaseLease(item.pending.id);
-				logger.warn('reuse settle failed', {
+				logger.warn('pending reuse upload not settled', {
 					uploadId: item.pending.id,
 					error
 				});
@@ -1543,11 +1408,9 @@ export class VerificationService {
 		return settled;
 	}
 
-	// Commits a deferred upload the queue consumer has already verified off the DO
-	// thread, running the same reserve→promote→materialise path the on-DO pass uses
-	// with the verdict passed in. A vanished row or a lost race is handled
-	// idempotently, so a re-driven verify (the consumer may run a row twice) is
-	// safe.
+	// This compatibility RPC is idempotent because a queue consumer can report the
+	// same upload again after a retry. A vanished, terminal or superseded row makes
+	// the repeated report a no-op.
 	async recordVerification(
 		logger: Logger,
 		uploadId: UploadId,
@@ -1572,27 +1435,16 @@ export class VerificationService {
 		);
 	}
 
-	// Settles a batch of verdicts the queue consumer decoded off the DO thread in
-	// one RPC, so a pass over many deferred uploads costs a single round trip
-	// into the DO. The verdicts apply concurrently (each
-	// upload id is claimed once, so no two applies share a row) and their
-	// materialisations coalesce onto the shared flush, so a batch costs a
-	// handful of gates and charge batches. One
-	// verdict's apply failing (a transient promote or commit fault) must not
-	// abort the rest of the batch or fail the queue message: its row is left for
-	// the next pass, the same fault isolation the per-upload RPCs had. Returns
-	// how many verdicts actually applied, so the caller continues the drain only
-	// on real progress; a batch whose every apply fails backs off to the cron.
+	// Each result is isolated so a transient promote or commit failure leaves only
+	// that row for another pass. Materialisations share the flush, and the return
+	// value counts only results that applied. The consumer requests a continuation
+	// only after real progress; a batch with no progress leaves retry to cron.
 	async recordVerifications(
 		logger: Logger,
 		results: readonly VerificationResult[]
 	): Promise<number> {
 		let applied = 0;
 
-		// Phase A: read, reserve, verify and promote each verdict concurrently. A
-		// verdict settled here (missing, a lost path, an already-committed row, or a
-		// failed verdict) is progress and counts at once; a promoted survivor is
-		// collected to materialise once the batch's probe facts are read.
 		const ready: PreparedSettle[] = [];
 
 		await mapWithConcurrency(
@@ -1669,13 +1521,10 @@ export class VerificationService {
 		return applied;
 	}
 
-	// Records the terminal outcome for a deferred upload whose bytes the queue
-	// consumer found definitively gone, so its waiters are answered promptly. A
-	// fresh row's staging object cannot reappear, so it fails as `mismatch`. A
-	// reuse row's bytes are the shared canonical object, and that object going
-	// missing is no evidence against the bytes the client offered, so the row is
-	// dropped and its waiters told `absent`, the answer that re-drives the push
-	// through a fresh negotiate and upload.
+	// A missing private staging object is a terminal mismatch because those bytes
+	// cannot reappear. A missing canonical object does not prove that a reuse
+	// client's NAR is invalid, so clear that row and report `absent`; the client can
+	// negotiate and upload again.
 	async recordMissingObject(uploadId: UploadId): Promise<void> {
 		const pending = this.context.db
 			.select()
@@ -1741,9 +1590,9 @@ export class VerificationService {
 					return result;
 				});
 
-				// A concurrent pass has already committed this generation (its edge
-				// exists), so the missing verdict is stale and the path serves. Clear
-				// the stuck row and answer servable, without pruning its root.
+				// A concurrent pass has already committed this generation, so the
+				// missing verdict is stale. Clear the stuck row and send `servable`
+				// without pruning its root.
 				if (reclaim === 'committed-current') {
 					this.notifyWaiters(pending, 'servable');
 					this.uploadState.clearPendingUpload(pending.id);

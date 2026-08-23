@@ -40,9 +40,6 @@ describe('provided', () => {
 	});
 });
 
-// The endpoint URLs built from a URL input derive from its origin and path
-// alone, so anything else the value carries is a copy mistake surfaced here
-// with the offending field's name.
 describe('providedUrl', () => {
 	it.each([
 		[
@@ -125,7 +122,7 @@ describe('providedReadUser', () => {
 		expect(providedReadUser(value)).toBe(expected);
 	});
 
-	it('refuses a name the credential format cannot carry', () => {
+	it('rejects a colon because Basic authentication uses it as a separator', () => {
 		expect(() => providedReadUser('rea:der')).toThrow(ReadUserInvalidError);
 	});
 });

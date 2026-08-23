@@ -40,8 +40,6 @@ describe('NixSignature', () => {
 		});
 	});
 
-	// A signature missing either half selects no key or carries nothing to check
-	// against one, so it is refused rather than decoded into arbitrary bytes.
 	it.each([
 		{ name: 'no separator', value: 'cupboard-1' },
 		{ name: 'an empty name', value: ':c2lnbmVk' },
@@ -53,8 +51,6 @@ describe('NixSignature', () => {
 		expect(() => new NixSignature(value)).toThrow(InvalidNixSignatureError);
 	});
 
-	// Whitespace inside the material is read past by the decoder this is built
-	// on, and Nix's own decoder refuses it, so it is refused here.
 	it.each([
 		{ name: 'a rendered signature', value: 'cupboard-1:c2lnbmVk', reads: true },
 		{
@@ -70,8 +66,6 @@ describe('NixSignature', () => {
 		{ name: 'no separator', value: 'cupboard-1', reads: false },
 		{ name: 'an empty name', value: ':c2lnbmVk', reads: false },
 		{ name: 'empty material', value: 'cupboard-1:', reads: false },
-		// Six bits are no whole byte, so the value names a key and states
-		// nothing signed under it.
 		{
 			name: 'material carrying one character',
 			value: 'cupboard-1:A',
@@ -81,7 +75,7 @@ describe('NixSignature', () => {
 		expect(isNixSignature(value)).toBe(reads);
 	});
 
-	it('keeps the well-formed signatures of a narinfo and drops the rest', () => {
+	it('returns only well-formed narinfo signatures', () => {
 		expect(
 			NixSignature.parseAll([
 				'cupboard-1:c2lnbmVk',

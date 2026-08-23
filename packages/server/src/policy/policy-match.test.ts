@@ -13,31 +13,31 @@ const policies: readonly RetentionPolicy[] = [
 describe('mostSpecificPolicy', () => {
 	it.each([
 		{
-			name: 'a longer prefix wins over a shorter one',
+			name: 'uses the longest matching root-name prefix',
 			cache: '',
 			rootName: 'pr-release-9',
 			ttl: 86_400
 		},
 		{
-			name: 'a prefix match wins over a cache match',
+			name: 'uses a root-name prefix instead of a cache policy',
 			cache: 'builds',
 			rootName: 'pr-9',
 			ttl: 604_800
 		},
 		{
-			name: 'a cache match applies when no prefix matches',
+			name: 'uses a cache policy when no prefix matches',
 			cache: 'builds',
 			rootName: 'github:owner/repo/main',
 			ttl: 1_209_600
 		},
 		{
-			name: 'a cache policy targets the default cache by empty pattern',
+			name: 'matches the default cache with an empty pattern',
 			cache: '',
 			rootName: 'github:owner/repo/main',
 			ttl: 2_592_000
 		},
 		{
-			name: 'no policy matches',
+			name: 'returns undefined when no policy matches',
 			cache: 'other',
 			rootName: 'github:owner/repo/main',
 			ttl: undefined

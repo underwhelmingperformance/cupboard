@@ -2,14 +2,12 @@ import { z } from 'zod';
 
 const githubUrlPrefix = 'https://github.com/';
 
-// Every version of the SLSA build-provenance predicate type is a URL under this
-// prefix, and the major version is the last segment.
 const slsaProvenancePrefix = 'https://slsa.dev/provenance/';
 
 /**
- * Whether a predicate type is SLSA build provenance, of any version. Such a
- * statement claims that its signer's build produced the subjects, which is a
- * claim no other predicate type in this project makes.
+ * Returns whether the value begins with the SLSA provenance predicate prefix.
+ * This classifies the predicate for display; it does not validate a version or
+ * the predicate body.
  */
 export function isSlsaProvenanceType(predicateType: string): boolean {
 	return predicateType.startsWith(slsaProvenancePrefix);
@@ -61,9 +59,9 @@ const slsaProvenanceSchema = z.object({
 });
 
 /**
- * Returns the Git commit for `sourceRepository` from the predicate's resolved
- * dependencies. Returns `undefined` unless exactly one dependency refers to
- * that repository and records a commit.
+ * Returns the Git commit for `sourceRepository` from the resolved dependencies
+ * in GitHub's workflow provenance shape. Exactly one dependency must refer to
+ * that repository and include a commit.
  */
 function resolvedSourceCommit(
 	dependencies: readonly SlsaDependency[],
@@ -82,10 +80,9 @@ function resolvedSourceCommit(
 }
 
 /**
- * Returns the source commit recorded by a SLSA provenance predicate for a
- * GitHub repository. Returns `undefined` if the predicate is not SLSA
- * provenance or does not contain exactly one matching dependency with a Git
- * commit.
+ * Returns the source commit from GitHub's workflow provenance fields. Returns
+ * `undefined` when the predicate does not use that shape or does not contain
+ * exactly one matching dependency with a Git commit.
  */
 export function slsaSourceCommit(
 	predicate: unknown,
@@ -104,9 +101,8 @@ export function slsaSourceCommit(
 }
 
 /**
- * The build-identity fields of a SLSA provenance predicate, for display
- * alongside a verified attestation. Every field is optional because a predicate
- * need not record it.
+ * Build identity extracted from GitHub's workflow provenance fields for
+ * display alongside a verified attestation. Every field is optional.
  */
 export interface SlsaProvenanceSummary {
 	readonly builder?: string;
@@ -119,9 +115,8 @@ export interface SlsaProvenanceSummary {
 }
 
 /**
- * Summarises the build identity recorded by a SLSA provenance predicate,
- * including its source, workflow, builder, and invocation. Returns `undefined`
- * when none of those fields is present.
+ * Extracts the source, workflow, builder, and invocation from GitHub's workflow
+ * provenance fields. Returns `undefined` when none is present.
  */
 export function slsaProvenanceSummary(
 	predicate: unknown

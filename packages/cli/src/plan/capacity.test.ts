@@ -51,7 +51,7 @@ describe('checkStoreCapacity', () => {
 		});
 	});
 
-	it('refuses when the measured NAR bytes cross available space less the headroom', async () => {
+	it('rejects measured NAR bytes above available space less the headroom', async () => {
 		const available = 10 * defaultHeadroomAbsoluteMinimum;
 		const capacity = available;
 		const headroom = Math.max(

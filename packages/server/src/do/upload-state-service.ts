@@ -25,11 +25,11 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
 
-	// The `blob_state` rows for the hashes this tenant already owns a
-	// `tenant_blob` presence edge for. One join per chunk keeps a closure of any
-	// size to a bounded number of D1 reads, and joining on the tenant's own edge
-	// keeps reuse existence-oracle-safe: a hash the tenant has not itself
-	// uploaded never appears, even when another tenant holds identical bytes.
+	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
+	// canonical blob only after this tenant has established its own presence edge,
+	// so another tenant's identical bytes cannot become an existence oracle. The
+	// chunked reads also keep large closures within D1's parameter and subrequest
+	// limits.
 	private async ownedBlobStates(
 		tenant: TenantId,
 		narHashes: readonly NixSha256HashString[]
@@ -81,9 +81,9 @@ export class UploadStateService {
 		return new Map(batches.flat().map((row) => [row.narHash, row]));
 	}
 
-	// Un-arms the reaper grace timer for hashes a negotiate is about to offer
-	// for reuse: reusing is a fresh reference, and the clear must land before
-	// the response commits the client to the plan.
+	// After negotiate returns a commit decision, the client can use the canonical
+	// bytes until commit binds the new reference. Clear armed timers before
+	// returning the decision so the reaper cannot remove the blob in that interval.
 	async clearReaperTimers(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
@@ -103,10 +103,10 @@ export class UploadStateService {
 		);
 	}
 
-	// The NAR hashes among `narHashes` that still hold a `blob_state` row. A row
-	// exists exactly while the canonical `nar/<narHash>.nar.zst` object does (the
-	// reaper drops the row before the object), so a present hash confirms the NAR
-	// without an R2 head: the skip decision turns on this pure-D1 read.
+	// Promotion creates the canonical object before `blob_state`; the reaper
+	// removes `blob_state` before the object. The row is therefore positive
+	// evidence that the object is available, so classification needs no R2 head.
+	// Negotiated reconciliation repairs storage drift outside those transitions.
 	async presentNarHashes(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Set<NixSha256HashString>> {
@@ -128,11 +128,10 @@ export class UploadStateService {
 			.run();
 	}
 
-	// Clears an abandoned pending upload's record, deleting its private staging
-	// object first so the durable handle to that object is never dropped before the
-	// object itself. A reuse upload's r2Key is the shared canonical key, which must
-	// survive; only a per-upload staging key is removed. It awaits R2 I/O, so it is
-	// called outside any critical section.
+	// A pending row is the durable handle for private staging bytes. Delete those
+	// bytes before clearing the handle so a failed R2 operation remains retriable.
+	// A canonical key belongs to the shared reaper and must never be deleted here.
+	// Callers await the R2 operation outside critical sections.
 	async clearPendingUploadAndStaging(
 		uploadId: UploadId,
 		r2Key: R2ObjectKey,
@@ -145,9 +144,8 @@ export class UploadStateService {
 		this.clearPendingUpload(uploadId);
 	}
 
-	// Marking is a (re-)drive: any verify lease on the row belongs to a pass
-	// that no longer speaks for it, and the pass this drive requests must not
-	// wait that lease out.
+	// A new verification drive supersedes any existing claim lease. Clearing
+	// `claimedAt` makes the row immediately eligible for the next pass.
 	markUploadPending(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
@@ -156,9 +154,9 @@ export class UploadStateService {
 			.run();
 	}
 
-	// Records the commit session waiting on an upload, so the verify pass can
-	// route its verdict to that connection. A no-op for a row that is gone (a bad
-	// id, or one already settled and cleared).
+	// A reconnect replaces the session associated with this upload. Verification
+	// re-reads this value and sends the verdict to the latest connection. If the
+	// upload row is already gone, the update is a no-op.
 	attachSession(uploadId: UploadId, sessionId: SessionId): void {
 		this.context.db
 			.update(schema.pendingUploads)
@@ -167,11 +165,10 @@ export class UploadStateService {
 			.run();
 	}
 
-	// The commit sessions holding at least one upload that still awaits its
-	// verdict. Such a session has already been answered for that upload and is
-	// waiting for the verify pass, which may take longer than the idle period,
-	// so it is parked rather than stale. The verdict index covers the filter, so
-	// this reads the in-flight rows rather than the whole table.
+	// Deferred uploads have returned their entry credit, but verification can
+	// exceed the socket idle interval. The idle-close pass uses this set to keep
+	// their current sessions open. The verdict index limits the read to `pending`
+	// and `committing` rows.
 	sessionsAwaitingVerdict(): ReadonlySet<SessionId> {
 		const rows = this.context.db
 			.selectDistinct({ sessionId: schema.pendingUploads.sessionId })
@@ -189,9 +186,9 @@ export class UploadStateService {
 		);
 	}
 
-	// Marks an inline commit in progress before it reserves the narinfo row, so a
-	// crash mid-commit leaves a durable saga marker the verify pass re-drives rather
-	// than a null-verdict upload indistinguishable from one still awaiting its bytes.
+	// Set this marker before reservation or promotion. After a crash, verification
+	// re-drives `committing`; a null verdict still means that commit work has not
+	// begun.
 	markUploadCommitting(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
@@ -200,12 +197,9 @@ export class UploadStateService {
 			.run();
 	}
 
-	// Records a deferred upload's terminal verdict and deletes its staging bytes,
-	// keeping the upload row so a later status reader (`push --wait` or a status
-	// endpoint) can observe the outcome. `servable` once the background pass commits it,
-	// `mismatch` for a failed NAR-hash check, `over-quota` for a quota rejection;
-	// distinguished so a quota rejection is not misreported as bad content. Synchronous
-	// inline outcomes return at commit and need no retained verdict.
+	// Delete private staging bytes before recording a terminal verdict. If R2
+	// fails, the pending row remains available for another drive. Canonical reuse
+	// bytes remain under the shared reaper.
 	async markUploadTerminal(
 		uploadId: UploadId,
 		r2Key: R2ObjectKey,
@@ -216,9 +210,9 @@ export class UploadStateService {
 			await this.context.env.BLOBS.delete(r2Key);
 		}
 
-		// Refresh the observation window so the terminal verdict reliably outlives
-		// the verify pass that recorded it (the pass may run at or past the original
-		// upload TTL); GC reaps it once this window passes.
+		// Start a fresh observation window at the terminal transition. Verification
+		// can finish after the negotiation TTL, and polling still needs time to read
+		// the outcome before GC removes the row.
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
 		this.context.db
@@ -228,19 +222,8 @@ export class UploadStateService {
 			.run();
 	}
 
-	// The reusable shared blobs among `narHashes`, keyed by hash, read but not
-	// claimed. Pure D1: a `blob_state` row exists exactly while the canonical
-	// object does, so its presence confirms reuse without an R2 head, and a
-	// closure of any size costs a bounded number of D1 queries. Drift (a row
-	// outliving a reaped object) is healed off the hot path by the negotiated
-	// reconcile, which probes R2 and removes any narinfo whose NAR is gone.
-	//
-	// Existence-oracle-safe: reuse only hashes this tenant already holds its own
-	// presence edge for, never the global `blob_state`. A tenant that has not
-	// itself uploaded a hash is always told to upload, even when another tenant's
-	// identical verified bytes exist; the promote then dedups at rest. So a
-	// caller built on this never reveals whether another tenant has a blob.
-	// {@link findReusableBlobs} is the claiming twin a negotiate commits to.
+	// Preview must not change a reaper timer merely by reporting possible reuse, so
+	// it reads tenant-visible canonical blobs without claiming them.
 	async peekReusableBlobs(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
@@ -255,13 +238,10 @@ export class UploadStateService {
 		return this.ownedBlobStates(tenant, unique);
 	}
 
-	// {@link peekReusableBlobs}'s claiming twin: the same reusable read, but
-	// followed by cancelling any reaper grace timer the returned rows armed,
-	// since a caller reaching this method is about to bind a fresh reference to
-	// each hash it returns. Only a caller that will actually decide those paths
-	// as reuse commits (negotiate) may call this; a caller that only reports
-	// what it would do (preview) must use {@link peekReusableBlobs} instead, so
-	// it never un-arms a timer over bytes nothing has committed to reusing.
+	// Negotiate can direct the client to commit against each returned canonical
+	// object. Cancel any armed reaper timer before returning so the object survives
+	// until commit binds the new reference. Read-only callers must use
+	// {@link peekReusableBlobs}.
 	async findReusableBlobs(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
@@ -282,9 +262,6 @@ export class UploadStateService {
 		return blobStates;
 	}
 
-	// Promotes verified staging bytes into the shared CAS; see
-	// {@link promoteVerifiedBlob} for the write-once and crash-recovery
-	// contract.
 	promoteStagingBlob(
 		stagingKey: R2ObjectKey,
 		metadata: ParsedUploadPathNegotiation,

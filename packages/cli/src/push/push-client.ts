@@ -24,17 +24,13 @@ const notFoundStatus: number = StatusCodes.NOT_FOUND;
 export interface PushClientOptions {
 	readonly cache?: string;
 	readonly signal?: AbortSignal;
-	/**
-	Test hook standing in for global fetch.
-	*/
 	readonly fetcher?: typeof fetch;
 }
 
 /**
- * Builds the client a push consumes: the contract-backed conversations come from
- * the derived client with the access credential and cache bound here, the blobs
- * stream to R2 with the renewing push credential, and the commit WebSocket stays
- * on the raw client.
+ * Creates a push client for one tenant and cache. Administrative calls use the
+ * contract client, blob uploads use renewable R2 credentials, and commits use
+ * the WebSocket client.
  */
 export function pushClientFor(
 	url: URL,
@@ -77,17 +73,10 @@ export function pushClientFor(
 		options.signal
 	);
 
-	// One credential for the whole push, renewed as it nears expiry. It carries
-	// the signed push id that every negotiate request includes, and scopes the
-	// uploader to the push's staging prefix; a renewal re-issues against the
-	// same id, so a push longer than a single credential's life keeps streaming
-	// under that prefix.
 	const session = credentialSession((pushId) =>
 		rpc.uploads.credential({ cacheName, pushId })
 	);
 
-	// The uploader binds to the push's endpoint and bucket once, then signs each
-	// upload with the credential the session renews.
 	let uploader: Promise<BlobUploader> | undefined;
 	const buildUploader = async (): Promise<BlobUploader> => {
 		const push = await session.provider();
@@ -134,9 +123,8 @@ export function pushClientFor(
 			return hasUploadGraceFacts;
 		},
 		hasUploadGraceFacts: () => hasUploadGraceFacts,
-		// `nix-cache-info` exists on every server version and answers without
-		// credentials (or with a 401 on a private tenant), so only a routing
-		// 404 reads as the tenant not being there at all.
+		// Every server version implements nix-cache-info. A private tenant returns
+		// 401, so only a routing 404 means that the tenant does not exist.
 		tenantServes: async () => {
 			const target = new URL(url);
 			target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;

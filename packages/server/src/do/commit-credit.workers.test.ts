@@ -51,30 +51,21 @@ import {
 	unpacedSessions
 } from './commit-credit-service.ts';
 
-// A session the server paces, which is what a client that understands credit
-// opens.
 function openCredited(token: string): Promise<CommitConversation> {
 	return openCommitSession(token, DEFAULT_CACHE, commitCreditAccept);
 }
 
-// An id no pending row holds. Committing it answers an `error` frame, which is
-// one of the three first frames that return an entry's credit, and it costs no
-// upload fixture.
 function unknownUpload(seed: string): UploadId {
 	return uploadIdSchema.parse(`missing-${seed}`);
 }
 
-// Pushes a path all the way through, then names it again the way a reconnect
-// re-sends an entry whose reply was lost. The path is committed and its pending
-// row is gone, so the entry resolves against the path's narinfo and answers
-// `settled` at once.
 async function settledEntry(
 	token: string,
 	hashCharacter: string
 ): Promise<ParsedCommitBatchEntry> {
 	const name = `settled-${hashCharacter}`;
-	// Each path needs a NAR of its own: negotiate answers `reuse` for a hash the
-	// cache already holds, and a reused path is never uploaded or committed.
+	// Use a unique NAR hash so negotiation creates an upload instead of returning
+	// `reuse` for an existing blob.
 	const { metadata, nar } = await verifiablePath(name, {
 		name,
 		storePathHash: hashCharacter.repeat(32)
@@ -99,9 +90,9 @@ async function reCommitOfSettledPath(
 	return { op: 'commit-batch', commits: [await settledEntry(token, '1')] };
 }
 
-// Makes every R2 presence probe fault, which is what a batched entry whose
-// pending row is gone runs into while it resolves the path's narinfo. The entry
-// rejects, and `mapWithConcurrency` starts none of the entries behind it.
+// A recommit without a pending row probes R2 while resolving narinfo. Failing
+// every probe rejects an entry and stops the batch runner from starting later
+// entries.
 function faultPresenceProbes(): Promise<void> {
 	return runInDurableObject(currentServer(), (instance) => {
 		instance.context.env = {
@@ -113,8 +104,6 @@ function faultPresenceProbes(): Promise<void> {
 	});
 }
 
-// A batch entry no commit ever runs: the message naming it is refused before
-// the fan-out, so the entry only has to parse.
 function unrunEntry(hashCharacter: string): ParsedCommitBatchEntry {
 	return {
 		uploadId: unknownUpload(hashCharacter),
@@ -123,8 +112,6 @@ function unrunEntry(hashCharacter: string): ParsedCommitBatchEntry {
 	};
 }
 
-// Gives the tenant a budget that is not a positive integer, which is what a
-// deployment reaches by setting the variable to anything the policy refuses.
 function misconfigureBudget(): Promise<void> {
 	return runInDurableObject(currentServer(), (instance) => {
 		instance.context.env = {
@@ -134,9 +121,8 @@ function misconfigureBudget(): Promise<void> {
 	});
 }
 
-// Reclaims the credit of the session holding some, the way the idle close does,
-// and leaves its socket open: that is the state a peer leaves behind by never
-// answering the close the server sent it.
+// Leave the socket handshake incomplete to reproduce a peer that never answers
+// the server's close.
 function reclaimHeldSession(): Promise<void> {
 	return runInDurableObject(currentServer(), (instance, state) => {
 		const socket = state.getWebSockets().find((candidate) => {
@@ -157,9 +143,6 @@ function reclaimHeldSession(): Promise<void> {
 	});
 }
 
-// The session behind the first socket `isChosen` picks out. A test names a
-// session while it is still the only one in that state, so that it can read
-// what the object records against that one session later on.
 function sessionMatching(
 	isChosen: (attachment: CommitSessionAttachment) => boolean
 ): Promise<SessionId> {
@@ -170,21 +153,19 @@ function sessionMatching(
 			.find((candidate) => candidate !== undefined && isChosen(candidate));
 
 		if (attachment === undefined) {
-			throw new Error('expected a session the test could name');
+			throw new Error('expected a matching commit session');
 		}
 
 		return attachment.sessionId;
 	});
 }
 
-// The parts of a session's credit state the accounting turns on. The holding
-// stamp is left out because it carries a wall-clock time.
+// Exclude the wall-clock timestamp so credit-state assertions are deterministic.
 type CreditFacts = Pick<
 	NonNullable<CommitSessionAttachment['credit']>,
 	'demand' | 'granted' | 'hasRequested' | 'isClosing'
 >;
 
-// What the object records against one session.
 function recordedCredit(sessionId: SessionId): Promise<CreditFacts> {
 	return runInDurableObject(currentServer(), (_instance, state) => {
 		const socket = state.getWebSockets(sessionId)[0];
@@ -194,7 +175,7 @@ function recordedCredit(sessionId: SessionId): Promise<CreditFacts> {
 				: readCommitSessionAttachment(socket)?.credit;
 
 		if (credit === undefined) {
-			throw new Error('expected a session the object records credit for');
+			throw new Error('expected recorded credit for the commit session');
 		}
 
 		const { demand, granted, hasRequested, isClosing } = credit;
@@ -203,11 +184,7 @@ function recordedCredit(sessionId: SessionId): Promise<CreditFacts> {
 	});
 }
 
-// What the server did with a message from a session it has already closed: the
-// frame it answered, or the close it repeated, since the frame reader rejects
-// when the socket closes before a frame arrives. Reading either settles once
-// the object has handled the message.
-async function answerTo(session: CommitConversation): Promise<string> {
+async function firstFrameOrClose(session: CommitConversation): Promise<string> {
 	try {
 		const frame = await session.nextFrame();
 
@@ -217,9 +194,8 @@ async function answerTo(session: CommitConversation): Promise<string> {
 	}
 }
 
-// Whether a pass of the alarm leaves the object due to wake again. The drop,
-// the pass and the read share one call, since an alarm armed in another call is
-// not visible to this pool's storage view.
+// Deleting, running, and reading the alarm must share one Durable Object call.
+// This test pool does not expose an alarm created by another call's storage view.
 function doesAlarmRearm(): Promise<boolean> {
 	return runInDurableObject(currentServer(), async (instance, state) => {
 		await state.storage.deleteAlarm();
@@ -229,8 +205,6 @@ function doesAlarmRearm(): Promise<boolean> {
 	});
 }
 
-// The close code the server reported, for a socket the server is expected to
-// close.
 function closeCode(session: CommitConversation): Promise<number> {
 	return new Promise((resolve) => {
 		session.socket.addEventListener('close', (event) => {
@@ -262,9 +236,6 @@ function expireAuthentication(socket: WebSocket): void {
 	});
 }
 
-// Rewinds both of a session's stamps: when the server last heard from it, and
-// when the credit it holds began sitting unspent. A session reaches this state
-// by going that long without doing either.
 function rewindActivity(socket: WebSocket, by: number): void {
 	const attachment = readCommitSessionAttachment(socket);
 
@@ -285,8 +256,6 @@ function rewindActivity(socket: WebSocket, by: number): void {
 	);
 }
 
-// Rewinds only the holding stamp and leaves the activity stamp untouched, which
-// is the state a client reaches by talking without committing anything.
 function rewindHolding(socket: WebSocket, by: number): void {
 	const attachment = readCommitSessionAttachment(socket);
 	const credit = attachment?.credit;
@@ -303,8 +272,6 @@ function rewindHolding(socket: WebSocket, by: number): void {
 	);
 }
 
-// Rewinds the sessions `isChosen` picks out past the idle period, leaving the
-// close to a later turn.
 function rewindPastIdle(
 	isChosen: (attachment: CommitSessionAttachment) => boolean,
 	rewind: (socket: WebSocket, by: number) => void = rewindActivity
@@ -320,10 +287,8 @@ function rewindPastIdle(
 	});
 }
 
-// Closes the idle sessions the way the alarm does, first rewinding the sessions
-// `isChosen` picks out past the idle period. Both happen in one turn, so an
-// alarm of the object's own cannot reach the rewound sessions first. Called
-// with no argument it runs against the sessions as they stand.
+// Keep the timestamp change and alarm in one Durable Object turn so an
+// independently armed alarm cannot close the session between them.
 function runIdleClose(
 	isChosen: (attachment: CommitSessionAttachment) => boolean = () => false,
 	rewind: (socket: WebSocket, by: number) => void = rewindActivity
@@ -341,32 +306,19 @@ function runIdleClose(
 	});
 }
 
-// A session holding credit it has not spent, which is what the idle close
-// exists to reclaim.
 function isHoldingCredit(attachment: CommitSessionAttachment): boolean {
 	return (attachment.credit?.granted ?? 0) > 0;
 }
 
-// A session the server has told to wait: it has declared demand and holds
-// nothing to spend.
 function isQueuedForCredit(attachment: CommitSessionAttachment): boolean {
 	const { credit } = attachment;
 
 	return credit !== undefined && credit.demand > 0 && credit.granted === 0;
 }
 
-// What a session opens with against an idle tenant: half of the free pool.
 const openingGrant = Math.floor(defaultCommitEntryCreditBudget / 2);
-// What the tenant still has free once one session has opened.
 const remainingPool = defaultCommitEntryCreditBudget - openingGrant;
 
-// Opens a session and has it ask for `entries` of the tenant's credit, which is
-// what a publication with work queued does. The session's opening grant returns
-// to the tenant at its first request, so it asks for everything it is to hold,
-// and a grant is capped at `commitBatchMaxEntries`, so the answer arrives as one
-// frame per quantum. Asking for no more than the tenant can cover leaves the
-// session no unmet demand, so it drops out of the rotation and the sessions that
-// follow it are the ones served next.
 async function openHoldingPool(
 	token: string,
 	entries: number = defaultCommitEntryCreditBudget
@@ -420,12 +372,10 @@ describe('commit session credit', () => {
 		}
 	);
 
-	// A deployment that configured its budget with something other than a
-	// positive integer cannot pace anything, and the upgrade fails. It has to
-	// fail before the accept: a socket the object has accepted stays in
-	// `getWebSockets()` whatever the upgrade answers, so a dial would cost the
-	// tenant a socket of its ceiling every time.
-	it('accepts no socket when the tenant credit budget is misconfigured', async () => {
+	// Budget validation must precede `acceptWebSocket`. A rejected upgrade cannot
+	// remove an accepted socket from `getWebSockets()`, so accepting first would
+	// consume one slot from the tenant's socket ceiling on every retry.
+	it('does not accept a socket when the tenant credit budget is misconfigured', async () => {
 		const token = await initialise();
 
 		await misconfigureBudget();
@@ -473,12 +423,9 @@ describe('commit session credit', () => {
 		});
 	});
 
-	// The budget governs credited work and nothing else. The alarm drives the
-	// object's other background loops after the idle close, and the close runs
-	// even for a tenant holding no socket at all, so a misconfigured budget must
-	// not stop it: the pass reaches the budget only once it has a session to
-	// grant to. Reaching the end of the alarm is the assertion, since every later
-	// loop is awaited inside it.
+	// An alarm with no credit waiters must not read the credit budget. Otherwise a
+	// bad budget would also block unrelated maintenance loops. Reaching the end of
+	// the awaited alarm proves that those later loops were allowed to run.
 	it('runs the alarm for a socketless tenant when the budget is misconfigured', async () => {
 		await initialise();
 		await misconfigureBudget();
@@ -495,10 +442,9 @@ describe('commit session credit', () => {
 		expect(outcome).toStrictEqual({ sockets: 0, alarm: 'ran' });
 	});
 
-	// A client that never negotiated credit has no credit to reclaim, so its
-	// close must not read the budget either. Its hang-up runs the same reclaim
-	// every close runs, and a throw there would leave the handshake unfinished on
-	// a socket that still counts against the tenant's ceiling.
+	// Closing an unpaced session releases no credit and must not read the budget.
+	// A validation error here would interrupt the close handshake while the socket
+	// still counts against the tenant's ceiling.
 	it('closes an uncredited session when the budget is misconfigured', async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
@@ -526,12 +472,10 @@ describe('commit session credit', () => {
 		});
 	});
 
-	// A tenant whose sessions are waiting for credit cannot be served at all
-	// without a budget, so there the misconfiguration surfaces rather than being
-	// swallowed. The pass runs on a service that has not read the budget yet,
-	// which is the state of an object that woke since the deployment changed;
-	// one that read a good value before keeps it.
-	it('fails a close pass when a waiter needs the misconfigured budget', async () => {
+	// A rebuilt rotation needs the budget before it can grant credit. This path
+	// must reject an invalid value. A new service instance models a Durable Object
+	// wake after deployment configuration changed.
+	it('rejects an invalid budget when an idle-close pass allocates recorded demand', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -553,9 +497,8 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// Every session has an authentication deadline. A credited session also has
-	// an idle deadline, while an unpaced session arms the alarm only for its
-	// authentication deadline.
+	// Every live session contributes an authentication-expiry deadline. Only paced
+	// sessions also contribute an idle-credit deadline.
 	it('re-arms the socket close while any authenticated session is open', async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
@@ -574,11 +517,10 @@ describe('commit session credit', () => {
 		credited.socket.close();
 	});
 
-	// A session the close has finished with keeps its credit state, so a message
-	// crossing the close still reads a zero balance, and its socket stays listed
-	// until the peer answers. A peer that never answers would otherwise leave the
-	// tenant waking every idle period for a session the close is done with.
-	it('leaves the alarm unarmed for a session it has already closed', async () => {
+	// Reclamation keeps a marked, zeroed attachment until the peer completes the
+	// close handshake. The marker must also exclude the socket from future alarm
+	// scheduling if the peer never responds.
+	it('leaves the alarm unarmed after reclaiming a session', async () => {
 		const token = await initialise();
 		const closing = await openCredited(token);
 
@@ -595,13 +537,10 @@ describe('commit session credit', () => {
 		closing.socket.close();
 	});
 
-	// The socket of a session the close has finished with stays listed until its
-	// peer answers, so every later pass finds it again with nothing left to do
-	// for it: reclaiming twice recomputes a total that has not moved and reads
-	// the parked sessions for a session already gone. That read is the
-	// observable, since the pass asks for it only once it means to close
-	// something.
-	it('leaves a session it has already closed out of the next pass', async () => {
+	// A marked socket can remain in `getWebSockets()` after reclamation. Later
+	// passes must skip it before consulting verdict state; otherwise every alarm
+	// repeats work for a session that is already closed.
+	it('excludes a reclaimed session from later idle passes', async () => {
 		const token = await initialise();
 		const ghost = await openCredited(token);
 
@@ -616,8 +555,6 @@ describe('commit session credit', () => {
 					throw new Error('expected the closed session to be listed');
 				}
 
-				// Nothing else spares it: it has been silent past the idle period,
-				// and the rewind shares this turn with the pass.
 				rewindActivity(socket, commitSocketIdleMs + 1);
 
 				let parkedReads = 0;
@@ -642,13 +579,11 @@ describe('commit session credit', () => {
 		ghost.socket.close();
 	});
 
-	// The credit state stays behind for exactly this: a message the client sent
-	// before it read the close is recognised as one from a session the server has
-	// finished with. The server repeats the close and runs nothing. The session
-	// below has asked for credit and been answered, so it knows what it holds,
-	// and the close it now meets is the server's own doing rather than anything
-	// the client got wrong: the code has to be one the client retries.
-	it('repeats the close for a message that crosses it', async () => {
+	// The closing marker identifies messages sent before the peer observed the
+	// close. The server must repeat its retryable idle close without running the
+	// message; the client had previously received a valid grant and committed no
+	// protocol error.
+	it('repeats the close when a client message arrives after reclamation', async () => {
 		const token = await initialise();
 		const crossing = await openCredited(token);
 
@@ -666,13 +601,10 @@ describe('commit session credit', () => {
 		});
 	});
 
-	// A request for credit that crosses the close would otherwise re-arm the
-	// session it came from: the accounting would record the demand and grant
-	// against it, and nothing would ever reclaim what it was given, since the
-	// idle close is done with the session and a peer that never answers its close
-	// fires no close event. The session below asks for the whole budget, so a
-	// grant to it is a grant the tenant never gets back.
-	it('grants nothing to a request for credit that crosses the close', async () => {
+	// Processing demand after reclamation would allocate credit to a session that
+	// the idle pass will never revisit. If the peer also ignores the close, no
+	// close callback can return that allocation to the tenant.
+	it('rejects a credit request after reclaiming the session', async () => {
 		const token = await initialise();
 		const ghost = await openCredited(token);
 
@@ -692,12 +624,8 @@ describe('commit session credit', () => {
 			op: 'request-credit',
 			entries: defaultCommitEntryCreditBudget
 		});
-		const answered = await answerTo(ghost);
+		const answered = await firstFrameOrClose(ghost);
 
-		// The holder's credit goes back to the tenant, which rebuilds the rotation
-		// and hands out everything the tenant has free. The waiter is the only
-		// session left to serve, so it must be handed the whole budget however
-		// much the reclaimed session declared.
 		holder.socket.close();
 		const granted = await waiter.nextFrame();
 
@@ -721,15 +649,11 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A session whose queue never outgrew its opening grant never asks for
-	// credit, and it is the ordinary shape the idle close acts on. A commit that
-	// crosses that close names more entries than the reclaimed session holds, so
-	// without the closing mark the server would read a lost grant, take the
-	// session out of the accounting and run the whole message: entries committed
-	// for a session it has already closed, every frame unsendable, and a socket
-	// that from then on holds one of the unpaced sessions the tenant allows, with
-	// nothing left that may close it.
-	it('runs no commit for a message that crosses the close of a session that never asked for credit', async () => {
+	// A client can spend its opening grant without ever requesting more credit.
+	// After idle reclamation, a crossing batch must not enter the lost-grant
+	// downgrade path. Doing so would run entries whose result frames cannot be
+	// delivered and leave the closed socket counted as an unpaced session.
+	it('runs no commit when an opening-grant batch crosses an idle close', async () => {
 		const token = await initialise();
 		const ghost = await openCredited(token);
 
@@ -739,7 +663,7 @@ describe('commit session credit', () => {
 			op: 'commit-batch',
 			commits: [unrunEntry('m'), unrunEntry('n')]
 		});
-		const answered = await answerTo(ghost);
+		const answered = await firstFrameOrClose(ghost);
 		const unpaced = await runInDurableObject(
 			currentServer(),
 			(_instance, state) => unpacedSessions(state.getWebSockets())
@@ -751,9 +675,6 @@ describe('commit session credit', () => {
 		});
 	});
 
-	// A session opens on half of what is free, so no session can take the pool
-	// without asking for it, and two sessions opening in turn are offered half
-	// and then half of the rest.
 	it('opens each session on half of the free pool', async () => {
 		const token = await initialise();
 		const first = await openCredited(token);
@@ -771,9 +692,7 @@ describe('commit session credit', () => {
 		second.socket.close();
 	});
 
-	// Once one session holds the whole budget, the next opens on nothing and is
-	// told so when it declares demand: there is no credit left to hand out.
-	it('grants no more than the budget and queues the session it cannot cover', async () => {
+	it('queues demand beyond the tenant budget', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -792,17 +711,14 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// An entry's credit returns to the tenant as its first frame is sent,
-	// whichever frame that is, and reaches the waiting session in the same
-	// exchange.
 	it.each([
 		{
-			answer: 'settled',
+			result: 'settled',
 			commit: (token: string): Promise<CommitSessionRequest> =>
 				reCommitOfSettledPath(token)
 		},
 		{
-			answer: 'deferred',
+			result: 'deferred',
 			commit: async (token: string): Promise<CommitSessionRequest> => {
 				const deferred = await deferFreshUpload(
 					token,
@@ -814,13 +730,13 @@ describe('commit session credit', () => {
 			}
 		},
 		{
-			answer: 'error',
+			result: 'error',
 			commit: (_token: string): Promise<CommitSessionRequest> =>
 				Promise.resolve({ op: 'commit', uploadId: unknownUpload('c') })
 		}
 	])(
-		'returns the credit of an entry answered with $answer',
-		async ({ answer, commit }) => {
+		'releases one unit when the first result is $result',
+		async ({ result, commit }) => {
 			const token = await initialise();
 			const request = await commit(token);
 			const holder = await openHoldingPool(token);
@@ -833,9 +749,9 @@ describe('commit session credit', () => {
 			const first = await holder.nextFrame();
 			const granted = await waiter.nextFrame();
 
-			expect({ queued, answer: first.ev, granted }).toStrictEqual({
+			expect({ queued, result: first.ev, granted }).toStrictEqual({
 				queued: { ev: 'queued', ahead: 0 },
-				answer,
+				result,
 				granted: { ev: 'credit', grant: 1 }
 			});
 
@@ -844,18 +760,16 @@ describe('commit session credit', () => {
 		}
 	);
 
-	// A batch is debited whole and returns its credit an entry at a time, and the
-	// fan-out starts no entry behind one that rejects. The message has to return
-	// what those abandoned entries took, or the tenant circulates less credit
-	// after every storage fault. It has to answer them too, or the client waits
-	// out its own deadline on entries this object has stopped working on.
-	it('answers the entries a failing batch entry abandons and returns their credit', async () => {
+	// Admission debits the full batch before bounded fan-out begins. A rejection
+	// can prevent later entries from starting, so the batch boundary must answer
+	// those entries and release their units. Otherwise each storage fault shrinks
+	// the circulating budget and leaves the client waiting for abandoned work.
+	it('sends errors for unstarted entries after a batch failure and returns their credit', async () => {
 		const token = await initialise();
 		const commits: ParsedCommitBatchEntry[] = [];
 
-		// One path per entry, and more entries than the fan-out starts at once, so
-		// the first rejection leaves some of them unstarted. The hash characters
-		// skip 'e', which the nix base32 alphabet does not have.
+		// Exceed the concurrency limit so a rejection leaves entries unstarted.
+		// Nix base32 omits `e`.
 		for (const character of ['a', 'b', 'c', 'd', 'f', 'g', 'h', 'i']) {
 			commits.push(await settledEntry(token, character));
 		}
@@ -869,13 +783,10 @@ describe('commit session credit', () => {
 		await faultPresenceProbes();
 		holder.send({ op: 'commit-batch', commits });
 
-		// Every entry of the batch is answered: the fault reached each one that
-		// ran and stopped the rest before they started, so all of them are named
-		// in an error the client retries.
 		const answers = await Promise.all(commits.map(() => holder.nextFrame()));
 
-		// The entries that ran return their credit one at a time; the ones the
-		// first rejection abandoned come back together as the message settles.
+		// Started entries release individually. The batch cleanup releases all
+		// unstarted entries together.
 		const startedEntries = maxOutgoingConnections;
 		const grants = await Promise.all(
 			Array.from({ length: startedEntries + 1 }, () => waiter.nextFrame())
@@ -909,10 +820,7 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// Two entries free one unit of credit each. Round-robin gives one to each
-	// waiting session; serving them in the order they declared demand would give
-	// both to the first, whose demand is far from met.
-	it('serves the waiting sessions in turn', async () => {
+	it('grants credit to waiting sessions in round-robin order', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const first = await openCredited(token);
@@ -940,11 +848,9 @@ describe('commit session credit', () => {
 		second.socket.close();
 	});
 
-	// A session that has asked for credit has been answered over this same
-	// connection, so it knows what it holds, and a message naming more entries
-	// than that can only be a client bug. 1002 is the close a client treats as
-	// final rather than retrying.
-	it('closes a session that commits more entries than the credit it asked for', async () => {
+	// A grant sent over the established connection confirms the client's balance.
+	// Exceeding that balance is a fatal protocol error, reported with 1002.
+	it('closes a session for committing beyond its confirmed balance', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const overdrawing = await openCredited(token);
@@ -968,11 +874,10 @@ describe('commit session credit', () => {
 		holder.socket.close();
 	});
 
-	// A socket the server closes stays listed until the client answers, so the
-	// credit has to move in the same event as the close: the session that
-	// overdrew keeps nothing, and what it held reaches the waiting session at
-	// once.
-	it('returns the credit of a session it closes for overdrawing', async () => {
+	// Reclaim before starting the close handshake because the socket can remain
+	// listed until the peer replies. The waiter's immediate grant proves that the
+	// overdrawn session retained no balance.
+	it('redistributes a session balance before closing it for overdrawing', async () => {
 		const token = await initialise();
 		const spare = 2;
 		const holder = await openHoldingPool(
@@ -1010,13 +915,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// The grant a session opens with is advertised on the 101 response, and a hop
-	// that rewrites the handshake can drop it. Such a client believes it
-	// negotiated no credit and commits unpaced, so the server reads an overdraw
-	// from a session that has never asked for credit as a lost offer: it serves
-	// the message, and the session leaves the accounting for the rest of its
-	// life.
-	it('serves and downgrades a session that overdraws credit it never asked for', async () => {
+	// An intermediary can strip the opening grant from the 101 response. Before
+	// any `request-credit` exchange confirms the protocol, an overdraw therefore
+	// downgrades the connection and lets the client continue unpaced.
+	it('downgrades an overdraw before the first explicit credit exchange', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const downgraded = await openCredited(token);
@@ -1041,13 +943,10 @@ describe('commit session credit', () => {
 		downgraded.socket.close();
 	});
 
-	// The downgrade above serves a session by taking it out of the accounting,
-	// and the only bound left on it is the number of unpaced sessions the tenant
-	// allows. Once the tenant holds that many, the session is refused instead,
-	// with a close the client retries: an upgrade refused at the same bound is
-	// retryable too, so a client that genuinely lost its grant gets the offer
-	// again on a new connection.
-	it('refuses the downgrade once the tenant holds every unpaced session it allows', async () => {
+	// A downgraded connection has no per-entry bound, so the legacy session limit
+	// also guards this transition. At the limit, a retryable 1013 close lets a
+	// client reconnect and negotiate another opening grant.
+	it('refuses a downgrade at the unpaced-session limit', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const unpaced: CommitConversation[] = [];
@@ -1076,13 +975,11 @@ describe('commit session credit', () => {
 		}
 	});
 
-	// The opening grant travels only in the 101 capability token, so a hop that
-	// answers the handshake itself can strand it: the client commits believing it
-	// holds nothing, and the grant sits in the attachment for the life of the
-	// connection. A client asks for credit only when it holds none, so credit
-	// unspent at the first request is exactly that stranded grant. It returns to
-	// the tenant, and the answer re-offers it in a frame the client can see.
-	it('reclaims an opening grant the session never learned of', async () => {
+	// The opening grant exists only in the 101 response. At the first explicit
+	// request, any remaining opening balance may be unknown to the client, so the
+	// server returns it to the pool and sends the replacement grant over the open
+	// WebSocket.
+	it('replaces an unused opening grant on the first credit request', async () => {
 		const token = await initialise();
 		const stranded = await openCredited(token);
 		const demand = 10;
@@ -1098,8 +995,6 @@ describe('commit session credit', () => {
 		}).toStrictEqual({
 			opening: commitCapabilitiesValueWithCredit(openingGrant),
 			granted: { ev: 'credit', grant: demand },
-			// The stranded grant is back in the pool, so the next session opens on
-			// half of everything the first one did not ask for.
 			reopened: commitCapabilitiesValueWithCredit(
 				Math.floor((defaultCommitEntryCreditBudget - demand) / 2)
 			)
@@ -1109,10 +1004,9 @@ describe('commit session credit', () => {
 		reopened.socket.close();
 	});
 
-	// A session that spent its opening grant before asking has nothing to
-	// reclaim, so its first request is answered out of the tenant's free credit
-	// alone.
-	it('grants only free credit to a session that spent its opening grant', async () => {
+	// A first request replaces only unused opening credit. Credit already moved to
+	// an entry remains charged until that entry's first result frame.
+	it('preserves credit already spent from the opening grant', async () => {
 		const token = await initialise();
 		const spare = 2;
 		const holder = await openHoldingPool(
@@ -1141,9 +1035,7 @@ describe('commit session credit', () => {
 		spender.socket.close();
 	});
 
-	// A session that hangs up returns the credit it never spent, so the server
-	// never has to expire a grant or ask for one back.
-	it('returns the credit a closed session never spent', async () => {
+	it("returns a session's unused balance when it closes", async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1161,12 +1053,9 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A cold start remembers neither the credit it has granted nor the sessions
-	// waiting for more. Both are recorded in the socket attachments, so a fresh
-	// scheduler reading only those must reach the same state. The waiter below is
-	// granted one entry's worth: it would be the whole budget if the rebuilt
-	// total had missed the credit the holder's attachment claims, and no grant
-	// would arrive at all if the rebuilt rotation had not found the waiter.
+	// Hibernation discards both the cached balance and the rotation. A fresh
+	// service must rebuild both from socket attachments. The one-unit grant proves
+	// that it found the holder's balance and the waiter's demand.
 	it('rebuilds the granted total and the rotation from the socket attachments', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
@@ -1200,9 +1089,7 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// The idle close is what recovers a session that took credit and fell silent,
-	// and its firing is the wake a waiting session can always count on.
-	it('closes a silent session on the alarm and passes its credit on', async () => {
+	it('closes a silent session on the alarm and redistributes its credit', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1224,11 +1111,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// `request-credit` costs nothing and can be sent as often as a client likes,
-	// so a session that keeps asking while spending nothing would hold the whole
-	// budget for as long as it kept talking. What the idle close measures for a
-	// session holding credit is how long it has held that credit unspent.
-	it('closes a session that keeps talking while it holds unspent credit', async () => {
+	// Credit requests do not spend the balance. Client activity must therefore not
+	// reset the idle clock for a positive balance, or repeated requests could hold
+	// the tenant's budget indefinitely.
+	it('reclaims a positive balance despite repeated credit requests', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1236,8 +1122,6 @@ describe('commit session credit', () => {
 		waiter.send({ op: 'request-credit', entries: remainingPool });
 		const queued = await waiter.nextFrame();
 
-		// The holder is heard from now and has spent nothing since it opened, so
-		// only the spend stamp is rewound.
 		holder.send({ op: 'request-credit', entries: 1 });
 		const heartbeat = await holder.nextFrame();
 
@@ -1259,11 +1143,9 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// The idle close measures how long a session has held credit without
-	// emptying it, so a session holding the budget cannot put it off by
-	// keeping one entry moving. The entry it spends returns its own credit; the
-	// rest is credit nothing is using.
-	it('closes a session that trickles one entry while it holds the pool', async () => {
+	// Partial spending does not reset the positive-balance interval. Otherwise a
+	// session could retain the pool indefinitely by moving one entry at a time.
+	it('reclaims the remaining pool despite one-entry progress', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1272,12 +1154,9 @@ describe('commit session credit', () => {
 		const queued = await waiter.nextFrame();
 
 		const closed = closeCode(holder);
-		// The rewind, the trickled entry and the close run in one turn. Sending
-		// the entry from the client would expose the holder to the close across a
-		// round trip, in which an alarm the object armed on its own traffic can
-		// close it before the entry lands, and rewinding after that entry hides the
-		// behaviour under test: what this asserts is that spending leaves the
-		// holding clock alone, so the stamp the close reads is still the old one.
+		// Keep ageing, spending, and the alarm in one object turn. A client round
+		// trip could race an independently armed alarm, while ageing after the spend
+		// would not test whether partial spending preserved the original timestamp.
 		await runInDurableObject(currentServer(), async (instance, state) => {
 			const socket = state.getWebSockets().find((candidate) => {
 				const held = readCommitSessionAttachment(candidate);
@@ -1306,7 +1185,6 @@ describe('commit session credit', () => {
 
 		expect({
 			queued,
-			// The trickled entry's own credit reaches the waiter as it is released.
 			trickled: await waiter.nextFrame(),
 			code: await closed,
 			granted: await waiter.nextFrame()
@@ -1320,10 +1198,9 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A client with work to do spends what it is granted, so the grant that
-	// follows starts the clock again and the idle close leaves the session alone
-	// however long its publication runs.
-	it('keeps a session that spends each grant before asking for the next', async () => {
+	// Exhausting the balance ends the holding interval. A later grant begins a new
+	// interval, so steady progress does not inherit old idle time.
+	it('starts a new idle interval after the balance is exhausted', async () => {
 		const token = await initialise();
 		const spare = 1;
 		const holder = await openHoldingPool(
@@ -1338,10 +1215,8 @@ describe('commit session credit', () => {
 		spender.send({ op: 'commit', uploadId: unknownUpload('q') });
 		const spent = await spender.nextFrame();
 
-		// The stamp the session carries is older than the idle period, so only
-		// the grant that follows the spend can save it from the close. Rewinding
-		// it while the session holds nothing is safe: a session with no credit is
-		// measured by its last message, which is the commit above.
+		// Age the previous holding timestamp while the balance is zero. The recent
+		// commit controls idleness until the next grant replaces that timestamp.
 		await rewindPastIdle(
 			(attachment) => attachment.credit?.granted === 0,
 			rewindHolding
@@ -1373,16 +1248,13 @@ describe('commit session credit', () => {
 		spender.socket.close();
 	});
 
-	// A message that commits nothing puts nothing in flight, so it must leave no
-	// count behind: nothing releases what a subscribe never took, and the idle
-	// close never touches a session the object still counts entries for.
+	// Subscribe operations admit zero entries and have no matching release. They
+	// must not leave a non-zero in-flight count that prevents idle reclamation.
 	it('closes a session whose only accounted message commits nothing', async () => {
 		const token = await initialise();
 		const session = await openCredited(token);
 		const closed = closeCode(session);
 
-		// The reply says the id is gone, and it is also what tells this test the
-		// message was accounted before the close runs.
 		session.send({ op: 'subscribe', uploadIds: [unknownUpload('s')] });
 		const answer = await session.nextFrame();
 
@@ -1394,9 +1266,8 @@ describe('commit session credit', () => {
 		});
 	});
 
-	// A session that has declared demand and holds no credit is waiting on this
-	// object, which is what the `queued` frame told it to do. Closing it returns
-	// nothing to the tenant and costs the client a reconnect.
+	// A zero-balance session with declared demand is waiting on the server. It has
+	// no credit to reclaim, so an idle close would add only a reconnect.
 	it('keeps a session queued for credit through the idle close', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
@@ -1422,12 +1293,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// The idle close spares a session waiting with credit 0, and measures one
-	// holding credit. A grant moves the session from the first state to the
-	// second, and the wait before it must not count against the grant: the client
-	// has a round trip in which to spend it, and alarms fire on ordinary traffic,
-	// not on the idle period's beat.
-	it('gives a waiter the idle period to spend the grant that reached it', async () => {
+	// A grant moves a waiter from the demand clock to a new positive-balance
+	// interval. Time spent queued must not consume the interval available for the
+	// client to receive and spend that grant.
+	it('starts a full idle interval when a waiter receives credit', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1435,14 +1304,10 @@ describe('commit session credit', () => {
 		waiter.send({ op: 'request-credit', entries: remainingPool });
 		const queued = await waiter.nextFrame();
 
-		// Rewinding a session the alarm is forbidden to close is safe across the
-		// round trip below: while it holds no credit and has demand outstanding,
-		// neither stamp is consulted. Widening this to a session holding credit
-		// would let an alarm of the object's own close it before the grant lands.
+		// The alarm ignores timestamps while demand is positive and the balance is
+		// zero, so ageing this waiter cannot race the grant below.
 		await rewindPastIdle(isQueuedForCredit);
 
-		// One entry of the holder's frees one unit, which the release hands to the
-		// waiter.
 		holder.send({ op: 'commit', uploadId: unknownUpload('m') });
 		const answer = await holder.nextFrame();
 		const granted = await waiter.nextFrame();
@@ -1470,12 +1335,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A socket the server has closed stays listed until the client answers, so a
-	// later reclaim in the same pass still reads its attachment. Both reclaims
-	// below run against sessions the object still lists, which is that state
-	// exactly: the second must not count the credit the first has already handed
+	// Both closing sockets remain listed during this turn. Each rebuild must
+	// exclude previously reclaimed balances, including credit already reassigned
 	// to the waiter.
-	it('returns the credit of every session reclaimed in one turn', async () => {
+	it('returns every reclaimed balance in the same turn', async () => {
 		const token = await initialise();
 		const first = await openCredited(token);
 		const second = await openCredited(token);
@@ -1494,9 +1357,8 @@ describe('commit session credit', () => {
 			const reclaiming = new CommitCreditService(instance.context);
 			const holders: SessionId[] = [];
 
-			// Choose the holders before reclaiming any of them, since the first
-			// reclaim hands its credit to the waiter and would otherwise put the
-			// waiter in this set.
+			// Capture the original holders before redistribution gives the waiter a
+			// positive balance.
 			for (const socket of state.getWebSockets()) {
 				const attachment = readCommitSessionAttachment(socket);
 
@@ -1528,13 +1390,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// An object that woke with nothing in memory rebuilds its rotation from the
-	// attachments, but it has forgotten the entries that were in flight, so the
-	// budget can read as free with a waiter recorded and nothing else due to
-	// happen. The alarm has to hand that credit out even on a pass that closes
-	// nothing, or the waiter sits beside free credit until an unrelated message
-	// arrives.
-	it('grants to a rebuilt waiter on a pass that closes nothing', async () => {
+	// Hibernation preserves demand but not in-flight counters. The next alarm can
+	// therefore observe both a waiter and newly available capacity. It must grant
+	// that capacity even when no session qualifies for closing.
+	it('grants free capacity to a rebuilt waiter without closing a session', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1555,11 +1414,9 @@ describe('commit session credit', () => {
 				throw new Error('expected a session holding credit');
 			}
 
-			// The holder spent its credit on entries that were still executing when
-			// the object went away: the attachment survives saying it holds nothing,
-			// the count of what was in flight does not, so the whole budget reads as
-			// free to the object that wakes. Both sessions were heard from a moment
-			// ago, so this pass closes neither.
+			// Model a wake after the holder moved its balance into in-flight work.
+			// Hibernation removed that work, while the attachment retained a zero
+			// balance. Both sessions remain too recent for idle closure.
 			socket.serializeAttachment(
 				commitSessionAttachmentSchema.parse({
 					...attachment,
@@ -1580,14 +1437,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A cold start rebuilds the credit total and the rotation from the socket
-	// attachments, and an attachment outlives the code that wrote it, so the
-	// closing mark has to be enough on its own: a session carrying it is out of
-	// the accounting whatever balance its attachment still claims. The closing
-	// attachment below claims the whole budget, so a rebuild that counted it
-	// would find the tenant with nothing to hand out and leave the waiter with
-	// the demand it arrived with.
-	it('leaves a closing session out of a rebuilt total', async () => {
+	// A closing marker must override any stale balance in a durable attachment.
+	// The fixture gives the closing session the whole budget; a rebuild that
+	// counted it would leave the recorded waiter unserved.
+	it('excludes a marked session from a rebuilt total', async () => {
 		const token = await initialise();
 		const holder = await openHoldingPool(token);
 		const waiter = await openCredited(token);
@@ -1654,11 +1507,9 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// This is the ordinary shape of a publication: it opens on an unsolicited
-	// share of the pool, commits fewer entries than that share, and parks on the
-	// verdicts holding the rest. Nobody is queued for what it holds, so closing
-	// it would cost it a reconnect every idle period and return credit to a
-	// tenant with no use for it.
+	// A small publication can wait for a verdict while retaining part of its
+	// speculative opening grant. Without competing demand, reclaiming that surplus
+	// would force periodic reconnects without making useful capacity available.
 	it('keeps a session waiting on a verdict through the idle close', async () => {
 		const token = await initialise();
 		const session = await openCredited(token);
@@ -1680,7 +1531,6 @@ describe('commit session credit', () => {
 			deferred: deferred.ev,
 			verdict: await session.nextFrame()
 		}).toStrictEqual({
-			// The session still holds all but the entry it spent.
 			opening: commitCapabilitiesValueWithCredit(openingGrant),
 			deferred: 'deferred',
 			verdict: { ev: 'verdict', uploadId, status: 'servable' }
@@ -1689,11 +1539,10 @@ describe('commit session credit', () => {
 		session.socket.close();
 	});
 
-	// The exemption above is for a session that has nothing left to give back.
-	// A session parked on a verdict still holds credit, which is what the
-	// tenant's other publications are queued for, so the holding clock applies to
-	// it too, and its parked entry survives the close on its durable row.
-	it('closes a verdict-parked session that holds credit it never spent', async () => {
+	// Competing demand changes the idle decision. A session awaiting a verdict can
+	// still withhold unused credit from another publication. Its pending upload
+	// remains durable across the reconnect.
+	it('reclaims unused credit from a session awaiting a verdict when another session is waiting', async () => {
 		const token = await initialise();
 		const parked = await openHoldingPool(token);
 		const { uploadId } = await deferFreshUpload(
@@ -1710,8 +1559,7 @@ describe('commit session credit', () => {
 		const opening = await waiter.nextFrame();
 
 		const closed = closeCode(parked);
-		// The parked session is the one holding the rest of the budget; the
-		// waiter holds the single unit the tenant had free.
+		// Select the parked session by its larger balance; the waiter holds one unit.
 		await runIdleClose(
 			(attachment) => (attachment.credit?.granted ?? 0) > 1,
 			rewindHolding
@@ -1732,11 +1580,7 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// A session that did not negotiate credit is outside the accounting
-	// entirely. It is granted nothing, so it cannot reduce what another session
-	// is offered, and it never joins the rotation, so no `credit` frame is ever
-	// addressed to it.
-	it('grants nothing to a session that did not negotiate credit', async () => {
+	it("does not reduce a credited session's opening grant while a legacy session is open", async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
 
@@ -1759,17 +1603,13 @@ describe('commit session credit', () => {
 		credited.socket.close();
 	});
 
-	// Before this accounting existed the server never closed a commit socket, and
-	// a client built for that server treats a close as the end of its session, so
-	// the idle close leaves such a session alone however long it is silent. It
-	// holds no credit to reclaim, and the number of them a tenant may hold is
-	// bounded at the upgrade.
-	it('keeps a session that never negotiated credit through the idle close', async () => {
+	// Legacy clients treat a server close as the end of publication. Their
+	// sessions hold no credit and are bounded at upgrade, so idle reclamation must
+	// leave them open.
+	it('keeps a legacy session open through the idle pass', async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
 
-		// The session has to be heard from once, or the object has no activity to
-		// measure it by.
 		unpaced.send({ op: 'commit', uploadId: unknownUpload('t') });
 		const answer = await unpaced.nextFrame();
 
@@ -1817,13 +1657,11 @@ describe('commit session credit', () => {
 		}
 	);
 
-	// A client decides to pace itself from the declaration it sent, and the
-	// server decides to pace the session from the declaration it received, so a
-	// hop that drops the request header leaves a client asking for credit the
-	// session was never given. The op is answered the way an op this server does
-	// not know is answered, which is a reply the client falls back from: it
-	// commits through its own window, which is what the session was accepted as.
-	it('answers a session that asks for credit it never negotiated', async () => {
+	// An intermediary can remove the client's credit capability from the upgrade
+	// request. The server then accepts an unpaced session while the client still
+	// sends `request-credit`. An `unsupported` frame makes the client resume its
+	// legacy window without closing the session.
+	it('returns unsupported and keeps an unpaced session open after request-credit', async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
 

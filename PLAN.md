@@ -34,14 +34,14 @@ cannot unwrap the control signing key it can read from shared D1.
 
 ## Compatibility
 
-- Develop and test against the current Nix the e2e suite is run with (2.33, via
-  Determinate Nix, at the time of writing); that is the only version cupboard is
-  verified against, and there is no compatibility guarantee for older releases.
-  Supporting older clients is an explicit non-goal. zstd-compressed NARs are the
-  obvious hard cliff — Nix only gained zstd substitution in 2.4 (November 2021),
-  so anything older could not substitute at all — but the point is broader: we
-  do not certify a minimum version, and adding fallback NAR compression for old
-  clients is not worth it for a personal cache.
+- Develop and test against Nix 2.34.7, which the end-to-end suite installs with
+  Determinate Nix. That is the only version cupboard is verified against, and
+  there is no compatibility guarantee for older releases. Supporting older
+  clients is an explicit non-goal. zstd-compressed NARs are the obvious hard
+  limit because Nix gained zstd substitution in 2.4 (November 2021), so anything
+  older could not substitute at all. More broadly, we do not certify a minimum
+  version, and adding fallback NAR compression for old clients is not worth it
+  for a personal cache.
 - The CLI drives the write path. Pure TypeScript code serialises NARs, computes
   hashes, compresses blobs, and speaks the cupboard upload protocol. The CLI
   negotiates, prepares an upload, uploads the blob to a presigned R2 PUT, and
@@ -370,41 +370,41 @@ operational endpoints live with the features that use them.
 
 One DO SQLite database per deployment.
 
-- `narinfo` — one row per store path per cache.
+- `narinfo`: one row per store path per cache.
   - (`cache`, `store_path_hash`) (PK), `store_path`, `nar_hash`, `nar_size`,
     `file_hash`, `file_size`, `compression`, `references_json`, `deriver`, `ca`,
     `sigs_json`, `created_at`. The `cache` is the empty default cache or a named
     one; the narinfo R2 object is namespaced under the cache.
-- `nar_blob` — one row per stored compressed blob.
+- `nar_blob`: one row per stored compressed blob.
   - `nar_hash` (PK), `r2_key`, `compression`, `file_hash`, `file_size`,
     `created_at`.
-- `pending_upload` — in-flight uploads not yet committed.
+- `pending_upload`: in-flight uploads not yet committed.
   - `id` (PK), `cache`, `nar_hash`, `r2_key`, `expected_size`, `metadata_json`,
     `created_at`, `expires_at`. The `cache` binds the upload to the cache it was
     negotiated under, so a prepare or commit cannot redirect it.
-- `orphan_blob_deletion` — durable queue for deleting abandoned R2 objects.
+- `orphan_blob_deletion`: durable queue for deleting abandoned R2 objects.
   - `r2_key` (PK), `not_before`, `created_at`.
-- `narinfo_deletion` — durable queue for finishing interrupted narinfo removals.
+- `narinfo_deletion`: durable queue for finishing interrupted narinfo removals.
   - (`cache`, `store_path_hash`) (PK), `nar_hash`, `created_at`.
-- `retention_root` — a named channel of kept store paths, optionally expiring.
+- `retention_root`: a named channel of kept store paths, optionally expiring.
   - (`cache`, `name`) (PK), `expires_at` (nullable), `created_at`, `updated_at`.
-- `retention_root_target` — the store paths a channel currently keeps.
+- `retention_root_target`: the store paths a channel currently keeps.
   - (`cache`, `root_name`, `store_path_hash`) (PK), `store_path`.
-- `retention_policy` — default TTLs supplied to roots created without one.
+- `retention_policy`: default TTLs supplied to roots created without one.
   - `id` (PK), `scope` (`cache` or `root-name-prefix`), `pattern`,
     `default_ttl_seconds`, `created_at`. The most specific match wins.
-- `cache` — the named-cache registry; the empty name is the default cache.
+- `cache`: the named-cache registry; the empty name is the default cache.
   - `name` (PK), `priority`, `created_at`.
-- `verification_cursor` — where the background verify pass last stopped.
+- `verification_cursor`: where the background verify pass last stopped.
   - `id` (PK, single `active` row), `cache`, `last_store_path_hash` (nullable),
     `updated_at`. Holds a composite `(cache, store_path_hash)` position; empty
     restarts the scan at the first cache's lowest hash.
-- `auth_key` — deployment-owned signing keys for cupboard access JWTs, a
+- `auth_key`: deployment-owned signing keys for cupboard access JWTs, a
   rotatable set.
   - `id` (PK), `kid`, `private_jwk_json`, `public_jwk_json`, `created_at`,
     `retired_at` (nullable). The newest non-retired key mints; every non-retired
     key verifies, and the JWKS publishes each one by its `kid`.
-- `oidc_trust` — OIDC trust rules that federate an external identity into a
+- `oidc_trust`: OIDC trust rules that federate an external identity into a
   cupboard scope.
   - `id` (PK), `issuer`, `audience`, `scope` (`write` or `admin`), `claims_json`
     (exact-match policy), `allowed_roots_json` (write rules), `created_at`,
@@ -664,12 +664,12 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
       re-materialising is byte-identical. Reads serve the object; truth and
       queryability stay in the row.
 - [x] Never advertise a path as present without a servable object, but do not
-      try to make the two writes atomic with a rollback — a crash between the
-      row commit and the rollback cannot be covered. Lean on regenerability
-      instead: on commit write the row, then materialise the object; if the put
-      fails or the DO is evicted, the row persists and the object is re-derived
-      later. Close the window deterministically by re-materialising from the row
-      in both places that can report a path already present: negotiate before it
+      try to make the two writes atomic with a rollback. A crash between the row
+      commit and the rollback cannot be covered. Lean on regenerability instead:
+      on commit write the row, then materialise the object; if the put fails or
+      the DO is evicted, the row persists and the object is re-derived later.
+      Close the window deterministically by re-materialising from the row in
+      both places that can report a path already present: negotiate before it
       returns `skip`, and commit before it returns `already-present`. Each heads
       the object and regenerates it from the row when missing, so neither exit
       can advertise an unservable path. An only-if-absent conditional put
@@ -712,12 +712,12 @@ R2 and the edge.
         negotiate clears the narinfo object and returns an upload decision, and
         a previously cached narinfo is purged from the current colo.
 
-Deliberately deleting committed content — TTL-ordered NAR deletion, a durable
-narinfo-deletion queue, and orphan reconcile — is deferred to V3 (see Garbage
-collection and admin). V2 has no path that deletes a NAR a live narinfo points
-at: abandoned-pending GC only removes never-committed blobs, and stale recovery
-fires only once the NAR is already gone, so the edge-safe deletion machinery has
-no trigger until reference-graph GC exists.
+Deleting committed content through TTL-ordered NAR deletion, a durable
+narinfo-deletion queue, or orphan reconciliation is deferred to V3 (see Garbage
+collection and admin). V2 has no path that deletes a NAR referenced by a live
+narinfo: abandoned-pending GC only removes never-committed blobs, and stale
+recovery fires only once the NAR is already gone, so the edge-safe deletion
+machinery has no trigger until reference-graph GC exists.
 
 ## V3
 
@@ -782,7 +782,7 @@ cache.
   - Cache names are a single URL path segment, so they get their own
     `cacheNameSchema` rather than reusing `rootNameSchema` (root names allow `/`
     and other characters that do not belong in a path segment). Proposed
-    pattern: `[a-z0-9][a-z0-9._-]{0,62}` — lowercase, no slashes, no
+    pattern: `[a-z0-9][a-z0-9._-]{0,62}`: lowercase, no slashes, no
     percent-encoding.
   - Storage: add a `cache` column to `narInfos` and the retention tables,
     defaulting to the empty default cache. NAR blobs stay content-addressed by
@@ -799,7 +799,7 @@ cache.
   - Management surface: `cupboard cache list` / `create [--priority]` /
     `inspect` / `remove [--force]`, backed by admin routes `GET /caches`,
     `PUT /caches/:cacheName` (upsert priority), and `DELETE /caches/:cacheName`
-    (teardown — refuses the default cache and a non-empty cache without
+    (teardown; refuses the default cache and a non-empty cache without
     `--force`, which retires the cache's paths through the durable removal
     queue).
   - Reachability GC and retention roots are scoped per cache.
@@ -892,8 +892,8 @@ in three increments:
       root is created without an explicit TTL, the most specific matching policy
       supplies one (e.g. `pr-` → 14 days): a prefix match beats a cache match,
       and a longer prefix wins. `cupboard policy list/add/remove` and the
-      `/policies` routes manage them. Both scopes are live now that named caches
-      have landed.
+      `/policies` routes manage them. Both scopes apply to named caches and the
+      default cache.
 - [x] Repair/check command to compare metadata against R2. The admin
       `GET /check` route and `cupboard check [--deep]` scan the committed
       narinfo rows (bounded, the report flagging an incomplete scan), confirm
@@ -935,9 +935,9 @@ in three increments:
         migration). The flush deletes a blob only when `now >= not_before` and
         the committed and live-pending checks still pass; abandoned pending
         uploads keep `not_before = now`. `not_before` is monotonic
-        non-decreasing — an enqueue conflicting on the `r2_key` primary key
-        takes `max(existing, new)`, never earlier, so a delayed blob is never
-        pulled forward by a later immediate enqueue.
+        non-decreasing: an enqueue conflicting on the `r2_key` primary key takes
+        `max(existing, new)`, never earlier, so a delayed blob is never pulled
+        forward by a later immediate enqueue.
   - [x] Durable narinfo-deletion queue (`narinfo_deletion`, keyed by store path
         hash): the removal transaction deletes the narinfo row and enqueues the
         object cleanup. An opportunistic flush deletes the R2 object and, only
@@ -957,13 +957,11 @@ not lost.
       `concurrent-write.workers.test.ts` covers a two-way commit race, four
       concurrent pushes of one path settling to a single row, and two distinct
       paths sharing one NAR.
-- [x] Durable Object durability coverage: DO SQLite state — the signing key set
-      and committed metadata — persists in its final shape and stays consistent
-      across a fresh stub for the same DO name (deferred from V1 Storage and
-      Signing). `durability.workers.test.ts` reads the persisted rows from
-      `state.storage` and re-derives `/pubkey`, a working token, and a verifying
-      narinfo. The harness exposes no forced-eviction API, so durability is
-      asserted through storage and a fresh stub rather than a real restart.
+- [x] Durable Object durability coverage: `durability.workers.test.ts` reads the
+      final SQLite rows from `state.storage` and re-derives `/pubkey`, a working
+      token, and a verifying narinfo. The harness exposes no forced-eviction
+      API, so the test verifies the stored representation but does not prove
+      re-instantiation after eviction.
 
 ## V4
 
@@ -980,17 +978,17 @@ path: `Authorization: Bearer <cupboard-jwt>`.
 A single endpoint serves both callers, differing only by which trust rule the
 subject token matches. Verification is uniform; `jose` does the cryptography.
 
-- [x] `POST /token` — one RFC 8693 token-exchange grant. The `subject_token` is
+- [x] `POST /token`: one RFC 8693 token-exchange grant. The `subject_token` is
       an external OIDC token (the owner's `id_token` or a CI GitHub Actions
       token); cupboard verifies it against the matching rule's issuer and mints
-      a cupboard access JWT — owner login yields `admin`, CI yields `write`.
+      a cupboard access JWT. Owner login yields `admin`; CI yields `write`.
       Success and error bodies follow RFC 6749 §5.1/§5.2;
       `Cache-Control:     no-store`.
 - [x] Sign cupboard access JWTs with a deployment-owned key (`auth_key`) in the
       RFC 9068 shape: `typ: at+jwt`, a `scope` claim, and the signing key's
       `kid` in the header. Write tokens carry a `cb_roots` claim; admin tokens
-      are unconstrained. Tokens are short-lived and stateless — no issued-token
-      table; expiry and key rotation cover revocation.
+      are unconstrained. Tokens are short-lived and stateless, with no
+      issued-token table; expiry and key rotation cover revocation.
 - [x] Verify inbound tokens with issuer and audience pinned and an asymmetric
       algorithm allowlist (RS256/PS256/ES256/EdDSA), never the token's own
       header and never `alg: none` or a symmetric algorithm. Verification has
@@ -1021,7 +1019,7 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 - [x] `oidc_trust` rules federate an external identity into a scope: filter by
       issuer, exact-match every configured claim, most-specific match wins.
       Prefer stable ID claims (GitHub `repository_id`, `repository_owner_id`).
-      Providers are data, not hardcoded branches — the same evaluator fits
+      Providers are data, not hardcoded branches. The same evaluator fits
       Google, Entra, Auth0, Okta, and GitHub Actions.
 - [x] The owner is an `admin` rule seeded on DO init from deploy config
       (`CUPBOARD_OWNER_*`), pinned on issuer, subject, and audience. Break-glass
@@ -1029,7 +1027,7 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
       through the admin API, and bind the minted token to `allowed_roots` via
       `cb_roots`, enforced at `PUT /roots/<name>` so a CI token for one
       repository cannot replace another's root. A `cb_roots` entry matches a
-      root by exact name, or — when it ends with `/` — any root beneath that
+      root by exact name or, when it ends with `/`, any root beneath that
       prefix. The claim scopes retention roots only; NAR uploads stay
       deployment-wide, shared within the owner's single trust domain (see
       Tenancy).
@@ -1222,9 +1220,9 @@ Settled decisions:
   consistent with control state, bounded by the narinfo TTL and edge cache. The
   commit-time/maintenance invariant is that a narinfo R2 object is materialised
   only after the registry row is active, the per-narinfo edge exists,
-  `blob_state` is `available`, and the shared R2 object exists — and is
-  de-materialised (object deleted, cache purged) by the owning DO when any of
-  those ceases. No legacy or unverified carve-out.
+  `blob_state` is `available`, and the shared R2 object exists. When any of
+  those conditions ceases to hold, the owning DO deletes the materialised object
+  and purges its cache entry. No legacy or unverified carve-out.
 - **Per-narinfo identity and replay safety.** There is no atomic transaction
   across DO SQLite, D1, and R2. Every cross-store mutation is keyed by
   per-narinfo identity `(tenant, cache, storePathHash, generation)`, never by an
@@ -1256,9 +1254,9 @@ is per-table, not blanket: `blob_state` is shared and multi-writer (any tenant
 DO at promote, the queue consumer promoting the bytes it has just verified, the
 Worker reaper for `delete_after` and collection); the tenant DO writes its own
 `tenant_usage` counters (`bytes`/`narinfos`/`blobs`, where it charges and
-credits quota) while the Worker writes only that row's quota configuration
-(`quota_bytes`) — disjoint columns, no write conflict; and the Worker owns
-`tenant`, `control_*`, and `global_admin`.
+credits quota), while the Worker writes only that row's quota configuration
+(`quota_bytes`). Those columns are disjoint, so the writers do not conflict. The
+Worker also owns `tenant`, `control_*`, and `global_admin`.
 
 ### Control plane
 
@@ -1279,7 +1277,7 @@ most once per short interval. A slug absent from the manifest is rejected before
 any DO is instantiated; otherwise varying the slug could create unbounded,
 unprovisioned DOs. Each manifest record carries
 `{ status, readMode, configVersion }` and, for private tenants, a per-tenant
-read verifier (a hashed credential, never a DO signing key — plaintext secrets
+read verifier (a hashed credential, never a DO signing key; plaintext secrets
 stay out of KV). The manifest is therefore the single read-path authority for
 tenancy state: `handleRead` enforces `readMode` from the already-loaded entry
 with no D1 or DO read on the GET path. Unauthenticated control routes return 404
@@ -1308,7 +1306,7 @@ default declines.
 
 The bare-host control surface has its own auth. Per-tenant `auth_key` rows live
 in tenant DO SQLite and cannot sign global-admin tokens. The Worker is
-stateless, so control-plane key material is persisted outside it — but its
+stateless, so control-plane key material is persisted outside it. Its
 **private** part must be reachable only by the Worker, never by a tenant DO:
 
 - `control_auth_key` is the rotatable control key set. Its public key metadata
@@ -1359,21 +1357,18 @@ login: issuer and public client id. The first principal to authenticate and call
 the claim endpoint is promoted to global admin by a first-writer-wins insert
 into D1 (`global_admin` singleton, unique constraint). The claim also seeds the
 control trust policy, pinning that principal's `iss`, `sub`, and `aud`, after
-which `/token` works as above. The Worker verifies the deploy-configured gate
-(the single-use claim secret or the pinned `(issuer, subject)`) first; then the
-`global_admin` insert, the `control_trust` seed, and recording claim consumption
-are one atomic D1 batch. Single-use is enforced by a D1 record, not by mutating
-an env secret (an env secret cannot be "consumed"): the first-writer-wins
-`global_admin` row is the consumption marker. A second claim by a **different**
-principal is **refused** (the row already exists); a re-claim by the **same**
-principal is idempotent and returns the existing claim state. The atomicity
-matters because otherwise a crash between the writes leaves `global_admin`
-claimed but `control_trust` empty (no rule matches, so `/token` can never mint
-an admin token) — a permanently un-administerable deployment. This is the only
-irreversible bootstrap transition.
+which `/token` works as above. The Worker first verifies the deploy-configured
+gate, which is either a reusable claim secret or a pinned `(issuer, subject)`.
+One atomic D1 batch then inserts the `global_admin` singleton and seeds
+`control_trust`. A second claim by a different principal is refused because the
+singleton already exists. A claim by the same principal is idempotent and
+returns the existing state. The writes must remain atomic: if `global_admin`
+existed without a matching `control_trust` rule, `/token` could not mint an
+admin token and the deployment would have no way to recover through the admin
+API. This is the only irreversible bootstrap transition.
 
-The claim gate is required in hosted mode. The claimant must satisfy either a
-single-use claim secret or a pinned `(issuer, subject)`. With neither
+The claim gate is required in hosted mode. The claimant must satisfy either the
+configured claim secret or a pinned `(issuer, subject)`. With neither
 configured, claims are refused. An explicit local-dev flag relaxes this only for
 local development.
 
@@ -1422,14 +1417,14 @@ References are rows, not aggregate counters:
   table scan that stalls the reaper and leaks blobs at scale.
 
 - `generation` has a **durable, strictly-increasing source per
-  `(cache, store_path_hash)` that survives deletion** — a
+  `(cache, store_path_hash)` that survives deletion**: a
   `generation_seq(cache, store_path_hash, next_generation)` row in DO SQLite,
   advanced at commit and never reset by delete or offboarding. Sourcing it from
   the narinfo row (which delete removes) or `max(blob_ref.generation)` (which
   delete drains) resets to 1 and lets a stale deletion match a
-  freshly-recommitted same-`nar_hash` edge, silently reaping a servable
-  narinfo's blob — and reproducible builds make same-`nar_hash` recommit the
-  norm. Lifetime-monotonicity is what makes both compare-and-delete and
+  freshly-recommitted same-`nar_hash` edge and silently reap a servable
+  narinfo's blob. Reproducible builds make same-`nar_hash` recommits normal.
+  Lifetime-monotonicity is what makes both compare-and-delete and
   `INSERT OR IGNORE` idempotency hold.
 
 - `tenant_blob(tenant, nar_hash, file_size, PK(tenant, nar_hash))` is the
@@ -1477,10 +1472,10 @@ Quota (which lands in step 6; step 2 builds the edge/presence machinery without
 the charge) is charged once per tenant per unique `nar_hash` on the tenant's own
 verified staged `file_size`, so `SUM(tenant_blob.file_size)` equals
 `tenant_usage` exactly. Two tenants may be charged different sizes for the same
-hash when their encodings differ — a benign dedup-at-rest property; each pays
-for the bytes it transmitted. A user comparing quota with Nix's uncompressed NAR
-size will see a difference (the charge is the compressed `file_size`, not
-`nar_size`).
+hash when their encodings differ. This does not affect deduplication at rest;
+each pays for the bytes it transmitted. A user comparing quota with Nix's
+uncompressed NAR size will see a difference (the charge is the compressed
+`file_size`, not `nar_size`).
 
 The charge is idempotent because it is gated on the `tenant_blob` 0-to-1
 `INSERT OR IGNORE` actually inserting (`changes()`-derived), not on a standalone
@@ -1492,15 +1487,15 @@ driven by the DO. `tenant_usage` is the authoritative quota counter; cron
 roll-up is reconciliation and audit.
 
 The "single writer per tenant's D1 rows" rule is per-table. `blob_ref` and
-`tenant_blob`: the owning tenant DO only. `blob_state`: multi-writer — any
+`tenant_blob`: the owning tenant DO only. `blob_state`: multiple writers. Any
 tenant DO inserts/clears it at promote, and the Worker reaper arms
 `delete_after` and collects; the DO-versus-reaper conflict is resolved at the
 D1-row level (the `delete_after IS NOT NULL` guard makes promote/reuse clears
 and reaper deletes mutually exclusive). `tenant_usage` is split by column: the
-tenant DO writes the usage counters (`bytes`/`narinfos`/`blobs`), the Worker
-writes only `quota_bytes` (admin config) — disjoint, so no conflict. Offboarding
-deletes a tenant's edge rows through that tenant's DO, never directly from the
-Worker.
+tenant DO writes the usage counters (`bytes`/`narinfos`/`blobs`), while the
+Worker writes only `quota_bytes` (admin config). These columns are disjoint, so
+the writes do not conflict. Offboarding deletes a tenant's edge rows through
+that tenant's DO, never directly from the Worker.
 
 Per-tenant reachability GC stays in each DO. Collecting a narinfo deletes the
 matching `blob_ref` row and, on the tenant's last live reference to a `narHash`,
@@ -1524,41 +1519,40 @@ consume its rows, keeps a resume position (a single KV value, see below):
 
 `delete_after` is cleared to NULL by the paths that re-reference a hash: promote
 (`ON CONFLICT DO UPDATE SET delete_after = NULL`), a negotiate that plans a
-reuse of an armed hash (the tenant DO clears it before answering), and
-reuse-commit (an explicit update in the same batch as its edge insert — a
+reuse of an armed hash (the tenant DO clears it before responding), and
+reuse-commit (an explicit update in the same batch as its edge insert; a
 synchronous reuse commit does no promote, so this is mandatory; a deferred reuse
 settles through a decode-free promote against the canonical object, which clears
 it the promote way). The grace is the single deployment-wide
 `narinfo TTL + margin` (one TTL constant, preserved from V3). The reaper also
-runs a demote pass — it, not the per-DO verify pass, is the only actor that can
-scan global `blob_state` — keyset-paginating `blob_state` by `nar_hash` from a
-resume position held in a single KV value (cron bookkeeping, not shared-blob
-data, so it stays out of the relational schema), heading the canonical object,
-and on confirmed absence (same in-transaction re-check) deleting the
-`blob_state` row. `findReusableBlob`'s reference check queries `blob_ref` across
-tenants, not the local DO's `narInfos`.
+runs a demote pass. Only the reaper, not a per-DO verification pass, can scan
+global `blob_state`. It paginates `blob_state` by `nar_hash` from a resume
+position held in a single KV value (cron bookkeeping, not shared-blob data, so
+it stays out of the relational schema), heading the canonical object, and on
+confirmed absence (same in-transaction re-check) deleting the `blob_state` row.
+`findReusableBlob`'s reference check queries `blob_ref` across tenants, not the
+local DO's `narInfos`.
 
 ### Cross-store ordering
 
-Every commit and delete is a saga ordered so a crash leaves a convergent state a
-bounded repair pass drives to completion — never a servable narinfo without its
-blob, and never a permanently leaked blob or quota charge.
+Every commit and delete is an ordered saga. After a crash, a bounded repair pass
+can drive the remaining state to completion without leaving a servable narinfo
+without its blob or permanently leaking a blob or quota charge.
 
-Commit is row-first and edge-last. (The earlier edge-first sketch was unsafe: an
-edge written before the row is, to the reaper, a live reference, so a crash
-before the row pinned the blob and its quota charge forever with nothing to
-collect it.) Servability is the materialised R2 narinfo object — there is **no
+Commit is row-first and edge-last. If the edge were written first, the reaper
+would treat it as a live reference. A crash before the row write would then pin
+the blob and its quota charge without leaving a row that collection could
+remove. Servability is the materialised R2 narinfo object; there is **no
 `servable` flag, in any step**. "Not yet servable" is encoded by the narinfo row
 existing without its R2 object, and in-flight/failed status lives in
-`pending_upload.verdict`; a stored flag is never needed. (Recorded deviation
-from the original "track servability per narinfo".) The ordering below is
-uniform across step 2 and step 6 — step 6 only adds the quota check and charge
-at the points marked, never a flag or a pre-verify reservation:
+`pending_upload.verdict`; a stored flag is never needed. The ordering below is
+uniform across step 2 and step 6. Step 6 only adds the quota check and charge at
+the points marked, never a flag or a pre-verify reservation:
 
 1. The client uploads the compressed blob to a per-tenant staging key; R2
    verifies the compressed `fileHash` checksum.
 2. (Step 6, first: a cheap **read-only pre-verify quota check** runs **before
-   any write** — if the tenant is clearly over quota the commit is rejected here
+   any write**. If the tenant is clearly over quota, the commit is rejected here
    having written nothing, no row and no `generation_seq` advance, and the
    staging object is reclaimed; it is advisory, not the authority.) The DO then
    advances `generation_seq` and writes the narinfo row at that generation, not
@@ -1582,14 +1576,14 @@ live narinfo; an identical-content re-push is idempotent and does not bump
 `generation_seq`; differing content advances `generation_seq`, updates +
 re-signs + re-materialises the narinfo in one DO critical section, reserves the
 new-generation edge, then retires the old-generation edge through the deletion
-machinery — so a stale deletion of the old generation can only remove the old
+machinery, so a stale deletion of the old generation can only remove the old
 edge. (Today's `handleCommit` short-circuits an existing row to
 `already-present`; recommit replaces that with this content-keyed transition.)
 
 Delete is row-first and edge-last. The durable saga marker is the
 `narinfo_deletion` row itself, keyed by `(tenant, cache, storePathHash)` and
-carrying the captured `nar_hash` and generation: its existence records that a
-delete is in flight, and its removal is the single terminal step — there are no
+with the captured `nar_hash` and generation. Its existence records that a delete
+is in flight, and its removal is the single terminal step; there are no
 timestamp phase columns. Delete deletes the narinfo row and queues the marker in
 one DO transaction (instantly non-servable), then removes the R2 narinfo object,
 deletes the captured-generation `blob_ref` edge, updates `tenant_blob`/quota
@@ -1615,21 +1609,21 @@ commit-side rollback saga: a crashed commit is just a not-servable narinfo the
 collection removes.
 
 Because there is no `servable` flag in any step, "not-servable" is not a stored
-bit — the final serve predicate is simply that the materialised R2 narinfo
-object exists (plus admission/`readMode` at the edge). The collection classifies
-a narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
+bit. The final serve predicate is simply that the materialised R2 narinfo object
+exists (plus admission/`readMode` at the edge). The collection classifies a
+narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
 object is missing is in-flight or stranded and is resolved by the rest of the
 saga state: (a) no live edge, no `blob_state`, and no live `pending_upload`
-means a crashed pre-reservation commit — reclaim the row; (b) a live edge plus
+means a crashed pre-reservation commit, so reclaim the row; (b) a live edge plus
 `available` `blob_state` but no R2 object means a crashed pre-materialise commit
-or a demote heal — re-materialise the object (servable); (c) a live
-`pending_upload` (`verdict = 'pending'`) means it is still verifying — leave it
-for the verify pass. A row whose R2 object exists is already servable.
-Servability is thus a derivable predicate, not prose.
+or a demote heal, so re-materialise the object; (c) a live `pending_upload`
+(`verdict = 'pending'`) means it is still verifying, so leave it for the verify
+pass. A row whose R2 object exists is already servable. Servability can
+therefore be derived from the stored state.
 
 A reuse commit (no staging to re-promote) re-heads the canonical object at
-commit and returns a clean, attributable error if it is gone, before writing the
-narinfo or the edge — so a reaper that collected the object in the
+commit and returns a clean, attributable error if it is gone before writing the
+narinfo or the edge. If the reaper collected the object in the
 negotiate-to-commit window forces a re-negotiate-and-upload, never a dangling
 narinfo. After inserting its edge and clearing `delete_after`, the reuse path
 re-reads `blob_state` and fails (forcing re-upload) if the row was concurrently
@@ -1699,22 +1693,22 @@ unservable path.
 `push` waits on the commit WebSocket itself: a deferred upload's socket parks
 until the verification pass delivers the verdict, so the client never polls.
 Root-activation asks the tenant DO, by `(cache, storePathHash)`, for the **same
-availability predicate as serving** — the materialised tenant narinfo R2 object
+availability predicate as serving**: the materialised tenant narinfo R2 object
 exists (which the DO's classifier confirms only when the edge exists,
 `blob_state` is `available`, and the shared R2 blob is present, repairing if
 needed). It must **not** activate on narinfo-row + `blob_state` alone: a root
-would then advertise a path whose tenant narinfo object is not yet materialised
-— an unservable path. Root-activation and serving thus share one
-classifier/repair path. A settled upload leaves no residue: the background pass
-notifies the parked waiters, then clears the `pending_upload` row and its
-staging object. A failed upload's row instead turns terminal (`mismatch` or
-`over-quota`) and is retained, so a waiter that lost its socket can re-drive the
-commit and still hear why the path never became servable. The anti-resurrection
-guarantee: the verify pass only re-drives `verdict = 'pending'`, so a terminal
-row is never re-promoted. The parked socket settles on `servable` (reported as
-committed), hard-errors on `mismatch` or `over-quota` (it must not hang on a
-failed deferred blob), or times out client-side; `--no-wait` returns `pending`
-as soon as the deferral is stored.
+would then advertise a path whose tenant narinfo object is not yet materialised.
+Root activation and serving therefore share one classifier and repair path. A
+settled upload leaves no residue: the background pass notifies the parked
+waiters, then clears the `pending_upload` row and its staging object. A failed
+upload's row instead turns terminal (`mismatch` or `over-quota`) and is
+retained, so a waiter that lost its socket can re-drive the commit and still
+hear why the path never became servable. The anti-resurrection guarantee: the
+verify pass only re-drives `verdict = 'pending'`, so a terminal row is never
+re-promoted. The parked socket settles on `servable` (reported as committed),
+hard-errors on `mismatch` or `over-quota` (it must not hang on a failed deferred
+blob), or times out client-side; `--no-wait` returns `pending` as soon as the
+deferral is stored.
 
 ### Tenant auth and issuer
 
@@ -1726,11 +1720,11 @@ rejected at the JWT layer.
 env/default fallback. A cold-started DO whose `tenant_identity` row is absent
 returns `503 not configured` for every tenant route rather than defaulting
 issuer and audience to the literal `cupboard` and seeding the owner rule from
-operator env — otherwise an un-configured DO could mint a token cross-verifiable
-at any other un-configured DO (collapsing per-tenant issuer isolation) or take
-over the owner rule. `cupboard`/`cupboard` is not a valid mintable or verifiable
-tenant identity. This 503 is scoped to tenant DOs (`idFromName(tenant)`), not
-the bare-host control surface or local-dev.
+operator env. Such a default would let one unconfigured DO mint a token that
+another unconfigured DO could verify, collapsing per-tenant issuer isolation, or
+take over the owner rule. `cupboard`/`cupboard` is not a valid mintable or
+verifiable tenant identity. This 503 is scoped to tenant DOs
+(`idFromName(tenant)`), not the bare-host control surface or local-dev.
 
 The DO learns its identity through a `configure` RPC that the Worker calls at
 provision time and on config-version bumps; it persists the identity in a
@@ -1752,9 +1746,9 @@ issuer.
 
 Tenant creation requires an explicit `readMode: public | private`; private is
 the hosted default. Enforcement reads `readMode` (and the per-tenant read
-verifier) from the KV admission manifest on the read path, so a private tenant
-rejects unauthenticated reads from the moment it can be created — no window
-where the default mode lacks a data source.
+verifier) from the KV admission manifest on the read path. A private tenant
+therefore rejects unauthenticated reads from the moment it can be created; the
+default mode never lacks its verifier data.
 
 Suspension stops writes immediately (the Worker's authoritative D1 status read
 before write dispatch) and reads eventually, as described in the admission
@@ -1766,7 +1760,7 @@ stops dispatching ordinary GC for it); the DO halts its own
 verify/promote/deletion queues so the drain does not chase newly-created edges;
 in-flight commits settle; then a `runOffboard`/`drainEdges` RPC on the tenant's
 DO deletes a bounded batch of its `blob_ref`/`tenant_blob` rows per tick inside
-`blockConcurrencyWhile` — preserving the per-tenant single-writer rule (the
+`blockConcurrencyWhile`. This preserves the per-tenant single-writer rule. The
 Worker must not delete a tenant's edge rows directly; a stray in-flight commit
 could otherwise resurrect a row the reaper then treats as live, a permanent
 invisible leak). The Worker may delete the tenant's `t/<tenant>/...` R2 objects
@@ -1792,9 +1786,9 @@ bucketing is meaningful and the latency bound holds; `wrangler.jsonc` `crons` is
 updated to match. The fan-out records per-tenant failures (count and last error)
 rather than swallowing them with bare `allSettled`. The global reaper gets its
 own reserved budget after fan-out, or its own cron tick, so a long fan-out
-cannot starve it; its demote scan resumes from its own KV-held position. Reaper
-reclamation latency has a stated upper bound — grace plus at most one reaper
-interval plus scan-coverage time — for physical R2 reclamation; quota credit, by
+cannot starve it; its demote scan resumes from its own KV-held position. The
+upper bound for physical R2 reclamation is the grace period, plus at most one
+reaper interval and the time needed to cover the scan. Quota credit, by
 contrast, is released immediately on the DO-side 1-to-0 edge removal,
 independent of the reaper. Queues remain the fallback past single-Worker-scan
 scale.
@@ -1864,12 +1858,12 @@ New D1 database `CUPBOARD_DB`:
   `delete_after` is armed only by the reaper and cleared by promote and
   reuse-commit; an index on `delete_after` backs the reaper's candidate scan.
 
-- No cursor tables. The maintenance batch's round-robin position lives on the
-  data it maintains — a `tenant.last_maintained_at` column (with a
-  `(status, last_maintained_at)` index), oldest-first — and the reaper's demote
-  scan keeps its resume position in a single KV value (`CRON_STATE`), cron
-  bookkeeping rather than relational data. The self-draining reaper arm and
-  collect passes need no stored position at all.
+- No cursor tables. The maintenance batch stores its round-robin position in
+  `tenant.last_maintained_at`, with a `(status, last_maintained_at)` index, and
+  selects the oldest rows first. The reaper's demote scan keeps its resume
+  position in a single KV value (`CRON_STATE`), cron bookkeeping rather than
+  relational data. The self-draining reaper arm and collect passes need no
+  stored position at all.
 
 `tenant.status` is one of `active`, `suspended`, `offboarding`; `read_mode` and
 the per-tenant read verifier are projected into the KV manifest, not read from
@@ -1880,18 +1874,17 @@ Per-tenant DO SQLite changes:
 - Add `tenant_identity` with slug, issuer, owner triple, and config version.
 - Add `generation_seq(cache, store_path_hash, next_generation)`, the durable,
   never-reset per-store-path generation counter (advanced at commit; survives
-  delete and offboarding). It has no `tenant` column — the DO is tenant-scoped,
-  so this per-tenant table must not gain one. Add a `generation` column to
-  `narInfos` recording the live row's generation, sourced from `generation_seq`,
-  for compare-and-delete.
+  delete and offboarding). It has no `tenant` column because the DO is
+  tenant-scoped, so this per-tenant table must not gain one. Add a `generation`
+  column to `narInfos` recording the live row's generation, sourced from
+  `generation_seq`, for compare-and-delete.
 - No `servable` flag, in any step: servability is the materialised narinfo R2
   object (the row already exists before verify, so "not servable" is encoded by
   row-without-object), and in-flight/failed status lives in
   `pending_upload.verdict`. Step 6 adds quota without a flag: a cheap read-only
   pre-verify check early-rejects a clearly over-quota upload (saving verify CPU,
   advisory), and the authoritative idempotent charge stays in the existing
-  post-verify atomic batch gated on the `tenant_blob` 0→1 insert. (Recorded
-  deviation from the original "track servability per narinfo".)
+  post-verify atomic batch gated on the `tenant_blob` 0→1 insert.
 - `pending_upload` keeps its async verification verdicts from step 1: `pending`
   while a deferred blob awaits the background pass, then a terminal `mismatch`
   (the NAR-hash check failed) or `over-quota` (the canonical size exceeds the
@@ -1903,8 +1896,8 @@ Per-tenant DO SQLite changes:
   `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
   `tenant_blob`, `blob_state`, and the global reaper.
 - Extend `narinfo_deletion` with the captured `(nar_hash, generation)`; the row
-  itself is the durable delete-saga marker (no timestamp phase columns), and its
-  surviving-marker re-drive — a bounded batch — is the DO-owned repair pass,
+  itself is the durable delete-saga marker (no timestamp phase columns). The
+  DO-owned repair pass re-drives surviving markers in bounded batches and is
   correct by captured-identity idempotency.
 
 R2 keys:
@@ -1943,20 +1936,20 @@ together.
    `verifyDecompressedNar`, the backpressure-safe bridge, the zstd init
    self-test, inline and background verification, strict verify-before-serve,
    per-upload async verdicts, `CheckDiscrepancyKind` extensions, and
-   `limits.cpu_ms = 300_000`. Still single-tenant. The spike itself — measuring
-   real workerd zstd+SHA-256 throughput, confirming the DO honours
-   `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
-   fixture — needs a deploy to the operator's account, so it is deferred. The
-   provisional `verifiableMaxBytes` is 4 GiB; every fresh upload goes to the
-   background pass, so the deferred contract is exercised on every push. The
-   spike is a measurement, not an enabler: it confirms the background pass holds
-   CPU and memory on the real runtime and may lower `verifiableMaxBytes` from
-   the measurements, alongside the multi-hundred-MB bounded-memory and
-   `node:zlib` self-test-failure tests.
+   `limits.cpu_ms = 300_000`. Still single-tenant. Measuring real workerd
+   zstd+SHA-256 throughput, confirming the DO honours `cpu_ms = 300_000`, and
+   proving bounded peak memory on a multi-hundred-MB fixture needs a deploy to
+   the operator's account, so this spike is deferred. The provisional
+   `verifiableMaxBytes` is 4 GiB; every fresh upload goes to the background
+   pass, so the deferred contract is exercised on every push. The spike is a
+   measurement, not an enabler: it confirms the background pass holds CPU and
+   memory on the real runtime and may lower `verifiableMaxBytes` from the
+   measurements, alongside the multi-hundred-MB bounded-memory and `node:zlib`
+   self-test-failure tests.
 2. **D1 substrate + per-narinfo edges + shared-CAS.** Sub-commits: **2a**
    `blob_state` replaces `nar_blob` (done); **2b** `blob_ref` (with its
    `nar_hash` index) + `tenant_blob` + the durable `generation_seq` counter,
-   row-first/edge-last commit (no `servable` flag — servability is the
+   row-first/edge-last commit (no `servable` flag; servability is the
    materialised R2 object), and row-first/edge-last delete whose durable saga
    marker is the `narinfo_deletion` row (captured `(nar_hash, generation)`, no
    timestamp phase columns) + the DO-owned bounded repair pass that re-drives
@@ -1996,9 +1989,9 @@ together.
    `readMode`, and private-read enforcement from creation. The Worker admits a
    slug against the KV manifest before instantiating any DO (an absent slug is a
    404), enforces `readMode` and the per-tenant read verifier from the manifest
-   entry on the GET path (a private cache with no verifier fails closed), and
-   for a write does an authoritative D1 `tenant.status` read first — a suspended
-   or offboarding tenant is a 403. `tenant_identity` is the sole identity
+   entry on the GET path (a private cache with no verifier fails closed). Before
+   a write, the Worker reads the authoritative D1 `tenant.status`; a suspended
+   or offboarding tenant receives a 403. `tenant_identity` is the sole identity
    source: an unconfigured tenant DO returns 503 for every route rather than
    minting or verifying under the literal `cupboard` default. The per-tenant
    read verifier is a hashed credential carried in the manifest, never the
@@ -2034,18 +2027,8 @@ together.
    `/t/<slug>`), one file per target, and binds a cached token to its target
    before reuse: the signed issuer must equal the target (a tenant mints `iss`
    equal to its base URL, the control plane equal to the bare host), and the
-   audience must admit it, closing V4 finding C. **Step 6 is complete.** The
-   earlier gating notes, kept for context: existence-oracle-safe negotiate
-   gating on the asking tenant's own `tenant_blob`/`blob_ref` (this reworks 2b's
-   single-tenant reuse lookup, which consults global `blob_state` — a known,
-   accepted cost); per-tenant-per-`narHash` quota — a read-only pre-verify check
-   (early-reject to save verify CPU) plus the authoritative post-verify charge
-   gated on the `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage;
-   the per-upload status query the push contract polls; server
-   wait/no-wait/root-activation states and the CLI behaviour; the token cache
-   keyed on the full tenant base URL (origin plus `/t/<slug>`), with decoded
-   `iss` checked against the full path-based tenant issuer URL and `aud` against
-   the target (the CLI token-store gains a per-target dimension).
+   audience must admit it, so a token cannot be reused for another target.
+   **Step 6 is complete.**
 7. **Cron fan-out + global reaper + offboarding.** _(Done.)_ The hourly cron
    tick runs four sequential passes, each isolated so one stalling never holds
    back the next and their failures surface together as an `AggregateError`: the
@@ -2180,11 +2163,10 @@ Verification:
 
 ## Post-V5 Cost Controls
 
-This is a follow-up stage after V5 step 7 has landed and produced real
-operational data and the Post-V5 Operations hardening above. It does not block
-the cron fan-out, global reaper, or offboarding work in V5. The goal is to
-reduce Cloudflare Durable Object duration and request charges once the
-multi-tenant maintenance path is correct and observable.
+These controls use the operational data produced by the V5 maintenance path and
+the Post-V5 Operations instrumentation above. They reduce Cloudflare Durable
+Object duration and request charges without changing cron fan-out, the global
+reaper, or offboarding.
 
 Settled conclusions:
 
@@ -2538,9 +2520,9 @@ V6 carries per-path provenance as builder-signed Sigstore bundles, stored in the
 shared CAS and discovered through a per-path list of descriptors. Build
 provenance is the only predicate type populated initially; SBOMs and other
 predicate types attach through the same path with no structural change.
-Provenance is additive: it never participates in Nix substitution, and the
-cache-content trust path — the tenant-signed narinfo and Nix's own NAR re-hash —
-is unchanged.
+Provenance is additive: it never participates in Nix substitution. The
+cache-content trust path remains the tenant-signed narinfo and Nix's own NAR
+re-hash.
 
 V6 depends on the V5 shared CAS, reaper, D1 substrate, tenant routing, and the
 push contract.
@@ -2580,17 +2562,17 @@ Settled decisions:
 ### Discovery
 
 A bundle is a content-addressed object in the shared CAS at `cas/<sha256>`,
-deduplicated across tenants like a NAR blob — the same path pushed to several
+deduplicated across tenants like a NAR blob. The same path pushed to several
 tenants references one stored bundle. The CAS key is the bundle's own digest, so
 a bundle's location is not derivable from the store path hash. Each store path
 therefore carries a list: the tenant-namespaced, materialised R2 object
 `t/<tenant>/attestations/[<cache>/]<storePathHash>` holding descriptors
 `{ digest, predicateType, size }` that point into the CAS.
 
-`predicateType` is a descriptor field — the in-toto predicate type — so the
-namespace is open and a new predicate type attaches with no change to keys or
-server code. The list admits several descriptors of one `predicateType`, so
-multiple attestations of a type for a path are expressible.
+`predicateType` contains the in-toto predicate type. The namespace is open, so a
+new predicate type attaches with no change to keys or server code. The list
+admits several descriptors of one `predicateType`, so multiple attestations of a
+type for a path are expressible.
 
 Discovery is two reads, mirroring the OCI referrers-then-blob shape: fetch the
 list, then fetch the chosen bundles from the CAS. Both reads sit behind the
@@ -2618,7 +2600,7 @@ already re-materialises and bumps `generation` on every recommit.
 ### Storage, accounting, and GC
 
 Attestation storage reuses the V5 reference-and-reaper pattern. The NAR-specific
-`blob_state` is not widened — its invariant (a row exists iff a verified shared
+`blob_state` is not widened. Its invariant (a row exists iff a verified shared
 NAR object exists, carrying the canonical compressed metadata and the
 decompress-to-key check) stays strict. Bundles get sibling tables:
 
@@ -2659,10 +2641,10 @@ NAR bytes and CAS bytes.
 
 A bundle uploads to a per-tenant staging key; the server computes its SHA-256,
 which is its CAS key, so verification is self-addressing with no decompression
-step. At attach the server performs a filing-correctness guard — the bundle is a
-well-formed DSSE/Sigstore envelope and its in-toto subject digest equals the
-committed `narHash` — binding the attestation to the right path and rejecting
-garbage. This is not signature verification, which stays the consumer's.
+step. At attach, the server requires a well-formed DSSE/Sigstore envelope whose
+in-toto subject digest equals the committed `narHash`. This binds the
+attestation to the correct path and rejects malformed bundles. The consumer
+still performs signature verification.
 
 The tenant DO, the single writer of its tenant's D1 rows, promotes the bundle
 into the shared CAS (idempotent, content-addressed), inserts the edge, charges
@@ -2688,13 +2670,13 @@ demotes a `cas_object` fact whose R2 object is missing.
 
 ### Push and verify contract
 
-The builder produces the bundle in CI, where its OIDC identity lives — for
-example `actions/attest-build-provenance`, or `cosign attest-blob` against the
-instance the builder trusts. `cupboard push` attaches the builder-produced
-bundle to the matching path in the pushed closure by comparing the bundle's
-in-toto SHA-256 subject digest with each path's `narHash`; `--no-attest` omits
-attachment. Attachment does not gate root activation, consistent with the
-presence invariant.
+The builder produces the bundle in CI, where its OIDC identity lives. It can use
+`actions/attest-build-provenance` or `cosign attest-blob` against the instance
+the builder trusts. `cupboard push` attaches the builder-produced bundle to the
+matching path in the pushed closure by comparing the bundle's in-toto SHA-256
+subject digest with each path's `narHash`; `--no-attest` omits attachment.
+Attachment does not gate root activation, consistent with the presence
+invariant.
 
 A consumer verifies at a policy gate (CD or admission), enumerating a closure's
 store path hashes, fetching and verifying each required attestation, and
@@ -2749,8 +2731,8 @@ Each step leaves a working cache.
 
 ### Verification
 
-- Bundles dedupe across tenants — one `cas_object`, charged once per tenant —
-  and the list materialises correct descriptors, including several of one
+- Bundles deduplicate across tenants: one `cas_object`, charged once per tenant.
+  The list materialises correct descriptors, including several of one
   `predicateType`.
 - Discovery is two reads under `readMode`; absent and unauthorised are
   indistinguishable.
@@ -3397,11 +3379,10 @@ request per flush. Cutting the reads is the whole job.
 
 ### The arc
 
-Two phases fix the D1 budget, both server-only: the first is mechanical and
-lands incrementally, the second removes the per-path reads and clears the
-overload on its own. A third phase, a batched-commit protocol, follows them; a
-review found it is not a D1 lever, so it is scoped as a DO-side and wire
-evolution rather than part of the budget, but it is planned.
+Two server-only phases fix the D1 budget. The first batches the remaining
+per-call work. The second removes per-path reads and clears the overload on its
+own. A third phase adds a batched commit protocol to reduce Durable Object work;
+it does not reduce D1 requests and is therefore separate from the D1 budget.
 
 Phase 1: batch what stays per call. Collapse each remaining fan-out of separate
 statements into one `batch()` round-trip: the negotiate hint reads, the commit
@@ -3409,7 +3390,6 @@ and settle probe (canonical state and ownership together), the reaper's per-row
 expiry deletes into chunked `IN ... RETURNING`, the offboarding residue probes,
 the edge-retirement reads, and the stats reads. This cuts the cost _per call_
 and is safe in isolation; it does not change how many times a call is made.
-Largely done.
 
 Phase 2: read the batch's facts once, no wire change. This is the fix. The
 verify pass already claims a _batch_ of pending uploads before it settles them
@@ -3426,10 +3406,8 @@ grace timer up front. The commit path can do the same for its own claimed batch.
 Effect: push-time D1 reads go from O(paths) to a small constant, with no change
 to the client or the contract, and this alone is expected to clear the overload.
 
-What Phase 2 does _not_ do is cache the negotiate's reads across the push. An
-earlier draft proposed the DO reuse the front Worker's hint reads at commit
-time; a review killed it, and the reasons are worth recording so it is not
-re-proposed:
+Phase 2 does not cache the negotiation reads across the push. The Durable Object
+must not reuse the front Worker's hint reads at commit time:
 
 - The charge does not re-fence the blob _content_ facts. `materialiseFence`
   builds the served narInfo from `probe.blob`, and the charge credits
@@ -3452,27 +3430,21 @@ content facts can be revisited; until then it holds.
 
 ### Phase 3: batched commit, a follow-up protocol evolution
 
-An earlier draft made this the third D1 phase, on the premise that "the per-path
-reserves remain" after Phase 2. That premise is wrong: the reserve writes
-DO-local SQLite, not D1, and the reuse charge already batches through the flush,
-so batching the client's commit ops does not reduce D1 request count, and Phase
-2 resolves the overload on its own. The batched commit is therefore not part of
-the D1 budget; it is a separate evolution.
+The reserve writes use Durable Object SQLite, not D1, and the reuse charge
+already batches through the flush. Batching the client's commit operations does
+not reduce the D1 request count, so it is not part of the D1 budget.
 
-It is still planned, as the last phase, because it makes the wire match the
-batched shape the client already has and cuts real DO-side cost: fewer
+The batched protocol instead reduces Durable Object work: fewer
 `webSocketMessage` invocations, fewer DO SQLite transaction boundaries, and
-fewer `afterHotMutation` reconcile schedules per push. Because it is not on the
-D1 critical path it follows Phase 2 rather than blocking it, and its wire design
-had to answer three things the review surfaced. All three are now resolved and
-the phase is landed: the 101 advertises the optional ops in
-`x-cupboard-commit-capabilities` and the client batches only when this
-connection's upgrade offered it; a well-formed unknown op answers a per-message
-`unsupported` frame naming it (garbage still closes the socket); the
-`commit-batch` op carries each entry's `storePathHash`/`narHash`, a gone row
-resolving against the path's narinfo row (`already-present` when it still holds
-these bytes, `absent` otherwise); and entries settle under bounded concurrency,
-each answering its own frame. The original analysis follows:
+fewer `afterHotMutation` reconciliation schedules per push. The 101 response
+advertises the optional operations in `x-cupboard-commit-capabilities` and the
+client batches only when this connection's upgrade offered it; a well-formed
+unknown op answers a per-message `unsupported` frame naming it (garbage still
+closes the socket); the `commit-batch` op carries each entry's
+`storePathHash`/`narHash`, a gone row resolving against the path's narinfo row
+(`already-present` when it still holds these bytes, `absent` otherwise); and
+entries settle under bounded concurrency, each answering its own frame. These
+constraints address three failure modes:
 
 - Capability handshake before the first send. The client sends its first commit
   op on socket open, before it could learn the server's capabilities. Today the
@@ -3548,33 +3520,13 @@ each answering its own frame. The original analysis follows:
 - The batched-commit protocol is out of the D1-budget scope: it is a DO-side and
   wire evolution that follows the read reduction, not a D1 fix.
 
-### Review pass
-
-An adversarially verified multi-agent review of the whole branch confirmed 47
-findings, all fixed on the branch before merge. The headline was a teardown
-presence-delete statement binding 186 parameters against D1's cap of 100,
-invisible locally because the test pool's SQLite allows 32,766; a node-level
-guard now builds every chunked statement at full width and pins its parameter
-count, closing the class. The other clusters: the gone-row and reconnect
-resolutions fence on the committed reference (including the new
-`subscribe-identity` op); the batched settles handle prefetched-fact staleness
-(over-quota re-probe, fault isolation, an up-front reaper pin for claimed
-hashes); the promotion batch retries and falls back per statement; capability
-tokens are parameterised with the wire-freeze rule recorded; D1 overloads answer
-as retryable 503s on HTTP and the commit socket, which the client honours per
-entry; and the client windows its in-flight batch messages with a per-instance
-entry bound as the server backstop.
-
 ## Publish planning, retention grace, and tenant-wide reuse
 
-Status: implemented on `feat/cache-aware-publish`. Retention grace, explicit
-unretained publication with its preview and confirmation procedures, the
-workflow grace mode, named reuse views with the gated lookup, and the reader
-opt-in all landed as specified. The load gate ran at the planner's probe
-concurrency with no retryable refusals, and the real-Nix suite covers grace
-publication and reuse-view substitution end to end. One addition beyond the
-section: the workspace check now typechecks the perf suite, closing a gap the
-load-gate work surfaced.
+Retention grace, explicit unretained publication, the workflow grace mode, named
+reuse views and reader opt-in are implemented. The load test runs at the
+planner's probe concurrency, and the real-Nix suite covers grace publication and
+reuse-view substitution end to end. The workspace check also type-checks the
+performance suite.
 
 ### Context
 
@@ -4730,10 +4682,10 @@ the cohort's own runner:
 1. What would realising a target require? `Store::queryMissing` (worker
    operation 40) partitions the unrealised frontier into `willBuild`,
    `willSubstitute`, and `unknown` against the operator's actual store and
-   substituter configuration, and the same reply carries `downloadSize` and
-   `narSize` for the substitutable set, so the plan knows before dispatch how
-   many bytes substitution will download and how many NAR bytes it will
-   materialise. `narSize` is serialisation length, not on-disk cost: block
+   substituter configuration. The reply also reports `downloadSize` and
+   `narSize` for the substitutable set. The plan can therefore estimate before
+   dispatch how many bytes substitution will download and how many NAR bytes it
+   will materialise. `narSize` is serialisation length, not on-disk cost: block
    rounding on many small files lands above it and store-level hard links below
    it, so the size estimate is approximate and capacity headroom absorbs the
    gap. The operation recursively follows substitutable narinfo references and
@@ -4784,15 +4736,15 @@ the cohort's own runner:
    set, which is the fact the publication decision needs and the fact a
    signature-name hint cannot supply.
 
-   Coverage only settles a target when Nix would actually be permitted to
-   substitute it. The eligibility test is the effective global `substitute`
-   setting, then effective `always-allow-substitutes`, then the derivation's own
-   parsed `allowSubstitutes` option read from its `.drv`. Global substitution
-   off refuses immediately; `always-allow-substitutes` short-circuits the
+   Coverage applies only when Nix would be permitted to substitute the target.
+   The eligibility test is the effective global `substitute` setting, then
+   effective `always-allow-substitutes`, then the derivation's own parsed
+   `allowSubstitutes` option read from its `.drv`. Global substitution off
+   refuses immediately; `always-allow-substitutes` short-circuits the
    per-derivation read; otherwise a derivation that forbids substitution is
    built regardless of what the upstreams hold, and a derivation whose `.drv`
-   cannot be read is refused rather than assumed. Each refusal carries its
-   reason into the partition and the receipt.
+   cannot be read is refused rather than assumed. The partition and receipt
+   record the reason for each refusal.
 
 3. Which selected paths does the cupboard destination already serve, and which
    can it adopt by reference? The destination query remains necessary because
@@ -4851,13 +4803,12 @@ an advisory pre-filter that prunes whole cohorts before their runners start.
 Complete-closure mode never prunes a cohort from a top-level destination result,
 because it must inspect and repair the destination's transitive reference
 closure. In default mode a cohort can be pruned when every target it declares is
-covered: either the target's paths are all in its root's last reconciled list,
-which the plan job re-settles with exactly that list so a pruned job still
-refreshes retention and a served target never ages out by being pruned, or the
-target was recorded as left upstream by the previous run's receipt. A root whose
-reconciled list is empty settles nothing and the check proceeds on the receipt's
-coverage alone, which is what keeps a root all of whose targets are deliberately
-upstream from freezing.
+covered. A target is covered when its paths are all in the last reconciled list
+for its root, or when the previous run's receipt records the target as left
+upstream. Before pruning the cohort, the plan job writes the same reconciled
+list again. This refreshes retention for paths that the destination still
+serves. An empty reconciled list requires no write, so a root whose targets are
+all deliberately upstream can be covered by the receipt alone.
 
 The pre-filter prunes jobs, never composes build sets: a spawned job's own
 partition stays authoritative, so a stale central answer costs a no-op job and
@@ -5140,11 +5091,11 @@ every consumer's closure, a closure-size cost at odds with a tool whose subject
 is closure transfer, and leave its timeout and error behaviour outside
 cupboard's tests. The helper ships with cupboard itself: the Nix package
 compiles it with the stdenv toolchain and installs it under `libexec/cupboard/`
-beside `bin/cupboard`, and each release tarball carries it as a per-platform
-prebuilt binary beside the `cupboard` executable. The supervisor resolves the
-helper from its own installation, so resolution evaluates nothing, runs no `nix`
-subprocess, and depends on no substituter; preflight refuses, before the
-expensive build starts, only an installation that is missing its helper.
+beside `bin/cupboard`. Each release tarball includes the corresponding prebuilt
+helper beside the `cupboard` executable. The supervisor resolves the helper from
+its own installation, so resolution evaluates nothing, runs no `nix` subprocess,
+and depends on no substituter; preflight refuses, before the expensive build
+starts, only an installation that is missing its helper.
 
 One connection carries one message, so concurrent firings cannot interleave and
 framing stays a newline. After sending the message, the helper waits for a
@@ -5189,11 +5140,11 @@ last assignment wins and the variable outranks every configuration file, so the
 appended setting is effective in both cases while the operator's files continue
 to apply. `NIX_USER_CONF_FILES` is not used for this: the variable replaces the
 default user-config lookup rather than extending it, so routing the hook through
-it silently drops the operator's own user configuration. The environment is
-inherited, so every Nix invocation the child command runs, evaluation helpers,
-import-from-derivation, a script's own `nix build`, carries the hook and fires
-events for its builds too; those paths are ordinary publication candidates, and
-the selection rules apply to them unchanged.
+it silently drops the operator's own user configuration. The child process
+inherits the environment. The hook therefore applies to every Nix invocation
+started below it, including evaluation helpers, import-from-derivation, and
+`nix build` calls inside scripts. Builds from those invocations produce ordinary
+publication candidates, and the same selection rules apply to them.
 
 Nix supports exactly one post-build hook, so preflight reads the effective
 `post-build-hook` setting first and, when the operator already has one, reports
@@ -5728,10 +5679,10 @@ remaining work.
    path the tenant already holds reaches the destination cache without local
    realisation or NAR upload. The pieces exist already: negotiate returns a
    commit decision with no upload when the tenant's content store holds the
-   blob, the served narinfo carries every field the negotiate and commit shapes
-   need (`NarHash`, `NarSize`, `References`, `Deriver`, `CA`, `FileHash`,
-   `FileSize`, `Compression`), and the server signs the destination narinfo with
-   the tenant key, so no signature is copied.
+   blob. The served narinfo provides the metadata required by negotiation and
+   commit: `NarHash`, `NarSize`, `References`, `Deriver`, `CA`, `FileHash`,
+   `FileSize`, and `Compression`. The server signs the destination narinfo with
+   the tenant key, so it does not copy the source signature.
 5. Migrate the reusable workflow to cohort jobs, per-target by default with
    multi-target cohorts opt-in, each computing the availability partition and
    capacity check against its own store, running `nix build` over the resulting

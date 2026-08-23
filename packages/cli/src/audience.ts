@@ -4,21 +4,16 @@ import { z } from 'zod';
 import { InvalidAudienceError } from './errors.ts';
 
 /**
- * An OIDC audience: the exact string that a token's `aud` claim and a stored
- * trust rule are compared against. An audience is not always a URL (the owner
- * rule uses an access client id), so a string is parsed verbatim and the
- * operator's bytes are preserved. A `URL` is rendered through its canonical
- * form, so an audience defaulted from a tenant URL is always spelled the same
- * way. Every audience the CLI builds or exchanges passes through this schema.
+ * An OIDC audience used by the CLI's trust and grant commands. String inputs
+ * remain unchanged because an audience is not necessarily a URL. URL inputs
+ * use their canonical form so defaults derived from a tenant URL have stable
+ * spelling.
  */
 export const audienceSchema = z
 	.union([z.string().min(1), z.instanceof(URL).transform(canonicalHref)])
 	.brand('Audience');
 export type Audience = z.infer<typeof audienceSchema>;
 
-/**
-The `--audience` option parser: a typed refusal instead of a raw ZodError.
-*/
 export function parseAudience(value: string): Audience {
 	const parsed = audienceSchema.safeParse(value);
 

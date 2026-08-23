@@ -49,10 +49,8 @@ export type CommandRunner = (
 ) => void;
 
 /**
- * Compiles the post-build hook helper beside the CLI binary, so the tarball
- * unpacks it exactly where the CLI's helper resolution looks. The four
- * release platforms each compile natively; the Nix sandbox sets `CC` to the
- * stdenv compiler, and the release runners fall back to the system `cc`.
+ * The CLI resolves the post-build hook helper beside its own binary. Compile
+ * the helper there with the Nix-provided compiler or the host `cc`.
  */
 export function compileHookHelper(options: {
 	readonly binaryDirectory: string;
@@ -67,10 +65,6 @@ export function compileHookHelper(options: {
 	return outputPath;
 }
 
-/**
- * The `tar` arguments for the release asset: the CLI binary and its hook
- * helper side by side at the archive root.
- */
 export function releaseArchiveArguments(
 	assetPath: string,
 	binaryDirectory: string
@@ -138,8 +132,6 @@ async function main(): Promise<void> {
 	await mkdir(workDirectory, { recursive: true });
 	await mkdir(binaryDirectory, { recursive: true });
 
-	// Bundle both Workers and write the payload the deployed binary serves from
-	// embedded mode. Generated once and referenced as a SEA asset by both formats.
 	const payload = await buildEmbeddedPayload(
 		process.cwd(),
 		createEsbuildBundler()
@@ -345,16 +337,10 @@ function parseOptions(arguments_: readonly string[]): Options {
 	};
 }
 
-/**
-Preserve the caller's build identity after rejecting surrounding whitespace.
-*/
 export function normaliseBuildVersion(version: string): string {
 	return version.trim();
 }
 
-/**
-Name a binary by platform within the release that scopes it to one version.
-*/
 export function releaseAssetNameFor(
 	runtimePlatform: string,
 	runtimeArchitecture: string

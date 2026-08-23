@@ -66,8 +66,6 @@ const internalError = (): Response =>
 		}
 	);
 
-// A raw gateway failure from the edge, not a Worker oRPC envelope: transient, so
-// it is retried, and its body is surfaced verbatim.
 const badGateway = (): Response =>
 	new Response('Bad gateway\n', {
 		status: StatusCodes.BAD_GATEWAY,
@@ -75,7 +73,7 @@ const badGateway = (): Response =>
 	});
 
 describe('tenantRpc', () => {
-	it('keeps the tenant path prefix and sends the bound credential', async () => {
+	it('requests a tenant procedure under the existing path prefix with the configured credential', async () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })
 		]);
@@ -126,7 +124,7 @@ describe('tenantRpc', () => {
 		expect(captured).toStrictEqual([]);
 	});
 
-	it('refreshes a provider credential once on a 401 and retries', async () => {
+	it('refreshes a provider credential once after a 401', async () => {
 		const provider: TokenProvider = {
 			get: () => Promise.resolve('stale-token'),
 			refresh: () => Promise.resolve('fresh-token')
@@ -208,12 +206,10 @@ describe('tenantRpc', () => {
 		}
 	});
 
-	it('surfaces the ray id once the retry budget is spent', async () => {
+	it('includes the response body and ray id after the retry budget expires', async () => {
 		vi.useFakeTimers();
 
 		try {
-			// One attempt plus the four retries: every one fails, so the error
-			// surfaces after the final attempt.
 			const { fetcher, captured } = capturingFetcher(
 				Array.from({ length: 5 }, () => badGateway)
 			);
@@ -249,7 +245,7 @@ describe('tenantRpc', () => {
 		}
 	});
 
-	it('does not retry a 500, surfacing its decoded message at once', async () => {
+	it('decodes an oRPC body from an unmapped 500 without retrying', async () => {
 		const { fetcher, captured } = capturingFetcher([internalError]);
 		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 			credential: 'admin-token',
@@ -278,7 +274,7 @@ describe('tenantRpc', () => {
 		}
 	});
 
-	it('leaves a mapped 5xx for the contract to decode', async () => {
+	it('leaves INSUFFICIENT_STORAGE for oRPC to decode', async () => {
 		const { fetcher } = capturingFetcher([
 			() =>
 				Response.json(

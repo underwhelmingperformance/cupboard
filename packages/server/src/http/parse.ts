@@ -8,9 +8,9 @@ import {
 } from '../errors.ts';
 
 /**
- * Validates a JSON request body against a schema, returning the parsed
- * (branded) value. A body that is not JSON, or that the schema rejects, becomes
- * a 400 carrying the schema's own diagnostics.
+ * Parses a JSON request body and validates it against `schema`. Invalid JSON
+ * and schema mismatches become HTTP 400 errors; schema failures retain Zod's
+ * diagnostics.
  */
 export async function parseRequestBody<S extends z.ZodType>(
 	schema: S,
@@ -32,19 +32,16 @@ export async function parseRequestBody<S extends z.ZodType>(
 }
 
 /**
- * Validates an `application/x-www-form-urlencoded` request body against a
- * schema, returning the parsed (branded) value. Repeated keys collapse to their
- * last value. A body the schema rejects becomes an OAuth `invalid_request`
- * carrying the schema's diagnostics, so the `/token` endpoint reports it in the
- * RFC 6749 §5.2 envelope.
+ * Parses a request body as `application/x-www-form-urlencoded` data and
+ * validates it against `schema`. Schema mismatches become OAuth
+ * `invalid_request` errors in the RFC 6749 section 5.2 envelope.
  */
 export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
 	request: Request
 ): Promise<z.output<S>> {
-	// Decode the raw bytes directly: the runtime warns when
-	// `.text()` is called on a body whose type is not `text/*`, and a urlencoded
-	// body parses identically from its UTF-8 bytes.
+	// Read the bytes directly because the runtime warns when `Request.text()` reads
+	// an `application/x-www-form-urlencoded` body.
 	const decoder = new TextDecoder();
 	const body = decoder.decode(await request.arrayBuffer());
 	const parameters = new URLSearchParams(body);
@@ -57,9 +54,6 @@ export async function parseFormBody<S extends z.ZodType>(
 	return result.data;
 }
 
-/**
-Validates a value taken from the request path or query string.
-*/
 export function parseRequestValue<S extends z.ZodType>(
 	schema: S,
 	value: unknown
@@ -74,9 +68,8 @@ export function parseRequestValue<S extends z.ZodType>(
 }
 
 /**
- * Validates server-stored JSON against a schema. Stored state the server wrote
- * itself should always parse, so a failure is an internal fault: the caller
- * supplies the typed 500 to raise, with whatever context it holds.
+ * Parses and validates JSON owned by the server. Syntax and schema failures are
+ * internal faults, so `onInvalid` supplies the contextual typed 500 error.
  */
 export function parseStored<S extends z.ZodType>(
 	schema: S,
@@ -93,9 +86,6 @@ export function parseStored<S extends z.ZodType>(
 	return result.data;
 }
 
-/**
-Parses stored JSON text, mapping a syntax error to a typed fault.
-*/
 export function parseStoredJson(
 	source: string,
 	onInvalid: (cause: Error) => ServerHttpError

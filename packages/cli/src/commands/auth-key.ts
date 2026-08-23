@@ -23,11 +23,6 @@ interface RetireOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the auth-key commands use, in the
- * contract's input and output shapes. The real `tenantRpc(...).keys.auth`
- * satisfies this interface by construction.
- */
 export interface AuthKeyClient {
 	list(): Promise<ParsedAuthKeyListResponse>;
 	rotate(): Promise<ParsedAuthKeyRotateResponse>;

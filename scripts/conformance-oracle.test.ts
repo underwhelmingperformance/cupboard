@@ -102,9 +102,6 @@ function flakeLock(revision: string): string {
 	});
 }
 
-/**
-A workspace initialised with the record. It captures each write.
-*/
 function fakeWorkspace(record: OracleRecord | undefined): OracleWorkspace & {
 	writes: string[];
 	tables: { system: OracleSystem; text: string }[];
@@ -199,7 +196,7 @@ describe('parseOracleRecord', () => {
 });
 
 describe('parseFlakeLockRevision', () => {
-	it('reads the locked revision of the nixpkgs input', () => {
+	it('parses the locked revision of the nixpkgs input', () => {
 		expect(parseFlakeLockRevision(flakeLock(pinnedRevision))).toBe(
 			pinnedRevision
 		);
@@ -257,8 +254,6 @@ describe('checkConformanceOracle', () => {
 		}).not.toThrow();
 	});
 
-	// The generated table controls validation of Nix settings. Its recorded
-	// version must therefore match the oracle record.
 	it('reports a table generated from another Nix version', async () => {
 		const workspace = fakeWorkspace({
 			versions: pinnedVersions
@@ -287,7 +282,7 @@ describe('checkConformanceOracle', () => {
 });
 
 describe('parseProbedOracle', () => {
-	it('reads a typed table from a target-system probe', () => {
+	it('parses a typed table from a target-system probe', () => {
 		const document = JSON.stringify({
 			system: 'x86_64-linux',
 			version: pinnedVersion,
@@ -346,8 +341,7 @@ describe('parseProbedOracle', () => {
 });
 
 describe('parseSettingTypes', () => {
-	// Nix writes null in `experimentalFeature` when no feature gates a setting.
-	it('reads the value type reported for each setting', () => {
+	it('parses the value type reported for each setting', () => {
 		const document = [
 			'{',
 			'  "keep-outputs": { "value": false, "experimentalFeature": null },',
@@ -367,7 +361,7 @@ describe('parseSettingTypes', () => {
 		});
 	});
 
-	it('reads the value type of a setting behind an experimental feature', () => {
+	it('parses a setting behind an experimental feature', () => {
 		const document = [
 			'{',
 			'  "impure-env": { "value": {}, "experimentalFeature": "configurable-impure-env" },',
@@ -471,8 +465,7 @@ describe('integerWidthOf', () => {
 		expect(integerWidthOf('a-setting', accepted)).toBe(expected);
 	});
 
-	// Reject an unrecognised probe result instead of recording incorrect bounds.
-	it('refuses a combination that matches no supported width', () => {
+	it('rejects a combination that matches no supported width', () => {
 		expect(() =>
 			integerWidthOf('a-setting', {
 				negative: true,

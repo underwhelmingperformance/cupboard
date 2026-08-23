@@ -57,7 +57,7 @@ const rules = [ownerRule, repoRule, exactRepoRule];
 describe('matchOidcTrust', () => {
 	it.each([
 		{
-			name: 'the owner rule for a matching id_token',
+			name: 'selects the owner rule for a matching id_token',
 			claims: {
 				iss: 'https://accounts.google.com',
 				aud: 'client-id.apps.googleusercontent.com',
@@ -66,7 +66,7 @@ describe('matchOidcTrust', () => {
 			id: 'owner'
 		},
 		{
-			name: 'the most specific repo rule when both claim sets match',
+			name: 'selects the most specific repo rule when both claim sets match',
 			claims: {
 				iss: github,
 				aud: audience,
@@ -76,7 +76,7 @@ describe('matchOidcTrust', () => {
 			id: 'exact-repo'
 		},
 		{
-			name: 'the owner-prefix rule when only the owner claim matches',
+			name: 'selects the owner-prefix rule when only the owner claim matches',
 			claims: {
 				iss: github,
 				aud: audience,
@@ -86,12 +86,12 @@ describe('matchOidcTrust', () => {
 			id: 'repo'
 		},
 		{
-			name: 'an audience supplied as an array',
+			name: 'accepts an audience supplied as an array',
 			claims: { iss: github, aud: [audience], repository_owner_id: '5678' },
 			id: 'repo'
 		},
 		{
-			name: 'nothing when the issuer differs',
+			name: 'returns undefined when the issuer differs',
 			claims: {
 				iss: 'https://evil',
 				aud: audience,
@@ -100,7 +100,7 @@ describe('matchOidcTrust', () => {
 			id: undefined
 		},
 		{
-			name: 'nothing when the audience differs',
+			name: 'returns undefined when the audience differs',
 			claims: {
 				iss: github,
 				aud: 'https://other',
@@ -109,16 +109,16 @@ describe('matchOidcTrust', () => {
 			id: undefined
 		},
 		{
-			name: 'nothing when a required claim is absent',
+			name: 'returns undefined when a required claim is absent',
 			claims: { iss: github, aud: audience },
 			id: undefined
 		},
 		{
-			name: 'nothing when a required claim has the wrong value',
+			name: 'returns undefined when a required claim has the wrong value',
 			claims: { iss: github, aud: audience, repository_owner_id: '0000' },
 			id: undefined
 		}
-	])('matches $name', ({ claims, id }) => {
+	])('$name', ({ claims, id }) => {
 		expect(matchOidcTrust(rules, claims)?.id).toBe(id);
 	});
 
@@ -201,7 +201,7 @@ describe('matchOidcTrust', () => {
 		}).toStrictEqual({ forward: 'rule-a', reversed: 'rule-a' });
 	});
 
-	it('prefers an interactive rule over a same-specificity CI rule on a tie', () => {
+	it('prefers a wildcard rule over a claim-bound rule with the same specificity', () => {
 		const interactiveRule: OidcTrustRule = {
 			id: trustRuleIdSchema.parse('zzz-owner'),
 			issuer: github,
@@ -218,15 +218,13 @@ describe('matchOidcTrust', () => {
 		};
 		const claims = { iss: github, aud: audience, sub: 'shared', actor: 'ci' };
 
-		// `aaa-ci` sorts before `zzz-owner` by id, so only the interactive
-		// tie-break keeps the owner token on the wildcard rule.
 		expect({
 			forward: matchOidcTrust([interactiveRule, ciRule], claims)?.id,
 			reversed: matchOidcTrust([ciRule, interactiveRule], claims)?.id
 		}).toStrictEqual({ forward: 'zzz-owner', reversed: 'zzz-owner' });
 	});
 
-	it('prefers the interactive rule even over a more specific CI rule', () => {
+	it('prefers a wildcard rule over a more specific claim-bound rule', () => {
 		const interactiveRule: OidcTrustRule = {
 			id: trustRuleIdSchema.parse('owner'),
 			issuer: github,
@@ -248,8 +246,6 @@ describe('matchOidcTrust', () => {
 			actor: 'ci'
 		};
 
-		// The CI rule pins two claims to the owner rule's one, so without the
-		// interactive preference it would win on specificity and downgrade the owner.
 		expect(matchOidcTrust([interactiveRule, specificCiRule], claims)?.id).toBe(
 			'owner'
 		);
@@ -280,12 +276,12 @@ describe('firstClaimMismatch', () => {
 
 	it.each([
 		{
-			name: 'nothing when every configured claim matches',
+			name: 'returns undefined when every configured claim matches',
 			claims: matching,
 			expected: undefined
 		},
 		{
-			name: 'a wrong exact value with the presented value',
+			name: 'returns the wrong exact value and the presented value',
 			claims: { ...matching, ref: 'refs/heads/other' },
 			expected: {
 				claim: 'ref',
@@ -294,7 +290,7 @@ describe('firstClaimMismatch', () => {
 			}
 		},
 		{
-			name: 'a failed pattern in its pattern form',
+			name: 'returns a failed pattern in its pattern form',
 			claims: {
 				...matching,
 				job_workflow_ref:
@@ -307,17 +303,17 @@ describe('firstClaimMismatch', () => {
 			}
 		},
 		{
-			name: 'an absent claim without a presented value',
+			name: 'omits the presented value for an absent claim',
 			claims: { ...matching, ref: undefined },
 			expected: { claim: 'ref', expected: 'refs/heads/main' }
 		},
 		{
-			name: 'a non-string claim without a presented value',
+			name: 'omits the presented value for a non-string claim',
 			claims: { ...matching, repository_id: 1234 },
 			expected: { claim: 'repository_id', expected: '1234' }
 		},
 		{
-			name: 'the first mismatch in claim-name order when several fail',
+			name: 'returns the first mismatch in claim-name order when several fail',
 			claims: { ...matching, ref: 'refs/heads/other', repository_id: '9999' },
 			expected: {
 				claim: 'ref',
@@ -325,7 +321,7 @@ describe('firstClaimMismatch', () => {
 				presented: 'refs/heads/other'
 			}
 		}
-	])('reports $name', ({ claims, expected }) => {
+	])('$name', ({ claims, expected }) => {
 		expect(firstClaimMismatch(rule, claims)).toStrictEqual(expected);
 	});
 });

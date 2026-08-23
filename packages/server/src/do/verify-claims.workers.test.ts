@@ -26,8 +26,6 @@ import {
 import { UploadStateService } from './upload-state-service.ts';
 import { type PendingVerification } from './verification-service.ts';
 
-// Claims come back in upload-id order (the scan's cursor), so the expected
-// prefix is the deferred uploads sorted by id.
 function claimOrder(
 	uploads: readonly {
 		uploadId: UploadId;
@@ -46,9 +44,6 @@ function claimOrder(
 		}));
 }
 
-// A claim is a bounded chunk of the pending backlog: a row cap and a
-// cumulative byte cap over the fresh rows, with `truncated` telling the
-// consumer to chain another pass for what was left behind.
 describe('claiming a verification batch', () => {
 	beforeEach(resetTestServer);
 
@@ -116,9 +111,6 @@ describe('claiming a verification batch', () => {
 		];
 		const ordered = claimOrder(uploads);
 
-		// The first claim takes the whole backlog; a duplicate pass (the alarm
-		// backstop's re-request, an overlapping cron) inside the lease window
-		// must claim nothing.
 		const first = await currentServer().claimVerificationBatch(
 			10,
 			Number.MAX_SAFE_INTEGER
@@ -189,9 +181,6 @@ describe('claiming a verification batch', () => {
 			.slice(0, 2)
 			.reduce((total, claim) => total + claim.narSize, 0);
 
-		// The byte cap cuts the third row (and the sentinel) out of the first
-		// claim; they were not returned, so they stay unleased and the very next
-		// claim picks them up.
 		const first = await currentServer().claimVerificationBatch(10, capForTwo);
 		const rest = await currentServer().claimVerificationBatch(
 			10,
@@ -208,22 +197,18 @@ describe('claiming a verification batch', () => {
 		const token = await initialise();
 		const upload = await deferFreshUpload(token, 'cron-lease', 'a'.repeat(32));
 
-		// The consumer holds the claim; the hourly cron crossing its pass must
-		// leave the row alone.
 		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 		await currentServer().runVerification();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
 	});
 
-	it('frees a re-driven row for the pass its client requests', async () => {
+	it("makes a re-driven row immediately claimable for the client's verification pass", async () => {
 		const token = await initialise();
 		const upload = await deferFreshUpload(token, 'redrive', 'a'.repeat(32));
 
 		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 
-		// A client re-driving its commit marks the row afresh; the dead pass's
-		// lease must not make the re-drive's own verify pass wait it out.
 		await runInDurableObject(currentServer(), (instance) => {
 			new UploadStateService(instance.context).markUploadPending(
 				upload.uploadId
@@ -255,8 +240,6 @@ describe('claiming a verification batch', () => {
 
 		await commitPath(token, first, nar);
 
-		// Two more paths reuse the committed blob; deferring them leaves pending
-		// rows pointing at the shared canonical key.
 		const reuses = [];
 
 		for (const storePathHash of ['b'.repeat(32), 'c'.repeat(32)]) {
@@ -277,7 +260,6 @@ describe('claiming a verification batch', () => {
 			reuses.push({ uploadId: decision.uploadId });
 		}
 
-		// A byte cap of 1 admits every reuse row: they decode nothing.
 		const batch = await currentServer().claimVerificationBatch(10, 1);
 
 		expect(batch).toStrictEqual({

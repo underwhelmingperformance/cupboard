@@ -6,25 +6,17 @@ interface CommitSocketEnv {
 	readonly CUPBOARD_COMMIT_SOCKET_CEILING: string;
 }
 
-// The commit sockets one tenant may hold at once, hibernating ones included.
-// Credit bounds the work a session admits, so this is an anti-abuse ceiling and
-// not a capacity bound: a publication run opens one socket, which puts a
-// legitimate tenant orders of magnitude below this, and 256 sockets cost on the
-// order of a megabyte of socket state and attachments.
+// This anti-abuse ceiling includes hibernating sockets. Entry credit separately
+// limits parsed commit work, so this value is not an execution-capacity bound.
 export const defaultCommitSocketCeiling = 256;
 
-// A session that did not negotiate credit sends as fast as it likes, so the
-// only bound on the entries it can have parked in memory is the number of such
-// sockets the tenant holds. That is what the old per-tenant session cap bounded,
-// and it keeps bounding it until every client speaks credit.
+// Legacy sessions do not negotiate credit and cannot be paced. Keep a separate
+// cap on them until every supported client uses credit.
 export const maxUncreditedCommitSessions = 8;
 
 /**
- * The configured ceiling on a tenant's commit sockets. An empty (or absent)
- * variable means the built-in ceiling; any other value must be a positive
- * integer, otherwise the deployment is misconfigured. Deployments leave it
- * unset; the tests set it low so a suite can reach the ceiling with a handful
- * of sockets.
+ * Parses `CUPBOARD_COMMIT_SOCKET_CEILING`. An empty setting selects the built-in
+ * tenant ceiling; a non-empty setting must be a positive integer.
  */
 export function commitSocketCeiling(env: CommitSocketEnv): number {
 	const raw = env.CUPBOARD_COMMIT_SOCKET_CEILING;

@@ -33,7 +33,7 @@ async function fetchCountFor(status: number): Promise<number> {
 			repo: 'r'
 		});
 	} catch {
-		// The stub always fails; the call count is what matters.
+		// Ignore the expected response error; only the number of attempts matters.
 	}
 
 	return counter.calls();

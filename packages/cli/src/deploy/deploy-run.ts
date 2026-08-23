@@ -59,9 +59,6 @@ export interface DeployOptions {
 	readonly domain: string | undefined;
 	readonly dryRun: boolean;
 	readonly secrets: DeploySecrets;
-	/**
-	What `/_version` answered before this deploy, when reachable.
-	*/
 	readonly liveBuild: string | undefined;
 }
 
@@ -258,8 +255,6 @@ async function configureTriggers(
 	});
 }
 
-// The registrable zone for a hostname is the apex (last two labels), which is
-// what `zones.list` matches on.
 function zoneOf(hostname: string): string {
 	return hostname.split('.').slice(-2).join('.');
 }
@@ -324,8 +319,9 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * Provision, migrate, upload, and wire up a cupboard deployment. With
- * `--dry-run` it renders the plan and stops before any mutation.
+ * Provisions, migrates, uploads, and configures a Cupboard deployment.
+ * `--dry-run` renders the plan without mutating Cloudflare. A live deployment
+ * uploads the tenant Durable Object before the control Worker that binds it.
  */
 export async function runDeploy(
 	dependencies: DeployDependencies

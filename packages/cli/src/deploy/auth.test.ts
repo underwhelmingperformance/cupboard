@@ -34,9 +34,6 @@ interface ChainCalls {
 	readonly logins: number;
 }
 
-/**
-What the fake chain's world contains; anything not given is absent.
-*/
 interface ChainWorld {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly storedGrant?: CloudflareGrant;
@@ -357,9 +354,6 @@ describe('resolveCredential', () => {
 	});
 });
 
-/**
-An unsigned id_token whose payload carries the given expiry (seconds).
-*/
 function tokenExpiringAt(expSeconds: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
 		'base64url'
@@ -425,7 +419,7 @@ describe('freshIdToken', () => {
 		}).toStrictEqual({ token: stale, written: [] });
 	});
 
-	it('answers nothing without a cached grant', async () => {
+	it('returns undefined without a cached grant', async () => {
 		const { chain } = chainWith({});
 
 		expect(await freshIdToken(chain)).toBeUndefined();

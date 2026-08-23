@@ -180,7 +180,7 @@ describe('cupboard flake publish release coordinates', () => {
 		});
 	});
 
-	it('refuses unsupported GitHub Enterprise Server execution before using workflow identity', async () => {
+	it('rejects GitHub Enterprise Server before using workflow identity', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const cloudGuard = contents.indexOf(
 			'      - name: Require GitHub Cloud workflow identity'
@@ -313,7 +313,7 @@ describe('cupboard flake publish release coordinates', () => {
 		});
 	});
 
-	it('threads direct-store SSH credentials independently of classic builders', async () => {
+	it('passes direct-store SSH credentials to every prepare step', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
@@ -370,7 +370,7 @@ describe('cupboard flake publish release coordinates', () => {
 		});
 	});
 
-	it('threads private-input host pins independently into every prepare step', async () => {
+	it('passes private-input host pins to every prepare step', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
@@ -391,7 +391,7 @@ describe('cupboard flake publish release coordinates', () => {
 		});
 	});
 
-	it('refuses simultaneous direct-store and classic-builder modes', async () => {
+	it('rejects simultaneous direct-store and classic-builder modes', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect(contents).toContain(
@@ -399,7 +399,7 @@ describe('cupboard flake publish release coordinates', () => {
 		);
 	});
 
-	it('refuses ambient store identity without a direct store', async () => {
+	it('rejects ambient store identity without a direct store', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
@@ -474,7 +474,7 @@ describe('cupboard flake publish release coordinates', () => {
 });
 
 describe('cupboard publish release coordinates', () => {
-	it('refuses unsupported GitHub Enterprise Server execution before using workflow identity', async () => {
+	it('rejects GitHub Enterprise Server before using workflow identity', async () => {
 		const contents = await readFile(publishWorkflow, 'utf8');
 		const cloudGuard = contents.indexOf(
 			'      - name: Require GitHub Cloud workflow identity'
@@ -499,7 +499,7 @@ describe('cupboard publish release coordinates', () => {
 		});
 	});
 
-	it('documents tag-pinned resolution without duplicate coordinates', async () => {
+	it('shows tag-pinned resolution without duplicate coordinates', async () => {
 		const documentation = await readFile(githubActionsDocumentation, 'utf8');
 		const reusableWorkflowSection = documentation.slice(
 			documentation.indexOf('## The reusable workflow\n'),
@@ -519,7 +519,7 @@ describe('cupboard publish release coordinates', () => {
 		});
 	});
 
-	it('documents literal-first legacy version fallback and the Cloud boundary', async () => {
+	it('states the literal-first legacy fallback and GitHub Cloud requirement', async () => {
 		const documentation = await readFile(githubActionsDocumentation, 'utf8');
 		const prose = documentation.replaceAll(/\s+/gu, ' ');
 
@@ -632,7 +632,7 @@ describe('cupboard publish release coordinates', () => {
 });
 
 describe('cupboard release asset compatibility', () => {
-	it('documents stable new names and legacy installer lookup', async () => {
+	it('lists stable asset names and the legacy installer fallback', async () => {
 		const documentation = await readFile(releasesDocumentation, 'utf8');
 		const prose = documentation.replaceAll(/\s+/gu, ' ');
 
@@ -840,7 +840,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('carries no artifact upload or download steps', async () => {
+	it('omits artifact upload and download steps', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
@@ -852,7 +852,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('threads the packing opt-in and its capacity through to the plan action', async () => {
+	it('passes packing settings to the plan action', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
@@ -876,7 +876,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('prices the packing measurement against the store the cohorts build against', async () => {
+	it('passes the cohort store to the packing plan', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const [planStep] = actionSteps(
@@ -896,7 +896,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('threads the remote store into the cohort build', async () => {
+	it('passes the remote store to build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const [buildCohortStep] = actionSteps(
@@ -945,7 +945,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('threads publication and the shared run root into build-cohort', async () => {
+	it('passes publication and run-root settings to build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const [buildCohortStep] = actionSteps(
 			contents.split('\n'),
@@ -1203,7 +1203,7 @@ describe('cupboard build provenance', () => {
 		}).toStrictEqual({ plan: true, build: true });
 	});
 
-	it('documents release updates without routine tenant administration', async () => {
+	it('states when release updates require tenant administration', async () => {
 		const contents = await readFile(githubActionsDocumentation, 'utf8');
 		const prose = contents.replaceAll(/\s+/gu, ' ');
 
@@ -1224,16 +1224,13 @@ describe('cupboard build provenance', () => {
 		});
 	});
 
-	it('documents verification against committed destination narinfos', async () => {
+	it('states that provenance uses committed destination narinfos', async () => {
 		const contents = await readFile(githubActionsDocumentation, 'utf8');
+		const prose = contents.replaceAll(/\s+/gu, ' ');
 
 		expect({
-			committedDestination: contents.includes(
-				"destination's committed narinfos"
-			),
-			staleLiveStoreClaim: contents.includes(
-				'against the live store, then signs'
-			)
+			committedDestination: prose.includes("destination's committed narinfos"),
+			staleLiveStoreClaim: prose.includes('against the live store, then signs')
 		}).toStrictEqual({
 			committedDestination: true,
 			staleLiveStoreClaim: false
@@ -1335,8 +1332,6 @@ describe('cupboard build provenance', () => {
 			receipt: trimmed.includes(
 				'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
 			),
-			// The workflow passes both bundles of the run in the single
-			// repeatable `bundle` input.
 			bundleLines: trimmed.filter(
 				(line) =>
 					line.startsWith('bundle:') ||
@@ -1406,7 +1401,7 @@ describe('cupboard flake publish event preset', () => {
 		});
 	});
 
-	it('refuses non-pull-request runs outside the trusted branch', async () => {
+	it('rejects non-pull-request runs outside the trusted branch', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({

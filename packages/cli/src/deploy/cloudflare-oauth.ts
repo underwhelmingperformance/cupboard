@@ -6,9 +6,6 @@ import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
-/**
-Base of every failure mode of the Cloudflare browser login.
-*/
 export abstract class CloudflareLoginError extends CliError {}
 
 export class CloudflareTokenRequestError extends CloudflareLoginError {
@@ -18,9 +15,6 @@ export class CloudflareTokenRequestError extends CloudflareLoginError {
 	}
 }
 
-/**
-Base of the malformed-token-response failures.
-*/
 export abstract class CloudflareTokenResponseError extends CloudflareLoginError {}
 
 export class CloudflareTokenResponseNotJsonError extends CloudflareTokenResponseError {
@@ -32,14 +26,14 @@ export class CloudflareTokenResponseNotJsonError extends CloudflareTokenResponse
 
 export class CloudflareTokenResponseMalformedError extends CloudflareTokenResponseError {
 	constructor(options: { readonly cause: unknown }) {
-		super('Cloudflare token response carried no access token', options);
+		super('Cloudflare token response did not include an access token', options);
 		this.name = 'CloudflareTokenResponseMalformedError';
 	}
 }
 
 /**
- * cupboard's public OAuth client, registered on Cloudflare. A public client
- * carries no secret; the authorization code flow is bound by PKCE instead.
+ * Cupboard's public OAuth client, registered on Cloudflare. A public client
+ * has no secret; PKCE binds the authorization code flow instead.
  */
 export const cloudflareOauthClientId = '6c915db1f16ece47255821ee6ca1d538';
 
@@ -52,9 +46,6 @@ const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
 const callbackPorts: readonly number[] = [8377, 8378, 8379];
 const callbackPath = '/oauth/callback';
 
-/**
-The loopback redirect exactly as registered on cupboard's OAuth client.
-*/
 export const cloudflareLoopback = {
 	ports: callbackPorts,
 	host: 'localhost',
@@ -64,9 +55,9 @@ export const cloudflareLoopback = {
 /**
  * The scopes every login requests: what the deploy pipeline needs, as
  * registered on the OAuth client (scope ids correspond to Cloudflare API token
- * permission names), plus `offline_access` so the grant carries a refresh
+ * permission names), plus `offline_access` so the grant includes a refresh
  * token and repeat deploys do not reopen the browser, and `openid` so the
- * grant carries the deployer's identity in an id_token.
+ * grant includes the deployer's identity in an ID token.
  */
 export const deployScopes: readonly string[] = [
 	'account-settings.write',
@@ -83,9 +74,6 @@ export const deployScopes: readonly string[] = [
 
 const defaultAccessTokenLifetimeSeconds = 3600;
 
-/**
-An issued Cloudflare grant: a Bearer token, and the means to renew it.
-*/
 export interface CloudflareGrant {
 	readonly accessToken: string;
 	readonly refreshToken: string | undefined;
@@ -133,8 +121,8 @@ function jwtSubject(idToken: string): string | undefined {
 
 /**
  * The token's `exp` in epoch milliseconds, or undefined when the token does
- * not parse or carries none. Read unverified: it only decides whether a
- * cached id_token is worth presenting, and the server verifies for real.
+ * not parse or has no `exp`. The claim is unverified here: it only decides
+ * whether a cached ID token is worth presenting. The server verifies the token.
  */
 export function jwtExpiryMs(token: string): number | undefined {
 	const parsed = idTokenExpirySchema.safeParse(decodeJwtPayload(token));
@@ -184,10 +172,9 @@ export async function cloudflareLogin(
 }
 
 /**
- * Renews a grant from its refresh token, carrying the subject across the
- * renewal. Returns undefined when the grant has no refresh token, Cloudflare
- * declines (a revoked or expired grant), or the endpoint is unreachable, so
- * the caller can fall back to an interactive login.
+ * Attempts to renew a grant while preserving its subject. Returns `undefined`
+ * when there is no refresh token or any part of the exchange fails, including
+ * cancellation. Callers then fall back to interactive login.
  */
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
@@ -254,8 +241,8 @@ async function exchangeForGrant(
 	return {
 		accessToken: parsed.data.access_token,
 		// The server may rotate the refresh token on use, and a refresh response
-		// may omit the id_token; keep the previous values when nothing replaces
-		// them.
+		// may omit the id_token. Keep the previous values when the response omits
+		// their replacements.
 		refreshToken: parsed.data.refresh_token ?? previous?.refreshToken,
 		expiresAt: now() + expiresIn * 1000,
 		subject: subject ?? previous?.subject,

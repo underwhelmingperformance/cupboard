@@ -111,7 +111,6 @@ const tenantWideContinuation = {
 	collectLimit: maxPathsCollectedPerRun
 };
 
-// The pipeline over a live instance's context, as the server itself builds it.
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const attestationCas = new AttestationCasService(context);
@@ -137,8 +136,6 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	);
 }
 
-// The uploads service over a live instance's context, as the server itself
-// builds it.
 function uploadsServiceFor(context: ServerContext): UploadsService {
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const attestationCas = new AttestationCasService(context);
@@ -293,7 +290,7 @@ describe('retention grace deadlines in garbage collection', () => {
 		}).toStrictEqual({ path: undefined, deadlines: [] });
 	});
 
-	it('drains a grace-managed cache that holds no deadlines at all', async () => {
+	it('drains a grace-managed cache with no deadlines', async () => {
 		await useTestServer('grace-managed-empty');
 		const { token } = await bootstrap();
 
@@ -534,7 +531,7 @@ describe('retention grace transitions', () => {
 		});
 	});
 
-	it('settles a root over nothing, releasing its whole target set', async () => {
+	it('replaces a root with an empty target set and releases every target', async () => {
 		await useTestServer('transition-settle-empty');
 		const { token } = await bootstrap();
 
@@ -548,15 +545,13 @@ describe('retention grace transitions', () => {
 		await addGracePolicy('', dayGraceSeconds);
 		await setRoot(token, { name: 'channel', targets: [released.storePath] });
 
-		// The channel has moved on to a generation this cache does not hold, so
-		// it settles over nothing: the root row and its expiry stay, the target
-		// rows go, and the released path takes the ordinary grace.
+		// Replacing the target set must preserve the root row and its expiry while
+		// granting grace to the released path.
 		const settled = await setRoot(token, { name: 'channel', targets: [] });
 		const { roots } = await listRoots(token);
 		const remaining = await listRootTargets(token, 'channel');
 		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
 
-		// While the grace holds, a collection leaves the released path alone.
 		await runGc();
 		const wasHeldDuringGrace =
 			(await narInfoGeneration(released.storePathHash)) !== undefined;
@@ -1162,9 +1157,9 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// A pending upload negotiated before the grace-decision column existed
-	// carries NULL there. Verification must still materialise it, treating the
-	// row as though no policy matched, even when a policy now covers the cache.
+	// Rows written before the grace-decision column was added have NULL in that
+	// column. Verification must treat NULL as no captured policy, even if a
+	// policy now covers the cache.
 	it('materialises a pre-decision pending row without granting grace', async () => {
 		await useTestServer('publication-null-decision');
 		await clearBlobStorage();
@@ -1207,7 +1202,7 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	it('grants nothing when verification fails', async () => {
+	it('does not grant grace when verification fails', async () => {
 		await useTestServer('publication-mismatch');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
@@ -1228,8 +1223,7 @@ describe('retention grace at publication', () => {
 			metadata
 		);
 
-		// Bytes whose checksum matches the declared fileHash but which decompress
-		// to a different NAR than the declared hash: a background mismatch.
+		// The compressed hash matches, but the bytes decode to a different NAR.
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
 		await currentServer().runVerification();
@@ -1317,8 +1311,7 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// A later deadline already sits on this path (an earlier longer policy,
-		// or a root transition) before this commit's own candidate runs.
+		// Seed a later deadline than this commit would calculate.
 		await seedGraceDeadline(DEFAULT_CACHE, reused.storePathHash, liveDeadline);
 
 		const negotiated = await negotiateUploads(
@@ -1355,14 +1348,10 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// A concede answers success without ever running its own materialisation,
-	// so a naive implementation reports the winner's bytes but never applies
-	// the loser's own captured grace decision, leaving a positive policy
-	// ungranted whenever nothing else established a deadline. Drives a real
-	// concede deterministically: negotiate two upload ids for the identical
-	// metadata before either commits, settle the first (the winner), then
-	// commit the second: its own commit() call finds the row the winner just
-	// committed and concedes through the hasCommittedReference re-drive.
+	// A losing reservation returns success without materialising its own upload.
+	// It must apply its captured grace decision before discarding the pending
+	// row. Negotiate both reservations before committing either one so the
+	// second commit deterministically takes this path.
 	it.each([
 		{
 			id: 'positive',
@@ -1438,8 +1427,7 @@ describe('retention grace at publication', () => {
 			}
 
 			await putNarBytes(winnerDecision.r2Key, nar);
-			// Handles both an immediate settlement and a deferred one that needs a
-			// verification pass; either way, the winner ends up fully committed.
+			// commitUpload also runs verification when this fresh upload is deferred.
 			await commitUpload(token, uploadIdSchema.parse(winnerDecision.uploadId));
 
 			const loserConversation = await openCommitSession(token);
@@ -1495,13 +1483,7 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Commit the winner so its canonical blob and its narinfo row both
-		// exist, then call concedeToWinner directly for the identical store
-		// path: the deterministic shape a losing reservation reaches when
-		// committedNarInfoRow now finds the winner. A synthetic upload id and
-		// the canonical staging key are safe here, matching how the sibling
-		// "defers when no committed winner exists" test in
-		// commit-reservation-reclaim.workers.test.ts drives this same method.
+		// Commit the winning generation before exercising the losing reservation.
 		await pushPath(token, metadata, DEFAULT_CACHE, nar);
 
 		const outcome = await runInDurableObject(currentServer(), (instance) =>
@@ -1539,11 +1521,9 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// The concede destroys the pending row (and its staging object) as its
-	// bookkeeping, and the captured decision lives on that row: the grace
-	// application must precede the destruction, or an interruption between
-	// the two would lose the grant with the row. Faulting the staging delete
-	// proves the order: the deadline exists even though the concede failed.
+	// The captured grace decision exists only on the pending row. Apply it before
+	// deleting that row and its staging object so a cleanup failure cannot lose
+	// the grant.
 	it('applies the captured grace before the concede destroys the decision', async () => {
 		await useTestServer('concede-ordering');
 		const { token } = await bootstrap();
@@ -1569,8 +1549,7 @@ describe('retention grace at publication', () => {
 					BLOBS: failingDeleteBucket(instance.context.env.BLOBS)
 				};
 
-				// A private, non-canonical staging key so the concede's clean-up
-				// issues the faulting delete.
+				// Use a private staging key so cleanup reaches the failing delete.
 				try {
 					await pipelineFor(instance.context).concedeToWinner(
 						rootLogger(),
@@ -1602,11 +1581,9 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// The flush charges the durable edge before applying the captured grace,
-	// so an interruption between the two leaves a committed generation whose
-	// decision still sits on the pending row. The verify pass that re-claims
-	// such a row must reapply the decision before clearing it, not just
-	// finish the marker bookkeeping.
+	// A crash after the reference edge is committed can leave the grace decision
+	// on the pending row. A later verification pass must apply that decision
+	// before it clears the row.
 	it('reapplies the stored decision when recovery re-claims a committed generation', async () => {
 		await useTestServer('grace-recovery');
 		await clearBlobStorage();
@@ -1633,9 +1610,8 @@ describe('retention grace at publication', () => {
 		const row = await pendingRowSnapshot(upload.uploadId);
 		await currentServer().runVerification();
 
-		// Reconstruct the interruption: the generation is committed and
-		// charged, but the captured decision was never applied and the row
-		// holding it never cleared.
+		// Restore the pending row but remove the applied grace state to reproduce
+		// that crash boundary.
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.delete(schema.retentionGrace)
@@ -1667,12 +1643,10 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// A concede reads its winner, awaits an object heal, and only then applies
-	// the captured grace, so the row can move inside the window. Settling on
-	// the stale read would report a row that no longer holds the path and
-	// silently drop the grant; the concede must re-resolve, and a moved row
-	// whose new holder has not committed defers to the verify pass.
-	it('refuses to settle on a winner that moved during the concede', async () => {
+	// The winner can change while object repair is awaited. Re-read its identity
+	// before settling so a stale generation cannot discard the pending row and
+	// its captured grace decision.
+	it('defers when the winner changes during concession', async () => {
 		await useTestServer('concede-moved-winner');
 		const { token } = await bootstrap();
 
@@ -1693,10 +1667,7 @@ describe('retention grace at publication', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				// The first head probe of the object heal bumps the winner's
-				// generation, the shape of a recommit landing inside the
-				// concede's await window; the retry that follows sees the row
-				// hold still.
+				// Change the generation during the first object-repair probe.
 				let hasMoved = false;
 				const moveWinner = (): void => {
 					if (hasMoved) {
@@ -1732,10 +1703,8 @@ describe('retention grace at publication', () => {
 			}
 		);
 
-		// The moved row's new generation has no committed edge, so the re-read
-		// finds no committed winner: the concede defers, keeping the upload row
-		// (and its captured decision) live for the verify pass, instead of
-		// settling on the stale winner with no deadline behind it.
+		// The replacement generation has no committed edge, so the losing upload
+		// must remain pending for verification.
 		expect({
 			...result,
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
@@ -1751,10 +1720,8 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// The concede's re-resolution is bounded: sustained recommit churn would
-	// otherwise keep one request re-reading the winner and healing its object
-	// indefinitely. Past the cap the upload defers, keeping its row and
-	// captured decision for the verify pass.
+	// Bound re-resolution so sustained recommits cannot keep one request alive
+	// indefinitely. After the limit, retain the pending row for verification.
 	it('defers after bounded attempts when the winner keeps moving', async () => {
 		await useTestServer('concede-churn');
 		const { token } = await bootstrap();
@@ -1776,10 +1743,8 @@ describe('retention grace at publication', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				// Every object-heal probe bumps the winner again, and an edge is
-				// pre-seeded for each future generation so every re-read still
-				// finds a committed winner: the shape of sustained recommit
-				// churn that never lets the path hold still.
+				// Pre-seed reference edges and advance the generation on every probe so
+				// each retry finds another committed winner.
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
 					schema: d1Schema
 				});
@@ -1846,8 +1811,6 @@ describe('retention grace at publication', () => {
 
 		expect({
 			outcome: result.outcome,
-			// One heal probe per attempt, so a bounded loop probes a bounded
-			// number of times.
 			boundedBumps: result.bumpCount <= 6,
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
@@ -1862,11 +1825,9 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	// The recovery short-circuit checks the committed edge over D1, so the
-	// local row can move inside that await. Its "already committed" conclusion
-	// is then stale: finishing the bookkeeping would clear the upload as a
-	// success it never had. The pass must decline the short-circuit and drive
-	// the upload to an honest terminal verdict instead.
+	// The local row can change while the recovery path checks its D1 reference
+	// edge. Recheck the row before treating that edge as proof of the current
+	// generation.
 	it('declines the recovery short-circuit when the row moves during the edge check', async () => {
 		await useTestServer('recovery-moved-row');
 		await clearBlobStorage();
@@ -1893,8 +1854,7 @@ describe('retention grace at publication', () => {
 		const row = await pendingRowSnapshot(upload.uploadId);
 		await currentServer().runVerification();
 
-		// Reconstruct the interrupted flush, exactly as the recovery test
-		// above does, so the next pass re-claims a committed generation.
+		// Restore the pending row so the next pass takes the recovery path.
 		const hash = storePathHashSchema.parse(metadata.storePathHash);
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
@@ -1907,9 +1867,7 @@ describe('retention grace at publication', () => {
 				.run();
 		});
 
-		// Drive the pass through a context whose committed-edge read moves the
-		// row, the shape of a recommit landing inside the short-circuit's
-		// window.
+		// Change the row while the pass awaits the committed-edge query.
 		const hasMoved = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
@@ -1945,10 +1903,8 @@ describe('retention grace at publication', () => {
 			}
 		);
 
-		// The moved row means the short-circuit's success is stale: the pass
-		// declines it and, finding the row superseded by a replacement, settles
-		// the upload to an honest terminal verdict in the same pass. No
-		// deadline is ever granted against the moved identity.
+		// The superseded upload must fail without granting grace to the replacement
+		// generation.
 		expect({
 			hasMoved,
 			verdict: await pendingUploadVerdict(upload.uploadId),
@@ -1961,9 +1917,7 @@ describe('retention grace at publication', () => {
 	});
 });
 
-// An R2 binding whose head probes run the given tap before delegating: a
-// deterministic point for a test to interleave a concurrent mutation with the
-// code under test.
+// Run the tap before each R2 head so tests can place a mutation inside an await.
 function headTappingBucket(inner: R2Bucket, onHead: () => void): R2Bucket {
 	return {
 		head(key) {
@@ -1980,9 +1934,8 @@ function headTappingBucket(inner: R2Bucket, onHead: () => void): R2Bucket {
 	};
 }
 
-// A D1 binding whose matching prepared queries run the given tap before
-// delegating, the same deterministic interleaving point for reads that go to
-// the shared database.
+// Run the tap before matching D1 queries so tests can place a mutation inside
+// an await.
 function prepareTappingD1(
 	inner: D1Database,
 	isMatch: (query: string) => boolean,
@@ -2003,10 +1956,6 @@ function prepareTappingD1(
 	};
 }
 
-// The verification service over a live instance's context, as the server
-// itself builds it. Failed verifications prune retention targets through the
-// roots service; these tests never fail one into a root, so the prune is
-// inert.
 function verificationFor(context: ServerContext): VerificationService {
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const attestationCas = new AttestationCasService(context);
@@ -2039,13 +1988,11 @@ function verificationFor(context: ServerContext): VerificationService {
 		uploadState,
 		retention,
 		() => {
-			// These tests never fail a rooted upload, so nothing is pruned.
+			// Intentionally empty test callback.
 		}
 	);
 }
 
-// An R2 binding whose deletes throw, the shape of a fault in the staging
-// clean-up that follows a concede.
 function failingDeleteBucket(inner: R2Bucket): R2Bucket {
 	return {
 		head: inner.head.bind(inner),
@@ -2076,10 +2023,6 @@ async function pendingRowSnapshot(
 	return row;
 }
 
-// Narrows a negotiate response to its single `upload` decision, the reconnect
-// tests below use instead of `expectSingleUploadDecision`: a capable response
-// also carries a `grace` fact, which that helper's fixed shape does
-// not expect.
 function plannedUploadDecision(
 	response: Awaited<ReturnType<typeof negotiateUploads>>
 ): Extract<ReturnType<typeof singleDecision>, { action: 'upload' }> {
@@ -2182,7 +2125,7 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	it('carries the deadline on a settled frame only for a capable upload', async () => {
+	it('includes the deadline on a settled frame only for a capable upload', async () => {
 		await useTestServer('wire-settled');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -2341,10 +2284,9 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// Every already-present decision in one negotiation shares one batched
-	// grace application: the identity checks and extensions for the whole
-	// closure run through a single transaction, not one per path.
-	it('answers a multi-path already-present negotiation from one batched application', async () => {
+	// Apply grace for all already-present paths in one transaction so the
+	// negotiation does not open one transaction per path.
+	it('applies grace to several already-present paths in one transaction', async () => {
 		await useTestServer('wire-skip-batch');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -2376,8 +2318,6 @@ describe('retention grace facts on the wire', () => {
 		const transactionCount = await runInDurableObject(
 			currentServer(),
 			(instance) => {
-				// Spying on an already-spied method returns the existing spy, so
-				// this reads the count the negotiation accumulated above.
 				const transactions = vi.spyOn(instance.context.db, 'transaction');
 				const calls = transactions.mock.calls.length;
 
@@ -2398,11 +2338,9 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// The skippable snapshot is read before awaited shared-fact checks, so a
-	// row can move inside the window. A skip from that snapshot would describe
-	// a row that no longer holds the path, and a legacy client would take it
-	// at face value and never push its bytes. A moved row must be planned like
-	// any other path.
+	// Shared-object checks run after the skippable-row snapshot. Recheck the row
+	// before returning skip, or a legacy client could omit bytes for a generation
+	// that is no longer committed.
 	it('plans a path whose row moves during negotiation instead of skipping it', async () => {
 		await useTestServer('wire-skip-moved');
 		const { token } = await bootstrap();
@@ -2416,9 +2354,8 @@ describe('retention grace facts on the wire', () => {
 
 		await pushPath(token, path);
 
-		// The blob_ref edge read is the first shared-fact query the negotiate
-		// awaits, so a recommit fired on its preparation lands after the
-		// snapshot and before the batched grace application.
+		// Mutate when the first shared-object query starts, after the row snapshot
+		// and before the batched grace application.
 		const hash = storePathHashSchema.parse(path.storePathHash);
 		const response = await runInDurableObject(
 			currentServer(),
@@ -2473,19 +2410,16 @@ describe('retention grace facts on the wire', () => {
 		]);
 	});
 
-	// A client that reconnects mid-commit re-points the pending row at its new
-	// session and parks; the saga that finishes the upload then answers that
-	// session with a verdict frame. The frame must carry the same capability-gated
-	// stored deadline every other verdict path reports, or a client enforcing
-	// grace deadlines would reject a publication whose deadline was written.
+	// A reconnect can replace the pending row's session while the commit awaits
+	// shared-object work. The eventual verdict must include the stored deadline
+	// for the replacement session.
 	it('sends the stored deadline on a reattached session verdict frame', async () => {
 		await useTestServer('wire-reattach-verdict');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
-		// A committed path whose blob the contested upload reuses, so its
-		// commit settles synchronously through the reuse saga.
+		// Seed a canonical blob so the contested upload takes the reuse path.
 		const seed = await verifiableNar('reattach-seed');
 		const seeded = uploadMetadata({
 			storePathHash: repeated('4'),
@@ -2521,9 +2455,8 @@ describe('retention grace facts on the wire', () => {
 			throw new Error('the contested upload must plan a blob reuse');
 		}
 
-		// A parked session whose id the pending row can be re-pointed at: its
-		// own deferred fresh upload writes its session id to that row, where
-		// the test can read it back.
+		// Park a second session on a deferred upload so its durable session ID is
+		// available for the interleave below.
 		const parked = await verifiableNar('reattach-parked');
 		const parkedPath = uploadMetadata({
 			storePathHash: repeated('7'),
@@ -2569,11 +2502,9 @@ describe('retention grace facts on the wire', () => {
 			throw new Error('the parked commit must record its session');
 		}
 
-		// Drive the contested commit directly, re-pointing its row at the parked
-		// session on the saga's charge write: that runs after the saga captured
-		// its (session-less) committer and before it notifies, the shape of a
-		// reconnect attaching mid-commit. The parked session is then a
-		// reattached waiter, not the committer.
+		// Replace the contested row's session when the charge query starts. This
+		// occurs after the commit captured its original caller and before it sends
+		// the verdict.
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
@@ -2612,8 +2543,7 @@ describe('retention grace facts on the wire', () => {
 			throw new Error('the reattach tap never fired');
 		}
 
-		// The parked session may hear its own upload's verdict too; the frame
-		// under test is the contested upload's.
+		// Ignore the parked upload's verdict if it arrives first.
 		let frame = await conversation.nextFrame();
 
 		while (!('uploadId' in frame) || frame.uploadId !== reuse.uploadId) {
@@ -2641,11 +2571,9 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// A reconnect that re-sends a `commit-batch` (or `subscribe-identity`) entry
-	// for a row verification already cleared has no pending row left to read a
-	// captured grace decision from. A `retention`-marked entry tells the server
-	// this upload negotiated grace facts, so `resolveGoneCommit` reads the durable
-	// deadline the original commit recorded instead of answering with none.
+	// Verification can clear the pending row before a reconnect resends its
+	// entry. For an entry marked `retention`, read the deadline stored by the
+	// original commit because the captured grace decision is no longer present.
 	it('attaches the durable deadline when a retention-marked commit-batch entry resolves a cleared row', async () => {
 		await useTestServer('wire-reconnect-grace');
 		const { token } = await bootstrap();
@@ -2699,8 +2627,6 @@ describe('retention grace facts on the wire', () => {
 	it('reports an empty fact when a retention-marked reconnect resolves a cleared row with no stored deadline', async () => {
 		await useTestServer('wire-reconnect-no-grace');
 		const { token } = await bootstrap();
-		// No grace policy: the capable negotiation captures no graceSeconds,
-		// so the commit never writes a retention_grace row.
 
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2747,12 +2673,9 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// A gone pending row leaves no durable proof that this session ever
-	// negotiated the upload, so its already-present answer only reports the
-	// stored fact. Extending retention for a path the session did not push is
-	// upload:confirm authority, which a commit socket must not exercise: a
-	// commit-scoped token could otherwise refresh any committed path by
-	// fabricating an unknown uploadId with the path's public identity.
+	// A missing pending row does not prove that this session negotiated the
+	// upload. Report the stored deadline without extending it, or a commit-only
+	// token could refresh any committed path by inventing an upload ID.
 	it('reports the stored fact without extending when a retention-marked entry resolves a row another push committed', async () => {
 		await useTestServer('wire-reconnect-reports');
 		const { token } = await bootstrap();
@@ -2763,9 +2686,8 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-reports'
 		});
 
-		// The path lands before any policy exists, so its commit stores no
-		// deadline; the policy added afterwards is what a wrongful extension
-		// would draw on.
+		// Publish before adding the policy so any deadline would prove that this
+		// reconnect extended retention.
 		await pushPath(token, metadata);
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2802,9 +2724,8 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// An unmarked entry gets exactly the legacy shape even for an upload that did
-	// negotiate grace facts: the marker, not negotiation alone, gates the durable-fact
-	// read, so an old client's re-sent entry never trips a schema it predates.
+	// Only the `retention` marker opts into the grace field. Preserve the legacy
+	// frame shape when an older client resends an unmarked entry.
 	it('keeps the legacy shape for a capable reconnect entry with no retention marker', async () => {
 		await useTestServer('wire-reconnect-unmarked');
 		const { token } = await bootstrap();
@@ -2941,9 +2862,6 @@ class ForcedRollbackError extends Error {}
 describe('grace transition atomicity', () => {
 	beforeEach(resetTestServer);
 
-	// Proves the mechanism confirmSkipGrace relies on, directly: the marker and
-	// the deadline extension both take a writer, and one transaction handle
-	// passed to both lands them together.
 	it('writes the marker and the deadline together through one transaction handle', async () => {
 		await useTestServer('grace-atomic-commit');
 		const hash = storePathHashSchema.parse(repeated('k'));
@@ -2993,11 +2911,6 @@ describe('grace transition atomicity', () => {
 		}).toStrictEqual({ graceManaged: false, deadlines: [] });
 	});
 
-	// Proves the same claim for a root transition specifically: writeRoot,
-	// removeRoot, and the GC expiry pass all apply the grace transition inside
-	// the same transaction as the retention delete that releases the targets,
-	// mirroring the shape those methods use (delete the root and its targets,
-	// then apply the transition, through one handle).
 	it('rolls back a root deletion together with the grace transition it releases', async () => {
 		await useTestServer('grace-atomic-root-delete');
 		await addGracePolicy('', 3600);
@@ -3313,7 +3226,7 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	it('confirms false for an uncommitted or merely reserved path, extending nothing', async () => {
+	it('returns false for an uncommitted or reserved path without extending grace', async () => {
 		await useTestServer('confirm-uncommitted');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -3352,10 +3265,9 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	// The committed and backed checks await shared facts, so the narinfo row
-	// can move between its snapshot and the grace application. A moved row
-	// must confirm false: confirming true would hand the caller a deadline the
-	// path now committed does not hold.
+	// The narinfo row can change while the committed and backed checks await
+	// shared state. Recheck its identity before granting a deadline to the
+	// current generation.
 	it('confirms false when the row moves during the shared-fact checks', async () => {
 		await useTestServer('confirm-moved-row');
 		const { token } = await bootstrap();
@@ -3416,10 +3328,8 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	// A duplicate-heavy confirm answers every requested entry but runs the
-	// work once per distinct hash: one identity-check transaction for the
-	// whole request, not one per path.
-	it('answers duplicate entries from one batched application', async () => {
+	// Deduplicate the work but preserve one result for every requested entry.
+	it('returns duplicate entries from one batched application', async () => {
 		await useTestServer('confirm-duplicates');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -3469,9 +3379,8 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	// The request bound is only safe if a request AT the bound does bounded
-	// work: the whole batch runs through chunked identity-check transactions,
-	// so the statement count scales with the chunk count, not the path count.
+	// Chunk the identity checks so a request at the protocol limit stays within
+	// SQLite's bound-parameter limit.
 	it('applies a batch at the request bound through chunked transactions', async () => {
 		await useTestServer('confirm-at-bound');
 		await bootstrap();
@@ -3481,8 +3390,6 @@ describe('confirming an unretained publication', () => {
 			storePathHash: repeated('a'),
 			name: 'template'
 		}).narHash;
-		// Base-32 store-path hashes built from decimal digits, every one
-		// distinct and schema-valid.
 		const hashes = Array.from({ length: uploadConfirmMaxPaths }, (_, index) =>
 			storePathHashSchema.parse(String(index).padStart(32, '0'))
 		);

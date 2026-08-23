@@ -58,25 +58,19 @@ const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 
-// Builds and wires the worker Hono app. The route registrations are side
-// effects, so they live inside this builder and not at module top level;
-// the exported handler dispatches to the app this returns.
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
 
 	app.onError(serverErrorHandler);
 	app.notFound(() => notFoundResponse());
 
-	// Create the request logger before admission so early refusals still include
-	// the request fields. The admission middleware adds the tenant after resolving
-	// the slug.
+	// Initialise logging before admission so early refusals include request fields.
+	// Add the tenant field only after the slug is admitted.
 	app.use(loggerMiddleware);
 
-	// The bare host serves the deployment-level liveness and version endpoints.
-	// Neither endpoint has a tenant or cache prefix.
-	// `/healthz` is the conventional spelling; `/_health` is kept alongside it.
-	// Liveness checks no dependencies, so it stays public; the database readiness
-	// check lives behind admin auth on the control `check` procedure.
+	// Keep `/_health` as an alias for the conventional `/healthz` endpoint.
+	// Liveness is public and performs no dependency checks; the authenticated
+	// control check reports database readiness.
 	app.on('GET', ['/_health', '/healthz'], (context) =>
 		textResponse(context.req.raw, healthBody, {
 			'content-type': 'text/plain; charset=utf-8',
@@ -90,10 +84,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		})
 	);
 
-	// Admission resolves every tenant slug against the manifest in KV. Reject an
-	// absent slug before creating a Durable Object so arbitrary slugs cannot create
-	// unprovisioned objects. `parseTenantPath` reads the raw pathname and rejects an
-	// encoded slug.
+	// Reject unknown and encoded slugs before resolving a Durable Object so an
+	// arbitrary URL cannot create unprovisioned tenant storage.
 	//
 	// Writes stop immediately after the authoritative D1 status changes. Reads stop
 	// after the updated manifest reaches KV and the cached entry expires.
@@ -133,8 +125,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantRest', route.rest);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
 
-		// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
-		// bare root is the default cache. An unrecognised prefix is a 404.
+		// A valid `/cache/<name>/` prefix selects a named cache. Bare read paths use
+		// the default cache; malformed selectors return 404.
 		if (isRead) {
 			const scope = cacheScope(route.rest);
 
@@ -148,9 +140,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		await next();
 	});
 
-	// OAuth discovery and the auth public keys originate in the tenant's Durable
-	// Object. Neither response is cached because key rotation changes the JWKS and
-	// discovery contains absolute URLs derived from the public request origin.
+	// Discovery includes absolute URLs derived from the public request origin,
+	// and key rotation changes the JWKS. Fetch both from the tenant Durable Object
+	// without caching them.
 	app.get('/t/:tenant/.well-known/oauth-authorization-server', (context) =>
 		tenantUncachedRead(context, true)
 	);
@@ -160,9 +152,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
-	// Attestation lists and bundle references change when paths or caches are
-	// removed, so both stay uncached. A name that does not parse falls through to
-	// the dispatch fallback, as the object's own routes would see it.
+	// Path and cache deletion can change attestation lists and bundle references,
+	// so neither response is cached. Malformed names fall through to the tenant
+	// Durable Object's normal routing.
 	app.on(
 		'GET',
 		[
@@ -342,10 +334,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
-	// The Durable Object renders reuse-view `nix-cache-info` with the view's
-	// priority and sets `Cache-Control: no-store`. Dispatch directly because
-	// `cacheInfoResponse` applies default-cache rendering that does not apply to
-	// views.
+	// Reuse-view metadata has its own priority and is never cached. Bypass the
+	// default-cache renderer.
 	app.get('/t/:tenant/reuse/:view/nix-cache-info', async (context) => {
 		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
 
@@ -357,9 +347,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		);
 	});
 
-	// The Durable Object resolves a reuse-view narinfo lookup against the view
-	// definition and sets `Cache-Control: no-store` for both hits and misses.
-	// Dispatch directly after the read guard so the edge cache stores neither.
+	// Reuse-view membership can change without a purge key. Send both hits and
+	// misses directly to the Durable Object with `no-store`.
 	app.get(
 		String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 		async (context) => {
@@ -377,10 +366,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
-	// Reuse views deliberately expose no NAR route. Keep the entire subtree behind
-	// `guardRead` so a private tenant returns 401 before the 404 fallback. Set
-	// `no-store` on the 404 because a later deployment can add a matching view
-	// route.
+	// Reuse views expose no NAR route. Authenticate private tenants before the 404
+	// and prevent caches from retaining a miss for a route added later.
 	app.get('/t/:tenant/reuse/*', async (context) => {
 		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
 
@@ -394,8 +381,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		return response;
 	});
 
-	// This tenant's narinfo signing key set, served uncached from its Durable
-	// Object so a rotation is visible immediately.
+	// Serve signing keys uncached so rotation is visible immediately.
 	app.on(
 		'GET',
 		['/t/:tenant/pubkey', '/t/:tenant/cache/:cacheName/pubkey'],
@@ -409,11 +395,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
-	// The Worker reads shared D1 facts before upload negotiation and sends the
-	// results to the tenant Durable Object through RPC. This keeps those D1 reads
-	// outside the Durable Object. If the Worker cannot compute hints, or the tenant
-	// uses an older script without the RPC, dispatch without hints and let the
-	// object read the facts.
+	// Compute shared D1 hints on the Worker before entering the tenant Durable
+	// Object. If hint preparation or the deployment-skew RPC fails, dispatch
+	// without them and let the Durable Object read authoritative facts.
 	app.on('POST', '/t/:tenant/cache/:cacheName/uploads', async (context) => {
 		const tenant = context.get('tenant');
 		const writeStatus = admittedWriteStatus(context);
@@ -421,9 +405,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			context.req.param('cacheName')
 		);
 
-		// A fresh admission that already knows the tenant is not active skips the
-		// hint reads and dispatches plainly; the gate in dispatch stays the
-		// authoritative refusal.
+		// Skip advisory hint reads when fresh admission already found an inactive
+		// tenant. The write gate still produces the authoritative refusal.
 		if (writeStatus !== undefined && writeStatus !== 'active') {
 			return dispatchTenant(
 				innerRequest(context),
@@ -433,8 +416,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			);
 		}
 
-		// The hints clone the body, so they are read before `innerRequest` wraps
-		// the raw request for dispatch.
+		// Compute hints before constructing the forwarded request because reading
+		// them clones the original body.
 		const hints = await computeNegotiateHints(
 			context.req.raw,
 			context.env,
@@ -451,15 +434,15 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				).stageNegotiateHints(hints);
 				inner.headers.set(negotiateHintsHeader, token);
 			} catch {
-				// Staging unavailable: dispatch without hints.
+				// Hints are advisory; fall back to authoritative reads in the tenant.
 			}
 		}
 
 		return dispatchTenant(inner, context.env, tenant, writeStatus);
 	});
 
-	// Everything else under the tenant subtree dispatches to the Durable Object,
-	// registered last so the read routes above answer first.
+	// Keep the fallback last so specialised read routes can apply their cache
+	// policy before Durable Object dispatch.
 	app.all('/t/:tenant/*', (context) =>
 		dispatchTenant(
 			innerRequest(context),
@@ -469,7 +452,6 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
-	// The bare host is the control surface: the control plane's own auth.
 	app.route('/', controlApp);
 
 	return app;
@@ -481,8 +463,8 @@ export default {
 	fetch: app.fetch,
 
 	async scheduled(_controller, env) {
-		// Cron plans bounded work; the queue consumer owns execution and outcome
-		// recording so retries are per-message.
+		// Enqueue bounded jobs so execution failures retry per message rather than
+		// repeating the whole cron plan.
 		await enqueueMaintenanceJobs(env);
 	},
 
@@ -491,9 +473,8 @@ export default {
 	}
 } satisfies ExportedHandler<Env>;
 
-// Builds the request sent to the tenant Durable Object. It removes the
-// `/t/<tenant>/` prefix and strips any client-supplied hint token. The
-// negotiation route adds a server-issued hint token after this sanitisation.
+// Strip the public tenant prefix and any client-supplied hint token. Upload
+// negotiation adds a server-issued token only after this sanitisation.
 function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	const inner = new URL(context.req.url);
 	inner.pathname = context.get('tenantRest');
@@ -543,18 +524,14 @@ async function tenantUncachedRead(
 	});
 }
 
-// Dispatches a non-read tenant request to its Durable Object. A write (anything but
-// a read or the auth-plane token exchange) is gated first: a write for a suspended or
-// offboarding tenant is stopped on an authoritative D1 status read. The Durable
-// Object then authorises it against that tenant's own keys and writes only that
-// tenant's storage.
+// Confirm mutable requests against authoritative D1 status before Durable
+// Object dispatch. The tenant Durable Object then applies its own authorisation.
 async function dispatchTenant(
 	inner: Request,
 	env: Env,
 	tenant: TenantId,
-	// The status from admission, passed only when admission read it fresh from D1
-	// this request; a cached admission passes undefined so the status is reconfirmed
-	// against D1 before a write, keeping a suspend timely within the cache TTL.
+	// Reuse status only when admission read D1 for this request. Cached admission
+	// must recheck D1 before a write.
 	admittedStatus?: TenantEntry['status']
 ): Promise<Response> {
 	if (!isTenantWrite(inner)) {
@@ -570,8 +547,6 @@ async function dispatchTenant(
 	return tenantServer(env, tenant).fetch(inner);
 }
 
-// The admitted status to hand `dispatchTenant`: the entry's status when admission
-// read it fresh from D1, otherwise undefined so the write reconfirms against D1.
 function admittedWriteStatus(
 	context: Context<WorkerHonoEnv>
 ): TenantEntry['status'] | undefined {
@@ -580,10 +555,9 @@ function admittedWriteStatus(
 		: undefined;
 }
 
-// Whether a tenant request mutates state. Reads, the token exchange and
-// read-only POST operations do not. A WebSocket upgrade is a GET on the wire,
-// but the only socket route is the commit, a write, so upgrades are gated as
-// writes.
+// Token exchange and the two read-only POST endpoints bypass the write gate. A
+// WebSocket upgrade uses GET on the wire, but the only socket route commits
+// uploads and must be gated as a write.
 function isTenantWrite(inner: Request): boolean {
 	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return true;
@@ -613,9 +587,8 @@ function isCacheAvailabilityRequest(method: string, pathname: string): boolean {
 	return method === 'POST' && cacheAvailabilityPathPattern.test(pathname);
 }
 
-// Reads the authoritative tenant status from D1 so write suspension does not
-// wait for KV expiry. A missing row is treated as inactive. This read uses the
-// same bounded retry and retryable failure response as the admission-row lookup.
+// Read D1 so write suspension does not wait for KV expiry. A missing row is
+// inactive, and a persistent D1 failure remains retryable.
 async function tenantStatus(
 	env: Env,
 	tenant: TenantId

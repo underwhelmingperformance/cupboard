@@ -25,17 +25,13 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// The reaper's demote pass walks `blob_state` for a shared object that has gone
-// missing (the "available but no object" gap a crash can leave). Because reads serve
-// from a tenant's narinfo object and never from `blob_state`, demotion de-materialises
-// the referencing narinfos through their owning Durable Object first, then deletes the
-// `blob_state` fact last so the fact re-drives an interrupted run. Any correct
-// re-upload re-promotes and heals the path.
+// Remove tenant narinfo objects before deleting the shared `blob_state` row.
+// If a pass stops early, that row makes the next pass try again. Keep reference
+// edges so another upload of the missing NAR can restore the narinfo objects.
 //
-// Each test runs against its own freshly named tenant pushed through the real Worker,
-// so the Durable Object the reaper routes to by tenant slug is the one that holds the
-// data: the harness rotates the fixture tenant's object id per test, so the
-// fixture slug would route the reaper to an empty object instead.
+// Use a separately provisioned tenant for each test. The reaper routes by tenant
+// slug, but the test harness rotates the fixture Durable Object ID without
+// changing its slug; using the fixture tenant would route to an empty object.
 
 function* countFromOne(): Generator<number, never> {
 	for (let value = 1; ; value++) {
@@ -91,7 +87,7 @@ async function edgeCount(): Promise<number> {
 	return edges.length;
 }
 
-describe('reaper demote pass', () => {
+describe('missing blob demotion', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
@@ -100,12 +96,10 @@ describe('reaper demote pass', () => {
 		await clearBlobStorage();
 	});
 
-	it('demotes a blob whose object has gone and de-materialises its narinfos', async () => {
+	it('removes narinfo objects and the `blob_state` row for a missing NAR', async () => {
 		const { tenant, metadata, narHash } =
 			await committedTenantPath('demote-basic');
 
-		// Plant the gap: the shared object is gone, but its fact, its edge and the
-		// materialised narinfo all survive.
 		await env.BLOBS.delete(narObjectKey(narHash));
 
 		expect({
@@ -122,9 +116,6 @@ describe('reaper demote pass', () => {
 
 		const demoted = await runReaperDemote(rootLogger(), env);
 
-		// The fact is gone and the narinfo de-materialised, so the read path stops
-		// serving a narinfo whose NAR is missing. The edge stays: the path still wants
-		// the hash, and a re-upload heals it.
 		expect({
 			demoted,
 			blobState: await blobStateNarHashes(),
@@ -138,10 +129,7 @@ describe('reaper demote pass', () => {
 		});
 	});
 
-	it('demotes a shared blob through every referencing tenant in one pass', async () => {
-		// Two tenants push identical content, so they share one `blob_state` row but
-		// each holds its own narinfo object and edge. One demote pass must route to
-		// both owning tenants and then drop the single shared fact.
+	it('removes narinfo objects for every tenant that references a missing NAR', async () => {
 		const first = await committedTenantPath('demote-shared');
 		const second = await committedTenantPath('demote-shared');
 
@@ -180,7 +168,7 @@ describe('reaper demote pass', () => {
 		});
 	});
 
-	it('leaves a blob whose object is present untouched', async () => {
+	it('keeps narinfo objects and the `blob_state` row while the NAR is present', async () => {
 		const { tenant, metadata, narHash } =
 			await committedTenantPath('demote-present');
 
@@ -199,15 +187,13 @@ describe('reaper demote pass', () => {
 		});
 	});
 
-	it('heals on a re-upload after a demote', async () => {
+	it('serves the path after the missing NAR is uploaded again', async () => {
 		const { tenant, token, metadata, nar, narHash } =
 			await committedTenantPath('demote-heal');
 
 		await env.BLOBS.delete(narObjectKey(narHash));
 		await runReaperDemote(rootLogger(), env);
 
-		// A correct re-push re-promotes the shared object and re-materialises the
-		// narinfo, so the path serves again.
 		await pushPathToTenant(tenant, token, metadata, nar);
 
 		expect({

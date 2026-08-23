@@ -5,8 +5,10 @@ import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 
 import { verifiableMaxBytes } from '../http/http.ts';
 
-// What a stored NAR blob's bytes must satisfy: decompressed, they hash to the
-// `narHash` the narinfo commits to and signs, and their length is `narSize`.
+/**
+ * Verification accepts decompressed bytes only when both values match the
+ * corresponding narinfo fields.
+ */
 export interface ExpectedNar {
 	readonly narHash: string;
 	readonly narSize: number;
@@ -15,10 +17,8 @@ export interface ExpectedNar {
 export type NarVerification =
 	| {
 			readonly ok: true;
-			// The compressed object's own SHA-256 and byte length, computed over the
-			// same bytes this pass decompresses. A byte verification always reports
-			// them; the reuse pass-through, which verifies no bytes, omits them and
-			// sources the blob facts from `blob_state`.
+			// Byte verification reports these values. A reuse verdict omits them and
+			// uses the existing blob-state metadata.
 			readonly fileHash?: NixSha256HashString;
 			readonly fileSize?: number;
 	  }
@@ -38,21 +38,16 @@ export type NarVerification =
  * Streams a stored `.nar.zst` body through native zstd decompression and a
  * running SHA-256, recomputing the uncompressed NAR hash and size and comparing
  * them to what the narinfo commits to. The same pass hashes and counts the
- * compressed input, so a successful verification also yields the object's own
- * file hash and size without a second read. The stream is never buffered whole,
- * so peak memory stays bounded regardless of NAR size and only CPU time bounds
- * how large a NAR can be verified in one pass. This is the server-side check
- * that makes a client's `narHash` trustworthy before it is signed and served.
+ * compressed input, so successful verification also yields the object's file
+ * hash and size without a second read. Verification streams the body and
+ * rejects decompressed data beyond the declared size or the server limit.
  */
 export async function verifyDecompressedNar(
 	body: ReadableStream<Uint8Array>,
 	expected: ExpectedNar
 ): Promise<NarVerification> {
-	// Decompression stops once it exceeds the declared size or the server's hard
-	// cap, whichever is smaller. A frame that expands far beyond its declared
-	// `narSize` (a zstd bomb) cannot burn the CPU budget, and the bound is never
-	// larger than what the server is willing to verify regardless of what the
-	// client declared.
+	// Stop after the declared size or the server limit, whichever is smaller. A
+	// highly expanding frame cannot make this pass process an unbounded NAR.
 	const limit = Math.min(expected.narSize, verifiableMaxBytes);
 
 	// Hash and count the compressed bytes as they arrive, before decompression,

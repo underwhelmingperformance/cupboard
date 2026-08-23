@@ -246,28 +246,21 @@ export interface PlanInputs {
 	readonly optimise: boolean;
 	readonly temporaryDirectory: string;
 	readonly enablePacking: boolean;
-	// When packing is enabled, input resolution requires a positive byte budget
-	// for pricing candidate groupings.
 	readonly packCapacity: number;
-	// The remote ssh-ng store used by cohort builds. Empty uses each runner's
-	// store. Packing measures missing bytes in the selected build store.
 	readonly store: string;
-	/**
-	Keep cached targets runnable so their final derivations execute again.
-	*/
 	readonly requireProvenance: boolean;
 }
 
 /**
- * The external processes and network calls the plan makes, injectable so tests
- * can run the whole plan without a Nix store, a network or a cupboard binary.
+ * Dependencies that callers can replace to run planning without spawning Nix
+ * or Cupboard processes or making network requests.
  */
 export interface PlanDependencies {
 	readonly evaluator?: NixEvaluator;
 	/**
-	 * The store directory the runner's Nix reads, which the derivation paths in
-	 * an evaluation are relative to. Discovered from the runner's configuration
-	 * when it is not given.
+	 * When omitted, planning reads the store directory from the runner's Nix
+	 * configuration. Nix evaluation reports output paths relative to this
+	 * directory.
 	 */
 	readonly storeDirectory?: StoreDirectory;
 	readonly fetcher?: typeof fetch;
@@ -275,10 +268,9 @@ export interface PlanDependencies {
 	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	/**
-	 * Prices every surviving cohort target's own measured substitutable NAR
-	 * bytes, keyed by target attr, when packing is enabled. Defaults to
-	 * {@link packingMeasurer}, which shells to `cupboard plan measure` on this
-	 * runner's own store; injectable so tests can supply sizes directly.
+	 * When packing is enabled, returns each surviving target's substitutable NAR
+	 * size by attribute. The default runs `cupboard plan measure` against the
+	 * selected build store.
 	 */
 	readonly measurer?: (
 		cohorts: readonly Cohort[],
@@ -294,7 +286,7 @@ export function registerPlanCommand(
 	program
 		.command('plan')
 		.description(
-			'Plan a flake publication around what the cache already serves.'
+			'Plan a flake publication by checking which targets the cache already serves.'
 		)
 		.requiredOption('--targets <json>', 'JSON target manifest to evaluate')
 		.requiredOption('--url <url>', 'cupboard Worker URL')
@@ -304,7 +296,7 @@ export function registerPlanCommand(
 		)
 		.requiredOption(
 			'--root-prefix <prefix>',
-			'retention-root prefix prepended to every target root suffix'
+			"prefix used to form each target's retention root"
 		)
 		.option('--cache <name>', 'named cache to inspect and publish to')
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
@@ -318,19 +310,19 @@ export function registerPlanCommand(
 		)
 		.option(
 			'--enable-packing <value>',
-			'opt in to measured cohort packing under a disk budget: true or false'
+			'combine measured cohorts within a disk budget: true or false'
 		)
 		.option(
 			'--pack-capacity <bytes>',
-			'disk budget, in bytes, that measured cohort packing prices candidate groupings against'
+			'available disk capacity, in bytes, for measured cohort packing'
 		)
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store the cohorts build against; selected output paths must be known during planning'
+			'remote ssh-ng store for cohort builds; remote planning requires predictable output paths'
 		)
 		.option(
 			'--require-provenance <value>',
-			'keep cached targets on the build set for current-run provenance: true or false'
+			'build cached targets again to produce provenance for this run: true or false'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -349,8 +341,6 @@ export function resolvePlanInputs(
 
 	const targets = expandComponents(declaredTargets);
 
-	// A malformed URL would otherwise surface much later as a confusing OIDC
-	// or fetch failure.
 	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
@@ -419,10 +409,6 @@ export function resolvePlanInputs(
 	};
 }
 
-// Packing prices candidate groupings against a disk budget that differs by
-// runner, so enabling it without naming that budget would silently price
-// every grouping against a made-up number; the input is required exactly
-// when packing is, mirroring the read-user/read-password cross-check above.
 function resolvePackCapacity(
 	isPackingEnabled: boolean,
 	value: string | undefined
@@ -475,10 +461,9 @@ function validateTargetOutputLimits(targets: readonly PublishTarget[]): void {
 	}
 }
 
-// Checked against the declared manifest, before expandComponents replaces
-// each component-publication target with its components: the component
-// count is exactly the target list the aggregate's one retention root would
-// have to accept in a single write.
+// Validate the aggregate before `expandComponents` replaces it. All components
+// share one retention root, so the server must accept the complete component
+// list in one update.
 function validateComponentLimits(targets: readonly PublishTarget[]): void {
 	for (const target of targets) {
 		if (
@@ -496,11 +481,8 @@ function validateComponentLimits(targets: readonly PublishTarget[]): void {
 	}
 }
 
-// Cohort membership is a manifest-wide invariant, like rootSuffix uniqueness,
-// so a cohort spanning execution contexts is refused here, before evaluation
-// or building starts, rather than only once the plan is written. The result
-// is discarded: `optimisedPlan` and `unoptimisedPlan` each derive the plan's
-// own cohorts from the same manifest once planning proceeds.
+// `cohortsFor` rejects members that use different execution contexts. Run it
+// before evaluation so an invalid manifest fails before build work starts.
 function validateCohorts(targets: readonly PublishTarget[]): void {
 	cohortsFor(targets);
 }
@@ -543,9 +525,8 @@ export async function planAction(
 	const { plan, evaluations } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
 		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
-	// The pre-filter needs the same evaluated graph the plan itself used, so it
-	// runs only when the plan was optimised. The unoptimised path never inspects
-	// the cache, and it leaves every cohort's job in the matrix.
+	// Only an optimised plan has the evaluated graph that the pre-filter needs.
+	// An unoptimised plan must keep every cohort in the matrix.
 	const cohortDecisions =
 		inputs.optimise && !inputs.requireProvenance
 			? await cohortPreFilter(
@@ -614,16 +595,9 @@ async function optimisedPlan(
 	return { plan, evaluations };
 }
 
-/**
- * The root suffixes of the retained targets. A target is retained when the
- * cache already serves all of its outputs and `ensureRoot` renewed its
- * retention root.
- *
- * With `require-provenance` set, every target is built again and nothing can be
- * retained. Do not move the cache probe above the early return: a failed probe
- * fails the whole plan, and with provenance required the probe result cannot
- * change it.
- */
+// Keep the provenance return before the cache probe. Provenance requires every
+// target to be rebuilt, so a probe cannot change the result and must not fail
+// this plan.
 async function retainedRootsFor(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
@@ -658,9 +632,6 @@ async function retainedRootsFor(
 	);
 }
 
-/**
-Refuses remote publication unless every target's selected paths are known.
-*/
 export function validateRemoteOutputPredictability(
 	store: string,
 	evaluations: readonly TargetEvaluation[],
@@ -692,7 +663,6 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 		retained: [],
 		targets,
 		cohorts: cohortsFor(targets),
-		// No graph was evaluated, so there is nothing to invert.
 		derivationToTargets: []
 	};
 }
@@ -989,10 +959,6 @@ function rootTargetsResponse(
 	throw new RootTargetsResultMissingError(root);
 }
 
-// One target's coverage, including the I/O that the pure decision in
-// `evaluateTargetCoverage` cannot perform itself. A target that did not
-// evaluate, or whose selected outputs are not all known before building,
-// reports `unknown-output` without reading or ensuring its root.
 async function targetCoverageOutcome(
 	target: PublishTarget,
 	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
@@ -1021,8 +987,6 @@ async function targetCoverageOutcome(
 		};
 	}
 
-	// An empty reconciled target list cannot cover the target and requires no
-	// refresh.
 	if (reconciledPaths.size === 0) {
 		return { attr: target.attr, status: 'not-covered' };
 	}
@@ -1052,11 +1016,10 @@ async function targetCoverageOutcome(
 }
 
 /**
- * The advisory destination pre-filter: for every cohort in the plan, decides
- * whether its job can be pruned because every member is already covered.
- * The filter reads only retention roots, so each spawned job still computes
- * its partition against the selected store. Any failed check keeps the cohort
- * in the matrix and records the reason without failing the plan.
+ * Returns an advisory prune decision for every cohort. The filter reads only
+ * retention roots, so each remaining job still calculates its partition
+ * against the selected store. A failed check keeps the cohort in the matrix
+ * and records the reason without failing the plan.
  */
 export async function cohortPreFilter(
 	inputs: PlanInputs,
@@ -1090,8 +1053,6 @@ export async function cohortPreFilter(
 	);
 }
 
-// Use the same root construction for cached-target ensures and build-job
-// publication. `runs-on` comes directly from the operator's manifest.
 function targetMatrix(
 	inputs: PlanInputs,
 	plan: PublishPlan
@@ -1109,12 +1070,9 @@ function targetMatrix(
 	}));
 }
 
-// Each surviving cohort contains all data needed by its build job.
-// `installables` contains flake references. After evaluation,
-// `queryInstallables` contains the corresponding daemon derived paths, while
-// `expectedPaths` contains a value only for a target with one predictable
-// output. A target without either value stays on the build set. `bestEffort`
-// controls the job's `continue-on-error` value.
+// `queryInstallables` uses derived paths from evaluation. `expectedPaths` has a
+// value only for a target with one predictable output. A missing value in
+// either list tells the build job to keep the target in its build set.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
@@ -1145,10 +1103,6 @@ function cohortMatrix(
 	}));
 }
 
-// Packing is opt-in. When disabled, the action does not call the measurer and
-// emits the cohorts from the manifest unchanged. When a cohort lacks a
-// measurement, `packCohorts` leaves it unchanged because measured packing has
-// no basis for repartitioning it.
 async function packedCohortsFor(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
@@ -1170,9 +1124,6 @@ async function packedCohortsFor(
 	return packed?.cohorts ?? cohorts;
 }
 
-// One target measurement returned by `cupboard plan measure`. Each query
-// measures one target, so the byte count does not include other targets in the
-// group.
 const measurementSchema = z.object({
 	downloadSize: z.number(),
 	narSize: z.number()
@@ -1188,9 +1139,9 @@ interface MeasurableTarget {
 
 /**
  * Measures each surviving target's substitutable NAR size by invoking
- * `cupboard plan measure` once per target against the selected store. If any
- * measurement fails, returns an empty map; the planner retains the cohorts from
- * the manifest and succeeds.
+ * `cupboard plan measure` once per target against the selected build store. If
+ * any measurement fails, returns an empty map; the planner retains the cohorts
+ * from the manifest and succeeds.
  */
 export function packingMeasurer(
 	inputs: PlanInputs,
@@ -1322,11 +1273,6 @@ function measureResponse(recorded: string): ReadonlyMap<string, number> {
 	throw new MeasureResultMissingError();
 }
 
-// The derived-path form of a target member, the way the Nix daemon's store
-// protocol names a realisation target: the evaluated root derivation and the
-// outputs the manifest selected, exactly as `Cohort.installables` builds the
-// flake-reference form from the same target's attr and outputs. A target
-// that did not evaluate has no derivation path to build this from.
 function queryInstallableFor(
 	target: PublishTarget,
 	evaluation: TargetEvaluation | undefined
@@ -1338,13 +1284,9 @@ function queryInstallableFor(
 	return `${evaluation.rootDrvPath}^${target.outputs.join(',')}`;
 }
 
-// The single output path a build-time availability check can classify a
-// target member by. A target with more than one selected output has no
-// single path that represents it, and a target whose evaluation left any
-// selected output unresolved (a content-addressed or otherwise floating
-// output) has none at all; both report `undefined` and the target always
-// joins the build set, exactly as a manifest target with no predictable
-// output does elsewhere in the plan.
+// Return no expected path unless exactly one selected output was resolved. The
+// build job treats a missing expected path as requiring a build; choosing one
+// output from a multi-output target could incorrectly prune it.
 function expectedPathFor(
 	target: PublishTarget,
 	evaluation: TargetEvaluation | undefined

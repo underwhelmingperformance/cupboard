@@ -35,7 +35,7 @@ describe('check report schemas', () => {
 			value: { ...discrepancy, kind: 'file-hash-mismatch' },
 			expected: { ...discrepancy, kind: 'file-hash-mismatch' }
 		}
-	])('accepts discrepancy: $name', ({ value, expected }) => {
+	])('accepts $name', ({ value, expected }) => {
 		expect(checkDiscrepancySchema.parse(value)).toStrictEqual(expected);
 	});
 
@@ -48,7 +48,7 @@ describe('check report schemas', () => {
 			name: 'an unknown key',
 			value: { ...discrepancy, surprise: true }
 		}
-	])('rejects discrepancy: $name', ({ value }) => {
+	])('rejects $name', ({ value }) => {
 		expect(checkDiscrepancySchema.safeParse(value).success).toBe(false);
 	});
 
@@ -174,7 +174,7 @@ describe('pushSummarySchema', () => {
 
 	it.each([
 		{
-			name: 'a fully populated summary with every outcome and fact shape',
+			name: 'a summary with every outcome and grace shape',
 			value: {
 				uploadedPaths: 1,
 				reusedBlobs: 1,
@@ -212,7 +212,7 @@ describe('pushSummarySchema', () => {
 			}
 		},
 		{
-			name: 'an empty summary with no facts at all',
+			name: 'an empty summary',
 			value: {
 				uploadedPaths: 0,
 				reusedBlobs: 0,
@@ -299,7 +299,7 @@ describe('buildSummarySchema', () => {
 			value: summary
 		},
 		{
-			name: 'a clean run with nothing unconfirmed',
+			name: 'a clean run with no unconfirmed paths',
 			value: { ...summary, childExitStatus: 0, unconfirmedPaths: [] }
 		},
 		{
@@ -312,18 +312,18 @@ describe('buildSummarySchema', () => {
 
 	it.each([
 		{
-			name: 'an unknown key carrying a presigned URL',
+			name: 'a presigned URL in an unknown field',
 			value: {
 				...summary,
 				presignedUrl: 'https://r2.example/nar?signature=abc'
 			}
 		},
 		{
-			name: 'an unknown key carrying a credential',
+			name: 'a credential in an unknown field',
 			value: { ...summary, accessToken: 'write-1' }
 		},
 		{
-			name: 'a mode no run takes',
+			name: 'an unsupported mode',
 			value: { ...summary, mode: 'hooked' }
 		},
 		{

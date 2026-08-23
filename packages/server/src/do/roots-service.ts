@@ -67,8 +67,6 @@ export class RootsService {
 	private writeRoot(cache: StoredCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
-		// Precedence: an explicit TTL, then a matching retention policy, then the
-		// cold-path default for an implicit pin, otherwise permanent.
 		const expiresAt = resolveRootExpiry({
 			explicitTtlSeconds: request.ttlSeconds,
 			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, request.name),
@@ -88,10 +86,8 @@ export class RootsService {
 			.map((target) => target.storePathHash)
 			.filter((storePathHash) => !requested.has(storePathHash));
 
-		// Replace the root wholesale: a re-set fully declares the channel, so the
-		// old row and target set are dropped and rewritten. The createdAt of an
-		// existing channel is preserved; an absent expiry stores SQL NULL via the
-		// undefined insert value.
+		// A set request replaces the complete target set. Preserve the original
+		// creation time while storing no expiry as SQL NULL.
 		const createdAt = this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
@@ -175,8 +171,6 @@ export class RootsService {
 			.all();
 	}
 
-	// The set of distinct target hashes that would serve, the same predicate the
-	// read path uses.
 	private async servableTargets(
 		cache: StoredCache,
 		targets: readonly { storePathHash: StorePathHash }[]
@@ -187,12 +181,9 @@ export class RootsService {
 		);
 	}
 
-	// The exact identity behind each of `targets` that {@link servableTargets}
-	// finds servable, snapshotted synchronously before that probe's R2 heads and
-	// D1 reads run. `ensureRoot` revalidates this snapshot inside the write gate,
-	// so a delete-and-recommit landing during the probe cannot be answered
-	// `retained`: a hash whose row is gone by snapshot time is excluded here the
-	// same as one that never had a row.
+	// Snapshot each row before the R2 probe. `ensureRoot` rechecks the generation
+	// and NAR hash inside the write gate, so a delete and recommit during the probe
+	// cannot retain content that the probe did not verify.
 	private async servableTargetIdentities(
 		cache: StoredCache,
 		targets: readonly { storePathHash: StorePathHash }[]
@@ -217,10 +208,6 @@ export class RootsService {
 		);
 	}
 
-	// Whether a committed narinfo row still exists for this path, a synchronous DO
-	// SQLite read. A delete is row-first and runs under the gate, so a row still
-	// present inside the write gate cannot be mid-delete; this is the cheap
-	// re-check that lets the expensive serve probe run outside the gate.
 	private rowPresent(
 		cache: StoredCache,
 		storePathHash: StorePathHash
@@ -239,11 +226,6 @@ export class RootsService {
 		);
 	}
 
-	// The store paths among `targets` whose current row no longer matches the
-	// identity `servableTargetIdentities` snapshotted off-gate: the row is gone,
-	// or a recommit changed its generation or narHash. A synchronous DO SQLite
-	// read, so this settles inside the same critical section as the write it
-	// gates.
 	private mismatchedTargets(
 		cache: StoredCache,
 		targets: readonly {
@@ -301,9 +283,6 @@ export class RootsService {
 		};
 	}
 
-	// Every root write starts here, so this is where a submitted target is held
-	// to the store directory the cache serves: a root over a path from another
-	// store could never be satisfied by anything this cache can serve.
 	private buildRootSetCommand(
 		rootName: RootName,
 		body: ParsedRootSetBody
@@ -317,23 +296,13 @@ export class RootsService {
 		};
 	}
 
-	// A root may reference any target whose narinfo row exists: reserved at
-	// commit, committed, or servable. A push records retention over a path that
-	// is still verifying, and the path becomes servable when the verify pass
-	// materialises it (`present` reflects that, staying false until then).
-	// `servableTargets` heals a merely-lost object and drives the per-target
-	// `present` flag; its R2 heads run outside this gate. Without
-	// `expectedIdentities` (the `setRoot` path) the gate rejects only a target
-	// with no narinfo row (never uploaded, or deleted): a synchronous row read
-	// that, since a delete is row-first and runs under the gate, cannot
-	// interleave with one. With `expectedIdentities` (the `ensureRoot` path)
-	// the gate additionally refuses a target whose row's generation or narHash
-	// has moved on from the snapshot the caller took off-gate, so a
-	// delete-and-recommit landing during that probe cannot be answered
-	// `retained` for content the probe never actually verified. The section
-	// returns a rejected outcome rather than throwing, so the caller decides
-	// how to report it once the gate has closed: a validation error surfaced
-	// only after the section does not reset the Durable Object.
+	// A set request may retain a row that is still being verified. An ensure
+	// request first proves servability outside the gate, then supplies the exact
+	// generation and NAR hash for this synchronous recheck. Deletion removes the
+	// row first under the same gate, so neither path can write a root for a row
+	// that disappeared or was recommitted during an awaited probe. Return the
+	// rejection after leaving the gate because throwing inside it resets the
+	// Durable Object.
 	private async gatedRootWrite(
 		cache: StoredCache,
 		requested: RootSetCommand,
@@ -362,14 +331,9 @@ export class RootsService {
 		});
 	}
 
-	// Binds a push's run root at negotiate: created on the push's first
-	// negotiate, extended forward-only after that. The run root accretes and is
-	// never replaced, so nothing is released, no grace transition runs, and no
-	// target list is touched; committed paths join it as their commits finalise.
-	// The expiry resolves through the same precedence a root write uses: the
-	// explicit TTL, then a matching retention policy, then the cold-path default
-	// for an implicit pin, otherwise permanent. A single upsert on the single
-	// writer, so it needs no gate.
+	// The first negotiation creates a run root; later negotiations can only extend
+	// its expiry. They do not replace targets or release paths into grace. Commits
+	// add their paths as they finish.
 	bindRunRoot(
 		cache: StoredCache,
 		name: RootName,
@@ -399,10 +363,9 @@ export class RootsService {
 			.onConflictDoUpdate({
 				target: [schema.retentionRoots.cache, schema.retentionRoots.name],
 				set: {
-					// SQL `max` answers NULL when either side is NULL, which reads a
-					// permanent expiry as the latest possible one in both directions;
-					// over ISO-8601 UTC strings it is chronological, so a shorter TTL
-					// never truncates what an earlier negotiate established.
+					// SQLite `max` returns NULL when either operand is NULL, so a
+					// permanent root stays permanent. ISO-8601 UTC strings compare in
+					// chronological order, so a shorter TTL cannot reduce the expiry.
 					expiresAt: sql`max(${schema.retentionRoots.expiresAt}, excluded.expires_at)`,
 					updatedAt: nowIso
 				}
@@ -410,13 +373,9 @@ export class RootsService {
 			.run();
 	}
 
-	// Attaches already-served paths to a push's run root at negotiate. A path
-	// the cache already serves is answered as a skip, a publication that
-	// settles with no commit, so the root gains it here through the same
-	// additive, idempotent insert the commit gate applies, keyed by cache,
-	// root and store-path hash. Nothing is released, no grace transition runs
-	// and the root row is untouched. Chunked inserts on the single writer, so
-	// it needs no gate.
+	// A skipped path has no later commit at which to join the run root, so attach
+	// it during negotiation. The insert is additive and idempotent; it neither
+	// replaces targets nor starts a grace transition.
 	attachRunRootTargets(
 		cache: StoredCache,
 		name: RootName,
@@ -441,10 +400,8 @@ export class RootsService {
 		}
 	}
 
-	// Replaces a root's contents with exactly what the caller declares. An
-	// empty declaration is a replacement like any other: the target rows go,
-	// the root row and its resolved expiry stay, and every released target
-	// takes the grace a replaced generation takes.
+	// Replace the complete target set, including when it is empty. The root and
+	// its resolved expiry remain, and released targets enter retention grace.
 	async setRoot(
 		cache: StoredCache,
 		rootName: RootName,
@@ -506,10 +463,8 @@ export class RootsService {
 		};
 	}
 
-	// The listing summarises: counted in SQLite and keyset-paginated by name, it
-	// reads no target rows and probes nothing in R2, so a tenant whose run
-	// roots have accreted thousands of paths lists them in bounded pages. A
-	// root's targets are read through {@link rootTargets}.
+	// Count targets in SQLite and paginate roots by name without reading target
+	// rows or probing R2. Large run roots therefore do not expand this request.
 	listRoots(
 		cache: StoredCache,
 		options: { readonly cursor?: string; readonly limit?: number } = {}
@@ -552,10 +507,8 @@ export class RootsService {
 		};
 	}
 
-	// One page of a root's targets, keyset-paginated by store-path hash. The
-	// serve probe runs per page, so the page bound also bounds the per-target
-	// probe fan-out an unbounded run root would otherwise fan out in one
-	// request. An unknown root reads as a root with no targets.
+	// Paginate by store-path hash before probing servability, which bounds the R2
+	// fan-out for a large run root. An unknown root returns an empty page.
 	async rootTargets(
 		cache: StoredCache,
 		name: RootName,
@@ -639,10 +592,8 @@ export class RootsService {
 		});
 	}
 
-	// Drops a store path from every retention root's target set. A deferred upload
-	// that fails verification can never become servable, so a root must stop
-	// advertising it; the next push over that root rewrites its targets wholesale.
-	// One delete on the single writer, so it needs no gate.
+	// A deferred upload that fails verification cannot become servable. Remove it
+	// from every root so later listings do not continue to advertise it.
 	pruneRetentionTargets(
 		cache: StoredCache,
 		storePathHash: StorePathHash

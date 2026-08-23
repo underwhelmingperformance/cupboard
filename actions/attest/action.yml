@@ -1,34 +1,33 @@
 name: Attest cupboard store paths
 description:
-  Produce two Sigstore bundles for the NAR hashes in a current-run build
-  receipt. GitHub's SLSA build provenance covers the paths built by the run. A
-  cupboard build-origin statement covers every published path and records its
-  origin. Before signing, the action checks every subject against the
-  destination cache's live, committed narinfo. The build store is no longer
-  required.
+  Produce Sigstore bundles for the accepted subjects in a current-run build
+  receipt. GitHub's SLSA build provenance covers paths built by this run. A
+  cupboard build-origin statement covers every accepted subject and records its
+  origin. Before signing, committed destination narinfos verify each NAR hash
+  and any recorded deriver.
 inputs:
   receipt-file:
     description: Current-run receipt produced by a cupboard build action.
     required: true
   checksums-file:
     description:
-      Where to write the checksums of every path the receipt describes. Defaults
-      to a runner-local path under RUNNER_TEMP.
+      Where to write checksums for all accepted receipt subjects. Defaults to a
+      runner-local path under RUNNER_TEMP.
     required: false
   built-checksums-file:
     description:
-      Where to write the checksums of the paths the run built. They are the
-      subjects of the build-provenance bundle. Defaults to a file beside the
+      Where to write checksums for accepted subjects built by this run. They are
+      the subjects of the build-provenance bundle. Defaults to a file beside the
       checksums file.
     required: false
   predicate-file:
     description:
-      Where to write the build-origin predicate signed into the second bundle.
-      Defaults to a file beside the checksums file.
+      Where to write the build-origin predicate. Defaults to a file beside the
+      checksums file.
     required: false
   url:
     description:
-      Destination cupboard tenant URL whose committed narinfos verify every
+      Destination cupboard tenant URL. Its committed narinfos verify every
       subject before signing.
     required: true
   cache:
@@ -46,35 +45,29 @@ inputs:
 outputs:
   bundle-path:
     description:
-      Path to the generated SLSA build-provenance bundle. Empty when the receipt
-      records no path this run built, in which case the action signs no
-      provenance.
+      Path to the generated SLSA build-provenance bundle. Empty when this run
+      built no accepted subject.
     value: ${{ steps.attest.outputs.bundle-path }}
   origin-bundle-path:
     description:
-      Path to the generated build-origin bundle. Empty when the receipt records
-      no origin for the subjects this run signs, which is the case for a version
-      2 receipt and for a run with no eligible subject.
+      Path to the generated build-origin bundle. Empty for a version 2 receipt
+      or when no accepted subject has a recorded origin.
     value: ${{ steps.attest.outputs.origin-bundle-path }}
   checksums-file:
     description:
-      Path to the checksums of every path the receipt describes. They are the
+      Path to the checksums for all accepted receipt subjects. They are the
       subjects of the build-origin bundle.
     value: ${{ steps.subjects.outputs.checksums-file }}
   subject-count:
-    description:
-      Number of store paths the receipt describes and the action accepts as
-      attestation subjects.
+    description: Number of accepted attestation subjects.
     value: ${{ steps.subjects.outputs.subject-count }}
   built-checksums-file:
     description:
-      Path to the checksums of the paths the run built. They are the subjects of
-      the build-provenance bundle.
+      Path to the checksums for accepted subjects built by this run. They are
+      the subjects of the build-provenance bundle.
     value: ${{ steps.subjects.outputs.built-checksums-file }}
   built-subject-count:
-    description:
-      Number of the accepted subjects whose receipt entry records that this run
-      built the path.
+    description: Number of accepted subjects built by this run.
     value: ${{ steps.subjects.outputs.built-subject-count }}
 runs:
   using: composite

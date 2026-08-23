@@ -33,35 +33,17 @@ import {
 export interface BuildPushPreflightOptions {
 	readonly config: NixStoreConfig;
 	readonly storeKind: NixStoreKind;
-	/**
-	The physical state directory used by the resolved store backend.
-	*/
 	readonly stateDirectory: string;
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	readonly invocationId: InvocationId;
-	/**
-	The authorization_details the token exchange actually granted.
-	*/
 	readonly grants: readonly AuthorizationDetail[];
-	/**
-	The cache the run publishes to, as its wire selector.
-	*/
 	readonly cache: CacheSelector;
-	/**
-	The run root every streamed commit attaches to, when the run binds one.
-	*/
 	readonly runRoot?: RootName;
-	/**
-	The target roots reconciliation will set, when the run declares any.
-	*/
 	readonly targetRoots?: readonly RootName[];
 	readonly helper?: HelperResolutionOptions;
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 }
 
-/**
-The resources required for streaming and the method used to protect outputs.
-*/
 export interface BuildPushPreflight {
 	readonly outputProtection:
 		| { readonly kind: 'daemon-temporary-roots' }

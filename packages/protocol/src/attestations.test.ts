@@ -11,7 +11,7 @@ const bundle = { storePathHash, digest };
 const pushId = 'push-1';
 
 describe('attestationNegotiateRequestSchema', () => {
-	it('accepts a request within the bundle cap', () => {
+	it('accepts 100,000 bundles', () => {
 		const value = {
 			pushId,
 			bundles: Array.from(
@@ -37,7 +37,7 @@ describe('attestationNegotiateRequestSchema', () => {
 			value: { bundles: [{ ...bundle, digest: 'nope' }] }
 		},
 		{
-			name: 'more bundles than the cap allows',
+			name: '100,001 bundles',
 			value: {
 				bundles: Array.from(
 					{ length: attestationNegotiateMaxBundles + 1 },

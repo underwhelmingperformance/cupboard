@@ -81,9 +81,8 @@ function target(storePath: StorePathString, root?: RootName): ReconcileTarget {
 	};
 }
 
-// By default a path the store built itself, which is what a run normally
-// reaches reconciliation with. `isSubstituted` describes a path the store
-// fetched from a substituter instead.
+// Default metadata represents a local build. Substituted metadata includes a
+// signature and sets `ultimate` to false.
 function pathInfo(
 	storePath: StorePathString,
 	isSubstituted = false
@@ -98,9 +97,6 @@ function pathInfo(
 	};
 }
 
-// A receipt describes every path it publishes. These paths are the store's own
-// work and no attempt attributed a build to them, so each is described as work
-// the store already held.
 function heldSubjects(
 	storePaths: readonly StorePathString[]
 ): readonly BuildSubjectV3[] {
@@ -166,9 +162,6 @@ function emptyStream(): ReadableStream<Uint8Array> {
 
 interface HarnessOptions {
 	readonly valid?: readonly StorePathString[];
-	/**
-	Paths the store fetched from a substituter.
-	*/
 	readonly substituted?: readonly StorePathString[];
 	readonly actions?: ReadonlyMap<StorePathString, UploadDecision['action']>;
 	readonly failUploads?: ReadonlySet<StorePathString>;
@@ -189,9 +182,6 @@ interface Harness {
 	readonly negotiatedPaths: string[][];
 	readonly rootReplacements: { name: string; body: RootSetBody }[];
 	readonly uploadedKeys: string[];
-	/**
-	The paths committed through the client rather than over a shared session.
-	*/
 	readonly clientCommits: StorePathHash[];
 	readonly store: ReconcileOptions['store'];
 	readonly client: PushClient;
@@ -528,7 +518,7 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
-			name: 'settles a root empty when its only target is left upstream',
+			name: 'replaces a root with no targets when its only path is left upstream',
 			harness: { valid: [pathD] },
 			options: {
 				targets: [target(pathD, rootTwo)],
@@ -565,7 +555,7 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
-			name: 'settles a mixed root with only the destination-held target',
+			name: 'replaces a mixed root with only its destination-held target',
 			harness: { valid: [pathA, pathD] },
 			options: {
 				targets: [target(pathA, rootTwo), target(pathD, rootTwo)],
@@ -606,7 +596,7 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
-			name: 'leaves a root unsettled when a failed target shares it with one left upstream',
+			name: 'leaves a root unchanged when it contains a failed target',
 			harness: {
 				valid: [pathB, pathD],
 				actions: new Map<StorePathString, UploadDecision['action']>([
@@ -703,7 +693,7 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
-			name: 'records a published intermediate the store fetched as copied',
+			name: 'uses copied provenance for a substituted intermediate',
 			harness: { valid: [pathA, pathG], substituted: [pathG] },
 			options: {
 				targets: [target(pathA, rootOne)],
@@ -804,10 +794,8 @@ describe('reconcileBuild', () => {
 		});
 	});
 
-	// The fixture cannot shrink: a second batch exists only past
-	// `uploadNegotiateMaxPaths`, which is a wire constant, so this test builds
-	// a hundred thousand paths and needs more than the default timeout on a
-	// loaded runner.
+	// `uploadNegotiateMaxPaths` is a wire constant, so reaching a second batch
+	// requires a large fixture. Allow extra time on loaded runners.
 	it(
 		'continues with later batches after one negotiation fails',
 		{ timeout: 30_000 },
@@ -911,7 +899,7 @@ describe('reconcileBuild', () => {
 		});
 	});
 
-	it('withholds the root when a deferred verdict fails', async () => {
+	it('leaves the root unchanged when a deferred verdict fails', async () => {
 		const harnessed = harness({
 			valid: [pathA],
 			actions: new Map<StorePathString, UploadDecision['action']>([
@@ -946,7 +934,7 @@ describe('reconcileBuild', () => {
 		expect(failure?.cause).toBeInstanceOf(UploadVerificationFailedError);
 	});
 
-	it('reports a refused empty settlement against the target it was declared for', async () => {
+	it('reports a rejected empty root replacement for its declared target', async () => {
 		const harnessed = harness({ valid: [pathD] });
 		const refusal = new Error('root write refused');
 
@@ -1023,10 +1011,6 @@ describe('reconcileBuild', () => {
 	});
 });
 
-// A run opens one commit session and threads it through every phase, so
-// reconciliation must commit over it rather than opening its own. The client's
-// own `commit` is the fallback for a client that opens no session at all, and
-// reaching it here would mean a second socket per run.
 describe('reconcileBuild over a shared commit session', () => {
 	it('commits over the session and never through the client', async () => {
 		const sessionCommits: CommitSessionTarget[] = [];
@@ -1042,7 +1026,7 @@ describe('reconcileBuild over a shared commit session', () => {
 				});
 			},
 			close: () => {
-				throw new Error('the run closes the session, not reconciliation');
+				throw new Error('reconciliation must not close the shared run session');
 			}
 		};
 		const harnessed = harness({

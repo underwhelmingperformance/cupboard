@@ -31,11 +31,6 @@ interface ConfirmableOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the reuse-view commands use, in the
- * contract's input and output shapes. The real `tenantRpc(...).reuseViews`
- * satisfies this interface by construction.
- */
 export interface ReuseViewClient {
 	list(): Promise<ParsedReuseViewListResponse>;
 	set(input: {
@@ -226,7 +221,8 @@ export async function runReuseViewRemove(
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Remove reuse view ${name}?`,
-		detail: 'Caches that substitute from this view lose it immediately.'
+		detail:
+			'Clients can no longer query this view. The underlying caches are unchanged.'
 	});
 
 	if (outcome !== 'yes') {

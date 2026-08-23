@@ -24,11 +24,6 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
-/**
- * The slice of the derived control client the tenant commands consume, in the
- * contract's input and output shapes; the real `controlRpc(...).tenants`
- * satisfies it by construction.
- */
 export interface TenantClient {
 	list(): Promise<ParsedTenantListResponse>;
 	create(input: TenantCreateBody): Promise<ParsedTenantSummary>;
@@ -108,14 +103,14 @@ export function generateReadPassword(): string {
 	return randomBytes(32).toString('base64url');
 }
 
-// The Basic-auth user a command configures: the one supplied, or the default a
-// reader assumes when a cache names none.
 function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
 	return supplied ?? defaultReadUser;
 }
 
-// The read credential a private cache needs. Private tenants get a generated
-// password by default; `--no-read-password` keeps the existing fails-closed mode.
+/**
+ * Returns no credential for a public tenant or when `--no-read-password` is
+ * set. Otherwise it uses the supplied password or generates one.
+ */
 export function readCredentialFromOptions(options: {
 	readonly public?: boolean;
 	readonly readUser?: ReadUser;
@@ -195,7 +190,7 @@ export function registerTenantCommands(
 		)
 		.option(
 			'--no-read-password',
-			'create a private cache with no read password'
+			'do not create a read credential; private reads then fail closed'
 		)
 		.option(
 			'--quota-bytes <bytes>',
@@ -397,8 +392,6 @@ export async function runTenantCreate(
 		{ label: 'Read mode', value: summary.readMode }
 	];
 
-	// A private cache with no read credential fails closed, so flag it: the operator
-	// must recreate it with --read-user/--read-password before any reader can use it.
 	if (summary.readMode === 'private' && body.read === undefined) {
 		rows.push({
 			label: 'Warning',
@@ -521,8 +514,6 @@ export async function runTenantRotateCredential(
 		rows.push({ label: 'Read password', value: generated });
 	}
 
-	// A read credential only gates a private cache; flag the public case so the
-	// operator is not left thinking reads are now authenticated.
 	if (result.readMode === 'public') {
 		rows.push({
 			label: 'Warning',

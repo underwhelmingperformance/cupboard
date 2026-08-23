@@ -17,9 +17,6 @@ import type {
 	TextEditOptions
 } from './cli-ui.ts';
 
-/**
-Everything a {@link FakeCliUi} recorded, for structural assertions.
-*/
 export interface CliUiCapture {
 	readonly intros: string[];
 	readonly outros: string[];
@@ -38,8 +35,8 @@ export interface CliUiCapture {
 }
 
 /**
- * The answers a {@link FakeCliUi} gives to prompts. Each defaults to a
- * cancellation, so a test scripts only the prompts its path reaches.
+ * Unspecified prompt answers default to cancellation, so a test only needs to
+ * provide answers for the prompts its path reaches.
  */
 export interface CliUiScript {
 	readonly interactive?: boolean;
@@ -57,13 +54,9 @@ export interface FakeCliUi {
 }
 
 const noop = (): void => {
-	/*
-	the fake does not record phase facts or sub-step narration
-	*/
+	// Intentionally empty test callback.
 };
 
-// A `StepLog` whose every call is inert: tests run a `steps` body for its
-// effects, not to assert on the sub-step narration.
 const silentStepLog: StepLog = {
 	message: noop,
 	group: (): StepGroup => ({
@@ -75,9 +68,9 @@ const silentStepLog: StepLog = {
 };
 
 /**
- * A {@link CliUi} that records every narration and answers prompts from a
- * script, for asserting on a command's output without a terminal. Phases run
- * their body straight through and results are captured, not rendered.
+ * Use this in command tests that need scripted prompts and captured output
+ * without a terminal. Phases run their body directly, and results are captured
+ * rather than rendered.
  */
 export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	const captured: CliUiCapture = {
@@ -220,11 +213,10 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 }
 
 /**
- * A {@link Reporter} that runs each phase, progress and steps body straight
- * through and collects the result rows, info messages and top-level warnings,
- * for asserting on a command's output without a terminal. Warnings raised
- * inside a phase, `data` payloads and errors are discarded; a test that needs
- * them builds its own reporter.
+ * Use this when a test needs result rows, information messages, and top-level
+ * warnings without rendered output. It calls each phase, progress, and steps
+ * body directly. Warnings raised inside those bodies, `data` payloads, and
+ * errors are discarded; a test that needs them must provide its own reporter.
  */
 export function capturingReporter(
 	results: ResultRow[][],
@@ -239,8 +231,8 @@ export function capturingReporter(
 		result: (payload) => {
 			results.push([...payload.rows]);
 
-			// An empty result renders its `empty` message as an info line in the
-			// terminal, so record it alongside the infos a test asserts on.
+			// Match terminal rendering by recording an empty result's message with
+			// other informational lines.
 			if (payload.rows.length === 0 && payload.empty !== undefined) {
 				infos.push(payload.empty);
 			}

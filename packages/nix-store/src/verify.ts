@@ -8,8 +8,8 @@ import { NixSignature } from './signature.ts';
  */
 export class NixTrustedKeys {
 	/**
-	 * Parses the valid `<name>:<base64>` keys and ignores malformed values. The
-	 * remaining keys determine whether a path is trusted.
+	 * Parses the valid `<name>:<base64>` keys and ignores malformed values. Only
+	 * the parsed keys can verify path signatures.
 	 */
 	static of(values: readonly string[]): NixTrustedKeys {
 		const keys = new Map<NixKeyName, NixPublicKey>();
@@ -34,9 +34,9 @@ export class NixTrustedKeys {
 	}
 
 	/**
-	 * Whether at least one signature over this fingerprint is valid under a
-	 * trusted key. Nix counts the signatures it can verify and accepts a path
-	 * with at least one. Signatures from unknown keys do not affect the result.
+	 * Whether any signature verifies the fingerprint under a trusted key.
+	 * Malformed signatures and signatures from unknown keys do not affect the
+	 * result.
 	 */
 	async hasValidSignature(
 		fingerprint: NixFingerprint,
@@ -61,8 +61,8 @@ export class NixTrustedKeys {
 
 /**
  * Reads the public half of a Nix secret key file. The file contains a name and a
- * 64-byte Ed25519 secret whose last 32 bytes are the public key. A file that
- * does not match this format returns `undefined`.
+ * 64-byte Ed25519 secret whose last 32 bytes are the public key. Returns
+ * `undefined` for any other format.
  */
 export function publicKeyOfSecret(contents: string): NixPublicKey | undefined {
 	const parsed = parseKey(contents.trim());
@@ -80,11 +80,11 @@ export function publicKeyOfSecret(contents: string): NixPublicKey | undefined {
 const publicKeyByteLength = 32;
 const secretKeyByteLength = 64;
 
-// The signature algorithm every Nix signing key uses.
 const algorithm = 'Ed25519';
 
-// The Web Crypto API needs bytes backed by a buffer of their own, and a decoded
-// value's buffer may be shared, so each value is copied into a new buffer.
+// Web Crypto requires a byte view backed by an independent ArrayBuffer. A
+// decoded view can share a larger buffer, so copy each value before passing it
+// to the API.
 function ownBuffer(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 	const copy = new Uint8Array(bytes.byteLength);
 	copy.set(bytes);
@@ -125,8 +125,8 @@ async function isSignatureValid(
 			ownBuffer(signed)
 		);
 	} catch {
-		// Web Crypto reports malformed key or signature material by throwing. Such
-		// material cannot verify the fingerprint.
+		// Web Crypto throws for malformed key or signature bytes. In either case,
+		// the signature does not verify.
 		return false;
 	}
 }

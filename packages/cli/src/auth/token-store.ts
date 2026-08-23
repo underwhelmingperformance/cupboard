@@ -22,17 +22,12 @@ export function tokensDirectory(): string {
 	return path.join(configDirectory(), 'tokens');
 }
 
-// A target's session: the access token every request carries and, when the
-// server granted one, the rotating refresh token that renews it silently.
 const cachedSessionSchema = z.object({
 	accessToken: z.string().min(1),
 	refreshToken: z.string().min(1).optional()
 });
 export type CachedSession = z.output<typeof cachedSessionSchema>;
 
-/**
-Maps a token endpoint's response to the session shape the cache holds.
-*/
 export function sessionFromTokenResponse(
 	response: Pick<ParsedTokenResponse, 'access_token' | 'refresh_token'>
 ): CachedSession {
@@ -68,10 +63,8 @@ export async function readCachedSession(
 		return undefined;
 	}
 
-	// A cached session is reused only against the target it was issued for: the
-	// access token's issuer must be that target, and its audience must admit
-	// it. This stops a session cached for one tenant being sent to another on
-	// the same host.
+	// Use the decoded issuer and audience only to select a cached session. These
+	// claims are not verified here; the server verifies the token when it is used.
 	return isTokenBoundToTarget(session.accessToken, normalised)
 		? session
 		: undefined;
@@ -102,7 +95,7 @@ function parseSession(contents: string): CachedSession | undefined {
 		return undefined;
 	}
 
-	// A cache file from before sessions holds the bare access token.
+	// Cache files written before refresh sessions contain only the access token.
 	if (!trimmed.startsWith('{')) {
 		return { accessToken: trimmed };
 	}
@@ -127,12 +120,9 @@ const jwtClaimsSchema = z.object({
 	aud: z.union([z.string(), stringArraySchema]).optional()
 });
 
-// Whether a token's signed claims bind it to this target. The issuer is the
-// per-target binding: a tenant issues `iss` equal to its base URL, whereas the
-// control plane issues `iss` equal to the bare host, so a token issued for one
-// target never matches another. The audience must also admit the target: a
-// tenant token's audience is the target URL, while a control token's audience
-// is a configured client id (non-URL), so a non-URL audience is accepted too.
+// A tenant token uses its target URL as issuer and audience. A control token
+// uses the bare deployment URL as issuer and a non-URL client id as audience,
+// so admit non-URL audiences when selecting a cached control session.
 function isTokenBoundToTarget(token: string, target: string): boolean {
 	const claims = decodeJwtClaims(token);
 

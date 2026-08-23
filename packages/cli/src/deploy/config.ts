@@ -26,7 +26,7 @@ export interface R2Binding {
 
 /**
  * A KV namespace binding. `title` is the account-level name this command
- * reconciles by, derived from the binding (the wrangler config only carries a
+ * reconciles by, derived from the binding (the wrangler config only contains a
  * placeholder id).
  */
 export interface KvBinding {
@@ -116,8 +116,9 @@ const databaseName = resourceName('D1 database name', 63);
 const queueName = resourceName('queue name', 63);
 
 /**
-What a deploy-time edit can rename; KV titles are derived, not edited.
-*/
+ * KV namespace titles come from their bindings, so the interactive editor
+ * accepts changes only for these account-level resources.
+ */
 export type EditableResourceKind = 'bucket' | 'database' | 'queue';
 
 const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
@@ -127,9 +128,8 @@ const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
 };
 
 /**
- * Why `value` cannot name a resource of `kind`, or undefined when it can.
- * Reuses the wrangler-config schema rules, so interactive edits are held to
- * exactly the bar the checked-in config is.
+ * Uses the same schemas as the checked-in Wrangler configuration so an
+ * interactive edit cannot create a value that the configuration parser rejects.
  */
 export function resourceNameProblem(
 	kind: EditableResourceKind,
@@ -140,9 +140,6 @@ export function resourceNameProblem(
 	return parsed.success ? undefined : parsed.error.issues[0]?.message;
 }
 
-/**
-Why `value` cannot be a cron trigger, or undefined when it can.
-*/
 export function cronProblem(value: string): string | undefined {
 	const parsed = cronExpression.safeParse(value);
 

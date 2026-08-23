@@ -81,21 +81,17 @@ export async function handleSignup(
 	);
 }
 
-// The deployment gate configuration the claim consults: a single-use claim secret,
-// a pinned subject, and the local-development relaxation flag. A secret never put
-// (and a var a hand-rolled deploy omitted) is an absent binding, so each member
-// reads as undefined when unset.
+// Bindings can be absent in a hand-written deployment. Read each value as
+// optional so a missing gate fails closed outside local development.
 export interface SignupGate {
 	readonly CUPBOARD_SIGNUP_SECRET: string | undefined;
 	readonly CUPBOARD_SIGNUP_SUBJECT: string | undefined;
 	readonly CUPBOARD_LOCAL_DEV: string | undefined;
 }
 
-// Enforces the deployment gate that decides who may claim global admin. A
-// configured single-use claim secret must be presented and match; otherwise a
-// configured pinned subject must equal the verified subject; otherwise the claim is
-// refused unless local development explicitly relaxes it. Exported for direct
-// testing of the gate matrix.
+// A configured claim secret must match; otherwise a configured subject must
+// match the verified token. With neither binding, only local development may
+// claim the first administrator.
 export function enforceGate(
 	env: SignupGate,
 	claimSecret: string | undefined,

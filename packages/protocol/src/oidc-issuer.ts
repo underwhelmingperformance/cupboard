@@ -1,10 +1,9 @@
 const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 /**
- * Whether a URL may be used as an OIDC issuer or JWKS endpoint. HTTPS is
- * required so tokens and keys cannot be fetched over an interceptable channel;
- * plain HTTP is permitted only for loopback hosts, so local development and the
- * e2e stub issuer work without a certificate.
+ * OIDC issuer and JWKS URLs must use HTTPS so tokens and keys do not cross an
+ * interceptable channel. HTTP is accepted only for a loopback host, which
+ * supports local development and test issuers.
  */
 export function isAllowedIssuerUrl(value: string): boolean {
 	let url: URL;
@@ -23,11 +22,10 @@ export function isAllowedIssuerUrl(value: string): boolean {
 }
 
 /**
- * A validated, normalised OpenID Connect issuer identifier. Construction enforces
- * the transport rule (HTTPS, or HTTP only for loopback) and removes a trailing
- * slash, so that an issuer compares equal to a token's `iss` regardless of a
- * trailing slash, the discovery URL is exact, and the metadata `issuer` check
- * (OpenID Connect Discovery §4.3) is slash-insensitive.
+ * An issuer must pass {@link isAllowedIssuerUrl} and contain no query, fragment
+ * or user information. Cupboard removes one trailing slash before comparing
+ * issuer strings or building the discovery URL. This tolerance is local;
+ * OpenID Connect specifies exact issuer-string comparisons.
  */
 export class IssuerUrl {
 	static parse(raw: string): IssuerUrl | undefined {
@@ -49,9 +47,9 @@ export class IssuerUrl {
 			return undefined;
 		}
 
-		// The stored value is the raw identifier with only the trailing slash
-		// trimmed, deliberately not host-lowercased or otherwise URL-normalised,
-		// since OpenID Connect compares the issuer as a case-sensitive string.
+		// Preserve the supplied identifier apart from one trailing slash.
+		// Reconstructing it from `url` could normalise characters even though
+		// Cupboard's issuer comparisons are string-based.
 		return new IssuerUrl(raw.endsWith('/') ? raw.slice(0, -1) : raw);
 	}
 
@@ -66,9 +64,5 @@ export class IssuerUrl {
 	}
 }
 
-// The issuer and audience cupboard puts in its own access tokens, and pins when
-// verifying them, when a deployment leaves CUPBOARD_AUTH_ISSUER and _AUDIENCE
-// unset. One default keeps the issued token, its verification and the published
-// OAuth metadata reporting the same identity.
 export const defaultAuthIssuer = 'cupboard';
 export const defaultAuthAudience = 'cupboard';

@@ -156,8 +156,6 @@ describe('scheduled tenant pass failure records', () => {
 	});
 
 	it('attempts every batch when an earlier one fails, surfacing a typed error', async () => {
-		// More than one batch of messages: a tenant-maintenance message per tenant
-		// followed by a trailing global pass, the order a live tick produces.
 		const messages: MaintenanceQueueMessage[] = [
 			...Array.from({ length: 120 }, (_, index): MaintenanceQueueMessage => ({
 				kind: 'tenant-maintenance',
@@ -191,7 +189,6 @@ describe('scheduled tenant pass failure records', () => {
 			outcome = { error: queueBatchSendErrorShape(error) };
 		}
 
-		// The trailing batch was still handed to the queue despite the first failing.
 		expect({ outcome, attempted }).toStrictEqual({
 			outcome: {
 				error: { name: QueueBatchSendError.name, errors: [rejection] }
@@ -201,7 +198,6 @@ describe('scheduled tenant pass failure records', () => {
 	});
 
 	it('aggregates a failure from every batch in send order', async () => {
-		// 150 messages span two batches (100 then 50); both sends fail.
 		const messages: MaintenanceQueueMessage[] = Array.from(
 			{ length: 150 },
 			(_, index): MaintenanceQueueMessage => ({
@@ -239,8 +235,6 @@ describe('scheduled tenant pass failure records', () => {
 			outcome = { error: queueBatchSendErrorShape(error) };
 		}
 
-		// Both batches are attempted and their failures are aggregated in send order,
-		// so the accumulation keeps every failure, not just the last.
 		expect({ outcome, attempted }).toStrictEqual({
 			outcome: {
 				error: { name: QueueBatchSendError.name, errors: failures }
@@ -627,9 +621,9 @@ describe('scheduled tenant pass failure records', () => {
 	});
 
 	it('schedules tenants with due eligibility signals', async () => {
-		// `delete` and `verify` carry immediate work, which the reconcile publishes as
-		// the fixed past `wakeImmediately` sentinel. Seed that exact value so the
-		// producer's "due now" marker threads through the cron's `lte` selection.
+		// `delete` and `verify` use the fixed past `wakeImmediately` value for work
+		// that is due now. Seed the same value so the cron selects these rows with
+		// its `lte` query.
 		const wakeImmediately = isoTimestamp(new Date(0));
 
 		await provisionNamedTenant('delete');

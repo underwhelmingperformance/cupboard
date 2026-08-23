@@ -23,7 +23,7 @@ describe('control plane GET /control/check', () => {
 		expect(response.status).toBe(401);
 	});
 
-	it('answers no-tenant when no cache exists to probe through', async () => {
+	it('returns no-tenant when no cache exists to probe through', async () => {
 		// The harness provisions a fixture tenant on reset; this case is the
 		// deployment before its first cache, so the registry is emptied.
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
@@ -91,8 +91,8 @@ describe('control plane GET /control/check', () => {
 					pathname: signed.pathname,
 					search: signed.search,
 					method: probe.method,
-					// The push mechanism carries the session token in the header, never
-					// the query string, which R2 rejects for a temporary credential.
+					// The push sends the session token in the header. R2 rejects a
+					// temporary credential when that token appears in the query string.
 					hasToken: probe.hasToken
 				}
 			}).toStrictEqual({

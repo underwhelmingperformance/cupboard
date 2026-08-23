@@ -12,9 +12,6 @@ import {
 
 import { verifyRequestStaleMs } from './commit-pipeline-service.ts';
 
-// The verify request guard is single-flight while fresh: a second request
-// inside the staleness window coalesces with the outstanding message, and one
-// past it presumes that message lost and sends again.
 describe('verify request staleness guard', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -42,9 +39,6 @@ describe('verify request staleness guard', () => {
 	it('retries at once after a failed send', async () => {
 		await initialise();
 
-		// The first send fails; there is no outstanding message to ride, so the
-		// guard must clear and let the very next deferral send afresh rather
-		// than suppress it for the whole staleness window.
 		const sent: unknown[] = [];
 		const metrics = { backlogCount: 0, backlogBytes: 0 };
 		let shouldFail = true;

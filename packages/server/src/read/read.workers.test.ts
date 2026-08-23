@@ -27,7 +27,6 @@ async function seedOwnedNar(): Promise<void> {
 	await env.BLOBS.put(narObjectKey(narHash), narBytes);
 }
 
-// A private serve, so no edge cache sits in front of the ownership read.
 async function serveWithFaults(failures: number): Promise<Response> {
 	const faultyEnv = {
 		...env,
@@ -44,7 +43,7 @@ async function serveWithFaults(failures: number): Promise<Response> {
 }
 
 describe('NAR serve under shared-fact read faults', () => {
-	it('returns the GET representation when Hono dispatches HEAD', async () => {
+	it('returns the NAR body to Hono before Hono strips it from a HEAD response', async () => {
 		await seedOwnedNar();
 
 		const response = await serveNar(
@@ -94,7 +93,7 @@ describe('NAR serve under shared-fact read faults', () => {
 		}).toStrictEqual({ status: StatusCodes.OK, body: narBytes });
 	});
 
-	it('refuses retryably when the ownership read keeps faulting', async () => {
+	it('raises a 503 with Retry-After when both ownership reads fail', async () => {
 		await seedOwnedNar();
 
 		let caught: unknown;

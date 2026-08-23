@@ -1,17 +1,15 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
-/**
-Where {@link openBrowser} writes its messages; any reporter satisfies it.
-*/
 export interface BrowserMessages {
 	info(message: string): void;
 	warn(message: string): void;
 }
 
 /**
- * Best-effort browser launch: the URL is always printed, so a failed or absent
- * opener still leaves the user a link to follow.
+ * Prints the URL, then starts the platform opener without waiting for it. A
+ * warning reports only a failure to spawn the child process; the opener's later
+ * exit status is not observed.
  */
 export function openBrowser(target: string, messages: BrowserMessages): void {
 	messages.info(`Opening your browser to:\n${target}`);

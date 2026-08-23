@@ -81,7 +81,7 @@ describe('parseFormBody', () => {
 		subject_token: z.string()
 	});
 
-	it('parses a well-formed urlencoded body', async () => {
+	it('parses a well-formed URL-encoded body', async () => {
 		const parsed = await parseFormBody(
 			grant,
 			formRequest('grant_type=token-exchange&subject_token=abc')
@@ -125,7 +125,7 @@ describe('parseStored', () => {
 	it.each([
 		{ name: 'corrupt JSON', source: '{' },
 		{ name: 'a schema mismatch', source: JSON.stringify({ name: 1 }) }
-	])('raises the supplied fault on $name', ({ source }) => {
+	])('throws the supplied fault for $name', ({ source }) => {
 		expect(() => parseStored(schema, source, storedFault)).toThrow(
 			StoredUploadMetadataInvalidError
 		);

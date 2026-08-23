@@ -4,9 +4,6 @@ import { arch, platform } from 'node:process';
 import type { NixSystem } from './nix-systems.ts';
 import { nixSettingTables } from './setting-types.generated.ts';
 
-/**
-Setting metadata generated from the pinned Nix for one system.
-*/
 export interface NixSettingTable {
 	readonly generatedFromNix: string;
 	readonly types: Readonly<Record<string, NixSettingValueType>>;
@@ -44,10 +41,6 @@ const currentSettingTable =
 		? undefined
 		: nixSettingTables[currentNixSystem];
 
-/**
- * The value type reported for a Nix setting by `nix config show --json`. The
- * generated table maps every known setting to one of these types.
- */
 export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
@@ -69,7 +62,6 @@ export function isAppendableSetting(name: string): boolean {
 	return type === 'list' || type === 'map';
 }
 
-// The complete set of values that Nix accepts for boolean settings.
 const booleanValues = new Set(['true', 'yes', '1', 'false', 'no', '0']);
 
 /**
@@ -82,7 +74,6 @@ export type NixIntegerWidth = 'int32' | 'uint32' | 'int64' | 'uint64';
 // Fractions, other bases and suffixes other than a unit are rejected.
 const integerPattern = /^(?<digits>[+-]?\d+)(?<unit>[KMGTkmgt]?)$/u;
 
-// Optional binary units accepted by Nix, in either letter case.
 const binaryUnits: ReadonlyMap<string, bigint> = new Map([
 	['k', 1024n],
 	['m', 1024n ** 2n],
@@ -121,9 +112,6 @@ export function nixInteger(name: string, value: string): bigint | undefined {
 	);
 }
 
-/**
-The integer Nix reads from the value for a setting of the given width.
-*/
 export function nixIntegerOfWidth(
 	value: string,
 	width: NixIntegerWidth
@@ -212,14 +200,10 @@ export function isSettingValue(
 	return true;
 }
 
-/**
-A whitespace-separated setting value, as Nix reads its list settings.
-*/
 export function listOf(value: string): readonly string[] {
 	return value.split(/\s+/u).filter(Boolean);
 }
 
-// Store types that Nix accepts as bare words.
 const namedStores = new Set(['', 'auto', 'daemon', 'local']);
 
 /**
@@ -228,7 +212,6 @@ const namedStores = new Set(['', 'auto', 'daemon', 'local']);
  * are rejected later when the store is opened.
  */
 function isStoreReference(value: string): boolean {
-	// Remove query parameters before parsing the store reference.
 	const parameters = value.indexOf('?');
 	const reference = parameters === -1 ? value : value.slice(0, parameters);
 
@@ -280,9 +263,6 @@ function isPathReference(reference: string): boolean {
 	);
 }
 
-/**
-A human-readable description of the values accepted by a setting.
-*/
 export function settingValueExpectation(
 	name: string,
 	type: NixSettingValueType

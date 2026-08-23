@@ -63,7 +63,7 @@ describe('control contract round trip', () => {
 		expect(conflict).toMatchObject({ status: StatusCodes.CONFLICT });
 	});
 
-	it('drives the control keys through the derived client', async () => {
+	it('rotates, lists, and retires control keys through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		const rotated = await client.keys.rotate();
@@ -85,7 +85,7 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it('drives the control trust rules through the derived client', async () => {
+	it('creates, lists, and removes control trust rules through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		const added = await client.oidcTrust.add({
@@ -118,7 +118,7 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it('refuses a control trust write from a token scoped away from it', async () => {
+	it('rejects a control trust write from a token without its scope', async () => {
 		const scoped = await issueControlAdminToken('writer', cacheWriteGrants());
 		const client = controlClient(scoped);
 
@@ -128,7 +128,7 @@ describe('control contract round trip', () => {
 		expect(error).toMatchObject({ code: 'FORBIDDEN' });
 	});
 
-	it('drives the tenant registry through the derived client', async () => {
+	it('creates, lists, suspends, and offboards tenants through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		const created = await client.tenants.create({
@@ -175,7 +175,7 @@ describe('control contract round trip', () => {
 		expect(await client.membership.rebuild()).toStrictEqual({ tenants: 2 });
 	});
 
-	it('drives resume, read mode and read credential through the derived client', async () => {
+	it('updates tenant status, read mode, and read credentials through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		await client.tenants.create({
@@ -206,7 +206,7 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it('refuses a missing control token as the defined UNAUTHORIZED error', async () => {
+	it('returns UNAUTHORIZED when the control token is missing', async () => {
 		const client = controlClient();
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
@@ -223,7 +223,7 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it('refuses a write-scoped control token as FORBIDDEN', async () => {
+	it('returns FORBIDDEN for a write-scoped control token', async () => {
 		const client = controlClient(
 			await issueControlAdminToken('writer', cacheWriteGrants())
 		);
@@ -242,7 +242,7 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	it('refuses a tenant-plane token as UNAUTHORIZED', async () => {
+	it('returns UNAUTHORIZED for a tenant-plane token', async () => {
 		// A tenant admin token is signed by the tenant's auth key for the tenant
 		// audience; presented to the control plane it must not verify.
 		const client = controlClient(await issueServerSignedToken(adminGrants()));

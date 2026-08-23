@@ -30,8 +30,9 @@ export const rootSetBodySchema = z.strictObject({
 });
 export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;
 
-// An ensure asks whether the cache already holds the named targets and reports
-// which of them require a build, so the request must name at least one target.
+// An ensure request checks whether the cache already contains its targets and
+// reports which targets require a build. The request must contain at least one
+// target.
 export const rootEnsureBodySchema = z.strictObject({
 	targets: rootTargetListSchema.min(1),
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -55,7 +56,6 @@ export const rootSummarySchema = z.strictObject({
 });
 export type ParsedRootSummary = z.output<typeof rootSummarySchema>;
 
-// A set-root response is a root summary; the named alias documents the route.
 export const rootSetResponseSchema = rootSummarySchema;
 export type ParsedRootSetResponse = z.output<typeof rootSetResponseSchema>;
 
@@ -78,13 +78,12 @@ export type ParsedRootEnsureResponse = z.output<
 // limit. Root listings use the same page size to bound response size.
 export const rootListPageSize = 200;
 
-// A continuation for a listing with more pages: opaque to the client, passed
-// back unchanged to resume where the previous page stopped.
+// Clients must return the cursor unchanged to resume a listing. Its contents
+// are opaque.
 const listCursorSchema = z.string().min(1);
 
-// One root in the listing. A run root can accumulate attached paths without
-// bound, so the listing reports a target count instead of the targets
-// themselves; a root's targets are read through the paged targets route.
+// A run root can accumulate attached paths without bound. Listings therefore
+// report a target count, and clients read the targets through the paged route.
 export const rootListEntrySchema = z.strictObject({
 	name: rootNameSchema,
 	expiresAt: isoTimestampSchema.optional(),
@@ -115,9 +114,9 @@ export type ParsedRootRemoveResponse = z.output<
 	typeof rootRemoveResponseSchema
 >;
 
-// One garbage-collection pass's counts: expired roots, collected paths, the
-// pending and committed rows it removed, and the untracked staging objects it
-// reclaimed.
+// Each response reports only one bounded collection pass. The counts cover
+// expired roots, collected paths, pending uploads and attestations, narinfo
+// rows, and untracked staging objects.
 export const gcResponseSchema = z.strictObject({
 	ok: z.literal(true),
 	pendingUploadsDeleted: countSchema,
@@ -179,13 +178,11 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 
 // A retention-grace policy applies to paths published in caches whose names
 // start with `cachePrefix`. The empty prefix is the tenant-wide default, and the
-// longest matching prefix wins. A prefix cannot exceed the maximum cache-name
-// length because a longer value could not match a cache.
+// longest matching prefix wins. A prefix must be able to start a valid cache
+// name, and cannot be longer than a cache name.
 const gracePrefixMaxLength = 63;
 
 export const gracePolicyAddBodySchema = z.strictObject({
-	// The prefix must also be the prefix of a valid cache name. This rejects values
-	// such as uppercase cache names that could never match.
 	cachePrefix: z
 		.string()
 		.max(gracePrefixMaxLength)
@@ -223,10 +220,9 @@ export type ParsedGracePolicyRemoveResponse = z.output<
 	typeof gracePolicyRemoveResponseSchema
 >;
 
-// Whether a grace policy covers a cache. For a covered cache the response
-// reports the grace a publication to it would resolve, the longest matching
-// cache-name prefix winning exactly as it does for a push. For an uncovered
-// cache it reports no grace period at all.
+// For a covered cache, the response reports the grace period that a publication
+// would resolve. The longest matching cache-name prefix wins, as it does for a
+// push. An uncovered cache has no grace period in the response.
 export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
 	z.strictObject({
 		covered: z.literal(true),

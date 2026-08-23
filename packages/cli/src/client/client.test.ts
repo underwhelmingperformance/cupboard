@@ -310,7 +310,6 @@ describe('CupboardClient token retry', () => {
 		vi.useFakeTimers();
 
 		try {
-			// One attempt plus the four retries, all refused.
 			const { client, attempted } = scriptedClient(
 				Array.from({ length: 5 }, () => marked(StatusCodes.SERVICE_UNAVAILABLE))
 			);
@@ -492,7 +491,7 @@ describe('CupboardClient.commit', () => {
 		expect(socket?.closed).toBe(true);
 	});
 
-	it('commits over a wss socket carrying the bearer token on the upgrade', async () => {
+	it('sends the bearer token on the commit WebSocket upgrade', async () => {
 		const { client, connections } = commitClient([
 			(socket) => {
 				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });

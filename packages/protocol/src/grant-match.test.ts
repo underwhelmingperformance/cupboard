@@ -19,8 +19,6 @@ function request(value: unknown): AuthorizationDetail {
 
 const wildcard = grant({ type: 'cupboard_wildcard' });
 
-// A cache bound to the PR number captured from a GitHub `ref` claim, with the
-// root tied to the same cache.
 const prCacheGrant = grant({
 	type: 'cupboard_cache',
 	actions: ['upload:commit', 'root:set'],
@@ -69,7 +67,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: true
 		},
 		{
-			name: 'a template binding permits the rendered cache',
+			name: 'a PR 123 ref permits cache pr-123',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -80,7 +78,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: true
 		},
 		{
-			name: 'a template binding refuses a different cache',
+			name: 'a PR 123 ref refuses cache pr-456',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -91,7 +89,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'a binding refuses when the claim is absent',
+			name: 'a missing ref claim refuses the PR cache',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -102,7 +100,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'a binding refuses when the capture does not match',
+			name: 'a branch ref refuses the PR cache',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -113,7 +111,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'an action outside the permitted set is refused',
+			name: 'a PR-cache rule refuses gc:run',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -192,7 +190,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'a same-as-cache root permits the cache as the root',
+			name: 'a root bound to the cache permits root pr-123',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -204,7 +202,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: true
 		},
 		{
-			name: 'a same-as-cache root refuses a different root',
+			name: 'a root bound to the cache refuses root main',
 			permitted: [prCacheGrant],
 			requested: {
 				type: 'cupboard_cache',
@@ -216,7 +214,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'an exact default-cache binding permits the default cache',
+			name: 'an exact _default binding permits the default cache',
 			permitted: [
 				grant({
 					type: 'cupboard_cache',
@@ -233,7 +231,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: true
 		},
 		{
-			name: 'a domain grant covers its domain operation',
+			name: 'a domain grant permits stats:read',
 			permitted: [domainGrant],
 			requested: { type: 'cupboard_domain', actions: ['stats:read'] },
 			claims: {},
@@ -267,10 +265,7 @@ describe('isGrantPermittedByRule', () => {
 		);
 	});
 
-	it('refuses a rendered cache that escapes the cache grammar', () => {
-		// The template renders a claim verbatim; a value with a space or capital
-		// fails `cacheNamePattern`, so the binding yields nothing and refuses every
-		// request, issuing nothing against an invalid cache name.
+	it('refuses a binding that renders an invalid cache selector', () => {
 		const verbatimGrant = grant({
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],

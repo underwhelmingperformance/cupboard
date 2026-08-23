@@ -231,7 +231,7 @@ describe('runGithubCheck', () => {
 		await expect(pending).rejects.toBe(reason);
 	});
 
-	it('verifies the new workflow reference while previous rules overlap', async () => {
+	it('checks the supplied workflow reference while previous rules overlap', async () => {
 		const previousPrRule = storedRule(
 			'previous-pr',
 			githubPrAddBody(url, identity, {
@@ -412,9 +412,6 @@ describe('runGithubCheck', () => {
 		}
 	);
 
-	// A covering tenant-wide policy can still be shadowed for the PR caches
-	// by a longer prefix: the server resolves the longest match, so the check
-	// must resolve the policy each destination shape actually receives.
 	it('fails when a shorter pr- policy shadows the tenant-wide grace', async () => {
 		const results: ResultRow[][] = [];
 
@@ -441,7 +438,7 @@ describe('runGithubCheck', () => {
 		).toStrictEqual({
 			label: 'grace policy',
 			value:
-				'failed: the 300s grace in force for the pr-1 cache is under 3600s and risks expiring mid-run'
+				'failed: the pr-1 cache has 300s of grace; GitHub publication requires at least 3600s'
 		});
 	});
 
@@ -474,7 +471,7 @@ describe('runGithubCheck', () => {
 		).toStrictEqual({
 			label: 'grace policy',
 			value:
-				'failed: the 300s grace in force for the pr-2 cache is under 3600s and risks expiring mid-run'
+				'failed: the pr-2 cache has 300s of grace; GitHub publication requires at least 3600s'
 		});
 	});
 
@@ -504,11 +501,11 @@ describe('runGithubCheck', () => {
 		).toStrictEqual({
 			label: 'grace policy',
 			value:
-				'failed: the 300s grace in force for the pr-42 cache is under 3600s and risks expiring mid-run'
+				'failed: the pr-42 cache has 300s of grace; GitHub publication requires at least 3600s'
 		});
 	});
 
-	it('names each broken invariant and fails', async () => {
+	it('reports every configuration failure before throwing', async () => {
 		const results: ResultRow[][] = [];
 		const misSpelled = storedRule(
 			'pr',
@@ -544,18 +541,18 @@ describe('runGithubCheck', () => {
 				{
 					label: 'pull-request trust rule',
 					value:
-						'failed: rule pr expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; a run presents ' +
+						'failed: rule pr expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; the modelled run uses ' +
 						pinnedWorkflowReference
 				},
 				{
 					label: 'main trust rule',
 					value:
-						'failed: rule pr expects event_name to match pull_request; a run presents push'
+						'failed: rule pr expects event_name to match pull_request; the modelled run uses push'
 				},
 				{
 					label: 'grace policy',
 					value:
-						'failed: no grace policy covers the default cache: a require-grace push publishes paths nothing retains'
+						'failed: no grace policy covers the default cache; a push with require-grace would fail because no policy would retain its paths'
 				},
 				{
 					label: 'reuse view',
@@ -570,10 +567,7 @@ describe('runGithubCheck', () => {
 		});
 	});
 
-	// With both rules stored, a broken PR rule must be diagnosed against the
-	// PR rule, not explained as the branch rule's event mismatch: the
-	// candidate with the fewest mismatches for the presented shape wins.
-	it('diagnoses the broken rule for the shape, not its sibling', async () => {
+	it('reports the workflow-reference mismatch from the pull-request rule', async () => {
 		const results: ResultRow[][] = [];
 		const misSpelledPr = storedRule(
 			'pr',
@@ -609,7 +603,7 @@ describe('runGithubCheck', () => {
 				{
 					label: 'pull-request trust rule',
 					value:
-						'failed: rule pr expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; a run presents ' +
+						'failed: rule pr expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; the modelled run uses ' +
 						pinnedWorkflowReference
 				},
 				{ label: 'main trust rule', value: 'ok' }
@@ -617,10 +611,7 @@ describe('runGithubCheck', () => {
 		});
 	});
 
-	// A rule can pin the repository by a pattern rather than an exact id; the
-	// diagnostic must still treat it as this repository's candidate instead of
-	// claiming no rule pins the repository.
-	it('diagnoses a pattern-pinned rule as this repository\u{2019}s candidate', async () => {
+	it('reports the claim mismatch from a pattern-pinned repository rule', async () => {
 		const results: ResultRow[][] = [];
 		const patternPinned = storedRule('pattern', {
 			...githubPrAddBody(url, identity, {
@@ -656,12 +647,12 @@ describe('runGithubCheck', () => {
 		).toStrictEqual({
 			label: 'pull-request trust rule',
 			value:
-				'failed: rule pattern expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; a run presents ' +
+				'failed: rule pattern expects job_workflow_ref to match acme/app/.github/workflows/publish.yml@refs/heads/main; the modelled run uses ' +
 				pinnedWorkflowReference
 		});
 	});
 
-	it('reports what it could not verify and exits unavailable', async () => {
+	it('reports a missing root-prefix input and exits unavailable', async () => {
 		const results: ResultRow[][] = [];
 
 		let failure: unknown;
@@ -687,7 +678,7 @@ describe('runGithubCheck', () => {
 		});
 	});
 
-	it('fails when the interactive owner rule governs a workflow run', async () => {
+	it('refuses an interactive owner rule that matches the modelled claims', async () => {
 		const results: ResultRow[][] = [];
 		const ownerRule = storedRule('owner', {
 			...githubPrAddBody(url, identity, {
@@ -724,7 +715,7 @@ describe('runGithubCheck', () => {
 				{
 					label: 'pull-request trust rule',
 					value:
-						'failed: interactive rule owner matches this workflow; ' +
+						'failed: interactive rule owner matches the modelled claims; ' +
 						'workflows must use a scoped CI rule'
 				},
 				{ label: 'main trust rule', value: 'ok' }
@@ -732,10 +723,7 @@ describe('runGithubCheck', () => {
 		});
 	});
 
-	// A rule whose claims match but whose stored grants drifted would pass a
-	// claims-only check and still refuse the run's exchange; the grant check
-	// must catch it.
-	it('fails a claims-matching rule whose grants drifted', async () => {
+	it('reports missing authority after the modelled claims match', async () => {
 		const results: ResultRow[][] = [];
 		const grantDrifted = storedRule('branch', {
 			...githubBranchAddBody(url, identity, {
@@ -775,7 +763,7 @@ describe('runGithubCheck', () => {
 			row: {
 				label: 'main trust rule',
 				value:
-					'failed: rule branch matches but its grants do not permit ' +
+					'failed: rule branch matches the modelled claims but does not permit ' +
 					'upload:negotiate, upload:status, upload:commit, ' +
 					'attestation:negotiate, attestation:attach, root:set on cache ' +
 					'_default with root github:acme/app/main/target; remove it and ' +
@@ -852,14 +840,14 @@ describe('runGithubCheck', () => {
 					label: check,
 					value:
 						`failed: rule ${check.startsWith('pull-request') ? 'pr' : 'branch'} ` +
-						`matches but its grants do not permit ${detail}; remove it and ` +
+						`matches the modelled claims but does not permit ${detail}; remove it and ` +
 						're-run setup'
 				}
 			});
 		}
 	);
 
-	it('requires the exact workflow reference currently used by the caller', async () => {
+	it('rejects a tag pattern because check requires an exact reference', async () => {
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
 
@@ -876,7 +864,7 @@ describe('runGithubCheck', () => {
 		);
 	});
 
-	it('checks an exact release against stored tag-pattern rules', async () => {
+	it('accepts stored tag patterns that match the supplied exact reference', async () => {
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
 		const patternRules = [

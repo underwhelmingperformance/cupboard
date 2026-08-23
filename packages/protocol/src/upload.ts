@@ -17,11 +17,6 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// Each wire shape here is declared once and exposed two ways. The plain alias is
-// what a builder assembles: the CLI putting together a request, the server
-// putting together a response. The `Parsed…` output is what a successful parse
-// yields, and code that consumes a validated value takes that branded form.
-
 const isStorePathHashForPath = (value: {
 	readonly storePathHash: string;
 	readonly storePath: string;
@@ -36,9 +31,9 @@ const uploadPathNegotiationShape = {
 	narHash: nixSha256HashSchema,
 	narSize: positiveIntSchema,
 	references: referencesSchema,
-	// A narinfo names the deriver by basename, as it does references; the store
-	// directory comes from the cache's `StoreDir`. `ca` is a content-address
-	// specification, not a path, so it stays a metadata line.
+	// `Deriver` uses a store-path basename, as do the entries in `References`;
+	// the cache's `StoreDir` supplies the directory. `CA` contains a
+	// content-address specification, not a path.
 	deriver: storePathBasenameSchema.optional(),
 	ca: narInfoLineSchema.optional()
 };
@@ -85,15 +80,9 @@ export const pushIdSchema = z
 	.brand('PushId');
 export type PushId = z.infer<typeof pushIdSchema>;
 
-// An opaque upload identifier issued during negotiation. The client returns it
-// when committing or polling the pending upload. A brand prevents code from
-// substituting another string identifier.
 export const uploadIdSchema = z.string().brand('UploadId');
 export type UploadId = z.infer<typeof uploadIdSchema>;
 
-// A commit session's server-issued opaque id, one per WebSocket. A pending row
-// records the session waiting on an upload so a verdict routes to the right
-// socket. Branded so it cannot be passed where an upload id is expected.
 export const sessionIdSchema = z.string().brand('SessionId');
 export type SessionId = z.infer<typeof sessionIdSchema>;
 
@@ -103,9 +92,6 @@ export type SessionId = z.infer<typeof sessionIdSchema>;
 export const commitAuthenticationExpiredCloseCode = 1008;
 export const commitAuthenticationExpiredCloseReason = 'access token expired';
 
-// The temporary S3-compatible credentials for direct R2 uploads, including the
-// endpoint, bucket, and expiry. Both the server's credential builder and the
-// protocol response use this schema.
 export const r2CredentialSchema = z.strictObject({
 	accessKeyId: z.string(),
 	secretAccessKey: z.string(),
@@ -117,10 +103,9 @@ export const r2CredentialSchema = z.strictObject({
 export type ParsedR2Credential = z.output<typeof r2CredentialSchema>;
 export type R2Credential = z.input<typeof r2CredentialSchema>;
 
-// The credential a push uploads its blobs with, scoped to the push's staging
-// prefix, plus the signed push id that names the prefix. The CLI uses these
-// with a standard S3 client and uploads directly to R2, so no blob bytes pass
-// through the Worker.
+// The CLI passes these temporary credentials to a standard S3 client and
+// uploads directly to the push's staging prefix in R2. The signed push id names
+// that prefix, and no blob bytes pass through the Worker.
 export const pushCredentialSchema = z.strictObject({
 	pushId: pushIdSchema,
 	...r2CredentialSchema.shape
@@ -128,15 +113,13 @@ export const pushCredentialSchema = z.strictObject({
 export type ParsedPushCredential = z.output<typeof pushCredentialSchema>;
 export type PushCredential = z.input<typeof pushCredentialSchema>;
 
-// One negotiation request can contain at most 100,000 store paths. This limit is
-// above expected closure sizes and bounds abusive request bodies.
+// Negotiation and preview each accept at most 100,000 store paths. Confirmation
+// uses the lower 1,000-hash limit below.
 export const uploadNegotiateMaxPaths = 100_000;
 
-// The retention-grace result returned for one negotiation decision.
-// `retainUntil` is the updated deadline for a path that was already present.
-// `graceSeconds` is the matched policy's grace period for a planned upload or a
-// read-only decision, including zero. If both fields are absent, no grace policy
-// matched.
+// `retainUntil` reports the durable deadline after a path was confirmed.
+// `graceSeconds` reports the matched policy when no deadline was written,
+// including a zero-second policy. An empty object means no policy matched.
 export const uploadGraceFactSchema = z
 	.strictObject({
 		retainUntil: z.string().optional(),
@@ -150,9 +133,8 @@ export const uploadGraceFactSchema = z
 	);
 export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
-// The run root the push's commits attach to, bound at negotiate alongside the
-// push id; the commit socket inherits it. A commit frame carries no root, so
-// the name here covers every path the push commits.
+// Commit frames carry no root. Negotiation binds this root alongside the push
+// id, and the commit socket applies it to every path in the push.
 export const uploadAttachRootSchema = z.strictObject({
 	name: rootNameSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -248,9 +230,9 @@ export type ParsedUploadPreviewResponse = z.output<
 	typeof uploadPreviewResponseSchema
 >;
 
-// A confirmation request accepts at most 1,000 store-path hashes. Each hash
-// requires an identity check and a monotonic deadline update. The CLI splits
-// larger closures across sequential requests.
+// Confirmation accepts at most 1,000 store-path hashes. The server deduplicates
+// its storage work but returns one result for every input entry. The CLI splits
+// larger closures into sequential requests.
 export const uploadConfirmMaxPaths = 1000;
 
 export const uploadConfirmRequestSchema = z.strictObject({
@@ -260,8 +242,9 @@ export type ParsedUploadConfirmRequest = z.output<
 	typeof uploadConfirmRequestSchema
 >;
 
-// `confirmed` is false when the cache has no committed narinfo for the path. In
-// that case no deadline was extended, so `grace` is absent.
+// `confirmed` is false unless the committed reference, canonical NAR and
+// current narinfo identity all pass their checks. The server does not extend a
+// grace deadline when confirmation fails, so `grace` is absent in that case.
 export const uploadConfirmedPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	confirmed: z.boolean(),
@@ -304,54 +287,47 @@ export type ParsedUploadStatusResponse = z.output<
 >;
 export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 
-// One WebSocket handles all commits for a push. Every request and response
-// identifies its upload. The client uses `commit`, `commit-batch`, or `subscribe`;
-// the server sends one result frame for each upload.
+// One WebSocket handles all commits for a push. Upload-specific requests and
+// responses identify their upload. The `request-credit` operation and the
+// `credit` and `queued` frames apply to the connection. An `unsupported` frame
+// identifies an unrecognised operation. None of these connection-level frames
+// carries an upload id.
 const uploadIdsSchema = z.array(uploadIdSchema);
 
-// The response header on the commit session's 101 listing the optional ops this
-// server accepts. A client sends `commit-batch` only when the server listed it.
-// A server that does not list the op would close the socket on an op it cannot
-// parse, so a batching client falls back to per-id `commit` ops instead.
+// A client sends `commit-batch` only when the server lists it in the 101
+// response. A server that does not list the operation would close the socket if
+// it could not parse the request, so the client falls back to individual
+// `commit` operations.
 export const commitCapabilitiesHeader = 'x-cupboard-commit-capabilities';
 
-// The response header on upload negotiation listing the optional response
-// semantics this server accepted for the request.
 export const uploadCapabilitiesHeader = 'x-cupboard-upload-capabilities';
 
-// The request header clients use to declare optional protocol semantics they
-// understand. It is shared by upload negotiation and the commit session.
+// Upload negotiation and the commit session share this request header for
+// optional protocol semantics the client understands.
 export const acceptCapabilitiesHeader = 'x-cupboard-accept-capabilities';
 
-// The request header the client includes on the upgrade to declare which
-// optional ops it understands.
 export const commitAcceptCapabilitiesHeader = acceptCapabilitiesHeader;
 
-// Opts an upload negotiation into grace facts on decisions and on the commit
-// frames belonging to pending uploads created by that negotiation.
+// A client advertises this capability to receive grace facts in negotiation
+// decisions and in later commit frames for the same pending uploads.
 export const uploadGraceFactsCapability = 'upload-grace-facts';
 export const uploadCapabilitiesValue = uploadGraceFactsCapability;
 
-// The capability name for `commit-batch`. This is the bare token name that
-// clients look up in the parsed capability map; the server advertises it
-// with attributes via `commitBatchCapabilityToken`.
+// Clients look up the bare `commit-batch` name in the parsed capability map.
+// The server advertises the parameterised form below.
 export const commitBatchCapability = 'commit-batch';
 
-// Bounds one `commit-batch` message. Each entry is a few hundred bytes, so the
-// cap keeps a message far below the socket's limits while still collapsing a
-// burst of commits into a handful of messages.
-//
 // Wire-freeze: this constant is encoded in the capability token the server
 // advertises on every 101. Any change to this value, or to the shape of a
-// known op's schema, needs a NEW capability token so older servers (which close
+// known op's schema, needs a new capability token so older servers (which close
 // on schema violations) and newer clients can coexist safely.
 export const commitBatchMaxEntries = 100;
 
 // The attribute both tokens below carry once the server accepts the optional
 // `retention` marker on a `commitBatchEntrySchema` entry (see that schema's
 // wire-freeze note). A client checks for this attribute before ever setting
-// the marker, so a server that predates it -- whose schema is a
-// `strictObject` and would reject an unknown field -- never receives one.
+// the marker, so a server that predates it never receives the unknown field
+// that its strict schema would reject.
 export const retentionMarkerAttribute = 'retention';
 export const retentionMarkerAttributeValue = '1';
 
@@ -390,8 +366,6 @@ export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};
 // `queued` frames. Any change to their shapes needs a new capability token.
 export const commitCreditCapability = 'commit-credit';
 
-// The attribute carrying the credit the server grants the session at upgrade
-// time, so an uncontended tenant starts committing without a further round trip.
 export const commitCreditGrantAttribute = 'grant';
 
 // The credit token for one connection. Unlike the tokens above it varies from
@@ -401,28 +375,21 @@ export function commitCreditCapabilityToken(openingGrant: number): string {
 	return `${commitCreditCapability};${commitCreditGrantAttribute}=${String(openingGrant)}`;
 }
 
-// The connection-independent part of the `x-cupboard-commit-capabilities`
-// header. Build from the shared constants so no call site hand-codes the
-// combined string.
 export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken}`;
 
-// The full header value a 101 carries for a session the server admits under
-// credit: the fixed tokens plus this connection's opening grant.
 export function commitCapabilitiesValueWithCredit(
 	openingGrant: number
 ): string {
 	return `${commitCapabilitiesValue},${commitCreditCapabilityToken(openingGrant)}`;
 }
 
-// One identity-carrying entry shared by `commit-batch` and `subscribe-identity`.
-// Carries the upload to settle or resume plus the path identity the client holds
-// from negotiation. The identity lets a reconnect re-send an entry whose reply
-// was lost: the server resolves a since-gone row against the path's committed
-// narinfo and answers `already-present`, whereas a bare id could only fail as
-// unknown. `retention`, present only when the server advertised the
-// retention-marker attribute, additionally tells the server this upload
-// accepted grace facts, so that `already-present` answer can attach the path's
-// durable grace fact instead of none.
+// Entries for `commit-batch` and `subscribe-identity` include the upload and the
+// path identity from negotiation. A reconnect can therefore resend an entry
+// whose reply was lost. If the pending row has gone, the server can compare the
+// identity with the committed narinfo and return `already-present`; a bare id
+// could only fail as unknown. When the server advertised the retention marker,
+// `retention` also records that this upload accepted grace facts. The
+// `already-present` response can then include the path's durable grace fact.
 //
 // Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
 // bound is a breaking change that requires a new capability token for each op
@@ -452,10 +419,10 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 		op: z.literal('subscribe-identity'),
 		entries: z.array(commitBatchEntrySchema).min(1).max(commitBatchMaxEntries)
 	}),
-	// Declares how many entries the session has queued and cannot send for want
-	// of credit. The declaration is absolute and replaces the previous one, so a
-	// client re-sends it as its queue grows without the server accumulating
-	// stale demand. Sent only against a server that advertised `commit-credit`.
+	// A client reports how many entries it has queued but cannot send without
+	// more credit. Each report replaces the previous count, so updates do not
+	// accumulate stale demand. Clients send this only after the server advertises
+	// `commit-credit`.
 	z.strictObject({
 		op: z.literal('request-credit'),
 		entries: positiveIntSchema
@@ -559,10 +526,6 @@ export type ParsedDeletePathResponse = z.output<
 	typeof pathDeletionResponseSchema
 >;
 
-// The shapes a builder assembles: a schema's input is unbranded, so the CLI
-// constructs a request body and the server a response body from these forms
-// directly. The `Parsed…` outputs above are what a successful parse yields, and
-// code that consumes a validated value takes that branded form.
 export type UploadPathNegotiationFields = z.input<
 	typeof uploadPathNegotiationSchema
 >;

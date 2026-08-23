@@ -34,8 +34,8 @@ const root = path.resolve(import.meta.dirname, '../..');
 export const ownerSubject = 'e2e-owner';
 export const ownerAudience = 'cupboard-owner-client';
 
-// The audience the stub issuer stamps into a control-plane subject token, and the
-// deployment's single-use claim secret gating the first-signup global-admin claim.
+// The stub issuer's control-plane audience and the reusable secret that guards
+// the first administrator claim.
 export const signupAudience = 'cupboard-control-client';
 export const signupSecret = 'e2e-signup-secret';
 
@@ -85,9 +85,6 @@ interface CommitSessionCounters {
 	abandonedUpgrades: number;
 }
 
-// Counts a frame the worker sent. The keepalive answer is not a frame and the
-// socket carries nothing else that is not JSON, so anything unparseable is
-// simply not a frame worth counting.
 function countWorkerFrame(counters: CommitSessionCounters, data: string): void {
 	try {
 		const frame: unknown = JSON.parse(data);
@@ -102,7 +99,7 @@ function countWorkerFrame(counters: CommitSessionCounters, data: string): void {
 			counters.queuedFrames += 1;
 		}
 	} catch {
-		// Not a frame: the keepalive answer, or a control message.
+		// Keepalive and WebSocket control messages are not JSON protocol frames.
 	}
 }
 
@@ -302,9 +299,6 @@ export class CupboardTestServer {
 		return new URL(`/t/${fixtureTenant}`, this.url);
 	}
 
-	/**
-	Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}.
-	*/
 	tenantPath(path: string): URL {
 		const url = this.tenantUrl;
 		url.pathname = `${url.pathname}${path}`;
@@ -392,18 +386,12 @@ export class CupboardTestServer {
 		};
 	}
 
-	/**
-	Writes bytes to a staging key, the bucket the worker verifies against.
-	*/
 	async stageObject(r2Key: string, bytes: Uint8Array): Promise<void> {
 		await this.bucket.put(r2Key, bytes, {
 			sha256: createHash('sha256').update(bytes).digest()
 		});
 	}
 
-	/**
-	An owner admin token, obtained the real way: an owner id_token exchanged at `/token`.
-	*/
 	ownerAdminToken(): Promise<string> {
 		return this.exchangeIdToken(
 			this.issuer.sign({ aud: ownerAudience, sub: ownerSubject })
@@ -519,7 +507,6 @@ async function collectStreamBytes(
 	return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-// Order filenames by UTF-16 code unit, matching the default `Array#sort` order.
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {
 		return -1;
@@ -712,10 +699,9 @@ function capabilityHeaderLines(
 	return lines;
 }
 
-// Bridges a WebSocket upgrade to the worker: the upgrade request (with its
-// Authorization header) dispatches into Miniflare; an accepted socket relays
-// frames both ways, and a refusal is written back as the plain HTTP response
-// so the client sees the status and body it carries.
+// Dispatch the authenticated upgrade through Miniflare. Accepted connections
+// relay frames in both directions; refused upgrades preserve the HTTP status,
+// headers, and body.
 async function forwardUpgradeToWorker(
 	worker: Miniflare,
 	upgrades: WebSocketServer,

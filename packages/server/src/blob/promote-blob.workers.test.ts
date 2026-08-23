@@ -15,18 +15,13 @@ import {
 
 import { promoteVerifiedBlob } from './promote-blob.ts';
 
-// The canonical key is write-once through a conditional put: the first
-// promotion of a hash fixes the stored encoding, and a promotion that loses
-// the race adopts the winner's encoding so its narinfo describes the object
-// actually served. Both the Durable Object and the queue consumer run this,
-// so the race branch is shared ground.
 describe('promoteVerifiedBlob', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await clearBlobStorage();
 	});
 
-	it('adopts the winning encoding when it loses the conditional put', async () => {
+	it('uses the canonical object metadata after a concurrent promotion', async () => {
 		const staged = await verifiableNar('promote-loser');
 		const winner = await verifiableNarStored('promote-loser');
 		const canonicalKey = narObjectKey(staged.narHash);
@@ -34,14 +29,12 @@ describe('promoteVerifiedBlob', () => {
 
 		await env.BLOBS.put(stagingKey, staged.narBytes);
 
-		// The winner's object lands between this promote's head and its put; the
-		// head is blinded once so the conditional put is what discovers the race.
+		// Hide the canonical object from the first head so the conditional put
+		// discovers the competing promotion.
 		await env.BLOBS.put(canonicalKey, winner.narBytes, {
 			sha256: NixSha256Hash.parse(winner.fileHash).digestBytes()
 		});
 
-		// Blinding redirects the head to a key that holds nothing, so the miss is
-		// a genuine R2 answer, not a fabricated value.
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let isBlinded = true;
 		const head = vi
@@ -74,7 +67,7 @@ describe('promoteVerifiedBlob', () => {
 		}
 	});
 
-	it('throws when the winner vanished before it could be adopted', async () => {
+	it('rejects when the post-conflict head cannot find the canonical object', async () => {
 		const staged = await verifiableNar('promote-vanished');
 		const canonicalKey = narObjectKey(staged.narHash);
 		const stagingKey = r2ObjectKeySchema.parse(
@@ -83,9 +76,8 @@ describe('promoteVerifiedBlob', () => {
 
 		await env.BLOBS.put(stagingKey, staged.narBytes);
 
-		// The canonical object exists, so the conditional put genuinely loses,
-		// but every head answers absent: whatever won reads as gone again, and
-		// nothing remains to adopt or to bind a narinfo to.
+		// Keep a real canonical object so the conditional put conflicts, but hide it
+		// from both heads so the metadata cannot be adopted after the conflict.
 		await env.BLOBS.put(canonicalKey, staged.narBytes);
 
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);

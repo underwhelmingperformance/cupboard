@@ -40,8 +40,6 @@ describe('NixPublicKey', () => {
 		});
 	});
 
-	// A key that is missing either half names no signer or verifies nothing, so
-	// it is refused at the boundary rather than yielding a truncated name.
 	it.each([
 		{ name: 'no separator', value: 'cupboard-1' },
 		{ name: 'an empty name', value: ':cHVibGlj' },

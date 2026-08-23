@@ -13,7 +13,6 @@ const log = vi.hoisted(() => ({
 
 vi.mock('@clack/prompts', () => ({ log }));
 
-// Colours disabled so assertions can match on plain text without ANSI codes.
 const plain = pc.createColors(false);
 
 function record(
@@ -36,7 +35,7 @@ describe('clackSink', () => {
 		vi.clearAllMocks();
 	});
 
-	it('renders an info record through log.info with the message and fields', () => {
+	it('passes an info message and its fields to log.info', () => {
 		clackSink(plain)(record('info', 'pushed path', { path: '/nix/store/x' }));
 
 		expect(log.info).toHaveBeenCalledTimes(1);
@@ -45,7 +44,7 @@ describe('clackSink', () => {
 		expect(line).toContain('path /nix/store/x');
 	});
 
-	it('renders a warning record through log.warn', () => {
+	it('passes a warning to log.warn', () => {
 		clackSink(plain)(record('warning', 'slow response'));
 
 		expect(log.warn).toHaveBeenCalledTimes(1);
@@ -54,7 +53,7 @@ describe('clackSink', () => {
 	});
 
 	it.each(['error', 'fatal'] as const)(
-		'renders a %s record through log.error',
+		'passes %s-level records to log.error',
 		(level) => {
 			clackSink(plain)(record(level, 'push failed'));
 
@@ -63,7 +62,7 @@ describe('clackSink', () => {
 		}
 	);
 
-	it('renders an error property by its message, not [object Object]', () => {
+	it('renders an error property with its name and message', () => {
 		clackSink(plain)(
 			record('error', 'push failed', {
 				error: new TypeError('boom')

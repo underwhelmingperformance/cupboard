@@ -40,7 +40,7 @@ describe('parseManifest', () => {
 			name: 'the targets array under a targets key',
 			source: JSON.stringify({ targets: [app, tool] })
 		}
-	])('reads $name', ({ source }) => {
+	])('accepts $name', ({ source }) => {
 		expect(parseManifest(source)).toStrictEqual([parsedApp, parsedTool]);
 	});
 
@@ -100,7 +100,7 @@ describe('parseManifest', () => {
 			source: JSON.stringify([app, { ...app, rootSuffix: 'other' }]),
 			expected: DuplicateTargetAttributeError
 		}
-	])('refuses $name', ({ source, expected }) => {
+	])('rejects $name', ({ source, expected }) => {
 		expect(() => parseManifest(source)).toThrow(expected);
 	});
 });

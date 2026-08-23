@@ -45,8 +45,9 @@ import {
 } from './substitutable-closure.ts';
 
 /**
- * Whether availability results reflect the substituter settings used to open
- * the store. A negative result identifies the transport or trust restriction.
+ * Reports whether availability reflects the requested substituter settings. A
+ * negative result identifies the transport or trust boundary that prevents a
+ * guarantee.
  */
 export type SubstituterSettingsOutcome =
 	| { readonly isHonoured: true }
@@ -61,9 +62,6 @@ export type SubstituterSettingsOutcome =
 			readonly trust: NixDaemonTrust;
 	  };
 
-/**
-Resolves a path's real location, injected so canonicalisation is testable.
-*/
 export type RealPath = (path: string) => string;
 
 export interface NixDependencies extends StoreClientEnvironment {
@@ -72,7 +70,6 @@ export interface NixDependencies extends StoreClientEnvironment {
 
 const defaultRealPath: RealPath = (path) => realpathSync(path);
 
-// A client built over a bare backend has no substituter queries.
 const noSubstituters: QuerySubstitutablePathInfos = () =>
 	Promise.reject(
 		new UnsupportedNixStoreOperationError('substitutable-path-info queries')
@@ -80,9 +77,9 @@ const noSubstituters: QuerySubstitutablePathInfos = () =>
 
 /**
  * A client for the Nix store on the system. {@link Nix.open} discovers the
- * running configuration and reads through the daemon or the local store,
- * whichever Nix itself would use; callers query path information and closures
- * without depending on the selected backend.
+ * running configuration and applies Nix's normal choice between the daemon and
+ * local store. Callers query path information and closures without depending
+ * on the selected backend.
  */
 export class Nix {
 	static open(
@@ -117,8 +114,8 @@ export class Nix {
 	 * report external paths.
 	 *
 	 * A daemon provides these queries whenever its socket is available. Without
-	 * one this process queries the substituters directly. Per-call options
-	 * override discovered daemon settings, with the caller winning per key.
+	 * an available daemon, this process queries the substituters directly. Options
+	 * passed to this method override the discovered value for the same setting.
 	 * `storeUri` selects the store, an `ssh-ng` URI reaches that remote's daemon
 	 * over SSH, and a `substituters` override selects which substituters are
 	 * queried in either case.
@@ -150,9 +147,9 @@ export class Nix {
 	}
 
 	/**
-	 * Build a client over an explicit backend, store directory and path
-	 * resolver. The store kind defaults to `local-filesystem`, the kind whose
-	 * paths are on this machine's filesystem.
+	 * Creates a client over an explicit backend, store directory and path
+	 * resolver. The store kind defaults to `local-filesystem`, which reads NAR
+	 * contents from this machine's filesystem.
 	 */
 	static forStore(
 		store: NixStoreClient,
@@ -182,31 +179,16 @@ export class Nix {
 
 	private constructor(
 		private readonly store: NixStoreClient,
-		/**
-		 * Direct substituter queries, independent of the selected store backend.
-		 */
 		private readonly offers: QuerySubstitutablePathInfos,
-		/**
-		 * The logical directory that prefixes paths in this store.
-		 */
 		public readonly storeDirectory: StoreDirectory,
-		/**
-		 * The physical state directory used by this store backend.
-		 */
 		public readonly stateDirectory: string | undefined,
-		/**
-		 * The physical directory containing the paths in a local store.
-		 */
 		private readonly realStoreDirectory: string,
 		private readonly realpath: RealPath,
-		/**
-		The kind of store backend this client reads through.
-		*/
 		public readonly storeKind: NixStoreKind,
 		/**
-		 * Setting names from the source configuration that this client does not
-		 * recognise. The client ignores their values, matching Nix, and exposes
-		 * the names for callers to report.
+		 * Unrecognised setting names from the source configuration. The client
+		 * ignores their values, matching Nix, and exposes the names for callers to
+		 * report.
 		 */
 		public readonly unknownSettings: readonly string[] = []
 	) {}
@@ -232,16 +214,13 @@ export class Nix {
 		return storePath.success ? storePath.data : undefined;
 	}
 
-	/**
-	Path information for the store path the argument resolves to.
-	*/
 	async queryPathInfo(path: string): Promise<NixValidPathInfo> {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
 
 	/**
-	 * Path information for every argument, in argument order. An argument the
-	 * store does not hold fails the whole query.
+	 * Path information for every argument, in argument order. A missing argument
+	 * fails the whole query.
 	 */
 	async queryPathsInfo(
 		paths: readonly string[]
@@ -252,11 +231,10 @@ export class Nix {
 	}
 
 	/**
-	 * The stores each path was copied from, as the store reported the copies to
-	 * this client. The store reports a copy it performs for a caller, such as a
-	 * substitution during a build this client asked for. A path the store
-	 * already held has no entry, and neither does a path another process
-	 * fetched.
+	 * Copy activity visible to the selected backend while serving this client.
+	 * Daemon clients observe `actCopyPath` events on their own connections.
+	 * Backends without copy events return an empty map, as do paths that were
+	 * already present and copies requested through another client.
 	 */
 	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
 		return this.store.observedCopies?.() ?? new Map();
@@ -275,8 +253,7 @@ export class Nix {
 	}
 
 	/**
-	 * The subset of the arguments that are valid in this store, deduplicated and
-	 * sorted.
+	 * Returns the arguments that are valid in this store, deduplicated and sorted.
 	 */
 	async queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
 		return this.store.queryValidPaths(
@@ -285,7 +262,7 @@ export class Nix {
 	}
 
 	/**
-	 * The arguments available from the store's configured substituters,
+	 * Returns the arguments available from the store's configured substituters,
 	 * deduplicated and sorted.
 	 */
 	async querySubstitutablePaths(
@@ -297,12 +274,13 @@ export class Nix {
 	}
 
 	/**
-	 * The substituter offer for each path: transfer size, references and, from a
-	 * substituter's own narinfo, the NAR hash and signatures it would serve
-	 * the path under. Paths without an offer are omitted.
+	 * Returns the external offers visible through the selected backend and omits
+	 * paths without an offer. A daemon reports transfer sizes and references. A
+	 * process-driven store reads narinfo directly and also reports its NAR hash
+	 * and signatures.
 	 *
-	 * Results use the settings of the opened store. A client configured to bypass
-	 * a narinfo cache also bypasses it for this operation.
+	 * The client uses its configured settings and narinfo-cache policy for this
+	 * operation.
 	 */
 	async querySubstitutablePathInfos(
 		paths: readonly string[]
@@ -313,11 +291,10 @@ export class Nix {
 	}
 
 	/**
-	 * Whether everything in this store's closure of the argument is offered by
-	 * this client's substituters, proven by walking the closure held by this
-	 * store and querying every path in it. The operation uses the substituters
+	 * Checks whether every path in the locally recorded closure has an acceptable
+	 * offer from this client's substituters. The operation uses the substituters
 	 * configured when the client was opened, so a caller that needs a particular
-	 * set of substituters opens a client configured with them.
+	 * set opens a client configured with them.
 	 *
 	 * Each substituter is queried for the path's narinfo, so every offer includes
 	 * the NAR hash and signatures over it. An offer is proof only if a consumer
@@ -339,9 +316,9 @@ export class Nix {
 	}
 
 	/**
-	 * Computes the work required to realise the given targets. Targets pass through
-	 * unchanged: a derived path names a derivation and its outputs, not a
-	 * filesystem location, so there is nothing to canonicalise.
+	 * Computes the work required to realise the given targets. Targets pass
+	 * through unchanged. A derived path identifies a derivation and its outputs
+	 * rather than a filesystem location, so it does not require canonicalisation.
 	 */
 	async queryMissing(
 		targets: readonly NixDerivedPathString[]
@@ -350,7 +327,7 @@ export class Nix {
 	}
 
 	/**
-	 * Whether the daemon connection this client uses is trusted. Only a
+	 * Whether this client's daemon connection is trusted. Only a
 	 * daemon-backed store has a connection to query; any other backend reports
 	 * `unknown`, as does an unset handshake flag.
 	 */
@@ -361,7 +338,7 @@ export class Nix {
 	/**
 	 * Configured substituters that could not be queried. This distinguishes a
 	 * confirmed absence from an incomplete query. A daemon manages its own
-	 * substituters and does not report which of them it could not reach, so a
+	 * substituters and does not identify individual reachability failures, so a
 	 * daemon-backed store returns an empty list here.
 	 */
 	async unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
@@ -369,32 +346,25 @@ export class Nix {
 	}
 
 	/**
-	 * Whether an availability result may have come from a cache rather than from
-	 * a fresh substituter query. A daemon caches what its substituter queries
-	 * returned, so a path the daemon reports as unavailable may have been
-	 * recorded as unavailable earlier; a store driven by this process queries
-	 * the substituters directly, so its results are current.
+	 * Whether availability may reflect the daemon's narinfo cache. A daemon can
+	 * repeat an earlier negative result without contacting a substituter. A store
+	 * driven by this process queries its configured substituters for each
+	 * operation.
 	 */
 	get cachesSubstituterQueries(): boolean {
 		return this.storeKind !== 'local-filesystem';
 	}
 
-	/**
-	Whether this transport leaves the remote daemon's options untouched.
-	*/
 	get preservesDaemonOptions(): boolean {
 		return this.store.preservesDaemonOptions ?? false;
 	}
 
 	/**
-	 * Whether the substituter settings this client was opened with are the
-	 * ones reflected by its results.
-	 *
-	 * An SSH store preserves the remote daemon's settings rather than sending
-	 * these options. Other daemons apply an untrusted client's settings
-	 * selectively without reporting which were dropped, so only a trusted
-	 * connection can confirm the settings it was sent. A store driven by this
-	 * process applies the settings directly.
+	 * Reports whether availability uses the substituter settings supplied when
+	 * this client was opened. A process-driven store applies them directly. A
+	 * local daemon can silently drop overrides from an untrusted connection, so
+	 * only a trusted handshake confirms their use. An SSH store leaves its remote
+	 * daemon's options unchanged and cannot provide this guarantee.
 	 */
 	async honoursSubstituterSettings(): Promise<SubstituterSettingsOutcome> {
 		if (!this.cachesSubstituterQueries) {
@@ -416,9 +386,6 @@ export class Nix {
 			: { isHonoured: false, reason: 'daemon-trust', trust };
 	}
 
-	/**
-	The NAR serialisation of the store path the argument resolves to.
-	*/
 	narFromPath(path: string): AsyncIterable<Uint8Array> {
 		return this.store.narFromPath(this.toStorePath(path));
 	}
@@ -451,7 +418,7 @@ export class Nix {
 	}
 
 	/**
-	 * Whether the named derivation's own `allowSubstitutes` option lets Nix
+	 * Whether the specified derivation's own `allowSubstitutes` option lets Nix
 	 * fetch its outputs rather than build them.
 	 */
 	async canSubstituteDerivation(drvPath: string): Promise<boolean> {
@@ -460,9 +427,6 @@ export class Nix {
 		return derivation.allowsSubstitutes;
 	}
 
-	/**
-	 * The system and system features required to build the derivation.
-	 */
 	async derivationBuildRequirements(
 		drvPath: string
 	): Promise<DerivationBuildRequirements> {
@@ -472,12 +436,11 @@ export class Nix {
 	}
 
 	/**
-	 * Reads the named derivation from the store.
+	 * Reads the derivation at the specified store path.
 	 *
-	 * No store operation reports a derivation's contents, so the derivation
-	 * itself is read: a derivation is one regular file in the store, and its
-	 * serialisation contains all required metadata. This reads only the
-	 * derivation file, not its outputs.
+	 * No store operation reports a derivation's contents. The derivation is a
+	 * regular file whose serialisation contains all required metadata, so this
+	 * operation reads that file without reading its outputs.
 	 */
 	async readDerivation(drvPath: string): Promise<Derivation> {
 		const contents = await this.store.readDerivation(this.toStorePath(drvPath));
@@ -485,9 +448,6 @@ export class Nix {
 		return Derivation.parse(contents);
 	}
 
-	/**
-	The registered output paths of the given derivations, sorted.
-	*/
 	async queryDerivationOutputPaths(
 		drvPaths: readonly string[]
 	): Promise<readonly string[]> {
@@ -496,9 +456,6 @@ export class Nix {
 		);
 	}
 
-	/**
-	The closure of the given paths, sorted by store path.
-	*/
 	async resolveClosure(
 		paths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]> {
@@ -537,8 +494,9 @@ export class Nix {
 	}
 
 	/**
-	 * The filesystem location of a store path. A rooted local store retains its
-	 * logical store paths but keeps their contents beneath another directory.
+	 * Resolves a logical store path to its filesystem location. A rooted local
+	 * store keeps the same logical paths but places their contents beneath another
+	 * directory.
 	 */
 	storePathOnDisk(path: string): string {
 		return pathModule.join(

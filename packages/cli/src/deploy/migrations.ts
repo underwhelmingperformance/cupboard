@@ -38,10 +38,6 @@ export function parseD1Migrations(
 		}));
 }
 
-/**
- * The minimal surface the D1 migration runner needs from the Cloudflare client,
- * so the runner is testable against a fake.
- */
 export interface D1MigrationApi {
 	query(databaseId: DatabaseId, sql: string): Promise<void>;
 	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
@@ -94,10 +90,10 @@ export async function applyD1Migrations(
 
 /**
  * Decide which Durable Object migration step to send, given the migration tag
- * the deployed script already carries. On a first deploy (no tag) the full set
+ * the deployed script already reports. On a first deploy (no tag) the full set
  * of new-SQLite-class steps is sent; once the tag matches the latest config
- * migration nothing is sent. Mirrors wrangler's `getMigrationsToUpload`, reduced
- * to the steps this Worker uses.
+ * migration, no migration payload is sent. Mirrors wrangler's
+ * `getMigrationsToUpload`, reduced to the steps this Worker uses.
  */
 export function computeDurableObjectMigration(
 	deployedTag: string | undefined,

@@ -63,8 +63,8 @@ values outside that width but does not report the width directly. The update
 command tries four boundary values for each integer setting and records the
 width indicated by the accepted values. This requires four `nix config show`
 runs per integer setting. The oracle test performs the same probes for the
-system on which it runs. A lockfile refresh therefore fails only when that
-system's pinned Nix has different setting types or integer widths.
+system on which it runs. A lockfile refresh changes the generated table only
+when that system's pinned Nix has different setting types or integer widths.
 
 If the accepted values do not match a known width, the update fails. This forces
 the table reader to be updated when Nix adds another integer width.

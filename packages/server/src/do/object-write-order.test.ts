@@ -7,14 +7,10 @@ import { ObjectWriteOrder } from './object-write-order.ts';
 
 const key = (name: string): R2ObjectKey => r2ObjectKeySchema.parse(name);
 
-// The settled-signal shape the timeout error carries: resolves once the
-// resolver-backed promise settles.
 async function settled(pending: Promise<unknown>): Promise<void> {
 	await pending;
 }
 
-// A write whose mutation timed out, carrying the abandoned call's
-// settled-signal, as boundedSubrequest raises it.
 async function abandonedWrite(
 	order: ObjectWriteOrder,
 	keys: readonly R2ObjectKey[],
@@ -33,8 +29,6 @@ async function abandonedWrite(
 	expect(error).toBeInstanceOf(SubrequestTimeoutError);
 }
 
-// Flushes the microtask queue far enough for a write that is not blocked on an
-// outstanding signal to have issued its mutation.
 async function flushMicrotasks(): Promise<void> {
 	await vi.advanceTimersByTimeAsync(0);
 }
@@ -97,7 +91,7 @@ describe('ObjectWriteOrder', () => {
 		}
 	});
 
-	it('bounds the wait, rejecting retryably and keeping the signal for the retry', async () => {
+	it('rejects a blocked wait without forgetting the abandoned mutation', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -120,8 +114,6 @@ describe('ObjectWriteOrder', () => {
 			await rejects;
 			expect(events).toStrictEqual([]);
 
-			// The signal stayed registered: the retry still orders behind the
-			// abandoned call, and proceeds once it settles.
 			const retried = order.write([key('key')], () => {
 				events.push('retried');
 
@@ -140,7 +132,7 @@ describe('ObjectWriteOrder', () => {
 		}
 	});
 
-	it('registers a bulk mutation against every key it covered', async () => {
+	it('blocks writes to every key from an abandoned bulk mutation', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -178,10 +170,10 @@ describe('ObjectWriteOrder', () => {
 			error: () => new Error('r2 refused')
 		},
 		{
-			failure: 'a timeout whose call never started',
+			failure: 'a timeout before the R2 call starts',
 			error: () => new SubrequestTimeoutError('r2.delete')
 		}
-	])('registers nothing after $failure', async ({ error }) => {
+	])('does not block a later write after $failure', async ({ error }) => {
 		vi.useFakeTimers();
 
 		try {

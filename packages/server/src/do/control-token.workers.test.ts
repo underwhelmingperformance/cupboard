@@ -98,9 +98,6 @@ async function tokenExchangeError(
 	}
 }
 
-// A well-formed token for a given issuer/audience. With no control trust rule it
-// matches nothing; with a rule it routes there but issuer discovery or key
-// retrieval is unavailable in these tests, so the signature is never confirmed.
 async function signedToken(options: {
 	issuer: string;
 	audience: string;
@@ -147,7 +144,7 @@ describe('control plane POST /token', () => {
 			error: UnsupportedGrantTypeError
 		},
 		{
-			name: 'the subject token is not a JWT',
+			name: 'a subject token that is not a JWT',
 			form: () =>
 				Promise.resolve({
 					grant_type: tokenExchangeGrantType,
@@ -157,7 +154,7 @@ describe('control plane POST /token', () => {
 			error: SubjectTokenNotJwtError
 		},
 		{
-			name: 'no control trust rule matches the subject token',
+			name: 'a subject token that matches no control trust rule',
 			form: async () => ({
 				grant_type: tokenExchangeGrantType,
 				subject_token: await signedToken({
@@ -168,7 +165,7 @@ describe('control plane POST /token', () => {
 			}),
 			error: ControlSubjectTokenUntrustedError
 		}
-	])('rejects when $name', async ({ form, error }) => {
+	])('rejects $name', async ({ form, error }) => {
 		expect(await tokenExchangeError(await form())).toBeInstanceOf(error);
 	});
 
@@ -248,26 +245,21 @@ describe('control plane POST /token', () => {
 	it.each<{ name: string; override: Readonly<Record<string, string>> }>([
 		{ name: 'the wrapping secret', override: { CONTROL_KEY_WRAP_SECRET: '' } },
 		{ name: 'the audience', override: { CUPBOARD_CONTROL_AUDIENCE: '' } }
-	])(
-		'reports 500 when $name is not configured, issuing nothing',
-		async ({ override }) => {
-			const response = await postToken(
-				{
-					grant_type: tokenExchangeGrantType,
-					subject_token: 'x',
-					subject_token_type: subjectTokenTypeIdToken
-				},
-				override
-			);
-			await response.text();
+	])('reports 500 when $name is not configured', async ({ override }) => {
+		const response = await postToken(
+			{
+				grant_type: tokenExchangeGrantType,
+				subject_token: 'x',
+				subject_token_type: subjectTokenTypeIdToken
+			},
+			override
+		);
+		await response.text();
 
-			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
-		}
-	);
+		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
+	});
 
-	it('refuses to issue, failing closed, when a control trust rule pins no subject', async () => {
-		// An admin-scoped rule with no pinned subject would match every subject of
-		// the trusted issuer and audience, so it must be rejected.
+	it('refuses token exchange when a control trust rule does not pin a subject', async () => {
 		await seedControlTrust({
 			issuer: 'https://idp.example.test',
 			audience: 'cupboard-control'
@@ -298,7 +290,7 @@ describe('control plane POST /token', () => {
 		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 	});
 
-	it('publishes the control JWKS, distinct from any tenant key', async () => {
+	it('publishes the control JWKS with no-cache', async () => {
 		const response = await controlFetch('/.well-known/jwks.json');
 		const body = jwksResponseSchema.parse(await response.json());
 		const [key] = body.keys;

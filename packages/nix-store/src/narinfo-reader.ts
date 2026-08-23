@@ -10,14 +10,10 @@ import {
 } from './scalars.ts';
 import { isNixSignature } from './signature.ts';
 
-// Some caches write this value for a path whose deriver they do not know.
-// cache.nixos.org serves it for many older paths, and Nix reads it as no
-// deriver.
+// Some caches use this value when the deriver is unknown. cache.nixos.org
+// serves it for many older paths, and Nix parses it as an absent deriver.
 const unknownDeriver = 'unknown-deriver';
 
-/**
-What one narinfo document offers for the store path it describes.
-*/
 export interface NarInfoOffer {
 	readonly source: 'substituter';
 	readonly references: readonly StorePathString[];
@@ -28,9 +24,12 @@ export interface NarInfoOffer {
 	readonly narSize: number;
 }
 
-// A narinfo identifies the deriver and references by basename, while a
-// substitutable-path response uses full store paths. Accept every compression
-// supported by Nix and reject documents that omit fields required by Nix.
+/**
+ * Parses substitution evidence from a narinfo. Deriver and reference basenames
+ * are resolved in `storeDirectory`. The parser validates every recognised
+ * field against Nix's grammar, including compression values and required
+ * fields, and requires `StorePath` to match the requested path.
+ */
 export function offerFromNarInfo(
 	source: string,
 	storePath: StorePathString,
@@ -66,7 +65,6 @@ class NarInfoReader {
 
 	private contentAddress?: string;
 
-	// A narinfo carries one `Sig` line per key that signed the path.
 	private readonly signatures: string[] = [];
 
 	constructor(
@@ -119,8 +117,6 @@ class NarInfoReader {
 		this.readArchiveField(name, value);
 	}
 
-	// The fields describing the archive itself: how it is compressed, what it
-	// hashes to and how large it is.
 	private readArchiveField(name: string, value: string): void {
 		if (name === 'Compression') {
 			// Nix interprets an empty value as its default compression.
@@ -146,7 +142,6 @@ class NarInfoReader {
 		this.readReferenceField(name, value);
 	}
 
-	// The path's references, deriver, signatures and content address.
 	private readReferenceField(name: string, value: string): void {
 		if (name === 'References') {
 			// Nix separates references with single spaces. Other whitespace becomes
@@ -191,7 +186,6 @@ class NarInfoReader {
 		}
 	}
 
-	// A narinfo may specify at most one non-empty content address.
 	private readContentAddress(value: string): void {
 		if (this.contentAddress !== undefined) {
 			throw new CorruptNarInfoError(this.storePath);
@@ -208,10 +202,9 @@ class NarInfoReader {
 		this.contentAddress = value;
 	}
 
-	// Nix reads a hash field as an algorithm and a digest, in any of the
-	// spellings it writes them in, and refuses the document when it cannot.
-	// A NAR hash is kept when it is sha256, the algorithm a store path's own
-	// hash uses and therefore the only algorithm available for comparing offers.
+	// Validate every hash field so a malformed FileHash still rejects the
+	// document. Retain only a sha256 NarHash because offers compare NAR contents
+	// with that algorithm.
 	private readHash(name: string, value: string): void {
 		const hash = decodeNixHashField(value);
 
@@ -257,8 +250,8 @@ class NarInfoReader {
 
 		const narHash = this.narHash;
 
-		// Nix rejects a narinfo missing any of these fields as corrupt, so this
-		// reader does too and the path is never reported as available.
+		// If any of these fields are missing, Nix treats the narinfo as corrupt.
+		// Reject the narinfo here so the client never reports the path as available.
 		if (
 			narHash === undefined ||
 			!this.hasPath ||
@@ -280,7 +273,6 @@ class NarInfoReader {
 	}
 }
 
-// Compression algorithms accepted by Nix for narinfos.
 const compressionAlgorithms = new Set([
 	'none',
 	'br',

@@ -1,6 +1,6 @@
 name: Set up cupboard
 description:
-  Install cupboard and optionally export Nix binary cache configuration.
+  Acquire cupboard and optionally export Nix binary cache configuration.
 inputs:
   cupboard:
     description:
@@ -8,7 +8,7 @@ inputs:
     required: false
   cupboard-version:
     description:
-      cupboard version to install. Use latest or an exact published release tag.
+      Release tag to install. Use latest to resolve a published release.
     required: false
   include-prereleases:
     description:
@@ -16,31 +16,32 @@ inputs:
       of any kind.
     required: false
   github-token:
-    description: GitHub token used for release API calls.
+    description: GitHub token for release, asset and attestation requests.
     required: false
   release-repository:
-    description: Repository that publishes cupboard release assets.
+    description: Repository that publishes cupboard releases and provenance.
     required: false
   expected-source-commit:
     description:
-      Full commit id the installed release must have been built from. Requires
-      an exact cupboard-version.
+      Full commit id that the release provenance must identify. Requires an
+      exact cupboard-version.
     required: false
   install-dir:
-    description: Directory for the downloaded cupboard binary.
+    description: Directory for acquired cupboard files.
     required: false
   add-to-path:
-    description: Add the directory containing the acquired binary to PATH.
+    description:
+      Add the directory containing the acquired cupboard binary to PATH.
     required: false
     default: 'true'
   cache-url:
-    description: cupboard Worker URL to add to Nix substituters.
+    description: cupboard tenant URL to add to Nix substituters.
     required: false
   cache:
-    description: Named cache to read from.
+    description: Cache to use at the tenant URL.
     required: false
   trusted-public-key:
-    description: Nix trusted public key for the cupboard cache.
+    description: Nix signing key to trust for cache reads.
     required: false
   read-user:
     description: Username for private cache reads.
@@ -55,14 +56,16 @@ inputs:
       numerically greater than the destination's.
     required: false
   nix-config-file:
-    description: Optional Nix config file to append to.
+    description: Existing Nix config file to append generated settings to.
     required: false
 outputs:
   cupboard-path:
-    description: Path to the installed cupboard binary.
+    description: Path to the acquired cupboard executable.
     value: ${{ steps.setup.outputs.cupboard-path }}
   cupboard:
-    description: Canonical release or source acquisition as validated JSON.
+    description:
+      Pass this JSON to another setup invocation to acquire the same release or
+      source commit.
     value: ${{ steps.setup.outputs.cupboard }}
   cupboard-version:
     description: Resolved cupboard release tag; empty for source acquisition.
@@ -116,7 +119,7 @@ runs:
       working-directory: ${{ github.action_path }}/../..
       run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
 
-    - name: Install cupboard
+    - name: Acquire cupboard
       id: setup
       shell: bash
       env:

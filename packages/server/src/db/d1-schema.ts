@@ -33,12 +33,11 @@ export const instanceConfig = sqliteTable('instance_config', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
-// The global, cross-tenant shared-blob facts, held in D1 and shared across all
-// tenant Durable Objects. A row exists exactly when a verified shared
-// object lives at `nar/<nar_hash>.nar.zst`, so it is both the `available` set and
-// the canonical compressed metadata a servable narinfo advertises. Only positive
-// facts are recorded; a mismatch is kept on the per-upload record, never here,
-// so one tenant's bad upload can never poison a hash for everyone.
+// These rows store the canonical compressed metadata shared by every tenant.
+// Promotion writes R2 before this row, so a crash can leave an object without
+// metadata. Object loss can also leave a stale row. Callers that need proof of
+// availability must check R2. Upload mismatches remain on the private upload row
+// and cannot poison the shared metadata for a hash.
 export const blobState = sqliteTable(
 	'blob_state',
 	{
@@ -48,11 +47,10 @@ export const blobState = sqliteTable(
 		compression: text('compression', { enum: ['zstd'] }).notNull(),
 		narSize: integer('nar_size').notNull(),
 		verifiedAt: text('verified_at').$type<IsoTimestamp>().notNull(),
-		// The reaper's grace timer. The arm pass sets it to `now + grace` once no
-		// `blob_ref` references this hash; a commit that re-references the hash
-		// (promote or reuse) clears it back to NULL; the collect pass deletes the row
-		// and the shared object once it has elapsed and the hash is still
-		// unreferenced. NULL means live, or not yet armed.
+		// The reaper arms an unreferenced blob by setting this deadline. A new
+		// reference clears it. Collection must recheck that the deadline has elapsed
+		// and that no reference exists before deleting the row and object. Null means
+		// live or not yet armed.
 		deleteAfter: text('delete_after').$type<IsoTimestamp>()
 	},
 	(table) => [index('blob_state_delete_after_idx').on(table.deleteAfter)]
@@ -104,14 +102,12 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 	retiredAt: text('retired_at').$type<IsoTimestamp>()
 });
 
-// The control-plane trust policy: which external OIDC identity may exchange a
-// subject token for the control grants `permitted_grants_json` permits. It
-// mirrors a tenant `oidc_trust` rule but is global: `iss`/`aud` must match and
-// every `claims_json` entry (a pinned `sub` lives here) must match exactly. The
-// bootstrap owner is seeded with a wildcard by the gated first-signup claim;
-// scoped identities are added through the control admin API. `disabled_at`
-// soft-disables without losing the audit row. The control plane is its own
-// issuer, entirely separate from any tenant's.
+// These rules determine which external OIDC identities can receive control
+// grants. Decoded `iss`, `aud`, and `claims_json` values select a candidate;
+// token verification must succeed before `permitted_grants_json` can authorise
+// an exchange. The initial signup creates the wildcard owner rule, and the
+// control admin API adds scoped identities. Disabling a rule retains its audit
+// row. Control tokens use an issuer separate from every tenant issuer.
 export const controlTrust = sqliteTable('control_trust', {
 	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),
@@ -125,15 +121,14 @@ export const controlTrust = sqliteTable('control_trust', {
 	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
-// The tenant registry: one row per provisioned cache, written only by the Worker.
+// The tenant registry has one row per provisioned tenant and is written only by
+// the Worker.
 // `status` gates admission: `active` serves and accepts writes, `suspended` stops
 // writes at once and reads after the manifest TTL, `offboarding` drains, and
-// `offboarded` is the terminal scrubbed tombstone (kept so the slug is never reused,
-// excluded from the manifest, never maintained). `read_mode`
-// and the owner OIDC triple are projected into the KV admission manifest and seeded
-// into the tenant Durable Object at provision time. `config_version` is the
-// monotonic fence carried on every dispatch, so a Durable Object applies identity
-// updates in order and never downgrades to an older one.
+// `offboarded` is the terminal scrubbed tombstone, which keeps the slug from
+// being reused. The owner identity and `config_version` configure the tenant
+// Durable Object. The version orders deliveries so an older configuration
+// cannot replace a newer one.
 export const tenant = sqliteTable(
 	'tenant',
 	{
@@ -147,19 +142,14 @@ export const tenant = sqliteTable(
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// The per-tenant read verifier for a private cache: the Basic-auth user and a
-		// hash of its password. Both are NULL for a public cache, or for a private one
-		// with no credential, which then fails closed and rejects every read. Only the
-		// hash, never the plaintext, is projected into the KV manifest the read path
-		// checks, so a read secret never leaves the control plane in the clear.
+		// Private reads use this Basic-auth user and password verifier. The plaintext
+		// password is never stored. A private tenant with no complete verifier fails
+		// closed; public tenants keep all three columns null.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
-		// When the cron last ran maintenance (GC + verify) for this tenant. The batch
-		// processes the most-overdue active tenants first and stamps this, so the
-		// table carries its own round-robin position (no separate cursor);
-		// NULL (a never-maintained tenant) sorts first, so a new tenant is picked up
-		// promptly.
+		// Scheduled maintenance processes the least recently maintained active
+		// tenants first. Null sorts first, so a new tenant is selected promptly.
 		lastMaintainedAt: text('last_maintained_at').$type<IsoTimestamp>()
 	},
 	(table) => [
@@ -167,10 +157,9 @@ export const tenant = sqliteTable(
 	]
 );
 
-// Durable operational state for tenant-routed cron passes. A row records the latest
-// success and failure facts for one tenant/pass pair, so a failing tenant remains
-// visible after the Worker log line has gone and a later success clears the failure
-// streak without erasing when that pass last ran cleanly.
+// Keep the latest maintenance success and failure for each tenant and pass. A
+// failure remains visible after its Worker log has expired. A later success
+// clears the failure streak but preserves the time of the last successful pass.
 export const tenantMaintenanceFailure = sqliteTable(
 	'tenant_maintenance_failure',
 	{
@@ -184,10 +173,9 @@ export const tenantMaintenanceFailure = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.pass] })]
 );
 
-// A fail-open admission hint for cron-driven tenant maintenance. The tenant DO
-// owns the source tables and rewrites this row after mutations that can create
-// or clear deferred work; cron uses it only to avoid waking tenants whose row is
-// current and has no due work.
+// This row is a fail-open hint for scheduled tenant maintenance. The tenant
+// Durable Object recomputes it after mutations that can create or clear work.
+// The scheduler uses a current idle hint to avoid waking that tenant.
 export const tenantMaintenanceEligibility = sqliteTable(
 	'tenant_maintenance_eligibility',
 	{
@@ -195,11 +183,10 @@ export const tenantMaintenanceEligibility = sqliteTable(
 		// The tenant's next wake time: a fixed past sentinel when work is due now, the
 		// soonest deferred deadline otherwise, or null when the tenant is idle.
 		nextWakeAt: text('next_wake_at').$type<IsoTimestamp>(),
-		// When the wake time was last recomputed. Not strictly monotonic: the conflict
-		// rule can write an older reconcile's stamp when its wake is sooner, so a reader
-		// must not treat this as a "last reconciled" high-water mark. Its only consumer
-		// is the maintenance batch's staleness check, where a backward value can only
-		// trigger an extra pass, never miss one.
+		// This records when eligibility was recomputed, but it is not monotonic.
+		// Conflict resolution can retain an older timestamp when that row has an
+		// earlier wake time. Consumers use it only to detect stale hints, so moving
+		// backwards can schedule extra work but cannot skip due work.
 		reconciledAt: text('reconciled_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -210,21 +197,15 @@ export const tenantMaintenanceEligibility = sqliteTable(
 	]
 );
 
-// The monotonic version of the published admission manifest, a single row the
-// Worker advances every time it republishes. Sourcing the version from D1 (rather
-// than the KV version key) keeps concurrent provisioning operations from issuing
-// the same version: each provisioning batch bumps it, writes the manifest body
-// under that version's immutable KV key, then bumps the KV version pointer last.
 export const manifestState = sqliteTable('manifest_state', {
 	id: text('id').primaryKey(),
 	version: integer('version').notNull()
 });
 
-// The single global administrator, established once by the gated first-signup
-// claim. The fixed `id = 'singleton'` makes the first-writer-wins insert both the
-// irreversible bootstrap and the claim's consumption marker: a later claim by a
-// different principal hits the primary-key conflict and is refused. `issuer` and
-// `subject` identify the principal the claim promoted.
+// The first successful signup assigns the global administrator. The fixed
+// `id = 'singleton'` makes that assignment irreversible: a later principal hits
+// the primary-key conflict and is refused. `issuer` and `subject` identify the
+// administrator.
 export const globalAdmin = sqliteTable('global_admin', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
@@ -232,10 +213,9 @@ export const globalAdmin = sqliteTable('global_admin', {
 	claimedAt: text('claimed_at').$type<IsoTimestamp>().notNull()
 });
 
-// Per-tenant unique-blob presence: a tenant references this NAR hash via at least
-// one live narinfo version. Maintained by the tenant's DO on the 0↔1 edge
-// transition; `file_size` is the tenant's verified stored bytes, the basis for
-// once-per-tenant-per-blob quota charging (the charge itself lands later).
+// One row means that this tenant has at least one live narinfo reference to the
+// NAR hash. The same atomic batch inserts the first presence row and charges its
+// `file_size`. Removing the last reference deletes the row and credits that size.
 export const tenantBlob = sqliteTable(
 	'tenant_blob',
 	{
@@ -246,9 +226,9 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// A measured, content-addressed attestation bundle in shared R2. `stored_at` means
-// the bytes were measured and stored at `cas/<digest>`; it is not Sigstore, DSSE,
-// or trust-root verification.
+// A row records the size of attestation bytes stored at `cas/<digest>` in shared
+// R2. It does not mean that the bundle passed Sigstore, DSSE, or trust-root
+// verification.
 export const casObject = sqliteTable(
 	'cas_object',
 	{
@@ -305,10 +285,10 @@ export const tenantCasBlob = sqliteTable(
 // storage only, matching `tenant_cas_blob`. `narinfos` is the committed-narinfo
 // count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
 // counters are maintained incrementally by the owning tenant's Durable Object as it
-// charges on 0-to-1 presence transitions and credits on 1-to-0 transitions, and
-// reconciled by cron roll-ups. `quota_bytes` is the admin-set limit (NULL means
-// unlimited), written only by the Worker. The CHECK makes an over-quota charge fail
-// its D1 batch, so no edge and no charge are ever stranded over quota.
+// charges on 0-to-1 presence transitions and credits on 1-to-0 transitions.
+// `quota_bytes` is the admin-set limit (NULL means unlimited), written only by the
+// Worker. The CHECK makes an over-quota charge fail its D1 batch, so no edge and no
+// charge are ever stranded over quota.
 export const tenantUsage = sqliteTable(
 	'tenant_usage',
 	{

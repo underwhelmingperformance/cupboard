@@ -87,9 +87,6 @@ export function renameResource(
 	};
 }
 
-/**
-Replaces the control Worker's cron triggers (the tenant has none).
-*/
 export function withCrons(
 	config: DeploymentConfig,
 	crons: readonly string[]
@@ -101,10 +98,9 @@ export function withCrons(
 }
 
 /**
- * Sets the control-plane signup gate on the control Worker: the OIDC identity
- * allowed to claim global admin (`POST /signup`). No admin writes empty
- * strings, leaving the gate closed; a `CUPBOARD_SIGNUP_SECRET` Worker secret,
- * when set, takes precedence over the subject pin.
+ * Sets the OIDC identity allowed to claim global admin. Passing no identity
+ * writes empty values and closes the signup gate. A configured
+ * `CUPBOARD_SIGNUP_SECRET` takes precedence over this identity.
  */
 export function withSignupGate(
 	config: DeploymentConfig,

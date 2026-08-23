@@ -16,9 +16,6 @@ import {
 
 import { baseProcedure } from './base.ts';
 
-// Upload negotiation determines whether each path requires an upload, can reuse
-// an existing blob, or is already present. Missing NARs are uploaded directly to
-// R2 with temporary credentials. Commit uses a separate WebSocket protocol.
 export const uploadsContract = {
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
 	// creates and signs a new identifier. With an existing `pushId`, the server

@@ -88,11 +88,9 @@ function trackR2Puts(inner: R2Bucket): {
 	return { bucket, maximum: () => maximum };
 }
 
-// A `RootsService` wired over a fresh context sharing the live instance's
-// storage, whose R2 head probe runs `onHead` first: the ensure path's
-// off-gate identity snapshot settles servability with exactly one such probe
-// per target, so this is a deterministic point to interleave a mutation
-// between that snapshot and the gated write that revalidates it.
+// The first R2 head follows the off-gate identity snapshot and precedes the
+// gated revalidation. Run the mutation there to reproduce a row change between
+// those two reads.
 function rootsServiceWithHeadHook(
 	instance: CupboardServer,
 	state: DurableObjectState,
@@ -125,8 +123,7 @@ function ignoreHead(): void {
 	return;
 }
 
-// Fires `mutate` on the first head probe only, so a target that needs more
-// than one (a multi-target root) settles the rest undisturbed.
+// Mutate only on the first head so later targets follow the normal path.
 function onceOnHead(mutate: () => void): () => void {
 	let isFired = false;
 
@@ -143,7 +140,7 @@ function onceOnHead(mutate: () => void): () => void {
 describe('root ensure hardening', () => {
 	beforeEach(resetTestServer);
 
-	it('answers build-required when a target is recommitted between the ensure probe and the gate', async () => {
+	it('returns build-required when a target is recommitted between the ensure probe and the gate', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, committed);
@@ -177,11 +174,10 @@ describe('root ensure hardening', () => {
 		});
 	});
 
-	// A narinfo object can outlive its NAR: a crash can leave the canonical
-	// object gone while `blob_state` still records it, so the metadata head
-	// answers, substitution would 404 on the NAR, and ensure must not certify
-	// the root as retained.
-	it('answers build-required when the canonical NAR object is gone behind a live narinfo object', async () => {
+	// A crash can leave the narinfo object and `blob_state` row after the
+	// canonical NAR disappears. The root is not retained because substitution
+	// would return 404 for the NAR.
+	it('returns build-required when the canonical NAR object is missing behind a live narinfo object', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, committed);
@@ -209,11 +205,9 @@ describe('root ensure hardening', () => {
 		});
 	});
 
-	// A committed edge for an old generation can outlive a delete and recommit
-	// until the deletion backlog drains; it proves nothing about the live row,
-	// so a rewritten row whose own commit has not landed must not be certified
-	// by the stale edge and the old narinfo object.
-	it('answers build-required when only a stale committed edge backs a rewritten row', async () => {
+	// A reference edge for an old generation can remain until the deletion
+	// backlog drains. It cannot prove that the current row was committed.
+	it('returns build-required when only a stale committed edge backs a rewritten row', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, committed);
@@ -301,11 +295,6 @@ describe('root ensure hardening', () => {
 		});
 	});
 
-	// A maximum-sized root drives thousands of R2 operations through the pool:
-	// two heads and a repairing put per target, plus the gated re-read each
-	// publish makes. That settles in a couple of seconds on an idle machine and
-	// in about nine when the whole workspace runs in parallel around it, so the
-	// budget below leaves room for a runner slower again than that.
 	it('repairs a maximum-root-sized legacy object set with bounded concurrency', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -397,7 +386,7 @@ describe('root ensure hardening', () => {
 		});
 	}, 120_000);
 
-	it('still answers retained when the row is rewritten to the same identity between the probe and the gate', async () => {
+	it('still returns retained when the row is rewritten to the same identity between the probe and the gate', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, committed);
@@ -437,8 +426,9 @@ describe('root ensure hardening', () => {
 		]);
 	});
 
-	// setRoot writes the root either way; the recommitted target is reported
-	// not present, since its rewritten row has no committed edge of its own.
+	// Unlike ensureRoot, setRoot records the requested root even when a target is
+	// not yet servable. The rewritten row has no current reference edge, so the
+	// result reports that target as absent.
 	it('lets setRoot succeed over a target recommitted between its probe and its gate, unlike ensure', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });

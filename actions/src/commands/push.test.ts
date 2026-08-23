@@ -98,7 +98,7 @@ describe('buildPushArguments', () => {
 		]);
 	});
 
-	it('carries the store the push reads from', () => {
+	it('includes the remote store in the push invocation', () => {
 		expect(
 			buildPushArguments({
 				url: new URL('https://cache.example.test'),
@@ -127,7 +127,7 @@ describe('buildPushArguments', () => {
 		]);
 	});
 
-	it('carries the intermediate, reference and run-root flags', () => {
+	it('includes the intermediate, reference and run-root options', () => {
 		expect(
 			buildPushArguments({
 				url: new URL('https://cache.example.test'),
@@ -218,7 +218,7 @@ describe('resolvePushInputs', () => {
 		expect(resolvePushInputs(baseOptions, environment)).toStrictEqual(defaults);
 	});
 
-	it('passes the remote store through', () => {
+	it('returns the configured remote store URI unchanged', () => {
 		const resolved = resolvePushInputs(
 			{ ...baseOptions, store: 'ssh-ng://build@example.test' },
 			environment
@@ -280,7 +280,7 @@ describe('resolvePushInputs', () => {
 			UrlInputInvalidError
 		],
 		[
-			'url carries a fragment',
+			'url has a fragment',
 			{ ...baseOptions, url: 'https://cupboard.example/t/acme#copied' },
 			UrlInputInvalidError
 		],
@@ -351,7 +351,7 @@ describe('acquirePushCupboard', () => {
 		});
 	});
 
-	it('retains released installation when no path is supplied', async () => {
+	it('uses the release installer when no executable path is supplied', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-push-install-')
 		);
@@ -673,7 +673,7 @@ describe('pushArgumentsForInvocations', () => {
 		]);
 	});
 
-	it('carries the intermediate and reference paths only on the first of several root pushes', () => {
+	it('passes intermediate and reference paths only to the first root push', () => {
 		const pushes: readonly PushInvocation[] = [
 			{ root: 'github:owner/repo/main/app', paths: ['/nix/store/a'] },
 			{ root: 'github:owner/repo/main/lib', paths: ['/nix/store/b'] }
@@ -793,7 +793,7 @@ describe('pathsMissingGraceDeadline', () => {
 	const storePathHashC = '2'.repeat(32);
 	const storePathA = `/nix/store/${storePathHashA}-app`;
 
-	it('passes when every path carries a materialised deadline', () => {
+	it('passes when every path has a materialised deadline', () => {
 		expect(
 			pathsMissingGraceDeadline(
 				summaryWithPaths([
@@ -812,8 +812,8 @@ describe('pathsMissingGraceDeadline', () => {
 		expect(pathsMissingGraceDeadline(summaryWithPaths([]))).toStrictEqual([]);
 	});
 
-	// A fact-less path is a cache-level condition, so the per-path report
-	// leaves it out and `hasUngracedPath` carries it instead.
+	// A path with no grace fact indicates a cache-level policy failure. Exclude
+	// it from the per-path deadline failures and detect it with `hasUngracedPath`.
 	it('reports a path whose grace fact is empty as ungraced, not per-path', () => {
 		const summary = summaryWithPaths([
 			{ storePathHash: storePathHashB, outcome: 'committed', grace: {} }
@@ -839,7 +839,7 @@ describe('pathsMissingGraceDeadline', () => {
 		).toBe(false);
 	});
 
-	it('names a path whose grace is only captured so far as pending', () => {
+	it('reports a path with graceSeconds but no deadline as pending', () => {
 		expect(
 			pathsMissingGraceDeadline(
 				summaryWithPaths([
@@ -857,7 +857,7 @@ describe('pathsMissingGraceDeadline', () => {
 describe('requirePushSummary', () => {
 	const storePathHash = '3'.repeat(32);
 
-	it('yields the parsed data for a push-summary result event', () => {
+	it('returns the parsed data from a push-summary result event', () => {
 		const data = {
 			uploadedPaths: 1,
 			reusedBlobs: 0,
@@ -888,7 +888,7 @@ describe('requirePushSummary', () => {
 		).toStrictEqual({ ...data, paths: [] });
 	});
 
-	it('raises the schema error for a malformed push-summary data line', () => {
+	it('throws a schema error for malformed push-summary data', () => {
 		expect(() => {
 			requirePushSummary([
 				{ kind: 'push-summary', data: { uploadedPaths: 'many' } }
@@ -896,7 +896,7 @@ describe('requirePushSummary', () => {
 		}).toThrow(PushSummaryResponseError);
 	});
 
-	it('names the recorded kinds when no push-summary result was captured', () => {
+	it('reports the recorded result kinds when no push summary exists', () => {
 		let failure: unknown;
 
 		try {
@@ -950,7 +950,7 @@ describe('runPushCupboard', () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	it('passes the detected protocol into the cupboard invocation', async () => {
+	it('forwards the detected protocol to the cupboard invocation', async () => {
 		const result = { protocol: 'legacy-stderr' as const, results: [] };
 		const controller = new AbortController();
 		const detectResultProtocol = vi.fn(() =>

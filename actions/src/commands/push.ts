@@ -68,9 +68,6 @@ import {
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
-/**
-One root group's own target paths, from a cohort declaring several roots.
-*/
 export interface RootGroup {
 	readonly root: string;
 	readonly paths: readonly string[];
@@ -187,10 +184,8 @@ export function registerPushCommand(
 ): void {
 	program
 		.command('push')
-		.description(
-			'Push Nix store paths to a cupboard cache from GitHub Actions.'
-		)
-		.requiredOption('--url <url>', 'cupboard Worker URL')
+		.description('Push local Nix store paths to a cupboard cache.')
+		.requiredOption('--url <url>', 'URL of the cupboard Worker')
 		.option(
 			'--paths <path>',
 			'local Nix store path, derivation or installable to push (repeatable, or newline-delimited)',
@@ -199,7 +194,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--cupboard-path <path>',
-			'pre-acquired cupboard executable; skips release installation'
+			'use this pre-acquired cupboard executable and skip release installation'
 		)
 		.option(
 			'--cupboard-version <version>',
@@ -207,7 +202,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--include-prereleases <value>',
-			'when resolving latest, consider prereleases: true or false'
+			'include prereleases when resolving latest: true or false'
 		)
 		.option('--github-token <token>', 'GitHub token used for release API calls')
 		.option(
@@ -222,21 +217,24 @@ export function registerPushCommand(
 			'--install-dir <directory>',
 			'directory for the downloaded cupboard binary'
 		)
-		.option('--cache <name>', 'named cache to push to')
+		.option('--cache <name>', 'cache to receive the paths')
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store the push reads metadata and NAR bytes from'
+			'read path metadata and NAR bytes from this remote ssh-ng store'
 		)
-		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option('--root <root>', 'retention root for pushed paths')
+		.option(
+			'--audience <audience>',
+			'GitHub OIDC audience (defaults to the canonical Worker URL)'
+		)
+		.option('--root <root>', 'retention root to update with the pushed paths')
 		.option('--ttl <ttl>', 'retention TTL such as 7d or 12h')
 		.option(
 			'--retain <value>',
-			'record retention for the pushed paths: true or false'
+			'add the pushed paths to the retention root: true or false'
 		)
 		.option(
 			'--require-grace <value>',
-			'fail unless every pushed path reports a grace deadline: true or false'
+			'fail if any pushed path has no retention grace deadline: true or false'
 		)
 		.option(
 			'--wait <value>',
@@ -258,20 +256,17 @@ export function registerPushCommand(
 		)
 		.option(
 			'--reference-paths-file <path>',
-			'newline-delimited store paths the tenant already holds, published from the reference source with no local store read or NAR upload'
+			'newline-delimited store paths to publish from the reference source; their NAR blobs must already exist in the tenant'
 		)
 		.option(
 			'--reference-source <url>',
-			'served cache endpoint the reference paths are read from (required with --reference-paths-file)'
+			'cache endpoint that serves the reference paths (required with --reference-paths-file)'
 		)
-		.option(
-			'--run-root <name>',
-			'bind a run root: every pushed path also joins this root as it commits'
-		)
+		.option('--run-root <name>', 'add every committed path to this run root')
 		.option('--run-root-ttl <ttl>', 'expire the run root after this duration')
 		.option(
 			'--root-groups <json>',
-			'JSON array of {root, paths} groups: one push per group, replacing the flat paths and root inputs'
+			'JSON array of {root, paths} groups; replaces paths and root and runs one push per group'
 		)
 		.action((options: PushOptions) =>
 			pushAction(options, environment, undefined, {
@@ -284,8 +279,6 @@ export function resolvePushInputs(
 	options: PushOptions,
 	environment: Environment
 ): PushInputs {
-	// A malformed URL would otherwise surface much later as a confusing OIDC
-	// or fetch failure.
 	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
@@ -313,11 +306,9 @@ export function resolvePushInputs(
 		throw new RootGroupsRetentionConflictError();
 	}
 
-	// Unretained publication never conflicts with the action's own implicit
-	// default root: it simply suppresses it, the same way the CLI's
-	// `--no-retain` needs no `--root` to be given for it to take effect. It
-	// does conflict with an EXPLICITLY named root or ttl, since those ask for
-	// retention an unretained push then refuses to record.
+	// Disabling retention suppresses the action's implicit default root. An
+	// explicit root or TTL still requests retention, so reject either one when
+	// retention is disabled.
 	if (!isRetained && explicitRoot !== undefined) {
 		throw new RootRetentionConflictError();
 	}
@@ -331,9 +322,8 @@ export function resolvePushInputs(
 	const shouldWait = isEnabled('wait', options.wait, true);
 	const requiresGrace = isEnabled('require-grace', options.requireGrace, false);
 
-	// A still-verifying path has no concrete deadline to check; the reusable
-	// workflow always waits, so `require-grace` with an explicit `wait: false`
-	// can never be satisfied.
+	// A path has no grace deadline until verification finishes. `require-grace`
+	// therefore cannot succeed when waiting is disabled.
 	if (requiresGrace && !shouldWait) {
 		throw new GraceWaitConflictError();
 	}
@@ -409,11 +399,6 @@ export function resolvePushInputs(
 	};
 }
 
-/**
- * A cohort's `{root, paths}[]` grouping, replacing the flat `paths`/`root`
- * inputs when a cohort declares more than one target root: the all-or-nothing
- * replacement rule applies per root, so each group is its own push.
- */
 function parseRootGroups(value: string | undefined): readonly RootGroup[] {
 	const trimmed = provided(value);
 
@@ -493,9 +478,8 @@ export async function pushAction(
 	await publishPushOutputs(environment, summary);
 
 	if (inputs.requireGrace) {
-		// A pushed path with no grace fact at all means no policy covers the
-		// cache; resolution is cache-level, so the cache-level error names the
-		// remedy.
+		// A missing grace fact means that no policy covers the cache. Report this
+		// at cache level because the remedy is a cache policy change.
 		if (hasUngracedPath(summary)) {
 			throw new GracePolicyMissingError(inputs.cache);
 		}
@@ -622,10 +606,9 @@ export async function inspectCupboardVersion(
 }
 
 /**
- * Combines one summary per root-group push into a single summary. The action
- * publishes these totals as its own outputs and runs the require-grace checks
- * over the combined path list, because a grouped push is one publication
- * however many `cupboard push` invocations it took to reach every root.
+ * A grouped action run is one publication even though it invokes
+ * `cupboard push` once per root. Combine the summaries before publishing action
+ * outputs and checking grace deadlines.
  */
 export function aggregatePushSummaries(
 	summaries: readonly ParsedPushSummary[]
@@ -688,9 +671,8 @@ export function requireGraceResultProtocol(
 }
 
 /**
- * Whether the push report includes any path with no grace fact at all. Under
- * `require-grace` that means no policy covers the cache, which is the
- * cache-level condition {@link GracePolicyMissingError} reports.
+ * A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
+ * policy. {@link GracePolicyMissingError} reports this cache-level condition.
  */
 export function hasUngracedPath(summary: ParsedPushSummary): boolean {
 	return summary.paths.some(
@@ -701,11 +683,10 @@ export function hasUngracedPath(summary: ParsedPushSummary): boolean {
 }
 
 /**
- * The publication half of grace mode's fail-closed rule (see PLAN.md,
- * "Planning and destination adoption"): every path the push reports must
- * carry a materialised `retainUntil`. A path whose `grace` fact is empty
- * matched no cache policy; one that only carries `graceSeconds` is a deferred
- * upload still awaiting the verdict that would materialise its deadline.
+ * Grace mode fails closed unless every reported path has a materialised
+ * `retainUntil` value (see PLAN.md, "Planning and destination adoption"). An
+ * empty grace fact means that no cache policy matched. A `graceSeconds` value
+ * without `retainUntil` means that verification is still pending.
  */
 export function pathsMissingGraceDeadline(
 	summary: ParsedPushSummary
@@ -733,11 +714,9 @@ async function publishPushOutputs(
 	await setOutput(environment, 'uploaded-bytes', String(summary.uploadedBytes));
 }
 
-// A successful push always records its summary. It is parsed against the
-// protocol's own schema, so a summary whose shape the two sides disagree on (a
-// mismatched cupboard version, say) fails instead of parsing as an empty
-// result. When the run recorded no summary at all, the action has no counts to
-// publish and fails.
+// A successful push must record a summary that matches the protocol schema.
+// Reject an incompatible summary instead of treating it as empty, and fail if
+// the run records no summary.
 export function requirePushSummary(
 	results: readonly ReporterResultEvent[],
 	protocol: CupboardResultProtocol = 'result-file'
@@ -783,8 +762,8 @@ export function buildPushArguments(
 		...options.paths,
 		'--github-oidc'
 	];
-	// No default here: the CLI derives the audience from the canonical form of
-	// the URL it parses, so the default is applied in one place only.
+	// Let the CLI derive the default audience from its canonical Worker URL so
+	// canonicalisation and defaulting happen in one place.
 	if (options.audience !== '') {
 		arguments_.push('--audience', options.audience);
 	}
@@ -845,11 +824,9 @@ export function buildPushArguments(
 }
 
 /**
- * The `cupboard push` argv for each of a run's invocations, one per root
- * group (or the single flat push when the run declares none). The
- * cohort-wide intermediate and reference paths are not scoped to any one
- * target root, so only the first invocation carries them; a later one would
- * otherwise republish the same paths.
+ * Keep root groups and paths in input order. Intermediate and reference paths
+ * apply to the cohort rather than to one target root, so pass their files only
+ * to the first invocation and avoid publishing them again for later roots.
  */
 export function pushArgumentsForInvocations(
 	inputs: Pick<

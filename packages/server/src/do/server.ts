@@ -168,8 +168,8 @@ import {
 	VerificationService
 } from './verification-service.ts';
 
-// A reuse-view miss: 404 and no-store, so a shared cache can never pin an
-// answer that a later view definition or commit would change.
+// Reuse misses must be `no-store`. A view update or commit can make the same
+// lookup succeed, and no purge key covers the cached 404.
 function reuseNotFound(): Response {
 	return new Response('Not found\n', {
 		status: StatusCodes.NOT_FOUND,
@@ -180,9 +180,8 @@ function reuseNotFound(): Response {
 	});
 }
 
-// A storage key marking that a bounded garbage collection stopped at its
-// per-run cap with work left over. The alarm reads it to resume, so a large
-// backlog drains across successive alarm firings without holding the gate open.
+// Persist incomplete garbage collection so alarms can drain a large backlog
+// across bounded passes without holding the input gate continuously.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
 const garbageCollectionLimitSchema = z.number().int().positive();
@@ -206,8 +205,8 @@ type GarbageCollectionContinuation = z.infer<
 	typeof garbageCollectionContinuationSchema
 >;
 
-// An unreadable marker parses to no continuations at all, which drops the
-// resume; the backlog it marked is re-discovered by the next collection pass.
+// Discard an unreadable continuation. The next collection pass will rediscover
+// its backlog.
 function parseGarbageCollectionContinuations(
 	value: unknown
 ): GarbageCollectionContinuation[] {
@@ -256,16 +255,10 @@ function mergeGarbageCollectionContinuation(
 	];
 }
 
-// How many decode-free reuse rows one verify-backstop firing settles locally;
-// fresh rows always wait for the queue consumer's off-thread decode.
 const verifyBackstopReuseSettleLimit = 16;
 
-// The maintenance passes serialised per kind on this instance.
 type MaintenanceKind = 'gc' | 'verify';
 
-// Bounds the number of tasks that may run concurrently. Callers `acquire` a
-// slot before starting work and `release` it when done; excess callers wait
-// until a slot is free.
 class CountingSemaphore {
 	private slots: number;
 	private readonly waiters: ((value: undefined) => void)[] = [];
@@ -300,39 +293,25 @@ class CountingSemaphore {
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
 
-	// Serialises maintenance passes per kind on this instance. A Durable Object
-	// has one active instance, so the alarm, the cron/queue RPCs and the
-	// interactive admin path share these chains: a second driver of the same kind
-	// links its pass after the one ahead rather than piling both onto the input
-	// gate at once. Every pass runs; none is silently skipped.
 	private readonly maintenanceChains = new Map<
 		MaintenanceKind,
 		Promise<undefined>
 	>();
 
-	// The maintenance kinds a cron-driven pass is queued or running for. The cron
-	// entrypoints coalesce against it: while one is present a further cron tick for
-	// that kind returns at once, bounding the backlog to one queued cron pass per
-	// kind. The alarm resume and the interactive path do not use it; they always
-	// chain.
 	private readonly cronMaintenanceQueued = new Set<MaintenanceKind>();
 	private migrationPromise: Promise<void> | undefined;
 
-	// Whether a mutation is waiting on the next coalesced eligibility publish,
-	// and the drain currently publishing; see
-	// {@link CupboardServer.scheduleMaintenanceReconcile}.
 	private isReconcileDue = false;
 	private reconcileDrain: Promise<void> | undefined;
 
-	// Caps the total number of commits running concurrently across all in-flight
-	// session messages, batched entries and per-id ops alike, keeping the sum
-	// within one batch message's own bound.
+	// Apply one concurrency bound across messages and entries within a batch.
+	// Otherwise several simultaneous batches can exceed the intended tenant cap.
 	private readonly commitEntrySemaphore = new CountingSemaphore(
 		maxOutgoingConnections
 	);
 
-	// Admits commit work against the tenant's entry-credit budget, which is what
-	// bounds the parsed backlog; the semaphore above bounds only what executes.
+	// Credit limits parsed but unfinished entries. The semaphore separately
+	// limits entries that are executing.
 	private readonly commitCredit: CommitCreditService;
 
 	private readonly authKeys: AuthKeysService;
@@ -455,15 +434,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private routes(): void {
 		this.app.onError(serverErrorHandler);
 
-		// Seed the request logger before any gate or route runs, so a fault refused
-		// before it matches a route is still logged with the request's fields.
+		// Create the request logger before any guard runs so early failures retain
+		// the request fields.
 		this.app.use(loggerMiddleware);
 
-		// An unconfigured Durable Object has no identity to issue, verify or
-		// advertise under, so every request that reaches this app is refused with
-		// `TenantNotConfiguredError`. The guard sits on the `fetch` path only: the
-		// control plane's `configure` RPC, which assigns the identity, is a method
-		// call and does not pass through here.
+		// Refuse HTTP access until the Durable Object has a tenant identity. The
+		// control plane assigns that identity through RPC, which bypasses this guard.
 		this.app.use(async (_context, next) => {
 			if (this.tenantIdentity.current() === undefined) {
 				throw new TenantNotConfiguredError();
@@ -472,9 +448,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// The contract procedures answer first: the oRPC handler serves every
-		// JSON admin route declared in @cupboard/protocol/contract, and anything
-		// it does not match falls through to the wire-format routes below.
+		// Contract routes must run before wire-format routes because the oRPC
+		// handler signals an unmatched request by falling through.
 		this.app.use(async (context, next) => {
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				context.req.raw,
@@ -514,10 +489,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// Every request addresses a cache: the default one unless a
-		// `/cache/:cacheName/` prefix names another, validated here so the routes
-		// under the prefix always see a well-formed name. The `_default` wire
-		// alias maps back to the default cache's stored name.
+		// Treat an absent cache prefix and the `_default` wire alias as the stored
+		// default-cache name. Validate named prefixes before route dispatch.
 		this.app.use(async (context, next) => {
 			context.set('cache', DEFAULT_CACHE);
 			await next();
@@ -545,8 +518,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		// A named cache's nix-cache-info is rendered from its registry priority;
-		// the Worker forwards it here (the default cache's is rendered at the edge).
 		this.app.get('/cache/:cacheName/nix-cache-info', (context) =>
 			textResponse(
 				context.req.raw,
@@ -557,12 +528,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		// Every answer under /reuse is no-store, the faults included: corrupt
-		// stored rows and shared-fact failures surface as thrown errors here,
-		// and a cached error would outlive its repair exactly as a cached miss
-		// would outlive the next commit. The handlers set the header on their
-		// own responses; this renders the thrown ones through the same mapping
-		// as the app's error handler and stamps whatever leaves the route.
+		// Apply `no-store` to thrown reuse errors as well as ordinary responses.
+		// A shared cache must not retain a failure after its stored data is repaired.
 		const renderError: (
 			error: Error,
 			context: Context<TenantHonoEnv>
@@ -584,10 +551,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 		);
 
-		// A reuse view's nix-cache-info is rendered from its own stored priority.
-		// Every response is no-store, the misses included: a cached 404 for an
-		// unknown or unparseable view name would keep answering after the view
-		// is created, and no purge key covers it.
+		// Reuse-view cache information must be `no-store`. No purge key can
+		// invalidate a cached miss after the view is created.
 		this.app.get('/reuse/:view/nix-cache-info', (context) => {
 			const view = reuseViewNameSchema.safeParse(context.req.param('view'));
 
@@ -607,11 +572,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		});
 
-		// A reuse-view narinfo lookup: the one read that enters the gate, because
-		// it needs the definition-revision fence and the stored row fields. Both
-		// the hit and the miss are `no-store`: the answer changes when the view
-		// definition changes, a source cache commits a conflicting candidate, or
-		// a candidate is collected, and no purge key covers any of that.
+		// Reuse-view narinfo responses must be `no-store`. A view update, a source
+		// commit, or collection can change either a hit or a miss, and no purge key
+		// covers those changes.
 		this.app.get(
 			String.raw`/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 			async (context) => {
@@ -660,9 +623,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		});
 
-		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
-		// the tokens it issues. `/token` is unauthenticated: the subject token is
-		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
+		// `/token` uses the subject token as its credential. The Worker proxies the
+		// JWKS route to this Durable Object.
 		this.app.post('/token', (context) =>
 			this.tokenExchange.handleToken(context.req.raw)
 		);
@@ -685,10 +647,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 		});
 
-		// The commit endpoint is a WebSocket: the upgrade request carries the
-		// write token, the first frame settles or defers the path, and a
-		// deferred upload's socket parks (hibernating) until verification
-		// answers with the terminal verdict.
+		// The upgrade authenticates a commit session. Its frames can request credit,
+		// commit individual entries or batches, and subscribe to deferred verdicts.
 		this.app.on(
 			'GET',
 			['/commit', '/cache/:cacheName/commit'],
@@ -700,8 +660,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.get('claims').expiresAt
 				)
 		);
-		// The serve routes stream stored objects with conditional-request
-		// handling, so they keep their Response-shaped handlers.
 		this.app.on(
 			'GET',
 			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
@@ -727,11 +685,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Upgrades a push's single commit socket. The session is tagged with one id
-	// the verify pass routes verdicts to, and that id plus the cache are stored on
-	// the socket so the message handlers have them after a hibernation wake. The
-	// guard authenticates the upgrade as plain HTTP before any socket exists; each
-	// `commit` is authorised by the cache the session was opened against.
+	// Authenticate the HTTP upgrade before creating a socket. Store the session
+	// ID and cache on the accepted socket so verdict routing and cache scope
+	// survive hibernation.
 	private async commitSession(
 		request: Request,
 		cache: StoredCache,
@@ -741,17 +697,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw new CommitUpgradeRequiredError();
 		}
 
-		// Credit is enforced only against a client that declared it understands
-		// credit. A client that predates it paces itself by a fixed window of
-		// messages, which the server releases per entry, so a large push of such
-		// a client would routinely exceed any grant and be closed for overdrawing.
-		// That is a capacity condition surfacing as a fatal error, which is what
-		// credit exists to prevent, so those sessions are left unpaced and keep
-		// the bound they have always had.
+		// Enforce credit only when the client negotiated it. Older clients pace
+		// themselves with a fixed message window and would otherwise be closed for
+		// exceeding a grant they do not understand.
 		//
-		// This gate is transitional. Remove it, and admit every session under
-		// credit, once no deployed client without the `commit-credit` capability
-		// remains.
+		// Remove this compatibility branch once every deployed client advertises
+		// `commit-credit`.
 		const hasNegotiatedCredit = hasAcceptedCapability(
 			request,
 			commitCreditCapability
@@ -759,11 +710,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.refuseCommitSessionPastBound(hasNegotiatedCredit);
 
 		if (hasNegotiatedCredit) {
-			// Read the tenant's budget before accepting anything. A misconfigured
-			// value throws, and the socket an accept adds to `getWebSockets()`
-			// outlives the upgrade that failed, so a deployment configured this way
-			// would spend one socket of its ceiling on every dial. A session that
-			// negotiates no credit never reads the budget.
+			// Validate the credit budget before accepting the socket. A failed
+			// upgrade after acceptance would leave the socket counted against the
+			// tenant's connection limit.
 			commitEntryCreditBudget(this.context.env);
 		}
 
@@ -781,10 +730,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		await this.armCommitSocketClose();
 
-		// Advertise the optional ops on the 101 so a capable client batches only
-		// against a server that offered it; a server that does not list an op never
-		// receives it. The credit token carries this session's opening grant, so a
-		// credited client commits at once without asking for credit first.
+		// Advertise optional operations on the upgrade response. The credit token
+		// includes the opening grant so a negotiated client can commit immediately.
 		return new Response(undefined, {
 			status: 101,
 			webSocket: client,
@@ -796,11 +743,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Refuses an upgrade the tenant has no room for. Counted before the accept,
-	// while the refusal is still plain HTTP, so it reaches the client with the
-	// retryable status, Retry-After and no-store through the ordinary error
-	// handler. Parked hibernating sockets are live and count; a closed socket
-	// leaves the set once its close event is handled.
+	// Check the connection limit before accepting the socket so refusal remains
+	// a retryable HTTP response. Hibernating sockets count until their close event.
 	private refuseCommitSessionPastBound(hasNegotiatedCredit: boolean): void {
 		const sockets = this.ctx.getWebSockets();
 		const ceiling = commitSocketCeiling(this.context.env);
@@ -843,12 +787,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await armAlarmNoLaterThan(this.ctx.storage, nextClose);
 	}
 
-	// Commits one upload over the session and replies with a per-id frame. The
-	// socket stays open: a deferred upload's verdict arrives later over the same
-	// connection, and other ids keep committing. An error fails just this id. A
-	// batched entry carries the path identity from negotiation, so a row already
-	// gone (a re-sent entry whose reply was lost on a drop) resolves against the
-	// path's narinfo row; the lost reply is not an error.
+	// Fail only the affected upload and keep the session open for other entries.
+	// An identity-bearing retry can resolve a missing pending row against the
+	// current committed narinfo generation.
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
@@ -910,17 +851,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 
-			// A ServerHttpError carries a client-facing message; anything else is an
-			// internal fault whose detail must not leak over the socket, matching the
-			// platform 500 the HTTP error handler rethrows to.
+			// Preserve client-facing errors, but never expose an internal exception
+			// over the socket.
 			const isKnown = error instanceof ServerHttpError;
 
 			if (!isKnown) {
-				// The frame carries no detail, so this log line is the only record
-				// of what actually failed.
 				sessionLogger
 					.with({ uploadId })
-					.error('commit failed with an internal fault', { error });
+					.error('commit failed with an internal error', { error });
 			}
 
 			sendCommitSessionFrame(socket, {
@@ -932,21 +870,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Answers a batched commit whose pending row is gone. The pending row may be
-	// absent because verification committed the upload (the expected case on a
-	// reconnect re-send), or because the reaper deleted an unanswered expired row
-	// before the client ever received a reply. The path's narinfo row holding the
-	// same narHash, carrying a committed reference edge and passing the shared
-	// servability predicate confirms the upload reached a servable state; anything
-	// else re-drives the client with `absent`.
-	// The pending row's captured grace decision is gone along with the row, and
-	// with it every durable proof that this session negotiated the upload, so a
-	// `retention`-marked entry (a client that accepted grace facts for this
-	// upload) is answered with the path's stored fact and nothing is extended:
-	// extending retention on a path the session did not push is upload:confirm
-	// authority, which a commit socket must not exercise on an uploadId it
-	// merely names. An unmarked entry gets the legacy shape, matching a legacy
-	// publication.
+	// A missing pending row can mean that verification published the upload or
+	// that expiry removed it before the client received a reply. Report
+	// `already-present` only when the supplied path and hash match the current
+	// servable generation; otherwise report `absent`.
+	//
+	// The pending row also held the negotiated grace decision. If the entry uses
+	// the retention-capable frame, report the path's stored grace without
+	// extending it. Extending an arbitrary path would exercise `upload:confirm`
+	// authority that a commit socket does not have. Keep the legacy frame shape
+	// for an entry without the retention marker.
 	private async resolveGoneCommit(
 		socket: WebSocket,
 		cache: StoredCache,
@@ -1006,11 +939,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Replays one still-present pending row to a reconnected session: reject a
-	// row from another cache, re-point the row at this socket so a verdict from
-	// here on routes to it, then re-emit `deferred` for a row still awaiting its
-	// verdict or replay the terminal verdict. Shared by both subscribe ops, which
-	// differ only in how they answer a row that is gone.
+	// Enforce cache isolation and attach the current session before replaying the
+	// row's durable state. Both subscription forms use this path while the row
+	// still exists.
 	private replaySubscribedRow(
 		socket: WebSocket,
 		cache: StoredCache,
@@ -1030,8 +961,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.uploadState.attachSession(uploadId, sessionId);
 		const status = uploadStatusOf(row);
-		// The grace fact replays only for an upload that accepted grace facts,
-		// keeping a legacy upload's frames on the legacy shape.
+		// Include grace only when this upload negotiated grace reporting. Legacy
+		// clients cannot parse the extended frame.
 		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
 
 		if (status === 'pending') {
@@ -1069,11 +1000,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Re-attaches a reconnected session to ids still outstanding and replays each
-	// one's current durable state. A gone row answers `servable`: with only a bare
-	// id the settle's outcome cannot be told apart, and a committed path is the
-	// common clear. A client that holds the path identity resolves a gone row
-	// precisely through the `subscribe-identity` op instead.
+	// A missing row maps to `servable` for the legacy ID-only subscription because
+	// no path identity remains to distinguish a committed upload from a reaped
+	// one. Identity-aware clients use `subscribe-identity`.
 	private replaySubscribe(
 		socket: WebSocket,
 		cache: StoredCache,
@@ -1100,12 +1029,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Re-attaches a reconnected session to identity-carrying entries. An entry
-	// whose pending row still exists replays exactly as `subscribe` does; one
-	// whose row is gone resolves through the same committed-reference check as
-	// `resolveGoneCommit`, so a row that cleared because verification committed
-	// the path answers `already-present` and any other absence (a reaped row, a
-	// path now holding other bytes) answers `absent`.
+	// For a missing row, require the supplied identity to match the current
+	// committed generation. This distinguishes a completed upload from expiry or
+	// a later version of the same path.
 	private async replaySubscribeIdentity(
 		socket: WebSocket,
 		cache: StoredCache,
@@ -1129,8 +1055,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// The capabilities the contract procedures reach through the oRPC context:
-	// authentication, the post-mutation maintenance hook, and the domain services.
 	private rpcServices(): TenantRpcServices {
 		return {
 			authenticate: (request) => this.authKeys.authenticate(request),
@@ -1162,10 +1086,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	// Authorises the commit session, the one write route outside the contract:
-	// `upload:commit` against the cache the session is scoped to. Each `commit`
-	// frame then commits an id in that cache, and `commit(cache, uploadId)` fails
-	// an id whose row belongs to another cache, so the cache check covers every id.
+	// Authorise the session for `upload:commit` in its selected cache. Each upload
+	// row is checked against the same cache before it can commit.
 	private commitSessionGuard() {
 		return createMiddleware<TenantHonoEnv>(async (context, next) => {
 			const claims = await this.authKeys.authenticate(context.req.raw);
@@ -1183,10 +1105,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// The cache a pending upload or attestation row was opened against, for the
-	// id-only routes the authoriser cannot read a cache from the path. The
-	// durable-SQLite reads are synchronous; the resolver is a promise so the
-	// authoriser can stay uniform across resource sources.
 	private pendingCache(id: string): Promise<StoredCache | undefined> {
 		const uploadId = uploadIdSchema.parse(id);
 		const upload = this.context.db
@@ -1208,15 +1126,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return Promise.resolve(attestation?.cache);
 	}
 
-	// Runs a body and reconciles the maintenance-eligibility projection
-	// synchronously after it, invalidating first so a crash anywhere in the body
-	// leaves the tenant due (fail-open). The cron maintenance passes use this: a
-	// crash during a pass must not leave a stale not-due row behind. The mutating
-	// request paths skip the invalidate (that would cost a D1 delete on every
-	// mutation and defeat the write-coalescing) and accept the eviction window
-	// their trailing reconcile leaves: the admin mutations reconcile inline via
-	// `afterMutation`, the commit and verdict hot paths coalesce theirs via
-	// `afterHotMutation`.
+	// Invalidate eligibility before cron maintenance and reconcile it afterwards.
+	// A crash during the pass must leave the tenant due rather than preserve a
+	// stale future wake time. Mutating request paths reconcile only afterwards.
 	private async withMaintenanceEligibility<T>(
 		body: () => Promise<T>
 	): Promise<T> {
@@ -1227,20 +1139,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Runs a mutating request and republishes the tenant's wake time before the
-	// request returns. The reconcile is an existence check plus a few index-backed
-	// lookups, cheap enough to run on every mutation, so the published wake time
-	// trails the source tables only between the committed write and this `finally`.
-	// The `finally` covers a body that throws after a partial write; the one case it
-	// does not cover is a hard isolate eviction inside that window, which leaves the
-	// prior wake time in place. Deferred verify is re-triggered out of band by the
-	// `tenant-verify` queue message, so it does not wait for the cron pass. The
-	// other kinds of work do wait for it: a queued narinfo deletion that is now
-	// due, or a deferred deadline (upload or attestation expiry, retention-root
-	// TTL, auth-key retirement). They run on the first cron tick that reads the
-	// published wake time as due. The reconcile publishes through a single
-	// conditional upsert that writes only when the wake time moves, so a push of
-	// many paths costs one write.
+	// Reconcile in `finally` so a partial mutation cannot leave the old wake time
+	// published. A hard isolate eviction can still interrupt this window. Deferred
+	// verification has its queue request; deletion and time-based maintenance rely
+	// on the projection's staleness backstop until the next scheduler tick.
 	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
@@ -1249,9 +1151,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// The commit hot path's twin of {@link afterMutation}: the reply does not
-	// wait on the publish, and concurrent mutations coalesce onto a shared one.
-	// A push settling hundreds of paths costs a publish per in-flight window.
+	// Do not delay a commit reply for eligibility publication. Concurrent hot-path
+	// mutations share the same scheduled publication.
 	private async afterHotMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
@@ -1260,13 +1161,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Requests an eligibility publish without waiting for it. While one publish
-	// is in flight every further request collapses onto a single follow-up,
-	// which runs with the state as it stands then, so the last mutation of a
-	// burst is always covered. An eviction can drop a scheduled publish; the
-	// maintenance batch's staleness limit bounds how long the stale projection can
-	// suppress maintenance, the same backstop the synchronous reconcile's eviction
-	// window relies on.
+	// While a publication is in flight, collapse new requests onto one follow-up
+	// that reads the final state of the burst. Instance eviction can drop this
+	// work, so the scheduler's staleness limit remains the recovery path.
 	private scheduleMaintenanceReconcile(): void {
 		this.isReconcileDue = true;
 
@@ -1289,12 +1186,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async reconcileMaintenanceEligibility(): Promise<void> {
-		// The reconcile publishes through a single conditional upsert, so two concurrent
-		// same-tenant reconciles settle atomically without a lock: a stale one cannot
-		// overwrite a fresher one. A failed reconcile would leave a stale
-		// projection that can suppress maintenance until the staleness limit, so
-		// drop the row instead and let the periodic maintenance batch read the
-		// tenant as due (fail-open).
+		// The conditional upsert prevents an older concurrent result from replacing
+		// a newer wake time. On failure, delete the projection so maintenance remains
+		// due.
 		try {
 			await this.maintenanceEligibility.reconcile();
 		} catch {
@@ -1302,21 +1196,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Drops the maintenance-eligibility projection so the periodic maintenance batch
-	// reads the tenant as due and reconciles on its next tick. Fail-open: if the
-	// delete also fails, the batch's staleness limit still bounds the delay.
+	// Delete the projection to make the tenant due on the next scheduler tick. If
+	// deletion also fails, the scheduler's staleness limit still bounds the delay.
 	private async invalidateMaintenanceEligibility(): Promise<void> {
 		try {
 			await this.maintenanceEligibility.invalidate();
 		} catch {
-			// The maintenance batch's staleness limit is the backstop.
+			// The scheduler's staleness limit bounds the delay if invalidation fails.
 		}
 	}
 
-	// Runs a direct RPC entrypoint (one that bypasses `fetch`) inside its own
-	// request cost meter, so the Durable Object rows it reads are logged like an
-	// HTTP request's. The row-heavy maintenance passes arrive as direct RPCs, so
-	// they all run through here.
 	private metered<T>(
 		method: MeteredMethod,
 		body: (logger: Logger) => Promise<T>
@@ -1370,11 +1259,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async migrateAndSeed(): Promise<void> {
-		// The cumulative meter is never reset, and a purged object can run this again,
-		// so measure the cold-start cost as a delta over the migration and seed rather
-		// than reading the lifetime totals. The delta is exact only because nothing else
-		// issues statements on this object between the readings: the seed is synchronous
-		// and the one await here (`assertZstdAvailable`) touches no table.
+		// The meter is cumulative and a purged object can initialise again. Measure
+		// only this migration interval; its sole await does not access the database.
 		this.context.dbCost.recordOutstanding();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
@@ -1396,8 +1282,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.oidcTrust.seedOwnerRule();
 
-		// Migration and seeding run before the first request opens its meter, so their
-		// rows land on no per-request line. Surface them once as the cold-start cost.
 		this.context.dbCost.recordOutstanding();
 		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
 			rowsRead: this.context.dbCost.rowsRead - rowsReadBefore,
@@ -1405,11 +1289,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Serialises maintenance passes of one kind: a caller registers its own
-	// completion marker as the kind's tail before awaiting the previous tail, then
-	// runs its body and returns or throws its result. The chain never rejects,
-	// because each link resolves its marker in the `finally`, so a failing body
-	// surfaces only to its own caller and the next link still runs.
+	// Resolve the chain marker even when a pass fails. The failure reaches its own
+	// caller without preventing the next pass of the same kind from running.
 	private async runExclusiveMaintenance<T>(
 		kind: MaintenanceKind,
 		body: () => Promise<T>
@@ -1433,11 +1314,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// The cron entrypoints coalesce through this: while a cron-driven pass of a
-	// kind is queued or running, a further cron tick for that kind returns at once
-	// rather than queuing a second. Dropping a tick is safe, since each pass arms
-	// its own continuation for leftover work and the next tick picks the tenant up
-	// again.
+	// Coalesce cron ticks while a pass of the same kind is queued or running. The
+	// active pass republishes any remaining maintenance as due, and a later
+	// scheduler tick returns. Garbage collection also persists its own continuation.
 	private async runCoalescedCronMaintenance(
 		kind: MaintenanceKind,
 		body: () => Promise<void>
@@ -1455,13 +1334,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// One bounded collection pass. It records a continuation and arms an immediate
-	// alarm when either there is likely more to collect (the pass stopped at the
-	// cap) or a capped narinfo-deletion backlog is still queued, so the remaining
-	// paths and deletions drain across firings. The gate is free between firings, so
-	// push requests interleave while the backlog drains across chunks, and each
-	// chunk holds the gate only for its own deletes. The scope and cap are
-	// persisted so the alarm resumes the same work with the bound it started with.
+	// Persist the scope and cap while collection or narinfo deletion has more work.
+	// The alarm resumes with the same bounds, leaving the input gate free for
+	// requests between passes.
 	private async collectGarbageOnce(
 		collectLimit: number = maxPathsCollectedPerRun,
 		cache?: StoredCache
@@ -1486,7 +1361,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Collection can commit a bounded expiry batch before later R2 or deletion
 	// work fails. Every driver therefore re-arms the continuation on failure; a
-	// successful pass settles it from the returned backlog facts.
+	// successful pass updates or clears it from the returned backlog state.
 	private async runGarbagePass(
 		collect: () => Promise<GarbageCollectionOutcome>,
 		continuation: GarbageCollectionContinuation
@@ -1503,11 +1378,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Records or clears the garbage-collection continuation after a pass. It arms
-	// an immediate alarm when the pass stopped at its cap or a capped
-	// narinfo-deletion backlog is still queued, so the leftover paths and deletions
-	// drain across firings; otherwise it clears the marker. Shared by the cron
-	// pass and the interactive path.
 	private async settleGarbageContinuation(
 		outcome: GarbageCollectionOutcome,
 		continuation: GarbageCollectionContinuation
@@ -1520,12 +1390,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			: this.clearGarbageContinuation(continuation));
 	}
 
-	// The interactive garbage-collection pass the admin oRPC procedure reaches. It
-	// serialises against the cron pass and the alarm resume through the same 'gc'
-	// chain and arms the continuation the same way, so a manual run that hits the
-	// per-run cap drains its remainder across alarm firings too. The metering and
-	// eligibility reconcile the cron pass runs inline are supplied instead by the
-	// request meter and the oRPC maintenance hook the interactive request carries.
+	// Use the same serial chain and durable continuation as cron and alarm-driven
+	// collection. A bounded interactive pass must also resume through alarms.
 	private collectGarbageInteractive(
 		logger: Logger,
 		cache: StoredCache | undefined,
@@ -1539,10 +1405,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The interactive verification pass the admin oRPC procedure reaches. It
-	// serialises against the cron verify pass through the same 'verify' chain and
-	// shares the deferred-verify guard reset: the pass claims the pending rows, so
-	// a deferral after it starts must request its own pass.
+	// Share the cron verification chain and reset the queue-request guard before
+	// this pass claims rows. A later deferral then requests another pass.
 	private verifyInteractive(
 		logger: Logger,
 		purgeOrigin: RequestOrigin | undefined,
@@ -1592,16 +1456,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.ctx.storage.setAlarm(Date.now());
 	}
 
-	// Resumes a garbage-collection pass that stopped at its per-run cap. A run
-	// that did not stop at the cap left no continuation, so this is a no-op.
 	private async resumeGarbageCollection(): Promise<void> {
 		const stored = await this.ctx.storage.get(gcContinuationKey);
 		const pending = parseGarbageCollectionContinuations(stored);
 
-		// No continuation means no work: return without touching the chain, so an
-		// idle alarm costs nothing and never queues behind a concurrent pass. A
-		// marker that no longer parses is deleted on the way out; the backlog it
-		// marked is re-discovered by the next collection pass.
+		// Do not enter the serial chain without a continuation. Delete a malformed
+		// marker; the next collection pass will rediscover its backlog.
 		if (pending.length === 0) {
 			if (stored !== undefined) {
 				await this.ctx.storage.delete(gcContinuationKey);
@@ -1629,11 +1489,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// One bounded reconcile of the committed paths a recent negotiate queued. Like
-	// the garbage-collection pass it holds the gate only for the chunk's
-	// reconciles and re-arms the alarm while more remain, so a large closure's R2
-	// probes drain across firings off the push hot path. A drained queue clears its
-	// origin marker so a later push starts fresh.
+	// Drain negotiated paths in bounded alarm passes so R2 probes stay off the push
+	// path and release the input gate between chunks. Clear the origin only after
+	// the queue drains.
 	private async reconcileNegotiatedOnce(): Promise<void> {
 		const queued = await this.reconcileQueue.claimChunk();
 
@@ -1664,14 +1522,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.reconcileQueue.clearOrigin();
 	}
 
-	// The verify backstop: while deferred uploads may be pending, the alarm
-	// re-drives verification if the queue path has gone quiet. Not yet due, it
-	// only re-arms (another loop's immediate continuation consumed the alarm,
-	// which the runtime deletes once the handler returns). Due, it settles a
-	// bounded batch of decode-free reuse rows locally, then re-requests a queue
-	// pass; the request's staleness guard makes that a real send exactly when
-	// the previous one is presumed lost, and its arming starts the next backstop
-	// cycle. NAR decode never runs here: fresh rows wait for the queue consumer.
+	// Use this alarm when a verification queue request is lost. Before the
+	// deadline, rearm it. At the deadline, resolve a bounded set of reuse rows that
+	// need no decoding, then request the queue again. Fresh NAR decoding must stay
+	// off the Durable Object.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
 		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
 
@@ -1720,8 +1574,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		let status = StatusCodes.INTERNAL_SERVER_ERROR;
 		const { pathname } = new URL(request.url);
-		// Built once here, at the request boundary, for the cost line; the app's
-		// middleware seeds an equivalent logger onto the Hono context for the routes.
 		const logger = requestLogger(request);
 
 		return withSpan(
@@ -1730,9 +1582,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			() =>
 				withRequestCost(
 					async () => {
-						// The context's env carries the bounded R2/D1/Cache bindings, so
-						// every subrequest a route handler issues through `c.env` is bounded
-						// structurally, for any handler, not by convention.
+						// Route handlers receive only bounded storage bindings, so a new
+						// handler cannot accidentally bypass the input-gate deadline.
 						const response = await this.app.fetch(request, this.context.env);
 						status = response.status;
 
@@ -1747,9 +1598,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// The cron reaches maintenance through these Durable Object RPC methods
 	// rather than over HTTP, so no token is issued or exchanged. The `/gc` and
-	// `/verify` routes run the same passes for manual use. Called this way they
-	// cover every cache and skip the edge-cache purge, leaving stale edge
-	// entries to the narinfo TTL and the orphan-blob grace window.
+	// `/verify` routes run the same passes for manual use. The RPC passes cover
+	// every cache and skip the edge-cache purge, leaving stale edge entries to the
+	// narinfo TTL and the orphan-blob grace window.
 	async runGarbageCollection(collectLimit?: number): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
@@ -1757,16 +1608,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The Durable Object uses one alarm for all bounded background work. Each task
-	// re-arms the alarm while work remains, so the gate stays free between passes.
-	// Close expired or idle commit sockets first because sessions waiting for
-	// credit depend on that pass. Then reconcile committed paths, resume cache
-	// teardown and the verification backstop, and finally resume garbage
-	// collection. Garbage collection runs last because it can wait behind an
-	// interactive or cron collection and must not delay the other tasks.
+	// One alarm drives every bounded background task. Close commit sessions first
+	// so their credit is returned. Then run reconciliation, cache teardown, the
+	// verification backstop, queued cache purges, and signing-key backfill. Run
+	// garbage collection last because its continuation can wait on another
+	// collection pass.
 	override async alarm(): Promise<void> {
 		await this.initialise();
-		// Create a logger for resume paths that log outside a metered block.
 		const logger = rootLogger().with({ trigger: 'alarm' });
 		const now = Date.now();
 		this.commitCredit.closeExpiredSessions(now);
@@ -1782,10 +1630,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.resumeGarbageCollection();
 	}
 
-	// Starts a cache teardown directly, the manual/test entry that the `caches`
-	// remove route reaches through `removeCache`. The optional limit caps the first
-	// drain chunk so a test can force the over-cap, alarm-resumed path without
-	// pushing a whole cap's worth of paths, mirroring {@link runGarbageCollection}.
 	async runCacheTeardown(
 		cache: StoredCache,
 		origin: RequestOrigin,
@@ -1799,11 +1643,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Resumes a cache teardown that stopped at its per-run cap. It claims one cache
-	// awaiting teardown, retires another bounded chunk, then re-arms the alarm while
-	// any cache still has a marker, so several queued teardowns drain across firings
-	// with the gate free between them. No marker means nothing to do. The optional
-	// limit caps the chunk for tests, mirroring {@link runGarbageCollection}.
+	// Drain one cache teardown marker per bounded pass. Rearm the alarm while any
+	// marker remains so queued teardowns release the input gate between chunks.
 	async resumeCacheTeardown(limit?: number): Promise<void> {
 		const claimed = await this.cacheAdmin.claimTeardown();
 
@@ -1844,11 +1685,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// The prompt verify path runs the CPU-bound NAR decode in the queue consumer,
-	// off the DO thread. The consumer claims a bounded chunk of pending uploads
-	// here (a read), decodes and promotes each staging object itself, then
-	// reports the verdicts back so only the state transitions run on the single
-	// writer. A truncated claim tells the consumer more rows remain.
+	// Keep CPU-bound NAR decoding in the queue consumer, off the Durable Object
+	// thread. This RPC returns a bounded snapshot. The consumer promotes staging
+	// objects and reports verdicts, leaving only state transitions to the single
+	// writer. A truncated result tells the consumer that more rows remain.
 	async claimVerificationBatch(
 		limit: number,
 		maxNarBytes: number
@@ -1864,9 +1704,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The uncapped claim an older consumer script calls; the DO and the consumer
-	// deploy separately, so this stays callable until both run a release that
-	// speaks `claimVerificationBatch`.
+	// An older consumer calls this uncapped RPC. The Durable Object and consumer
+	// deploy separately, so keep it until both run a release that uses
+	// `claimVerificationBatch`.
 	async claimPendingVerifications(
 		limit: number
 	): Promise<PendingVerification[]> {
@@ -1875,11 +1715,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return [...batch.claims];
 	}
 
-	// Stages Worker-computed negotiate hints, returning the single-use token the
-	// dispatch that follows carries; see {@link NegotiateHintStore}. Reachable
-	// only over RPC, never HTTP, so a client cannot forge hints. An unrecognised
-	// shape (a deploy-skewed Worker) throws, which the Worker treats as staging
-	// unavailable and dispatches without hints.
+	// Only RPC callers can stage negotiate hints. The Worker puts the returned
+	// single-use token on the forwarded request. During deploy skew, invalid hint
+	// data is rejected and the Worker forwards the request without hints.
 	async stageNegotiateHints(
 		hints: NegotiateHints
 	): Promise<NegotiateHintsToken> {
@@ -1891,9 +1729,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Asks for another verification pass, through the same single-flight as a
-	// deferring commit, so a continuation from the queue consumer and a fresh
-	// deferral collapse onto one message that claims each row once.
+	// Queue continuations and new commit deferrals share one single-flight request,
+	// so a row is claimed only once per pass.
 	async requestVerificationPass(): Promise<void> {
 		await this.initialise();
 		const logger = rootLogger().with({ rpc: 'request-verification-pass' });
@@ -1903,10 +1740,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Settles a whole batch of verdicts in one call, so the queue consumer reports
-	// a pass with a single RPC into the DO. Returns how
-	// many verdicts actually applied, so the consumer's continuation gates on real
-	// progress.
+	// Return the number of results that changed a row. The queue consumer requests
+	// another pass only when at least one result was applied.
 	async recordVerifications(
 		results: readonly VerificationResult[]
 	): Promise<number> {
@@ -1948,11 +1783,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The global reaper found shared objects gone and routes the de-materialisation
-	// of this tenant's narinfos for those hashes through here in one call, the single
-	// writer of the tenant's objects. Each target is de-materialised only if its live
-	// row still names the hash and the object is still absent, so the call is
-	// idempotent and the reaper can re-drive it until the `blob_state` row is cleared.
+	// Route demotions through the tenant's single writer. A target can be
+	// dematerialised only while its live row still references the missing object;
+	// checking both facts makes reaper retries safe.
 	async demoteNarInfoObjects(
 		demotions: readonly NarInfoDemotion[]
 	): Promise<void> {
@@ -1991,10 +1824,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		size: number
 	): Promise<AttestationReferenceOutcome> {
 		await this.initialise();
-		// The attestation references live in D1, which the cost meter does not see.
-		// The one tenant-identity row this reads through the metered db is folded into
-		// the cumulative meter but is not worth its own per-request line, so this
-		// entrypoint is not metered.
 		return this.attestationCas.reserveReferenceAndCharge(reference, size);
 	}
 
@@ -2002,7 +1831,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		reference: AttestationReference
 	): Promise<void> {
 		await this.initialise();
-		// D1-bound references, like `reserveAttestationReference`, so not metered.
 		await this.attestationCas.removeCapturedReference(reference);
 	}
 
@@ -2020,18 +1848,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// The control plane begins offboarding this tenant. Marking it stops the
-	// verify-restore path re-materialising an object the drain is about to remove, so
-	// an in-flight commit settling on this instance cannot resurrect one.
+	// Set the warm-instance fence before the drain starts so an in-flight commit
+	// cannot restore a narinfo object behind the drain.
 	async beginOffboard(): Promise<void> {
 		await this.initialise();
 		this.offboarding.begin();
 	}
 
-	// One bounded drain pass: deletes a batch of this tenant's reference and presence
-	// rows (the rows only this Durable Object may write) and reports whether any
-	// remain, so the Worker drives the drain to completion over successive ticks. The
-	// freed shared blobs are collected by the global reaper.
+	// Drain only the reference and ownership rows assigned to this tenant writer.
+	// The Worker repeats bounded passes; the global reaper collects shared blobs.
 	async runOffboard(limit: number): Promise<{ drained: boolean }> {
 		await this.initialise();
 
@@ -2040,10 +1865,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Wipes this Durable Object's own storage once its tenant is drained: the signing
-	// and auth keys, the identity, and the narinfo rows. After this the
-	// object is unconfigured and serves nothing, so its tenant retains no secret or
-	// data.
+	// Call only after the tenant's external references have drained. This removes
+	// all tenant-local data and returns the Durable Object to its unconfigured state.
 	purgeStorage(): Promise<void> {
 		return this.ctx.blockConcurrencyWhile(async () => {
 			await this.ctx.storage.deleteAll();
@@ -2053,13 +1876,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Proves the R2 credentials this script is bound with: their values cannot
-	// be read back, so the control plane asks the Durable Object (which holds
-	// them) to issue a temporary credential the way a push does and see whether
-	// R2 accepts it. Probing the derived credential, not just the pair, catches
-	// a pair that signs plain requests but cannot issue the credential uploads
-	// use. The probe touches only the env, never this object's storage, so any
-	// instance can answer it.
+	// Derive a temporary upload credential from the stored R2 credentials and
+	// probe R2 with it. This verifies the credential form used by uploads without
+	// exposing the stored credentials or accessing tenant state.
 	async checkR2(): Promise<ParsedR2CredentialCheck> {
 		let response: Response;
 
@@ -2075,9 +1894,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw error;
 		}
 
-		// R2 refuses the temporary credential with 400 (InvalidArgument); a valid
-		// one answers 403 (the write-only grant may not read the probe key) or
-		// 404, so only other statuses speak against the pair.
+		// A 2xx response, 403, or 404 proves that R2 accepted the derived
+		// credential far enough to evaluate the probe. Other statuses reject it;
+		// 400 is R2's `InvalidArgument` response for an invalid credential.
 		if (response.ok || response.status === 403 || response.status === 404) {
 			return { result: 'ok' };
 		}
@@ -2085,11 +1904,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return { result: 'rejected', status: response.status };
 	}
 
-	// The control plane assigns this Durable Object its identity at provision time
-	// and on config-version bumps. The compare-and-set on the config version makes a
-	// stale or replayed dispatch a no-op, and the owner admin rule is re-seeded from
-	// the newly applied identity. SQLite access in the Durable Object is synchronous
-	// and the object is single-threaded, so the read-compare-write is atomic.
+	// Ignore a stale or replayed configuration version. The synchronous SQLite
+	// read and write cannot interleave, and an accepted identity must reseed the
+	// owner rule.
 	async configure(identity: TenantIdentity): Promise<void> {
 		await this.initialise();
 
@@ -2102,11 +1919,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// A client frame on the commit session: a `commit` to settle one id or a
-	// `subscribe` to re-attach a reconnected socket to ids still outstanding.
-	// Keepalive pings never reach here; the auto-response answers them without
-	// waking this object. The cache and session id ride on the socket so they
-	// survive a hibernation wake.
+	// The socket attachment preserves cache and session identity across
+	// hibernation. Keepalive pings use the automatic response and never wake the
+	// Durable Object.
 	async webSocketMessage(
 		socket: WebSocket,
 		message: string | ArrayBuffer
@@ -2129,17 +1944,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		if (isSessionClosing(attachment)) {
-			// The server closed this session and took its credit back. The socket
-			// stays listed until the peer answers the close, so a message the client
-			// sent before it read the close still arrives here; the server repeats
-			// the close and runs nothing. Serving the message would commit
-			// entries for a session that is gone, with every frame it answers
-			// unsendable, and credit granted to the session again would never return
-			// to the tenant: the idle close skips a session it has finished with,
-			// and a peer that never answers its close fires no close event. The code
-			// is 1001 rather than 1002 because this close is the server's own doing,
-			// so the client may reconnect at once.
-			socket.close(1001, 'closed');
+			// A peer can send a late frame before acknowledging the server's close.
+			// Do not run it or grant credit again: this session has already returned
+			// its credit and may never produce another close event. Use 1001 so the
+			// client can reconnect.
+			socket.close(1001, 'commit session closed');
 			return;
 		}
 
@@ -2148,10 +1957,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const parsed = commitSessionRequestSchema.safeParse(safeJsonParse(text));
 
 		if (!parsed.success) {
-			// A well-formed op this server does not know gets a per-message reply
-			// naming it, so a newer client degrades gracefully; garbage (unparseable
-			// JSON, or a known op with a broken shape) still closes the socket, since
-			// it speaks for a client this session cannot trust.
+			// Reply `unsupported` for a well-formed future operation. Malformed JSON
+			// or an invalid shape for a known operation closes the socket.
 			const unknown = unknownSessionOp(text);
 
 			if (unknown !== undefined) {
@@ -2175,12 +1982,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			if (!hasNegotiated) {
-				// This session was accepted without credit, so either the declaration
-				// the client believes it made did not reach the upgrade, or the client
-				// is speaking a protocol this session never agreed to. The answer is
-				// the one an op this server does not know gets, which is a reply the
-				// client already falls back from: it drops to its own window and
-				// commits unpaced, which is what this session was accepted as.
+				// This session did not negotiate credit. Reply `unsupported` so the
+				// client falls back to the fixed window used by legacy sessions.
 				sendCommitSessionFrame(socket, {
 					ev: 'unsupported',
 					op: request.op
@@ -2197,43 +2000,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			Date.now()
 		);
 
-		// Both closes below reclaim first, in this same event. A socket the server
-		// has closed stays listed until the client completes the handshake, so
-		// waiting for the close event would leave the session's credit and its
-		// rotation entry standing, and a grant could land on a socket that is on
-		// its way out.
+		// Reclaim before initiating either close. The socket remains listed until
+		// the peer acknowledges it, and another grant could otherwise reach a
+		// closing session.
 		if (decision === 'overdrawn') {
-			// Credit is bound to the connection and the server hands out every unit
-			// of it. This session has asked for credit and been answered, so it
-			// knows what it holds, and a message naming more entries than that can
-			// only be a client bug. 1002 is the close a client treats as final
-			// rather than retrying.
+			// A negotiated client knows its exact grant. Exceeding it is a terminal
+			// protocol error, so close with 1002.
 			this.commitCredit.closeSession(sessionId, Date.now());
 			socket.close(1002, 'commit credit exceeded');
 			return;
 		}
 
 		if (decision === 'refused') {
-			// Serving this message would take the session out of the credit
-			// accounting, and the tenant already holds every unpaced session it
-			// allows. 1013 tells the client to come back, which is what an upgrade
-			// refused at the same bound tells it, so a client whose grant was lost
-			// reconnects and negotiates again.
+			// The tenant has no capacity for another unpaced session. Use retryable
+			// close code 1013 so the client reconnects and negotiates again.
 			this.commitCredit.closeSession(sessionId, Date.now());
 			socket.close(1013, 'too many unpaced commit sessions');
 			return;
 		}
 
-		// Each accounted entry returns its credit to the tenant as its first frame
-		// is sent, which is the instant it stops occupying this object.
+		// Release an accounted entry after its processing and result-send attempt
+		// finish. The `finally` also returns credit when sending the frame fails.
 		const isAccounted = decision === 'accounted';
 
 		if (request.op === 'commit') {
-			// The socket message is a top-level entrypoint, so it seeds the logger the
-			// commit path is threaded. The per-id op shares the batch entries' bound:
-			// a client that speaks only this op fans one message per path, so without
-			// a slot per commit a large push's burst of messages runs unbounded and
-			// queues enough control-plane reads to make the database shed.
+			// Apply the same tenant-wide semaphore to individual commit messages and
+			// batch entries so neither form can bypass the concurrency limit.
 			const logger = rootLogger().with({ sessionId, cache, op: request.op });
 			await this.commitEntrySemaphore.acquire();
 
@@ -2257,18 +2049,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		if (request.op === 'commit-batch') {
-			// Every entry answers its own frame: a failing commit answers that id
-			// while its chunk-mates proceed, and the bounded concurrency keeps an
-			// entry parked on the materialise flush from head-of-line-blocking the
-			// rest. Concurrent settles share the flush gate, so a chunk lands in a
-			// handful of combined charge batches.
+			// Each entry reports its own result, so one failure does not stop its
+			// batch peers. Bounded concurrency also prevents one materialisation wait
+			// from blocking the rest of the batch.
 			const logger = rootLogger().with({ sessionId, cache, op: request.op });
 
-			// Prefetch the D1 probe facts and the tenant account once for the whole
-			// message, so each entry's commit pays only its per-path R2 head and the
-			// message's D1 reads stay bounded whatever its size. Both reads are
-			// advisory: the charge batch remains the authoritative fence for status
-			// and quota. A fault in either read degrades to per-entry fresh reads.
+			// Prefetch D1 facts once for the batch. They remain advisory; the charge
+			// batch decides status and quota. On failure, each entry reads fresh facts.
 			const narHashes = request.commits.map((entry) => entry.narHash);
 			let batchPrefetched:
 				Map<string, PrefetchedMaterialisationFacts> | undefined;
@@ -2282,14 +2069,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				batchPrefetched = prefetched;
 				batchAccount = account;
 			} catch {
-				// D1 fault: degrade to per-entry reads.
+				// Each entry falls back to fresh reads.
 			}
 
-			// The message was debited for every entry at once, and an entry returns
-			// its own credit only if it runs: `mapWithConcurrency` starts none of
-			// the entries behind one that rejects. Count what the entries returned
-			// and return the rest here, so the tenant gets the whole message's
-			// credit back however the message ends.
+			// `mapWithConcurrency` may leave later entries unstarted after a rejection.
+			// Return their reserved credit here; entries that ran return their own.
 			let released = 0;
 			const answered = new Set<UploadId>();
 
@@ -2329,14 +2113,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					}
 				);
 			} catch (error) {
-				// A commit answers its own entry whatever the outcome, so a fault that
-				// reaches here escaped one entry and stopped the entries behind it
-				// from starting. Every entry the client is still waiting on is
-				// answered retryably, so it re-sends them as soon as it reads the
-				// frame instead of holding them until its own deadline expires. The
-				// frames carry no detail of the fault, so this line is the only record
-				// of what failed.
-				logger.error('a commit batch failed outside an entry frame', { error });
+				// An escaped entry failure can prevent later entries from starting.
+				// Return a retryable result for every entry without a frame and keep the
+				// internal exception in server logs.
+				logger.error(
+					'commit batch stopped after an error escaped per-entry handling',
+					{ error }
+				);
 
 				for (const entry of request.commits) {
 					if (answered.has(entry.uploadId)) {
@@ -2375,9 +2158,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
 	}
 
-	// A waiter that hangs up needs no bookkeeping of its own (the hibernation API
-	// drops it from `getWebSockets`); closing our end completes the handshake.
-	// Its credit is another matter, and goes back to the tenant here.
+	// Return the session's remaining credit when the peer closes the socket.
 	webSocketClose(socket: WebSocket): void {
 		reclaimCommitCredit(this.commitCredit, socket);
 		socket.close();
@@ -2389,8 +2170,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 }
 
-// A session's unspent credit goes back to the tenant as soon as its socket is
-// gone, so the server never has to expire a grant or ask for one back.
 function reclaimCommitCredit(
 	credit: CommitCreditService,
 	socket: WebSocket
@@ -2404,9 +2183,8 @@ function reclaimCommitCredit(
 	credit.closeSession(attachment.sessionId, Date.now());
 }
 
-// The entries one client message commits, which is what the session's credit is
-// debited by. The subscribe ops re-attach to durable rows rather than commit
-// anything, so they cost no credit and keep their own bounds.
+// Debit credit only for entries that start commits. Subscription operations
+// retain their separate request-size bounds and consume no commit credit.
 function commitEntryCount(request: ParsedCommitSessionRequest): number {
 	if (request.op === 'commit') {
 		return 1;
@@ -2427,16 +2205,13 @@ function safeJsonParse(text: string): unknown {
 	}
 }
 
-// The ops this build's session schema knows, derived from the schema so the
-// set cannot drift from it.
 const knownSessionOps = new Set<string>(
 	commitSessionRequestSchema.options.map((option) => option.shape.op.value)
 );
 
-// Distinguishes an op from a later protocol from a broken message: a JSON
-// object naming an op outside this build's schema is the former and earns a
-// per-message `unsupported` reply; anything else is the latter and closes the
-// socket. Returns the unknown op's name, or undefined for garbage.
+// Only a well-formed operation from a later protocol version receives an
+// `unsupported` reply. Invalid JSON and malformed known operations remain
+// protocol errors.
 function unknownSessionOp(text: string): string | undefined {
 	const body = safeJsonParse(text);
 
@@ -2453,13 +2228,8 @@ function unknownSessionOp(text: string): string | undefined {
 	return op;
 }
 
-// Emits a line when a request finishes, carrying its Durable Object SQLite cost
-// among the fields. The DO is billed per row read, so surfacing rows read and
-// written per request makes a row-heavy request observable in the logs rather
-// than only on the daily bill. One DO backs one tenant, so the emitting object
-// already identifies the tenant. The request logger already carries the method
-// and path, so only the status and cost are added here. It is per-request
-// telemetry, so it logs at `debug`.
+// Durable Object storage is billed per row. Include row counts at `debug`; the
+// request logger and object identity already provide method, path, and tenant.
 function logRequestFinished(
 	logger: Logger,
 	status: number,
@@ -2472,8 +2242,6 @@ function logRequestFinished(
 	});
 }
 
-// The closed set of direct (non-`fetch`) entrypoints the cost meter labels, kept as
-// a union so a label cannot drift from its entrypoint or be mistyped.
 type MeteredMethod =
 	| 'auth-key-retirement'
 	| 'cache-teardown'
@@ -2492,11 +2260,8 @@ type MeteredMethod =
 	| 'verification'
 	| 'verify-backstop';
 
-// The same cost line for a direct RPC entrypoint (the maintenance passes,
-// configure, the cold-start migration): no `fetch` runs, but the rows it reads
-// are still worth surfacing. These fire far more often than HTTP requests, on
-// every cron tick and every queue message, so this is the noisiest telemetry
-// and logs at `trace`, off by default and enabled only when investigating cost.
+// Direct RPCs have no HTTP request log. Record their storage cost at `trace`
+// because cron and queue traffic makes this the noisiest cost telemetry.
 function logMethodFinished(logger: Logger, cost: DatabaseCost): void {
 	logger.trace('method finished', {
 		rowsRead: cost.rowsRead,

@@ -184,11 +184,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # This tier runs a consumer repository's publication for real: a flake
-      # with genuine derivations, the composite action's own steps, a build,
-      # and a push over OIDC to a Worker in workerd. It needs the same Nix a
-      # publishing job gets. The remote-store leg starts its ssh-ng store in a
-      # container; the runner image provides the engine.
+      # This tier runs a consumer repository's publication with genuine
+      # derivations, the composite action, and an OIDC push to a Worker in
+      # workerd. Install the same Nix used by publication jobs. The remote-store
+      # leg starts its ssh-ng store in a container supplied by the runner image.
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
           nix_version: 2.34.7

@@ -93,8 +93,8 @@ export const keyAbortResponseSchema = z.strictObject({
 });
 export type ParsedKeyAbortResponse = z.output<typeof keyAbortResponseSchema>;
 
-// The auth-token signing keys. `active` marks the key that currently issues;
-// every listed key still verifies and is published in the JWKS.
+// `active` marks the key that issues new tokens. Every listed key still
+// verifies tokens and remains published in the JWKS.
 export const authKeySummarySchema = z.strictObject({
 	kid: authKeyIdSchema,
 	createdAt: isoTimestampSchema,

@@ -91,9 +91,6 @@ export async function verifyRemoteAttestations(
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
 	const fetcher = dependencies.fetch ?? resilientFetcher();
-	// The narinfo, list and bundle endpoints hang off the cache base under
-	// fixed protocol paths, so the base is rendered once and those paths are
-	// appended to it.
 	const base = canonicalHref(cacheUrl(options.url, options.cache));
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(
@@ -281,8 +278,8 @@ async function isNarInfoSignatureValid(
 
 	for (const publicKey of publicKeys) {
 		const key = new NixPublicKey(publicKey);
-		// A signature carries the name of the key that produced it, so only the
-		// signatures naming this key are checked against it.
+		// Nix selects a verification key by the name claimed in the signature.
+		// Verify only signatures whose claimed name matches this public key.
 		const claimed = signatures.filter(
 			(signature) => signature.name === key.name
 		);

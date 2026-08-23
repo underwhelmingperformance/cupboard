@@ -16,47 +16,23 @@ import {
 } from './narinfo.ts';
 import type { Oracle } from './oracle.ts';
 
-/**
-The on-disk cache fixture opened by both clients.
-*/
 export type CacheFixture = {
-	/**
-	The store URI parameters configured for both clients.
-	*/
 	readonly parameters?: string;
 } & (
 	| {
 			readonly kind: 'directory';
-			/**
-			The served `nix-cache-info`, or `undefined` to omit it.
-			*/
 			readonly cacheInfo?: string;
 	  }
-	/**
-	A store URI that refers to a regular file rather than a cache directory.
-	*/
 	| { readonly kind: 'file' }
 );
 
-/**
-One client's result for the cache directory.
-*/
 export interface CacheOutcome {
 	readonly oracle: {
-		/**
-		Whether Nix opened the cache and queried the path.
-		*/
 		readonly opened: boolean;
 		readonly offer: OfferFields | undefined;
-		/**
-		Nix's error output when it refused to open the cache.
-		*/
 		readonly stderr: string;
 	};
 	readonly client: {
-		/**
-		The cache URI passed to our client.
-		*/
 		readonly uri: string;
 		readonly offer: OfferFields | undefined;
 		readonly unreachable: readonly UnreachableSubstituter[];

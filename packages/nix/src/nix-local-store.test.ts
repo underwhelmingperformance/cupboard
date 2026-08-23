@@ -167,21 +167,21 @@ describe('NixLocalStoreClient', () => {
 
 	it.each([
 		{
-			name: 'substituters, with none configured',
+			name: 'substitutable-path queries without configured substituters',
 			operation: 'substitutable-path queries',
 			query: () => client.querySubstitutablePaths([pathA])
 		},
 		{
-			name: 'a realisation partition, with no substituters configured',
+			name: 'missing-path queries without configured substituters',
 			operation: 'missing-path queries',
 			query: () => client.queryMissing([pathA])
 		},
 		{
-			name: 'a build request',
+			name: 'build requests',
 			operation: 'build requests',
 			query: () => client.buildPathsWithResults([pathA])
 		}
-	])('cannot answer for $name here', async ({ operation, query }) => {
+	])('rejects unsupported $name', async ({ operation, query }) => {
 		let outcome:
 			{ value: unknown } | { error: { name: string; operation: string } };
 		try {
@@ -207,9 +207,7 @@ describe('NixLocalStoreClient', () => {
 		});
 	});
 
-	// The store database holds the references, so a row that does not name a
-	// store path is refused at the read rather than carried into the closure.
-	it('refuses a reference that does not name a store path', async () => {
+	it('rejects an invalid reference while reading path metadata', async () => {
 		const brokenReferences = new NixLocalStoreClient(() => ({
 			pathRow: (storePath) => rowsByPath[storePath],
 			references: () => ['/nix/store/notes.txt'],
@@ -223,9 +221,7 @@ describe('NixLocalStoreClient', () => {
 		);
 	});
 
-	// A store the system diverted elsewhere reads the same way the default one
-	// does: the store directory is discovered, never assumed to be `/nix/store`.
-	it('reads a path and its references from a diverted store directory', async () => {
+	it('reads metadata for a store directory other than `/nix/store`', async () => {
 		const divertedPath = storePathSchema.parse(
 			'/home/u/.local/share/nix/root/store/dddddddddddddddddddddddddddddddd-a'
 		);
@@ -244,9 +240,7 @@ describe('NixLocalStoreClient', () => {
 		]);
 	});
 
-	// A derivation is one regular file in the store, so the local store reads
-	// it where it sits.
-	it('reads a derivation from the file the store directory holds', async () => {
+	it('reads a derivation file from the configured store directory', async () => {
 		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
 		const read = vi.fn(() => Promise.resolve(aterm));
 		const client = new NixLocalStoreClient(() => emptyDatabase(), {
@@ -262,7 +256,7 @@ describe('NixLocalStoreClient', () => {
 		});
 	});
 
-	it('refuses a derivation the store directory does not hold', async () => {
+	it('maps a derivation read failure to a missing store path', async () => {
 		const client = new NixLocalStoreClient(() => emptyDatabase(), {
 			storeDirectory: storeDirectorySchema.parse('/nix/store'),
 			readStoreFile: () => Promise.reject(new Error('ENOENT'))
@@ -274,8 +268,6 @@ describe('NixLocalStoreClient', () => {
 	});
 });
 
-// Configured substituters are what the availability questions are asked of,
-// so a store given them answers all three the way a daemon-backed one does.
 describe('NixLocalStoreClient with substituters', () => {
 	const cacheInfo = 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n';
 	const narInfo = `${[
@@ -305,13 +297,13 @@ describe('NixLocalStoreClient with substituters', () => {
 		return new NixLocalStoreClient(() => emptyDatabase(), { substituters });
 	}
 
-	it('reports which paths the substituters offer', async () => {
+	it('returns paths offered by the configured substituters', async () => {
 		await expect(
 			clientOver().querySubstitutablePaths([pathA, pathB])
 		).resolves.toStrictEqual([pathB]);
 	});
 
-	it('reports what the substituters offer for a path', async () => {
+	it('returns substituter metadata for an offered path', async () => {
 		await expect(
 			clientOver().querySubstitutablePathInfos([pathB])
 		).resolves.toStrictEqual([
@@ -328,7 +320,7 @@ describe('NixLocalStoreClient with substituters', () => {
 		]);
 	});
 
-	it('partitions a realisation over what the substituters hold', async () => {
+	it('uses substituter offers to partition a realisation', async () => {
 		await expect(clientOver().queryMissing([pathB])).resolves.toStrictEqual({
 			willBuild: [],
 			willSubstitute: [pathB],
@@ -339,9 +331,6 @@ describe('NixLocalStoreClient with substituters', () => {
 	});
 });
 
-/**
-A cache serving the given `nix-cache-info` and one narinfo.
-*/
 function servedBy(cacheInfo: string, narInfo: string): typeof undiciFetch {
 	return (input) => {
 		const url = requestUrl(input);
@@ -403,8 +392,6 @@ function seededDatabase(): DatabaseSync {
 		)
 		.run();
 
-	// Each row leaves a different column NULL by omitting it, so the adapter is
-	// exercised on an absent deriver, ultimate, sigs and ca.
 	database
 		.prepare(
 			'insert into ValidPaths (id, path, hash, registrationTime, deriver, narSize, ultimate, sigs) values (?, ?, ?, ?, ?, ?, ?, ?)'

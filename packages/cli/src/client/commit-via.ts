@@ -1,11 +1,6 @@
 import type { CommitOptions, CommitTarget } from './client.ts';
 import type { CommitOutcome, CommitSession } from './commit-socket.ts';
 
-/**
- * What a phase of a publication needs in order to commit a path: the session
- * the run opened, when it opened one, and the client to fall back to when it
- * did not.
- */
 export interface CommitSource {
 	readonly session?: CommitSession;
 	readonly client: {
@@ -18,10 +13,9 @@ export interface CommitSource {
 }
 
 /**
- * Commits one path over the session the run holds, falling back to a one-off
- * commit for a client that opened none. A run that shares one session commits
- * every path of every phase over a single socket, which is what lets the server
- * pace the run as a whole rather than each phase separately.
+ * When a publication has a shared commit session, use it for commits from every
+ * phase. All paths then draw from one server credit grant and declared demand
+ * budget. Without a session, use a one-off client commit.
  */
 export function commitOverSession(
 	source: CommitSource,

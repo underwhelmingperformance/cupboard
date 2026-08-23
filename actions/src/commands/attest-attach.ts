@@ -70,24 +70,30 @@ export function registerAttestAttachCommand(
 	program
 		.command('attest-attach')
 		.description(
-			'Attach a signed provenance bundle to the published paths a build receipt records.'
+			'Attach signed attestation bundles to the published subjects in a build receipt.'
 		)
 		.requiredOption('--url <url>', 'cupboard Worker URL')
 		.requiredOption(
 			'--cupboard-path <path>',
 			'path to the cupboard binary installed by actions/setup'
 		)
-		.option('--cache <name>', 'named cache the paths were published to')
+		.option('--cache <name>', 'named cache that received the paths')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option('--read-user <user>', 'private-read username')
-		.option('--read-password <password>', 'private-read password')
+		.option(
+			'--read-user <user>',
+			'username for private destination-cache reads'
+		)
+		.option(
+			'--read-password <password>',
+			'password for private destination-cache reads'
+		)
 		.requiredOption(
 			'--receipt-file <path>',
 			'current-run receipt produced by the build action'
 		)
 		.requiredOption(
 			'--checksums-file <path>',
-			'subject checksums passed to the signing action'
+			'checksums for the signed receipt subjects'
 		)
 		.option(
 			'--bundle <path>',
@@ -157,9 +163,8 @@ export function resolveAttestAttachInputs(
 }
 
 /**
- * The `cupboard attest attach` argv for one receipt's paths. The bundles attach
- * to paths the run has already published, authenticated with GitHub OIDC, so
- * the argv carries no upload or retention flag.
+ * Attaching uses GitHub OIDC and operates on paths already published by the
+ * run. The command must not include upload or retention flags.
  */
 export function attestAttachArguments(
 	inputs: AttestAttachInputs,
@@ -208,14 +213,14 @@ function requireSettledAttachment(
 
 	if (event === undefined) {
 		throw new AttestationAttachmentResultError(
-			'The installed cupboard recorded no attestation attachment result'
+			'The installed cupboard emitted no attestation attachment result'
 		);
 	}
 
 	const parsed = attestationAttachSummarySchema.safeParse(event.data);
 	if (!parsed.success) {
 		throw new AttestationAttachmentResultError(
-			'The installed cupboard recorded an invalid attestation attachment result',
+			'The installed cupboard emitted an invalid attestation attachment result',
 			{ cause: parsed.error }
 		);
 	}
@@ -271,7 +276,7 @@ export async function attestAttachAction(
 
 	if (subjectPaths.length === 0) {
 		reporter.warn(
-			'The build receipt records no provenance subjects; nothing to attach'
+			'The build receipt contains no provenance subjects; skipping attachment'
 		);
 		return;
 	}

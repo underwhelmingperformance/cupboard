@@ -1,9 +1,8 @@
 /**
- * Arms the Durable Object alarm for `at` unless one is already set to fire
- * sooner. A DO carries a single alarm and `setAlarm` overwrites it, so a
- * far-out deadline must never push back an imminent firing. Immediate
- * continuations (`setAlarm(Date.now())`) stay as bare calls, since nothing can
- * be sooner; any deadline in the future arms through here.
+ * Durable Object storage has one alarm, and `setAlarm` overwrites its current
+ * deadline. Keep an earlier deadline when scheduling future work so a later
+ * deadline cannot postpone it. Immediate continuations call
+ * `setAlarm(Date.now())` directly because no earlier firing is possible.
  */
 export async function armAlarmNoLaterThan(
 	storage: DurableObjectStorage,

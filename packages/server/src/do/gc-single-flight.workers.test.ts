@@ -53,10 +53,6 @@ const verifyReport = {
 	wrapped: true
 } satisfies VerifyReport;
 
-// The DO alarm, the cron/queue RPCs and the interactive admin path can all drive
-// maintenance on the same instance. A cron tick coalesces against a cron pass
-// already queued or running; the alarm resume and interactive drivers serialise
-// through the per-kind chain rather than skipping, so every pass runs.
 describe('garbage-collection maintenance serialisation', () => {
 	beforeEach(resetTestServer);
 	afterEach(clearAbandonedAlarms);
@@ -82,7 +78,6 @@ describe('garbage-collection maintenance serialisation', () => {
 				await runInDurableObject(currentServer(), async (instance) => {
 					const first = instance.runGarbageCollection();
 
-					// The first driver is now inside the collection, holding the 'gc' chain.
 					await started.promise;
 
 					const rest = Array.from({ length: drivers - 1 }, () =>
@@ -161,10 +156,6 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	// A failing pass surfaces only to its own driver: the per-kind chain
-	// resolves its marker in the finally and the cron coalescing marker is
-	// cleared, so the next cron tick runs a fresh collection instead of wedging
-	// behind the failure or coalescing into it.
 	it('recovers from a failing collection, running the next cron pass', async () => {
 		await initialise();
 
@@ -211,7 +202,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('drops and deletes a continuation this build cannot read', async () => {
+	it('discards a continuation whose shape this build cannot parse', async () => {
 		await initialise();
 
 		const collect = vi
@@ -222,8 +213,8 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					// A marker in a shape no supported build writes. The resume drops
-					// it; the backlog it marked is re-discovered by the next pass.
+					// A later pass will rediscover the backlog represented by this unsupported
+					// marker, so alarm recovery can discard it.
 					await state.storage.put(gcContinuationKey, [
 						{ scope: 'cache', cache: 'builds', limit: maxPathsCollectedPerRun }
 					]);
@@ -350,7 +341,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('queues distinct cache continuations and settles only the resumed scope', async () => {
+	it('removes only the resumed cache from the continuation queue', async () => {
 		const token = await initialise();
 		const collect = vi
 			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
@@ -475,7 +466,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('bails from the alarm resume when a concurrent collection already drained the marker', async () => {
+	it('does not run an alarm collection after a concurrent collection removes the continuation', async () => {
 		await initialise();
 
 		const started = Promise.withResolvers<boolean>();
@@ -499,9 +490,9 @@ describe('garbage-collection maintenance serialisation', () => {
 					const cron = instance.runGarbageCollection();
 					await started.promise;
 
-					// The alarm's resume reads the marker, then chains behind the collection
-					// in flight. That collection drains the marker, so the resume's body finds
-					// nothing left and does not collect a second time.
+					// The alarm reads the marker before waiting behind the active collection.
+					// It must read the marker again after acquiring the chain because the active
+					// collection can remove it while the alarm waits.
 					const alarm = instance.alarm();
 
 					blocked.resolve(true);

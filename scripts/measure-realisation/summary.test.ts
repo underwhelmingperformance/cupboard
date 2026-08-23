@@ -70,22 +70,22 @@ const report: RealisationReport = {
 };
 
 describe('renderSummary', () => {
-	it('reads out every target and the combined group', () => {
+	it('renders every target and the combined group', () => {
 		expect(renderSummary(report).split('\n')).toStrictEqual([
-			'Realising nixpkgs against an empty store',
+			'Realising nixpkgs in the diverted store',
 			'Substituters: https://cache.nixos.org',
 			'',
 			'Per target:',
-			'  app: 3 to build, 10 to fetch (1.0 KiB download, 2.0 KiB unpacked)',
+			'  app: 3 to build, 10 to fetch (1.0 KiB download, 2.0 KiB NAR)',
 			'',
 			'Group all-targets (app, tool):',
-			'  together: 5 to build, 15 to fetch (3.0 KiB download, 4.0 KiB unpacked)',
-			'  apart:    7 to build, 22 to fetch (5.0 KiB download, 8.0 KiB unpacked)',
-			'  grouping saves 2 derivation(s) and 4.0 KiB unpacked'
+			'  together: 5 to build, 15 to fetch (3.0 KiB download, 4.0 KiB NAR)',
+			'  apart:    7 to build, 22 to fetch (5.0 KiB download, 8.0 KiB NAR)',
+			'  grouping saves 2 derivation(s) and 4.0 KiB NAR bytes'
 		]);
 	});
 
-	it('names an empty substituter list', () => {
+	it('renders an empty substituter list as (none)', () => {
 		expect(
 			renderSummary({ ...report, substituters: [] }).split('\n', 2)[1]
 		).toBe('Substituters: (none)');

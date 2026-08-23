@@ -56,7 +56,7 @@ function tenantClient(token: string): TenantClient {
 describe('tenant contract round trip', () => {
 	beforeEach(resetTestServer);
 
-	it('drives the cache registry through the derived client', async () => {
+	it('creates, lists, and removes caches through the derived client', async () => {
 		await useTestServer('contract-caches');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -87,7 +87,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('answers a refused teardown as the defined CACHE_NOT_EMPTY error', async () => {
+	it('returns CACHE_NOT_EMPTY when cache removal requires force', async () => {
 		await useTestServer('contract-cache-not-empty');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -119,7 +119,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('drives both key sets through the derived client', async () => {
+	it('rotates and lists both key sets through the derived client', async () => {
 		await useTestServer('contract-keys');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -263,7 +263,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('drives policies and trust rules through the derived client', async () => {
+	it('creates policies and trust rules through the derived client', async () => {
 		await useTestServer('contract-policies-trust');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -331,7 +331,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('drives roots, path deletion and gc through the derived client', async () => {
+	it('updates roots, deletes paths, and runs GC through the derived client', async () => {
 		await useTestServer('contract-roots');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -391,7 +391,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('drives upload negotiation and staging through the derived client', async () => {
+	it('negotiates an upload and obtains staging credentials through the derived client', async () => {
 		await useTestServer('contract-uploads');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -554,7 +554,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('refuses a write-scoped token on an admin procedure', async () => {
+	it('rejects a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();
 		const client = tenantClient(

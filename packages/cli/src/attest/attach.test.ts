@@ -23,6 +23,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	AttestationAttachResponseMismatchError,
+	AttestationBundleInvalidError,
 	AttestationNegotiationMismatchError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
@@ -33,6 +34,7 @@ import {
 import {
 	type AttestationAttachClient,
 	type AttestationPathInfo,
+	parseAttestationBundle,
 	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
 	runAttestAttach
@@ -83,7 +85,7 @@ function pathInfo(
 }
 
 describe('readCommittedAttestationPathInfos', () => {
-	it('reads a private named cache after the build store is unavailable', async () => {
+	it('reads committed path identities from a private named cache', async () => {
 		const requests: { url: string; authorization?: string }[] = [];
 		const infos = await readCommittedAttestationPathInfos(
 			[appPath],
@@ -119,7 +121,7 @@ describe('readCommittedAttestationPathInfos', () => {
 		});
 	});
 
-	it('refuses a destination that no longer serves the path', async () => {
+	it('refuses a path absent from the destination before negotiation', async () => {
 		await expect(
 			readCommittedAttestationPathInfos(
 				[appPath],
@@ -206,6 +208,19 @@ function sigstoreBundleBytes(
 	const encoder = new TextEncoder();
 	return encoder.encode(JSON.stringify(bundle));
 }
+
+describe('parseAttestationBundle', () => {
+	it('reports when a Sigstore bundle has no DSSE envelope', () => {
+		const bytes = new TextEncoder().encode(JSON.stringify({}));
+
+		expect(() => parseAttestationBundle('bundle.sigstore.json', bytes)).toThrow(
+			new AttestationBundleInvalidError(
+				'bundle.sigstore.json',
+				'bundle has no DSSE envelope'
+			)
+		);
+	});
+});
 
 function reporter(
 	results: ResultRow[][],
@@ -608,7 +623,7 @@ describe('runAttestAttach', () => {
 		).rejects.toBeInstanceOf(AttestationSubjectNotPushedError);
 	});
 
-	it('refuses a bundle that mixes pushed and unrelated subjects', async () => {
+	it('refuses a bundle that mixes selected and unrelated subjects', async () => {
 		const bundle = sigstoreBundleBytes(bundleSubject(appPath, appHash), {
 			name: 'unrelated-output',
 			digest: narDigestHex(runtimeHash)
@@ -627,13 +642,16 @@ describe('runAttestAttach', () => {
 		).rejects.toStrictEqual(
 			expect.objectContaining({
 				name: 'AttestationSubjectNotPushedError',
+				message:
+					'Attestation bundle mixed.sigstore.json has subjects outside the selected paths: ' +
+					narDigestHex(runtimeHash),
 				path: 'mixed.sigstore.json',
 				subjectDigests: [narDigestHex(runtimeHash)]
 			})
 		);
 	});
 
-	it('records a path the cache does not serve as unservable and attaches the rest', async () => {
+	it('records NOT_FOUND during attachment as unservable and attaches the rest', async () => {
 		const record: RecordedClient = {
 			negotiations: [],
 			uploads: [],

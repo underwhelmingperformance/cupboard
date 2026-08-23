@@ -39,33 +39,22 @@ import {
 	presentNarObjects
 } from './bulk.ts';
 
-// One narinfo whose object the demote pass must take down: a tenant, the cache it
-// lives in, and its store-path hash. The reaper groups these by tenant and routes
-// them to the owning tenant's Durable Object, the single writer of that tenant's
-// objects.
 export interface DemoteTarget {
 	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
 }
 
-// One hash whose shared object is gone, paired with the narinfos referencing it
-// in a single tenant. A demote routes one of these batches to each owning tenant,
-// so a tenant referencing many reaped hashes is told about them in one call.
 export interface NarInfoDemotion {
 	readonly narHash: NixSha256HashString;
 	readonly targets: readonly DemoteTarget[];
 }
 
-// The port the demote pass reaches a tenant's Durable Object through. The reaper
-// itself never touches a tenant's objects; it asks the owning tenant to
-// de-materialise the narinfos referencing hashes whose shared objects are gone, so
-// the per-tenant single-writer rule holds.
+// Route narinfo changes through the owning tenant Durable Object. The global
+// reaper must not write tenant-owned objects directly.
 export interface NarInfoDemoter {
 	demote(tenant: string, demotions: readonly NarInfoDemotion[]): Promise<void>;
 }
 
-// One attestation digest whose CAS object is gone, with the `stored_at` the delete
-// is fenced on so a re-stored object is left intact.
 export interface CasReferenceDemotion {
 	readonly digest: Sha256HexDigest;
 	readonly fenceStoredAt: IsoTimestamp;
@@ -78,28 +67,20 @@ export interface CasReferenceDemoter {
 	): Promise<void>;
 }
 
-// A fenced batch delete binds two parameters per row (the key and its fence), so
-// the OR-of-AND list is chunked to stay within D1's bound-parameter limit.
 const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
-// The demote scan's resume position across cron ticks. It is the last `nar_hash`
-// reached, an exclusive lower bound for the next keyset page, with '' meaning start
-// from the beginning (and written back to wrap). It is pure cron bookkeeping, so
-// the Worker backs it with a single KV value (not a relational row); the eventual consistency is harmless because the scan is idempotent
-// and the position only ever resumes a window it would otherwise cover anyway.
+// Persist the last key scanned. An empty position wraps to the start. Eventual
+// consistency can repeat an idempotent page but cannot skip beyond the stored
+// cursor.
 export interface DemoteCursor {
 	read(): Promise<string>;
 	advance(position: string): Promise<void>;
 }
 
-// The global blob reaper. It is the only actor that sees every tenant's reference
-// edges, so it runs Worker-side over the shared D1 facts, driven by the cron
-// and not inside any one tenant's Durable Object. It works `blob_state` in two
-// bounded passes: arm every blob no live `blob_ref` references with a grace timer,
-// then collect those whose grace has elapsed and that are still unreferenced. Its
-// safety rests on the atomic compare-and-delete that re-checks the predicate, not
-// on a critical section, so it is correct while tenant objects commit and promote
-// concurrently.
+// The Worker runs this reaper because only it can see reference edges for every
+// tenant. One bounded pass arms unreferenced objects; a later pass removes rows
+// whose grace expired and which remain unreferenced. Atomic compare-and-delete,
+// not a Durable Object gate, protects concurrent commits and promotions.
 export class BlobReaperService {
 	constructor(
 		private readonly d1: DrizzleD1Database<typeof d1Schema>,
@@ -108,10 +89,8 @@ export class BlobReaperService {
 		private readonly casDemoter: CasReferenceDemoter
 	) {}
 
-	// Arms unreferenced shared blobs with a grace timer. The cross-tenant
-	// "referenced anywhere" probe is on `blob_ref.nar_hash` (its dedicated index),
-	// not any one tenant's narinfos. Bounded: only a batch is armed per pass, and a
-	// commit that re-references a hash clears the timer it set.
+	// Determine global reachability from `blob_ref.nar_hash`, not from one
+	// tenant's narinfos. A later reference clears the grace timer.
 	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
 		const deletionTime = isoTimestamp(
 			new Date(now.getTime() + blobReaperGraceMs)
@@ -137,10 +116,8 @@ export class BlobReaperService {
 
 		const candidateHashes = candidates.map((candidate) => candidate.narHash);
 
-		// The candidate batch can exceed D1's bound-parameter limit, so the arm
-		// update runs per chunk. Each chunk re-checks the timer is still unset, so
-		// a commit clearing it between chunks wins. The chunks go in one D1 batch,
-		// so all chunks cost a single round-trip.
+		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
+		// timer is still unset, so a concurrent reference wins.
 		const chunks = chunk(candidateHashes, maxInClauseValues);
 		const queries = chunks.map((hashes) => {
 			const fence = and(
@@ -157,11 +134,9 @@ export class BlobReaperService {
 		await batchNonEmpty(this.d1, queries);
 	}
 
-	// Collects armed shared blobs whose grace has elapsed. Each is removed by a
-	// single compare-and-delete that re-checks armed, elapsed and unreferenced
-	// atomically, so a blob re-referenced or re-armed since the scan is never taken;
-	// the D1 fact is deleted before the R2 object (D1-first/R2-last), so a crash
-	// between them leaves only a harmless orphan object the next promote adopts.
+	// Recheck the grace deadline and global reachability in the delete statement.
+	// Delete D1 first so a crash before the R2 delete leaves only an orphaned
+	// content-addressed object that a later promotion can adopt.
 	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
 		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
@@ -180,10 +155,8 @@ export class BlobReaperService {
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference);
 
-		// One compare-and-delete per chunk; the fence still re-checks armed,
-		// elapsed and unreferenced atomically for each row, so a blob
-		// re-referenced or re-armed since the scan is never taken, and
-		// `RETURNING` reports exactly which rows the fence let go.
+		// `RETURNING` identifies only rows that still satisfy the atomic deletion
+		// fence.
 		const hashChunks = chunk(
 			expired.map((blob) => blob.narHash),
 			maxInClauseValues
@@ -207,8 +180,7 @@ export class BlobReaperService {
 			}
 		}
 
-		// Every fenced D1 delete has run, so the R2 objects go in one bulk delete,
-		// keeping the D1-first/R2-last order a crash relies on.
+		// Preserve D1-first, R2-last ordering across every chunk.
 		await deleteObjects(this.blobs, removedKeys);
 
 		return removedKeys.length;
@@ -242,10 +214,8 @@ export class BlobReaperService {
 
 		const candidateDigests = candidates.map((candidate) => candidate.digest);
 
-		// The candidate batch can exceed D1's bound-parameter limit, so the arm
-		// update runs per chunk. Each chunk re-checks the timer is still unset, so
-		// an attach clearing it between chunks wins. The chunks go in one D1 batch,
-		// so all chunks cost a single round-trip.
+		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
+		// timer is still unset, so a concurrent attestation reference wins.
 		const chunks = chunk(candidateDigests, maxInClauseValues);
 		const queries = chunks.map((digests) => {
 			const fence = and(
@@ -283,9 +253,8 @@ export class BlobReaperService {
 			.select({ digest: d1Schema.attestationReference.digest })
 			.from(d1Schema.attestationReference);
 
-		// One compare-and-delete per chunk; the fence still re-checks each row's
-		// armed, elapsed and unreferenced state, and `RETURNING` reports exactly
-		// which rows it let go.
+		// `RETURNING` identifies only rows that still satisfy the atomic deletion
+		// fence.
 		const digestChunks = chunk(
 			expired.map((object) => object.digest),
 			maxInClauseValues
@@ -314,9 +283,6 @@ export class BlobReaperService {
 		return removedKeys.length;
 	}
 
-	// The narinfos referencing each of a batch of hashes, grouped by owning tenant
-	// then by hash, in one bulk read per chunk. Each
-	// tenant's entry is the set of demotions to route to it in a single call.
 	private async referencingDemotions(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<string, NarInfoDemotion[]>> {
@@ -356,8 +322,6 @@ export class BlobReaperService {
 		return demotionsByTenant;
 	}
 
-	// The digests whose CAS object is present, the attestation counterpart of
-	// {@link presentNarObjects}.
 	private async presentCasObjects(
 		digests: readonly Sha256HexDigest[]
 	): Promise<ReadonlySet<Sha256HexDigest>> {
@@ -377,9 +341,8 @@ export class BlobReaperService {
 		);
 	}
 
-	// Routes each tenant's demotions to its Durable Object, bounded and caught per
-	// tenant, and returns the tenants whose routing failed. A failed tenant leaves
-	// its hashes' facts in place so the next pass re-drives them.
+	// Route tenants independently with bounded concurrency. Keep global facts for
+	// failed tenants so a later pass retries them.
 	private async routeByTenant<T>(
 		log: Logger,
 		byTenant: ReadonlyMap<string, readonly T[]>,
@@ -394,10 +357,7 @@ export class BlobReaperService {
 				try {
 					await send(tenant, items);
 				} catch (error) {
-					// Keep the per-tenant isolation (the others still demote and the
-					// failed tenant's facts are left for the next pass), but surface the
-					// failure: a tenant whose demote routing keeps failing must not be
-					// silently swallowed.
+					// Continue other tenants but report this failure to the cron caller.
 					failed.add(tenant);
 					log.error('reaper demote routing failed', {
 						tenant,
@@ -411,15 +371,11 @@ export class BlobReaperService {
 		return failed;
 	}
 
-	// Deletes the `blob_state` rows for the given hashes, each fenced on the
-	// `verified_at` captured at scan so a row deleted and re-promoted in the window
-	// is left intact. The fence is an OR of per-row (hash, verified_at) pairs,
-	// chunked to stay within D1's bound-parameter limit. Returns how many were
-	// deleted.
+	// Fence each deletion on the `verified_at` value captured by the scan so a
+	// re-promoted row survives. Chunk the predicate for D1's parameter limit.
 	private async deleteFencedBlobStates(
 		rows: readonly { narHash: NixSha256HashString; verifiedAt: IsoTimestamp }[]
 	): Promise<number> {
-		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
 		const chunks = chunk(rows, maxFencedDeleteRows);
 		const queries = chunks.map((batch) => {
 			const match = or(
@@ -442,8 +398,6 @@ export class BlobReaperService {
 		return results.reduce((demoted, removed) => demoted + removed.length, 0);
 	}
 
-	// One keyset page of `blob_state` after the cursor, the Drizzle cursor-pagination
-	// pattern on the `nar_hash` primary key.
 	private demoteBatch(
 		after: string,
 		limit: number
@@ -460,13 +414,11 @@ export class BlobReaperService {
 			.all();
 	}
 
-	// Deletes the `cas_object` rows for the given digests, each fenced on the
-	// `stored_at` captured at scan, the CAS counterpart of
-	// {@link deleteFencedBlobStates}. Returns how many were deleted.
+	// Fence each deletion on the `stored_at` value captured by the scan so a
+	// re-stored object survives.
 	private async deleteFencedCasObjects(
 		rows: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
 	): Promise<number> {
-		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
 		const chunks = chunk(rows, maxFencedDeleteRows);
 		const queries = chunks.map((batch) => {
 			const match = or(
@@ -505,9 +457,6 @@ export class BlobReaperService {
 			.all();
 	}
 
-	// The tenants referencing each of a batch of digests, grouped by tenant, in one
-	// bulk read per chunk. Each tenant's entry is the demotions to route to it in a
-	// single call, carrying the per-digest `stored_at` fence.
 	private async casReferencingDemotions(
 		objects: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
 	): Promise<Map<string, CasReferenceDemotion[]>> {
@@ -550,7 +499,6 @@ export class BlobReaperService {
 		return demotionsByTenant;
 	}
 
-	// Returns how many shared blobs it collected.
 	async reapBlobs(now: Date, limit: number): Promise<number> {
 		await this.armUnreferencedBlobs(now, limit);
 
@@ -563,14 +511,9 @@ export class BlobReaperService {
 		return this.collectExpiredCasObjects(now, limit);
 	}
 
-	// Walks a bounded batch of `blob_state` from the persisted cursor, removing the
-	// fact and de-materialising the referencing narinfos of any shared blob whose
-	// canonical object is gone (an "available but no object" gap a crash can leave).
-	// Reads serve from a tenant's narinfo object, never `blob_state`, so clearing the
-	// fact alone would stop no read; the narinfos are de-materialised first, through
-	// each owning tenant's Durable Object, and the `blob_state` row is deleted last so
-	// it stays the durable marker that re-drives an interrupted demote on the next
-	// pass. Returns how many shared facts it demoted.
+	// Dematerialise tenant narinfos before deleting the global `blob_state` row.
+	// Reads use the tenant narinfo object, so the global row must remain as the
+	// durable retry marker until every tenant update succeeds.
 	async demoteMissingBlobs(
 		logger: Logger,
 		limit: number,
@@ -580,9 +523,8 @@ export class BlobReaperService {
 		const after = await cursor.read();
 		const batch = await this.demoteBatch(after, limit);
 
-		// A short page means the scan reached the end of the hash order, so wrap to the
-		// start; otherwise resume after the last hash scanned. Advanced before
-		// processing, so a failure does not wedge the scan.
+		// Advance before processing so one failing page cannot wedge the cursor. A
+		// short page wraps the next pass to the start.
 		const next = batch.length < limit ? '' : (batch.at(-1)?.narHash ?? '');
 		await cursor.advance(next);
 
@@ -600,9 +542,8 @@ export class BlobReaperService {
 			return 0;
 		}
 
-		// De-materialise the referencing narinfos first (one call per tenant), then
-		// delete the facts. A hash whose tenant routing failed keeps its fact for the
-		// next pass; one referenced by no tenant is eligible immediately.
+		// Delete a global fact only after every referencing tenant was updated. A
+		// hash with no tenant references is eligible immediately.
 		const demotionsByTenant = await this.referencingDemotions(
 			missing.map((blob) => blob.narHash)
 		);

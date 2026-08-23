@@ -17,12 +17,10 @@ import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type RetentionService } from './retention-service.ts';
 
-// The retention grace decision a negotiation captures on its pending upload.
-// `reportsGrace` records whether the negotiation accepted the grace-facts
-// capability, which versions the responses and commit frames it may carry.
-// `graceSeconds` is the policy grace resolved at negotiation, absent when no
-// policy matched; zero marks the cache grace-managed without granting a
-// lasting deadline.
+// Each pending upload stores the grace policy resolved during negotiation.
+// `reportsGrace` records whether the client accepted grace facts. An absent
+// `graceSeconds` means no policy matched; zero marks the cache as grace-managed
+// without granting a lasting deadline.
 export const graceDecisionSchema = z.strictObject({
 	reportsGrace: z.boolean(),
 	graceSeconds: graceSecondsSchema.optional()
@@ -30,8 +28,8 @@ export const graceDecisionSchema = z.strictObject({
 
 export type GraceDecision = z.output<typeof graceDecisionSchema>;
 
-// A rolling deployment can leave either representation in an in-flight
-// pending row. New writes use `reportsGrace`; reads normalise both shapes.
+// Rolling deployments can leave either representation in an in-flight row.
+// New writes use `reportsGrace`, but reads must accept the legacy `plan` field.
 const storedGraceDecisionSchema = z.union([
 	graceDecisionSchema,
 	z
@@ -50,9 +48,8 @@ export function serialiseGraceDecision(decision: GraceDecision): string {
 }
 
 /**
- * Reads a stored grace decision back off a pending-upload row. An unset column
- * is a row negotiated before the decision existed and carries no policy fact,
- * so it parses to `undefined` and materialises as though no policy matched.
+ * Parses the grace decision stored on a pending upload. An unset column comes
+ * from a negotiation before grace decisions existed and grants no grace.
  */
 export function parseStoredGraceDecision(
 	source: string | null | undefined
@@ -64,8 +61,8 @@ export function parseStoredGraceDecision(
 	return storedGraceDecisionSchema.parse(JSON.parse(source));
 }
 
-// The captured policy fact a still-deferred upload reports: its deadline is
-// unknown until it materialises, so the fact carries the captured grace.
+// A deferred upload has no materialised deadline, so it reports the grace
+// duration captured during negotiation.
 export function capturedGraceFact(
 	decision: GraceDecision | undefined
 ): ParsedUploadGraceFact {
@@ -74,9 +71,6 @@ export function capturedGraceFact(
 		: { graceSeconds: decision.graceSeconds };
 }
 
-// The path's stored grace deadline as a wire fact, for an answer that settles
-// without materialising anything itself: an already-present decision, a
-// concurrent winner's commit, or a replayed servable verdict.
 export function storedGraceFact(
 	database: ServerContext['db'],
 	cache: StoredCache,
@@ -96,25 +90,16 @@ export function storedGraceFact(
 	return row === undefined ? {} : { retainUntil: row.retainUntil };
 }
 
-/**
- * The result of confirming a grace decision against the row now committed
- * for a store-path hash. `matched` reports whether the row still carried the
- * expected generation and NAR hash when the decision was applied; only a
- * matched confirmation has anything applied or a fact to report.
- */
 export type ConfirmedGrace =
 	| { readonly matched: true; readonly fact: ParsedUploadGraceFact }
 	| { readonly matched: false };
 
 /**
- * Applies a grace decision to the row now actually committed for a
- * store-path hash, whether this call's own materialisation produced it or it
- * conceded to a concurrent winner. A concede that skips this and merely
- * reports success leaves a positive policy ungranted whenever no other event
- * has established a deadline. The identity re-check always runs, whatever
- * the decision says; `graceSeconds` only gates the writes, so a caller can
- * always tell a row that moved from one that simply carried no policy. A
- * matched confirmation reports the resulting stored fact.
+ * Applies a captured grace decision to the exact committed generation and NAR
+ * hash. This also applies the decision after conceding to a concurrent winner,
+ * before the pending row that stores it is cleared. The identity check always
+ * runs, including when no policy matched, so callers can distinguish a moved
+ * row from a matching row that receives no grace.
  */
 export function confirmGrace(
 	context: ServerContext,
@@ -138,12 +123,8 @@ export function confirmGrace(
 }
 
 /**
- * The batched form of {@link confirmGrace}: one identity re-check and one
- * monotonic extension per chunk of rows, so confirming a whole closure costs
- * a bounded number of statements rather than one transaction per path.
- * Returns the stored fact for each store-path hash whose row still matched
- * its expected identity; a mismatched or vanished row is absent from the map
- * and has nothing applied.
+ * Confirms grace for a closure in bounded chunks. Only rows whose generation
+ * and NAR hash still match receive an extension and appear in the result.
  */
 export function confirmGraceBatch(
 	context: ServerContext,
@@ -156,18 +137,16 @@ export function confirmGraceBatch(
 	}[],
 	graceSeconds: GraceSeconds | undefined
 ): Map<StorePathHash, ParsedUploadGraceFact> {
-	// One deadline for the whole batch, computed up front so every matched row
-	// reports the same extension.
+	// Compute one deadline before batching so every matched row receives the same
+	// extension.
 	const retainUntil =
 		graceSeconds === undefined || graceSeconds === 0
 			? undefined
 			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000));
 	const matched: StorePathHash[] = [];
 
-	// The identity re-check and the writes it authorises share one transaction
-	// per chunk, so a concurrent change to a row after its check extends
-	// nothing. The chunk bound covers the re-check's IN-list; the extension
-	// chunks its own inserts.
+	// Check identity and apply each chunk's writes in one transaction. A row that
+	// changes concurrently receives no extension.
 	for (const batch of chunk(entries, maxInClauseValues)) {
 		const batchHashes = batch.map((entry) => entry.storePathHash);
 
@@ -213,8 +192,8 @@ export function confirmGraceBatch(
 	}
 
 	if (retainUntil === undefined) {
-		// A matched zero-grace policy is reported as such: an empty fact
-		// strictly means no policy matched.
+		// Report a matched zero-grace policy explicitly. An empty fact means no
+		// policy matched.
 		const fact: ParsedUploadGraceFact =
 			graceSeconds === undefined ? {} : { graceSeconds };
 
@@ -236,12 +215,10 @@ export function confirmGraceBatch(
 }
 
 /**
- * The stored grace deadline for each of the given paths in one cache, read
- * back after an extension's monotonic max upsert. Storage may already hold a
- * later deadline than the one just extended to (an earlier longer policy, or
- * a root transition), so this is the fact a reply or frame must report,
- * never the candidate the caller just computed. A path the extension did not
- * touch, or that was never granted a deadline, is absent from the map.
+ * Reads the stored grace deadlines after a monotonic extension. An earlier
+ * policy or root transition may already have set a later deadline, so replies
+ * must report the stored value rather than the latest candidate. Paths without
+ * a deadline are absent from the result.
  */
 export function storedGraceDeadlines(
 	database: ServerContext['db'],

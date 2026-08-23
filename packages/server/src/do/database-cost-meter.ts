@@ -1,21 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-// The Durable Object is billed per row its SQLite reads, and a row-heavy request
-// is invisible until it shows up on the daily bill. This meter sums the rows read
-// and written across every statement, so the figure can be logged when the
-// request ends and asserted on in tests.
-//
-// A read cursor's `rowsRead` is final only once its rows have been read out, and a
-// write reports its `rowsWritten` as it runs. Drizzle's Durable Object session
-// drains each cursor to completion inside the fielded `.all()` or `.get()` call
-// that issued it. A statement's totals are therefore final before the next
-// statement starts. The meter records the outstanding cursor's totals before
-// each new statement and records the last cursor at the request boundary. A
-// write (`run`) does not iterate a cursor, but `exec` reports `rowsWritten` as it
-// runs, so the total is final when the statement returns. This holds for the
-// query builder. A fieldless `db.get(sql`...`)` streams its cursor lazily and
-// would be recorded before it was drained, but the schema layer does not make
-// such a call. The query layer receives the original platform cursor.
 type AnyCursor = SqlStorageCursor<Record<string, SqlStorageValue>>;
 
 export interface DatabaseCost {
@@ -28,8 +12,8 @@ export class DatabaseCostMeter {
 	rowsRead = 0;
 	rowsWritten = 0;
 
-	// Records a statement's cursor and accounts for the previous one after its
-	// query has finished consuming it. Returns the cursor unchanged.
+	// A cursor's row totals become final only after Drizzle consumes it. Account
+	// for the preceding cursor when the next statement starts.
 	track<T extends Record<string, SqlStorageValue>>(
 		cursor: SqlStorageCursor<T>
 	): SqlStorageCursor<T> {
@@ -39,9 +23,6 @@ export class DatabaseCostMeter {
 		return cursor;
 	}
 
-	// Folds the outstanding cursor's final totals into the running counts. Called
-	// before each new statement and once at the request boundary; a no-op when no
-	// cursor is outstanding.
 	recordOutstanding(): void {
 		if (this.outstanding === undefined) {
 			return;
@@ -53,21 +34,14 @@ export class DatabaseCostMeter {
 	}
 }
 
-// The meter scoped to the in-flight request or invocation. The object handles
-// requests concurrently (they interleave at await points on the single-threaded
-// object), so a single shared per-request delta would fold in another request's
-// rows. Each entrypoint runs its body within its own meter here, so the rows it
-// attributes are only its own statements'.
-//
-// Work that runs outside any request boundary has no request meter to attribute
-// to: the cold-start migration and seed run before the first request's meter
-// opens, so the cumulative meter is the only place their rows are recorded, and
-// the object logs that figure once as the cold-start cost.
+// Requests can interleave at await points. Async-local storage prevents one
+// request from including another request's database rows.
 const requestMeter = new AsyncLocalStorage<DatabaseCostMeter>();
 
-// Runs `body` within a fresh request-scoped meter. At the boundary, it records
-// the final cursor and reports the exact rows read and written by the body's
-// statements.
+/**
+ * Isolates the row count for `body` from interleaved requests and reports the
+ * final count whether `body` returns or throws.
+ */
 export async function withRequestCost<T>(
 	body: () => Promise<T>,
 	report: (cost: DatabaseCost) => void
@@ -84,13 +58,8 @@ export async function withRequestCost<T>(
 	});
 }
 
-// Wraps a SqlStorage so every statement it runs is tracked. The cumulative meter
-// holds the object's lifetime totals (read by tests); the request-scoped meter,
-// when one is active, additionally attributes the statement to the in-flight
-// request for the per-request cost line. `SqlStorage` is exactly `exec`,
-// `databaseSize`, `Cursor` and `Statement`, so the returned object covers the whole
-// surface (the `SqlStorage` return type would fail to compile if a member were
-// missed): `exec` is instrumented and the other three pass through to the real handle.
+// Keep the platform cursor unchanged. Drizzle consumes it before the next
+// statement, which is when both the lifetime and request meters record it.
 function meteredSql(
 	sql: SqlStorage,
 	cumulative: DatabaseCostMeter
@@ -114,10 +83,8 @@ function meteredSql(
 	};
 }
 
-// Wraps a DurableObjectStorage so its `sql` handle is metered. The query layer
-// (Drizzle) reads `sql` and `transactionSync` from this; every other member
-// delegates to the real storage with its own receiver, so native methods keep
-// their internal state.
+// Bind pass-through methods to the platform storage. These host methods depend
+// on their receiver and fail when invoked through an ordinary proxy receiver.
 export function meteredStorage(
 	storage: DurableObjectStorage,
 	meter: DatabaseCostMeter

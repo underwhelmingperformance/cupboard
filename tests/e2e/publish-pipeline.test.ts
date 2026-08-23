@@ -58,9 +58,8 @@ const releaseArchive =
 		? undefined
 		: path.resolve(env.CUPBOARD_RELEASE_ARCHIVE);
 
-// The repository the runner's token asserts. The presets pin a repository by
-// its immutable numeric ids and a branch by its `ref`, so the token carries all
-// three alongside the subject a GitHub token would.
+// The presets pin the repository by its immutable numeric ids and the branch by
+// its `ref`. Include all three claims alongside the subject that GitHub emits.
 const consumerRepository = {
 	repositoryId: 4241,
 	repositoryOwnerId: 4242,
@@ -103,9 +102,6 @@ interface Fixture {
 	readonly runner: StubRunnerTokenEndpoint;
 	readonly cupboard: CupboardCommand;
 	readonly system: string;
-	/**
-	Whether a local build streams; see {@link canStreamLocalBuild}.
-	*/
 	readonly streams: boolean;
 }
 
@@ -121,10 +117,6 @@ function fixture(): Fixture {
 	return prepared;
 }
 
-/**
- * The archive `CUPBOARD_RELEASE_ARCHIVE` names. Its leg skips when the
- * variable is unset, so nothing reaches the refusal below.
- */
 function namedReleaseArchive(): string {
 	if (releaseArchive === undefined) {
 		throw new Error('No release archive was named');
@@ -171,11 +163,6 @@ async function canStreamLocalBuild(): Promise<boolean> {
 	return (await createBuildPushDaemon(config, {}).daemonTrust()) === 'trusted';
 }
 
-/**
- * A consumer repository's flake: two packages published as one cohort, each
- * under its own retention root. `cupboardOutputs` is the target manifest the
- * publication workflow evaluates before it plans.
- */
 function consumerFlake(options: {
 	readonly directory: string;
 	readonly system: string;
@@ -315,17 +302,11 @@ async function runNix(arguments_: readonly string[]): Promise<string> {
 const cohortEntrySchema = z.looseObject({ key: z.string() });
 const matrixSchema = z.object({ include: z.array(cohortEntrySchema) });
 
-/**
-One composite action step: its exit status and the outputs it recorded.
-*/
 interface StepResult {
 	readonly status: number;
 	readonly outputs: Readonly<Record<string, string>>;
 }
 
-/**
-One publication run: a runner temporary directory its steps share.
-*/
 interface PublishJob {
 	readonly runnerTemporary: string;
 	readonly runId: string;
@@ -339,11 +320,6 @@ function ignore(): void {
 // process is not a runner, so the steps register nothing on it.
 const unhandledSignals = { once: ignore, removeListener: ignore };
 
-/**
- * Runs one composite action step: the `cupboard-action` entrypoint with the
- * argv the composite builds, and the two runner-contract variables a step
- * reads.
- */
 async function runStep(
 	job: PublishJob,
 	stepName: string,
@@ -431,9 +407,6 @@ function planArguments(options: {
 	];
 }
 
-/**
-The argv `actions/build-cohort` builds for one cohort-matrix entry.
-*/
 function buildCohortArguments(options: {
 	readonly cohortJson: string;
 	readonly url: string;
@@ -496,9 +469,9 @@ function buildCohortArguments(options: {
 }
 
 /**
- * The argv the subject step of `actions/attest` builds. Signing is the next
- * step in that composite and needs a GitHub identity, so a pipeline run stops
- * here, with the subjects the receipt records.
+ * Signing is the next step in `actions/attest`, but it requires a GitHub
+ * identity. The test stops after the subject step and inspects the subjects
+ * from the receipt.
  */
 function attestArguments(options: {
 	readonly receiptFile: string;
@@ -526,12 +499,6 @@ interface AttestationOutcome {
 	readonly checksums: string;
 }
 
-/**
- * Which producer a receipt attributes its own builds to: a supervised attempt
- * on this machine, or the report of the store that holds them. `no-builds` and
- * `mixed` are values in their own right, so a receipt that matches neither
- * shape fails the case showing what it did record.
- */
 type RecordedAttribution = Attribution | 'no-builds' | 'mixed';
 
 interface RecordedReceipt {
@@ -559,9 +526,6 @@ interface PublishOptions {
 	readonly flakeDirectory: string;
 	readonly requireProvenance: boolean;
 	readonly store: string;
-	/**
-	Every root this run writes nests under this prefix.
-	*/
 	readonly rootPrefix?: string;
 	/**
 	 * The `cupboard` executable every step of the run invokes. Defaults to the
@@ -575,11 +539,6 @@ interface PublishOptions {
 	readonly audience?: string;
 }
 
-/**
- * One consumer publication run, step by step: evaluate the target manifest,
- * plan it against the destination, then build, publish and run the subject step
- * of attestation for every cohort the plan emitted.
- */
 async function runPublication(
 	name: string,
 	options: PublishOptions
@@ -726,14 +685,6 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 	};
 }
 
-/**
- * The producer the receipt attributed its own builds to, read back from the
- * subjects themselves. A leg asserts this against what the runner's daemon
- * state predicts, so a run that took the other path fails with the path named
- * and not with a difference somewhere in the receipt. A subject for a path the
- * run published without building it records no producer, so only the `built`
- * subjects are read here.
- */
 function recordedAttribution(
 	subjects: readonly ParsedBuildSubjectV3[]
 ): RecordedAttribution {
@@ -811,7 +762,7 @@ function byStorePath(left: PublishedPath, right: PublishedPath): number {
 /**
  * Who the receipt records as the producer of its subjects. A supervised
  * attempt is a streaming local build; a store report is what a reconciled
- * local build and a remote-store publication both carry, because neither
+ * local build and a remote-store publication both use, because neither
  * watched the build happen.
  */
 type Attribution = 'supervised-attempt' | 'store-report';
@@ -821,13 +772,7 @@ function localAttribution(): Attribution {
 }
 
 interface PublicationPaths {
-	/**
-	Every path a build of the cohort produces.
-	*/
 	readonly built: readonly PublishedPath[];
-	/**
-	The cohort's own targets, a subset of {@link built}.
-	*/
 	readonly targets: readonly PublishedPath[];
 	readonly attribution: Attribution;
 }
@@ -844,9 +789,6 @@ function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
 		: options.targets;
 }
 
-/**
-The receipt a cohort writes for the paths it published and claimed.
-*/
 function expectedReceipt(
 	options: PublicationPaths & {
 		/**
@@ -855,11 +797,6 @@ function expectedReceipt(
 		 * see {@link isBuildPushCohort}.
 		 */
 		readonly store: string;
-		/**
-		 * Whether the destination already served every path. Such a run uploads
-		 * nothing, and each target's outcome records that the destination held
-		 * it.
-		 */
 		readonly alreadyServed?: boolean;
 	}
 ): unknown {
@@ -904,19 +841,10 @@ function expectedReceipt(
 	};
 }
 
-/**
- * Whether a cohort publishes through `cupboard build-push`, which supervises
- * the build it publishes. `build-cohort` takes the remote-store path only for
- * a publishing cohort with a store of its own, so an empty `store` input is
- * what puts a run on the supervised path.
- */
 function isBuildPushCohort(store: string): boolean {
 	return store === '';
 }
 
-/**
-The checksums file the attest step writes for a receipt's subjects.
-*/
 function expectedChecksums(claimed: readonly PublishedPath[]): string {
 	return claimed
 		.toSorted(byStorePath)
@@ -947,13 +875,8 @@ interface RetentionRoot {
 	readonly targets: readonly string[];
 }
 
-// The segment that precedes the run identifier in every run root's name.
 const runRootMarker = '/_cupboard-run/';
 
-/**
- * The roots the tenant holds whose names satisfy `isWanted`, with the paths
- * each one retains.
- */
 async function retentionRoots(
 	isWanted: (name: string) => boolean
 ): Promise<readonly RetentionRoot[]> {
@@ -983,11 +906,6 @@ async function retentionRoots(
 	);
 }
 
-/**
- * The target roots the tenant holds, with the paths each one retains. The run
- * root every push attaches to is left out: its name carries the run
- * identifier, which changes with every job.
- */
 function targetRoots(): Promise<readonly RetentionRoot[]> {
 	return retentionRoots((name) => !name.includes(runRootMarker));
 }
@@ -1028,10 +946,9 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 
 		// The tenant trusts the runner's identity for what a publication job
 		// does: the upload and attestation conversations, and roots beneath
-		// the consumer's own prefix. These are the `push`, `attest`, `root`
-		// and `attach` allowances a documented CI rule carries, plus
-		// `root:list`, which the plan's pre-filter uses to read a root's
-		// targets.
+		// the consumer's own prefix. A documented CI rule grants `push`,
+		// `attest`, `root` and `attach`; the plan's pre-filter also needs
+		// `root:list` to read the targets of a root.
 		await tenantRpc(server.tenantUrl, {
 			credential: await server.ownerAdminToken()
 		}).oidcTrust.add({
@@ -1377,12 +1294,12 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 	// than merely small, and the single upgrade proves it waited on the socket
 	// it already held rather than re-dialling for capacity.
 	//
-	// A `queued` answer needs the budget to be exhausted at the instant a
+	// A `queued` frame needs the budget to be exhausted at the instant a
 	// session asks for more, which needs entries in flight from more than one
 	// commit at a time. A run publishes its paths a few at a time, so whether
 	// that happens here depends on the machine rather than on the arrangement.
 	// The CLI-level oversubscription test arranges the contention directly and
-	// asserts the `queued` answer there.
+	// asserts the `queued` frame there.
 	it('publishes a cohort whose demand exceeds the tenant credit budget', async () => {
 		const prepared = fixture();
 		const flakeDirectory = path.join(prepared.workspace, 'oversubscribed');
@@ -1422,7 +1339,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 			// are new, so it has entries to commit. The retention push that
 			// follows is a separate process, and it opens a session of its own
 			// only when a path's verdict is still pending when it negotiates;
-			// when every path has settled by then, the negotiation answers skip
+			// when every path has settled by then, negotiation returns skip
 			// for each and the push never dials. A client that re-dialled for
 			// capacity would add an upgrade per starved wait on top.
 			upgrades: expect.toSatisfy(

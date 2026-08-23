@@ -94,7 +94,7 @@ describe('fetchGithubOidcToken', () => {
 		});
 	});
 
-	it('throws when the response carries no token value', async () => {
+	it('throws when the response has no token value', async () => {
 		const outcome = await (async () => {
 			try {
 				const token = await fetchGithubOidcToken({

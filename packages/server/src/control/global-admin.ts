@@ -15,7 +15,6 @@ const singletonId = 'singleton';
 // same principal does not insert a duplicate.
 const bootstrapTrustId = 'signup';
 
-// The verified principal a signup claim promotes to global admin.
 export interface ClaimPrincipal {
 	readonly issuer: string;
 	readonly subject: string;
@@ -23,14 +22,12 @@ export interface ClaimPrincipal {
 }
 
 export interface ClaimOutcome {
-	// True when this call performed the claim, false for an idempotent re-claim by
-	// the principal that already holds it.
 	readonly claimed: boolean;
 }
 
-// Promotes a verified principal to global admin and seeds the control trust rule
-// that lets it issue admin tokens, in one atomic D1 batch so a crash can never
-// leave the deployment claimed but with no trust rule (and so un-administerable).
+// Claim the administrator and seed its control trust rule in one D1 batch. A
+// crash cannot leave the deployment claimed without a principal that can issue
+// an administrative token.
 //
 // The `global_admin` singleton is inserted first-writer-wins. The trust seed is an
 // `INSERT ... SELECT` gated, within the same batch, on the singleton row already

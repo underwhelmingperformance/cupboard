@@ -244,7 +244,7 @@ describe('readCredentialFromOptions', () => {
 		});
 	});
 
-	it('respects the no-read-password escape hatch', () => {
+	it('creates no credential with --no-read-password', () => {
 		expect(readCredentialFromOptions({ readPassword: false })).toStrictEqual({
 			read: undefined,
 			generatedPassword: undefined
@@ -336,7 +336,7 @@ describe('runTenantList', () => {
 		]);
 	});
 
-	it('reports nothing when there are no tenants', async () => {
+	it('reports an empty tenant list', async () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
@@ -527,10 +527,8 @@ describe('runTenantRotateCredential', () => {
 		const grantSchema = z.object({ id: z.string(), read: readSchema });
 		const [call] = z.tuple([grantSchema]).parse(calls);
 
-		// The generated password is sent to the server and printed to the operator,
-		// so capture what was sent and assert the printed value is exactly it: an
-		// operator shown a different value would hold a password that cannot
-		// authenticate.
+		// The operator must see the exact generated password sent to the server;
+		// another value could not authenticate.
 		const sentPassword = call.read.password;
 
 		expect({ calls, results }).toStrictEqual({

@@ -41,8 +41,7 @@ describe('mapWithConcurrency', () => {
 		expect(maxInFlight).toBe(2);
 	});
 
-	// `NaN` would spawn zero workers and silently drop every value.
-	it('refuses a NaN concurrency', async () => {
+	it('rejects a NaN concurrency', async () => {
 		await expect(
 			mapWithConcurrency([1, 2], NaN, (value) => Promise.resolve(value))
 		).rejects.toBeInstanceOf(RangeError);

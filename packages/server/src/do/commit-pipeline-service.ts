@@ -84,36 +84,25 @@ import { type SigningKeysService } from './signing-keys-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
-// How long a sent `tenant-verify` request suppresses further sends before it
-// is presumed lost and a deferral may send again. Must stay below the verify
-// alarm backstop's delay, so that when the backstop fires the previous request
-// is already stale and its re-request is a real send.
+// Keep this shorter than `verifyBackstopDelayMs`. When the alarm backstop
+// fires, the previous queue request must be stale so the alarm can send again.
 export const verifyRequestStaleMs = 45_000;
 
-// The verify backstop: a durable storage marker holding the epoch millisecond
-// at which the alarm re-drives verification, armed by every deferral. The
-// queue path settles work in seconds when healthy; the backstop bounds how
-// long a lost message, a dead-lettered pass or an evicted instance can leave
-// waiters parked. The delay sits above `verifyRequestStaleMs` (see there).
+// Every deferral stores this deadline. The alarm reissues verification when a
+// queue message is lost, dead-lettered, or forgotten after instance eviction.
 export const verifyBackstopKey = 'maintenance:verify-pending';
 export const verifyBackstopDelayMs = 60_000;
 
-// A stall guard for `verifyPendingNar`'s fetch-and-decode, which runs off the
-// critical section and so carries no deadline scope of its own. Generous
-// enough that a legitimately large NAR never hits it: the queue consumer does
-// the routine decode off the DO, so this path is only the backstop for a
-// stalled R2 body stream.
+// `verifyPendingNar` runs outside the input gate and has no enclosing deadline.
+// This budget stops a stalled R2 body from holding a verification pass forever.
 export const narVerifyBudgetMs = 5 * 60 * 1000;
 
 /**
- * What a commit settled to at commit time: the path is served (`settled`,
- * committed by these bytes or already present from an earlier upload), or the
- * upload is stored pending verification (`deferred`) and the caller waits for
- * the verification pass's verdict. Failures are thrown.
+ * Reports a final commit response immediately, or tells the caller to wait for
+ * the verification pass.
  */
-// The optional `grace` fact is populated only for an upload that accepted
-// grace facts, mirroring the wire rule: a legacy upload's frames keep exactly
-// the legacy shapes.
+// Include `grace` only when the client negotiated grace facts. Older clients
+// must receive the original frame shape.
 export type CommitOutcome =
 	| {
 			readonly kind: 'settled';
@@ -127,9 +116,6 @@ export type CommitOutcome =
 			readonly grace?: ParsedUploadGraceFact;
 	  };
 
-// The tenant's publish status and quota basis, read together by
-// {@link CommitPipelineService.tenantAccount}. The usage columns are nullable
-// because the left join may find no usage row.
 export interface TenantAccount {
 	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
 	readonly bytes: number | null;
@@ -137,17 +123,12 @@ export interface TenantAccount {
 	readonly quotaBytes: number | null;
 }
 
-// The canonical blob facts a materialisation renders and charges from.
 interface CanonicalBlobFacts {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
 	readonly compression: (typeof d1Schema.blobState.$inferSelect)['compression'];
 }
 
-/**
- * One settle awaiting the shared materialise flush; see
- * {@link CommitPipelineService.materialiseBatched}.
- */
 export interface MaterialiseRequest {
 	readonly cache: StoredCache;
 	readonly metadata: ParsedUploadPathNegotiation;
@@ -155,36 +136,27 @@ export interface MaterialiseRequest {
 	readonly probe: MaterialisationProbe;
 	readonly mustOwnBlob: boolean;
 	/**
-	 * The retention grace decision captured when this upload was negotiated,
-	 * applied atomically with the materialisation. `undefined` is a row from
-	 * before the decision existed and grants nothing.
+	 * Apply this negotiated decision in the same gate as materialisation.
+	 * `undefined` identifies a legacy row and grants no grace.
 	 */
 	readonly graceDecision: GraceDecision | undefined;
 	/**
-	 * The run root the push bound at negotiate, stamped on the pending row. A
-	 * materialised outcome attaches the committed path to it inside the same
-	 * gate; `undefined` is a push that named no root and attaches nothing.
+	 * Attach the path to the run root selected at negotiation while the
+	 * materialised generation is still protected by the gate. `undefined` means
+	 * that the push selected no run root.
 	 */
 	readonly attachRootName: RootName | undefined;
 	/**
-	 * Runs inside the flush gate before the fence; a false verdict settles the
-	 * request as `gone` (its row's fate was decided elsewhere) without charging.
-	 * Must be synchronous: the whole point of the shared gate is that nothing
-	 * awaits inside it beyond the one combined charge batch.
+	 * Return false to report `gone` without charging. This runs inside the flush
+	 * gate and must stay synchronous so no event can change the row between this
+	 * check and the generation fence.
 	 */
 	readonly isStillSettleable?: () => boolean;
 }
 
-/**
- * What a batched materialisation settles to: a {@link MaterialiseOutcome}, or
- * `gone` when the request's own settleable check found its row's fate already
- * decided.
- */
 export type BatchedMaterialiseOutcome =
 	MaterialiseOutcome | { readonly kind: 'gone' };
 
-// What one charge settles to. `tenant-inactive` carries the status the charge
-// batch's own select read, which is the authoritative fence for the decision.
 type ChargeOutcome =
 	| { readonly kind: 'charged' }
 	| { readonly kind: 'over-quota' }
@@ -193,8 +165,6 @@ type ChargeOutcome =
 			readonly tenantStatus: TenantStatus | undefined;
 	  };
 
-// What a whole flush's combined charge batch settles to. `retry-individually`
-// means the batch rolled back and each charge re-runs on its own.
 type BatchChargeOutcome =
 	| Exclude<ChargeOutcome, { kind: 'over-quota' }>
 	| { readonly kind: 'retry-individually' };
@@ -205,20 +175,13 @@ interface PendingMaterialise {
 	readonly reject: (error: unknown) => void;
 }
 
-// How many settles one flush charges in a single D1 batch: five statements
-// and a handful of bound parameters each, kept well inside D1's per-batch
-// budgets. A larger burst drains over successive flushes.
+// Each materialisation adds five statements. Cap a flush below D1's statement
+// and parameter limits; larger bursts drain through later flushes.
 const materialiseFlushCap = 32;
 
-// How many times a concede re-resolves a winner that moved inside its await
-// window before deferring to the verify pass. Each retry needs a fresh
-// recommit to have landed inside the window, so real contention settles in
-// one or two; the cap only stops sustained churn from pinning one request.
+// Bound winner re-resolution so repeated recommits cannot pin one request.
 const concedeAttemptLimit = 3;
 
-// A flush produced no outcome for a request it carried: a programming error
-// (every fence and charge path assigns one). Surfacing it keeps the waiter
-// from parking forever.
 class MaterialiseFlushOutcomeMissingError extends Error {
 	constructor() {
 		super('materialise flush produced no outcome for a request');
@@ -227,16 +190,10 @@ class MaterialiseFlushOutcomeMissingError extends Error {
 }
 
 /**
- * The per-path facts a materialisation decides on, probed outside the critical
- * section so their round-trips never hold the gate: the canonical blob's
- * compressed metadata and object presence, and whether the tenant already holds
- * the hash (no fresh charge). The tenant account (publish status and quota
- * basis) is not here: it is tenant-wide, so a flush reads it once for its whole
- * batch, not once per path. The gate re-checks only what the single
- * writer owns (the generation fence and the in-memory offboarding flag); a probe
- * going stale converges through the same paths a concurrent delete always could,
- * and the quota CHECK constraint remains the authoritative guard behind the
- * probed decision.
+ * Facts read before materialisation enters the input gate. The gate rechecks
+ * the generation and offboarding state, and the charge batch makes the final
+ * tenant-status and quota decisions. Callers recover from stale ownership in
+ * the same way as a concurrent deletion.
  */
 export interface MaterialisationProbe {
 	readonly blob: CanonicalBlobFacts | undefined;
@@ -244,18 +201,11 @@ export interface MaterialisationProbe {
 	readonly isOwned: boolean;
 }
 
-// The two D1 facts a probe reads for one narHash: its canonical `blob_state` and
-// this tenant's presence. A batch read supplies these for a whole claimed set at
-// once, so a per-path probe reads neither from D1; the R2 head that decides
-// `isCanonicalPresent` has no batch form and stays per path.
 export interface PrefetchedMaterialisationFacts {
 	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isOwned: boolean;
 }
 
-// Whether charging this hash would take the tenant over its quota. A null
-// quota or a hash the tenant already holds is within quota; null usage
-// columns (no usage row) count as zero, matching an unset quota.
 function isOverQuota(
 	account: TenantAccount,
 	isOwned: boolean,
@@ -271,11 +221,8 @@ function isOverQuota(
 	);
 }
 
-// The verifier's pipe locks the R2 body, so cancelling that body directly
-// rejects and never reaches R2's underlying stream. This helper keeps the only
-// reader on `body` and forwards its chunks through a fresh stream for the
-// verifier to pipe, so the returned `cancel` always reaches the R2 stream,
-// whatever the verifier does with the stream it was given.
+// The verifier locks its input stream. Keep the R2 reader outside that stream
+// so timeout cancellation can still reach the underlying R2 body.
 function cancellableNarBody(body: ReadableStream<Uint8Array>): {
 	readonly stream: ReadableStream<Uint8Array>;
 	readonly cancel: (reason?: unknown) => Promise<void>;
@@ -301,22 +248,11 @@ function cancellableNarBody(body: ReadableStream<Uint8Array>): {
 }
 
 export class CommitPipelineService {
-	// Single-flight guard for the prompt verification request: when a
-	// `tenant-verify` message was enqueued, cleared when the next pass starts
-	// and claims the pending rows (`onVerificationPassStarted`). While a recent
-	// send is outstanding, a deferral skips its own: the row is written before
-	// the deferral requests, and an unclaimed send means that pass has not yet
-	// taken its snapshot, so the pass already coming will observe the row. One
-	// message thereby covers a whole push with no duplicate.
-	//
-	// The guard is a timestamp so a lost message cannot suppress requests
-	// forever: past `verifyRequestStaleMs` a deferral sends again. Eviction
-	// clearing it early is harmless, since the worst case is one duplicate
-	// message whose claim is idempotent and chunk-bounded.
+	// A pending row is durable before this timestamp is set, so one recent queue
+	// request covers later deferrals until verification takes its snapshot. Use a
+	// timestamp rather than a boolean so a lost request cannot suppress retries.
 	private verifyRequestedAt: number | undefined;
 
-	// The settles awaiting the next materialise flush, and the drain currently
-	// flushing them; see {@link materialiseBatched}.
 	private readonly materialiseQueue: PendingMaterialise[] = [];
 	private materialiseDrain: Promise<void> | undefined;
 
@@ -329,12 +265,9 @@ export class CommitPipelineService {
 		private readonly retention: RetentionService
 	) {}
 
-	// Sends a `verdict/servable` frame to any commit session parked on this
-	// upload. The row's session id is re-read at notify time, so a reconnect that
-	// re-pointed the row via `attachSession` after the saga read it receives the
-	// verdict. `excludeSessionId` is the session that initiated the commit; it
-	// receives the result via the return value, so it is skipped even when the
-	// row still names it.
+	// Read the session ID at notification time so a reconnect receives the
+	// verdict. Exclude the committing session because it receives the result as
+	// the response to its commit frame.
 	private notifyUploadWaiters(
 		uploadId: UploadId,
 		excludeSessionId: SessionId | null | undefined
@@ -359,11 +292,8 @@ export class CommitPipelineService {
 			return;
 		}
 
-		// The grace fact is sent only for an upload that accepted grace facts,
-		// keeping a legacy upload's frames on the legacy shape. The
-		// deadline is read afresh from storage, the same fact every other
-		// servable verdict reports; the callers apply the captured grace before
-		// notifying, so the row it reads is current.
+		// Do not add grace fields to a legacy session. Read the stored deadline
+		// after the caller has applied the captured decision.
 		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
 		const grace =
 			graceDecision?.reportsGrace === true
@@ -385,10 +315,6 @@ export class CommitPipelineService {
 		}
 	}
 
-	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
-	// materialise from the existing canonical object and `blob_state`. If the shared
-	// blob was reaped between negotiate and now, reclaim the row and report it gone:
-	// a narinfo with no backing object must never be served.
 	private async commitReusedBlob(
 		logger: Logger,
 		cache: StoredCache,
@@ -396,16 +322,8 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		graceDecision: GraceDecision | undefined,
 		attachRootName: RootName | undefined,
-		// The caller's probe of the shared facts, taken alongside its advisory
-		// checks. It may be stale by the gate below; the charge batch is the
-		// authoritative guard.
 		probe: MaterialisationProbe,
 		committingSessionId: SessionId | null | undefined,
-		// Whether the probe was supplied from a batch prefetch. An over-quota outcome
-		// with a prefetched probe may reflect stale `isOwned`: a sibling entry in the
-		// same batch charged the blob first, making the tenant its new owner. Re-probe
-		// fresh and retry exactly once before treating it as terminal; the re-probe and
-		// the retry are each idempotent.
 		isProbeFromPrefetch: boolean
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
@@ -423,9 +341,8 @@ export class CommitPipelineService {
 			);
 		}
 
-		// `mine` means this same upload-id already holds the reservation, a
-		// same-uploadId replay racing its original. Proceed through materialise with
-		// the existing generation, mirroring how the verify path handles `mine`.
+		// `mine` includes a replay of this upload. Reuse its generation; conceding
+		// would incorrectly treat this upload as a competing winner.
 		const generation = reserved.generation;
 
 		let outcome = await this.materialiseBatched(logger, {
@@ -438,11 +355,8 @@ export class CommitPipelineService {
 			attachRootName
 		});
 
-		// Over quota on a prefetched probe: the prefetched `isOwned` can be stale when
-		// two entries in one batch share a narHash: the sibling that settled first
-		// charged the blob and became the owner. Re-probe fresh and retry once; the
-		// charge batch remains the authoritative fence. The same shape as
-		// `materialiseVerified`'s over-quota retry.
+		// A sibling in the same batch may have established ownership after the
+		// prefetch. Re-probe once before treating this result as over quota.
 		if (isProbeFromPrefetch && outcome.kind === 'over-quota') {
 			const freshProbe = await this.probeMaterialisation(metadata);
 			outcome = await this.materialiseBatched(logger, {
@@ -457,8 +371,8 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'materialised') {
-			// The object publishes after the gate; the marker clears only once it
-			// has landed, so an interruption in between stays re-drivable.
+			// Publish the narinfo object before clearing the saga marker. A crash
+			// between those operations must leave the commit available for recovery.
 			await this.narInfoObjects.publishNarInfoObject(
 				cache,
 				metadata.storePathHash,
@@ -467,7 +381,6 @@ export class CommitPipelineService {
 				outcome.narInfo
 			);
 
-			// Notify any session parked behind this saga before clearing the row.
 			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
 
@@ -516,14 +429,9 @@ export class CommitPipelineService {
 			);
 		}
 
-		// blob-gone: reclaim the reserved row only when it was not already committed
-		// by a concurrent saga. A superseded row belongs to a replacement now, so
-		// this upload settles as committed only for its own still-current row. The
-		// grace confirmation runs inside the same gated callback as the identity
-		// proof: the input gate reopens the moment that callback completes, so a
-		// confirmation outside it could race a delete or recommit queued behind
-		// the gate. Applied together they are atomic, and the returned fact is
-		// the grant the winner's row actually holds.
+		// The probe can report a missing canonical NAR after another saga has already
+		// committed this generation. Check the current generation before reclaiming
+		// it, and apply grace and root retention before releasing the same gate.
 		const confirmed = await this.context.criticalSection(async () => {
 			const reclaim = await this.reclaimReservedRow(
 				cache,
@@ -536,13 +444,8 @@ export class CommitPipelineService {
 				return;
 			}
 
-			// A concurrent commit already materialised this generation; the
-			// object serves. This upload lost the race, so its own captured
-			// decision never ran; apply it against the winner's generation
-			// before any waiter hears the verdict and before the row holding
-			// the decision is cleared, or a positive policy would grant nothing.
-			// The push's run root retains the path for the same reason, applied
-			// with the same identity proof.
+			// This upload's captured retention decisions have not run. Apply them
+			// while the winning generation is still protected by the identity check.
 			this.attachRootTarget(
 				cache,
 				attachRootName,
@@ -583,15 +486,8 @@ export class CommitPipelineService {
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
 
-	// The tenant's publish gate and quota basis in one read. The status is the
-	// advisory active check the probe carries: the Worker's write gate read it
-	// before dispatch, but a commit can settle here after a suspend or offboard,
-	// so the probe re-reads it, and the charge batch fences it authoritatively (a
-	// write applies only while the tenant row is active, decided in the batch).
-	// A missing row reads as not-active and fails closed. The usage columns come
-	// from a left join, so the same read also answers the quota decision; an
-	// absent usage row leaves them null, which {@link isOverQuota} reads as
-	// within quota.
+	// This read is advisory. The charge batch rechecks tenant status and quota
+	// after any await; a missing tenant fails closed there.
 	private async tenantAccount(
 		tenant: TenantId
 	): Promise<TenantAccount | undefined> {
@@ -611,18 +507,14 @@ export class CommitPipelineService {
 			.get();
 	}
 
-	// Whether another upload's live saga backs a reservation of this hash: a
-	// row still awaiting its verdict and not yet expired. An expired or reaped
-	// rival left its reservation dead, with nothing for the verification pass
-	// to arbitrate.
+	// Only an unexpired upload can keep a competing reservation alive. Otherwise
+	// a retry must reclaim the abandoned row instead of waiting for verification.
 	private hasLiveRival(
 		cache: StoredCache,
 		narHash: NixSha256HashString,
 		uploadId: UploadId,
 		nowIso: IsoTimestamp
 	): boolean {
-		// A null verdict is an inline commit mid-flight; `committing` and
-		// `pending` are sagas the verification pass re-drives.
 		const awaitingVerdict = or(
 			isNull(schema.pendingUploads.verdict),
 			inArray(schema.pendingUploads.verdict, ['committing', 'pending'])
@@ -643,8 +535,6 @@ export class CommitPipelineService {
 		return rival !== undefined;
 	}
 
-	// Whether the tenant holds a presence edge for this hash; if so, charging it
-	// would replay an existing ownership and must be skipped.
 	private async ownsHash(
 		tenant: TenantId,
 		narHash: NixSha256HashString
@@ -663,12 +553,9 @@ export class CommitPipelineService {
 		return owned !== undefined;
 	}
 
-	// The five statements one charge contributes to an atomic D1 batch: credit
-	// the usage counters (gated on the edge/presence rows not yet existing, so a
-	// replay neither double-charges nor double-references), insert the edge and
-	// presence rows, and clear the reaper grace timer so a re-referenced blob
-	// stays alive. Every statement applies only while the tenant row is active,
-	// so the batch that carries them is also the authoritative status fence.
+	// Keep the usage updates, reference and ownership inserts, and reaper disarm
+	// in one batch. Their predicates make a replay idempotent and refuse every
+	// write unless the tenant is still active.
 	private chargeStatements(
 		tenant: TenantId,
 		cache: StoredCache,
@@ -781,9 +668,6 @@ export class CommitPipelineService {
 		];
 	}
 
-	// The status read every charge batch carries: not-active (or a missing row)
-	// means every conditional write in the batch was a no-op, telling a refused
-	// charge apart from an applied one. Fails closed, matching the write gate.
 	private tenantStatusSelect(tenant: TenantId) {
 		return this.context.d1
 			.select({ status: d1Schema.tenant.status })
@@ -791,11 +675,8 @@ export class CommitPipelineService {
 			.where(eq(d1Schema.tenant.id, tenant));
 	}
 
-	// Writes the reference edge and per-tenant presence and charges usage, all in one
-	// atomic D1 batch that is also the authoritative status fence; see
-	// {@link chargeStatements}. An over-quota bytes charge fails the
-	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge
-	// are ever stranded over quota.
+	// The database quota check rolls back the whole charge batch, so an edge
+	// cannot be recorded without its corresponding usage charge.
 	private async reserveEdgeAndCharge(
 		tenant: TenantId,
 		cache: StoredCache,
@@ -805,8 +686,6 @@ export class CommitPipelineService {
 	): Promise<ChargeOutcome> {
 		const now = isoTimestamp(new Date());
 
-		// The probed pre-check is the clean over-quota rejection. The
-		// `tenant_usage` CHECK constraint backs it as a database-level invariant.
 		let statusRows: { status: TenantAccount['status'] }[];
 
 		try {
@@ -816,10 +695,8 @@ export class CommitPipelineService {
 			]);
 			statusRows = status;
 		} catch (error) {
-			// Two commits can both probe under quota and race to the charge; the
-			// CHECK fails the loser's batch. An authoritative in-gate re-read tells
-			// that loss apart from a fault: genuinely over quota reclaims cleanly,
-			// anything else propagates.
+			// Concurrent commits can both pass the advisory quota check. Re-read
+			// after a failed charge to distinguish that race from a storage fault.
 			const account = await this.tenantAccount(tenant);
 			const isOwned = await this.ownsHash(tenant, metadata.narHash);
 
@@ -843,13 +720,9 @@ export class CommitPipelineService {
 		return { kind: 'charged' };
 	}
 
-	// The whole flush's charges in one atomic D1 batch, one status select plus
-	// five conditional statements per settle. The statements run sequentially
-	// inside the transaction, so two settles of the same hash in one flush see
-	// each other's presence row and charge it once, exactly as two sequential
-	// batches would. A thrown batch (one settle's charge tripping the quota
-	// CHECK rolls all of them back) answers `retry-individually`, and the flush
-	// re-runs each charge on its own so only the offenders refuse.
+	// D1 executes these statements sequentially, so two requests for the same
+	// hash charge the blob once. If one request exceeds quota, the batch rolls
+	// back and the flush retries each request separately to isolate the failure.
 	private async reserveEdgesAndCharge(
 		tenant: TenantId,
 		charges: readonly {
@@ -893,10 +766,8 @@ export class CommitPipelineService {
 		return { kind: 'charged' };
 	}
 
-	// Arms the durable verify backstop for `now + verifyBackstopDelayMs`. An
-	// already-armed future deadline is never pushed later, so a stream of
-	// deferrals cannot starve an imminent firing; a past-due marker (the
-	// backstop is firing and re-requesting) starts the next cycle instead.
+	// Do not postpone an existing future deadline when more work is deferred.
+	// Once a stored deadline is due, start a new backstop cycle.
 	private async armVerifyBackstop(now: number): Promise<void> {
 		const storage = this.context.ctx.storage;
 		const dueAt = now + verifyBackstopDelayMs;
@@ -913,11 +784,6 @@ export class CommitPipelineService {
 		await armAlarmNoLaterThan(storage, effective);
 	}
 
-	// The synchronous half of a materialisation, run inside the shared flush
-	// gate: the offboarding and probe checks, the generation fence against the
-	// live row, and the advisory quota decision. A chargeable request comes back
-	// with its narinfo rendered and the canonical facts its charge uses;
-	// everything else settles with its outcome here, before any charge.
 	private materialiseFence(
 		request: MaterialiseRequest,
 		account: TenantAccount | undefined
@@ -928,16 +794,9 @@ export class CommitPipelineService {
 		| { readonly narInfo: NarInfo; readonly blob: CanonicalBlobFacts } {
 		const { cache, metadata, generation, probe } = request;
 
-		// A commit that passed the Worker's write gate while the tenant was active
-		// can still be settling here after the tenant was suspended or began
-		// offboarding. Publishing its edge now would re-reference a shared blob
-		// the drain is reclaiming, pinning it forever, so the caller reclaims the
-		// reserved row instead. The in-memory flag is re-checked inside the gate:
-		// the offboard drain runs its passes under the same gate on this instance
-		// after setting it, so the flag and the gate together keep an edge write
-		// from landing behind a drain pass. The single rule, publish only while
-		// the tenant is active, covers suspended, offboarding, offboarded and a
-		// missing row alike.
+		// A tenant can stop accepting writes after the Worker admits this commit.
+		// Recheck inside the gate so no new edge can land behind the offboarding
+		// drain and keep a shared blob alive.
 		if (this.context.offboarding || account?.status !== 'active') {
 			return {
 				outcome: {
@@ -953,10 +812,8 @@ export class CommitPipelineService {
 			return { outcome: { kind: 'blob-gone' } };
 		}
 
-		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
-		// strength of its presence edge. If the edge has gone (a delete credited
-		// the bytes back) the tenant no longer has that proof, so the reuse is
-		// refused and the client uploads the bytes again.
+		// Reuse depends on the tenant's existing ownership record. If deletion has
+		// removed it and credited the bytes back, require a fresh upload.
 		if (request.mustOwnBlob && !probe.isOwned) {
 			return { outcome: { kind: 'blob-gone' } };
 		}
@@ -972,35 +829,24 @@ export class CommitPipelineService {
 			)
 			.get();
 
-		// A concurrent recommit may have replaced the row between reserve and now;
-		// only materialise the version this commit reserved, so the edge and the
-		// served object always describe the same narinfo version.
+		// Fence on both generation and hash so a recommit cannot attach this edge
+		// to a replacement narinfo row.
 		if (row?.generation !== generation || row.narHash !== metadata.narHash) {
 			return { outcome: { kind: 'superseded' } };
 		}
 
-		// Quota decision against the size that will actually be charged: the
-		// canonical `blob_state` size, which the promote may have adopted from an
-		// existing encoding and so can differ from the staged size the negotiate
-		// pre-check used. Refusing here lets the caller reclaim the reserved row;
-		// the charge batch re-fences the decision.
+		// Charge the canonical size. It can differ from the staged encoding size
+		// used during negotiation; the charge batch checks quota again.
 		if (isOverQuota(account, probe.isOwned, probe.blob.fileSize)) {
 			return { outcome: { kind: 'over-quota' } };
 		}
 
-		// The blob was probed present, so the narinfo renders from the row and the
-		// metadata already in hand.
 		return {
 			narInfo: this.narInfoObjects.buildNarInfo(row, probe.blob),
 			blob: probe.blob
 		};
 	}
 
-	// Processes one batch of materialisations inside the caller's gate. Each
-	// request's eligibility check and synchronous fence run first, then every
-	// surviving charge joins one D1 batch. If a quota race rolls the batch back,
-	// each charge runs again on its own so only the requests over quota fail.
-	// Returns one outcome per request, in order.
 	private async processMaterialiseFlushLocked(
 		requests: readonly MaterialiseRequest[],
 		account: TenantAccount | undefined
@@ -1083,12 +929,9 @@ export class CommitPipelineService {
 		return outcomes;
 	}
 
-	// Applies each materialised request's captured grace decision inside the same
-	// gate that finalised its generation, so the collector can never observe the
-	// committed path without its deadline. A decision with no matching policy, or
-	// a row from before decisions existed, grants nothing; a zero grace marks the
-	// cache grace-managed without a lasting deadline. Grouped so one flush issues
-	// one extension per distinct cache and deadline.
+	// Apply the negotiated grace decision before releasing the generation fence.
+	// This prevents collection from observing a committed path without its
+	// deadline. A zero duration still marks the cache as grace-managed.
 	private applyCapturedGrace(
 		requests: readonly MaterialiseRequest[],
 		outcomes: (BatchedMaterialiseOutcome | undefined)[]
@@ -1153,10 +996,8 @@ export class CommitPipelineService {
 				group.retainUntil
 			);
 
-			// The upsert is monotonic, so storage may already hold a later
-			// deadline than the candidate above (an earlier longer policy, or a
-			// root transition); read it back so the reply and frames report the
-			// stored maximum rather than what this settle alone computed.
+			// The upsert is monotonic. Report the stored maximum, which may come
+			// from an earlier policy decision or a root transition.
 			const stored = storedGraceDeadlines(this.context.db, group.cache, hashes);
 
 			for (const entry of group.entries) {
@@ -1170,15 +1011,10 @@ export class CommitPipelineService {
 		}
 	}
 
-	// Attaches each materialised request's committed path to the run root its
-	// push bound at negotiate, inside the same gate that finalised the
-	// generation, so the collector can never observe the committed path without
-	// its retention row. Additive and monotonic, keyed by cache, root and
-	// store-path hash: a replayed flush re-inserts nothing, and nothing is ever
-	// released, so no grace transition runs and the root row's expiry is
-	// untouched. The narinfo row exists by construction here, and the run
-	// root's target list may grow past the per-request root-write cap, which
-	// bounds request sizing only.
+	// Attach the negotiated run root before releasing the generation fence. A
+	// replay is harmless because root targets are additive and idempotent. Do not
+	// alter the root expiry or run a grace transition here. Chunk the insert
+	// because one run can exceed the per-request root-write limit.
 	private applyRootAttach(
 		requests: readonly MaterialiseRequest[],
 		outcomes: readonly (BatchedMaterialiseOutcome | undefined)[]
@@ -1206,24 +1042,16 @@ export class CommitPipelineService {
 		}
 	}
 
-	// One flush: a single gate settles a whole batch, taken from the queue
-	// inside the gate callback itself. The wait for the gate is the collection
-	// window: every settle whose own turn in the gate queue (its reserve, a
-	// competing flush) came up while this flush waited has enqueued by the time
-	// the callback runs, so a concurrent burst lands in one batch with no timer
-	// involved. The waiters resume once the gate has released, so their
-	// publishes and replies never run under it. A flush that fails as a whole
-	// (a D1 fault surviving the individual retries) rejects every waiter it
-	// carried; each caller's own error handling answers its client, and the
-	// saga markers keep the settles re-drivable.
+	// Take the batch only after entering the gate. The wait for the gate collects
+	// concurrent requests without a timer, and callers resume only after the gate
+	// has released. If the flush fails, reject every request it took; their saga
+	// markers remain available for recovery.
 	private async flushMaterialiseQueue(logger: Logger): Promise<void> {
 		let batch: PendingMaterialise[] = [];
 		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
 
-		// The tenant account is tenant-wide, so one read outside the gate serves
-		// every settle this flush collects; the charge batch is the authoritative
-		// quota fence, so a value made stale by a prior flush's charges only softens
-		// this advisory check.
+		// Read the account outside the gate. The charge batch rechecks any value
+		// that becomes stale before this flush runs.
 		const account = await this.tenantAccount(this.context.requireTenant());
 
 		try {
@@ -1235,16 +1063,14 @@ export class CommitPipelineService {
 				);
 			});
 		} catch (error) {
-			// A failure before the callback took its batch fails everything queued:
-			// they were all waiting on this drain.
+			// If the gate failed before taking a batch, every queued request was
+			// waiting on this drain and must be rejected.
 			const failed = batch.length > 0 ? batch : [...this.materialiseQueue];
 
 			if (batch.length === 0) {
 				this.materialiseQueue.length = 0;
 			}
 
-			// The waiters' own surfaces carry no detail, so this log line is the
-			// record of what took the flush down.
 			logger.error('materialise flush failed', {
 				settles: failed.length,
 				error
@@ -1269,9 +1095,6 @@ export class CommitPipelineService {
 		}
 	}
 
-	// Drains the queue a flush at a time. An uncontended settle flushes alone
-	// with no added latency; under load, where gates queue behind one another,
-	// each flush's wait collects the burst that shares it.
 	private async drainMaterialiseQueue(logger: Logger): Promise<void> {
 		try {
 			while (this.materialiseQueue.length > 0) {
@@ -1283,23 +1106,17 @@ export class CommitPipelineService {
 	}
 
 	/**
-	 * The tenant's advisory publish status and quota basis, for a batch caller
-	 * that reads the account once and passes it into each entry's commit. The
-	 * charge batch remains the authoritative fence; this is the same read
-	 * {@link commit} performs internally when no advisory account is supplied.
+	 * Reads tenant-wide account facts once for a commit batch. The charge batch
+	 * still makes the authoritative status and quota decision for each entry.
 	 */
 	async readTenantAccount(): Promise<TenantAccount | undefined> {
 		return this.tenantAccount(this.context.requireTenant());
 	}
 
 	/**
-	 * Attaches one committed path to the run root a push bound at negotiate,
-	 * for a settle that finalises outside the shared flush: an already-present
-	 * answer, a concede to a concurrent winner, or a re-driven saga whose
-	 * generation a competing pass committed. Additive and idempotent by cache,
-	 * root and store-path hash; a push that bound no root attaches nothing.
-	 * Callers apply it where the committed row's identity has just been
-	 * proven, exactly where the captured grace decision is reapplied.
+	 * Attaches a committed path to the run root selected at negotiation. Call
+	 * this only while the winning row's identity is proven; retries are
+	 * idempotent by cache, root, and store-path hash.
 	 */
 	attachRootTarget(
 		cache: StoredCache,
@@ -1318,12 +1135,10 @@ export class CommitPipelineService {
 			.run();
 	}
 
-	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
-	// winner's object is materialised, reclaims this upload's staging object,
-	// and reports already-present with the winner's narHash. Any blob this
-	// upload promoted that no edge now references is left for the reaper to
-	// collect. When no committed winner exists yet (the winning upload is still
-	// verifying), the upload stays live so the verify pass can settle it.
+	// Do not concede until the winning generation has both a committed edge and
+	// a narinfo object. Until then, keep this upload available for verification.
+	// The global reaper owns any promoted canonical blob left without an edge;
+	// this path clears only the losing upload's private staging object.
 	async concedeToWinner(
 		logger: Logger,
 		cache: StoredCache,
@@ -1333,11 +1148,9 @@ export class CommitPipelineService {
 		graceDecision?: GraceDecision,
 		attachRootName?: RootName
 	): Promise<CommitOutcome> {
-		// An attempt repeats only when a recommit moved the winning row between
-		// the read and the confirmation below, so an attempt that finds the row
-		// unchanged returns from the loop. A path under sustained churn could
-		// keep one request retrying, so after `concedeAttemptLimit` attempts the
-		// upload defers and the verify pass arbitrates.
+		// A recommit can replace the winner while its object is repaired. Retry a
+		// bounded number of times, then leave the upload for verification so churn
+		// cannot pin this request indefinitely.
 		for (let attempt = 0; attempt < concedeAttemptLimit; attempt += 1) {
 			const winner = await this.narInfoObjects.committedNarInfoRow(
 				cache,
@@ -1345,10 +1158,8 @@ export class CommitPipelineService {
 			);
 
 			if (winner === undefined) {
-				// The row is held by a saga that has not yet committed. Leave the
-				// upload row intact, and request a prompt verification pass so the
-				// deferred socket is answered within its wait window rather than
-				// by the hourly cron pass.
+				// Keep the pending upload while the winning saga has no committed edge.
+				// Verification will resolve both contenders.
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
@@ -1366,9 +1177,8 @@ export class CommitPipelineService {
 				winner.storePathHash
 			);
 
-			// This upload lost the race, so its own captured decision never ran;
-			// apply it against the winner's generation before the row holding the
-			// decision is destroyed, or a crash in between would lose the grant.
+			// Apply this upload's retention decision to the winner before deleting
+			// the pending row that stores the decision.
 			const confirmed = confirmGrace(
 				this.context,
 				this.retention,
@@ -1379,18 +1189,12 @@ export class CommitPipelineService {
 				graceDecision?.graceSeconds
 			);
 
-			// The winner was read before the object-heal await, so its row can
-			// have moved by now. A mismatch means whatever holds the path is not
-			// the winner this concede read: settling would report a stale row and
-			// silently drop the captured grant, so resolve the current winner and
-			// concede to that instead.
+			// The winner can change while its object is repaired. Confirm its
+			// generation before applying retention or reporting success.
 			if (!confirmed.matched) {
 				continue;
 			}
 
-			// The winner's row identity was just proven by the confirmation, so
-			// this push's run root retains the path it published, served by the
-			// winner's row.
 			this.attachRootTarget(
 				cache,
 				attachRootName,
@@ -1415,11 +1219,8 @@ export class CommitPipelineService {
 			};
 		}
 
-		// The path moved on every attempt: leave the upload row (and its
-		// captured decision) intact and let the verify pass arbitrate once the
-		// churn subsides. The prompt pass is requested here for the same reason
-		// as the no-winner deferral above: the socket only hears `deferred`, so
-		// without one its answer would wait on the hourly cron pass.
+		// Preserve the pending row and its retention decision after repeated
+		// generation changes. Verification can arbitrate after the churn subsides.
 		await this.requestVerification(logger, this.context.requireTenant());
 
 		return {
@@ -1432,20 +1233,15 @@ export class CommitPipelineService {
 		};
 	}
 
-	// A verification pass is about to claim the pending rows, satisfying the
-	// outstanding request. Clear the guard before the snapshot is taken: the pass
-	// starting now has already chosen its rows, so a deferral after this point
-	// must enqueue its own request to be seen.
+	// Clear the guard before the pass takes its snapshot. A row deferred after
+	// that snapshot needs a new queue request.
 	onVerificationPassStarted(): void {
 		this.verifyRequestedAt = undefined;
 	}
 
-	// Asks for a prompt verification pass over the maintenance queue, so a pending
-	// commit becomes servable within seconds. Single-flight while fresh: at most
-	// one message per staleness window per DO instance, so a pass continuing the
-	// drain and a concurrent deferral collapse onto one message that claims each
-	// row once. A failed send clears the guard so the next deferral retries; a
-	// sent message no pass ever claims goes stale and the next deferral re-sends.
+	// Coalesce deferrals onto one recent queue request. A failed send clears the
+	// guard immediately; an unclaimed request becomes eligible for retry after
+	// `verifyRequestStaleMs`.
 	async requestVerification(logger: Logger, tenant: TenantId): Promise<void> {
 		const now = Date.now();
 
@@ -1476,18 +1272,15 @@ export class CommitPipelineService {
 		logger: Logger,
 		cache: StoredCache,
 		uploadId: UploadId,
-		// Advisory values a batch caller reads once for the whole message. When
-		// present, `commit` uses them for its probe and quota pre-check and skips its
-		// own D1 reads for those. The charge batch remains the authoritative fence for
-		// status and quota; a stale advisory value only softens the pre-check, never
-		// bypasses the authoritative guard.
+		// Batch callers may reuse these advisory reads. The charge batch still
+		// makes the authoritative status and quota decision.
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
 		}
 	): Promise<CommitOutcome> {
-		// A commit settling after offboarding began must publish nothing: refuse
-		// before deferring, so the writer hears a stopped write immediately.
+		// Do not defer a commit after offboarding begins. It could otherwise be
+		// restored after the drain has removed this tenant's references.
 		if (this.context.offboarding) {
 			throw new TenantWritesStoppedError(
 				this.context.requireTenant(),
@@ -1546,16 +1339,11 @@ export class CommitPipelineService {
 			.get();
 
 		if (existingNarInfo !== undefined) {
-			// This upload already started its own commit saga and is mid-verify:
-			// its row is reserved, not yet servable, and the verification pass
-			// re-drives it from the durable marker. Stay deferred, leaving the
-			// marker and the staged bytes the re-drive needs intact. A concurrent
-			// commit, by contrast, reaches here with its own verdict still null.
+			// Preserve this upload's durable saga marker and staged bytes while
+			// verification is still responsible for the reserved row.
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
-				// Request a prompt verification pass so a retried socket is re-driven
-				// within its wait window. A `committing` reuse saga that crashed before
-				// settling never requested one, so the hourly cron pass would otherwise
-				// be its only re-drive.
+				// A reuse commit can crash before its first queue request. A retry must
+				// request verification instead of waiting for the scheduled backstop.
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
@@ -1571,17 +1359,13 @@ export class CommitPipelineService {
 			if (
 				await this.narInfoObjects.hasCommittedReference(cache, existingNarInfo)
 			) {
-				// A concurrent commit already holds the path: heal its object if
-				// missing and concede, reclaiming this upload's own staging.
 				await this.narInfoObjects.ensureNarInfoObject(
 					cache,
 					existingNarInfo.storePathHash
 				);
 
-				// This upload lost the race, so its own captured decision never ran;
-				// apply it against the winner's generation before the row holding
-				// the decision is destroyed, or a crash in between would lose the
-				// grant.
+				// Apply this upload's retention decision to the winner before
+				// deleting the pending row that stores the decision.
 				const confirmed = confirmGrace(
 					this.context,
 					this.retention,
@@ -1592,11 +1376,9 @@ export class CommitPipelineService {
 					graceDecision?.graceSeconds
 				);
 
-				// The winner was read before the reference-check and heal awaits,
-				// so its row can have moved by now. Settling on it would report a
-				// stale row and silently drop the captured grant; the path is
-				// contested, so hand the upload to the verification pass to
-				// arbitrate, exactly as a live rival below is handled.
+				// The row can change during the reference check and object repair. If
+				// its identity moved, keep the decision for verification to apply to
+				// the current winner.
 				if (!confirmed.matched) {
 					this.uploadState.markUploadPending(uploadId);
 					await this.requestVerification(logger, this.context.requireTenant());
@@ -1611,9 +1393,6 @@ export class CommitPipelineService {
 					};
 				}
 
-				// The winner's row identity was just proven by the confirmation,
-				// so this push's run root retains the path it published, served
-				// by the winner's row.
 				this.attachRootTarget(
 					cache,
 					pending.attachRootName,
@@ -1639,12 +1418,8 @@ export class CommitPipelineService {
 			}
 
 			if (this.hasLiveRival(cache, existingNarInfo.narHash, uploadId, nowIso)) {
-				// A concurrent commit reserved the path and its saga is live, so the
-				// verification pass arbitrates. Track this upload for the pass,
-				// exactly as a fresh deferral does, so it reaches a terminal verdict
-				// (`servable` once it owns the path, `absent` if the rival version
-				// won); the socket is driven to completion without waiting for the
-				// commit timeout.
+				// Keep this upload for verification while another live saga owns the
+				// reservation. Verification will decide which version remains.
 				this.uploadState.markUploadPending(uploadId);
 				await this.requestVerification(logger, this.context.requireTenant());
 
@@ -1658,11 +1433,8 @@ export class CommitPipelineService {
 				};
 			}
 
-			// No live upload backs the reservation: its saga died (the upload
-			// expired or was reaped before materialising), so only the periodic
-			// scan would ever reap the row. Waiting on that parks every retry of
-			// the path behind a heal this commit can perform itself: reclaim the
-			// dead reservation and commit afresh.
+			// No upload can complete this reservation. Reclaim it here so retries
+			// do not wait for the periodic recovery scan.
 			await this.context.criticalSection(() =>
 				this.reclaimReservedRow(
 					cache,
@@ -1676,15 +1448,6 @@ export class CommitPipelineService {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const tenant = this.context.requireTenant();
 
-		// The facts a commit decides on: the blob state and canonical presence for
-		// the probe, and the tenant's publish status and quota basis. When an advisory
-		// prefetch and account are supplied (a batch caller read them once for the
-		// whole message), use them to skip the per-entry D1 reads; only the per-path
-		// R2 head for a fresh upload's staged object is always per-entry. The charge
-		// batch remains the authoritative fence for status and quota; the advisory
-		// values only soften the pre-check. A reuse's staged key is the canonical
-		// object itself, whose presence the probe already answers, so only a fresh
-		// upload heads its private staging object.
 		const [probe, stagedObject, account] = await Promise.all([
 			this.probeMaterialisation(metadata, advisory?.prefetched),
 			pending.r2Key === canonicalKey
@@ -1693,9 +1456,6 @@ export class CommitPipelineService {
 			advisory?.account ?? this.tenantAccount(tenant)
 		]);
 
-		// The staged object must exist before a commit can verify or promote it; its
-		// contents are checked by the decompression pass, not here, so a missing
-		// object is the only synchronous content failure.
 		const stagedSize =
 			pending.r2Key === canonicalKey
 				? probe.isCanonicalPresent
@@ -1707,13 +1467,9 @@ export class CommitPipelineService {
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
 
-		// Advisory pre-verify quota check: skip the expensive verify and promote when
-		// charging this hash would clearly exceed quota. It estimates the charge from
-		// the canonical size if the hash already exists (the promote adopts it),
-		// otherwise the stored object's size, which becomes the canonical size; the
-		// authoritative decision is made against the canonical size in
-		// materialiseServable, so a concurrent promote that changes the size cannot
-		// let an over-quota commit through.
+		// Avoid verification when the advisory facts already prove this charge
+		// exceeds quota. An existing canonical encoding can have a different size,
+		// so materialisation checks its size again.
 		const estimate = probe.blob?.fileSize ?? stagedSize;
 
 		if (
@@ -1723,20 +1479,13 @@ export class CommitPipelineService {
 			throw new QuotaExceededError(tenant);
 		}
 
-		// Past the synchronous validation, mark the row `committing` before any of
-		// the reserve/promote/materialise work so an interruption (or, once
-		// verification runs off the DO, the handoff itself) leaves a durable saga
-		// marker the verify pass re-drives. A null-verdict row would be
-		// indistinguishable from one still awaiting its bytes, so it must not be
-		// left that way. The reuse and fresh branches below both inherit this
-		// marker.
+		// Store the saga marker before any reservation or handoff. After a crash,
+		// verification can distinguish this work from an upload still receiving
+		// bytes and resume it.
 		this.uploadState.markUploadCommitting(uploadId);
 
-		// Capture the session that initiated this commit so it can be excluded
-		// from `notifyUploadWaiters` inside `commitReusedBlob`: the committing
-		// session receives the result via the return value, not through the
-		// notify path, and sending it a `verdict` frame before the `settled`
-		// return would break the session's expected frame sequence.
+		// The initiating session receives the returned commit result. Exclude it
+		// from waiter notification so a verdict frame cannot arrive first.
 		const committingRow = this.context.db
 			.select({ sessionId: schema.pendingUploads.sessionId })
 			.from(schema.pendingUploads)
@@ -1744,9 +1493,8 @@ export class CommitPipelineService {
 			.get();
 		const committingSessionId = committingRow?.sessionId;
 
-		// A reuse binds a new narinfo to a blob already in the verified CAS. It
-		// passed verify-before-serve when it was first promoted, so bind it without
-		// re-verifying its bytes.
+		// Canonical bytes passed verification when they entered the CAS, so reuse
+		// does not decode them again.
 		if (pending.r2Key === canonicalKey) {
 			return this.commitReusedBlob(
 				logger,
@@ -1761,12 +1509,8 @@ export class CommitPipelineService {
 			);
 		}
 
-		// Verify-before-serve for a fresh upload staged under a private key. One
-		// too large to ever verify within the CPU budget is rejected, since it
-		// could never be served; every other fresh upload defers: it is marked
-		// pending, a prompt verification pass is requested, and the caller's
-		// socket parks until the pass answers. One path for every size, so no
-		// caller has to know about budgets or thresholds.
+		// Fresh bytes cannot be served before verification. Reject a NAR above the
+		// verifier's hard limit; defer every other fresh upload to the same queue.
 		if (metadata.narSize > verifiableMaxBytes) {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
@@ -1777,11 +1521,8 @@ export class CommitPipelineService {
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
 		}
 
-		// Reserve the narinfo row at commit so it exists before verification: a
-		// retention root set right after commit can reference it, and the
-		// reachability scan keeps it through the verify window. The verify pass
-		// re-runs this idempotently (`mine`, same generation, no counter advance);
-		// a `lost` outcome writes no row, and the verify pass answers the waiter.
+		// Reserve the row before verification so a root can retain it during the
+		// verification window. The verification pass repeats this idempotently.
 		await this.reserveNarInfoRow(cache, metadata);
 
 		await this.requestVerification(logger, tenant);
@@ -1796,15 +1537,9 @@ export class CommitPipelineService {
 		};
 	}
 
-	// Reserves the narinfo row for a commit before its bytes are verified, the
-	// row-first half of the row-first/edge-last saga. It signs the fingerprint
-	// over the uncompressed `NarHash`/`NarSize`/references only (independent of
-	// any compressed encoding), reads and stamps the next generation, and advances
-	// the durable counter, all in one DO transaction. It writes neither the D1 edge
-	// nor the R2 object and never touches the pending upload, so the reserved row is
-	// never servable on its own. On a conflicting row it reports whether that row is
-	// this same commit (`mine`, every signed and rendered field matches) or a
-	// different version that won the path (`lost`).
+	// Reserve the row before writing its committed edge. A reservation alone is
+	// not servable. Generate its identity in the same transaction, and never
+	// reuse a generation after deletion.
 	async reserveNarInfoRow(
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation
@@ -1812,10 +1547,8 @@ export class CommitPipelineService {
 		const now = isoTimestamp(new Date());
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
-		// The fingerprint, and so the signature, commits to the uncompressed NAR and
-		// references alone, never the compressed encoding, so the row is reserved and
-		// signed from the path metadata before a fresh upload's file hash and size
-		// are known.
+		// Nix signatures cover the uncompressed NAR identity, not its compressed
+		// encoding. The compressed file hash and size are therefore unnecessary here.
 		const fingerprint = narFingerprint(
 			new StorePath(metadata.storePath),
 			metadata.narHash,
@@ -1833,10 +1566,8 @@ export class CommitPipelineService {
 		);
 		const referencesJson = JSON.stringify(metadata.references);
 
-		// Source the generation inside the same transaction as the insert and the
-		// counter advance, so a winning reservation reads, stamps and bumps
-		// atomically; the counter survives deletes, so a recommit always lands a
-		// higher one.
+		// Read, stamp, and advance the generation atomically. The sequence survives
+		// deletion, so a recommit cannot reuse an old edge identity.
 		return this.context.db.transaction((tx) => {
 			const seq = tx
 				.select({ next: schema.generationSeq.nextGeneration })
@@ -1901,9 +1632,9 @@ export class CommitPipelineService {
 				)
 				.get();
 
-			// A row already holds the path. Treat it as this same commit only when
-			// every signed and rendered field matches; any difference means a
-			// different narinfo version won, and this upload must not adopt its row.
+			// Treat the row as the same narinfo version only when its store path,
+			// NAR identity, references, deriver, and content address match. Do not
+			// compare signatures: key rotation can re-sign the same version.
 			const isMine =
 				existing?.narHash === metadata.narHash &&
 				existing.narSize === metadata.narSize &&
@@ -1920,21 +1651,15 @@ export class CommitPipelineService {
 		});
 	}
 
-	// Probes the shared facts a materialisation decides on, outside any critical
-	// section so the D1 and R2 round-trips never hold the gate; see
-	// {@link MaterialisationProbe}. Must not open its own critical section.
+	// Keep D1 and R2 probe reads outside the input gate. The returned facts are
+	// advisory and may be stale by the time materialisation acquires the gate.
 	async probeMaterialisation(
 		metadata: ParsedUploadPathNegotiation,
 		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<MaterialisationProbe> {
-		// When a caller batch-read the D1 facts for its whole claimed set, use them
-		// and pay only the per-path R2 head, which has no batch form. The facts were
-		// read once before phase B and can be stale by the time this path is reached.
-		// Safety: phase A's promote upserts blob_state and re-arms deleteAfter = NULL
-		// for every batch member, so a batch member's canonical row cannot be reaped
-		// mid-pass (the reaper needs a fresh arm plus its grace period). The charge
-		// batch remains the authoritative fence for status and quota; a stale isOwned
-		// that causes an over-quota result triggers a fresh re-probe and one retry.
+		// Promotion disarms the reaper before these prefetched facts are used. The
+		// charge batch still fences status and quota, and a stale ownership result is
+		// re-probed once if it would reject the commit.
 		if (prefetched !== undefined) {
 			const canonical = await this.context.env.BLOBS.head(
 				narObjectKey(metadata.narHash)
@@ -1954,8 +1679,6 @@ export class CommitPipelineService {
 			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
 		);
 
-		// The canonical facts and the presence check are both keyed on the hash and
-		// independent, so read them in one D1 batch; the R2 head runs alongside.
 		const [d1Rows, canonical] = await Promise.all([
 			this.context.d1.batch([
 				this.context.d1
@@ -1983,13 +1706,9 @@ export class CommitPipelineService {
 		};
 	}
 
-	// Batch-reads the two D1 probe facts, the canonical `blob_state` and this
-	// tenant's presence, for a whole claimed set of narHashes in two chunked `IN`
-	// queries, keyed for a per-path probe to read from memory. A settle pass reads
-	// this once before phase B, so each path's probe pays only its R2 head and the
-	// pass's D1 reads fall from O(paths) to 2 (one concurrent batch per table,
-	// regardless of chunk count). The facts can go stale across the batch; the
-	// charge batch remains the authoritative fence for status and quota.
+	// Prefetch canonical and ownership facts for a claimed set. These values can
+	// become stale across the set, so callers must still use the authoritative
+	// charge fence and the ownership retry.
 	async prefetchMaterialisationFacts(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, PrefetchedMaterialisationFacts>> {
@@ -2054,14 +1773,11 @@ export class CommitPipelineService {
 		return new Map(facts);
 	}
 
-	// Whether this upload's reserved generation is already fully committed and
-	// serving: its reference edge exists (the generation-scoped proof that these
-	// bytes verified, promoted and charged, since the edge is written only by the
-	// charge) and its narinfo object is published. A re-claimed row that reads true
-	// here had only its clear-marker step interrupted, so it needs its bookkeeping
-	// finished, not a re-decode and re-materialise. Keys on the per-generation edge,
-	// never shared blob presence, so a superseded or lost generation reads false.
-	// The D1 and R2 reads run outside any critical section.
+	// A generation is committed only when its exact D1 edge and narinfo object
+	// both exist. Shared blob presence cannot prove that a superseded generation
+	// committed. A true result lets crash recovery finish marker and retention
+	// bookkeeping without decoding the upload again. Keep these remote reads
+	// outside the input gate.
 	async isGenerationCommitted(
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
@@ -2089,13 +1805,9 @@ export class CommitPipelineService {
 		return edge !== undefined && object !== null;
 	}
 
-	// Materialises a reserved narinfo through the shared flush queue: concurrent
-	// settles (socket commits and verify-pass verdicts alike) share one gate and
-	// one combined charge batch per flush, so a push of hundreds of paths costs
-	// a handful of gates. The request's probe arrives from outside any gate and
-	// may be stale by its flush; the charge batch is the authoritative guard,
-	// exactly as it is for a lone settle. The returned narinfo's object is the
-	// caller's to publish, after the flush.
+	// Share one input gate and charge batch across concurrent socket and
+	// verification settlements. The charge batch validates the advisory probe;
+	// callers publish the returned narinfo only after the gate has released.
 	async materialiseBatched(
 		logger: Logger,
 		request: MaterialiseRequest
@@ -2106,17 +1818,9 @@ export class CommitPipelineService {
 		});
 	}
 
-	// Removes a reserved narinfo row whose commit failed verification, leaving its
-	// burned generation in `generation_seq` (monotonic, never reused). The live
-	// local row decides the outcome: only while it still carries the reserved
-	// `(generation, narHash)` does a committed edge mean the path serves this
-	// reservation. A replaced row reports `superseded` whatever edges linger; a
-	// stale D1 edge for the old generation can outlive a delete and recommit
-	// until the deletion backlog drains, and proves nothing about the live row.
-	// Runs in a critical section so the identity read, the edge check and the
-	// delete cannot interleave with a materialisation.
-	//
-	// Runs inside the caller's critical section; must not open its own.
+	// Call only inside the input gate. Reclaim the row only if its generation and
+	// hash still match and no committed edge exists for that identity. Old edges
+	// can survive deletion and recommit until the deletion backlog drains.
 	async reclaimReservedRow(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -2137,7 +1841,6 @@ export class CommitPipelineService {
 			)
 			.get();
 
-		// A vanished row was reclaimed already; the outcome is idempotent.
 		if (current === undefined) {
 			return 'reclaimed';
 		}
@@ -2167,10 +1870,8 @@ export class CommitPipelineService {
 
 		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 
-		// Every other removal path drops the path's grace deadline with its
-		// row; a reclaim must too, and in the same transaction, or a failed
-		// verification can leave a dangling deadline that wakes maintenance
-		// for nothing and over-retains a later recommit's closure.
+		// Delete the grace deadline with the reserved row. A dangling deadline
+		// could otherwise retain a later generation of the same path.
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.narInfos)
 				.where(
@@ -2196,12 +1897,8 @@ export class CommitPipelineService {
 		return 'reclaimed';
 	}
 
-	// Fetches a staging object and decodes it, off the critical section: the
-	// object can be arbitrarily large, so this must never hold the DO's input
-	// gate. `budgetMs` bounds the fetch and decode together against a stalled R2
-	// body stream, which would otherwise hang the whole verification pass
-	// indefinitely; a test may shorten it below {@link narVerifyBudgetMs} to
-	// exercise the timeout without waiting the full budget.
+	// Fetch and decode outside the input gate. Bound both operations so a stalled
+	// R2 body cannot hold the verification pass indefinitely.
 	async verifyPendingNar(
 		r2Key: R2ObjectKey,
 		metadata: ParsedUploadPathNegotiation,
@@ -2218,8 +1915,6 @@ export class CommitPipelineService {
 						throw new UploadedObjectNotFoundError(r2Key);
 					}
 
-					// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
-					// as `ReadableStream`; narrow it to the byte stream the verifier expects.
 					const body = object.body as ReadableStream<Uint8Array>;
 					const cancellable = cancellableNarBody(body);
 					cancelBody = cancellable.cancel;
@@ -2233,10 +1928,8 @@ export class CommitPipelineService {
 				(abandoned) => new SubrequestTimeoutError('nar.verify', abandoned)
 			);
 		} catch (error) {
-			// The decode loop reads from the fetched body forever unless told
-			// otherwise; cancelling it here lets the abandoned call settle promptly
-			// instead of leaving the R2 stream open for the rest of the isolate's
-			// life.
+			// Cancel the R2 reader after a timeout so the abandoned decode does not
+			// leave the body open for the rest of the isolate's lifetime.
 			if (cancelBody !== undefined && error instanceof SubrequestTimeoutError) {
 				try {
 					await cancelBody();

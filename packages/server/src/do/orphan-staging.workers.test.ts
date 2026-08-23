@@ -21,8 +21,6 @@ import {
 
 const uploadGraceMs = 15 * 60 * 1000;
 
-// The real wall-clock instant R2 stamps onto an object written now, recovered
-// past the harness's faked `Date`.
 async function realUploadInstant(): Promise<number> {
 	await env.BLOBS.put('probe/now', new Uint8Array([0]));
 	const head = await env.BLOBS.head('probe/now');

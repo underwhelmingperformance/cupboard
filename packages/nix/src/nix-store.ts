@@ -21,13 +21,10 @@ export type UnreachableSubstituter = {
 	readonly uri: string;
 } & UnreachableSubstituterCause;
 
-/**
-Why a substituter could not be queried.
-*/
 export type UnreachableSubstituterCause =
 	| { readonly reason: 'unreadable-uri' }
 	/**
-	A store this reader does not open, such as `s3://` or `ssh://`.
+	The URI uses an unsupported store scheme, such as `s3://` or `ssh://`.
 	*/
 	| { readonly reason: 'unsupported-scheme' }
 	| { readonly reason: 'no-cache-info' }
@@ -38,17 +35,8 @@ export type UnreachableSubstituterCause =
 	 */
 	| { readonly reason: 'needs-credentials' }
 	| {
-			/**
-			 * The substituter serves paths for a different store directory.
-			 */
 			readonly reason: 'store-directory-mismatch';
-			/**
-			The store directory the substituter serves paths for.
-			*/
 			readonly servesStoreDirectory: StoreDirectory;
-			/**
-			The requested store directory.
-			*/
 			readonly queriedStoreDirectory: StoreDirectory;
 	  };
 
@@ -68,20 +56,16 @@ export interface NixValidPathInfo {
 	readonly ultimate: boolean;
 }
 
-/**
- * Metadata common to every store-path offer. It is sufficient to walk the
- * closure without fetching NAR contents.
- */
 interface NixOfferedPath {
 	readonly storePath: StorePathString;
 	readonly deriver?: string;
 	readonly references: readonly StorePathString[];
 	/**
-	 * The uncompressed NAR size included in the signed fingerprint.
-	 */
+	Signature verification includes this uncompressed size in the fingerprint.
+	*/
 	readonly narSize: number;
 	/**
-	Bytes the fetch would transfer; zero when unavailable.
+	Expected transfer size in bytes. Zero means no size was provided.
 	*/
 	readonly downloadSize: number;
 }
@@ -96,18 +80,12 @@ export interface NixDaemonOffer extends NixOfferedPath {
 
 /**
  * An offer parsed from a substituter's narinfo. It includes the advertised NAR
- * hash and every signature, which lets a consumer apply the same checks before
- * fetching the path.
+ * hash and every `Sig` entry. Consumers use this evidence for signature and
+ * policy checks before fetching the path.
  */
 export interface NixSubstituterOffer extends NixOfferedPath {
 	readonly source: 'substituter';
-	/**
-	The NAR hash that the substituter advertises for the path.
-	*/
 	readonly narHash: NixSha256Hash;
-	/**
-	The signatures in the path's narinfo.
-	*/
 	readonly signatures: readonly string[];
 	/**
 	 * Whether the substituter that made this offer is configured as trusted. Nix
@@ -133,8 +111,8 @@ export type NixDerivedPathString =
 /**
  * The work required to realise a set of targets, partitioned like
  * `Store::queryMissing`. An already-valid target appears in no
- * set. `downloadSize` and `narSize` describe the substitutable set: the bytes
- * substitution would download and the NAR bytes it would materialise.
+ * set. `downloadSize` is the number of bytes to transfer for the substitutable
+ * paths. `narSize` is their total uncompressed size.
  */
 export interface NixMissingPartition {
 	readonly willBuild: readonly StorePathString[];
@@ -144,11 +122,6 @@ export interface NixMissingPartition {
 	readonly narSize: number;
 }
 
-/**
- * The result of building one derived path. A successful target contains the
- * realised outputs reported by the daemon; a failed target contains the
- * daemon's message.
- */
 export type NixBuildOutcome =
 	| {
 			readonly kind:
@@ -171,9 +144,6 @@ export type NixBuildOutcome =
 			readonly message: string;
 	  };
 
-/**
-One build result keyed by its derived path.
-*/
 export interface NixBuildResult {
 	readonly target: NixDerivedPathString;
 	readonly outcome: NixBuildOutcome;
@@ -183,22 +153,18 @@ export interface NixBuildResult {
 	readonly stopTime: number;
 }
 
-/**
-How the daemon should realise a requested derivation.
-*/
 export type NixBuildMode = 'normal' | 'check';
 
-/**
-Operations provided by a selected Nix store backend.
-*/
 export interface NixStoreClient {
 	/**
-	Whether this transport deliberately omits per-connection SetOptions.
+	Whether this transport must preserve daemon policy and therefore omits the
+	per-connection SetOptions frame.
 	*/
 	readonly preservesDaemonOptions?: boolean;
 	/**
-	 * The stores each path was copied from, in the order the store reported
-	 * them. A client that cannot observe copies does not implement this method.
+	 * Returns the stores each path was copied from, in the order the store
+	 * reported them. A client that cannot observe copies does not implement this
+	 * method.
 	 */
 	observedCopies?: () => ReadonlyMap<StorePathString, readonly string[]>;
 	resolveClosure(
@@ -221,58 +187,50 @@ export interface NixStoreClient {
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
 	/**
-	 * The subset of the given paths valid in this store, deduplicated
-	 * and sorted by store path.
+	 * Returns the given paths that are valid in this store, deduplicated and
+	 * sorted by store path.
 	 */
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
 	/**
-	 * The subset of the given paths available from the store's configured
-	 * substituters, deduplicated and sorted by store path.
+	 * Returns the given paths available from the store's configured substituters,
+	 * deduplicated and sorted by store path.
 	 */
 	querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
 	/**
-	 * What the store's permitted substituters offer for each of the given
-	 * paths, sorted by store path. Paths without offers are omitted. Local path
-	 * validity does not affect external availability.
+	 * Offers from the store's permitted substituters for the given paths, sorted
+	 * by store path. Paths without offers are omitted. Local path validity does
+	 * not affect external availability.
 	 */
 	querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixSubstitutablePathInfo[]>;
 	/**
-	 * The registered output paths of the given derivations, deduplicated and
-	 * sorted by store path. An output that was never built has no registered
-	 * path and is left out.
+	 * Returns registered output paths for the given derivations, deduplicated and
+	 * sorted by store path. An output that was never built has no registered path
+	 * and is left out.
 	 */
 	queryDerivationOutputPaths(
 		drvPaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
 	/**
-	 * The work required to realise the targets against this
-	 * store's validity and its configured substituters. Every set comes back
-	 * deduplicated and sorted by store path.
+	 * Partitions the work required to realise the targets against this store's
+	 * validity and its configured substituters. Every set comes back deduplicated
+	 * and sorted by store path.
 	 */
 	queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 	/**
-	 * The serialised derivation at the given path. Local backends read the
+	 * Reads the serialised derivation at the given path. Local backends read the
 	 * regular file directly; worker-protocol backends extract the file from the
 	 * path's NAR.
 	 */
 	readDerivation(drvPath: StorePathString): Promise<string>;
-	/**
-	 * The NAR serialisation of the given path, streamed as the store reads
-	 * it.
-	 */
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
-	/**
-	 * Build the given targets and report the outcome of each one, with the
-	 * realised outputs where the store reports them.
-	 */
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode?: NixBuildMode
@@ -285,9 +243,9 @@ export interface NixStoreClient {
 	daemonTrust?(): Promise<NixDaemonTrust>;
 	/**
 	 * Configured substituters that could not be queried. This distinguishes a
-	 * confirmed absence from an incomplete query. Only a store this process
-	 * drives exposes this information; a daemon manages its own substituters and
-	 * records which of them it reached in its own log.
+	 * confirmed absence from an incomplete query. Process-driven stores expose
+	 * individual failures. A daemon manages its own substituters and records
+	 * reachability in its log instead.
 	 */
 	unreachableSubstituters?(): Promise<readonly UnreachableSubstituter[]>;
 }
@@ -388,15 +346,12 @@ export class NixStorePathNotFoundError extends NixStoreError {
 export class InvalidNixStorePathError extends NixStoreError {
 	constructor(public readonly path: string) {
 		super(
-			`The Nix store reported '${path}', which does not name a store path: it must be an absolute directory followed by a 32-character hash, a dash, and a name`
+			`The Nix store returned an invalid store path '${path}': expected an absolute directory followed by a 32-character hash, a dash, and a name`
 		);
 		this.name = 'InvalidNixStorePathError';
 	}
 }
 
-/**
-Why an `include` line could not be followed.
-*/
 export type NixConfigIncludeFailure =
 	| 'too-many-nested-includes'
 	| 'file-does-not-exist'
@@ -448,14 +403,11 @@ export class NixConfigSyntaxError extends NixStoreError {
  */
 export class NixNetrcSyntaxError extends NixStoreError {
 	constructor(public readonly found: string) {
-		super(`The netrc file could not be read: it contains ${found}`);
+		super(`The netrc file is invalid: it contains ${found}`);
 		this.name = 'NixNetrcSyntaxError';
 	}
 }
 
-/**
-Why a `builders` value's `@file` entries could not be expanded.
-*/
 export type NixMachineFileFailure =
 	'too-many-nested-machine-files' | 'file-could-not-be-read';
 
@@ -469,22 +421,27 @@ const machineFileFailureDescriptions: Readonly<
 /**
  * A `builders` value whose `@file` entries could not be expanded. A machines
  * file may include another, so a chain of them can be followed only so far.
+ * `source` contains the original builders value when nesting is too deep, or
+ * the machines file path when a read fails.
  */
 export class NixMachineFileError extends NixStoreError {
 	constructor(
-		/**
-		The builders value or machines file that caused the failure.
-		*/
 		public readonly source: string,
 		public readonly reason: NixMachineFileFailure,
 		options?: ErrorOptions
 	) {
-		super(
-			`Could not read the Nix builders '${source}': ${machineFileFailureDescriptions[reason]}`,
-			options
-		);
+		super(machineFileFailureMessage(source, reason), options);
 		this.name = 'NixMachineFileError';
 	}
+}
+
+function machineFileFailureMessage(
+	source: string,
+	reason: NixMachineFileFailure
+): string {
+	return reason === 'too-many-nested-machine-files'
+		? `Could not expand Nix builders '${source}': ${machineFileFailureDescriptions[reason]}`
+		: `Could not read Nix machines file '${source}'`;
 }
 
 export class NixConfigSettingError extends NixStoreError {
@@ -500,9 +457,6 @@ export class NixConfigSettingError extends NixStoreError {
 	}
 }
 
-/**
-The setting a discovered store directory came from.
-*/
 export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'NIX_STORE';
 
 export class InvalidNixStoreDirectoryError extends NixStoreError {
@@ -511,16 +465,15 @@ export class InvalidNixStoreDirectoryError extends NixStoreError {
 		public readonly source: NixStoreDirectorySource
 	) {
 		super(
-			`The ${source} setting '${storeDirectory}' does not name a Nix store directory: it must be an absolute path of one or more segments, none of them '.' or '..'`
+			`${source} contains invalid Nix store directory '${storeDirectory}': expected an absolute path of one or more segments, none of them '.' or '..'`
 		);
 		this.name = 'InvalidNixStoreDirectoryError';
 	}
 }
 
 /**
- * A local store URI naming a directory by something other than an absolute
- * path. Nix reads each of these parameters as a path from the filesystem root,
- * and refuses a store URI that gives such a directory in any other form.
+ * A local store URI with a relative directory parameter. Nix resolves these
+ * parameters from the filesystem root and rejects every non-absolute value.
  */
 export class InvalidNixStoreParameterError extends NixStoreError {
 	constructor(
@@ -528,7 +481,7 @@ export class InvalidNixStoreParameterError extends NixStoreError {
 		public readonly value: string
 	) {
 		super(
-			`The store parameter '${parameter}' names '${value}', which is not an absolute path`
+			`Store parameter '${parameter}' must be an absolute path, got '${value}'`
 		);
 		this.name = 'InvalidNixStoreParameterError';
 	}

@@ -17,11 +17,11 @@ Install it into a profile:
 nix profile install github:underwhelmingperformance/cupboard
 ```
 
-The flake builds the CLI from source for the host platform (x86-64 and arm64
-Linux, arm64 macOS), so pinning the input at a revision gives you the `cupboard`
-built from that same revision, and the package version reflects it. The flake
-also exposes an overlay, so you can refer to `pkgs.cupboard` after adding
-`inputs.cupboard.overlays.default` to your `nixpkgs.overlays`.
+The flake builds the CLI from source for x86-64 and arm64 Linux and macOS.
+Pinning the input at a revision therefore builds `cupboard` from that revision,
+and the package version identifies it. The flake also exposes an overlay, so you
+can refer to `pkgs.cupboard` after adding `inputs.cupboard.overlays.default` to
+your `nixpkgs.overlays`.
 
 ## Tracking releases
 
@@ -33,8 +33,8 @@ with a version range:
 inputs.cupboard.url = "https://flakehub.com/f/underwhelmingperformance/cupboard/*";
 ```
 
-`*` follows the newest release; a range such as `0.1.*` allows patch and minor
-movement only. FlakeHub resolves the range when the input is locked, so
+`*` follows the newest release; a range such as `0.1.*` allows patch releases
+within version 0.1. FlakeHub resolves the range when the input is locked, so
 `nix flake update` is what moves you to a newer release, and `flake.lock` pins
 the exact release you got until the next update.
 
@@ -83,7 +83,7 @@ an input, so this configures _your_ builds, not your users'. For a cache you
 want every consumer to use, ship one of the modules below or have them add the
 cache to their own configuration.
 
-### As a NixOS or home-manager module
+### As a NixOS or Home Manager module
 
 Both modules expose `nix.cupboard.caches`, a list of `{ url; publicKeys; }`, and
 fold each entry into `nix.settings.substituters` and
@@ -105,7 +105,7 @@ NixOS:
 }
 ```
 
-home-manager is identical, importing
+Home Manager is identical, importing
 `inputs.cupboard.homeManagerModules.default` instead. A user-level substituter
 only takes effect if the user is a trusted user of the daemon
 (`nix.settings.trusted-users`); otherwise set it system-wide.

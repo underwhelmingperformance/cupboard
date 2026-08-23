@@ -1,7 +1,7 @@
 import { InvalidCacheUrlBaseError } from './errors.ts';
 
-// A URL's path can carry any number of trailing slashes, and an anchored `/+$`
-// pattern rescans from each one, so the trim walks back from the end instead.
+// An anchored `/+$` expression can rescan a long suffix from every trailing
+// slash. Scan backwards once so trimming remains linear in the path length.
 function withoutTrailingSlashes(value: string): string {
 	let end = value.length;
 
@@ -13,12 +13,10 @@ function withoutTrailingSlashes(value: string): string {
 }
 
 /**
- * The base a cache's URLs are built from, checked once so every builder and
- * every request derived from it can take the result on trust. The scheme must
- * be `http` or `https`, and only the origin and path may be set: a username or
- * password would be sent with every request built from the base, and a query
- * or fragment would be carried onto every URL derived from it. Trailing
- * slashes are dropped from the path so one deployment has one base.
+ * Validates and canonicalises a base URL for cache requests. It accepts only
+ * HTTP and HTTPS URLs without credentials, a query or a fragment. The returned
+ * URL is a copy, so the input remains unchanged. Its path has no trailing
+ * slashes unless it is the root path, which remains `/`.
  */
 export function parseBaseUrl(url: URL): URL {
 	if (
@@ -39,11 +37,10 @@ export function parseBaseUrl(url: URL): URL {
 }
 
 /**
- * Renders a URL for exact-string contexts: a Nix substituter list, an OIDC
- * audience claim, a stored trust rule's audience, a session-store key.
- * `URL#href` adds a trailing slash to a bare origin, so two references to the
- * same deployment could render as different strings; stripping trailing
- * slashes gives every URL one rendering, the form the workflows and docs use.
+ * Returns the stable string used in Nix substituter lists, OIDC audience
+ * claims, stored trust-rule audiences and session-store keys. `URL#href` adds a
+ * trailing slash to a bare origin. Removing trailing slashes prevents the same
+ * deployment from acquiring different exact-string identities.
  */
 export function canonicalHref(url: URL): string {
 	return withoutTrailingSlashes(url.href);

@@ -4,9 +4,6 @@ export interface HookScriptOptions {
 	readonly invocationId: InvocationId;
 	readonly helperPath: string;
 	readonly socketPath: string;
-	/**
-	The directory in which a daemonless hook creates GC-root links.
-	*/
 	readonly rootLinkDirectory?: string;
 }
 

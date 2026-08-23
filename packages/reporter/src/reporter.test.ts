@@ -34,8 +34,6 @@ function expectReporterTestError(
 	expect(error).toBeInstanceOf(ReporterTestError);
 }
 
-// A failure that reports only that a step failed and keeps the reason two
-// levels down its cause chain.
 function twoLevelFailure(): Error {
 	return new Error('the step failed', {
 		cause: new RangeError('the value is too big', {
@@ -75,9 +73,7 @@ describe('formatTimestamp', () => {
 	it.each([
 		['2026-06-13T14:30:45.123Z', '2026-06-13 14:30 UTC'],
 		['2026-01-02T03:04:05.000Z', '2026-01-02 03:04 UTC'],
-		// A non-UTC offset is normalised to UTC.
 		['2026-06-13T14:30:00+02:00', '2026-06-13 12:30 UTC'],
-		// An unparseable value passes through unchanged.
 		['not a date', 'not a date']
 	])('renders %s as %s', (value, expected) => {
 		expect(formatTimestamp(value)).toBe(expected);
@@ -110,13 +106,13 @@ describe('createReporter', () => {
 		const { events, reporter } = jsonReporter(() => clock);
 
 		const value = await reporter.phase('Fetching', (phase) => {
-			phase.fact('rows', '1k'); // t=0, just started: no interim event yet
+			phase.fact('rows', '1k');
 			clock = 2000;
-			phase.fact('rows', '2k'); // a full interval on: emits the facts so far
+			phase.fact('rows', '2k');
 			clock = 2500;
-			phase.fact('rows', '3k'); // 500ms since the last emit: throttled, no event
+			phase.fact('rows', '3k');
 			clock = 4000;
-			phase.fact('rows', '4k'); // another interval on: emits again
+			phase.fact('rows', '4k');
 			return 'done';
 		});
 
@@ -251,14 +247,14 @@ describe('createReporter', () => {
 			'Preparing',
 			{ total: 100 },
 			(bar) => {
-				bar.advance(10); // t=0, just started: no interim event yet
+				bar.advance(10);
 				clock = 2000;
-				bar.advance(10); // a full interval on: emits completed=20
+				bar.advance(10);
 				clock = 2500;
-				bar.advance(10); // 500ms since the last emit: throttled, no event
+				bar.advance(10);
 				clock = 4000;
 				bar.fact('rate', '5/s');
-				bar.advance(10); // another interval on: emits completed=40 with the fact
+				bar.advance(10);
 				return 'prepared';
 			}
 		);
@@ -419,9 +415,6 @@ describe('createReporter', () => {
 		]);
 	});
 
-	// Each build-push phase runs as an ordinary phase unit under its declared
-	// label, with its counts carried as facts; nothing beyond the label, status,
-	// duration and facts enters the event.
 	const buildPushPhaseCases: readonly {
 		readonly phase: BuildPushPhase;
 		readonly label: string;
@@ -515,7 +508,7 @@ describe('createReporter', () => {
 		]);
 	});
 
-	it('writes data payloads to stdout and emits one error event', () => {
+	it('writes data to out and errors to the event stream', () => {
 		const { events, payloads, reporter } = jsonReporter();
 
 		reporter.data('{"public_key":"abc"}');
@@ -565,49 +558,49 @@ describe('createGithubReporter', () => {
 
 	it.each([
 		{
-			name: 'warn with a value maps to a warning annotation',
+			name: 'writes a warning annotation with a value',
 			run: (reporter: Reporter) => {
 				reporter.warn('skipped', 'already present');
 			},
 			expected: ['::warning::skipped: already present\n']
 		},
 		{
-			name: 'warn without a value maps to a warning annotation',
+			name: 'writes a warning annotation without a value',
 			run: (reporter: Reporter) => {
 				reporter.warn('detached');
 			},
 			expected: ['::warning::detached\n']
 		},
 		{
-			name: 'info maps to a plain line',
+			name: 'writes info as a plain line',
 			run: (reporter: Reporter) => {
 				reporter.info('all done');
 			},
 			expected: ['all done\n']
 		},
 		{
-			name: 'success maps to a notice annotation',
+			name: 'writes success as a notice annotation',
 			run: (reporter: Reporter) => {
 				reporter.success('saved');
 			},
 			expected: ['::notice::saved\n']
 		},
 		{
-			name: 'step maps to a plain line',
+			name: 'writes a step as a plain line',
 			run: (reporter: Reporter) => {
 				reporter.step('queued');
 			},
 			expected: ['queued\n']
 		},
 		{
-			name: 'data writes a raw stdout line',
+			name: 'writes data as a raw line to out',
 			run: (reporter: Reporter) => {
 				reporter.data('{"public_key":"abc"}');
 			},
 			expected: ['{"public_key":"abc"}\n']
 		},
 		{
-			name: 'result rows render as label: value lines',
+			name: 'writes result rows as label: value lines',
 			run: (reporter: Reporter) => {
 				reporter.result({
 					kind: 'push-summary',
@@ -621,7 +614,7 @@ describe('createGithubReporter', () => {
 			expected: ['paths: 5\n', 'bytes: 1,024\n']
 		},
 		{
-			name: 'an empty result renders its empty message',
+			name: 'writes the empty message for an empty result',
 			run: (reporter: Reporter) => {
 				reporter.result({
 					kind: 'tenant-list',
@@ -638,7 +631,7 @@ describe('createGithubReporter', () => {
 		expect(written).toStrictEqual(expected);
 	});
 
-	it('opens a group, prints facts, and closes it for a phase', async () => {
+	it('writes a phase as a group with its final facts', async () => {
 		const value = await createGithubReporter().phase('Building', (phase) => {
 			phase.fact('files', 3);
 			return 'done';
@@ -652,7 +645,7 @@ describe('createGithubReporter', () => {
 		]);
 	});
 
-	it('emits an error before closing the group when a phase fails', async () => {
+	it('writes a phase error before closing its group', async () => {
 		const failure = new ReporterTestError('build-failed');
 
 		let error: unknown;
@@ -706,13 +699,13 @@ describe('createGithubReporter', () => {
 			'Uploading',
 			{ total: 100 },
 			(bar) => {
-				bar.advance(10); // t=0, just started: no interim line yet
+				bar.advance(10);
 				clock = 2000;
-				bar.advance(10); // a full interval on: emits 20/100
+				bar.advance(10);
 				clock = 2500;
-				bar.advance(10); // 500ms since the last emit: throttled
+				bar.advance(10);
 				clock = 4000;
-				bar.advance(10); // another interval on: emits 40/100
+				bar.advance(10);
 				return 'uploaded';
 			}
 		);
@@ -727,7 +720,7 @@ describe('createGithubReporter', () => {
 		]);
 	});
 
-	it('maps steps groups and messages to nested lines', async () => {
+	it('writes step groups and messages as nested lines', async () => {
 		const value = await createGithubReporter().steps('Attestations', (log) => {
 			const read = log.group('read');
 			read.message('opening');
@@ -747,14 +740,14 @@ describe('createGithubReporter', () => {
 		]);
 	});
 
-	it('maps error to an error annotation', () => {
+	it('writes an error annotation', () => {
 		createGithubReporter().error(new RangeError('too big'));
 
 		expect(normaliseErrors(written)).toStrictEqual(['::error::\n']);
 	});
 
-	// GitHub reads an annotation up to the first newline. The workflow command
-	// escapes the newlines, so the whole chain stays in one annotation.
+	// With `GITHUB_ACTIONS=true`, newlines are escaped so GitHub receives the
+	// complete cause chain in one annotation.
 	it('annotates the cause chain of a failure as one escaped line', () => {
 		createGithubReporter().error(twoLevelFailure());
 
@@ -808,7 +801,7 @@ describe('result file', () => {
 		}
 	);
 
-	it('writes nothing when no result file is configured', () => {
+	it('emits the result event when no result file is configured', () => {
 		const sink = captureStream();
 
 		createReporter({ stream: sink.stream, out: sink.stream }).result({
@@ -817,7 +810,6 @@ describe('result file', () => {
 			rows: []
 		});
 
-		// The result event still flows through the reporter's own stream.
 		expect(sink.lines().map((line): unknown => JSON.parse(line))).toStrictEqual(
 			[{ event: 'result', kind: 'push-summary', data: { uploaded: 5 } }]
 		);

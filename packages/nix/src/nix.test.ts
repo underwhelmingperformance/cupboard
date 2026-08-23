@@ -27,9 +27,6 @@ import {
 import type { NixMachineProbes } from './store-config.ts';
 import type { QuerySubstitutablePathInfos } from './substitutable-closure.ts';
 
-/**
-A machine offering nothing a build can ask for beyond the portable names.
-*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
 	isFilePresent: () => false,
@@ -78,27 +75,15 @@ interface RecordingStore extends NixStoreClient {
 }
 
 interface RecordingStoreOptions {
-	/**
-	What the substituters offer, as a store path to its references.
-	*/
 	readonly substitutableOffers?: ReadonlyMap<
 		StorePathString,
 		readonly StorePathString[]
 	>;
-	/**
-	The references this store records, which a closure walk follows.
-	*/
 	readonly localReferences?: ReadonlyMap<
 		StorePathString,
 		readonly StorePathString[]
 	>;
-	/**
-	The bytes `narFromPath` streams for every path.
-	*/
 	readonly narBytes?: Uint8Array;
-	/**
-	The text `readDerivation` answers for every derivation.
-	*/
 	readonly derivationText?: string;
 }
 
@@ -224,15 +209,10 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 }
 
 interface RecordingSubstituters {
-	/**
-	Each batch of paths the substituters were asked about.
-	*/
 	readonly batches: string[][];
 	readonly querySubstitutablePathInfos: QuerySubstitutablePathInfos;
 }
 
-// The substituters a client asks, each of them offering every path it is asked
-// about under the NAR hash this store holds.
 function recordingSubstituters(): RecordingSubstituters {
 	const batches: string[][] = [];
 
@@ -298,8 +278,6 @@ describe('Nix.toStorePath', () => {
 		expect(nixOver(recordingStore()).toStorePath(input)).toBe(expected);
 	});
 
-	// The store directory comes from the running configuration, so a store the
-	// system diverted elsewhere resolves the same way the default one does.
 	it('returns the store path under a diverted store directory', () => {
 		const divertedPath = `${divertedStoreDirectory}/cccccccccccccccccccccccccccccccc-app`;
 		const nix = nixOver(
@@ -393,7 +371,7 @@ describe('Nix.open', () => {
 		});
 	});
 
-	it('refuses a configured store directory that could hold no store path', () => {
+	it('rejects a configured store directory that is not absolute', () => {
 		const noConfigurationFiles: Record<string, string> = {};
 
 		expect(() =>
@@ -417,9 +395,6 @@ describe('Nix.open', () => {
 
 const noFiles = new Map<string, string>();
 
-/**
-The directory these fixtures run in. A relative path resolves against it.
-*/
 const workingDirectory = '/work/dir';
 
 function daemonDependencies(hasSocket: boolean): NixDependencies {
@@ -450,8 +425,6 @@ describe('Nix.openForAvailability', () => {
 		directories.length = 0;
 	});
 
-	// A binary cache held in a directory, which answers a narinfo read without
-	// anything having to be reachable over the network.
 	function cacheDirectory(files: Readonly<Record<string, string>>): string {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-nix-cache-'));
 		directories.push(directory);
@@ -463,10 +436,10 @@ describe('Nix.openForAvailability', () => {
 		return directory;
 	}
 
-	// The daemon's batched answer names no NAR hash and no signature, so the
-	// walk that proves a closure is held upstream reads each path's narinfo
-	// from the substituter itself, whatever backend serves every other query.
-	it('asks the substituters itself while the daemon answers for this store', async () => {
+	// Daemon queries omit the NAR hash and signatures needed to verify a
+	// substitutable closure. Read that metadata from the substituter even when
+	// other store operations use the daemon.
+	it('reads substitutable-closure metadata directly from the substituter', async () => {
 		const narHash = `sha256:${'11'.repeat(32)}`;
 		const directory = cacheDirectory({
 			'nix-cache-info':
@@ -561,18 +534,15 @@ describe('Nix.openForAvailability', () => {
 		});
 	});
 
-	// A daemonless install answers for itself, so the questions are asked of
-	// the store this process drives.
 	it('opens the store this process drives when no daemon is running', () => {
 		expect(Nix.openForAvailability(daemonDependencies(false)).storeKind).toBe(
 			'local-filesystem'
 		);
 	});
 
-	// The two facts a plan reads off the opened store. A daemon keeps a
-	// narinfo cache and applies an untrusted client's settings selectively; a
-	// store this process drives has neither, holding its settings itself and
-	// asking the substituters as the question is put.
+	// A daemon caches substituter queries and may reject option overrides from
+	// an untrusted client. A directly opened local store does neither. An SSH
+	// store preserves the remote daemon's option policy.
 	it.each([
 		{
 			name: 'a daemon that trusts this client',
@@ -632,7 +602,7 @@ describe('Nix.openForAvailability', () => {
 			}
 		}
 	])(
-		'reports what it can answer for over $name',
+		'reports substituter-query and option-override behaviour for $name',
 		async ({ hasSocket, storeUri, trust, expected }) => {
 			const nix = Nix.openForAvailability(daemonDependencies(hasSocket), {
 				...(storeUri !== undefined && { storeUri }),
@@ -647,9 +617,7 @@ describe('Nix.openForAvailability', () => {
 		}
 	);
 
-	// A store URI naming the daemon asked for that daemon, so a missing socket
-	// answers the caller's question.
-	it('refuses a store URI naming a daemon that is not running', () => {
+	it('rejects a store URI that requires a daemon when none is running', () => {
 		let outcome:
 			{ value: Nix } | { error: { name: string; socketPath: string } };
 		try {
@@ -777,10 +745,10 @@ describe('Nix queries', () => {
 		expect(store.substitutableBatches).toStrictEqual([[appPath, libraryPath]]);
 	});
 
-	// The walk reads each path's narinfo from the substituters themselves, so
-	// the backend serving every other query is never asked what is available
-	// elsewhere, however much it would answer.
-	it('canonicalises the root of a substitutable-closure walk and asks the substituters', async () => {
+	// Closure availability must come from the configured substituters. Querying
+	// the selected build store would confuse locally valid paths with paths the
+	// destination can download.
+	it('canonicalises the root and queries the configured substituters', async () => {
 		const store = recordingStore({
 			localReferences: new Map([[appPath, [libraryPath]]]),
 			substitutableOffers: new Map([
@@ -812,9 +780,7 @@ describe('Nix queries', () => {
 		});
 	});
 
-	// A client built over a bare backend was given no substituters, so it has
-	// nobody to put the question to.
-	it('refuses a substitutable-closure walk with no substituters to ask', async () => {
+	it('rejects a substitutable-closure query with no substituters', async () => {
 		await expect(
 			nixOver(recordingStore()).resolveSubstitutableClosure(appPath)
 		).rejects.toBeInstanceOf(UnsupportedNixStoreOperationError);
@@ -827,12 +793,12 @@ describe('Nix queries', () => {
 			expected: false
 		},
 		{
-			name: 'a derivation that says nothing about substitution',
+			name: 'a derivation without an allowSubstitutes value',
 			environment: '[("name","app")]',
 			expected: true
 		}
 	])(
-		'reads the substitution option out of $name in the store',
+		'returns the substitution policy from $name',
 		async ({ environment, expected }) => {
 			const aterm = `Derive([],[],[],"system","builder",[],${environment})`;
 			const store = recordingStore({ derivationText: aterm });
@@ -851,7 +817,7 @@ describe('Nix queries', () => {
 		}
 	);
 
-	it('reads what a derivation in the store asks of its machine', async () => {
+	it("returns a derivation's system and required features", async () => {
 		const aterm =
 			'Derive([],[],[],"aarch64-linux","builder",[],' +
 			'[("requiredSystemFeatures","big-parallel kvm")])';
@@ -928,7 +894,7 @@ describe('Nix queries', () => {
 		expect(store.buildBatches).toStrictEqual([[`${appPath}^out`, libraryPath]]);
 	});
 
-	it('reports unknown daemon trust for a backend with no connection to ask', async () => {
+	it('reports unknown daemon trust for a backend with no daemon connection', async () => {
 		const store = recordingStore();
 
 		await expect(nixOver(store).daemonTrust()).resolves.toBe('unknown');

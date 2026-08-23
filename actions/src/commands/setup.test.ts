@@ -57,7 +57,7 @@ describe('cupboardPathEntry', () => {
 	});
 });
 
-describe('setupAction compatibility outputs', () => {
+describe('setupAction acquisition outputs', () => {
 	it.each([
 		{
 			name: 'canonical release',
@@ -94,7 +94,7 @@ describe('setupAction compatibility outputs', () => {
 			},
 			expectedVersion: ''
 		}
-	])('projects $name onto the legacy version output', async (testCase) => {
+	])('writes the legacy version output for a $name', async (testCase) => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-output-')
 		);
@@ -126,7 +126,7 @@ describe('setupAction compatibility outputs', () => {
 		['latest-resolved release', undefined, 'v9.8.7'],
 		['explicit arbitrary release tag', 'production', 'production']
 	])(
-		'projects a %s onto the legacy version output',
+		'writes the resolved tag to the legacy version output for a %s',
 		async (_name, selected, resolved) => {
 			const directory = await mkdtemp(
 				path.join(tmpdir(), 'cupboard-setup-output-')
@@ -408,7 +408,7 @@ describe('resolveSubstituters', () => {
 		readPassword: ''
 	};
 
-	it('performs no nix-cache-info fetches and returns the destination alone when no view is set', async () => {
+	it('returns only the destination without probing when no view is set', async () => {
 		const requests: string[] = [];
 		const fetcher = stubFetch((url) => {
 			requests.push(url);
@@ -524,7 +524,7 @@ describe('resolveSubstituters', () => {
 		['destination', 'https://cache.example.test/nix-cache-info'],
 		['view', 'https://cache.example.test/reuse/reuse/nix-cache-info']
 	] as const)(
-		'raises the invalid-document error for a priority-free %s response',
+		'throws CacheInfoInvalidError for a priority-free %s response',
 		async (side, missingUrl) => {
 			const fetcher = stubFetch((url) =>
 				url === missingUrl
@@ -555,7 +555,7 @@ describe('resolveSubstituters', () => {
 		['destination', 'https://cache.example.test/nix-cache-info'],
 		['view', 'https://cache.example.test/reuse/reuse/nix-cache-info']
 	] as const)(
-		'raises a fetch error for a non-2xx %s response',
+		'throws CacheInfoFetchError for a non-2xx %s response',
 		async (side, failingUrl) => {
 			const fetcher = stubFetch(() => cacheInfoBody(40), {
 				status: (url) => (url === failingUrl ? 503 : 200)
@@ -776,7 +776,7 @@ describe('resolveSetupInputs read credentials', () => {
 });
 
 describe('resolveSetupInputs reuse view', () => {
-	it('threads reuse-view through', () => {
+	it('preserves the reuse-view input', () => {
 		const inputs = resolveSetupInputs(
 			{ ...baseOptions, reuseView: 'reuse', installDir: '/opt/cupboard' },
 			{ GITHUB_ACTION_REPOSITORY: 'owner/cupboard' }

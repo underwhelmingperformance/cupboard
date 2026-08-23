@@ -1,8 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
 
-/**
-The child lifecycle events needed to wait until all stdio has closed.
-*/
 export interface ChildProcessLifecycle {
 	onceError(listener: (error: Error) => void): void;
 	onceClose(
@@ -13,39 +10,24 @@ export interface ChildProcessLifecycle {
 	): void;
 }
 
-/**
-A child process that can receive explicit POSIX termination signals.
-*/
 export interface AbortableChildProcessLifecycle extends ChildProcessLifecycle {
 	kill(signal: NodeJS.Signals): boolean;
 }
 
-/**
-A cancellable delayed escalation, abstracted for deterministic tests.
-*/
 export interface ScheduledChildProcessEscalation {
 	cancel(): void;
 }
 
-/**
-Schedules forced termination after the graceful shutdown window.
-*/
 export interface ChildProcessEscalationScheduler {
 	schedule(run: () => void, delayMs: number): ScheduledChildProcessEscalation;
 }
 
-/**
-A child result observed only after its `close` event.
-*/
 export interface ClosedChildProcess {
 	readonly error: Error | undefined;
 	readonly signal: NodeJS.Signals | undefined;
 	readonly status: number | null;
 }
 
-/**
-Time allowed for an aborted child to close after SIGTERM.
-*/
 export const terminationGracePeriodMs = 10_000;
 
 const defaultEscalationScheduler: ChildProcessEscalationScheduler = {
@@ -61,9 +43,6 @@ const defaultEscalationScheduler: ChildProcessEscalationScheduler = {
 	}
 };
 
-/**
-Adapt Node's overloaded child-process events to the lifecycle contract.
-*/
 export function observeChildProcess(
 	child: Pick<ChildProcess, 'kill' | 'once'>
 ): AbortableChildProcessLifecycle {
@@ -83,8 +62,9 @@ export function observeChildProcess(
 }
 
 /**
-Records a spawn error and waits for the child to close before resolving.
-*/
+ * Node can emit `error` before `close`. Record the error, but do not resolve
+ * until `close` confirms that the process and its stdio streams have finished.
+ */
 export function waitForChildProcess(
 	child: ChildProcessLifecycle
 ): Promise<ClosedChildProcess> {
@@ -101,9 +81,9 @@ export function waitForChildProcess(
 }
 
 /**
- * Wait for complete process closure, terminating an aborted child gracefully
- * before escalating to SIGKILL. Node's spawn-level AbortSignal handling must
- * not also be enabled: this helper is the single owner of child termination.
+ * On abort, send SIGTERM and wait for `close`; send SIGKILL only after the
+ * grace period expires. Do not also pass the AbortSignal to Node's spawn API,
+ * because this helper must remain the single owner of child termination.
  */
 export async function waitForAbortableChildProcess(
 	child: AbortableChildProcessLifecycle,

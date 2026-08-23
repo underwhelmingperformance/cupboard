@@ -13,10 +13,6 @@ import { z } from 'zod';
 // so the schemas give the newer fields defaults and a payload from an older
 // binary still parses.
 
-/**
- * The store the plan queried: the backend kind, and the store URI when the
- * caller selected one explicitly.
- */
 export const planStoreSchema = z.object({
 	kind: z.enum(['local-filesystem', 'daemon', 'ssh-ng']),
 	uri: z.string().min(1).optional()
@@ -33,7 +29,7 @@ const attributeSchema = z
 
 // A store path optionally followed by `^` and a non-empty output selection.
 // The selection is free-form ("out", "out,dev", "*"), but it is rendered into
-// operator diagnostics, so it must not carry control characters.
+// operator diagnostics, so it must not contain control characters.
 const derivedPathStringSchema = z.string().refine((value) => {
 	const selection = value.indexOf('^');
 	const basePath = selection === -1 ? value : value.slice(0, selection);
@@ -46,9 +42,6 @@ const derivedPathStringSchema = z.string().refine((value) => {
 	);
 }, 'must name a Nix store path, optionally followed by a non-empty output selection');
 
-/**
-One cohort target that refers to an unknown store path directly.
-*/
 export const unknownPathTargetSchema = z.object({
 	attr: attributeSchema,
 	installable: derivedPathStringSchema
@@ -66,10 +59,9 @@ export const unknownPathCauseSchema = z.discriminatedUnion('kind', [
 export type UnknownPathCause = z.output<typeof unknownPathCauseSchema>;
 
 /**
- * A store path whose availability the plan could not determine, together with
- * the inferred cause. `targets` contains cohort targets that refer to the path
- * directly through an installable, expected output path, or planned derivation.
- * Dependencies reached only through closure traversal have no target entry.
+ * `targets` contains cohort targets that refer to the path directly through an
+ * installable, expected output path, or planned derivation. Dependencies
+ * reached only through closure traversal have no target entry.
  */
 export const unknownPathDetailSchema = z.object({
 	path: storePathSchema,
@@ -79,9 +71,8 @@ export const unknownPathDetailSchema = z.object({
 export type UnknownPathDetail = z.output<typeof unknownPathDetailSchema>;
 
 /**
- * The maximum number of paths with unknown availability that a plan permits.
  * `source` identifies either the configured limit or the fallback used when
- * Cupboard could not trust the configured limit.
+ * Cupboard could not trust that limit.
  */
 export const availabilityCeilingSchema = z.object({
 	value: z.number(),
@@ -93,10 +84,8 @@ export type ParsedAvailabilityCeiling = z.output<
 >;
 
 /**
- * The payload of a `plan-cohort-refusal` reporter event when the plan found
- * too many paths with unknown availability. An older cupboard reports only
- * the count, the ceiling and the byte totals, so the newer fields default to
- * empty and that payload still parses.
+ * An older cupboard reports only the count, the ceiling and the byte totals.
+ * The newer fields therefore default to empty so that payload still parses.
  */
 export const unknownPathsCeilingRefusalSchema = z.object({
 	reason: z.literal('unknown-paths-ceiling'),
@@ -112,9 +101,6 @@ export type ParsedUnknownPathsCeilingRefusal = z.output<
 	typeof unknownPathsCeilingRefusalSchema
 >;
 
-/**
-The information the rendered refusal message draws on.
-*/
 export interface UnknownPathsRefusalDescription {
 	readonly unknownPaths: readonly UnknownPathDetail[];
 	readonly ceiling: {
@@ -147,7 +133,6 @@ function withoutPassword(uri: string): string {
 	return url.href;
 }
 
-// The store as a mid-sentence phrase. Sentence-initial callers capitalise it.
 function planStorePhrase(store: PlanStore | undefined): string {
 	if (store === undefined) {
 		return 'the selected Nix store';
@@ -177,20 +162,16 @@ function describeUnknownPathCause(
 	const subject = sentenceInitial(planStorePhrase(store));
 
 	if (cause.kind === 'missing-derivation') {
-		return `${subject} does not contain this derivation, so Nix cannot inspect its outputs or dependencies.`;
+		return `${subject} does not contain this derivation. Nix therefore cannot inspect its outputs or dependencies.`;
 	}
 
 	if (cause.kind === 'substituter-result-not-refreshed') {
 		return `${subject} does not contain this path. Cupboard could not refresh Nix's cached substituter result because ${cause.reason}.`;
 	}
 
-	return `${subject} does not contain this path, and no substituter the plan could query provided it.`;
+	return `${subject} does not contain this path. The plan queried the available substituters, but none provided it.`;
 }
 
-/**
- * Renders one unknown path for the operator: the path, the targets that refer
- * to it, and the cause the plan inferred.
- */
 export function describeUnknownPath(
 	detail: UnknownPathDetail,
 	store: PlanStore | undefined
@@ -204,19 +185,16 @@ export function describeUnknownPath(
 	return `${identity}\n${cause}`;
 }
 
-// The ceiling's internal names (source, trust) stay off the operator
-// surface. The sentence states the rule that refused the plan, and why the
-// fallback limit replaced the configured one when it did. The fallback is
-// not necessarily stricter than the configured limit.
+// Keep the internal `source` and trust names off the operator surface. Explain
+// why a fallback replaced the configured limit without implying that the
+// fallback is stricter.
 function limitSentence(
 	ceiling: UnknownPathsRefusalDescription['ceiling']
 ): string {
 	const rule =
 		ceiling.value === 0
-			? 'The plan refuses when any required path is unavailable.'
-			: ceiling.value === 1
-				? 'The plan refuses when more than 1 required path is unavailable.'
-				: `The plan refuses when more than ${String(ceiling.value)} required paths are unavailable.`;
+			? 'The plan refuses if Nix cannot obtain any required path.'
+			: `The plan refuses when the count of required paths that Nix cannot obtain exceeds ${String(ceiling.value)}.`;
 
 	if (ceiling.source === 'configured') {
 		return rule;
@@ -229,19 +207,14 @@ function limitSentence(
 	return `${rule} That limit applied because ${reason}.`;
 }
 
-/**
- * Renders the complete refusal for the operator. The message lists each
- * unavailable path and its cause, any substituters that could not be queried,
- * the applicable limit, and the corrective action.
- */
 export function describeUnknownPathsRefusal(
 	refusal: UnknownPathsRefusalDescription
 ): string {
 	const count = refusal.unknownPaths.length;
 	const unavailable =
 		count === 1
-			? '1 required store path is unavailable'
-			: `${String(count)} required store paths are unavailable`;
+			? 'Nix cannot obtain 1 required store path'
+			: `Nix cannot obtain ${String(count)} required store paths`;
 	const heading = count === 1 ? 'Unavailable path' : 'Unavailable paths';
 	const details = refusal.unknownPaths
 		.map(
@@ -252,13 +225,13 @@ export function describeUnknownPathsRefusal(
 	const unreachable =
 		refusal.unreachableSubstituters.length === 0
 			? ''
-			: 'These configured substituters could not be queried, so a path ' +
-				'only they serve still counts as unavailable: ' +
+			: 'The plan could not query these configured substituters. A path ' +
+				'available only from one of them therefore counts as unavailable: ' +
 				`${refusal.unreachableSubstituters.join(', ')}.\n\n`;
 
 	return (
 		'Cupboard cannot calculate the build and download work for this ' +
-		`cohort because ${unavailable} to Nix.\n\n` +
+		`cohort because ${unavailable}.\n\n` +
 		`${heading}:\n${details}\n\n` +
 		unreachable +
 		`${limitSentence(refusal.ceiling)} Make the missing ` +

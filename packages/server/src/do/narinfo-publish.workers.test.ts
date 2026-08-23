@@ -124,14 +124,13 @@ function stallingPutBucket(
 	};
 }
 
-// The narinfo object publishes outside the critical section, so a publish can
-// land after a gated delete or recommit has already decided the path's fate.
-// The post-publish fence re-reads the row under the gate and rewrites the
-// object from it, so a stale publish can never outlive that decision.
-describe('narinfo object publish fence', () => {
+// Publication occurs outside the critical section. A delete or recommit can
+// therefore change the row before the put finishes. The publisher must re-read
+// the row under the gate and remove or rewrite the late object.
+describe('narinfo publication after a concurrent row change', () => {
 	beforeEach(resetTestServer);
 
-	it('rewrites a publish whose version the row no longer names', async () => {
+	it('rewrites a late publish when its generation no longer matches the committed row', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('publish-fence');
 		const metadata = uploadMetadata({
@@ -148,9 +147,6 @@ describe('narinfo object publish fence', () => {
 		const row = await committedRow(metadata.storePathHash);
 		const current = await narInfoObjectText(metadata.storePathHash);
 
-		// A publish carrying a version the row no longer names: the shape of a
-		// put that raced the row's committed version. Its content differs from
-		// the row's render, so the fence's rewrite is observable.
 		await runInDurableObject(currentServer(), async (instance) => {
 			const service = new NarInfoObjectsService(instance.context);
 			const staleNarInfo = await service.narInfoFromRow({
@@ -175,12 +171,10 @@ describe('narinfo object publish fence', () => {
 			);
 		});
 
-		// The fence saw the row naming a different version, so it re-rendered
-		// the object from the row.
 		expect(await narInfoObjectText(metadata.storePathHash)).toBe(current);
 	});
 
-	it('removes a publish whose row is gone', async () => {
+	it('removes a late publish after the committed row has been deleted', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('publish-fence-gone');
 		const metadata = uploadMetadata({
@@ -196,8 +190,6 @@ describe('narinfo object publish fence', () => {
 
 		const row = await committedRow(metadata.storePathHash);
 
-		// The row vanishes (the shape of a gated delete landing between the
-		// charge and the object put), then the late publish arrives.
 		const filter = narInfoRowFilter(metadata.storePathHash);
 		await runInDurableObject(currentServer(), async (instance) => {
 			instance.context.db.delete(schema.narInfos).where(filter).run();

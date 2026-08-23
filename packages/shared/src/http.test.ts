@@ -18,7 +18,7 @@ describe('basicAuthHeader', () => {
 		});
 	});
 
-	it('encodes a credential carrying a colon and non-ASCII bytes', () => {
+	it('encodes a password with a colon and non-ASCII characters', () => {
 		expect(basicAuthHeader(credential('user', 'p:ss wörd'))).toStrictEqual({
 			authorization: `Basic ${Buffer.from('user:p:ss wörd').toString('base64')}`
 		});

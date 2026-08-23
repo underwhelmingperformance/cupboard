@@ -10,7 +10,6 @@ import {
 
 import { baseProcedure } from './base.ts';
 
-// The force flag is a query parameter on the cache removal route.
 const forceQuerySchema = z
 	.strictObject({ force: z.boolean().default(false) })
 	.default({ force: false });
@@ -44,7 +43,7 @@ export const cachesContract = {
 		.route({
 			method: 'DELETE',
 			path: '/caches/{cacheName}',
-			// The force flag is a query parameter: a DELETE carries no body.
+			// DELETE carries no body, so `force` is a query parameter.
 			inputStructure: 'detailed'
 		})
 		.input(

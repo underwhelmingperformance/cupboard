@@ -17,16 +17,13 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
 
-// The most paths a negotiate may carry for the Worker to compute hints. The
-// hints are read before the Durable Object authenticates the bearer, so the
-// reads are gated on the body's signed push id and bounded here; a larger
-// body dispatches plainly and the Durable Object reads its own facts after
-// authenticating.
+// Hint reads happen before the Durable Object authenticates the request. Bound
+// their size here; larger negotiations proceed without hints and read the facts
+// after authentication.
 const hintPathCap = 10_000;
 
-// Just the fields the hint reads key on, tolerant of everything else in the
-// body: the Durable Object's contract schema stays the authority, and a body
-// this parse rejects simply dispatches without hints.
+// Parse only the fields needed for the optional hint. The Durable Object still
+// validates the complete request against the protocol schema.
 const hintPathSchema = z.object({
 	narHash: nixSha256HashSchema,
 	storePathHash: storePathHashSchema
@@ -37,15 +34,10 @@ const lenientNegotiateBodySchema = z.object({
 });
 
 /**
- * Computes the shared-fact reads for a negotiate in the front Worker: the
- * `blob_state` rows and this tenant's presence edges for the requested NAR
- * hashes. The reads run before the Durable Object authenticates the bearer
- * (only it holds the verification keys), so they are gated on the body's push
- * id instead: it is HMAC-signed under the Worker's own key and only issued to
- * an authenticated push, so one local HMAC bounds the D1 reads an
- * unauthenticated request can cause to none. Anything unexpected (no bearer
- * token, an unverifiable push id, an unparseable body, too many paths)
- * returns undefined and the request dispatches without hints.
+ * Prefetches shared blob and reference facts before dispatching a negotiation.
+ * The Durable Object holds the access-token keys, so this Worker authorises the
+ * prefetch with the HMAC-signed push ID instead. Missing credentials, invalid
+ * input, an invalid push ID, or an oversized request disables the optimisation.
  */
 export async function computeNegotiateHints(
 	request: Request,
@@ -104,10 +96,8 @@ async function readHints(
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {
-	// The 90-parameter `IN` cap forces one statement per chunk, but D1 counts
-	// each `.all()` as a separate queued request, and a large negotiate can issue
-	// hundreds at once. A single `batch()` carries every chunk in one round-trip,
-	// so the whole hint read is one request to D1 regardless of the path count.
+	// D1 limits each `IN` clause to 90 parameters. Batch the resulting statements
+	// so a large negotiation still uses one D1 round trip.
 	const blobStateQueries = chunk(narHashes, maxInClauseValues).map((keys) =>
 		database
 			.select({

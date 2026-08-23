@@ -18,19 +18,16 @@ const retryableStatuses = new Set<number>([
 	StatusCodes.GATEWAY_TIMEOUT
 ]);
 
-/**
-Whether a wire response is a transient server failure worth retrying.
-*/
 export function isTransientResponse(response: Response): boolean {
 	return retryableStatuses.has(response.status);
 }
 
 /**
- * Wraps a fetcher so transient network failures and
- * {@link isTransientResponse} statuses retry after a delay. The function makes
- * at most {@link maxTransientRetries} additional attempts. Deterministic
- * responses return immediately. A valid `Retry-After` header supplies the delay
- * up to the configured maximum, and an abort signal ends the wait immediately.
+ * Retries every rejected fetch and each {@link isTransientResponse} status,
+ * with at most {@link maxTransientRetries} additional attempts. Other responses
+ * return immediately. A positive numeric `Retry-After` value supplies the delay
+ * up to the configured maximum; HTTP-date values use the normal backoff. An
+ * abort signal ends the wait immediately.
  *
  * The function clones a `Request` before each attempt. Callers that send a body
  * must therefore supply reusable bytes rather than a one-shot stream.
@@ -70,9 +67,9 @@ export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 }
 
 /**
- * Discards a transient response body, then waits for the next attempt. A valid
- * `Retry-After` header supplies the delay, limited to the maximum backoff.
- * Otherwise the function calls {@link backoffDelay}.
+ * Discards a transient response body, then waits for the next attempt. A
+ * positive numeric `Retry-After` value supplies the delay, limited to the
+ * maximum backoff. HTTP-date and invalid values use {@link backoffDelay}.
  */
 export async function transientResponseDelay(
 	response: Response,
@@ -95,9 +92,9 @@ export async function transientResponseDelay(
 }
 
 /**
- * Waits for an exponentially increasing delay with full jitter. The delay does
- * not exceed `maxRetryDelayMs`. An abort signal ends the wait immediately. Tests
- * can complete any wait by advancing a fake clock past the maximum.
+ * Waits for an exponentially increasing delay with equal jitter: half the
+ * current ceiling plus a random value in the other half. The delay does not
+ * exceed `maxRetryDelayMs`. An abort signal ends the wait immediately.
  */
 export async function backoffDelay(
 	attempt: number,
@@ -134,10 +131,10 @@ async function abortableSleep(
 }
 
 /**
- * Wraps a fetcher so a network-level failure (a DNS lookup, a refused
- * connection) surfaces as the caller's own typed error naming the host. An
- * abort is a `DOMException`, so it propagates unchanged; only the `TypeError`
- * fetch uses for network faults is translated.
+ * Replaces any `TypeError` rejected by the fetcher with the caller's typed error
+ * for the requested host. Other rejected values propagate unchanged. Fetch
+ * commonly uses `TypeError` for network failures, but an abort reason supplied
+ * as a `TypeError` is translated too.
  */
 export function reachableFetcher(
 	fetcher: typeof fetch,

@@ -1,15 +1,12 @@
 import type { Reporter } from '@cupboard/reporter';
 
-// How long the session has to be waiting before the wait is worth a line of
-// output.
 const sustainedCapacityWaitMs = 5000;
 
 /**
- * Reports the session's capacity waits. The flag toggles once per path when the
- * cache grants one entry at a time, so a wait is announced only once it has
- * lasted `sustainedCapacityWaitMs`. The end of a wait is never announced: a run
- * that continues shows for itself that capacity arrived, and a run that gave up
- * reports the reason in the failure that follows.
+ * Reports a capacity wait only after it has lasted five seconds. The session
+ * may briefly leave and re-enter the waiting state as it commits each path, so
+ * shorter waits produce no output and repeated waiting does not produce a line
+ * for every path.
  */
 export function capacityWaitReporter(
 	reporter: Reporter

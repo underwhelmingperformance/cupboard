@@ -13,7 +13,7 @@ const baseOptions = {
 };
 
 describe('acquireCupboard', () => {
-	it('installs an already-canonical release with its exact source commit', async () => {
+	it('uses the resolved release tag and source commit for installation', async () => {
 		const cupboard: ResolvedCupboard = {
 			kind: 'release',
 			repository: 'owner/cupboard',
@@ -62,7 +62,7 @@ describe('acquireCupboard', () => {
 		expect(installSource).not.toHaveBeenCalled();
 	});
 
-	it('builds an already-canonical source checkout', async () => {
+	it('builds the resolved source checkout', async () => {
 		const cupboard: ResolvedCupboard = {
 			kind: 'source',
 			repository: 'owner/cupboard',
@@ -100,7 +100,7 @@ describe('acquireCupboard', () => {
 		expect(installRelease).not.toHaveBeenCalled();
 	});
 
-	it('passes cancellation to canonical source acquisition', async () => {
+	it('forwards cancellation to source acquisition', async () => {
 		const cupboard: ResolvedCupboard = {
 			kind: 'source',
 			repository: 'owner/cupboard',

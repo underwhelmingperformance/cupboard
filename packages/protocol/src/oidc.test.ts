@@ -43,7 +43,7 @@ describe('tokenExchangeRequestSchema', () => {
 		expect(parsed).toStrictEqual(request);
 	});
 
-	it('carries authorization_details as an opaque string for the token service', () => {
+	it('leaves authorization_details encoded for the token service', () => {
 		// The body validator keeps it raw; the token service parses it, so a
 		// malformed value is `invalid_authorization_details`, not `invalid_request`.
 		const raw = JSON.stringify([

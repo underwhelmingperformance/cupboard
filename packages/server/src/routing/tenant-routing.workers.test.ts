@@ -124,8 +124,7 @@ describe('tenant routing', () => {
 		});
 	});
 
-	it('stops reads to a suspended tenant once the manifest carries the status', async () => {
-		// The harness configures and admits the fixture tenant active.
+	it('stops reads once the tenant manifest records suspension', async () => {
 		const active = await handlerFetch(
 			`/t/${fixtureTenant}/.well-known/jwks.json`
 		);
@@ -154,8 +153,6 @@ describe('tenant routing', () => {
 	it('dispatches a named tenant write to its Durable Object to authorise', async () => {
 		await provisionNamedTenant('acme');
 
-		// No token: the write is dispatched to the tenant's object, which rejects it as
-		// unauthorised.
 		const response = await handlerFetch(
 			'/t/acme/cache/_default/uploads',
 			writeRequest()

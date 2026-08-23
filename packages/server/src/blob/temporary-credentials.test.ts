@@ -68,7 +68,7 @@ function jwtFrom(sessionToken: string): {
 describe('createR2TemporaryCredentials', () => {
 	const prefixPaths = ['staging/push-1/'];
 
-	it('reuses the parent key id and reports the endpoint, bucket and expiry', async () => {
+	it('reuses the parent access key ID and returns the endpoint, bucket, expiry and derived secret', async () => {
 		const credentials = await createR2TemporaryCredentials(
 			configuration,
 			{ scope: 'object-read-write', prefixPaths, ttlSeconds },
@@ -90,7 +90,7 @@ describe('createR2TemporaryCredentials', () => {
 		});
 	});
 
-	it('signs an HS256 scope JWT carrying the bucket, scope, prefix and registered claims', async () => {
+	it('encodes the bucket, scope, paths and registered claims in an HS256 JWT', async () => {
 		const credentials = await createR2TemporaryCredentials(
 			configuration,
 			{ scope: 'object-read-write', prefixPaths, ttlSeconds },
@@ -159,7 +159,7 @@ describe('createR2TemporaryCredentials', () => {
 		});
 	});
 
-	it('defaults the object paths to empty and honours an explicit object scope', async () => {
+	it('uses an empty objectPaths list unless object keys are supplied', async () => {
 		const credentials = await createR2TemporaryCredentials(
 			configuration,
 			{
@@ -182,8 +182,7 @@ describe('createR2TemporaryCredentials', () => {
 		});
 	});
 
-	it('grants by an actions allow-list and no scope when given actions', async () => {
-		// R2 rejects a JWT carrying both, so a grant is one claim or the other.
+	it('encodes an actions grant without a scope claim', async () => {
 		const credentials = await createR2TemporaryCredentials(
 			configuration,
 			{ actions: ['PutObject', 'GetObject'], prefixPaths, ttlSeconds },

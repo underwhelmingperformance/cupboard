@@ -198,7 +198,6 @@ describe('retention policies', () => {
 
 	it('applies the matching policy to a root with no explicit TTL', async () => {
 		const token = await initialise();
-		// Activation gates on servability, so the root target must be committed first.
 		await pushPath(
 			token,
 			uploadMetadata({
@@ -295,7 +294,7 @@ describe('retention grace policies', () => {
 		});
 	});
 
-	it('accepts the empty (tenant-wide default) prefix', async () => {
+	it('accepts an empty prefix as the tenant-wide default', async () => {
 		const token = await initialise();
 
 		const added = await addGracePolicy(token, {
@@ -419,7 +418,7 @@ async function graceCoverage(
 describe('grace coverage', () => {
 	beforeEach(resetTestServer);
 
-	it('resolves the longest matching prefix and reports unmatched caches as uncovered', async () => {
+	it('selects the longest matching grace-policy prefix', async () => {
 		const token = await initialise();
 		await addGracePolicy(token, { cachePrefix: '', graceSeconds: 86_400 });
 		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });
@@ -445,7 +444,7 @@ describe('grace coverage', () => {
 		});
 	});
 
-	it('answers uncovered when no policy matches', async () => {
+	it('returns covered: false when no grace policy matches', async () => {
 		const token = await initialise();
 
 		const coverage = await graceCoverage(token, WIRE_DEFAULT_CACHE);
@@ -456,7 +455,7 @@ describe('grace coverage', () => {
 		});
 	});
 
-	it('is readable with a confirm-scoped token, without the policy-admin scope', async () => {
+	it('allows upload:confirm to read coverage, rejects upload:commit, and does not grant policy administration', async () => {
 		const adminToken = await initialise();
 		await addGracePolicy(adminToken, { cachePrefix: '', graceSeconds: 86_400 });
 		const confirmToken = await issueServerSignedToken(
@@ -474,9 +473,6 @@ describe('grace coverage', () => {
 		const commitOnly = await graceCoverage(commitOnlyToken, WIRE_DEFAULT_CACHE);
 		const refusedList = await authorisedFetch('/policies/grace', confirmToken);
 
-		// The token that can confirm a publication can read coverage. A presented
-		// commit grant does not imply runtime confirm authority, so it cannot,
-		// and the policy-admin listing stays refused to both.
 		expect({
 			coverageStatus: coverage.status,
 			coverageBody: coverage.body,

@@ -10,9 +10,6 @@ import {
 	type RealisationReport
 } from './measurement.ts';
 
-/**
-Invalid gate input: an unreadable baseline or tolerance.
-*/
 export abstract class BudgetError extends UsageError {}
 
 export class BaselineJsonError extends BudgetError {
@@ -42,16 +39,15 @@ const budgetEntrySchema = z.object({
 	measurement: realisationMeasurementSchema
 });
 
-/**
- * Expected measurements for a gate, read from a previous report. Parsing
- * ignores all fields except target and group keys and their measurements, so
- * newer report fields do not invalidate existing baselines. A hand-written
- * baseline needs only those values.
- */
 const keySchema = z.string().min(1);
 const targetBudgetSchema = budgetEntrySchema.extend({ attr: keySchema });
 const groupBudgetSchema = budgetEntrySchema.extend({ key: keySchema });
 
+/**
+ * Reads target and group keys and their measurements while ignoring other
+ * report fields. New report fields therefore do not invalidate an existing
+ * baseline, and a hand-written baseline needs only these values.
+ */
 export const realisationBaselineSchema = z.object({
 	targets: z.array(targetBudgetSchema),
 	groups: z.array(groupBudgetSchema),
@@ -79,9 +75,6 @@ export function parseBaseline(source: string): RealisationBaseline {
 	return parsed.data;
 }
 
-/**
-The share by which a measurement may exceed its budget and still pass.
-*/
 export const defaultTolerance = 0.05;
 
 export function parseTolerance(value: string): number {
@@ -95,9 +88,6 @@ export function parseTolerance(value: string): number {
 	return tolerance;
 }
 
-/**
-Which part of a report a budget entry belongs to.
-*/
 export type BudgetScope = 'target' | 'group' | 'combined';
 
 export interface BudgetBreach {
@@ -110,9 +100,6 @@ export interface BudgetBreach {
 	readonly excess: number;
 }
 
-/**
-A measurement the baseline sets no budget for, such as a new target.
-*/
 export interface UnbudgetedMeasurement {
 	readonly scope: BudgetScope;
 	readonly key: string;
@@ -131,10 +118,9 @@ export interface BudgetOptions {
 }
 
 /**
- * Compares report measurements with baseline budgets plus the tolerance. Each
- * breach records the metric, budget, measured value, and excess. Measurements
- * absent from the baseline are reported as unbudgeted but do not fail the gate,
- * which lets a new target establish a baseline on its first run.
+ * Compares each measurement with its baseline multiplied by one plus the
+ * tolerance. Measurements absent from the baseline are reported as unbudgeted
+ * but do not fail the gate, so a new target can establish a baseline.
  */
 export function checkBudgets(options: BudgetOptions): BudgetResult {
 	const tolerance = options.tolerance ?? defaultTolerance;
@@ -232,13 +218,11 @@ function allowanceFor(expected: number, tolerance: number): number {
 // measured drift from an internal fixture failure.
 export const budgetExitCode = 65;
 
-/**
-Raised when a gate run measured more than a baseline allows.
-*/
 export class BudgetBreachError extends CodedError {
 	constructor(readonly breaches: readonly BudgetBreach[]) {
+		const noun = breaches.length === 1 ? 'measurement' : 'measurements';
 		super(
-			`${String(breaches.length)} measurement(s) exceeded their budget: ` +
+			`${String(breaches.length)} ${noun} exceeded the budget: ` +
 				breaches
 					.map((breach) => `${breach.scope} ${breach.key} ${breach.metric}`)
 					.join(', ')

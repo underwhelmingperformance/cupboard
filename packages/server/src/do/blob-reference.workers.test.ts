@@ -23,9 +23,9 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// `blob_ref`/`tenant_blob` are the D1 reference substrate: one edge per committed
-// narinfo version (keyed by generation), and a per-tenant presence row per shared
-// NAR hash. The single-tenant edges are written under tenant `v1`.
+// Each committed narinfo generation has one `blob_ref` edge. A tenant also has
+// one `tenant_blob` presence row for each shared NAR hash it references. These
+// single-tenant fixtures use tenant `v1`.
 
 describe('blob_ref / tenant_blob reference edges', () => {
 	beforeEach(async () => {
@@ -130,8 +130,6 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
 
-		// The delete retires the edge and per-tenant presence at once; the now-
-		// unreferenced shared fact is reclaimed by the reaper after its grace.
 		await reapBlobsPastGrace();
 
 		expect({
@@ -201,8 +199,6 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		});
 
 		await commitPath(token, first, nar);
-		// The second path reuses the already-promoted blob (negotiate returns a
-		// commit decision); only its edge is new.
 		await commitSharedPath(token, second);
 
 		const bothEdges = await blobReferenceRows();

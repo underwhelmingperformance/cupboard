@@ -148,9 +148,6 @@ describe('uploadNegotiateRequestSchema', () => {
 		}).toStrictEqual({ matching: true, mismatched: false });
 	});
 
-	// A narinfo names its deriver by basename, the way it names references, so
-	// the two fields carry different shapes: `ca` is a content-address
-	// specification and not a path at all.
 	it.each([
 		{
 			name: 'a deriver basename',
@@ -368,7 +365,7 @@ describe('uploadConfirmRequestSchema', () => {
 		expect(uploadConfirmRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
-	it('accepts a list at the shared negotiate bound and rejects one above it', () => {
+	it('accepts 1,000 confirmation hashes and rejects 1,001', () => {
 		const atBound = {
 			storePathHashes: Array.from(
 				{ length: uploadConfirmMaxPaths },
@@ -499,23 +496,26 @@ describe('commit session schemas', () => {
 		},
 		{ ev: 'deferred', uploadId: 'upload-1', storePathHash, narHash },
 		{ ev: 'verdict', uploadId: 'upload-1', status: 'servable' },
-		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' },
-		{ ev: 'credit', grant: 100 },
-		{ ev: 'queued', ahead: 0 },
-		{ ev: 'queued', ahead: 3 }
-	])('accepts the $ev frame', (value) => {
+		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' }
+	])('accepts the upload-specific $ev frame', (value) => {
 		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
 	});
 
-	it('requires an uploadId on every frame', () => {
+	it.each([
+		['a credit frame', { ev: 'credit', grant: 100 }],
+		['a queued frame with no sessions ahead', { ev: 'queued', ahead: 0 }],
+		['a queued frame with three sessions ahead', { ev: 'queued', ahead: 3 }]
+	])('accepts %s', (_name, value) => {
+		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('requires an uploadId on a verdict frame', () => {
 		expect(
 			commitSessionFrameSchema.safeParse({ ev: 'verdict', status: 'servable' })
 				.success
 		).toBe(false);
 	});
 
-	// Credit counts entries. A declaration of no entries asks for nothing, and a
-	// negative or fractional count is a broken client rather than a small demand.
 	it.each([
 		{ shape: 'no entries', request: { op: 'request-credit', entries: 0 } },
 		{
@@ -530,8 +530,6 @@ describe('commit session schemas', () => {
 		expect(commitSessionRequestSchema.safeParse(request).success).toBe(false);
 	});
 
-	// A grant of nothing is sent as `queued`, so a `credit` frame always carries
-	// entries the session may spend.
 	it.each([
 		{
 			shape: 'a credit frame granting nothing',
@@ -545,10 +543,6 @@ describe('commit session schemas', () => {
 		expect(commitSessionFrameSchema.safeParse(frame).success).toBe(false);
 	});
 
-	// The opening grant is carried on the token, so a client reads its first
-	// grant from the same header that carries the batch bound, with no further
-	// round trip. A saturated tenant advertises `grant=0` and the session waits
-	// for a `credit` frame.
 	it('advertises the credit token with the opening grant', () => {
 		expect({
 			capability: commitCreditCapability,
@@ -602,9 +596,6 @@ describe('commit session schemas', () => {
 		).toBe(false);
 	});
 
-	// The retention-marker attribute must be present on both tokens (they share
-	// the entry schema), so a client can send the marker on whichever op it
-	// uses without a separate capability check per op.
 	it('advertises the retention-marker attribute on both tokens', () => {
 		expect({
 			commitBatchCapabilityToken,

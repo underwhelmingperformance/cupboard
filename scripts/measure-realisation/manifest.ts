@@ -7,9 +7,6 @@ import {
 	publishTargetsSchema
 } from '../../actions/src/publish-plan.ts';
 
-/**
-Invalid fixture input: a manifest that cannot be parsed or measured.
-*/
 export abstract class ManifestError extends UsageError {}
 
 export class ManifestJsonError extends ManifestError {
@@ -34,9 +31,8 @@ export class DuplicateTargetAttributeError extends ManifestError {
 }
 
 /**
- * The target manifest accepted by this fixture. It can be the publish
- * workflow's `--targets` array directly or an object with that array under a
- * `targets` key. Both forms produce the same target list.
+ * Accepts the publish workflow's target array directly or under a `targets`
+ * property. Both forms produce the same target list.
  */
 export const measurementManifestSchema = z.union([
 	publishTargetsSchema,
@@ -87,9 +83,6 @@ function assertDistinctAttributes(targets: readonly PublishTarget[]): void {
 	}
 }
 
-/**
-Targets assigned to the same cohort job.
-*/
 export interface TargetGroup {
 	readonly key: string;
 	readonly attrs: readonly string[];

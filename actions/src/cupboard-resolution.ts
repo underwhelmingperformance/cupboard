@@ -46,10 +46,6 @@ const resolvedSourceSchema = z.strictObject({
 	sourceCommit: commitSchema
 });
 
-/**
- * The canonical coordinate every acquisition step consumes: a resolved
- * release, or a resolved source revision.
- */
 export const resolvedCupboardSchema = z.discriminatedUnion('kind', [
 	resolvedReleaseSchema,
 	resolvedSourceSchema
@@ -58,33 +54,18 @@ export const resolvedCupboardSchema = z.discriminatedUnion('kind', [
 export type ResolvedCupboard = z.infer<typeof resolvedCupboardSchema>;
 
 export interface ResolveCupboardOptions {
-	/**
-	An explicit published release tag or `latest`; blank resolves from the workflow.
-	*/
 	readonly cupboardVersion?: string;
-	/**
-	Whether an explicit `latest` may select a prerelease.
-	*/
 	readonly includePrereleases: boolean;
 	readonly releaseRepository: string;
 	readonly githubToken: string;
 	readonly workflowSha: string;
 	readonly workflowRef: string;
-	/**
-	REST root such as GitHub Enterprise's `https://host/api/v3`.
-	*/
 	readonly githubApiUrl?: string;
-	/**
-	Exact GraphQL endpoint supplied by the Actions `github.graphql_url` context.
-	*/
 	readonly githubGraphqlUrl?: string;
 }
 
 export interface ResolveCupboardDependencies {
 	readonly fetch?: typeof fetch;
-	/**
-	Raw release pages supplied by tests without Octokit's request scheduler.
-	*/
 	readonly releaseDiscoveryPage?: (cursor: string | null) => Promise<unknown>;
 }
 
@@ -160,10 +141,9 @@ query CupboardReleases($owner: String!, $name: String!, $cursor: String) {
 const publicRestApiUrl = 'https://api.github.com';
 const publicGraphqlUrl = 'https://api.github.com/graphql';
 
-// The query requests 100 releases at a time. One thousand candidates cover
-// roughly two decades of weekly releases, while twenty pages leave equal room
-// for sparse or nullable histories without permitting an open-ended cursor
-// chain.
+// GitHub returns at most 100 releases per page. Limit the search to 1,000
+// candidates, and cap the cursor chain separately because sparse pages may
+// never reach the candidate limit.
 export const maximumReleaseDiscoveryPageEntries = 100;
 export const maximumReleaseDiscoveryCandidates = 1000;
 export const maximumReleaseDiscoveryPages = 20;
@@ -224,15 +204,18 @@ function githubApiEndpoints(
 }
 
 /**
-Encode a validated canonical coordinate for transport through a job output.
-*/
+ * Validate again before serialisation. This prevents unresolved or
+ * noncanonical coordinates from crossing the job-output boundary if a caller
+ * bypasses `resolveCupboard`.
+ */
 export function serialiseResolvedCupboard(resolved: ResolvedCupboard): string {
 	return JSON.stringify(resolvedCupboardSchema.parse(resolved));
 }
 
 /**
-Decode a job output without accepting unknown fields or noncanonical values.
-*/
+ * Reject unknown fields and noncanonical coordinates from the job output, and
+ * report JSON and schema failures through `CupboardResolutionJsonError`.
+ */
 export function parseResolvedCupboard(value: string): ResolvedCupboard {
 	try {
 		return resolvedCupboardSchema.parse(JSON.parse(value) as unknown);
@@ -242,9 +225,9 @@ export function parseResolvedCupboard(value: string): ResolvedCupboard {
 }
 
 /**
- * Resolve caller input and reusable-workflow identity into one exact release or
- * source coordinate. No unresolved `latest` or implicit selection crosses this
- * boundary.
+ * Select an exact release tag and source commit, or the exact source commit
+ * from the reusable workflow. The result must not contain `latest` or defer
+ * any choice to acquisition.
  */
 export async function resolveCupboard(
 	options: ResolveCupboardOptions,

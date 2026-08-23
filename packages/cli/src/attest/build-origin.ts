@@ -11,7 +11,7 @@ import { z } from 'zod';
 import { CliError } from '../errors.ts';
 
 /**
- * A bundle claimed the build-origin predicate type, but its predicate does not
+ * A bundle declared the build-origin predicate type, but its predicate does not
  * match the statement's schema. `fields` names each failing part of the
  * predicate as a dotted path.
  */
@@ -29,14 +29,14 @@ export class BuildOriginStatementInvalidError extends CliError {
 }
 
 /**
- * The build-origin statement a verified bundle carries. Returns undefined for
- * a bundle whose predicate type is not the build-origin type, so a predicate
- * of another type is never read as a cupboard statement.
+ * Returns undefined unless the verified bundle declares the build-origin
+ * predicate type. A predicate of another type is never parsed as a Cupboard
+ * statement.
  *
- * A bundle that claims the type but fails the schema throws
+ * A bundle that declares the type but fails the schema throws
  * {@link BuildOriginStatementInvalidError}. The predicate type claims origin
- * facts, and treating the bundle as carrying no statement would report it as
- * verified without those facts.
+ * facts, so treating a malformed predicate as absent would report the bundle
+ * as verified without validating those facts.
  */
 export function buildOriginStatement(
 	result: Pick<VerifyResult, 'bundle' | 'predicateType' | 'predicate'>
@@ -58,15 +58,9 @@ export function buildOriginStatement(
 	return parsed.data;
 }
 
-/**
- * One sentence describing where a subject came from. A path the run built names
- * the machine or store that built it. A path the store already held names that
- * store. A path the run copied names the stores it came from and the keys that
- * signed it. A republished path names the cache its metadata was read from.
- */
 export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 	if (subject.origin === 'store-held') {
-		return `${subject.buildStore} registered it as its own work, and this run did not build it`;
+		return `${subject.buildStore} reported the path as locally built, but the receipt does not record when it was built`;
 	}
 
 	if (subject.origin === 'copied') {
@@ -74,9 +68,9 @@ export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 	}
 
 	if (subject.origin === 'republished') {
-		return `this run republished it from ${subject.metadataSource}${signedBy(
+		return `this run read its narinfo from ${subject.metadataSource}${describeSignatures(
 			subject.signatures,
-			'that cache published no signature for it'
+			'the narinfo'
 		)}`;
 	}
 
@@ -85,34 +79,36 @@ export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 	}
 
 	if (subject.machine === undefined) {
-		return `${subject.buildStore} reports it as its own work, and this run did not watch the build`;
+		return `${subject.buildStore} reported that it built the path, but this run did not observe which machine performed the build`;
 	}
 
 	return `${subject.machine} built it, and ${subject.buildStore} reported the build`;
 }
 
-// A copied path is described from what the run can show: the stores it watched
-// the copy come from, if it watched one at all, and the keys that signed the
-// path.
+// `copiedFrom` records every source in the observed copy attempts. It does not
+// prove which source supplied the path because an earlier attempt may have
+// failed before Nix tried the next source.
 function describeCopied(
 	subject: Extract<ParsedBuildOriginSubject, { origin: 'copied' }>
 ): string {
 	const source =
 		subject.copiedFrom === undefined
-			? 'it was copied into the build store, but this run did not watch the copy'
-			: `this run copied it from ${subject.copiedFrom.join(', ')}`;
-	return `${source}${signedBy(subject.signatures, 'the store holds no signature for it')}`;
+			? 'the build store reported a copied path, but this run did not observe the source'
+			: `this run observed copy attempts from ${subject.copiedFrom.join(', ')}`;
+	return `${source}${describeSignatures(subject.signatures, 'the build-store metadata')}`;
 }
 
-// The keys that signed a path, as a clause to append to its description. A path
-// with no signature takes the caller's clause, because which document should
-// have carried one differs by origin.
-function signedBy(signatures: readonly string[], unsigned: string): string {
+// These signatures are evidence recorded in the receipt, not verification
+// results. Only describe what the source metadata reported.
+function describeSignatures(
+	signatures: readonly string[],
+	source: string
+): string {
 	const names = NixSignature.parseAll(signatures).map(
 		(signature) => signature.name
 	);
 
 	return names.length === 0
-		? `; ${unsigned}`
-		: `; signed by ${names.join(', ')}`;
+		? `; ${source} lists no Nix signatures`
+		: `; ${source} lists unverified Nix signatures for ${names.join(', ')}`;
 }

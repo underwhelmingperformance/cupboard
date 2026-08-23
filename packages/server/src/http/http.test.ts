@@ -25,32 +25,32 @@ const cases: readonly {
 	expected: boolean;
 }[] = [
 	{
-		name: 'matching ETag',
+		name: 'the request ETag matches',
 		headers: { 'if-none-match': etag },
 		expected: true
 	},
 	{
-		name: 'non-matching ETag',
+		name: 'the request ETag does not match',
 		headers: { 'if-none-match': '"zzz"' },
 		expected: false
 	},
 	{
-		name: 'a star matches the existing representation',
+		name: 'If-None-Match is *',
 		headers: { 'if-none-match': '*' },
 		expected: true
 	},
 	{
-		name: 'a comma-separated list containing the ETag',
+		name: 'an If-None-Match list contains the response ETag',
 		headers: { 'if-none-match': '"zzz", "abc"' },
 		expected: true
 	},
 	{
-		name: 'a weak request tag against the strong ETag',
+		name: 'a weak request ETag matches the strong response ETag',
 		headers: { 'if-none-match': 'W/"abc"' },
 		expected: true
 	},
 	{
-		name: 'a non-matching If-None-Match ignores a satisfying If-Modified-Since',
+		name: 'a non-matching If-None-Match accompanies a later If-Modified-Since',
 		headers: {
 			'if-none-match': '"zzz"',
 			'if-modified-since': afterLastModified
@@ -58,20 +58,24 @@ const cases: readonly {
 		expected: false
 	},
 	{
-		name: 'If-Modified-Since alone, not modified since',
+		name: 'only If-Modified-Since is later than Last-Modified',
 		headers: { 'if-modified-since': afterLastModified },
 		expected: true
 	},
 	{
-		name: 'If-Modified-Since alone, modified since',
+		name: 'only If-Modified-Since is earlier than Last-Modified',
 		headers: { 'if-modified-since': beforeLastModified },
 		expected: false
 	},
-	{ name: 'no conditional headers', headers: {}, expected: false }
+	{
+		name: 'the request has no conditional headers',
+		headers: {},
+		expected: false
+	}
 ];
 
 describe('isNotModified', () => {
-	it.each(cases)('$name', ({ headers, expected }) => {
+	it.each(cases)('returns $expected when $name', ({ headers, expected }) => {
 		const responseHeaders = new Headers({
 			etag,
 			'last-modified': lastModified
@@ -84,7 +88,7 @@ describe('isNotModified', () => {
 describe('narInfoObjectKey', () => {
 	const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
 
-	it('namespaces by tenant, bare for the default cache and nested for a named one', () => {
+	it('uses no cache segment for the default cache and adds one for a named cache', () => {
 		expect({
 			default: narInfoObjectKey(tenant, hash),
 			named: narInfoObjectKey(tenant, hash, buildsCache)

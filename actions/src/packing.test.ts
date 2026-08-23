@@ -125,7 +125,7 @@ describe('packCohorts', () => {
 		expect(result?.cohorts).toContainEqual(explicit);
 	});
 
-	it('leaves a target packing cannot price untouched, in its own cohort', () => {
+	it('leaves a target without a measurement in its original cohort', () => {
 		const withoutMeasurement = singleton('.#without-measurement');
 
 		const result = packCohorts({
@@ -166,51 +166,48 @@ describe('packCohorts', () => {
 
 	it.each([
 		{
-			name: 'both tolerate failure',
+			name: 'combines two best-effort targets',
 			first: true,
 			second: true,
 			packed: [['.#a', '.#b']]
 		},
 		{
-			name: 'both are required',
+			name: 'combines two required targets',
 			first: false,
 			second: false,
 			packed: [['.#a', '.#b']]
 		},
 		{
-			name: 'one tolerates failure and the other is required',
+			name: 'keeps a best-effort target and a required target in separate jobs',
 			first: true,
 			second: false,
 			packed: [['.#a'], ['.#b']]
 		}
-	])(
-		'packs two priced cohorts into one job when $name: $packed',
-		({ first, second, packed }) => {
-			const result = packCohorts({
-				enabled: true,
-				cohorts: [
-					singleton('.#a', { targets: [target('.#a', { bestEffort: first })] }),
-					singleton('.#b', { targets: [target('.#b', { bestEffort: second })] })
-				],
-				measurements: measurements([
-					['.#a', 10],
-					['.#b', 10]
-				]),
-				capacity: 1000,
-				headroom: { absoluteMinimum: 0, fraction: 0 }
-			});
+	])('$name', ({ first, second, packed }) => {
+		const result = packCohorts({
+			enabled: true,
+			cohorts: [
+				singleton('.#a', { targets: [target('.#a', { bestEffort: first })] }),
+				singleton('.#b', { targets: [target('.#b', { bestEffort: second })] })
+			],
+			measurements: measurements([
+				['.#a', 10],
+				['.#b', 10]
+			]),
+			capacity: 1000,
+			headroom: { absoluteMinimum: 0, fraction: 0 }
+		});
 
-			expect(
-				result?.cohorts
-					.map((cohort) => cohort.targets.map((entry) => entry.attr))
-					.toSorted((left, right) =>
-						left.join(',').localeCompare(right.join(','))
-					)
-			).toStrictEqual(packed);
-		}
-	);
+		expect(
+			result?.cohorts
+				.map((cohort) => cohort.targets.map((entry) => entry.attr))
+				.toSorted((left, right) =>
+					left.join(',').localeCompare(right.join(','))
+				)
+		).toStrictEqual(packed);
+	});
 
-	it('carries every emitted cohort’s own measured size, structurally', () => {
+	it('reports the measured size of each emitted cohort', () => {
 		const explicit = singleton('.#group-a', {
 			key: 'cohort-group',
 			targets: [target('.#group-a'), target('.#group-b')],

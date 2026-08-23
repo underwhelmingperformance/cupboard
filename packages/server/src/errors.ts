@@ -21,8 +21,8 @@ import { type R2ObjectKey } from './http/http.ts';
 export abstract class ServerHttpError extends Error {
 	abstract readonly status: number;
 
-	// When set, the response carries a Retry-After header: the refusal is
-	// transient and a client that waits this long may succeed.
+	// The Hono error renderer sends this value as Retry-After and marks the
+	// response no-store.
 	readonly retryAfterSeconds?: number;
 }
 
@@ -75,7 +75,7 @@ export class OwnerConfigurationInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(public readonly issuer: OidcIssuer) {
-		super('The configured owner issuer is not a valid https issuer URL');
+		super('The configured owner issuer is not a valid HTTPS issuer URL');
 		this.name = 'OwnerConfigurationInvalidError';
 	}
 }
@@ -84,9 +84,7 @@ export class CommitUpgradeRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.UPGRADE_REQUIRED;
 
 	constructor() {
-		super(
-			'The commit endpoint accepts WebSocket upgrades. Upgrade this request.'
-		);
+		super('The commit endpoint requires a WebSocket upgrade');
 		this.name = 'CommitUpgradeRequiredError';
 	}
 }
@@ -115,7 +113,7 @@ export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor(public readonly cache: StoredCache) {
-		super('The cache contains store paths. Pass force to delete it.');
+		super('The cache contains store paths. Set force to true to delete it.');
 		this.name = 'CacheNotEmptyError';
 	}
 }
@@ -209,9 +207,6 @@ export class StoredControlTrustInvalidError extends ServerHttpError {
 	}
 }
 
-/**
-A control trust rule was submitted without a pinned subject.
-*/
 export class ControlTrustSubjectRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
@@ -221,9 +216,8 @@ export class ControlTrustSubjectRequiredError extends ServerHttpError {
 	}
 }
 
-// A missing deployment configuration is a server-side fault an operator must
-// fix; a client cannot clear it by retrying, so it joins the other
-// missing-configuration faults as a 500.
+// A missing deployment configuration requires operator action. Retrying the
+// request cannot fix it, so the server returns 500 rather than a retryable 503.
 export class ControlNotConfiguredError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -289,10 +283,10 @@ export class TenantNotFoundError extends ServerHttpError {
 	}
 }
 
-// Creation configures a tenant's Durable Object before it admits the slug, so
-// an admitted tenant whose object was never configured means the provisioning
-// sequence did not finish. The client cannot clear that by retrying: an
-// operator re-runs the create, which is idempotent and configures the object.
+// Provisioning configures the Durable Object before admitting the tenant slug.
+// If an admitted tenant is not configured, the provisioning sequence did not
+// finish. The failing tenant request cannot repair this state; an operator must
+// rerun the idempotent creation request.
 export class TenantNotConfiguredError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -345,14 +339,15 @@ export class TenantNotSuspendedError extends ServerHttpError {
 	}
 }
 
-// Committing this blob would take the tenant past its storage quota. The charge is
-// gated on the tenant's 0-to-1 blob transition, so this is raised only when the
-// tenant does not already hold the hash and the new bytes would exceed the limit.
+// Committing this blob would take the tenant past its storage quota. The charge
+// is gated on the tenant's 0-to-1 blob transition, so this is raised only when
+// the tenant does not already hold the hash and the new bytes would exceed the
+// limit.
 export class QuotaExceededError extends ServerHttpError {
 	readonly status = StatusCodes.INSUFFICIENT_STORAGE;
 
 	constructor(public readonly tenant: TenantId) {
-		super('This tenant is over its storage quota');
+		super("This upload would exceed the tenant's storage quota");
 		this.name = 'QuotaExceededError';
 	}
 }
@@ -480,11 +475,10 @@ export type OAuthErrorCode =
 	| 'unsupported_grant_type';
 
 /**
- * An OAuth 2.0 error (RFC 6749 §5.2). The `error` code and the message become
- * the `error` and `error_description` of a JSON envelope sent with `no-store`.
- * A concrete cause may also surface a `problem` that refines the RFC code for
- * clients that understand it, and a structured `detail` carrying the facts of
- * that problem.
+ * An OAuth 2.0 error (RFC 6749 §5.2). The JSON response uses the error code and
+ * message as `error` and `error_description`, and is sent with `no-store`. A
+ * concrete error can also include `problem`, which refines the RFC code, and a
+ * structured `detail` describing that problem.
  */
 export abstract class OAuthError extends ServerHttpError {
 	abstract readonly error: OAuthErrorCode;
@@ -492,17 +486,11 @@ export abstract class OAuthError extends ServerHttpError {
 	readonly detail?: Readonly<Record<string, string>>;
 }
 
-/**
-`invalid_request`: the request is malformed or missing a parameter.
-*/
 export abstract class InvalidRequestError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_request';
 }
 
-/**
-A token-exchange request omitted the required `subject_token`.
-*/
 export class SubjectTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'subject-token-required';
 
@@ -512,9 +500,6 @@ export class SubjectTokenRequiredError extends InvalidRequestError {
 	}
 }
 
-/**
-A token request carried a `subject_token_type` the server does not accept.
-*/
 export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	readonly problem = 'unsupported-subject-token-type';
 
@@ -524,9 +509,6 @@ export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	}
 }
 
-/**
-A refresh-token grant omitted the required `refresh_token`.
-*/
 export class RefreshTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'refresh-token-required';
 
@@ -536,9 +518,6 @@ export class RefreshTokenRequiredError extends InvalidRequestError {
 	}
 }
 
-/**
-A token request body failed schema validation.
-*/
 export class TokenRequestBodyInvalidError extends InvalidRequestError {
 	readonly problem = 'schema-mismatch';
 
@@ -549,9 +528,9 @@ export class TokenRequestBodyInvalidError extends InvalidRequestError {
 }
 
 /**
- * A claim-bound (CI) exchange omitted `authorization_details`. Only the
- * interactive owner class may exchange without naming the grants it wants; a
- * CI rule must declare them explicitly.
+ * A rule without wildcard authority must receive explicit
+ * `authorization_details`. Wildcard-permitting interactive rules may omit the
+ * field and receive their full permitted authority.
  */
 export class AuthorizationDetailsRequiredError extends InvalidRequestError {
 	readonly problem = 'authorization-details-required';
@@ -573,15 +552,12 @@ export class InvalidAuthorizationDetailsError extends OAuthError {
 	readonly problem: string;
 
 	constructor(problem: string) {
-		super('the requested authorization_details are not permitted');
+		super('The requested authorization_details are not permitted');
 		this.problem = problem;
 		this.name = 'InvalidAuthorizationDetailsError';
 	}
 }
 
-/**
-`invalid_grant`: the supplied grant or token is invalid, expired, or untrusted.
-*/
 export abstract class InvalidGrantError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_grant';
@@ -601,16 +577,10 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 	}
 }
 
-/**
-A subject token was structurally or cryptographically unusable.
-*/
 export abstract class SubjectTokenInvalidError extends InvalidGrantError {
 	readonly problem = 'subject-token-invalid';
 }
 
-/**
-The subject token was not a well-formed JWT.
-*/
 export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token is not a JWT');
@@ -618,9 +588,6 @@ export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
 	}
 }
 
-/**
-The subject token's signature or claims failed verification.
-*/
 export class SubjectTokenVerificationFailedError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token failed verification');
@@ -628,9 +595,6 @@ export class SubjectTokenVerificationFailedError extends SubjectTokenInvalidErro
 	}
 }
 
-/**
-The subject token carried no subject claim.
-*/
 export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token has no subject');
@@ -638,16 +602,10 @@ export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	}
 }
 
-/**
-No enabled trust rule matched the subject token.
-*/
 export abstract class SubjectTokenUntrustedError extends InvalidGrantError {
 	override readonly problem: string = 'subject-token-untrusted';
 }
 
-/**
-No tenant trust rule matched the subject token.
-*/
 export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
 	constructor() {
 		super('No trust rule matches the subject token');
@@ -656,10 +614,10 @@ export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError
 }
 
 /**
- * A trust rule pinned to the caller's repository ids refused the token over
- * one configured claim. Raised only after the token's signature verified
- * against that rule's issuer, so the diagnostic discloses the rule's shape only
- * to a repository the rule already pins; every other caller receives the flat
+ * The token matched a rule's repository pins but failed another configured
+ * claim. This error is used only after the token's signature has been verified
+ * against that rule's issuer. The detailed diagnostic is therefore disclosed
+ * only to a repository that the rule already pins; every other caller receives
  * {@link TenantSubjectTokenUntrustedError}.
  */
 export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedError {
@@ -680,9 +638,6 @@ export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedE
 	}
 }
 
-/**
-No control trust rule matched the subject token.
-*/
 export class ControlSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
 	constructor() {
 		super('No control trust rule matches the subject token');
@@ -700,9 +655,9 @@ export class UnsupportedGrantTypeError extends OAuthError {
 	}
 }
 
-// Discovery (or the JWKS behind it) for the subject token's issuer could not be
-// reached. This is an upstream/transient condition, not a bad token: a 503 the
-// caller can retry, not an `invalid_grant` the caller treats as permanent.
+// Failure to retrieve the issuer metadata or signing keys is transient. Return
+// a retryable 503 rather than the permanent `invalid_grant` used for a bad
+// token.
 export class IssuerUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -712,7 +667,7 @@ export class IssuerUnavailableError extends ServerHttpError {
 		options: { readonly cause: unknown }
 	) {
 		super(
-			`Could not reach issuer ${issuer} to verify the subject token`,
+			`Could not retrieve metadata or signing keys for issuer ${issuer}`,
 			options
 		);
 		this.name = 'IssuerUnavailableError';
@@ -842,7 +797,7 @@ export class InvalidPushIdError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
 	constructor() {
-		super('Push id is not recognised');
+		super('Push ID is not recognised');
 		this.name = 'InvalidPushIdError';
 	}
 }
@@ -881,10 +836,9 @@ export class UploadCacheMismatchError extends ServerHttpError {
 }
 
 export class UploadedObjectNotFoundError extends ServerHttpError {
-	// NOT_FOUND, matching a reaped upload slot. Every flow that raises this
-	// error (a staging object gone before commit, a reused blob gone between
-	// negotiate and commit) has the same remedy: the re-negotiation the push
-	// already performs when a commit returns 404.
+	// Use 404 when staging bytes disappear before commit or a reusable blob
+	// disappears after negotiation. The push client already renegotiates an
+	// upload when commit returns this status.
 	readonly status = StatusCodes.NOT_FOUND;
 
 	constructor(public readonly r2Key: R2ObjectKey) {
@@ -903,9 +857,6 @@ export class TenantAdmissionUnavailableError extends ServerHttpError {
 	}
 }
 
-// D1 sheds load under sustained pressure by throwing an overload error with no
-// structured code. The fault is transient, so callers that wait briefly may
-// succeed; the refusal is a 503 carrying Retry-After for them to honour.
 export class DatabaseOverloadedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -929,15 +880,15 @@ export class SharedFactsUnavailableError extends ServerHttpError {
 	}
 }
 
-// The runtime aborted the request with a fault it marks as retryable: the
-// Durable Object serving the request was reset or overloaded, so the request
-// died with the object, independent of anything about the request itself.
+// Cloudflare marks some runtime faults as retryable when an overload or Durable
+// Object reset interrupts a request. The same classification can occur outside
+// a tenant route, so the diagnostic refers to the service rather than a tenant.
 export class TenantDispatchInterruptedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
 
 	constructor(public override readonly cause: unknown) {
-		super('Tenant is temporarily unavailable');
+		super('The service was temporarily unavailable');
 		this.name = 'TenantDispatchInterruptedError';
 	}
 }
@@ -1085,9 +1036,6 @@ export class UploadedObjectChecksumMismatchError extends ServerHttpError {
 	}
 }
 
-// The uploaded blob's compressed bytes match their checksum, but decompressing
-// them does not reproduce the NAR hash or size the narinfo would commit to and
-// sign. The bytes are rejected so the server never signs an unverified mapping.
 export class NarVerificationFailedError extends ServerHttpError {
 	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
 
@@ -1101,9 +1049,6 @@ export class NarVerificationFailedError extends ServerHttpError {
 	}
 }
 
-// The declared uncompressed NAR is larger than the server will decompress to
-// verify within its CPU budget, so it could never be served safely. Rejected at
-// commit.
 export class NarTooLargeError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 
@@ -1111,14 +1056,11 @@ export class NarTooLargeError extends ServerHttpError {
 		public readonly narSize: number,
 		public readonly maxNarSize: number
 	) {
-		super('NAR is too large to verify and cannot be served');
+		super('The declared NAR size exceeds the verification limit');
 		this.name = 'NarTooLargeError';
 	}
 }
 
-// The runtime does not provide native zstd decompression, so the server cannot
-// verify NAR contents. Raised loudly at Durable Object initialisation rather
-// than as an opaque stream error at the first verified commit.
 export class ZstdUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -1128,15 +1070,11 @@ export class ZstdUnavailableError extends ServerHttpError {
 	}
 }
 
-/**
- * A bounded I/O wrapper refused a member it cannot bound: sessions and
- * multipart handles issue their own network calls, and those calls do not pass
- * through the wrapper, so the per-call limit would not apply to them. Take the
- * handle from the raw binding instead, outside any critical section.
- */
 export class UnboundableIoError extends Error {
 	constructor(public readonly member: string) {
-		super(`${member} cannot be bounded; use the raw binding off the gate`);
+		super(
+			`${member} cannot be bounded; use the raw binding outside a critical section`
+		);
 		this.name = 'UnboundableIoError';
 	}
 }

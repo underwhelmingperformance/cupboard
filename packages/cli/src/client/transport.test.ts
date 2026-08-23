@@ -12,7 +12,7 @@ describe('parseWorkerUrl', () => {
 	it.each([
 		['a bare host', 'https://cupboard.example.workers.dev'],
 		['a tenant path', 'https://cupboard.example.workers.dev/t/acme']
-	])('parses %s', (_name, value) => {
+	])('accepts %s', (_name, value) => {
 		expect(parseWorkerUrl(value).host).toBe('cupboard.example.workers.dev');
 	});
 
@@ -31,9 +31,6 @@ describe('parseWorkerUrl', () => {
 		expect(() => parseWorkerUrl('not a url')).toThrow(InvalidWorkerUrlError);
 	});
 
-	// Every route resolves under the base's origin and path, so a base
-	// carrying anything else would corrupt or missend the requests built on
-	// it.
 	it.each([
 		['an FTP scheme', 'ftp://cupboard.example.workers.dev/t/acme'],
 		['a file scheme', 'file:///tmp/cupboard'],
@@ -45,7 +42,7 @@ describe('parseWorkerUrl', () => {
 			'embedded credentials',
 			'https://ci:secret@cupboard.example.workers.dev/t/acme'
 		]
-	])('rejects a URL carrying %s', (_name, value) => {
+	])('rejects %s in a Worker URL', (_name, value) => {
 		expect(() => parseWorkerUrl(value)).toThrow(
 			new InvalidWorkerUrlBaseError()
 		);
@@ -61,7 +58,7 @@ describe('reachableFetcher', () => {
 		expect(await fetcher('https://cupboard.example.workers.dev')).toBe(ok);
 	});
 
-	it('turns a network failure into a host-named unreachable error', async () => {
+	it('translates a rejected TypeError into a host-named unreachable error', async () => {
 		const cause = new TypeError('fetch failed', {
 			cause: new Error('getaddrinfo ENOTFOUND cupboard.example.workers.dev')
 		});

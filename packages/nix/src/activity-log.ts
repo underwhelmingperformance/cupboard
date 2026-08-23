@@ -4,14 +4,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-// Nix records the start of a copy as an `action: 'start'` record of activity
-// type 100. Its fields are the store path, the store the bytes are read from
-// and the store they are written to. Nix writes the record when the transfer
-// begins, after it has checked that the destination does not already hold the
-// path, so the record shows that this run really did fetch the path from that
-// source. Activity type 108 reports the substituter a substitution selected,
-// but Nix writes that record before the check, so it also appears for a path
-// the destination turns out to hold already.
+// Nix emits `actCopyPath` (100) only after it has confirmed that the destination
+// lacks the path and the transfer has begun. Its first three fields are the
+// store path, source store and destination store, so the event proves this run
+// started fetching the path from that source. Activity type 108 is emitted
+// before the destination check and can also appear for an existing path.
 const copyActivityStartSchema = z.object({
 	action: z.literal('start'),
 	type: z.literal(100),
@@ -21,10 +18,9 @@ const copyActivityStartSchema = z.object({
 });
 
 /**
- * The records in one `json-log-path` file. Nix writes one JSON document per
- * line. The file comes from another process, so a line that does not parse as
- * JSON is skipped, and each caller ignores the record types it does not
- * recognise.
+ * Parses the records in one `json-log-path` file. Nix writes one JSON document
+ * per line. The file comes from another process, so malformed lines are skipped
+ * and each caller ignores unrecognised record types.
  */
 export function* activityLogRecords(log: string): Generator {
 	for (const line of log.split(/\r?\n/u)) {
@@ -41,14 +37,13 @@ export function* activityLogRecords(log: string): Generator {
 }
 
 /**
- * The stores a run copied each path from, keyed by store path, in the order the
- * logs recorded them. A path has more than one source when the run copied it
- * more than once, which happens when Nix moves on to the next substituter after
- * a fetch fails.
+ * Extracts copy evidence from the supplied activity logs. Each map entry lists
+ * the source stores from this run's `actCopyPath` events, deduplicated in log
+ * order. Several sources mean that Nix started more than one transfer for the
+ * path, for example after a fetch failed.
  *
- * A path the run never copied has no entry. That covers every path the store
- * already held when the run started, and every path another store fetched out
- * of this run's view.
+ * The map omits paths with no copy event in these logs. This includes paths
+ * that were already valid and copies performed outside these invocations.
  */
 export function copySources(
 	logs: readonly string[]

@@ -49,10 +49,9 @@ export class IntegrityCheckService {
 			return undefined;
 		}
 
-		// The compressed checksum to verify against is the canonical fact in
-		// `blob_state`, not a field on the narinfo row. When it is present, check the
-		// stored object's `fileHash`/`fileSize`; the uncompressed re-derivation below
-		// runs regardless, since it needs only the row's `narHash`/`narSize`.
+		// `blob_state` is authoritative for the compressed size and hash. A deep
+		// check also derives the uncompressed NAR hash below, even if that row is
+		// absent.
 		const blobFact = blobFacts.get(row.narHash);
 
 		if (blobFact !== undefined) {
@@ -95,9 +94,8 @@ export class IntegrityCheckService {
 		return undefined;
 	}
 
-	// A deep check verifies each distinct NAR against its canonical `blob_state`
-	// checksum. Reading that row per hash while iterating is an N+1 over the
-	// batch's distinct hashes, so fetch them all up front with a chunked `IN`.
+	// Fetch the canonical compressed-file facts in bounded batches rather than
+	// issuing one D1 query for each NAR.
 	private async blobFactsFor(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobFact>> {
@@ -155,7 +153,6 @@ export class IntegrityCheckService {
 
 		const tenant = this.context.requireTenant();
 
-		// Only the deep path reads `blob_state`, so only it needs the prefetch.
 		const distinctNarHashes = [...new Set(rows.map((row) => row.narHash))];
 		const blobFacts = isDeep
 			? await this.blobFactsFor(distinctNarHashes)

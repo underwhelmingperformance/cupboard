@@ -48,17 +48,15 @@ const storePathHash = storePathHashSchema.parse(
 );
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 const path = '/cache/_default/commit';
-// The session's jittered reconnect back-off never exceeds this cap, so advancing
-// a fake clock by it fires any pending reconnect.
+// Advancing by this cap fires every possible jittered reconnect delay.
 const maxBackoffMs = 5000;
-// The longest delay a timer can hold; a runtime truncates a longer one to a
-// millisecond, which is what the session's chained deadlines work around.
+// Node truncates longer timer delays. The session chains timers to preserve a
+// deadline beyond this limit.
 const maxTimerDelayMs = 2 ** 31 - 1;
-// How long the session reads a refusal body before it gives up on the response
-// and drops the connection, mirroring its own bound.
+// The session abandons a stalled upgrade-response body after this interval.
 const drainTimeoutMs = 5000;
-// The upgrade request the real client sends: it declares both optional ops on
-// every connection, whatever the server turns out to support.
+// The client offers both optional operations on every connection. The response
+// selects the operations the server supports.
 const creditDeclaringHeaders = {
 	'x-cupboard-accept-capabilities': 'commit-batch,commit-credit'
 };
@@ -94,8 +92,7 @@ async function rejectedBy<T extends Error>(
 }
 
 interface SessionTestOptions {
-	// The upgrade request headers, which are what the session declares to the
-	// server. Empty unless a test declares a capability on the client's behalf.
+	// Headers offered by the client on the upgrade request.
 	readonly headers?: Readonly<Record<string, string>>;
 	readonly timeoutSeconds?: number;
 	readonly signal?: AbortSignal;
@@ -104,8 +101,7 @@ interface SessionTestOptions {
 	readonly reconnectBackoffMs?: number;
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
-	// Collects the clock time of each connection, so a test can measure the
-	// back-off the session waited before reopening.
+	// Record each connection time so tests can measure reconnect delays.
 	readonly connectedAt?: number[];
 }
 
@@ -118,8 +114,7 @@ function fixedAttempt(
 	};
 }
 
-// Hands the session a fresh socket per connection attempt, so a test can drop
-// one and drive the reconnect onto the next.
+// Return a fresh socket for each connection attempt.
 function openSessionOver(
 	sockets: readonly FakeCommitSocket[],
 	options: SessionTestOptions = {}
@@ -168,8 +163,7 @@ function openSession(
 	return openSessionOver([socket], options);
 }
 
-// The commit ack without its `settled` promise, so a test can assert the prompt
-// disposition structurally.
+// Remove the asynchronous verdict from an acknowledgement before comparison.
 async function ackOf(
 	commit: Promise<CommitOutcome>
 ): Promise<Omit<CommitOutcome, 'settled'>> {
@@ -178,7 +172,7 @@ async function ackOf(
 	return { storePathHash, narHash, status };
 }
 
-// The verdict promise a commit ack carries.
+// Return the promise that resolves with the final verdict.
 async function settledOf(commit: Promise<CommitOutcome>): Promise<void> {
 	const outcome = await commit;
 
@@ -221,7 +215,7 @@ describe('runCommitSession', () => {
 		expect(socket.closed).toBe(true);
 	});
 
-	it('settles each commit by its upload id over one socket', async () => {
+	it('resolves each commit from the frame with its upload ID', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const first = session.commit({
@@ -289,7 +283,7 @@ describe('runCommitSession', () => {
 		});
 	});
 
-	it('parks a deferred upload and settles committed on a servable verdict', async () => {
+	it('parks a deferred upload and resolves it as committed on a servable verdict', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit(target);
@@ -312,13 +306,13 @@ describe('runCommitSession', () => {
 		await expect(settledOf(settled)).resolves.toBeUndefined();
 	});
 
-	it('acks committed on a servable verdict that arrives before the deferred frame', async () => {
+	it('resolves as committed when a servable verdict precedes the deferred frame', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit(target);
 
-		// Verification settled the upload before its deferred frame, so the verdict
-		// races ahead. The client settles from the target's known identity.
+		// Deliver the verdict first to reproduce verification completing before the
+		// deferred frame reaches the client.
 		socket.emit('open');
 		socket.emit(
 			'message',
@@ -415,7 +409,6 @@ describe('runCommitSession', () => {
 				})
 			);
 
-			// The entry must not have resolved or rejected yet: it is waiting for the retry.
 			let hasResolved = false;
 			let hasRejected = false;
 			void (async () => {
@@ -432,7 +425,6 @@ describe('runCommitSession', () => {
 				hasRejected: false
 			});
 
-			// Advance past the retry delay, then deliver a settled frame.
 			await vi.advanceTimersByTimeAsync(5000);
 			socket.emit(
 				'message',
@@ -456,14 +448,13 @@ describe('runCommitSession', () => {
 		const session = openSession(socket);
 		const commit = session.commit(target);
 
-		// Register the rejection handler before driving any frames so the rejection
-		// is caught even when it fires synchronously inside advanceTimersByTimeAsync.
+		// Register the handler before advancing fake timers because rejection can
+		// occur synchronously inside the timer callback.
 		const rejection = rejectedBy(commit, CupboardHttpError);
 
 		socket.emit('open');
 
-		// Send one more error frame than the retry cap; the last one terminates.
-		// maxEntryRetries = 3, so 4 total error frames exhaust the budget.
+		// Four error frames exhaust the three-retry budget.
 		for (let index = 0; index < 4; index += 1) {
 			socket.emit(
 				'message',
@@ -503,15 +494,13 @@ describe('runCommitSession', () => {
 		}).toStrictEqual({
 			name: 'CupboardHttpError',
 			status: 404,
-			// The session sent one commit op on open; no retry op after the terminal error.
 			sentAfterError: 1
 		});
 	});
 
-	// Below 500, only a rate limit is about timing; any other status refuses
-	// this request itself. A token the cache will not accept and a route it does
-	// not serve both read the same on the next dial, so the session gives up at
-	// once.
+	// A 429 response can succeed after a delay. Other 4xx responses reject this
+	// request permanently, so reconnecting with the same route and token cannot
+	// help.
 	it.each([
 		{ status: 401, body: 'Missing bearer token' },
 		{ status: 404, body: 'No such cache' }
@@ -535,7 +524,6 @@ describe('runCommitSession', () => {
 				path: error.path,
 				status: error.status,
 				body: error.body,
-				// The session's teardown closes the connection on this exit.
 				closed: socket.closed
 			}).toStrictEqual({
 				name: 'CupboardHttpError',
@@ -548,11 +536,8 @@ describe('runCommitSession', () => {
 		}
 	);
 
-	// A dial meets the server's own overload statuses and the gateway ones an
-	// edge in front of it reports, and a dial refused with any of them may still
-	// be followed by one that succeeds. A paced session treats them all as a
-	// drop, so its capacity clock decides how long it keeps trying, and the run
-	// continues when a dial gets through.
+	// Server and gateway overload responses can be transient. A credit-paced
+	// session keeps reconnecting until its capacity deadline expires.
 	it.each([429, 502, 503, 504, 520])(
 		'carries on after an upgrade refused with %i',
 		async (status) => {
@@ -589,9 +574,8 @@ describe('runCommitSession', () => {
 		}
 	);
 
-	// An unpaced session has no capacity clock, so the refusal spends from the
-	// reconnect budget like any other drop: the session dials again, and it is
-	// the drop after that, with the budget gone, that ends the push.
+	// An unpaced session has no capacity deadline, so a retryable upgrade refusal
+	// consumes its reconnect budget like any other drop.
 	it('spends the reconnect budget on an upgrade refused with a retryable status', async () => {
 		const first = new FakeCommitSocket();
 		const refused = new FakeCommitSocket();
@@ -608,8 +592,6 @@ describe('runCommitSession', () => {
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The refusal spends the second of the two reconnects, so the session
-		// dials once more rather than failing here.
 		const refusal = new FakeUpgradeFailure(503);
 		refused.emit('unexpected-response', {}, refusal);
 		refusal.emit('data', Buffer.from('Commit sessions are busy'));
@@ -677,12 +659,9 @@ describe('runCommitSession', () => {
 			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
 
-		// The socket drops while the upload is parked for its verdict.
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The reconnect resumes the acked id with a subscribe, and the replayed
-		// verdict settles it over the new socket.
 		second.emit('open');
 		second.emit(
 			'message',
@@ -707,12 +686,10 @@ describe('runCommitSession', () => {
 		const session = openSessionOver([first, second]);
 		const settled = session.commit(target);
 
-		// The socket drops before any frame, so the commit op may never have landed.
 		first.emit('open');
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The reconnect re-sends the commit, which settles over the new socket.
 		second.emit('open');
 		second.emit(
 			'message',
@@ -835,7 +812,7 @@ function batchOp(ids: readonly string[]): string {
 	});
 }
 
-// The server's side of an accepting upgrade that offers the batch op.
+// Accept an upgrade and advertise the batch operation.
 function advertiseBatch(socket: FakeCommitSocket): void {
 	socket.emit('upgrade', {
 		headers: { 'x-cupboard-commit-capabilities': 'commit-batch' }
@@ -855,10 +832,8 @@ function settleBoth(socket: FakeCommitSocket, ids: readonly string[]): void {
 	}
 }
 
-// The 101's capabilities header switches the session onto the batched op: the
-// server offered it, so commits coalesce into `commit-batch` messages carrying
-// each path's identity. Without the advertisement (every case above) the
-// session speaks per-id `commit` ops.
+// The response capability selects `commit-batch`, which includes each path's
+// identity. Without it, the session sends one `commit` operation per upload ID.
 describe('batched commit ops', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -900,7 +875,7 @@ describe('batched commit ops', () => {
 
 		const first = session.commit(targetFor('upload-a'));
 		const second = session.commit(targetFor('upload-b'));
-		// The coalescing flush runs on a microtask.
+		// Let the microtask that coalesces commits run.
 		await Promise.resolve();
 
 		settleBoth(socket, ['upload-a', 'upload-b']);
@@ -946,14 +921,13 @@ describe('batched commit ops', () => {
 		const session = openSessionOver([first, second]);
 		const settled = session.commit(target);
 
-		// The socket drops before any frame, so the op may never have landed.
 		advertiseBatch(first);
 		first.emit('open');
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The reconnect re-sends the commit with its identity, which the server
-		// resolves even when the row settled and cleared before the drop.
+		// Identity-aware replay remains valid after the server clears the pending
+		// row.
 		advertiseBatch(second);
 		second.emit('open');
 		second.emit(
@@ -976,12 +950,11 @@ describe('batched commit ops', () => {
 		});
 	});
 
-	it('speaks per-id ops to a connection that advertised nothing', async () => {
+	it('sends per-ID operations when the connection advertises no capabilities', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const commit = session.commit(target);
 
-		// An upgrade response with no capabilities header: an older server.
 		socket.emit('upgrade', { headers: {} });
 		socket.emit('open');
 		socket.emit(
@@ -1025,7 +998,6 @@ describe('batched commit ops', () => {
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Second socket does not advertise commit-batch, so replay speaks per-id ops.
 		second.emit('upgrade', { headers: {} });
 		second.emit('open');
 		second.emit(
@@ -1049,8 +1021,7 @@ describe('batched commit ops', () => {
 	});
 });
 
-// Three single-entry chunks for windowing tests: the window cap (2) fills on
-// the first two, leaving the third to queue until a frame arrives.
+// Three single-entry chunks fill the two-message window and leave one queued.
 const windowTestIds = ['upload-w0', 'upload-w1', 'upload-w2'] as const;
 
 describe('batch message windowing', () => {
@@ -1062,22 +1033,19 @@ describe('batch message windowing', () => {
 		vi.useRealTimers();
 	});
 
-	it('holds the third chunk until a frame arrives for any entry of the first', async () => {
+	it('queues the third chunk until a frame frees a message-window slot', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const [id0, id1, id2] = windowTestIds;
 		const commits = windowTestIds.map((id) => session.commit(targetFor(id)));
 
-		// Advertise batch with max=1 so each entry lands in its own chunk.
 		socket.emit('upgrade', {
 			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=1' }
 		});
 		socket.emit('open');
 
-		// Only the first two chunks go out immediately.
 		expect(socket.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
 
-		// A frame for an entry in the first chunk releases the third.
 		socket.emit(
 			'message',
 			frame({
@@ -1111,25 +1079,19 @@ describe('batch message windowing', () => {
 		});
 		first.emit('open');
 
-		// Two chunks sent, one queued.
 		expect(first.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
 
-		// Drop before the third chunk was sent; reconnect replays all three through
-		// a fresh window without ever having sent the third to the first socket.
+		// Drop while the third chunk is still queued on the first socket.
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Reconnect sends all outstanding entries through a fresh window.
 		second.emit('upgrade', {
 			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=1' }
 		});
 		second.emit('open');
 
-		// All three ids are outstanding, so the new window sends the first two
-		// immediately and queues the third again.
 		expect(second.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
 
-		// A frame for the first entry releases the window slot, sending the third.
 		second.emit(
 			'message',
 			frame({
@@ -1157,7 +1119,7 @@ function subscribeIdentityOp(ids: readonly string[]): string {
 	});
 }
 
-// Emits an upgrade that advertises both commit-batch and subscribe-identity.
+// Advertise both identity-aware operations.
 function advertiseBoth(socket: FakeCommitSocket): void {
 	socket.emit('upgrade', {
 		headers: {
@@ -1189,11 +1151,9 @@ describe('subscribe-identity', () => {
 			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
 
-		// Socket drops while the upload is parked.
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Reconnect advertises both tokens: acked id replays via subscribe-identity.
 		advertiseBoth(second);
 		second.emit('open');
 		second.emit(
@@ -1229,7 +1189,6 @@ describe('subscribe-identity', () => {
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Second connection only offers commit-batch, not subscribe-identity.
 		advertiseBatch(second);
 		second.emit('open');
 		second.emit(
@@ -1244,19 +1203,17 @@ describe('subscribe-identity', () => {
 		});
 	});
 
-	it('settles an acked entry when a settled frame arrives for it', async () => {
+	it('resolves an acknowledged entry from a later settled frame', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit(target);
 
 		advertiseBoth(socket);
 		socket.emit('open');
-		// The deferred frame acks the entry.
 		socket.emit(
 			'message',
 			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
-		// A settled/already-present frame arrives for the acked id.
 		socket.emit(
 			'message',
 			frame({
@@ -1301,8 +1258,7 @@ function subscribeIdentityOpWithRetention(ids: readonly string[]): string {
 	});
 }
 
-// Emits an upgrade whose capabilities are the real value the server sends,
-// which carries the retention-marker attribute on both tokens.
+// Advertise the server's retention-marker attribute on both operations.
 function advertiseRetentionMarker(socket: FakeCommitSocket): void {
 	socket.emit('upgrade', {
 		headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
@@ -1318,7 +1274,7 @@ describe('retention marker', () => {
 		vi.useRealTimers();
 	});
 
-	it('sets the marker on a commit-batch entry for a plan-carrying target when the server advertises it', async () => {
+	it('sets the marker on a commit-batch entry whose target has a retention plan', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit({ ...target, retention: true });
@@ -1340,9 +1296,8 @@ describe('retention marker', () => {
 		session.close();
 	});
 
-	// A disabled or unrecognised advertisement must read as no marker: only
-	// the exact advertised value proves the versioned handshake.
-	it('omits the marker when the advertised attribute carries a different value', async () => {
+	// Only the exact attribute value enables the versioned handshake.
+	it('omits the marker when the advertised attribute has a different value', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit({ ...target, retention: true });
@@ -1373,8 +1328,6 @@ describe('retention marker', () => {
 		const session = openSession(socket);
 		const settled = session.commit({ ...target, retention: true });
 
-		// Advertises commit-batch, but not the retention-marker attribute: the
-		// shape a server that predates the marker sends.
 		advertiseBatch(socket);
 		socket.emit('open');
 
@@ -1505,7 +1458,6 @@ describe('parameterised capability max', () => {
 		});
 		socket.emit('open');
 
-		// 3 commits, max=2 → two batch ops
 		expect(socket.sent).toStrictEqual([
 			batchOp(['upload-a', 'upload-b']),
 			batchOp(['upload-c'])
@@ -1526,7 +1478,6 @@ describe('parameterised capability max', () => {
 			void session.commit(targetFor(id));
 		}
 
-		// max=9999 is above the protocol bound, so the protocol bound wins.
 		socket.emit('upgrade', {
 			headers: {
 				'x-cupboard-commit-capabilities': `commit-batch;max=${String(commitBatchMaxEntries + 100)}`
@@ -1581,7 +1532,7 @@ describe('unknown frame ev tolerance', () => {
 		vi.useRealTimers();
 	});
 
-	it('ignores a frame whose ev is unknown and settles on the next valid frame', async () => {
+	it('ignores a frame with an unknown event and resolves on the next valid frame', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const commit = session.commit(target);
@@ -1614,7 +1565,6 @@ describe('unknown frame ev tolerance', () => {
 		const commit = session.commit(target);
 
 		socket.emit('open');
-		// 'settled' is a known ev but this frame is missing the required fields.
 		socket.emit('message', JSON.stringify({ ev: 'settled', uploadId }));
 
 		const error = await rejectedBy(commit, CommitSocketProtocolError);
@@ -1680,7 +1630,6 @@ describe('onCapabilities callback', () => {
 			}
 		});
 
-		// Upgrade with no capabilities header.
 		socket.emit('upgrade', { headers: {} });
 		socket.emit('open');
 
@@ -1721,11 +1670,9 @@ describe('onCapabilities callback', () => {
 		await commit;
 
 		expect(calls).toHaveLength(2);
-		// First connection advertised commit-batch.
 		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([
 			['commit-batch', {}]
 		]);
-		// Second connection advertised nothing.
 		expect([...(calls[1]?.entries() ?? [])]).toStrictEqual([]);
 	});
 });
@@ -1741,7 +1688,6 @@ describe('close code and reason', () => {
 
 	it('fails the session immediately on close code 1002 with no reconnect', async () => {
 		const first = new FakeCommitSocket();
-		// A second socket would throw if the session tried to reconnect.
 		const session = openSessionOver([first]);
 		const commit = session.commit(target);
 
@@ -1787,10 +1733,9 @@ describe('close code and reason', () => {
 		});
 	});
 
-	// `ws` reports one fault as an `error` event followed by a `close` event, so
-	// a drop that costs two reconnects would halve the retry budget and open two
-	// connections that then share the session's state. The reconnect budget of
-	// one below is exhausted by a second count of the same drop.
+	// `ws` reports one transport fault as an `error` followed by `close`. Count
+	// that pair once so one failure cannot consume two reconnects or start two
+	// connections over the same session state.
 	it('counts an error and the close that follows it as one drop', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -1812,14 +1757,12 @@ describe('close code and reason', () => {
 		});
 	});
 
-	// A retryable error frame arms a per-entry retry. The replay onto the fresh
-	// connection re-sends that entry itself, so the retry must not fire as well.
+	// Reconnect replay resends an entry that already has a retry timer. Cancel the
+	// timer so the new connection does not receive the entry twice.
 	it('does not re-send a replayed entry whose retry was armed before the drop', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
 		const session = openSessionOver([first, second], {
-			// Short enough that the reconnect completes well before the entry's
-			// retry would have fired.
 			reconnectBackoffMs: 20,
 			keepaliveMs: 600_000
 		});
@@ -1838,7 +1781,6 @@ describe('close code and reason', () => {
 		second.emit('open');
 		const replayed = [...second.sent];
 
-		// Past the retry armed on the dropped connection.
 		await vi.advanceTimersByTimeAsync(1000);
 		second.emit('message', settledFrame(uploadId));
 
@@ -1855,10 +1797,8 @@ describe('close code and reason', () => {
 });
 
 describe('late commit after clean close', () => {
-	// The server closes a socket it has heard nothing on for a long time. That
-	// costs a session with nothing outstanding nothing at all, so the next commit
-	// opens a fresh connection rather than failing. A session the caller closed
-	// stays closed, which the case below asserts.
+	// A server-initiated idle close leaves the session reusable. An explicit
+	// client close is terminal.
 	it('reopens the connection for a commit issued after the server closed an idle socket', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -1917,8 +1857,8 @@ describe('boundary conditions', () => {
 
 		first.emit('open');
 		const commit = session.commit(target);
-		// Drop before the microtask flush; the coalescing flush sees no open
-		// socket and sends nothing. The reconnect replays the entry once.
+		// Drop before the batching microtask runs. Replay must send the entry once
+		// on the new socket.
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
@@ -1937,8 +1877,6 @@ describe('boundary conditions', () => {
 			narHash,
 			status: 'committed'
 		});
-		// Nothing reached the first socket (the flush ran after the close).
-		// The second socket replayed exactly one op.
 		expect({ first: first.sent, second: second.sent }).toStrictEqual({
 			first: [],
 			second: [commitOp(uploadId)]
@@ -1950,15 +1888,12 @@ describe('boundary conditions', () => {
 		const second = new FakeCommitSocket();
 		const session = openSessionOver([first, second], { maxReconnects: 1 });
 
-		// Register before the first connection so there is outstanding work when the
-		// socket drops, so the drop enters the reconnect path.
 		const commit = session.commit(target);
 
 		first.emit('open');
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Second socket replays, then drops. Reconnect budget is now zero.
 		second.emit('open');
 		second.emit('close', 1006, '');
 
@@ -1975,11 +1910,8 @@ describe('boundary conditions', () => {
 		const session = openSessionOver([first, second]);
 		const commit = session.commit(target);
 
-		// Neither socket advertises commit-batch; bare commit ops are used
-		// throughout. On a reconnect, the bare op re-sends to the server even
-		// though the row may have settled and cleared before the drop; the server
-		// answers with an error frame in that case. This asymmetry is inherent to
-		// the non-batching path.
+		// Bare replay lacks path identity. If the pending row disappeared before
+		// reconnect, only the server's error frame can resolve the entry.
 		first.emit('open');
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
@@ -2006,8 +1938,7 @@ describe('boundary conditions', () => {
 	});
 });
 
-// The server's side of an upgrade that paces the session by credit: `grant`
-// entries to start with, and batches of at most `max` entries.
+// Accept an upgrade with credit pacing and the given batch limit.
 function advertiseCredit(
 	socket: FakeCommitSocket,
 	grant: number,
@@ -2048,10 +1979,9 @@ describe('credit-paced commits', () => {
 		vi.restoreAllMocks();
 	});
 
-	// A session that opens on nothing declares its whole queue once, then spends
-	// each grant as it arrives. It re-declares only when the queue outgrows what
-	// it last declared, so a steady drain costs one declaration.
-	it('declares its queue when it opens on no credit and sends what each grant covers', () => {
+	// A zero-credit session declares the queued demand once, then consumes each
+	// grant. It declares again only when the queue exceeds the previous demand.
+	it('declares its queue at zero credit and sends entries as grants arrive', () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const commits = queuedIds.map((id) => session.commit(targetFor(id)));
@@ -2073,10 +2003,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// Waiting describes the session rather than any one frame: it holds whenever
-	// paths are queued with nothing to send them under, and it ends when a grant
-	// arrives. The callback reports that state and nothing more, since the
-	// server's rotation moves as soon as any entry settles anywhere.
+	// Waiting is session state: it begins when entries are queued without credit
+	// and ends when a grant lets the session send one.
 	it('reports waiting for capacity while paths are queued with no credit', () => {
 		const socket = new FakeCommitSocket();
 		const reported: boolean[] = [];
@@ -2100,10 +2028,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// Every ending of a wait is reported, however it ended, so a caller that
-	// keeps its own record of the session never has a stale one. The queued
-	// paths reject with the capacity timeout, and that rejection is what says
-	// the wait ended in failure.
+	// Report every transition out of waiting so callers cannot retain a stale
+	// capacity-wait indicator. The queued entries separately reject with the
+	// timeout.
 	it('reports the end of a wait when the wait expires', async () => {
 		const socket = new FakeCommitSocket();
 		const reported: boolean[] = [];
@@ -2134,11 +2061,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A cache that refuses every dial with a server error is retried for the
-	// whole budget, because a transient fault heals and the clock is what
-	// bounds the attempt. What the operator needs from the failure is the
-	// refusal, not just the length of the wait, so the timeout carries the last
-	// one the session met.
+	// Retry transient upgrade failures until the capacity deadline. Preserve the
+	// last refusal as the timeout cause so the operator sees why no connection
+	// opened.
 	it('includes the last upgrade refusal in a capacity timeout', async () => {
 		vi.spyOn(Math, 'random').mockReturnValue(0);
 
@@ -2178,10 +2103,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A refusal belongs to the wait it was met during. Once that wait has
-	// expired and reported it, a later wait that meets no refusal reports the
-	// wait alone, rather than pointing the operator at a condition from before
-	// the previous failure.
+	// Clear a recorded refusal when its wait ends. A later timeout must not report
+	// an error from a previous capacity wait.
 	it('leaves a refusal behind with the wait that reported it', async () => {
 		const refused = new FakeCommitSocket();
 		const idle = new FakeCommitSocket();
@@ -2203,8 +2126,6 @@ describe('credit-paced commits', () => {
 		const met = firstError.cause.cause;
 		expectError(met, CupboardHttpError);
 
-		// The wait that follows meets a cache that takes the session and grants
-		// it nothing, which refuses no dial at all.
 		const later = session.commit(targetFor('upload-2'));
 		const laterExpired = rejectedBy(later, CommitCapacityTimeoutError);
 		advertiseCredit(second, 0, 1);
@@ -2221,11 +2142,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A grant on the 101 is an offer, and `ws` reports the 101 before it has
-	// checked the handshake, so a hop that answers every dial with a grant and
-	// a handshake the client rejects never opens a connection. Such a dial
-	// makes no progress for the session, and the wait it is spending has to
-	// end it: its drops cost no reconnect budget, so nothing else would.
+	// `ws` exposes the 101 response before it validates the handshake. Do not
+	// treat an opening grant as progress until the connection opens, or repeated
+	// invalid handshakes could reset the capacity deadline indefinitely.
 	it('expires a wait against a peer whose granting upgrades never open', async () => {
 		const dialled = Array.from({ length: 8 }, () => new FakeCommitSocket());
 		const spare = Array.from({ length: 8 }, () => new FakeCommitSocket());
@@ -2249,8 +2168,6 @@ describe('credit-paced commits', () => {
 			await vi.advanceTimersByTimeAsync(maxBackoffMs);
 		}
 
-		// The wait ends the loop. Its type says how: a session failed by the
-		// reconnect budget instead would reject with a protocol error.
 		expect(isRejected).toBe(true);
 
 		const error = await expired;
@@ -2264,12 +2181,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The opening grant counts as progress once the connection carrying it
-	// opens, the same as a `credit` frame does, so it ends the wait it arrived
-	// during and the next wait runs a whole budget. A cache that takes the
-	// session and grants it nothing has made no progress for it, which is why a
-	// grant of zero elsewhere in these tests leaves a wait running.
-	it('starts a fresh wait when the upgrade carries a grant', async () => {
+	// An opening grant counts as progress only after the connection opens. It
+	// resets the capacity deadline just like a later credit frame.
+	it('starts a fresh wait after an opening grant is consumed', async () => {
 		const refused = new FakeCommitSocket();
 		const granting = new FakeCommitSocket();
 		const idle = new FakeCommitSocket();
@@ -2291,8 +2205,6 @@ describe('credit-paced commits', () => {
 		refusal.emit('end');
 		await vi.advanceTimersByTimeAsync(8000);
 
-		// The dial that follows is granted credit and takes the entry, then dies
-		// before answering it, so the entry waits again from here.
 		advertiseCredit(granting, 1, 1);
 		granting.emit('open');
 		granting.emit('close', 1006, '');
@@ -2313,10 +2225,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A server that rejects `request-credit` takes the session off credit, which
-	// ends the credited wait as surely as a grant would: what follows is the
-	// session's own window, and a later connection that paces it again starts
-	// its wait over.
+	// An `unsupported` response disables credit pacing and ends the current
+	// capacity wait. If a later connection enables pacing again, its wait starts
+	// with a fresh deadline.
 	it('starts a fresh wait when the server drops it off credit', async () => {
 		const refused = new FakeCommitSocket();
 		const unpaced = new FakeCommitSocket();
@@ -2340,16 +2251,12 @@ describe('credit-paced commits', () => {
 		refusal.emit('end');
 		await vi.advanceTimersByTimeAsync(8000);
 
-		// This server knows nothing of credit, so the session sends the entry
-		// through its own window instead, and the connection then drops.
 		advertiseCredit(unpaced, 0, 1);
 		unpaced.emit('open');
 		unpaced.emit('message', frame({ ev: 'unsupported', op: 'request-credit' }));
 		unpaced.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The connection after it paces the session again, and its wait is its
-		// own.
 		advertiseCredit(paced, 0, 1);
 		paced.emit('open');
 		await vi.advanceTimersByTimeAsync(5000);
@@ -2368,9 +2275,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A cache that gives the session progress and then stops has nothing to
-	// answer for in the refusal it gave earlier, so the wait that expires
-	// afterwards reports the wait alone.
+	// Progress clears an earlier upgrade refusal. A later timeout must report
+	// only the new capacity wait.
 	it('reports a plain capacity cause when the cache made progress after a refusal', async () => {
 		const refused = new FakeCommitSocket();
 		const serving = new FakeCommitSocket();
@@ -2390,8 +2296,6 @@ describe('credit-paced commits', () => {
 		refusal.emit('end');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The dial that follows makes progress: the entry is taken and answered,
-		// which is the cache working rather than refusing.
 		advertiseCredit(serving, 1, 1);
 		serving.emit('open');
 		serving.emit('message', deferredFrame(uploadId));
@@ -2410,8 +2314,7 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A session closed while it waits is no longer waiting, and it reports that,
-	// so a caller holding an announcement back for that wait can drop it.
+	// Closing the session must clear the waiting state reported to callers.
 	it('reports the end of a wait when the session closes during one', () => {
 		const socket = new FakeCommitSocket();
 		const reported: boolean[] = [];
@@ -2434,9 +2337,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A wait that expires and a wait that follows it are two separate waits, and
-	// each is announced in its turn. A caller that announces only a wait which
-	// lasts therefore never misses the second one.
+	// Report a new waiting transition after an earlier wait expires. Callers may
+	// suppress brief waits independently.
 	it('reports a second wait after one has expired', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -2469,11 +2371,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A caller that commits one path at a time against a server granting one
-	// entry at a time waits between each path and its grant, so the flag
-	// toggles twice per path. A reporter that showed every toggle would print
-	// two lines per path, which is why `build-push` announces only a wait that
-	// lasts.
+	// With one-entry grants, the waiting flag changes once before and once after
+	// each grant. `build-push` delays its announcement to suppress these brief
+	// waits.
 	it('toggles the waiting flag once per path when each grant covers one', async () => {
 		const socket = new FakeCommitSocket();
 		const reported: boolean[] = [];
@@ -2497,18 +2397,16 @@ describe('credit-paced commits', () => {
 		expect(reported).toStrictEqual([true, false, true, false, true, false]);
 	});
 
-	// The budget measures one unbroken stretch during which the cache gives the
-	// session no progress. A cache that has stopped making progress runs that
-	// stretch out, and every path still queued fails.
+	// The capacity budget measures one uninterrupted period without progress.
+	// When it expires, reject every entry still queued.
 	it('expires the queued paths when the cache makes no progress for a whole budget', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
-			// Long enough that no keepalive lands in the traffic asserted below.
 			keepaliveMs: 600_000
 		});
-		// The rejections land while the clock is being advanced, so the
-		// assertions take hold of the promises before that rather than after.
+		// Observe the promises before advancing fake time because they reject in
+		// the timer callback.
 		const expiries = queuedIds.map((id) =>
 			rejectedBy(session.commit(targetFor(id)), CommitCapacityTimeoutError)
 		);
@@ -2539,16 +2437,13 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A budget of weeks is longer than a timer can hold, and a runtime truncates
-	// such a delay to a millisecond. The deadline is armed in instalments
-	// instead, so it stays armed across the boundary and expires only once the
-	// wait has really run the budget out.
-	it('holds a capacity budget longer than a timer can carry', async () => {
+	// Arm long deadlines in instalments because Node truncates a delay above its
+	// timer limit to one millisecond.
+	it("preserves a capacity budget longer than Node's timer limit", async () => {
 		const socket = new FakeCommitSocket();
 		const timeoutSeconds = 4 * 7 * 24 * 60 * 60;
 		const session = openSession(socket, {
-			// A keepalive is an interval, which a runtime truncates the same way,
-			// so the test keeps it under the boundary as well as rare.
+			// Keep the interval below Node's timer limit and outside this assertion.
 			keepaliveMs: maxTimerDelayMs,
 			timeoutSeconds
 		});
@@ -2579,9 +2474,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The same instalments carry a deferred upload's verdict deadline, which is
-	// armed from the same budget.
-	it('holds a verdict deadline longer than a timer can carry', async () => {
+	// Deferred verdict deadlines use the same chained-timer implementation.
+	it("preserves a verdict deadline longer than Node's timer limit", async () => {
 		const socket = new FakeCommitSocket();
 		const timeoutSeconds = 4 * 7 * 24 * 60 * 60;
 		const session = openSession(socket, {
@@ -2617,12 +2511,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A frame for an upload the session does not hold is a stale duplicate: the
-	// server re-answering a re-sent id, or answering one from before a
-	// reconnect. It makes no progress for the session, so a cache that
-	// repeats such frames while granting nothing runs the budget out like any
-	// other silent cache.
-	it('expires a wait that is fed only frames for uploads it does not hold', async () => {
+	// A frame for an unknown upload ID is stale and does not reset the capacity
+	// deadline.
+	it('expires a wait that receives only frames for unknown upload IDs', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
@@ -2651,11 +2542,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// Echoing one earns a connection no reconnect either. A cache that answers
-	// ids the session has already finished has answered no entry the session is
-	// waiting on, so each dead connection spends a reconnect and the push fails
-	// instead of reconnecting for ever.
-	it('spends a reconnect for a connection that only repeats an upload it does not hold', async () => {
+	// Frames for completed or unknown uploads do not prove that a connection made
+	// progress on outstanding work. Its subsequent drop consumes a reconnect.
+	it('spends a reconnect when a connection reports only an unknown upload ID', async () => {
 		const sockets = [
 			new FakeCommitSocket(),
 			new FakeCommitSocket(),
@@ -2681,10 +2570,9 @@ describe('credit-paced commits', () => {
 		expect(error.path).toBe(path);
 	});
 
-	// The same frame for an entry the session does hold is the server answering
-	// that entry, which shows the connection can carry work, so each drop that
-	// follows one costs no more of the reconnect budget than the first did.
-	it('restores the reconnect budget for each entry a connection answers', async () => {
+	// A frame for an outstanding entry proves progress and restores the reconnect
+	// budget before the next drop.
+	it('restores the reconnect budget after each outstanding entry receives a frame', async () => {
 		const sockets = [
 			new FakeCommitSocket(),
 			new FakeCommitSocket(),
@@ -2707,8 +2595,6 @@ describe('credit-paced commits', () => {
 			socket.emit('open');
 			socket.emit('message', settledFrame(id));
 
-			// Every connection but the last drops, spending the one reconnect the
-			// budget holds and restoring it with the entry it answered.
 			if (index < sockets.length - 1) {
 				socket.emit('close', 1006, '');
 				await vi.advanceTimersByTimeAsync(maxBackoffMs);
@@ -2722,15 +2608,11 @@ describe('credit-paced commits', () => {
 		);
 	});
 
-	// A cache that is down or firewalled never completes an upgrade, so the
-	// session learns no grant from a 101 and has no connection to measure. It is
-	// paced by what it declared on the request, which is what the server pins
-	// pacing to, so the clock runs from the first commit and the budget ends the
-	// wait. This is the base case of the model: with no connection ever
-	// established, nothing else bounds the session at all.
+	// Credit was offered on the request before any connection opens. Therefore
+	// repeated transport failures remain subject to the capacity deadline even
+	// when no 101 response ever supplies a grant.
 	it('expires a wait against a cache it never reaches', async () => {
 		const failing = Array.from({ length: 4 }, () => new FakeCommitSocket());
-		// The dial the last failure schedules, which the budget runs out under.
 		const lastDial = new FakeCommitSocket();
 		const reported: boolean[] = [];
 		const session = openSessionOver([...failing, lastDial], {
@@ -2744,7 +2626,6 @@ describe('credit-paced commits', () => {
 		const commit = session.commit(target);
 		const expired = rejectedBy(commit, CommitCapacityTimeoutError);
 
-		// Every dial fails at the socket, before any upgrade reaches the client.
 		for (const dial of failing) {
 			dial.emit('error', new Error('connect ECONNREFUSED'));
 			await vi.advanceTimersByTimeAsync(30_000);
@@ -2752,8 +2633,6 @@ describe('credit-paced commits', () => {
 
 		const error = await expired;
 
-		// A further dial would throw for want of a socket, so this also shows the
-		// session stopped dialling when it gave up.
 		await vi.advanceTimersByTimeAsync(60_000);
 
 		expect({
@@ -2765,16 +2644,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A cache that stops answering the dial makes no progress for the
-	// session, which is the same wait as a cache that answers and grants
-	// nothing, so the clock runs on and the budget ends it. Nothing else
-	// would: an entry the session never sent has no deadline of its own, and
-	// a dial that fails before it opens leaves nothing in flight, so it
-	// spends no reconnect budget.
-	//
-	// Four connections are scripted after the first. A fifth would throw for
-	// want of a socket, so the assertions below also show the session stopped
-	// dialling once it gave up.
+	// A partition after the first connection leaves queued entries without an
+	// in-flight verdict deadline. Keep the capacity deadline running across the
+	// failed reconnects so the session still terminates.
 	it('expires a wait that a partition never lets it resume', async () => {
 		const first = new FakeCommitSocket();
 		const dials = Array.from({ length: 4 }, () => new FakeCommitSocket());
@@ -2789,8 +2661,6 @@ describe('credit-paced commits', () => {
 		first.emit('open');
 		first.emit('close', 1006, '');
 
-		// Every dial from here fails before it opens, which is what `ws` reports
-		// for a refused or reset handshake.
 		for (const dial of dials) {
 			await vi.advanceTimersByTimeAsync(30_000);
 			dial.emit('error', new Error('connect ECONNREFUSED'));
@@ -2808,11 +2678,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// An entry parked on its verdict is bounded by its own verdict deadline,
-	// which runs whether or not the session is connected, so the drops that
-	// interrupt the park cost no reconnect budget. The server holds a durable
-	// row for such an entry, and a link that flaps more often than the budget
-	// allows must not fail work the next resubscribe would have collected.
+	// A parked entry has its own verdict deadline and a durable server row. Drops
+	// while it is parked do not consume the reconnect budget; reconnect replay
+	// can still collect the eventual verdict.
 	it('survives more drops than the reconnect budget while its entry is parked', async () => {
 		const dropped = Array.from({ length: 6 }, () => new FakeCommitSocket());
 		const last = new FakeCommitSocket();
@@ -2824,8 +2692,6 @@ describe('credit-paced commits', () => {
 		const parked = session.commit(target);
 		const timedOut = rejectedBy(settledOf(parked), UploadWaitTimeoutError);
 
-		// Every connection answers the resubscribe with a repeat deferral, which
-		// is what the server sends for a row that is still pending.
 		for (const socket of dropped) {
 			advertiseCredit(socket, 1, 1);
 			socket.emit('open');
@@ -2838,8 +2704,6 @@ describe('credit-paced commits', () => {
 		last.emit('open');
 		last.emit('message', deferredFrame(uploadId));
 
-		// The verdict never comes, so the entry ends on its own deadline rather
-		// than on a protocol error from an exhausted budget.
 		await vi.advanceTimersByTimeAsync(101_000);
 		const error = await timedOut;
 
@@ -2852,10 +2716,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The first deferral of an entry answers it, so each connection that takes
-	// one restores the reconnect budget and the session survives more drops than
-	// that budget holds.
-	it('restores the reconnect budget for each entry a connection parks', async () => {
+	// A deferral is progress for its entry and restores the reconnect budget.
+	it('restores the reconnect budget when each entry is deferred', async () => {
 		const sockets = [
 			new FakeCommitSocket(),
 			new FakeCommitSocket(),
@@ -2869,8 +2731,6 @@ describe('credit-paced commits', () => {
 			session.commit(targetFor(id))
 		);
 
-		// Each of the first two connections parks a different entry, so each
-		// restores the one reconnect its drop then spends.
 		for (const [index, id] of ['upload-1', 'upload-2'].entries()) {
 			const socket = sockets[index];
 
@@ -2909,10 +2769,8 @@ describe('credit-paced commits', () => {
 		]);
 	});
 
-	// A grant is not proof that a connection can carry work. A cache that
-	// answers `request-credit` and then dies before it answers any entry has to
-	// spend a reconnect for each attempt, so the push fails where restoring the
-	// budget once per cycle would reconnect for ever.
+	// A credit grant alone does not prove progress on an entry. A connection that
+	// drops before any entry receives a frame must consume a reconnect.
 	it('exhausts the reconnect budget when every connection dies after granting', async () => {
 		const sockets = [
 			new FakeCommitSocket(),
@@ -2926,8 +2784,6 @@ describe('credit-paced commits', () => {
 		const commit = session.commit(target);
 		const failed = rejectedBy(commit, CommitSocketProtocolError);
 
-		// One cycle per scripted connection: it grants, the session sends the
-		// commit under that grant, and the socket dies unanswered.
 		for (const socket of sockets) {
 			advertiseCredit(socket, 0, 1);
 			socket.emit('open');
@@ -2947,13 +2803,10 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A cache that keeps making progress for the session never expires it,
-	// however slowly that progress comes: each grant and each answered entry
-	// starts the measurement again. Here the session waits nine tenths of
-	// its budget before
-	// every path, so it waits more than two budgets in total and still commits
-	// every one of them.
-	it('never expires while the cache keeps making progress, whatever the total wait', async () => {
+	// Each grant and each entry frame resets the no-progress deadline. Total wait
+	// time may therefore exceed one budget while the cache continues to advance
+	// the queue.
+	it('does not expire while the cache keeps making progress across a longer total wait', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
@@ -2988,10 +2841,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// An entry the server has still to answer is one the cache is working on,
-	// and answering it returns the credit the queue is waiting for. So the
-	// budget does not run while any entry is outstanding, however long the queue
-	// behind it, and starts once the last of them is answered.
+	// Stop the capacity deadline while an entry is in flight. Its first response
+	// returns credit and starts the deadline for any queued work.
 	it('spends none of the budget while an entry it sent is in flight', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, { timeoutSeconds: 100 });
@@ -3006,8 +2857,6 @@ describe('credit-paced commits', () => {
 			isRejected = true;
 		});
 
-		// upload-1 spent the opening grant and no frame has answered it, so the
-		// queued path waits behind it without the budget running.
 		await vi.advanceTimersByTimeAsync(500_000);
 		const isRejectedWhileInFlight = isRejected;
 
@@ -3028,15 +2877,12 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// An error frame is an answer like any other: the server released that
-	// entry's credit when it sent the frame, and it owes the session nothing
-	// further for the id. The retry re-queues the target behind the backlog, so
-	// the session waits from the moment the error lands and its budget runs.
+	// A retryable error returns the entry's credit before requeueing it. Start the
+	// capacity deadline if the retry cannot be sent immediately.
 	it('starts the capacity wait when a retryable error re-queues its entry', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
-			// Long enough that no keepalive lands in the traffic asserted below.
 			keepaliveMs: 600_000
 		});
 		const retried = session.commit(targetFor('upload-1'));
@@ -3060,8 +2906,6 @@ describe('credit-paced commits', () => {
 			})
 		);
 
-		// The retry re-queues upload-1 behind upload-2, and the tenant grants
-		// nothing, so nothing goes out for the rest of the wait.
 		await vi.advanceTimersByTimeAsync(99_000);
 		const isMidway = isRejected;
 		await vi.advanceTimersByTimeAsync(2000);
@@ -3082,15 +2926,12 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The wait ends as any other does, when the session has an entry the server
-	// has still to answer. Here that entry is the retried one, sent under the
-	// grant that ended the wait. The grant reset the measurement, so the wait
-	// that follows has the whole budget to run through.
+	// A grant ends the current wait and resets the deadline. Once the retried
+	// entry is in flight, no capacity time accrues until its next response.
 	it('stops the capacity wait when the retried entry goes back on the wire', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
-			// Long enough that no keepalive lands in the traffic asserted below.
 			keepaliveMs: 600_000
 		});
 		const retried = session.commit(targetFor('upload-1'));
@@ -3111,12 +2952,9 @@ describe('credit-paced commits', () => {
 			})
 		);
 
-		// Stalled from the error frame until the grant: sixty seconds of budget.
 		await vi.advanceTimersByTimeAsync(60_000);
 		socket.emit('message', frame({ ev: 'credit', grant: 1 }));
 
-		// The resend is on the wire, so this stretch, three times the budget,
-		// costs it nothing.
 		await vi.advanceTimersByTimeAsync(300_000);
 		const isRejectedWhileInFlight = isRetriedRejected;
 		socket.emit('message', settledFrame('upload-1'));
@@ -3128,9 +2966,6 @@ describe('credit-paced commits', () => {
 			isQueuedRejected = true;
 		});
 
-		// The grant and the answer that followed it each reset the measurement,
-		// so this wait starts from zero with the whole budget to run through.
-		// The sixty seconds before them survive only in the lifetime total.
 		await vi.advanceTimersByTimeAsync(99_000);
 		const isMidway = isQueuedRejected;
 		await vi.advanceTimersByTimeAsync(2000);
@@ -3159,11 +2994,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// An entry can finish while its target is still queued: a retryable error
-	// re-queues it, and the verdict for the row the server had already attached
-	// arrives later. The session will never send that target, so it stops
-	// counting as a path waiting for capacity and is not declared to the server
-	// as demand.
+	// A late verdict can finish an entry after a retryable error requeues it.
+	// Remove the stale queued target so it no longer contributes to declared
+	// demand.
 	it('stops waiting for a queue whose entries have all finished', async () => {
 		const socket = new FakeCommitSocket();
 		const reported: boolean[] = [];
@@ -3187,8 +3020,6 @@ describe('credit-paced commits', () => {
 			})
 		);
 
-		// The retry re-queues upload-1 with no credit to send it under, so the
-		// session declares it and waits; the late verdict then finishes it.
 		await vi.advanceTimersByTimeAsync(500);
 		const whileQueued = [...reported];
 		socket.emit(
@@ -3197,9 +3028,8 @@ describe('credit-paced commits', () => {
 		);
 		const afterVerdict = [...reported];
 
-		// A real path committed now is one path, and the one entry of demand the
-		// session has already declared covers it, so it declares nothing further.
-		// A queue still holding the finished target would have declared two.
+		// The existing demand declaration covers this one new path. A stale queued
+		// retry would force another declaration.
 		const later = session.commit(targetFor('upload-2'));
 		await vi.advanceTimersByTimeAsync(0);
 		socket.emit('message', frame({ ev: 'credit', grant: 1 }));
@@ -3226,10 +3056,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A retryable error re-queues its entry, and the answer to the first attempt
-	// can still arrive while it waits there. The queued target is stale by then:
-	// its id names a row the server has answered, so the next grant skips it and
-	// spends nothing on it.
+	// A late frame for the first attempt can resolve an entry while its retry is
+	// queued. The next grant must skip that stale queue item.
 	it('skips a queued target whose entry settled before the grant arrived', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
@@ -3248,8 +3076,6 @@ describe('credit-paced commits', () => {
 			})
 		);
 
-		// The retry re-queues upload-1 behind upload-2, with no credit to send
-		// either under, and the first attempt's answer arrives while it waits.
 		await vi.advanceTimersByTimeAsync(500);
 		socket.emit('message', settledFrame('upload-1'));
 
@@ -3273,11 +3099,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The server returns an entry's credit with the first frame it sends for
-	// that entry, the `deferred` frame included, and the verdict that follows
-	// returns none. A session whose sent entries have all parked on their
-	// verdicts is therefore waiting on capacity like any other, and its budget
-	// runs.
+	// The first frame for an entry returns its credit, including a `deferred`
+	// frame. A later verdict returns no additional credit, so queued work waits
+	// against the capacity deadline while earlier entries are parked.
 	it('spends the budget while a sent entry parks on its verdict', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, { timeoutSeconds: 100 });
@@ -3307,24 +3131,19 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// Parking an entry on its verdict answers that entry and returns its credit
-	// to the tenant, so the queue behind it starts a new wait with the whole
-	// budget, and the sixty seconds before the parking survive only in the
-	// lifetime total. A cache that answers every entry with a deferral gives the
-	// session as much progress as one that settles them.
+	// Deferring an entry returns its credit and counts as progress. The queued
+	// work therefore starts a fresh capacity deadline.
 	it('restarts the wait when an entry parks on its verdict', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
 		const session = openSessionOver([first, second], {
 			timeoutSeconds: 100,
-			// Long enough that no keepalive lands in the traffic asserted below.
 			keepaliveMs: 600_000
 		});
 		const parked = session.commit(targetFor('upload-1'));
 		const queued = session.commit(targetFor('upload-2'));
 		const expired = rejectedBy(queued, CommitCapacityTimeoutError);
-		// The parked entry is bounded by its own verdict deadline, armed for the
-		// same budget when it parked, so it fails at that moment too.
+		// The parked entry has an independent verdict deadline with the same length.
 		const parkedTimedOut = rejectedBy(
 			settledOf(parked),
 			UploadWaitTimeoutError
@@ -3360,21 +3179,16 @@ describe('credit-paced commits', () => {
 		}).toStrictEqual({
 			midway: false,
 			waitedSeconds: 100,
-			// Three stretches: sixty seconds waiting before the drop, five
-			// disconnected, and the hundred seconds of the wait that expired.
-			// The deferred frame reset the wait the timeout measures, and this
-			// total keeps all three.
+			// Lifetime includes the wait before the drop, the disconnection, and the
+			// final capacity wait.
 			totalWaitedSeconds: 165,
 			parkedAck: { storePathHash, narHash, status: 'pending' },
 			parkedTimeoutSeconds: 100
 		});
 	});
 
-	// A disconnection the session waits through is part of one wait, so the
-	// caller hears the wait start once and end once. Reporting an end at every
-	// drop would let a caller that announces only a sustained wait stay silent
-	// through a long one, because each connected window is shorter than the
-	// delay it holds the announcement for.
+	// A reconnect does not split one capacity wait into several reported waits.
+	// Otherwise a caller that suppresses brief waits could hide one long outage.
 	it('reports one wait across the drops it waits through', async () => {
 		const dropped = [
 			new FakeCommitSocket(),
@@ -3419,14 +3233,11 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The back-off is drawn from the number of reconnects since the server last
-	// answered an entry, not from the reconnect budget, so a session that
-	// reconnects for free while it waits still backs off to the cap. Otherwise a
-	// cache that accepts a connection and drops it is reopened every few hundred
-	// milliseconds for the whole budget, and the object never hibernates.
+	// Backoff depends on reconnects since the last entry frame, not on reconnect
+	// budget consumption. Free reconnects during a capacity wait must still reach
+	// the cap so a repeatedly dropping server is not dialled continuously.
 	//
-	// The jitter is pinned to its lower bound, so each delay here is half of its
-	// step's ceiling: 500, 1000, 2000, 4000, then the 5000 cap.
+	// Pin jitter to its lower bound: 500, 1000, 2000, 4000, then the 5000 cap.
 	it('backs off further on each free reconnect', async () => {
 		vi.spyOn(Math, 'random').mockReturnValue(0);
 
@@ -3456,10 +3267,8 @@ describe('credit-paced commits', () => {
 		expect(delays).toStrictEqual([250, 500, 1000, 2000, 2500]);
 	});
 
-	// The same counter serves the drops that do spend budget, and the server
-	// answering an entry starts it again: the connection after that answer waits
-	// the first step once more.
-	it('starts the back-off again when the server answers an entry', async () => {
+	// An entry frame resets the reconnect counter as well as restoring budget.
+	it('resets reconnect backoff after an entry receives a frame', async () => {
 		vi.spyOn(Math, 'random').mockReturnValue(0);
 
 		const unanswered = [new FakeCommitSocket(), new FakeCommitSocket()];
@@ -3478,8 +3287,6 @@ describe('credit-paced commits', () => {
 
 		const delays: number[] = [];
 
-		// The first two connections take the entry and die unanswered, so each
-		// drop spends budget and the back-off steps up.
 		for (const socket of unanswered) {
 			advertiseCredit(socket, 1, 1);
 			socket.emit('open');
@@ -3506,13 +3313,10 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A server that refuses the upgrade sends `Retry-After` when it wants a
-	// longer gap than the back-off would take, so the delay before the next dial
-	// is at least the seconds it named, capped at a minute. A refusal that
-	// carries no delay, or one the client cannot read, leaves the back-off alone.
+	// Honour a valid `Retry-After` when it exceeds the reconnect backoff, up to
+	// one minute. A missing or unreadable value leaves the backoff unchanged.
 	//
-	// The jitter is pinned to its lower bound, so the back-off the first
-	// reconnect would otherwise wait is 250 ms.
+	// Pin jitter so the first reconnect backoff is 250 ms.
 	it.each([
 		{ what: 'a delay longer than the back-off', asked: '12', delayMs: 12_000 },
 		{ what: 'a delay beyond the cap', asked: '3600', delayMs: 60_000 },
@@ -3550,12 +3354,8 @@ describe('credit-paced commits', () => {
 		}
 	);
 
-	// `ws` hands a refused connection over to the session and abandons it in its
-	// handshake, so closing it is the session's to do: a session that keeps
-	// dialling against a busy cache would otherwise hold one open connection
-	// per refusal, and each of those keeps the process alive after the run has
-	// finished. The close is what returns the connection, so it is the close
-	// this asserts rather than the state of the response.
+	// `ws` exposes a refused connection but does not close it. Close each refusal
+	// so repeated retries do not leak sockets that keep the process alive.
 	it('closes every connection an upgrade refusal arrives on', async () => {
 		const refused = [new FakeCommitSocket(), new FakeCommitSocket()];
 		const last = new FakeCommitSocket();
@@ -3587,11 +3387,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A refusal is read long after it arrives when the body stalls, and by then
-	// the session may have left the connection it refused: here the capacity
-	// wait expires, abandons that connection and goes dormant, and the next
-	// commit is served over a fresh one. The refusal condemned a connection that
-	// is gone, so reading it changes nothing, whatever its status.
+	// Reading a stalled refusal body can finish after its connection was
+	// abandoned. Ignore that late result so it cannot terminate a newer
+	// connection.
 	it('ignores a refusal read after the connection it refused was abandoned', async () => {
 		const refused = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
@@ -3603,9 +3401,6 @@ describe('credit-paced commits', () => {
 		const abandoned = session.commit(target);
 		const expired = rejectedBy(abandoned, CommitCapacityTimeoutError);
 
-		// The status would end the session if the refusal were still the
-		// session's to act on, and the body never arrives, so the drain is what
-		// eventually reads it.
 		const refusal = new FakeUpgradeFailure(403);
 		refused.emit('unexpected-response', {}, refusal);
 		await vi.advanceTimersByTimeAsync(3000);
@@ -3618,7 +3413,6 @@ describe('credit-paced commits', () => {
 		last.emit('message', settledFrame('upload-2'));
 		await ackOf(resumed);
 
-		// The drain of the abandoned connection falls here.
 		await vi.advanceTimersByTimeAsync(drainTimeoutMs);
 		const served = session.commit(targetFor('upload-3'));
 		last.emit('message', settledFrame('upload-3'));
@@ -3630,11 +3424,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A refusal that finds nothing outstanding leaves the session dormant, and
-	// the dial the next commit makes is the one the server's wait applies to.
-	// The session opens before a push has anything to commit, so this is the
-	// refusal a loaded server is most likely to give.
-	it('holds a dormant redial back until the wait a refusal asked for', async () => {
+	// Preserve `Retry-After` while the session is dormant so the next commit does
+	// not redial before the server's requested time.
+	it('delays a dormant redial until Retry-After expires', async () => {
 		const refused = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
 		const connectedAt: number[] = [];
@@ -3651,8 +3443,6 @@ describe('credit-paced commits', () => {
 		refusal.emit('end');
 		const refusedAt = Date.now();
 
-		// The commit arrives inside the gap the server asked for, so its dial
-		// waits out what is left of it.
 		await vi.advanceTimersByTimeAsync(5000);
 		void session.commit(target).catch(() => {
 			return;
@@ -3669,12 +3459,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A refusal that finds work outstanding has its wait honoured by the
-	// reconnect it schedules, and that reconnect is not always the dial that
-	// happens: an expiring capacity wait cancels it and leaves the session
-	// dormant. The dial the next commit makes then owes the server the rest of
-	// the wait it asked for.
-	it('holds a redial back when a capacity expiry cancels the dial a refusal delayed', async () => {
+	// A capacity timeout can cancel a reconnect scheduled after `Retry-After`.
+	// Preserve the remaining delay for the next commit's dial.
+	it('preserves Retry-After when capacity expiry cancels the scheduled redial', async () => {
 		const refused = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
 		const connectedAt: number[] = [];
@@ -3693,8 +3480,6 @@ describe('credit-paced commits', () => {
 		refusal.emit('end');
 		const refusedAt = Date.now();
 
-		// The wait expires two seconds inside the gap, which cancels the dial
-		// the refusal scheduled for the end of it.
 		await vi.advanceTimersByTimeAsync(3000);
 		await expired;
 
@@ -3713,11 +3498,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A peer can leave the refusal body unfinished: truncated and then
-	// half-closed, or headers with a length it never sends the rest of. Neither
-	// shape produces another event, so the session bounds the read and treats
-	// the timeout as the refusal itself. The delay stated in a response that
-	// never finished is not honoured, so the next dial takes the back-off.
+	// A peer can leave an upgrade-response body unfinished without another
+	// socket event. Bound the read; if it times out, discard any incomplete
+	// `Retry-After` value and use reconnect backoff.
 	it.each([
 		{ what: 'a truncated body', body: 'Commit sess' },
 		{ what: 'no body at all', body: undefined }
@@ -3760,11 +3543,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A drop while the session is doing nothing but wait costs no reconnect
-	// budget: what bounds a wait is the capacity deadline. The wait also carries
-	// on through the disconnection, since the cache makes no progress for
-	// the session while it reconnects, so the two five-second gaps count
-	// towards the hundred alongside each attempt's thirty connected seconds.
+	// A drop during a capacity wait does not consume reconnect budget. The
+	// disconnected interval still counts towards the capacity deadline because
+	// the cache makes no progress during it.
 	it('counts a disconnection while it only waits, and spends no reconnect budget', async () => {
 		const dropped = [new FakeCommitSocket(), new FakeCommitSocket()];
 		const last = new FakeCommitSocket();
@@ -3798,13 +3579,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The clock runs on whatever the connection is doing: it stops only while
-	// the cache owes the session an answer, and a grant starts it again. Here
-	// the minute one entry spends unanswered costs the budget nothing, the ten
-	// seconds queued before the grant are wiped by that grant, and what reaches
-	// the hundred is the five seconds of the disconnection after it plus the
-	// ninety-five the last connection spends granting nothing. Every one of
-	// those stretches is still in the session's lifetime total.
+	// Capacity time accrues while queued or disconnected and stops while an entry
+	// is in flight. A grant resets the deadline; lifetime reporting still includes
+	// every interval.
 	it('runs the clock through disconnection and stops it only for work in flight', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -3824,22 +3601,19 @@ describe('credit-paced commits', () => {
 			return;
 		});
 
-		// Ten seconds waiting, then the drop that starts the disconnection.
 		advertiseCredit(first, 0, 1);
 		first.emit('open');
 		await vi.advanceTimersByTimeAsync(10_000);
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// This connection takes an entry and holds it for a minute before it
-		// dies, which is working time rather than waiting time.
+		// Keep the entry in flight for a minute before dropping the connection.
 		advertiseCredit(second, 1, 1);
 		second.emit('open');
 		await vi.advanceTimersByTimeAsync(60_000);
 		second.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// Five seconds are spent, from the disconnection this connection ends.
 		advertiseCredit(third, 0, 1);
 		third.emit('open');
 		await vi.advanceTimersByTimeAsync(94_000);
@@ -3859,11 +3633,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A drop while an entry is parked on its verdict is still a drop out of a
-	// capacity wait: a parked entry is no sign that the cache is making
-	// progress, and the replay resubscribes it whatever the drop cost. A paced
-	// push parks entries as a matter of course, so counting them here would
-	// spend the reconnect budget on the ordinary case.
+	// A parked entry does not make a drop consume reconnect budget. Verdict
+	// replay resubscribes it, and credit-paced sessions park entries routinely.
 	it('spends no reconnect budget for a drop with an entry parked on its verdict', async () => {
 		const parking = new FakeCommitSocket();
 		const blipped = new FakeCommitSocket();
@@ -3881,8 +3652,6 @@ describe('credit-paced commits', () => {
 			UploadWaitTimeoutError
 		);
 
-		// The first connection parks upload-1 and leaves upload-2 queued; the
-		// two that follow have nothing to send and drop with it still parked.
 		advertiseCredit(parking, 1, 1);
 		parking.emit('open');
 		parking.emit('message', deferredFrame('upload-1'));
@@ -3911,11 +3680,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A cache that accepts a connection and drops it before making any progress
-	// gives the session no connected time to measure, and costs it no reconnect
-	// budget either, since it never leaves the waiting state. What bounds it is
-	// that the disconnections themselves count as waiting: four twenty-five
-	// second gaps run the budget out.
+	// Repeated drops before any progress do not consume reconnect budget during
+	// a capacity wait. Count the disconnected intervals so the capacity deadline
+	// still bounds the session.
 	it('expires a wait that a cache keeps dropping before it makes any progress', async () => {
 		const dropped = Array.from({ length: 4 }, () => new FakeCommitSocket());
 		const last = new FakeCommitSocket();
@@ -3934,8 +3701,6 @@ describe('credit-paced commits', () => {
 			await vi.advanceTimersByTimeAsync(25_000);
 		}
 
-		// The wait resumes on this connection with the budget already run out by
-		// the four gaps behind it, so it expires without waiting on it at all.
 		advertiseCredit(last, 0, 1);
 		last.emit('open');
 		await vi.advanceTimersByTimeAsync(0);
@@ -3950,9 +3715,9 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// An expired wait gives the connection up: the server keeps a session's
-	// declared demand and its granted credit in the socket, so a publication that
-	// has stopped waiting must stop absorbing the grants other sessions need.
+	// Close the connection when a capacity wait expires. The server associates
+	// declared demand and granted credit with that socket, so leaving it open
+	// would absorb capacity needed by other sessions.
 	it('closes the connection when the wait expires and reopens for a later commit', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -3975,8 +3740,6 @@ describe('credit-paced commits', () => {
 		expect({
 			wasClosedOnExpiry,
 			ack: await ackOf(later),
-			// The reopened connection sends the commit its grant covers, with no
-			// declaration to make.
 			sent: second.sent
 		}).toStrictEqual({
 			wasClosedOnExpiry: true,
@@ -3985,8 +3748,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The budget bounds one wait, not the session: a later commit that finds the
-	// cache busy again waits its own full budget before giving up.
+	// A capacity timeout ends one wait, not the session. A later commit receives
+	// a fresh capacity deadline.
 	it('waits the full budget again after an expiry', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -4039,10 +3802,8 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// The wait belongs to the session, not to the connection it was spent on, so
-	// reconnecting cannot reset it. Were it reset, the fresh connection's
-	// budget would be a full hundred seconds and the path below would still be
-	// waiting rather than failed.
+	// The capacity deadline belongs to the session, so reconnecting cannot reset
+	// time already spent waiting.
 	it('keeps the wait it has already spent across a reconnect', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();
@@ -4087,13 +3848,10 @@ describe('a session that declares credit to a server that offers none', () => {
 		vi.useRealTimers();
 	});
 
-	// The server pins its grant to the declaration on the upgrade request and
-	// closes a session that sends more than it has. Whether the grant reaches the
-	// client is a separate question: an intermediary that answers the handshake
-	// itself can drop the response header. A session that declared credit
-	// therefore paces itself either way, opening at zero and asking for what its
-	// queue needs.
-	it('paces itself through request-credit when the 101 carries no grant', async () => {
+	// The server enforces the credit declaration on the request even if an
+	// intermediary removes the grant header from the 101 response. Start at zero
+	// credit and request the queue's demand in that case.
+	it('requests credit when the 101 response omits the opening grant', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, { headers: creditDeclaringHeaders });
 		const commits = queuedIds.map((id) => session.commit(targetFor(id)));
@@ -4129,9 +3887,8 @@ describe('a session that declares credit to a server that offers none', () => {
 		});
 	});
 
-	// A server old enough not to know `request-credit` answers `unsupported`
-	// rather than closing. It paces nothing, so the session drops back to the
-	// window it keeps itself and sends the queue through that.
+	// An older server returns `unsupported` for `request-credit`. Fall back to
+	// the client's uncredited message window without closing the session.
 	it('falls back to the uncredited window when the server rejects request-credit', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, { headers: creditDeclaringHeaders });
@@ -4151,10 +3908,9 @@ describe('a session that declares credit to a server that offers none', () => {
 		});
 	});
 
-	// The budget is the only bound an unpaced session has, so every drop spends
-	// one, a dial that fails before it opens included. A paced session
-	// reconnects free of the budget only because its capacity clock is running
-	// instead, and this session has none.
+	// After credit fallback, the session has no capacity deadline. Transport
+	// failures therefore consume the reconnect budget, including a dial that
+	// never opens.
 	it('spends the budget on a failed dial once the fallback takes it off credit', async () => {
 		const first = new FakeCommitSocket();
 		const failedDial = new FakeCommitSocket();
@@ -4170,29 +3926,20 @@ describe('a session that declares credit to a server that offers none', () => {
 			rejection = error;
 		});
 
-		// The fallback puts the session on its own window, and the drop that
-		// follows owes an answer, so it spends the one reconnect the budget has.
 		first.emit('upgrade', { headers: {} });
 		first.emit('open');
 		first.emit('message', frame({ ev: 'unsupported', op: 'request-credit' }));
 		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// This dial fails before it opens, so it owes nothing. A third connection
-		// would throw for want of a socket, so reaching the assertion at all also
-		// shows the session stopped dialling.
 		failedDial.emit('error', dialFailure);
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
-		// The transport fault reaches the caller, which is what the session has
-		// to report when the budget runs out on a dial that never opened.
 		expect(rejection).toBe(dialFailure);
 	});
 
-	// A session the fallback took off credit has no capacity clock, so the
-	// reconnect budget is what bounds it, as it does for a client that never
-	// declared credit at all. The window sends its entries, so each drop leaves
-	// an answer owed and spends one.
+	// Once credit fallback disables pacing, the reconnect budget bounds the
+	// session just as it does for a client that never offered credit.
 	it('bounds a session the fallback took off credit by the reconnect budget', async () => {
 		const first = new FakeCommitSocket();
 		const second = new FakeCommitSocket();

@@ -68,8 +68,6 @@ afterAll(async () => {
 });
 
 it('bundles both Workers into bytes workerd can serve', async () => {
-	// The first dispatch boots workerd with both bundled Workers and the
-	// Durable Object, which can run past the default 5s under load.
 	const response = await activeMiniflare().dispatchFetch(
 		'https://cupboard.store/_health'
 	);

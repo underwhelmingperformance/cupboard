@@ -31,8 +31,7 @@ export type RunMode = 'tree' | 'embedded';
 /**
  * Where this invocation gets its Worker bytes. `tree` rebuilds from a checkout's
  * source; `embedded` uploads the bundles baked into the binary at release time.
- * `notice` carries a one-line explanation to surface to the user when the choice
- * is non-obvious (a released binary run inside a checkout).
+ * `notice` explains the choice when a released binary runs inside a checkout.
  */
 export interface WorkerSourcePlan {
 	readonly mode: RunMode;

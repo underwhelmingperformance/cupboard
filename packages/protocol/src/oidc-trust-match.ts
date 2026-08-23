@@ -8,9 +8,6 @@ import {
 } from './oidc.ts';
 import { IssuerUrl } from './oidc-issuer.ts';
 
-// A trust rule reduced to what matching and issuance need. The DO reads enabled
-// rows from `oidc_trust`, parses `claims_json`/`permitted_grants_json`, and
-// passes them here; disabled rows are filtered out before matching.
 export interface OidcTrustRule {
 	readonly id: TrustRuleId;
 	readonly issuer: OidcIssuer;
@@ -20,19 +17,16 @@ export interface OidcTrustRule {
 	readonly display?: OidcTrustDisplay;
 }
 
-// A rule that permits a wildcard is the interactive owner/admin trust class: an
-// exchange may omit `authorization_details` and receive the wildcard, and the
-// session carries a refresh token. Every other rule is claim-bound (CI) and must
-// request the concrete grants it wants.
+// A rule that permits a wildcard is interactive. Its exchange may omit
+// `authorization_details` and receive the wildcard. Tenant exchanges for these
+// rules also receive a refresh token. The rule id does not affect this
+// classification.
 export function isRuleInteractive(rule: OidcTrustRule): boolean {
 	return rule.permittedGrants.some(
 		(grant) => grant.type === 'cupboard_wildcard'
 	);
 }
 
-// The verified claims of an inbound OIDC token, as far as matching reads them.
-// Structurally a superset of `jose`'s `JWTPayload`, so a verified payload is
-// passed straight in.
 export interface OidcClaims {
 	readonly iss?: string;
 	readonly aud?: string | readonly string[];
@@ -79,29 +73,21 @@ function hasMatchingClaims(rule: OidcTrustRule, claims: OidcClaims): boolean {
 	);
 }
 
-// More pinned claims is a tighter rule, so it wins over a looser one for the
-// same issuer.
 function specificity(rule: OidcTrustRule): number {
 	return Object.keys(rule.claims).length;
 }
 
-// The owner's interactive rule outranks any matching CI rule. The owner rule
-// pins the owner's identity, so only the owner's token can match it; a CI rule
-// that also matches that token (even a more specific one) must never displace it
-// and downgrade the owner. A CI token cannot match the owner rule, so this never
-// grants a CI identity more than it asked for.
 function interactiveRank(rule: OidcTrustRule): number {
 	return isRuleInteractive(rule) ? 1 : 0;
 }
 
 /**
- * The trust rule whose issuer, audience and configured claims all match the
- * verified token, or `undefined` when none does. Selection prefers the
- * interactive owner rule (so the owner is never downgraded), then the most
- * specific rule, then the lowest id, so the choice is deterministic regardless
- * of the order the rows arrive in. Matching never substitutes for verification:
- * the caller must already have checked the token's signature, issuer, audience
- * and expiry with `jose`.
+ * Selects a candidate trust rule from decoded OIDC claims. The caller must then
+ * verify the token's signature, issuer, audience and expiry against that rule
+ * before using it. A matching rule that permits a wildcard grant takes
+ * precedence over claim-bound rules. The remaining order is the number of
+ * configured claims followed by the rule id, so selection does not depend on
+ * the order of the input rows.
  */
 export function matchOidcTrust(
 	rules: readonly OidcTrustRule[],
@@ -123,9 +109,6 @@ export function matchOidcTrust(
 		.at(0);
 }
 
-// One configured claim a token failed to satisfy: the claim's name, the
-// configured expectation (a pattern in its `pattern:` form), and the token's
-// value when it carried a string one.
 export interface ClaimMismatch {
 	readonly claim: string;
 	readonly expected: string;
@@ -159,9 +142,6 @@ export function claimMismatches(
 		});
 }
 
-/**
-The first entry of {@link claimMismatches}, for a single-claim report.
-*/
 export function firstClaimMismatch(
 	rule: OidcTrustRule,
 	claims: OidcClaims

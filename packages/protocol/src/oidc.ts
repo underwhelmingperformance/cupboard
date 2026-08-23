@@ -46,9 +46,8 @@ export const claimMatchSchema = z.union([
 ]);
 export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
-// RFC 8693 token-exchange issues the first cupboard token of a session. The
-// subject token is an external OIDC JWT: the owner's `id_token` or a CI GitHub
-// Actions token. The issued cupboard token is reported as an access token.
+// RFC 8693 token exchange issues the first Cupboard token in a session from an
+// external OIDC JWT. The response reports the Cupboard token as an access token.
 export const tokenExchangeGrantType =
 	'urn:ietf:params:oauth:grant-type:token-exchange';
 export const issuedAccessTokenType =
@@ -71,8 +70,8 @@ export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 // A client sends the RFC 9396 `authorization_details` array as a JSON-encoded
 // form field. The token service parses and validates it and returns
 // `invalid_authorization_details` for malformed or unauthorised values. A
-// claim-bound rule must send the field. An interactive owner may omit it and
-// receive a wildcard grant.
+// claim-bound rule must send the field. A rule that permits a wildcard grant
+// may omit it and receive that grant.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
@@ -102,10 +101,10 @@ export const tokenRequestSchema = z.object({
 export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
 
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
-// access token is the cupboard JWT; `issued_token_type` is present for the
-// token-exchange grant. A `refresh_token` accompanies an interactive session and
-// is rotated on every refresh. `authorization_details` (RFC 9396) reports the
-// grants the token carries. Field names are the OAuth wire spelling.
+// access token is the Cupboard JWT; `issued_token_type` is present for the
+// token-exchange grant. A tenant's interactive session receives a refresh token,
+// which rotates on every refresh. `authorization_details` (RFC 9396) reports the
+// grants the token carries. Field names use the OAuth wire spelling.
 export const tokenResponseSchema = z.strictObject({
 	access_token: z.string(),
 	token_type: z.literal('Bearer'),
@@ -116,11 +115,10 @@ export const tokenResponseSchema = z.strictObject({
 });
 export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 
-// A trust rule maps an external OIDC identity to Cupboard grants. Deployment
-// configuration creates the owner rule with a wildcard grant. Administrators
-// create other rules through the API, and their resource bindings determine the
-// grants that can be issued. `display` stores provenance for the preset that
-// created the rule.
+// Deployment configuration seeds an owner rule with a wildcard grant. The API
+// can create additional rules, including other wildcard rules. For a claim-bound
+// rule, resource bindings determine which concrete grants the server can issue.
+// `display` records which preset created the rule.
 export const oidcTrustAddBodySchema = z.strictObject({
 	issuer: z
 		.url()

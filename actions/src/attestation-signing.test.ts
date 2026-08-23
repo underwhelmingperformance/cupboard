@@ -25,10 +25,6 @@ vi.mock('@actions/attest', () => ({
 	buildSLSAProvenancePredicate: mocks.buildSLSAProvenancePredicate
 }));
 
-/**
- * Stands in for a `@sigstore/sign` error: a code for the stage that failed,
- * with the underlying failure as its cause.
- */
 class SigningFailure extends Error {
 	constructor(
 		public readonly code: SigningStageCode,
@@ -39,10 +35,6 @@ class SigningFailure extends Error {
 	}
 }
 
-/**
- * Stands in for the error the Sigstore HTTP client throws for a non-2xx
- * response.
- */
 class HttpFailure extends Error {
 	constructor(public readonly statusCode: number) {
 		super('the service answered with an error status');
@@ -69,7 +61,7 @@ interface ClassificationCase {
 
 const classificationCases: readonly ClassificationCase[] = [
 	{
-		failure: 'fetching the log entry got no answer',
+		failure: 'fetching the log entry received no response',
 		error: signingFailure('TLOG_FETCH_ENTRY_ERROR'),
 		transient: true
 	},
@@ -105,7 +97,7 @@ const classificationCases: readonly ClassificationCase[] = [
 		transient: false
 	},
 	{
-		failure: 'the timestamp authority gave no answer',
+		failure: 'the timestamp authority returned no response',
 		error: signingFailure('TSA_CREATE_TIMESTAMP_ERROR'),
 		transient: true
 	},
@@ -154,20 +146,11 @@ const signed: SignedAttestation = { bundle: '{"mediaType":"test"}\n' };
 
 interface SigningRun {
 	readonly signer: StatementSigner;
-	/**
-	The statement passed to the signer, recorded once per attempt.
-	*/
 	readonly attempted: AttestationStatement[];
-	/**
-	The attempt number passed to each wait.
-	*/
 	readonly delays: number[];
 	readonly delay: (attempt: number) => Promise<void>;
 }
 
-/**
-A signer that fails with each listed error in turn, then succeeds.
-*/
 function signingRun(failures: readonly Error[]): SigningRun {
 	const attempted: AttestationStatement[] = [];
 	const delays: number[] = [];
@@ -342,7 +325,7 @@ describe('githubStatementSigner', () => {
 });
 
 describe('slsaProvenanceStatement', () => {
-	it('takes the type and the parameters of the generated predicate', async () => {
+	it('returns the generated predicate type and parameters as a statement', async () => {
 		const parameters = { buildDefinition: { buildType: 'workflow' } };
 
 		mocks.buildSLSAProvenancePredicate.mockResolvedValue({

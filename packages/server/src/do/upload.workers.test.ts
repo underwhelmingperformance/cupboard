@@ -112,8 +112,8 @@ function byUploadId(
 	return left.uploadId.localeCompare(right.uploadId);
 }
 
-// The per-id identity a session frame names, for order-insensitive assertions.
-// An `unsupported` frame names no upload, so it reads as an empty id.
+// Use an empty upload ID for connection-level frames in order-insensitive
+// comparisons.
 function frameIdentity(frame: ParsedCommitSessionFrame): {
 	readonly ev: string;
 	readonly uploadId: string;
@@ -141,9 +141,8 @@ function publicKeyShape(publicKey: string): {
 	};
 }
 
-// Drives the DO alarm directly so the negotiated reconcile runs: the test pool
-// does not deliver the request-armed alarm negotiate sets, so the handler is
-// invoked the way the GC continuation tests invoke it.
+// The test pool does not dispatch request-armed alarms, so invoke the Durable
+// Object alarm directly to run negotiated reconciliation.
 async function fireReconcile(): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => instance.alarm());
 }
@@ -159,9 +158,8 @@ function expectError<T extends Error>(
 	expect(error).toBeInstanceOf(errorClass);
 }
 
-// Projects an oRPC validation error body down to the fields a schema-mismatch
-// test pins: the code, status, and each issue's code and path. The per-issue
-// message is human-readable and version-dependent, so it is dropped.
+// Validation messages can change between schema-library versions. Compare the
+// stable code, status, issue code, and path.
 function badRequestBodyShape(body: unknown): {
 	readonly code: unknown;
 	readonly status: unknown;
@@ -323,7 +321,6 @@ describe('upload flow', () => {
 			second.token
 		);
 
-		// A re-bootstrap issues a fresh token but never rotates the signing key.
 		expect({
 			firstToken: first.token.length > 0,
 			secondToken: second.token.length > 0,
@@ -505,9 +502,7 @@ describe('upload flow', () => {
 		const capture = startCapture();
 
 		try {
-			// `beforeEach` already initialised a server, so reset again under the
-			// capture: the fresh server's first request runs the cold-start migration
-			// where the log line is visible.
+			// Reset inside the capture so it observes the cold-start migration.
 			await resetTestServer();
 			const init = await bootstrap();
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -519,14 +514,9 @@ describe('upload flow', () => {
 			capture.stop();
 		}
 
-		// The cold-start migration and the commit are the row-heavy entrypoints that
-		// bypass `fetch`, so each logs its own cost line. Neither is on the fetch path
-		// the request-cost test covers, so without this the `metered()` plumbing could
-		// regress unseen. Both are asserted as a present, non-zero cost: the cold-start
-		// total tracks the whole DO migration history and the commit total tracks the
-		// closure, neither a stable behavioural quantity.
-		// The meter's row accounting is pinned exactly by the fetch-path and reconcile
-		// cost tests instead.
+		// Migration and commit bypass `fetch`, so each must create its own metered
+		// request context. Their exact row counts depend on migration history and
+		// closure size; assert only that accounting occurred.
 		const byMethod = capture.logs
 			.filter((entry) => entry.message === 'method finished')
 			.map((entry) => methodLineSchema.parse(entry.properties));
@@ -543,9 +533,8 @@ describe('upload flow', () => {
 	it('routes a mixed closure through one batched negotiate', async () => {
 		const init = await bootstrap();
 
-		// One negotiate must route every path from its bulk reads without crossing
-		// their decisions: a committed path skips, a hash this tenant already owns
-		// reuses at a new store path, and a brand-new path uploads.
+		// Exercise skip, reuse, and fresh-upload decisions in one bulk request so a
+		// result cannot be associated with the wrong path.
 		const committedPath = await commitVerifiablePath(init.token, 'skip-me', {
 			name: 'skip',
 			storePathHash: '22222222222222222222222222222222'
@@ -627,9 +616,7 @@ describe('upload flow', () => {
 
 	it('rejects an upload whose bytes do not match the declared NAR hash', async () => {
 		const token = await initialise();
-		// The declared narHash is not what the stored bytes decompress to, but the
-		// compressed fileHash does match, so only the server-side decompress-verify
-		// can catch it. Verify-before-serve must reject it and leave nothing servable.
+		// The compressed hash matches, but the bytes decode to a different NAR.
 		const metadata = uploadMetadata({
 			name: 'tampered',
 			storePathHash: '99999999999999999999999999999999',
@@ -660,9 +647,7 @@ describe('upload flow', () => {
 
 	it('rejects corrupt, undecompressable bytes at verification', async () => {
 		const token = await initialise();
-		// Bytes that are not a valid zstd frame but whose declared compressed hash
-		// matches, so only the decompress step can reject them. The error it raises
-		// must surface as a clean 422, not a 500, and must reclaim the staging blob.
+		// The compressed hash matches, but the bytes are not a zstd frame.
 		const garbage = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);
 		const garbageFileHash = NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
@@ -706,8 +691,7 @@ describe('upload flow', () => {
 		const good = await verifiableNar('isolation-good');
 		const wrong = await verifiableNar('isolation-wrong');
 
-		// A bad upload claims `good`'s narHash but stages `wrong`'s bytes, whose own
-		// compressed hash matches, so only the decompress-verify catches it.
+		// The compressed hash matches the staged bytes, but their NAR hash differs.
 		const badMetadata = uploadMetadata({
 			name: 'bad',
 			storePathHash: 'a'.repeat(32),
@@ -732,8 +716,6 @@ describe('upload flow', () => {
 			verdict: 'mismatch'
 		});
 
-		// The hash is not poisoned: a correct upload of `good` for another store path
-		// still negotiates as an upload, verifies, commits, and is served.
 		const goodMetadata = uploadMetadata({
 			name: 'good',
 			storePathHash: 'b'.repeat(32),
@@ -768,7 +750,7 @@ describe('upload flow', () => {
 		const compressed = await verifiableNar('shared-encoding');
 		const stored = await verifiableNarStored('shared-encoding');
 
-		// Same NAR content, two distinct compressed encodings (so different fileHash).
+		// Use two compressed encodings of the same NAR with different file hashes.
 		expect(compressed.narHash).toBe(stored.narHash);
 		expect(compressed.fileHash).not.toBe(stored.fileHash);
 
@@ -789,8 +771,8 @@ describe('upload flow', () => {
 			narSize: stored.narSize
 		});
 
-		// Both negotiate as fresh uploads before either commits, the only window in
-		// which two distinct encodings of one hash race.
+		// Negotiate both encodings before either commit so they race to establish
+		// the canonical object.
 		const firstUpload = expectSingleUploadDecision(
 			await negotiateUploads(token, [first]),
 			first
@@ -806,8 +788,6 @@ describe('upload flow', () => {
 		await commitUpload(token, firstUpload.uploadId);
 		await commitUpload(token, secondUpload.uploadId);
 
-		// Both narinfos advertise the canonical object's fileHash (the one promoted
-		// first), so a substituter fetching either downloads bytes whose hash matches.
 		const firstInfo = await fetchNarInfo(first.storePathHash);
 		const secondInfo = await fetchNarInfo(second.storePathHash);
 		const canonical = await env.BLOBS.head(narObjectKey(compressed.narHash));
@@ -846,16 +826,14 @@ describe('upload flow', () => {
 
 		await currentServer().runVerification();
 
-		// Background verification failed: it deleted the bad staging bytes but kept a
-		// durable `mismatch` verdict (readable later by `push --wait`), committing
-		// nothing servable.
+		// A terminal verdict remains readable during the observation window after
+		// the staging bytes are deleted.
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// The terminal row is reaped once its observation window has passed.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
 
@@ -876,9 +854,8 @@ describe('upload flow', () => {
 
 		await commitPath(token, first, nar);
 
-		// A second store path declares the same narHash but a forged, larger narSize.
-		// The blob is reused (no re-upload), so the server must sign the verified
-		// canonical narSize, not the unchecked declared one.
+		// Reuse must take narSize from the verified canonical object rather than
+		// from the new path's untrusted metadata.
 		const forged = uploadMetadata({
 			name: 'forged',
 			storePathHash: 'b'.repeat(32),
@@ -910,17 +887,15 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// A blob too large to verify inline commits as `pending`: stored, but not
-		// servable until the background pass confirms its bytes. Simulate that
-		// verdict without a multi-megabyte fixture.
+		// Every fresh upload remains pending until the background pass verifies its
+		// staged bytes.
 		await markUploadPendingVerification(upload.uploadId);
 
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// Past the 15-minute upload expiry: GC must not reap a pending upload, and
-		// the background verify pass must then confirm and commit it.
+		// Pending verification survives the ordinary upload expiry.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
 		await currentServer().runVerification();
@@ -933,7 +908,7 @@ describe('upload flow', () => {
 		).resolves.not.toBeNull();
 	});
 
-	it('re-drives an inline commit crashed mid-saga from its committing marker', async () => {
+	it('re-drives a commit that crashed after writing its committing marker', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -942,17 +917,13 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// An inline commit that crashed after marking itself in progress but before
-		// reserving the row: the staging bytes are present, the upload carries the
-		// `committing` marker, and nothing is servable yet.
+		// Reproduce a crash after the durable marker and before narinfo reservation.
 		await markUploadCommitting(upload.uploadId);
 
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// The verify pass re-drives it through the same reserve→verify→promote→
-		// materialise path a deferred upload takes, then clears the marker.
 		await currentServer().runVerification();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
@@ -970,16 +941,14 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await markUploadCommitting(upload.uploadId);
 
-		// Past the 15-minute upload expiry, GC runs before verification (their cron
-		// ordering is not guaranteed). A `committing` upload is a live saga, not an
-		// abandoned upload, so GC must leave it and its staged bytes alone.
+		// GC and verification have no guaranteed relative order. A `committing`
+		// upload must survive expiry until verification can resume it.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('committing');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		// The verify pass then still re-drives it to servable.
 		await currentServer().runVerification();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
@@ -996,9 +965,8 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// A fresh upload defers for verify-before-serve. The commit must leave a
-		// durable `committing` marker before any reserve/verify work, so the verify
-		// pass re-drives it and an interruption never strands a null-verdict row.
+		// The durable marker must precede reservation and verification so an
+		// interruption leaves work that a later pass can resume.
 		const deferred = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
 			wait: false
 		});
@@ -1025,8 +993,6 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
-		// The queue consumer claims the deferred upload (a read on the DO), decodes
-		// the bytes off the DO thread, then reports the verdict back.
 		expect(await currentServer().claimPendingVerifications(10)).toStrictEqual([
 			{
 				uploadId: upload.uploadId,
@@ -1037,8 +1003,6 @@ describe('upload flow', () => {
 			}
 		]);
 
-		// The off-DO consumer reports the file hash and size it computed while
-		// decoding, the facts the promote records for the served narinfo.
 		await currentServer().recordVerification(upload.uploadId, {
 			ok: true,
 			fileHash: fileHash.value,
@@ -1118,7 +1082,6 @@ describe('upload flow', () => {
 		await putNarBytes(a.r2Key);
 		await putNarBytes(b.r2Key);
 
-		// Both commits ride one socket and each gets its own per-id frame.
 		const session = await openCommitSession(token);
 		session.send({ op: 'commit', uploadId: a.uploadId });
 		session.send({ op: 'commit', uploadId: b.uploadId });
@@ -1144,14 +1107,12 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// Commit on one session; it defers, then that socket drops.
 		const first = await openCommitSession(token);
 		first.send({ op: 'commit', uploadId: upload.uploadId });
 		const deferred = await first.nextFrame();
 		expect(deferred.ev).toBe('deferred');
 		first.socket.close();
 
-		// A reconnected session re-subscribes and is replayed the deferral.
 		const second = await openCommitSession(token);
 		second.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
 		const replay = await second.nextFrame();
@@ -1160,7 +1121,6 @@ describe('upload flow', () => {
 			uploadId: upload.uploadId
 		});
 
-		// The verdict routes to the reconnected socket.
 		await currentServer().runVerification();
 		const verdict = await second.nextFrame();
 		second.socket.close();
@@ -1181,12 +1141,11 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// Commit fully, so its pending row is cleared.
 		const committed = await commitUpload(token, upload.uploadId);
 		expect(committed.status).toBe('committed');
 
-		// A later subscribe to the cleared row replays servable: a cleared row is
-		// always a committed path.
+		// The legacy ID-only subscription cannot distinguish a committed upload
+		// from one whose row expired. For this committed path it returns servable.
 		const session = await openCommitSession(token);
 		session.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
 		const replay = await session.nextFrame();
@@ -1238,7 +1197,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('answers every entry of a batched commit with its own frame', async () => {
+	it('returns one frame for every entry in a batched commit', async () => {
 		const token = await initialise();
 		const metaA = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
@@ -1300,7 +1259,7 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('settles both entries of a batch durably even when the client closes mid-batch', async () => {
+	it('commits both batch entries durably when the client closes mid-batch', async () => {
 		const token = await initialise();
 		const { metadata: metaA, nar: narA } = await verifiablePath(
 			'dead-socket-a',
@@ -1335,11 +1294,8 @@ describe('upload flow', () => {
 		await putNarBytes(a.r2Key, narA);
 		await putNarBytes(b.r2Key, narB);
 
-		// Open a session, then close the server-side socket BEFORE handling the
-		// batch, so every frame the handler sends lands on a dead socket. The
-		// handler is invoked directly and awaited, so the test observes its
-		// completion with no timing sensitivity: the entries must have settled
-		// durably by the time it returns.
+		// Close the server-side socket before handling the batch. Awaiting the
+		// handler then proves durability without depending on frame timing.
 		await openCommitSession(token);
 
 		const batchMessage = JSON.stringify({
@@ -1377,7 +1333,7 @@ describe('upload flow', () => {
 		}).toStrictEqual({ a: undefined, b: undefined });
 	});
 
-	it('settles both batch messages when they are sent back-to-back', async () => {
+	it('commits entries from two back-to-back batch messages', async () => {
 		const token = await initialise();
 		const metaA = uploadMetadata({
 			storePathHash: 'n'.repeat(32),
@@ -1410,8 +1366,8 @@ describe('upload flow', () => {
 		await putNarBytes(a.r2Key);
 		await putNarBytes(b.r2Key);
 
-		// Two separate commit-batch messages sent back-to-back: the per-DO semaphore
-		// must queue the second message's entries without dropping them.
+		// The per-Durable-Object semaphore must queue the second message without
+		// dropping its entries.
 		const session = await openCommitSession(token);
 		session.send({
 			op: 'commit-batch',
@@ -1447,7 +1403,7 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('settles a burst of per-id commit ops within the shared entry bound', async () => {
+	it('commits a burst of per-ID operations within the shared entry bound', async () => {
 		const token = await initialise();
 		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 		const metadatas = Array.from({ length: 10 }, (_, index) =>
@@ -1474,9 +1430,8 @@ describe('upload flow', () => {
 			await putNarBytes(upload.r2Key);
 		}
 
-		// Ten per-id ops sent back-to-back, the shape a client without the batch
-		// capability fans out. The shared entry bound queues the excess; every op
-		// must still answer its own frame.
+		// A client without batching can send many per-ID operations. The shared
+		// entry bound must queue excess work without dropping a response.
 		const session = await openCommitSession(token);
 
 		for (const upload of uploads) {
@@ -1500,7 +1455,7 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('answers an unknown op with an unsupported frame, keeping the session', async () => {
+	it('returns unsupported for an unknown operation and keeps the session open', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -1515,8 +1470,6 @@ describe('upload flow', () => {
 		session.socket.send(JSON.stringify({ op: 'compress-all', level: 19 }));
 		const reply = await session.nextFrame();
 
-		// The socket survived the unknown op: a known op on the same session still
-		// answers.
 		session.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
 		const replay = await session.nextFrame();
 		session.socket.close();
@@ -1536,8 +1489,7 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// Commit fully, so the pending row is cleared: the state a reconnect
-		// re-sending an entry whose `settled` frame was lost finds.
+		// Clear the pending row before replay to reproduce a lost settled frame.
 		const committed = await commitUpload(token, upload.uploadId);
 		expect(committed.status).toBe('committed');
 
@@ -1566,7 +1518,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('refuses to settle a re-sent entry against a superseded servability proof', async () => {
+	it('does not resolve a replay from a stale servability proof', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -1620,7 +1572,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('answers a re-sent entry as absent when its committed NAR has been lost', async () => {
+	it('returns absent for a replay whose committed NAR is missing', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -1695,7 +1647,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('answers a batched entry whose row and path are both gone as absent', async () => {
+	it('returns absent for a batched entry whose row and path are both missing', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			storePathHash: 'f'.repeat(32),
@@ -1734,13 +1686,9 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength
 		});
 
-		// Plant a narinfo row for this path with no committed reference edge,
-		// the state a mid-saga reservation leaves: the row exists but no D1 edge
-		// makes it servable.
+		// Reserve the narinfo row without a D1 reference edge.
 		await seedReservedNarInfo(metadata);
 
-		// The pending row for this uploadId never existed (simulating a re-sent
-		// entry whose original pending row was reaped), so `resolveGoneCommit` runs.
 		const session = await openCommitSession(token);
 		session.send({
 			op: 'commit-batch',
@@ -1755,9 +1703,8 @@ describe('upload flow', () => {
 		const frame = await session.nextFrame();
 		session.socket.close();
 
-		// The narinfo row matches the narHash but has no committed reference edge,
-		// so the upload has not been committed; the entry must answer `absent`,
-		// not `already-present`.
+		// A matching narinfo row without a current reference edge is not a
+		// committed upload.
 		expect(frame).toStrictEqual({
 			ev: 'verdict',
 			uploadId: 'reservation-only-upload',
@@ -1765,7 +1712,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('subscribe-identity: a gone row whose path committed answers already-present', async () => {
+	it('subscribe-identity returns already-present for a committed path with no pending row', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -1774,7 +1721,6 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// Commit fully so the pending row clears, leaving a committed narinfo row.
 		const committed = await commitUpload(token, upload.uploadId);
 		expect(committed.status).toBe('committed');
 
@@ -1803,7 +1749,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('subscribe-identity: a gone row with only a reservation answers absent', async () => {
+	it('subscribe-identity returns absent for an uncommitted reservation with no pending row', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			storePathHash: 'd'.repeat(32),
@@ -1812,7 +1758,6 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength
 		});
 
-		// Plant a narinfo row for this path with no committed reference edge.
 		await seedReservedNarInfo(metadata);
 
 		const session = await openCommitSession(token);
@@ -1836,7 +1781,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('subscribe-identity: an entry whose pending row exists replays deferred and routes the verdict to the new socket', async () => {
+	it('subscribe-identity replays a pending entry and sends its verdict to the new socket', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -1845,15 +1790,12 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// Commit on one session so it defers, then close that socket.
 		const first = await openCommitSession(token);
 		first.send({ op: 'commit', uploadId: upload.uploadId });
 		const deferred = await first.nextFrame();
 		expect(deferred.ev).toBe('deferred');
 		first.socket.close();
 
-		// A reconnected session replays with subscribe-identity; the pending row
-		// exists, so it re-emits deferred and re-attaches the session.
 		const second = await openCommitSession(token);
 		second.send({
 			op: 'subscribe-identity',
@@ -1871,7 +1813,6 @@ describe('upload flow', () => {
 			uploadId: upload.uploadId
 		});
 
-		// The verdict routes to the reconnected socket.
 		await currentServer().runVerification();
 		const verdict = await second.nextFrame();
 		second.socket.close();
@@ -1892,15 +1833,12 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// The state a crashed inline commit leaves: the row reserved at generation 0,
-		// the upload marked committing, the staged bytes still present, and nothing
-		// servable.
+		// Reproduce a crash after reservation and before publication.
 		await seedReservedNarInfo(metadata);
 		await markUploadCommitting(upload.uploadId);
 
-		// A client retry must not concede `already-present` for the not-yet-servable
-		// row, nor delete the staged bytes the re-drive needs: it defers, leaving
-		// the marker and bytes intact.
+		// Retry must preserve the staged bytes and defer; the reservation alone is
+		// not proof that the path is already present.
 		const retry = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
 			wait: false
 		});
@@ -1911,7 +1849,6 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// The verify pass re-drives the preserved saga to servable.
 		await currentServer().runVerification();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
@@ -1928,8 +1865,7 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// A crashed inline reuse saga: reserved row, marked committing, never settled
-		// and never requested a prompt pass.
+		// Reproduce a reuse commit that crashed before requesting verification.
 		await seedReservedNarInfo(metadata);
 		await markUploadCommitting(upload.uploadId);
 
@@ -1950,8 +1886,6 @@ describe('upload flow', () => {
 			return Promise.resolve();
 		});
 
-		// Retrying the commit re-drives the saga through a prompt pass, so the socket
-		// settles within its wait window.
 		const commit = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
 			wait: false
 		});
@@ -1988,19 +1922,17 @@ describe('upload flow', () => {
 			return Promise.resolve();
 		});
 
-		// Two deferrals before any pass starts coalesce onto one outstanding
-		// request: the pass it triggers will claim both rows.
+		// Deferrals before a pass starts share one outstanding verification request.
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		expect(sent).toStrictEqual([
 			{ kind: 'tenant-verify', tenant: fixtureTenant }
 		]);
 
-		// A pass starts (the queue consumer claims the rows), re-arming the guard.
 		await currentServer().claimPendingVerifications(10);
 
-		// A deferral after the snapshot asks for a fresh pass; the one that has
-		// already chosen its rows will not see it.
+		// Once a pass has claimed its snapshot, a later deferral needs another
+		// request.
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		expect(sent).toStrictEqual([
 			{ kind: 'tenant-verify', tenant: fixtureTenant },
@@ -2017,12 +1949,9 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(loser.r2Key);
 
-		// A rival commit reserved the path but has not committed its reference yet:
-		// the narinfo row exists, unmaterialised, with no D1 edge or R2 object, and
-		// the rival's own upload row is live (mid-saga, unexpired). This upload's
-		// verdict is still null, so it is a distinct racer, not a retry, and the
-		// live rival is what routes it to the verification pass; a reservation with
-		// no live upload behind it is reclaimed at commit instead.
+		// Seed a live competing upload that reserved the path without committing a
+		// reference edge. A distinct racer must enter verification; an orphaned
+		// reservation would instead be reclaimed immediately.
 		await seedReservedNarInfo(metadata);
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
@@ -2043,16 +1972,12 @@ describe('upload flow', () => {
 			wait: false
 		});
 
-		// There is nothing committed to concede to; the loser is marked pending
-		// and staged for the prompt verification pass.
 		expect({
 			status: committed.status,
 			verdict: await pendingUploadVerdict(loser.uploadId),
 			staged: (await env.BLOBS.head(loser.r2Key)) !== null
 		}).toStrictEqual({ status: 'pending', verdict: 'pending', staged: true });
 
-		// The pass drives the tracked loser to servable, the terminal verdict its
-		// socket would have carried.
 		await currentServer().runVerification();
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -2068,9 +1993,8 @@ describe('upload flow', () => {
 		const good = await verifiableNar('reuse-verify-good');
 		const wrong = await verifiableNar('reuse-verify-wrong');
 
-		// Stage a second upload for a different path that claims `good`'s narHash but
-		// holds `wrong`'s bytes (whose own compressed hash matches). Negotiate while
-		// no shared blob exists, so it is an upload decision, not a reuse.
+		// Negotiate the dishonest path before a shared blob exists so it must upload
+		// and verify its own staged bytes.
 		const liar = uploadMetadata({
 			name: 'liar',
 			storePathHash: 'a'.repeat(32),
@@ -2085,8 +2009,8 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(liarUpload.r2Key, wrong);
 
-		// A correct upload of `good` for another path commits first, so `blob_state`
-		// now holds `good`'s narHash and the canonical object exists.
+		// Commit an honest path with the same declared NAR hash before verifying the
+		// dishonest upload.
 		const honest = uploadMetadata({
 			name: 'honest',
 			storePathHash: 'b'.repeat(32),
@@ -2097,9 +2021,8 @@ describe('upload flow', () => {
 		});
 		await commitPath(token, honest, good);
 
-		// The liar's deferred verify must re-derive its own staged bytes, not bind to
-		// the shared blob because `blob_state` already holds the hash: its bytes are
-		// `wrong`, so it fails terminally and never becomes servable.
+		// An existing canonical blob must not let fresh staged bytes bypass
+		// verification.
 		await markUploadPendingVerification(liarUpload.uploadId);
 		await currentServer().runVerification();
 
@@ -2108,7 +2031,6 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, liar.storePathHash))
 		).resolves.toBeNull();
 
-		// The honest path is unaffected and still serves.
 		const served = await fetchNarInfo(honest.storePathHash);
 		expect(served.narHash.toString()).toBe(good.narHash);
 	});
@@ -2184,8 +2106,8 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
-		// A transient read failure during the background verify must not fail the
-		// upload terminally: the row stays `pending` and its staging bytes survive.
+		// A transient staging read failure must leave the upload pending and retain
+		// its bytes for retry.
 		const getSpy = vi
 			.spyOn(env.BLOBS, 'get')
 			.mockRejectedValueOnce(new Error('transient R2 read'));
@@ -2196,7 +2118,6 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		// The next pass reads cleanly, commits, and clears the settled upload.
 		await currentServer().runVerification();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
@@ -2207,7 +2128,7 @@ describe('upload flow', () => {
 	it('chains a verify pass that fills its batch and drains the rest, stopping on a short batch', async () => {
 		const token = await initialise();
 
-		// Three distinct deferred uploads: more than one pass holds at a batch of two.
+		// Three deferred uploads require two passes when the claim limit is two.
 		const uploadIds: UploadId[] = [];
 		for (const index of [0, 1, 2]) {
 			const seed = `drain-${String(index)}`;
@@ -2224,8 +2145,7 @@ describe('upload flow', () => {
 			uploadIds.push(upload.uploadId);
 		}
 
-		// The continuation routes through the object's single-flight, so it sends on
-		// the object's own queue binding; collect those sends.
+		// Collect continuation requests sent through the Durable Object's queue.
 		const sent: unknown[] = [];
 		const metrics = { backlogCount: 0, backlogBytes: 0 };
 		await runInDurableObject(currentServer(), (instance) => {
@@ -2246,7 +2166,6 @@ describe('upload flow', () => {
 		});
 		const tenant = currentServerTenant();
 
-		// A committed upload clears its row, so a gone verdict counts as servable.
 		const servableCount = async (): Promise<number> => {
 			const verdicts = await Promise.all(
 				uploadIds.map((uploadId) => pendingUploadVerdict(uploadId))
@@ -2255,15 +2174,12 @@ describe('upload flow', () => {
 			return verdicts.filter((verdict) => verdict === undefined).length;
 		};
 
-		// A full batch leaves a row pending, so the pass chains one continuation.
 		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
 			sent: sent.length,
 			servable: await servableCount()
 		}).toStrictEqual({ sent: 1, servable: 2 });
 
-		// The continuation claims a short batch (the last row): it drains it and
-		// sends no further request.
 		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
 			sent: sent.length,
@@ -2284,15 +2200,12 @@ describe('upload flow', () => {
 
 		await currentServer().runVerification();
 
-		// The background commit settles the upload completely: the waiters held
-		// the verdict, so no row remains to re-drive.
+		// Verification clears the pending row after publishing the verdict.
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 
-		// Deleting the committed path is not undone by a later verify pass:
-		// nothing of the settled upload survives to re-promote it.
 		await deletePath(token, metadata.storePathHash);
 		await currentServer().runVerification();
 
@@ -2303,9 +2216,8 @@ describe('upload flow', () => {
 
 	it('records a durable mismatch for an undecodable deferred blob, not a retried pending upload', async () => {
 		const token = await initialise();
-		// Bytes that are not a valid zstd frame, but whose declared compressed hash
-		// matches (so R2 and verifyUploadedObject accept them); only decompression
-		// fails. A decode failure is terminal, never an endlessly-retried `pending`.
+		// The compressed hash matches, but decompression fails. This is a terminal
+		// mismatch rather than a transient pending verdict.
 		const garbage = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 		const garbageFileHash = NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
@@ -2340,13 +2252,12 @@ describe('upload flow', () => {
 		).resolves.toBeNull();
 	});
 
-	it('reaps a canonical blob orphaned by losing the commit race at a different narHash', async () => {
+	it('leaves no orphaned canonical blob after one of two competing NAR hashes loses', async () => {
 		const token = await initialise();
 		const narX = await verifiableNar('race-x');
 		const narY = await verifiableNar('race-y');
 		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
 
-		// Defer an upload of path P at narHash X (awaiting background verification).
 		const x = uploadMetadata({
 			name: 'p',
 			storePathHash,
@@ -2362,7 +2273,6 @@ describe('upload flow', () => {
 		await putNarBytes(xUpload.r2Key, narX);
 		await markUploadPendingVerification(xUpload.uploadId);
 
-		// Defer a second upload of the SAME path P at a different narHash Y.
 		const y = uploadMetadata({
 			name: 'p',
 			storePathHash,
@@ -2378,9 +2288,8 @@ describe('upload flow', () => {
 		await putNarBytes(yUpload.r2Key, narY);
 		await markUploadPendingVerification(yUpload.uploadId);
 
-		// One pass settles both: whichever verifies first wins the narinfo row,
-		// the other loses it, and anything the loser staged or promoted that no
-		// edge references are reaped.
+		// Whichever upload verifies first wins the narinfo row. The losing NAR hash
+		// must have no canonical object left after both verdicts are applied.
 		await currentServer().runVerification();
 		await currentServer().runGarbageCollection();
 
@@ -2407,9 +2316,8 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
-		// The staging object is gone for good (R2 loss / external delete). The
-		// background pass must terminally fail it. Left `pending`, the upload
-		// would re-read an absent object on every cron tick, for ever.
+		// A definitively missing staging object is terminal; leaving it pending
+		// would retry the same absent object on every pass.
 		await env.BLOBS.delete(upload.r2Key);
 		await currentServer().runVerification();
 
@@ -2436,8 +2344,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
 
-		// The verify pass runs after the original 15-minute upload TTL; the recorded
-		// mismatch refreshes the window, so a GC pass right after does not reap it.
+		// A terminal verdict starts a new observation window after the upload TTL.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runVerification();
 
@@ -2486,7 +2393,6 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// The deferral must trigger a prompt verification pass.
 		const sent: unknown[] = [];
 		const metrics = { backlogCount: 0, backlogBytes: 0 };
 		await runInDurableObject(currentServer(), (instance) => {
@@ -2539,9 +2445,8 @@ describe('upload flow', () => {
 		expect(firstCommit.status).toBe('committed');
 		expect(secondCommit.status).toBe('already-present');
 
-		// Both private staging objects are reclaimed (the winner's on commit and
-		// the loser's on the already-present path), leaving only the canonical blob.
-		// GC never has a handle to a staging key once its upload is cleared.
+		// Both private staging objects must be deleted before their upload rows are
+		// cleared; GC cannot discover a staging key after that point.
 		await expect(env.BLOBS.head(first.r2Key)).resolves.toBeNull();
 		await expect(env.BLOBS.head(second.r2Key)).resolves.toBeNull();
 		await expect(
@@ -2550,9 +2455,8 @@ describe('upload flow', () => {
 	});
 
 	it('finalises and reclaims staging when the canonical blob was already promoted', async () => {
-		// Simulates recovery after a crash that promoted the blob but had not yet
-		// committed: the canonical object exists, the upload is still staged, and a
-		// retried commit must finalise from it without failing or re-copying.
+		// Reproduce a crash after promotion and before commit. Retry must adopt the
+		// canonical object and clean up staging without copying it again.
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -2670,7 +2574,8 @@ describe('upload flow', () => {
 
 		const original = await readStoredNarInfo(metadata.storePathHash);
 
-		// The common breakage: the narinfo object is gone but its NAR is intact.
+		// Remove only the narinfo object; keep the canonical NAR available for
+		// repair.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
@@ -2678,8 +2583,8 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// Negotiate skips on the lingering blob_state row and queues the path; it
-		// does not heal on the hot path.
+		// Negotiation queues reconciliation but does not repair the object on the
+		// request path.
 		const skip = await negotiateUploads(token, [metadata]);
 
 		expect(skip.uploads).toStrictEqual([
@@ -2690,8 +2595,6 @@ describe('upload flow', () => {
 			}
 		]);
 
-		// The reconcile restores the object, so the path serves again after the one
-		// re-push.
 		await fireReconcile();
 
 		const healed = await readStoredNarInfo(metadata.storePathHash);
@@ -2710,8 +2613,8 @@ describe('upload flow', () => {
 
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
-		// The blob_state row still backs the hash, so negotiate skips and queues the
-		// path; the reconcile then finds the NAR truly gone and removes the narinfo.
+		// Leave `blob_state` present so negotiation queues reconciliation. The
+		// missing canonical object then makes reconciliation retire the narinfo.
 		const skip = await negotiateUploads(token, [metadata]);
 
 		expect(skip.uploads).toStrictEqual([
@@ -2728,7 +2631,6 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		// With the dangling narinfo gone, the next re-push re-uploads the NAR.
 		expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
@@ -2804,13 +2706,11 @@ describe('upload flow', () => {
 		await commitPath(token, first);
 		await commitSharedPath(token, second);
 
-		// Two committed paths share one blob; its object disappears.
+		// Remove the canonical object shared by two committed paths.
 		await env.BLOBS.delete(narObjectKey(first.narHash));
 
-		// Negotiate skips both committed paths (the blob_state row still backs the
-		// hash) and queues them. The reconcile finds the NAR gone and retires both
-		// edges, crediting the shared blob exactly once: the per-tenant counters stay
-		// consistent and non-negative across the two removals.
+		// Reconciliation retires both reference edges but credits the shared blob
+		// only once.
 		await negotiateUploads(token, [first, second]);
 		await fireReconcile();
 
@@ -2821,7 +2721,6 @@ describe('upload flow', () => {
 			totalFileSize: 0
 		});
 
-		// A genuinely lost NAR re-plans an upload on the next push.
 		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
 	});
 
@@ -2877,15 +2776,12 @@ describe('upload flow', () => {
 
 	it('spares an in-flight reserved narinfo row from collection', async () => {
 		const token = await initialise();
-		// A distinct NAR so the in-flight upload below stays a genuine upload rather
-		// than a reuse of this committed path's blob.
 		const kept = await commitVerifiablePath(token, 'kept', { name: 'kept' });
 
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
-		// An in-flight commit saga: its narinfo row is reserved but unmaterialised,
-		// so it is unreachable from the root and a collection landing now would
-		// delete it.
+		// The reserved narinfo row is not yet reachable from a root. Its active
+		// upload must protect it from collection.
 		const reserved = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'reserved',
@@ -2901,8 +2797,6 @@ describe('upload flow', () => {
 
 		const result = await runGcResult();
 
-		// The collection spared the reserved row, so the verify pass still drives the
-		// preserved saga to servable.
 		await currentServer().runVerification();
 		const narInfo = await fetchNarInfo(reserved.storePathHash);
 
@@ -3013,8 +2907,8 @@ describe('upload flow', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 
-		// The abandoned upload's private staging object is reclaimed directly when the
-		// upload is reaped; it has no `blob_state` row, so the reaper collects nothing.
+		// Reaping the pending row must delete its private staging object directly;
+		// the global blob reaper has no `blob_state` row for it.
 		expect(await runGcResult()).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
@@ -3042,13 +2936,13 @@ describe('upload flow', () => {
 		await commitPath(token, metadata);
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
-		// Negotiate skips on the lingering blob_state row and queues the path; the
-		// reconcile finds the NAR gone and removes the stale narinfo.
+		// Leave `blob_state` present so negotiation queues reconciliation before the
+		// missing canonical object retires the narinfo.
 		await negotiateUploads(token, [metadata]);
 		await fireReconcile();
 
-		// The reconcile credited the tenant's presence back even though the shared
-		// fact lingers for the reaper.
+		// Tenant usage is credited when its edge is retired, before the global
+		// `blob_state` row is reaped.
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -3056,7 +2950,6 @@ describe('upload flow', () => {
 			totalFileSize: 0
 		});
 
-		// The next push re-plans an upload for the genuinely lost NAR.
 		expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
@@ -3151,8 +3044,7 @@ describe('upload flow', () => {
 
 		const token = await initialiseViaWorker();
 
-		// A committed path whose narinfo object we then lose out of band:
-		// verification must re-materialise it from the row.
+		// Remove the published narinfo object but keep its committed row and NAR.
 		const committed = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'committed',
@@ -3170,7 +3062,6 @@ describe('upload flow', () => {
 			narInfoObjectKey(fixtureTenant, committed.storePathHash)
 		);
 
-		// A distinct pending upload left to expire: GC must collect it.
 		const stale = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'stale',
@@ -3222,8 +3113,8 @@ describe('upload flow', () => {
 		const afterDelete = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
 		expect(afterDelete.status).toBe(StatusCodes.NOT_FOUND);
-		// The narinfo is gone immediately; the tenant's presence is gone even though
-		// the now-unreferenced shared fact persists until the reaper collects it.
+		// Path deletion retires tenant ownership immediately. The unreferenced
+		// shared blob remains until the reaper's grace period expires.
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -3231,7 +3122,6 @@ describe('upload flow', () => {
 			totalFileSize: 0
 		});
 
-		// The first reaper pass arms the unreferenced blob but does not collect it.
 		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
@@ -3272,8 +3162,6 @@ describe('upload flow', () => {
 
 		expect(deletedSecond.narScheduledForDeletion).toBe(true);
 
-		// The first reaper pass arms the now-unreferenced blob; the pass past the
-		// grace collects it.
 		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
@@ -3304,10 +3192,8 @@ describe('upload flow', () => {
 		await commitPath(token, metadata);
 		await deletePath(token, metadata.storePathHash);
 
-		// Arm the now-unreferenced blob, fixing its grace window.
 		await runBlobReaper(rootLogger(), env);
 
-		// A later reaper pass before the grace elapses must not collect it.
 		vi.setSystemTime(new Date(testBase.getTime() + 16 * 60 * 1000));
 		await runBlobReaper(rootLogger(), env);
 		await expect(
@@ -3366,9 +3252,8 @@ describe('upload flow', () => {
 
 		deleteSpy.mockRestore();
 
-		// The row is gone, so the path is logically deleted, but the opportunistic
-		// object cleanup failed: the narinfo object, its NAR edge and its NAR all
-		// survive, so tenant-scoped usage is still charged.
+		// Reproduce a crash after deleting the local row but before removing the
+		// published narinfo object and D1 reference edge.
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 1,
@@ -3385,8 +3270,8 @@ describe('upload flow', () => {
 
 		const recovered = await runGcResult();
 
-		// GC flushed the durable queue: the narinfo object is gone and the NAR is
-		// only now scheduled, with the grace starting from this removal.
+		// Replaying the deletion marker removes the object and retires the edge. The
+		// blob grace period starts when that edge is retired.
 		expect(recovered.narInfosDeleted).toBe(1);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
@@ -3395,8 +3280,6 @@ describe('upload flow', () => {
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
-		// The edge is retired, so the blob is now unreferenced; the reaper arms it,
-		// then collects it past the grace.
 		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
@@ -3418,9 +3301,7 @@ describe('upload flow', () => {
 		await deletePath(token, metadata.storePathHash);
 		deleteSpy.mockRestore();
 
-		// The path is committed again before GC reaches the dangling queue entry.
-		// The failed object cleanup leaves this tenant's presence edge charged, so the
-		// recommit reuses the tenant-held hash.
+		// Recommit the path before deletion-marker replay reaches it.
 		await commitSharedPath(token, metadata);
 
 		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
@@ -3429,8 +3310,8 @@ describe('upload flow', () => {
 
 		const collected = await runGcResult();
 
-		// The re-committed row owns a live object, so the stale entry is dropped
-		// without deleting the object.
+		// The generation check must discard the stale marker without deleting the
+		// replacement object.
 		const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
 		expect({
@@ -3491,8 +3372,8 @@ describe('upload flow', () => {
 				targets: [committed.storePath]
 			});
 
-			// Re-setting the same root with a not-yet-servable target must be refused
-			// wholesale, so the channel keeps its previous, servable target set.
+			// Root replacement is atomic: an unservable target must leave the existing
+			// target set intact.
 			const response = await authorisedFetch(
 				'/cache/_default/roots/main',
 				token,
@@ -3639,9 +3520,9 @@ describe('upload flow', () => {
 			});
 		});
 
-		// A delete is row-first, so a narinfo object can outlive its row. Such a
-		// target counts as servable outside the write gate, and only the row
-		// re-check inside the gate can reject it.
+		// Path deletion removes the row before the narinfo object. Recheck the row
+		// inside the root write gate so the surviving object cannot prove
+		// servability.
 		it('reports a build requirement for a target whose narinfo row is gone but whose object survives', async () => {
 			const token = await initialise();
 			const orphaned = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -3779,9 +3660,8 @@ describe('upload flow', () => {
 			]);
 		});
 
-		// A set declares the root's whole contents and may declare nothing; an
-		// ensure asks which of the targets it names require a build, so it must
-		// name at least one.
+		// Setting an empty target list clears a root. Ensuring a root requires at
+		// least one target because it reports which targets need a build.
 		it.each([
 			{
 				name: 'a target that is not a store path',
@@ -3964,14 +3844,13 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
-		it('skips collection when roots resolve to nothing committed', async () => {
+		it('skips collection when no root target remains committed', async () => {
 			const token = await initialise();
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 			await commitPath(token, committed);
 
-			// Activation only allows a servable target, but that target can later be
-			// deleted, leaving the root resolving to nothing committed. The
-			// collection must then skip the rest of the cache.
+			// A target can be deleted after root activation. If no root target remains
+			// committed, skip collection for the entire cache.
 			const ghost = await commitVerifiablePath(token, 'ghost', {
 				name: 'ghost',
 				storePathHash: '99999999999999999999999999999999'
@@ -4131,8 +4010,8 @@ describe('upload flow', () => {
 			await commitPath(token, c, cNar);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
-			// The per-tenant collection removes the unreachable path c and retires its
-			// edge; the now-unreferenced blob is reaped separately, Worker-side.
+			// Tenant GC retires the unreachable path's edge. The global reaper handles
+			// the resulting unreferenced blob separately.
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,
 				pendingUploadsDeleted: 0,
@@ -4143,8 +4022,6 @@ describe('upload flow', () => {
 				orphanStagingDeleted: 0
 			});
 
-			// The reaper arms the unreferenced blob; the grace not yet elapsed, the
-			// object stays.
 			expect({
 				deleted: await runBlobReaper(rootLogger(), env),
 				stored: (await env.BLOBS.head(narObjectKey(cNar.narHash))) !== null
@@ -4155,7 +4032,6 @@ describe('upload flow', () => {
 
 			vi.setSystemTime(afterGrace());
 
-			// Past the grace the reaper collects the fact and then the object.
 			expect(await runBlobReaper(rootLogger(), env)).toBe(1);
 			await expect(
 				env.BLOBS.head(narObjectKey(cNar.narHash))
@@ -4166,7 +4042,6 @@ describe('upload flow', () => {
 	describe('authentication', () => {
 		it('accepts a bootstrap-issued admin token on each scope of route', async () => {
 			const token = await initialise();
-			// Root activation gates on servability, so commit the target first.
 			await pushPath(
 				token,
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
@@ -4193,7 +4068,6 @@ describe('upload flow', () => {
 		it('refuses a write token on admin routes but accepts it on write routes', async () => {
 			const admin = await initialise();
 			const target = '/nix/store/11111111111111111111111111111111-a';
-			// Root activation gates on servability, so commit the target first.
 			await pushPath(
 				admin,
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
@@ -4294,8 +4168,6 @@ async function foreignKeyToken(scope: 'write' | 'admin'): Promise<string> {
 }
 
 async function runQueuedMaintenanceTick(): Promise<void> {
-	// The eligibility projection is already current: each mutation reconciles it
-	// synchronously, so the cron tick reads a fresh wake time with nothing deferred.
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {

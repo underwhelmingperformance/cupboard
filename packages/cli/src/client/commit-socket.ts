@@ -35,17 +35,13 @@ import {
 
 import type { BearerAttempt } from './credentials.ts';
 
-/**
-A received frame or body chunk; `ws` hands these over as `Buffer`s.
-*/
 export interface CommitSocketData {
 	toString(): string;
 }
 
 /**
- * The HTTP response a refused upgrade carries (a `ws` `IncomingMessage`). `ws`
- * hands a refused connection to the listener and does nothing further with it,
- * so the session closes it through `destroy` once it has read the refusal.
+ * The `ws` response for a refused upgrade. Ownership of the connection passes
+ * to the listener, so the session must destroy the response after reading it.
  */
 export interface UpgradeFailure {
 	readonly statusCode?: number;
@@ -55,18 +51,10 @@ export interface UpgradeFailure {
 	destroy(): void;
 }
 
-/**
- * The accepted upgrade's 101 response (a `ws` `IncomingMessage`), carrying the
- * headers the server advertises its optional ops in.
- */
 export interface UpgradeResponse {
 	readonly headers: Readonly<Record<string, string | string[] | undefined>>;
 }
 
-/**
- * The client half of a commit WebSocket. Structurally a subset of `ws`'s
- * `WebSocket`, so the real client and test fakes plug in alike.
- */
 export interface CommitSocket {
 	on(event: 'open', listener: () => void): unknown;
 	on(event: 'upgrade', listener: (response: UpgradeResponse) => void): unknown;
@@ -84,9 +72,6 @@ export interface CommitSocket {
 	close(): void;
 }
 
-/**
-Opens a commit WebSocket carrying the bearer token on the upgrade request.
-*/
 export type CommitSocketConnect = (
 	url: URL,
 	headers: Readonly<Record<string, string>>
@@ -103,10 +88,10 @@ export interface CommitSocketCredentials {
 }
 
 /**
- * A path to commit over the session, with the identity from negotiation. Set
- * `retention` when the upload negotiated a retention plan: on a reconnect the
- * server resolves a row it has already cleared by that identity, and the marker
- * makes it answer with the path's stored grace fact instead of none.
+ * The path identity supports recovery when a reconnect finds that the pending
+ * row was already cleared. `retention` is set when the original negotiation
+ * response acknowledged `upload-grace-facts`. On an identity-based reconnect,
+ * it asks a capable server to return the stored grace fact.
  */
 export interface CommitSessionTarget {
 	readonly uploadId: UploadId;
@@ -116,73 +101,52 @@ export interface CommitSessionTarget {
 }
 
 /**
- * Parsed attributes for one capability token from the server's 101 response.
- * A bare token (no semicolons) maps to an empty record.
- */
+A bare capability token, with no semicolons, maps to an empty record.
+*/
 export type CapabilityAttributes = Readonly<Record<string, string>>;
 
-/**
- * The capabilities the server advertised on a connection, keyed by token name.
- */
 export type AdvertisedCapabilities = ReadonlyMap<string, CapabilityAttributes>;
 
 export interface CommitSessionOptions {
-	/**
-	The route path the socket was opened on, for error messages.
-	*/
 	readonly path: string;
 	/**
-	Bounds how long a deferred upload's `settled` waits for its verdict.
+	Bounds both a deferred verdict and the wait for commit capacity.
 	*/
 	readonly timeoutSeconds: number;
 	readonly signal?: AbortSignal;
 	readonly keepaliveMs?: number;
-	/**
-	How many times a dropped socket is re-established before the push fails.
-	*/
 	readonly maxReconnects?: number;
-	/**
-	Base back-off before the first reconnect; doubles, jittered, then capped.
-	*/
 	readonly reconnectBackoffMs?: number;
-	/**
-	 * Called on each connection with the capabilities the server advertised in
-	 * the 101 response. Useful for logging the negotiated mode.
-	 */
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	/**
-	 * Called when the session starts waiting for the server to grant it capacity
-	 * to commit under, and again when it stops. It reports the fact only: the
-	 * server's queue moves as soon as any entry settles anywhere, so there is no
-	 * position or estimate to report and none is passed.
+	 * Called when the session starts waiting for the server to grant commit
+	 * capacity, and again when it stops. It reports only the state transition:
+	 * queue position can change whenever another tenant entry settles, so the
+	 * client has no stable position or completion estimate.
 	 */
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 }
 
 /**
- * A committed path's prompt disposition plus the promise of its eventual
- * verdict. `commit` resolves this as soon as the server acknowledges the path
- * (its row is reserved), so retention can be recorded before any wait; `settled`
- * resolves once the path is servable and rejects on a failed verdict. For a
- * reuse or inline commit (`committed`) `settled` is already resolved.
+ * Separates the server's durable acknowledgement from the final verification
+ * result. `commit` returns after the pending row exists, which allows retention
+ * to be recorded immediately. `settled` completes when the path is servable or
+ * verification fails. Reuse and inline verification complete both stages in
+ * the same frame.
  */
 export interface CommitOutcome {
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
 	readonly status: 'committed' | 'pending' | 'already-present';
 	readonly settled: Promise<void>;
-	// The retention grace fact this outcome's frame carried, present only when
-	// the negotiation sent a retention plan: a deadline for a path whose verdict
-	// has arrived, the captured grace for one still pending.
+	// The acknowledgement reports the captured policy decision for a pending
+	// outcome and the stored deadline for a final outcome.
 	readonly grace?: ParsedUploadGraceFact;
-	// The grace fact of the terminal frame, readable once `settled` resolves: a
-	// deferred path's deadline arrives with its verdict, not its ack.
+	// Reads the final grace fact after `settled`. Deferred paths receive their
+	// deadline in the verdict rather than the acknowledgement.
 	readonly verdictGrace?: () => ParsedUploadGraceFact | undefined;
 }
 
-/**
-A push's commit session: many paths commit over one socket.
-*/
 export interface CommitSession {
 	commit(target: CommitSessionTarget): Promise<CommitOutcome>;
 	/**
@@ -198,14 +162,11 @@ interface SessionEntry {
 	readonly settled: Promise<void>;
 	readonly settleServable: () => void;
 	readonly settleFailed: (error: Error) => void;
-	// A `deferred` frame has arrived, so the server holds a durable row for this
-	// upload. A reconnect resumes such an id with `subscribe`, where a since-gone
-	// row safely means it committed; an un-acked id is re-sent as `commit`
-	// instead, since its op may never have reached the server.
+	// Records whether the server created a durable pending row. Reconnects
+	// subscribe to acknowledged entries, but resend unacknowledged entries because
+	// their original commit might not have reached the server.
 	acked: boolean;
 	deadline?: NodeJS.Timeout;
-	// How many times this entry has been retried after a retryable error frame,
-	// and the timer of a retry not yet sent, cleared with the deadline.
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
 	// The grace fact of the last `settled` or `verdict` frame, exposed through
@@ -213,12 +174,6 @@ interface SessionEntry {
 	verdictGrace?: ParsedUploadGraceFact;
 }
 
-/**
- * Why a connection ended, for the parts of the drop path that treat a server
- * refusing the upgrade differently from a connection that failed. A refusal
- * carries the wait the server asked for before the next dial, when it sent one
- * the client could read.
- */
 type DropCause =
 	| { readonly kind: 'connection' }
 	| { readonly kind: 'authentication-expired' }
@@ -246,9 +201,8 @@ const nonRetryableCloseCode = 1002;
 // that replaces this window entirely for the connection.
 const maxInFlightBatchMessages = 2;
 
-// The longest delay a timer can hold. A runtime truncates anything longer to a
-// millisecond, so a deadline past this is armed in instalments, each measuring
-// what is left afresh.
+// Node.js truncates timer delays above this value to one millisecond. Longer
+// deadlines therefore use instalments that recalculate the remaining delay.
 const maxTimerDelayMs = 2 ** 31 - 1;
 
 // Status codes that indicate a transient server overload: a short per-entry
@@ -257,29 +211,20 @@ const maxTimerDelayMs = 2 ** 31 - 1;
 // condition of its own as one of these two.
 const retryableErrorStatuses = new Set([429, 503]);
 
-// The longest wait a refused upgrade can ask of the session before it dials
-// again. A server sends `Retry-After` to ask for a longer gap than the
-// back-off would take, so a cap much above the five-second back-off ceiling is
-// needed for the header to mean anything; a minute keeps a nonsense value from
-// spending the session's whole capacity deadline on one gap.
+// Cap `Retry-After` above the reconnect back-off ceiling so valid server delays
+// still take effect, but an unbounded value cannot consume the whole capacity
+// deadline.
 const maxRetryAfterMs = 60_000;
 
-// How long the session reads a refusal body before it gives up on the response.
-// A refusal body is a short message already on its way, so five seconds is far
-// longer than a working peer needs. It bounds the two cases that produce no
-// further event: a body truncated and then half-closed, and headers whose
-// stated length never arrives. Either would otherwise leave the session waiting
-// on a connection nothing will speak on again.
+// Bound refusal-body reads when a peer truncates and half-closes the body or
+// declares a length it never sends. Without this timer, either case could leave
+// the session waiting indefinitely.
 const refusalDrainMs = 5000;
-// How many times one entry is re-sent before its error is treated as terminal.
 const maxEntryRetries = 3;
-// Base delay in ms before the first entry retry; doubles per attempt (no jitter,
-// so the retry fires promptly in tests that use fake timers).
 const entryRetryBaseMs = 500;
 
-// The ev values whose frames carry mandatory fields the schema validates; an ev
-// absent from this set is treated as unknown and ignored for forward
-// compatibility with new server frame kinds.
+// Validate every recognised event against its complete frame schema. Unknown
+// event kinds are ignored so a newer server can add advisory frames.
 const knownEvs = new Set([
 	'settled',
 	'deferred',
@@ -290,18 +235,16 @@ const knownEvs = new Set([
 	'queued'
 ]);
 
-// Awaits a promise solely to observe a rejection no caller did, so an unawaited
-// `settled` never surfaces as an unhandled rejection.
+// Observe `settled` when the caller chooses not to wait, preventing a later
+// verification failure from becoming an unhandled rejection.
 async function ignoreRejection(promise: Promise<unknown>): Promise<void> {
 	try {
 		await promise;
 	} catch {
-		// Intentionally ignored: the caller sees the rejection if it awaits.
+		// The caller still observes the rejection if it awaits `settled`.
 	}
 }
 
-// A verdict promise with its resolver and rejecter, the `settled` half of a
-// commit outcome.
 function deferredSettle(): {
 	readonly settled: Promise<void>;
 	readonly settleServable: () => void;
@@ -368,10 +311,9 @@ export function parseCapabilities(header: string): AdvertisedCapabilities {
 	return result;
 }
 
-// Resolves the effective batch size for a connection from its advertised
-// capabilities. Returns `undefined` when `commit-batch` was not advertised. A
-// non-numeric, non-positive, or absent `max` attribute uses the protocol default;
-// an advertised max larger than the protocol bound is capped.
+// Without `commit-batch`, use the per-entry protocol. An invalid or absent
+// `max` attribute uses the protocol default, and a larger value is capped at
+// the protocol bound.
 function resolvedBatchSize(
 	capabilities: AdvertisedCapabilities
 ): number | undefined {
@@ -396,9 +338,8 @@ function resolvedBatchSize(
 	return Math.min(parsed, commitBatchMaxEntries);
 }
 
-// The credit this connection opens with, or `undefined` when the 101 carried no
-// `commit-credit` token. A token with no readable grant opens at zero, which
-// costs one `request-credit` round trip and nothing else.
+// Without `commit-credit`, use the local window. An unreadable grant starts at
+// zero and requires a `request-credit` before the client sends entries.
 function resolvedOpeningGrant(
 	capabilities: AdvertisedCapabilities
 ): number | undefined {
@@ -417,11 +358,10 @@ function resolvedOpeningGrant(
 	return grant;
 }
 
-// Whether these upgrade request headers declare `commit-credit`. The server
-// decides to pace a session from this declaration alone and closes it for
-// overdrawing, so a session that declares the token has to pace itself even
-// when the 101 comes back without it: an intermediary that answers the upgrade
-// itself can drop the response header.
+// The server decides to pace a session from the request declaration alone and
+// closes it for overdrawing. A session that declares the token must therefore
+// pace itself even when the 101 comes back without it: an intermediary that
+// answers the upgrade itself can drop the response header.
 function isCommitCreditDeclared(
 	headers: Readonly<Record<string, string>>
 ): boolean {
@@ -436,11 +376,9 @@ function isCommitCreditDeclared(
 	return false;
 }
 
-// Whether the server advertised the retention-marker attribute on the given
-// capability token, so a client can set `retention: true` on an entry of the
-// op that token names without risking a `strictObject` rejection from a
-// server that predates the marker. The attribute's exact advertised value is
-// required, so an unrecognised variant reads as no marker at all.
+// Set `retention: true` only when the relevant operation advertises the exact
+// marker value. Older servers validate operation bodies strictly and reject
+// this field.
 function hasRetentionMarker(
 	capabilities: AdvertisedCapabilities,
 	capability: string
@@ -451,19 +389,9 @@ function hasRetentionMarker(
 	);
 }
 
-/**
- * Runs a push's commit session over one socket. Each `commit` registers a path,
- * sends a `commit` op, and resolves when the path's per-id frame settles it: a
- * settled or already-present reply straight away, a `deferred` upload's verdict
- * once verification answers (or `pending` when `wait` is off). A frame names its
- * upload, so many commits multiplex over the one connection. The server answers
- * the keepalive pings without waking the Durable Object, so a long park survives
- * idle timeouts.
- *
- * A transient drop does not fail the push: the session reconnects with a capped
- * back-off and replays the outstanding work onto the fresh socket, so one blip
- * costs at most a brief pause.
- */
+// Keepalives preserve deferred waits without waking the Durable Object.
+// Transient drops reconnect with bounded back-off and replay work according to
+// whether the server had already acknowledged it.
 export function runCommitSession(
 	connect: CommitSocketConnect,
 	url: URL,
@@ -476,61 +404,49 @@ export function runCommitSession(
 	const isCreditDeclared = isCommitCreditDeclared(credentials.initial.headers);
 
 	let socket: CommitSocket | undefined;
-	// Counts the connections this session has opened, so each connection's
-	// handlers can tell whether they are still the current one.
+	// Events from superseded sockets must not mutate current session state. Each
+	// handler captures this generation and ignores events after it changes.
 	let connectionGeneration = 0;
 	let isOpened = false;
 	let isClosed = false;
-	// The server closes a socket it has heard nothing on for a long time. With
-	// nothing outstanding that costs the session nothing, so it goes dormant
-	// rather than closed and the next commit opens a fresh connection.
+	// When the server closes an idle socket with no outstanding work, keep the
+	// session dormant. The next commit can open a fresh connection.
 	let isDormant = false;
 	let failure: Error | undefined;
 	let keepalive: NodeJS.Timeout | undefined;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let isAuthorising = false;
 	let connectionAttempt = credentials.initial;
-	// Bounds how long the body of a refused upgrade is read. It is held here
-	// rather than in the handler that arms it so that a session which is torn
-	// down, or which has moved to another connection, can clear it.
+	// Store the refusal-body timer at session scope so teardown or a superseding
+	// connection can clear it.
 	let refusalDrainTimer: NodeJS.Timeout | undefined;
-	// The clock time before which the session does not dial again, set when a
-	// server refuses an upgrade and asks for a wait. It outlives a dormancy,
-	// since the dial it applies to is usually the one the next commit makes.
+	// Preserve `Retry-After` across dormancy. The next commit often triggers the
+	// connection attempt to which the delay applies.
 	let earliestDialAt = 0;
 	let reconnectsLeft = maxReconnects;
-	// Reconnects since the server last answered an entry. The back-off is drawn
-	// from this rather than from `reconnectsLeft`, so a reconnect that spends no
-	// budget still backs off further than the one before it.
+	// Count reconnects since the server last answered an entry. Back-off uses this
+	// count because some reconnects preserve the retry budget but must still dial
+	// less frequently.
 	let reconnectAttempt = 0;
-	// Effective batch size for the current connection: a positive integer when the
-	// server advertised `commit-batch` (possibly with a `max` attribute), or
-	// `undefined` when it did not.
 	let effectiveBatchSize: number | undefined;
-	// Whether the current connection's server advertised `subscribe-identity`.
-	// When true, reconnect replays send acked ids through the identity-carrying
-	// op, so a row that settled and cleared during the drop resolves by identity.
+	// Use `subscribe-identity` for acknowledged entries only when the current
+	// connection advertises it. The server can then resolve a row that settled
+	// and cleared during the drop.
 	let hasSubscribeIdentity = false;
-	// Whether the current connection's server accepts the `retention` marker on
-	// a `commit-batch` or `subscribe-identity` entry, respectively. A target
-	// negotiated with a retention plan sets the marker on an entry of that op
-	// only when the connection supports it, so that after a reconnect the server
-	// answers with the path's stored grace fact rather than none.
+	// Mark a grace-aware upload only when the current connection advertises the
+	// `retention` marker for `commit-batch` or `subscribe-identity`. After a
+	// reconnect, the server can then return the stored grace fact.
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
-	// The entries this connection may still send, and the demand it last
-	// declared. Both are per connection: a fresh 101 carries a fresh grant, and
-	// the server keeps no demand for a session that has gone. `undefined` credit
-	// means the server did not advertise `commit-credit` and does not pace this
-	// session, which leaves the window above in charge.
+	// Credit and declared demand belong to one connection. A new 101 supplies a
+	// new grant, and closing the old connection clears its demand on the server.
+	// `undefined` selects the client-side batch window instead of server pacing.
 	let creditAvailable: number | undefined;
 	let declaredDemand = 0;
-	// Whether this session is paced by credit. It starts from the client's own
-	// declaration, for the same reason the missing-token fallback does: the
-	// server pins pacing to that declaration, so the client must not wait for a
-	// 101 to agree. A session that cannot reach the cache at all therefore still
-	// has a capacity clock. Only a server that rejects `request-credit` takes the
-	// session off credit, and only for the connection that rejected it.
+	// Initialise credit pacing from the upgrade request because the server enforces
+	// that declaration even if the response token is stripped. The capacity clock
+	// therefore runs before a connection opens. Only an `unsupported` response to
+	// `request-credit` disables pacing, and only for that connection.
 	let isCreditPaced = isCreditDeclared;
 	// Entries the caller has committed that the server has not acknowledged with
 	// a durable row. An acked entry is bounded by its own verdict deadline
@@ -538,23 +454,20 @@ export function runCommitSession(
 	// frame.
 	let unackedEntries = 0;
 
-	// The wait the capacity timeout measures, and the sum of every wait the
-	// session has had. See {@link isWaitingForCapacity}.
+	// Track the current capacity wait separately from total wait time across the
+	// session. See {@link isWaitingForCapacity}.
 	let accruedWaitMs = 0;
 	let totalWaitedMs = 0;
 	let waitingSince: number | undefined;
 	let capacityTimer: NodeJS.Timeout | undefined;
 	let isWaitingReported = false;
-	// The rotation count the server last reported, carried into the timeout's
-	// cause as a diagnostic and read for nothing else.
+	// The latest server-reported queue position, retained only for timeout
+	// diagnostics.
 	let lastAhead: number | undefined;
-	// The last upgrade refusal the session was given and went on dialling
-	// through. A wait that expires having only met refusals reports this one, so
-	// the status and body reach the operator rather than a wait time on its own.
-	// It belongs to the wait it was met during, so it is cleared by progress of
-	// any kind, in `noteCapacityProgress`, and by the ends of that wait: the
-	// expiry that has just reported it, and a dormancy, which leaves the session
-	// with nothing outstanding to wait for.
+	// Preserve the latest retryable refusal while one capacity wait remains in
+	// progress. If that wait expires without progress, its error includes the
+	// refusal's status and body. Progress, expiry, and dormancy all clear it so a
+	// later wait cannot report stale server state.
 	let lastRefusal: CupboardHttpError | undefined;
 
 	const sendNow = (request: CommitSessionRequest): void => {
@@ -624,19 +537,17 @@ export function runCommitSession(
 		}
 	};
 
-	// The targets this connection has not sent yet for want of credit. Cleared on
-	// reconnect, since `replayOutstanding` re-queues everything outstanding.
+	// This queue belongs to one connection. Reconnect discards it and rebuilds it
+	// from `outstanding` under the new connection's grant.
 	let queuedTargets: CommitSessionTarget[] = [];
 
-	// The entries this connection has sent that the server has not answered. An
-	// entry leaves on its first frame, `deferred` included, because that is when
-	// the server returns its credit. Cleared on reconnect, since the replay sends
-	// everything outstanding again.
+	// Entries awaiting their first frame on this connection. Any first frame,
+	// including `deferred`, returns the entry's credit. Reconnect rebuilds the set
+	// when it replays outstanding work.
 	const inFlightEntries = new Set<UploadId>();
 
-	// Removes a target whose entry has already finished. A retry re-queues an
-	// entry, and its verdict can arrive while it waits there; without this the
-	// queue would go on counting it as a path waiting for capacity.
+	// A verdict can finish a retry while its target is still queued. Remove that
+	// target so it no longer contributes to demand or the capacity wait.
 	const removeQueuedTarget = (uploadId: UploadId): void => {
 		const index = queuedTargets.findIndex(
 			(target) => target.uploadId === uploadId
@@ -649,28 +560,17 @@ export function runCommitSession(
 		queuedTargets.splice(index, 1);
 	};
 
-	// Whether the session is waiting for capacity: a paced session holding work
-	// the cache has not let it send, with nothing sent that the cache still owes
-	// an answer for.
-	//
-	// This deliberately ignores the state of the connection. The cache makes
-	// no progress for the session whether it is refusing credit, dropping the
-	// socket or refusing the dial, so the deadline stays armed through a
-	// disconnection and a partition ends at the budget like any other wait
-	// without progress. It
-	// reads `outstanding` rather than the queue for the same reason: the queue
-	// belongs to a connection, and a reconnect empties it.
-	//
-	// The deadline measures one unbroken wait. A grant or an answered entry
-	// starts it again from zero. `accruedWaitMs` holds the wait still running and
-	// `totalWaitedMs` sums every wait the session has had.
+	// Capacity time runs while unacknowledged work exists and no sent entry can
+	// return credit. Connection state is irrelevant, so a partition cannot reset
+	// the deadline. Use session-wide `outstanding` state because reconnect replaces
+	// the per-connection queue. A grant or first frame starts a new wait;
+	// `totalWaitedMs` retains the complete history for diagnostics.
 	const isWaitingForCapacity = (): boolean =>
 		!isClosed &&
 		isCreditPaced &&
 		unackedEntries > 0 &&
 		inFlightEntries.size === 0;
 
-	// Adds the wait still running to both counters and returns the wait so far.
 	const accrueCapacityWait = (): number => {
 		if (waitingSince === undefined) {
 			return accruedWaitMs;
@@ -693,7 +593,6 @@ export function runCommitSession(
 		capacityTimer = undefined;
 	};
 
-	// How long the session has waited, including the part still running.
 	const waitedSoFar = (): number =>
 		accruedWaitMs +
 		(waitingSince === undefined ? 0 : Date.now() - waitingSince);
@@ -720,11 +619,10 @@ export function runCommitSession(
 		lastRefusal = undefined;
 	};
 
-	// Fails the work the cache never let the session send, once the wait reaches
-	// the budget. This can fire while the session is disconnected, so it rejects
-	// from `outstanding` rather than from the queue a reconnect has emptied. An
-	// entry parked on its verdict is left alone: the server holds a durable row
-	// for it, and its own deadline bounds it.
+	// Fail work that the server never admitted once the capacity budget expires.
+	// This can happen while disconnected, so reject from `outstanding` rather than
+	// the per-connection queue. Entries awaiting verdicts have durable server rows
+	// and remain bounded by their own deadlines.
 	const expireCapacityWait = (): void => {
 		capacityTimer = undefined;
 		const waited = accrueCapacityWait();
@@ -746,9 +644,8 @@ export function runCommitSession(
 			});
 		}
 
-		// With nothing left outstanding there is nothing to reconnect for, and
-		// the pending reconnect goes with the session, so a run that gave up
-		// during a partition stops holding the process open.
+		// Cancel the pending reconnect after the final unacknowledged entry times
+		// out. This lets the process exit during a partition.
 		if (outstanding.size === 0) {
 			goDormant();
 		} else {
@@ -762,8 +659,6 @@ export function runCommitSession(
 		updateCapacityWait();
 	};
 
-	// Starts, stops and reports the capacity wait as the session's work and
-	// credit change. Called after anything that can alter either.
 	const updateCapacityWait = (): void => {
 		const isWaiting = isWaitingForCapacity();
 
@@ -804,8 +699,6 @@ export function runCommitSession(
 		sendNow({ op: 'request-credit', entries: declaredDemand });
 	};
 
-	// Sends as much of the queue as the session holds credit for, in messages of
-	// at most the connection's batch size.
 	const drainCredit = (): void => {
 		while (
 			isOpened &&
@@ -818,10 +711,6 @@ export function runCommitSession(
 				0,
 				Math.min(effectiveBatchSize ?? 1, creditAvailable)
 			);
-			// A queued target whose entry has since finished names a row the
-			// server has already answered, and re-sending it would spend credit
-			// on a commit for an upload the session no longer holds. Only the
-			// survivors are sent, and only they are paid for.
 			const batch = drained.filter((target) =>
 				outstanding.has(target.uploadId)
 			);
@@ -849,10 +738,10 @@ export function runCommitSession(
 		updateCapacityWait();
 	};
 
-	// Sends a set of commits in the shape this connection speaks: one
+	// Send commits with the protocol that this connection supports: one
 	// `commit-batch` op per bounded chunk when the server offered it, a per-id
-	// `commit` op each otherwise. A server that paces the session takes what its
-	// grant covers and the rest waits in the queue.
+	// `commit` op otherwise. A paced server admits only the entries covered by its
+	// grant; the remainder stay queued.
 	//
 	// On a reconnect without `commit-batch`, a bare re-sent op may try to commit
 	// a row that already settled and cleared between the drop and the replay. The
@@ -886,11 +775,10 @@ export function runCommitSession(
 		}
 	};
 
-	// Commits registered while the socket is up coalesce over a microtask, so a
-	// burst issued in one tick (the reuse commits of a large push) lands in a
-	// handful of batch ops. A target whose entry settled or vanished before the
-	// flush is skipped; a drop before the flush discards the queue, since the
-	// reconnect replays every outstanding entry anyway.
+	// Coalesce commits registered during one microtask so a burst, such as reuse
+	// commits from a large push, uses only a few batch operations. Skip entries
+	// that settle or vanish before the flush. A drop discards this queue because
+	// reconnect replays every outstanding entry.
 	let sendQueue: CommitSessionTarget[] = [];
 	let isFlushScheduled = false;
 
@@ -951,9 +839,8 @@ export function runCommitSession(
 		clearCapacityDeadline();
 		clearReconnectTimer();
 		clearRefusalDrain();
-		// The session is closed, so a wait it was reporting has ended and the
-		// caller is told so here. Whether capacity arrived or the session gave
-		// up is carried by each path's outcome, not by this call.
+		// Closing the session ends any reported capacity wait. Individual outcomes
+		// distinguish successful admission from failure.
 		updateCapacityWait();
 
 		for (const entry of outstanding.values()) {
@@ -970,11 +857,9 @@ export function runCommitSession(
 		socket?.close();
 	};
 
-	// Closes the connection but keeps the session's entries. The server holds a
-	// session's declared demand and its granted credit in the socket alone, so
-	// closing returns both to the tenant. The session sends nothing until a
-	// connection is up again, opened either by the drop path's reconnect or by
-	// the next commit.
+	// Closing a socket releases its declared demand and granted credit on the
+	// server. Keep the entries for replay after an automatic reconnect or the
+	// next commit.
 	const abandonConnection = (): void => {
 		clearKeepalive();
 		isOpened = false;
@@ -984,8 +869,6 @@ export function runCommitSession(
 		socket?.close();
 	};
 
-	// Closes the connection with nothing left outstanding on it. No reconnect
-	// follows; the next commit opens a connection and negotiates again.
 	const goDormant = (): void => {
 		clearReconnectTimer();
 		isDormant = true;
@@ -993,9 +876,6 @@ export function runCommitSession(
 		abandonConnection();
 	};
 
-	// A failure the session cannot recover from (a refused upgrade, exhausted
-	// reconnects, an abort, a bad frame): every outstanding commit rejects, since
-	// the one socket carried them all.
 	const failSession = (error: Error): void => {
 		if (isClosed) {
 			return;
@@ -1008,8 +888,8 @@ export function runCommitSession(
 		teardown();
 
 		for (const entry of entries) {
-			// An acked entry's caller already holds its `settled`; an un-acked one is
-			// still awaiting the commit reply, so its ack rejects instead.
+			// Acknowledged entries fail through `settled`; unacknowledged entries
+			// fail the original commit call.
 			if (entry.acked) {
 				entry.settleFailed(error);
 			} else {
@@ -1071,7 +951,7 @@ export function runCommitSession(
 			return;
 		}
 
-		// An ev not in the known set is from a future server version; ignore it.
+		// An unknown event kind can come from a future server version; ignore it.
 		// Entry deadlines bound the risk of a missed verdict.
 		if (!knownEvs.has(envelope.data.ev)) {
 			return;
@@ -1089,16 +969,15 @@ export function runCommitSession(
 
 		const frame = parsed.data;
 
-		// Any frame naming an upload counts as an ack for that chunk's window
-		// slot, releasing the next queued batch chunk (the ANY-frame rule).
+		// Any frame with an upload ID acknowledges that batch chunk for windowing
+		// and releases the next queued chunk (the ANY-frame rule).
 		if ('uploadId' in frame) {
 			releaseChunkForUploadId(frame.uploadId);
 		}
 
-		// Only the first answer to an entry the session still holds restores the
-		// reconnect budget. A repeated `deferred` frame does not, because the
-		// replay asks for one on every reconnect, and a cache that accepts an
-		// entry, repeats its answer and dies would be reconnected to for ever.
+		// Restore the reconnect budget only when the server first acknowledges
+		// outstanding work. Replay deliberately elicits repeated `deferred` frames;
+		// counting those as progress would permit an endless reconnect loop.
 		const answered =
 			'uploadId' in frame ? outstanding.get(frame.uploadId) : undefined;
 
@@ -1112,8 +991,8 @@ export function runCommitSession(
 
 		switch (frame.ev) {
 			case 'settled': {
-				// A frame for an id the session no longer holds returns no credit,
-				// so it must not reach `noteCapacityProgress` below.
+				// Ignore stale frames before recording capacity progress. They do not
+				// return credit for any current entry.
 				if (!outstanding.has(frame.uploadId)) {
 					return;
 				}
@@ -1145,14 +1024,13 @@ export function runCommitSession(
 					return;
 				}
 
-				// A reconnect resubscribes every parked entry and the server answers
+				// A reconnect resubscribes every deferred entry and the server answers
 				// each with a fresh `deferred` frame, so only the first one for an
 				// entry returns credit.
 				const isFirstDeferral = !entry.acked;
 
-				// The server holds a durable row now: ack the disposition so the
-				// caller can record retention, and keep the entry to carry the
-				// verdict its `settled` promise resolves on.
+				// The durable row is now available for retention. Resolve the
+				// acknowledgement, but keep the entry until its verdict settles.
 				entry.acked = true;
 				entry.deadline ??= armDeadline(frame.uploadId);
 				entry.resolveAck({
@@ -1200,9 +1078,8 @@ export function runCommitSession(
 						settling.verdictGrace = frame.grace;
 						settling.settleServable();
 
-						// A verdict can race ahead of the deferred frame; with no ack
-						// yet, resolve it now from the target's identity: servable is
-						// committed.
+						// A verdict can arrive before its deferred acknowledgement. Use the
+						// target identity to return the committed outcome immediately.
 						if (!settling.acked) {
 							settling.resolveAck({
 								storePathHash: settling.target.storePathHash,
@@ -1265,8 +1142,8 @@ export function runCommitSession(
 					}, delay);
 					entry.retryTimer.unref();
 
-					// The error frame is this entry's first answer, so it leaves the
-					// set even though the retry will queue the target again.
+					// The error is the first response for this attempt. Remove the entry
+					// from the in-flight set before its retry returns to the queue.
 					inFlightEntries.delete(errorUploadId);
 					updateCapacityWait();
 
@@ -1296,10 +1173,9 @@ export function runCommitSession(
 			case 'credit': {
 				noteCapacityProgress();
 
-				// The grant covers entries this session may now send. The server
-				// decremented the demand it holds for this session by the same
-				// amount, so the client's own record follows it and a queue that is
-				// still longer declares the remainder on the next drain.
+				// The server deducts each grant from this connection's declared
+				// demand. Mirror that deduction so the next drain declares only the
+				// remaining queue.
 				creditAvailable = (creditAvailable ?? 0) + frame.grant;
 				declaredDemand = Math.max(0, declaredDemand - frame.grant);
 				drainCredit();
@@ -1308,30 +1184,25 @@ export function runCommitSession(
 			}
 
 			case 'queued': {
-				// The server has no capacity to grant yet. The count goes into the
-				// timeout's cause and nothing reads it otherwise. The wait is
-				// already running, since the session had a queue and no credit
-				// before it asked.
+				// The server has no capacity to grant yet. Retain the queue position
+				// for a possible timeout diagnostic; the capacity wait is already active.
 				lastAhead = frame.ahead;
 
 				return;
 			}
 
 			case 'unsupported': {
-				// `request-credit` is the one op the session sends on its own
-				// declaration rather than on something the server advertised, so a
-				// server that does not know it is simply older. Such a server does
-				// not pace the session at all, so the session falls back to its own
-				// window of in-flight messages and sends the queue through that.
+				// The client declares `request-credit` in the upgrade request, so it
+				// may receive `unsupported` from an older server. Disable server pacing
+				// for this connection and send through the client-side batch window.
 				if (frame.op === 'request-credit') {
 					const queued = queuedTargets;
 					queuedTargets = [];
 					creditAvailable = undefined;
 					isCreditPaced = false;
 					declaredDemand = 0;
-					// The credited wait ends with the pacing: what the session
-					// waited for is not coming from this server, and a later
-					// connection that paces it again measures its own wait.
+					// Stop this capacity wait when the server declines pacing. A later
+					// connection that enables pacing starts a new wait.
 					noteCapacityProgress();
 					updateCapacityWait();
 					sendCommits(queued);
@@ -1352,12 +1223,10 @@ export function runCommitSession(
 		}
 	};
 
-	// On every open (the first connect and each reconnect), drive the outstanding
-	// work onto the fresh socket: an acked id resumes with `subscribe` (or
-	// `subscribe-identity` when advertised), an un-acked id is re-sent as a commit.
-	// On the first open this is just the registered paths' commits. The re-sent
-	// commits carry the path identity when batching, so an id whose reply was lost
-	// on the drop still resolves via the path identity.
+	// Replay unacknowledged entries as commits. Resume acknowledged entries with
+	// `subscribe`, or with `subscribe-identity` when the server supports recovery
+	// after a settled row has been cleared. Batched commits include path identity
+	// so a lost acknowledgement can also be recovered.
 	const replayOutstanding = (): void => {
 		const ackedTargets: CommitSessionTarget[] = [];
 		const unacked: CommitSessionTarget[] = [];
@@ -1404,9 +1273,7 @@ export function runCommitSession(
 	// Unref it and a run whose remaining work all waits on this session exits
 	// with its awaits unsettled instead of reconnecting.
 	//
-	// A wait the server asked for never shortens the back-off the attempt count
-	// has reached, so a session that keeps failing still dials less often the
-	// longer it fails.
+	// `Retry-After` can extend but never shorten exponential back-off.
 	const scheduleReconnect = (minimumDelayMs = 0): void => {
 		reconnectAttempt += 1;
 		reconnectTimer = setTimeout(
@@ -1470,10 +1337,9 @@ export function runCommitSession(
 			});
 	};
 
-	// Opens the connection a commit needs when the session is dormant. A server
-	// that refused the last dial and asked for a wait is given it, since a
-	// dormant session dials the moment a commit arrives and the timing of that
-	// commit is the caller's, not the server's.
+	// Open a connection for work added to a dormant session. If the previous
+	// refusal supplied `Retry-After`, delay this caller-triggered dial until that
+	// interval has elapsed.
 	const openDormantConnection = (): void => {
 		const remaining = earliestDialAt - Date.now();
 
@@ -1492,11 +1358,9 @@ export function runCommitSession(
 		}, remaining);
 	};
 
-	// A drop is treated as transient: reconnect and replay, so a network blip
-	// does not lose the whole push. Code 1002 means the server rejected the
-	// request deliberately, which reconnecting cannot fix. An upgrade refused
-	// with a retryable status arrives here too, since a cache that refuses this
-	// dial may still accept the next one.
+	// Reconnect and replay after transient connection failures. Protocol close
+	// code 1002 is terminal because the server deliberately rejected the request.
+	// Retryable upgrade refusals also use this path because a later dial can succeed.
 	const onDrop = (
 		code: number,
 		error: Error,
@@ -1509,20 +1373,16 @@ export function runCommitSession(
 		const minimumDelayMs =
 			cause.kind === 'refusal' ? (cause.minimumDelayMs ?? 0) : 0;
 
-		// Every route out of this drop honours the wait a refusal asked for: the
-		// reconnect scheduled below takes it directly, and recording it here
-		// carries it to a dial that comes some other way. An expiring capacity
-		// wait cancels a pending reconnect and leaves the session dormant, and
-		// the dial the next commit makes is then the one that owes the server
-		// the rest of its wait.
+		// Record the earliest permitted dial for every retryable refusal. This also
+		// constrains a later caller-triggered dial if a capacity timeout cancels the
+		// scheduled reconnect and leaves the session dormant.
 		if (cause.kind === 'refusal') {
 			earliestDialAt = Math.max(earliestDialAt, Date.now() + minimumDelayMs);
 		}
 
-		// Whether the connection died owing the session an answer. That is the one
-		// state a drop is evidence about: the cache had taken an entry and was to
-		// answer it. Read before the set below is cleared, so a dial that fails
-		// before it opens is classified by the state that survived it.
+		// Record whether the server had received an entry but had not answered it.
+		// Read this before clearing connection state so a later failed dial retains
+		// the correct retry-budget classification.
 		const wasAnswerOwed = inFlightEntries.size > 0;
 
 		isOpened = false;
@@ -1542,24 +1402,18 @@ export function runCommitSession(
 			entry.retryTimer = undefined;
 		}
 
-		// The server closes a socket once nothing is outstanding on it, which is
-		// what its idle close does to a session whose push has gone quiet.
-		// Nothing was lost, so the session stays usable and the next commit opens
-		// a fresh connection, renegotiating its capabilities and its grant. A
-		// caller that is finished closes the session itself, which takes the
-		// branch above.
+		// An idle close with no outstanding entries loses no work. Leave the
+		// session dormant so a later commit opens a fresh connection and negotiates
+		// new capabilities and credit.
 		if (outstanding.size === 0) {
 			isDormant = true;
 			creditAvailable = undefined;
 			reconnectsLeft = maxReconnects;
 			lastRefusal = undefined;
 
-			// The back-off reached so far outlives a dormancy a refusal caused,
-			// since the server declined to serve this session and the next dial
-			// is the same session asking again. An idle close is the server
-			// saying the opposite: it took this session and closed it only
-			// because it had gone quiet, and it will take the next connection
-			// whenever one comes, so that dial starts afresh.
+			// Preserve back-off after a refusal because the next dial retries the same
+			// rejected session. Reset it after an ordinary idle close because the
+			// server had accepted the connection and closed it only after inactivity.
 			if (cause.kind !== 'refusal') {
 				reconnectAttempt = 0;
 			}
@@ -1586,12 +1440,10 @@ export function runCommitSession(
 			return;
 		}
 
-		// A paced session that was owed no answer reconnects for free, because the
-		// clock that owns the work it left behind bounds it: the capacity deadline
-		// for entries the cache has not taken, and each parked entry's verdict
-		// deadline for the ones it has, both of which run through a
-		// disconnection. Spending the budget there would fail work the server
-		// holds durably, over a link that is merely flaky.
+		// A paced session preserves its reconnect budget when no server response was
+		// outstanding. Unadmitted entries remain bounded by the capacity deadline,
+		// while acknowledged entries remain bounded by their verdict deadlines. Both
+		// deadlines continue through disconnection, including for durable server work.
 		//
 		// An unpaced session has no capacity deadline, so the budget is the only
 		// bound it has and every drop spends one, a failed dial included.
@@ -1611,9 +1463,9 @@ export function runCommitSession(
 		scheduleReconnect(minimumDelayMs);
 	};
 
-	// Fails a deferred entry whose verdict never arrives. A budget longer than a
-	// timer can hold is armed in instalments, each measuring what is left of it,
-	// and only the last one fails the entry.
+	// Fail a deferred entry whose verdict never arrives. For a deadline beyond the
+	// timer limit, each instalment recalculates the remaining delay and only the
+	// final instalment fails the entry.
 	function armDeadline(uploadId: UploadId): NodeJS.Timeout {
 		const expiresAt = Date.now() + options.timeoutSeconds * 1000;
 
@@ -1658,10 +1510,9 @@ export function runCommitSession(
 	}
 
 	function openConnection(attempt: BearerAttempt): void {
-		// This connection supersedes any the drop path still has pending, so a
-		// timer left armed must not open a second one behind it. A refusal still
-		// being read belongs to the connection this one replaces, and `refuse`
-		// ignores a refusal that old, so its drain has nothing left to decide.
+		// Cancel pending reconnect and refusal timers before installing the new
+		// connection. Otherwise a stale timer could open another connection or act
+		// on a refusal from the superseded handshake.
 		clearReconnectTimer();
 		clearRefusalDrain();
 		connectionAttempt = attempt;
@@ -1697,9 +1548,8 @@ export function runCommitSession(
 		inFlightChunks.clear();
 		uploadIdToChunkKey.clear();
 		pendingBatchChunks = [];
-		// Credit belongs to the connection the server granted it on, and the
-		// server holds no demand for a session that has gone. The wait already
-		// spent is not reset here: it is the session's, not the connection's.
+		// A grant and its declared demand belong to one connection. Clear both,
+		// but preserve the session-wide time already spent waiting for capacity.
 		creditAvailable = undefined;
 		declaredDemand = 0;
 		queuedTargets = [];
@@ -1707,13 +1557,11 @@ export function runCommitSession(
 		// Captured per connection, so `onCapabilities` reports the negotiation of
 		// the connection whose `open` fired.
 		let connectionCaps: AdvertisedCapabilities = new Map();
-		// The capacity this connection's 101 offered. A dial that never opens
-		// leaves it unread, which is what keeps an offer from counting as
-		// progress.
+		// Record the opening grant but do not count it as progress until the
+		// connection opens. A refused handshake must not reset the capacity wait.
 		let openingGrant = 0;
-		// Named as well as stored, so a handler that outlives this connection
-		// acts on the connection it belongs to rather than on the session's
-		// current one.
+		// Capture the connection for its handlers so stale events cannot act on the
+		// session's current socket.
 		const connection = connect(url, connectionAttempt.headers);
 		socket = connection;
 
@@ -1737,14 +1585,13 @@ export function runCommitSession(
 				connectionCaps,
 				subscribeIdentityCapability
 			);
-			// A session that declared credit is paced whether or not the grant
-			// token survived the hop back, so an unreadable offer opens at zero
-			// and the first `request-credit` asks for what the queue needs.
+			// The server enforces the capability from the request. If an intermediary
+			// strips it from the response, start with zero credit and request a grant.
 			creditAvailable =
 				resolvedOpeningGrant(connectionCaps) ??
 				(isCreditDeclared ? 0 : undefined);
-			// Each connection negotiates for itself, so a session an older server
-			// took off credit is back on it for the next one.
+			// Negotiate pacing per connection. A new connection can restore pacing
+			// after an older server rejected it on the previous one.
 			isCreditPaced = creditAvailable !== undefined;
 			openingGrant = creditAvailable ?? 0;
 		});
@@ -1757,18 +1604,10 @@ export function runCommitSession(
 			isOpened = true;
 			options.onCapabilities?.(connectionCaps);
 
-			// Capacity the session can now spend is progress, the same as a
-			// `credit` frame is, so the wait this connection opened during ends
-			// here and the next one runs a whole budget. An offer on a 101 whose
-			// handshake the client then rejects never reaches this line, which is
-			// why the reset lives here rather than beside the header it was read
-			// from. A cache that takes the session and grants it nothing has made
-			// no progress for it, so its wait carries on.
-			//
-			// This runs before the replay, which sends what the grant covers and
-			// re-arms the deadline for whatever is still queued. After it, the
-			// reset would clear the deadline the replay had just armed and
-			// nothing would arm another until the next frame.
+			// A positive opening grant is capacity progress. Reset the wait only after
+			// the socket opens, so a rejected handshake cannot count its advertised
+			// grant. Reset before replay because replay can immediately arm a new wait
+			// for entries beyond the grant.
 			if (openingGrant > 0) {
 				noteCapacityProgress();
 			}
@@ -1824,38 +1663,20 @@ export function runCommitSession(
 
 			const chunks: string[] = [];
 
-			// Ends the refusal, reclaiming the connection and then deciding what
-			// the session does next.
+			// `ws` transfers ownership of the refused handshake to this listener.
+			// Destroy the response to release an unfinished body and close the socket
+			// to release the connection. Otherwise repeated refusals would retain one
+			// referenced connection each.
 			//
-			// `ws` hands the connection to this listener and abandons it there,
-			// still in its handshake, so the session is what gives it back:
-			// destroying the response releases a body still being read, and
-			// closing the socket ends the connection itself. Destroying alone
-			// leaves a read that finished holding an open connection, and a
-			// session dialling against a busy cache for minutes would then hold
-			// one per refusal, each a ref'd handle that keeps a finished run
-			// from exiting.
-			//
-			// The server refuses an upgrade with a retryable status when it is
-			// loaded or has just reset, and this session dials often enough to
-			// meet one: after a drop, after going dormant, and after its idle
-			// close. So a retryable refusal goes through the drop path, where the
-			// session's own bounds decide how long it keeps trying. A refusal
-			// that asks for a delay in `Retry-After` also holds the next dial
-			// back at least that long. Any other status is a refusal of this
-			// request rather than of its timing.
+			// Retryable statuses enter the normal reconnect path, including any
+			// `Retry-After` delay. Other statuses fail the session.
 			const refuse = (minimumDelayMs: number | undefined): void => {
 				response.destroy();
 				connection.close();
 
-				// The body can take long enough that the session has left the
-				// connection this refusal condemns by the time it is read: a
-				// capacity wait that expires abandons a connection mid-handshake,
-				// and the session reconnects and carries on. Acting on the refusal
-				// then would end a session over a dial it has already replaced,
-				// whatever the status said. The drain is cleared below rather
-				// than here, because by this point the timer can belong to the
-				// connection the session moved to.
+				// Reading the body can outlive this connection, for example when a
+				// capacity timeout abandons the handshake. Ignore stale refusals so they
+				// cannot fail a session that has already installed another connection.
 				if (hasDropped || !isCurrent()) {
 					return;
 				}
@@ -1871,10 +1692,8 @@ export function runCommitSession(
 				);
 
 				if (isRetryableRefusal(status)) {
-					// Kept so that a wait which only ever meets refusals fails
-					// naming this one. A cache that goes on to make progress for the
-					// session clears it, so the refusal reported is always one the
-					// session was still being given when it gave up.
+					// Retain the latest refusal for a capacity timeout diagnostic. Any
+					// subsequent server progress clears it as stale.
 					lastRefusal = refusal;
 					dropOnce(0, refusal, { kind: 'refusal', minimumDelayMs });
 
@@ -1891,15 +1710,13 @@ export function runCommitSession(
 				failSession(refusal);
 			};
 
-			// A peer can leave the body unfinished in the ways `refusalDrainMs`
-			// describes, none of which produce another event on this connection,
-			// so the read is bounded. The status arrived with the headers, so the
-			// refusal is answered on what was received. A `Retry-After` on a
-			// response whose body never finished is not honoured, and the
-			// back-off decides the next dial.
+			// Bound an unfinished response body because no later connection event is
+			// guaranteed. The status is already available from the headers. If the
+			// body times out, reconnect back-off determines the next dial because the
+			// client does not parse `Retry-After` from an incomplete response.
 			//
-			// This timer is not unref'd, since until it fires nothing else will
-			// move the session on.
+			// Keep this timer referenced because it is the only event guaranteed to
+			// resolve an unfinished refusal body.
 			refusalDrainTimer = setTimeout(() => {
 				refuse(undefined);
 			}, refusalDrainMs);
@@ -1931,18 +1748,16 @@ export function runCommitSession(
 			);
 		}
 
-		// A dormant session was closed by the server with nothing outstanding, so
-		// this commit opens a fresh connection and `replayOutstanding` sends it
-		// once that connection is up. The caller's `close` runs first if it came
-		// first, since it sets `isClosed` and the guard above rejects.
+		// An idle server close leaves the session dormant. Open a new connection
+		// before replaying this commit.
 		if (isDormant) {
 			openDormantConnection();
 		}
 
 		return new Promise<CommitOutcome>((resolveAck, rejectAck) => {
 			const { settled, settleServable, settleFailed } = deferredSettle();
-			// A caller that never awaits `settled` (a `--no-wait` push, or an ack
-			// that never lands) must not surface its rejection as unhandled.
+			// Observe `settled` immediately because a `--no-wait` caller may never await
+			// it, and the acknowledgement itself may never arrive.
 			void ignoreRejection(settled);
 
 			outstanding.set(target.uploadId, {
@@ -1957,11 +1772,9 @@ export function runCommitSession(
 			});
 			unackedEntries += 1;
 
-			// An open socket enqueues onto the coalescing flush; before the first
-			// open (or mid-reconnect) the op waits and `replayOutstanding` sends it
-			// when the socket comes up. Nothing will carry it until then, so the
-			// capacity clock starts here rather than on a connection this session
-			// may never get.
+			// An open socket uses the coalescing queue. Before the first open or during
+			// reconnect, `replayOutstanding` sends the entry after connection. Start
+			// the capacity clock now because a connection might never open.
 			if (isOpened) {
 				enqueueSend(target);
 			} else {
@@ -1986,9 +1799,7 @@ function asError(value: unknown): Error {
 	return value instanceof Error ? value : new TokenProviderError(value);
 }
 
-// Exponential back-off with full jitter, capped. The jittered delay never
-// exceeds the cap, so a test can fire any pending reconnect by advancing a fake
-// clock past `maxReconnectBackoffMs`.
+// Exponential back-off with full jitter, capped.
 function reconnectDelay(attempt: number, base: number): number {
 	const ceiling = Math.min(base * 2 ** (attempt - 1), maxReconnectBackoffMs);
 
@@ -1996,26 +1807,22 @@ function reconnectDelay(attempt: number, base: number): number {
 }
 
 /**
- * Whether a refused upgrade refuses the timing of this dial rather than the
- * request itself. An upgrade is answered by whatever stands in front of the
- * Worker, so the gateway conditions an edge reports (a 502 during a redeploy, a
- * 504 on an origin timeout, Cloudflare's own 52x pages) belong here beside the
- * server's own overload statuses, and every other 5xx is a fault the next dial
- * may well not meet. Below 500 only a rate limit passes: an authorisation or
- * routing failure reads the same however often the session dials.
+ * Returns whether a later upgrade attempt can reasonably succeed. Gateways and
+ * the Worker can return transient 5xx responses during deployment, overload, or
+ * origin failure. Rate limiting is also transient. Other 4xx responses describe
+ * the request and remain terminal across retries.
  *
- * This is wider than {@link retryableErrorStatuses}, which answers the same
- * question for a frame the server itself wrote.
+ * This set is wider than {@link retryableErrorStatuses}, which covers frames
+ * written by the Worker after a successful upgrade.
  */
 function isRetryableRefusal(status: number): boolean {
 	return status === 429 || status >= 500;
 }
 
 /**
- * The wait a refused upgrade asked for in `Retry-After`, in milliseconds and
- * capped at {@link maxRetryAfterMs}. Only the delay-seconds form is read. For
- * an HTTP date, or a value that is not a positive number of seconds, this
- * returns `undefined` and the back-off decides the delay on its own.
+ * Parses the delay-seconds form of `Retry-After` and caps the result at
+ * {@link maxRetryAfterMs}. HTTP dates and non-positive or invalid values return
+ * `undefined`, leaving exponential back-off to choose the delay.
  */
 function requestedRetryDelayMs(failure: UpgradeFailure): number | undefined {
 	const stated = failure.headers['retry-after'];

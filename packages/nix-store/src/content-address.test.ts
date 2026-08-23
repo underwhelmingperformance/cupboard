@@ -9,57 +9,69 @@ const base32 = toNixBase32(digest);
 
 describe('isContentAddress', () => {
 	it.each([
-		{ name: 'a flat fixed output', value: `fixed:sha256:${base32}` },
 		{
-			name: 'a fixed output serialised as a NAR',
+			name: 'accepts a flat fixed-output address',
+			value: `fixed:sha256:${base32}`
+		},
+		{
+			name: 'accepts a NAR fixed-output address',
 			value: `fixed:r:sha256:${base32}`
 		},
-		{ name: 'a text output', value: `text:sha256:${base32}` },
+		{ name: 'accepts a text address', value: `text:sha256:${base32}` },
 		{
-			name: 'a digest written base16',
+			name: 'accepts a base16 digest',
 			value: `fixed:sha256:${bytesToHex(digest)}`
 		},
 		{
-			name: 'a digest written base64',
+			name: 'accepts a base64 digest',
 			value: `fixed:sha256:${bytesToBase64(digest)}`
 		},
 		{
-			name: 'another algorithm',
+			name: 'accepts an MD5 digest',
 			value: `fixed:md5:${bytesToHex(digest.slice(0, 16))}`
 		}
-	])('reads $name', ({ value }) => {
+	])('$name', ({ value }) => {
 		expect(isContentAddress(value)).toBe(true);
 	});
 
 	it.each([
-		{ name: 'nothing that separates a method off', value: 'no separator here' },
-		{ name: 'a method it does not know', value: `flat:sha256:${base32}` },
-		{ name: 'no method at all', value: `sha256:${base32}` },
 		{
-			// Nix reads this method behind the git-hashing experimental feature.
-			name: 'a method behind an experimental feature',
+			name: 'rejects a value without a method separator',
+			value: 'no separator here'
+		},
+		{ name: 'rejects an unknown method', value: `flat:sha256:${base32}` },
+		{
+			name: 'rejects a hash without a content-address method',
+			value: `sha256:${base32}`
+		},
+		{
+			name: 'rejects the git method without git-hashing',
 			value: `fixed:git:sha256:${base32}`
 		},
-		{ name: 'no hash', value: 'fixed:' },
-		{ name: 'no algorithm before the digest', value: `fixed:${base32}` },
+		{ name: 'rejects a missing hash', value: 'fixed:' },
 		{
-			name: 'an algorithm it does not know',
+			name: 'rejects a missing hash algorithm',
+			value: `fixed:${base32}`
+		},
+		{
+			name: 'rejects an unsupported hash algorithm',
 			value: `fixed:md4:${'a'.repeat(32)}`
 		},
-		{ name: 'a digest of the wrong length', value: 'fixed:sha256:abcd' },
 		{
-			name: 'a digest outside its alphabet',
+			name: 'rejects a digest with the wrong length',
+			value: 'fixed:sha256:abcd'
+		},
+		{
+			name: 'rejects a digest outside the Nix base32 alphabet',
 			value: `fixed:sha256:${'e'.repeat(52)}`
 		},
 		{
-			// A content address states its algorithm before a colon, so the
-			// integrity spelling states no algorithm this reads.
-			name: 'a hash in the integrity spelling',
+			name: 'rejects SRI hash syntax',
 			value: `fixed:sha256-${bytesToBase64(digest)}`
 		},
-		{ name: 'a recursive marker and nothing else', value: 'fixed:r:' },
-		{ name: 'the empty string', value: '' }
-	])('reads no content address out of $name', ({ value }) => {
+		{ name: 'rejects fixed:r: without a hash', value: 'fixed:r:' },
+		{ name: 'rejects an empty value', value: '' }
+	])('$name', ({ value }) => {
 		expect(isContentAddress(value)).toBe(false);
 	});
 });

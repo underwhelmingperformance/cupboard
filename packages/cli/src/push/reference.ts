@@ -12,9 +12,6 @@ import {
 	ReadCredentialPairError
 } from '../errors.ts';
 
-/**
-A served cache endpoint that path metadata is read from.
-*/
 export interface ReferenceSource {
 	readonly url: URL;
 	readonly readUser?: ReadUser;
@@ -27,14 +24,9 @@ export interface ReferenceFetchDependencies {
 }
 
 /**
- * One reference entry's served narinfo, in the two forms a push needs it: the
- * fields the negotiate and commit shapes carry, and the signatures the source
- * published over the path.
- *
- * The upload fields carry no signature because the destination signs the
- * narinfo it serves itself. The receipt records the source's signatures
- * separately: they are made over the path's fingerprint, which the destination
- * serves unchanged, so a reader can check them against keys it trusts.
+ * The destination signs the narinfo it serves, so upload metadata excludes the
+ * source signatures. The receipt retains them because they cover the unchanged
+ * path fingerprint and remain independently verifiable.
  */
 export interface ReferenceMetadata {
 	readonly upload: UploadPathMetadataFields;
@@ -42,13 +34,10 @@ export interface ReferenceMetadata {
 }
 
 /**
- * Reads one path's served narinfo from the reference source and maps it into
- * the metadata the negotiate and commit shapes carry: the path pair, NAR hash
- * and size, references as sorted basenames, the deriver basename and content
- * address, plus the blob's file hash, file size and compression. A response
- * that is not OK refuses with {@link NarInfoUnavailableError} carrying the
- * status; a body that does not parse as a narinfo refuses with
- * {@link NarInfoUnparsableError}.
+ * Fetches and parses `<store-path-hash>.narinfo` from a reference source. The
+ * result retains source signatures separately from upload metadata. A
+ * non-success response throws {@link NarInfoUnavailableError}; invalid narinfo
+ * text throws {@link NarInfoUnparsableError}.
  */
 export async function fetchReferenceMetadata(
 	source: ReferenceSource,

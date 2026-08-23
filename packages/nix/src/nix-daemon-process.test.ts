@@ -121,7 +121,7 @@ describe('createProcessNixDaemonConnector', () => {
 		]);
 	});
 
-	it('drives the daemon handshake through the bridged stdio', async () => {
+	it("exchanges daemon protocol bytes through the child's stdin and stdout", async () => {
 		const children: FakeDaemonChild[] = [];
 		const run: DaemonCommandRunner = () => {
 			const child = new FakeDaemonChild(
@@ -155,7 +155,7 @@ describe('createProcessNixDaemonConnector', () => {
 		});
 	});
 
-	it('surfaces a child that exits mid-connection as a typed error', async () => {
+	it('rejects with NixDaemonRemoteError when the child exits during the handshake', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: createProcessNixDaemonConnector(
 				'nix',
@@ -169,7 +169,7 @@ describe('createProcessNixDaemonConnector', () => {
 		);
 	});
 
-	it('settles cleanup and surfaces the spawn error when the child cannot start', async () => {
+	it('rejects with the spawn error and completes child cleanup when the command cannot start', async () => {
 		const spawnError = new Error('spawn failed');
 		const children: UnspawnableDaemonChild[] = [];
 		const run: DaemonCommandRunner = () => {
@@ -186,7 +186,7 @@ describe('createProcessNixDaemonConnector', () => {
 		expect(children.map((child) => child.killed)).toStrictEqual([1]);
 	});
 
-	it('kills the child when the connection closes', async () => {
+	it('terminates the child when the connection closes', async () => {
 		const children: FakeDaemonChild[] = [];
 		const run: DaemonCommandRunner = () => {
 			const child = new FakeDaemonChild(new FakeDaemonTransport({}));
@@ -203,7 +203,7 @@ describe('createProcessNixDaemonConnector', () => {
 		expect(children.map((child) => child.killed)).toStrictEqual([1]);
 	});
 
-	it('settles close after an ordinary TERM exit without escalation', async () => {
+	it('sends no SIGKILL when the child exits after SIGTERM', async () => {
 		const child = new ControlledDaemonChild();
 		const scheduler = new ControlledKillScheduler();
 		child.onKill = (signal) => {
@@ -253,7 +253,7 @@ describe('createProcessNixDaemonConnector', () => {
 		await first;
 	});
 
-	it('escalates a TERM-resistant child to KILL and waits for its exit', async () => {
+	it('sends SIGKILL after the grace period and waits for the child to exit', async () => {
 		const child = new ControlledDaemonChild();
 		const scheduler = new ControlledKillScheduler();
 		const afterExit = vi.fn();

@@ -26,9 +26,6 @@ describe('assembleSecrets', () => {
 		).toStrictEqual({
 			missing: [],
 			secrets: {
-				// The push id signing key lands on both Workers: the tenant object
-				// issues and verifies push ids, the front Worker verifies them to
-				// gate its pre-auth negotiate hint reads.
 				control: [
 					{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'wrap' },
 					{ name: 'CUPBOARD_SIGNUP_SECRET', text: 'signup' },
@@ -70,15 +67,25 @@ describe('settlePushIdSigningKey', () => {
 	const key = 'PUSH_ID_SIGNING_KEY';
 
 	it.each([
-		// Both Workers hold the key: presumed aligned, left untouched.
-		['keep', { control: [key], tenant: [key] }],
-		// A first deploy: neither Worker holds one yet.
-		['generate', { control: [], tenant: [] }],
-		// The value cannot be read back to copy across, so a single-Worker key
-		// realigns by rotating a fresh one onto both.
-		['rotate', { control: [], tenant: [key] }],
-		['rotate', { control: [key], tenant: [] }]
-	] as const)('answers %s for %j', (expected, existing) => {
+		['keeps matching keys', 'keep', { control: [key], tenant: [key] }],
+		['generates the first key', 'generate', { control: [], tenant: [] }],
+		[
+			'rotates when only the tenant Worker has a key',
+			'rotate',
+			{
+				control: [],
+				tenant: [key]
+			}
+		],
+		[
+			'rotates when only the control Worker has a key',
+			'rotate',
+			{
+				control: [key],
+				tenant: []
+			}
+		]
+	] as const)('%s', (_name, expected, existing) => {
 		expect(settlePushIdSigningKey(existing)).toBe(expected);
 	});
 });

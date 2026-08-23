@@ -10,8 +10,8 @@ import {
 const secret = pushIdSigningKeySchema.parse('parent-secret');
 const nonce = Uint8Array.from({ length: 16 }, (_, index) => index);
 
-describe('push id', () => {
-	it('issues a hex id whose nonce leads the full HMAC tag', async () => {
+describe('push IDs', () => {
+	it('returns a 16-byte nonce followed by a full HMAC-SHA256 tag in lowercase hex', async () => {
 		const pushId = await issuePushId(secret, nonce);
 
 		expect({
@@ -32,7 +32,7 @@ describe('push id', () => {
 		expect(first).toBe(second);
 	});
 
-	it('accepts an id it signed and rejects tampering, a wrong key and bad shapes', async () => {
+	it('validates the tag, key, length and hexadecimal encoding', async () => {
 		const pushId = await issuePushId(secret, nonce);
 		const tamperedTag = `${pushId.slice(0, -1)}${pushId.at(-1) === '0' ? '1' : '0'}`;
 		const tamperedNonce = `${pushId.at(0) === '0' ? '1' : '0'}${pushId.slice(1)}`;
@@ -57,7 +57,7 @@ describe('push id', () => {
 		});
 	});
 
-	it('issues random, individually verifiable ids', async () => {
+	it('creates distinct IDs that validate with the issuing key', async () => {
 		const first = await createPushId(secret);
 		const second = await createPushId(secret);
 

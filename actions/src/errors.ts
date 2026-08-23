@@ -14,9 +14,6 @@ export class MissingInputError extends UsageError {
 	}
 }
 
-/**
-The `cache` input is not a valid cache name.
-*/
 export class CacheNameInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('cache must be a valid cache name');
@@ -24,14 +21,8 @@ export class CacheNameInvalidError extends UsageError {
 	}
 }
 
-/**
-The names of action inputs that accept a base URL.
-*/
 export type UrlInputName = 'cache-url' | 'url';
 
-/**
-A URL-valued action input is not a credential-safe HTTP URL.
-*/
 export class UrlInputInvalidError extends UsageError {
 	constructor(public readonly input: UrlInputName) {
 		super(
@@ -41,9 +32,6 @@ export class UrlInputInvalidError extends UsageError {
 	}
 }
 
-/**
-The `read-user` input cannot be represented in a Basic credential.
-*/
 export class ReadUserInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('read-user must not contain a colon');
@@ -51,9 +39,6 @@ export class ReadUserInvalidError extends UsageError {
 	}
 }
 
-/**
-A boolean action input is neither `true` nor `false`.
-*/
 export class BooleanInputInvalidError extends UsageError {
 	constructor(
 		public readonly input: string,
@@ -64,9 +49,6 @@ export class BooleanInputInvalidError extends UsageError {
 	}
 }
 
-/**
-The build action received no installables.
-*/
 export class BuildInstallablesMissingError extends UsageError {
 	constructor() {
 		super('installables must contain at least one value');
@@ -74,9 +56,6 @@ export class BuildInstallablesMissingError extends UsageError {
 	}
 }
 
-/**
-An installable cannot be passed to Nix as a positional argument.
-*/
 export class BuildInstallableInvalidError extends UsageError {
 	constructor(public readonly installables: readonly string[]) {
 		super(
@@ -86,9 +65,6 @@ export class BuildInstallableInvalidError extends UsageError {
 	}
 }
 
-/**
-The build retry count is not a positive safe integer.
-*/
 export class BuildAttemptsInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('attempts must be a positive integer');
@@ -96,9 +72,6 @@ export class BuildAttemptsInvalidError extends UsageError {
 	}
 }
 
-/**
-A GitHub API endpoint is not a credential-safe HTTPS URL.
-*/
 export class GithubEndpointInvalidError extends UsageError {
 	constructor(public readonly input: string) {
 		super(`${input} must be a credential-safe HTTPS URL`);
@@ -106,9 +79,6 @@ export class GithubEndpointInvalidError extends UsageError {
 	}
 }
 
-/**
-The configured GitHub REST and GraphQL endpoints have different origins.
-*/
 export class GithubEndpointOriginMismatchError extends UsageError {
 	constructor() {
 		super('github-graphql-url must have the same origin as github-api-url');
@@ -116,9 +86,6 @@ export class GithubEndpointOriginMismatchError extends UsageError {
 	}
 }
 
-/**
-The workflow revision is not a full lowercase Git commit ID.
-*/
 export class WorkflowShaInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('workflow-sha must be a lowercase, full 40-character Git commit id');
@@ -126,9 +93,6 @@ export class WorkflowShaInvalidError extends UsageError {
 	}
 }
 
-/**
-An explicit Cupboard executable was combined with release selection inputs.
-*/
 export class CupboardReleaseSelectionConflictError extends UsageError {
 	constructor(public readonly input: 'cupboard' | 'cupboard-path') {
 		super(`${input} cannot be combined with release selection inputs`);
@@ -136,9 +100,6 @@ export class CupboardReleaseSelectionConflictError extends UsageError {
 	}
 }
 
-/**
-The `pack-capacity` input is not a positive integer byte count.
-*/
 export class PackCapacityInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('pack-capacity must be a positive integer byte count');
@@ -146,9 +107,6 @@ export class PackCapacityInvalidError extends UsageError {
 	}
 }
 
-/**
-A root prefix and target suffix do not form a valid root name.
-*/
 export class RootNameInvalidError extends UsageError {
 	constructor(
 		public readonly target: string,
@@ -161,9 +119,6 @@ export class RootNameInvalidError extends UsageError {
 	}
 }
 
-/**
-A remote build target has an output path that planning cannot determine.
-*/
 export class RemoteOutputPathUnknownDuringPlanningError extends UsageError {
 	constructor(public readonly targets: readonly string[]) {
 		super(
@@ -173,9 +128,6 @@ export class RemoteOutputPathUnknownDuringPlanningError extends UsageError {
 	}
 }
 
-/**
-A push has neither positional paths nor root groups.
-*/
 export class PushPathsMissingError extends UsageError {
 	constructor() {
 		super('paths is required and must contain at least one path');
@@ -183,9 +135,6 @@ export class PushPathsMissingError extends UsageError {
 	}
 }
 
-/**
-Root groups and positional paths were supplied together.
-*/
 export class RootGroupsPathsConflictError extends UsageError {
 	constructor() {
 		super('root-groups cannot be combined with paths');
@@ -193,9 +142,6 @@ export class RootGroupsPathsConflictError extends UsageError {
 	}
 }
 
-/**
-Root groups and an explicit root were supplied together.
-*/
 export class RootGroupsRootConflictError extends UsageError {
 	constructor() {
 		super(
@@ -205,9 +151,6 @@ export class RootGroupsRootConflictError extends UsageError {
 	}
 }
 
-/**
-Root groups were supplied for an unretained push.
-*/
 export class RootGroupsRetentionConflictError extends UsageError {
 	constructor() {
 		super(
@@ -217,9 +160,6 @@ export class RootGroupsRetentionConflictError extends UsageError {
 	}
 }
 
-/**
-An explicit root was supplied for an unretained push.
-*/
 export class RootRetentionConflictError extends UsageError {
 	constructor() {
 		super('root cannot be combined with no-retain');
@@ -227,9 +167,6 @@ export class RootRetentionConflictError extends UsageError {
 	}
 }
 
-/**
-A retention lifetime was supplied for an unretained push.
-*/
 export class TtlRetentionConflictError extends UsageError {
 	constructor() {
 		super('ttl cannot be combined with no-retain');
@@ -237,9 +174,6 @@ export class TtlRetentionConflictError extends UsageError {
 	}
 }
 
-/**
-Grace-period verification was requested without waiting for publication.
-*/
 export class GraceWaitConflictError extends UsageError {
 	constructor() {
 		super('require-grace cannot be combined with wait: false');
@@ -247,9 +181,6 @@ export class GraceWaitConflictError extends UsageError {
 	}
 }
 
-/**
-Only one of the reference paths file and reference source was supplied.
-*/
 export class ReferenceSourcePairingError extends UsageError {
 	constructor() {
 		super(
@@ -259,9 +190,6 @@ export class ReferenceSourcePairingError extends UsageError {
 	}
 }
 
-/**
-The `root-groups` input is not valid JSON.
-*/
 export class RootGroupsJsonInvalidError extends UsageError {
 	constructor(public override readonly cause: unknown) {
 		super(
@@ -272,9 +200,6 @@ export class RootGroupsJsonInvalidError extends UsageError {
 	}
 }
 
-/**
-The `root-groups` input does not match the root-group schema.
-*/
 export class RootGroupsSchemaError extends UsageError {
 	constructor(public override readonly cause: z.ZodError) {
 		super(
@@ -285,9 +210,6 @@ export class RootGroupsSchemaError extends UsageError {
 	}
 }
 
-/**
-A custom predicate file was supplied without its predicate type.
-*/
 export class PredicateTypeRequiredError extends UsageError {
 	constructor() {
 		super('predicate-type is required when predicate-file is supplied');
@@ -295,9 +217,6 @@ export class PredicateTypeRequiredError extends UsageError {
 	}
 }
 
-/**
-The checksums file contains no attestation subjects.
-*/
 export class AttestationSubjectsMissingError extends UsageError {
 	constructor(public readonly checksumsFile: string) {
 		super(`${checksumsFile} lists no subject to sign`);
@@ -305,9 +224,6 @@ export class AttestationSubjectsMissingError extends UsageError {
 	}
 }
 
-/**
-The attestation attachment action received no bundles.
-*/
 export class AttestationBundlesMissingError extends UsageError {
 	constructor() {
 		super('bundle is required and must name at least one attestation bundle');
@@ -315,9 +231,6 @@ export class AttestationBundlesMissingError extends UsageError {
 	}
 }
 
-/**
-The Cupboard version is neither `latest` nor an exact release tag.
-*/
 export class CupboardVersionInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('cupboard-version must be latest or an exact release tag');
@@ -325,9 +238,6 @@ export class CupboardVersionInvalidError extends UsageError {
 	}
 }
 
-/**
-Source-commit verification was requested without an exact Cupboard release.
-*/
 export class ExactCupboardVersionRequiredError extends UsageError {
 	constructor() {
 		super(
@@ -337,9 +247,6 @@ export class ExactCupboardVersionRequiredError extends UsageError {
 	}
 }
 
-/**
-The expected source revision is not a full Git commit ID.
-*/
 export class ExpectedSourceCommitInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('expected-source-commit must be a full 40-character Git commit id');
@@ -347,9 +254,6 @@ export class ExpectedSourceCommitInvalidError extends UsageError {
 	}
 }
 
-/**
-An internal release selection did not contain an exact tag.
-*/
 export class ExactReleaseTagRequiredError extends CodedError {
 	constructor() {
 		super('Release selection did not produce an exact tag.');
@@ -357,9 +261,6 @@ export class ExactReleaseTagRequiredError extends CodedError {
 	}
 }
 
-/**
-The release archive digest is not a lowercase SHA-256 digest.
-*/
 export class ArchiveSha256InvalidError extends CodedError {
 	constructor(public readonly value: string) {
 		super('The release archive digest is not a lowercase SHA-256 digest.');
@@ -367,9 +268,6 @@ export class ArchiveSha256InvalidError extends CodedError {
 	}
 }
 
-/**
-The release repository is not an owner/name pair.
-*/
 export class ReleaseRepositoryInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super(`release-repository must be <owner>/<name>, got '${value}'`);
@@ -377,9 +275,6 @@ export class ReleaseRepositoryInvalidError extends UsageError {
 	}
 }
 
-/**
-The `cohort-json` input is not valid JSON.
-*/
 export class CohortJsonInvalidError extends UsageError {
 	constructor(public override readonly cause: unknown) {
 		super(
@@ -390,9 +285,6 @@ export class CohortJsonInvalidError extends UsageError {
 	}
 }
 
-/**
-The `cohort-json` input does not match the cohort matrix schema.
-*/
 export class CohortJsonSchemaError extends UsageError {
 	constructor(public override readonly cause: z.ZodError) {
 		super(
@@ -403,9 +295,6 @@ export class CohortJsonSchemaError extends UsageError {
 	}
 }
 
-/**
-The action received a read user without its password.
-*/
 export class ReadPasswordRequiredError extends UsageError {
 	constructor() {
 		super('read-password is required when read-user is supplied');
@@ -413,9 +302,6 @@ export class ReadPasswordRequiredError extends UsageError {
 	}
 }
 
-/**
-The action received a read password without its user.
-*/
 export class ReadUserRequiredError extends UsageError {
 	constructor() {
 		super('read-user is required when read-password is supplied');
@@ -423,9 +309,6 @@ export class ReadUserRequiredError extends UsageError {
 	}
 }
 
-/**
-The `max-jobs` input is outside Nix's supported unsigned 32-bit range.
-*/
 export class InvalidMaxJobsError extends UsageError {
 	constructor(public readonly value: string) {
 		super('max-jobs must be a non-negative 32-bit integer');
@@ -433,9 +316,6 @@ export class InvalidMaxJobsError extends UsageError {
 	}
 }
 
-/**
-The action received `run-root-ttl` without `run-root`.
-*/
 export class RunRootRequiredError extends UsageError {
 	constructor(public readonly ttl: string) {
 		super('run-root-ttl requires run-root');
@@ -453,9 +333,6 @@ export class UnsupportedPlatformError extends UsageError {
 	}
 }
 
-/**
-Builds `Error`'s options bag, omitting `cause` entirely when none was given.
-*/
 function withCause(cause: unknown): ErrorOptions | undefined {
 	return cause === undefined ? undefined : { cause };
 }
@@ -498,9 +375,6 @@ export class NoReleaseFoundError extends CodedError {
 	}
 }
 
-/**
-A canonical cupboard coordinate could not be decoded from the job output.
-*/
 export class CupboardResolutionJsonError extends UsageError {
 	constructor(public override readonly cause: unknown) {
 		super('resolved-cupboard is not valid canonical JSON', { cause });
@@ -508,9 +382,6 @@ export class CupboardResolutionJsonError extends UsageError {
 	}
 }
 
-/**
-GitHub returned a release-discovery page outside its declared schema.
-*/
 export class MalformedReleaseDiscoveryResponseError extends CodedError {
 	constructor(options: { readonly cause?: unknown } = {}) {
 		super(
@@ -521,9 +392,6 @@ export class MalformedReleaseDiscoveryResponseError extends CodedError {
 	}
 }
 
-/**
-Release discovery exceeded the bounded response and pagination policy.
-*/
 export class ReleaseDiscoverySearchTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumPageEntries: number,
@@ -550,9 +418,6 @@ export class ReleaseAssetNotFoundError extends CodedError {
 	}
 }
 
-/**
-A release asset URL is unsafe for an authenticated GitHub API request.
-*/
 export class InvalidReleaseAssetUrlError extends CodedError {
 	constructor(
 		public readonly assetName: string,
@@ -565,9 +430,6 @@ export class InvalidReleaseAssetUrlError extends CodedError {
 	}
 }
 
-/**
-A release asset exceeded the bounded size accepted by the action.
-*/
 export class DownloadAssetTooLargeError extends CodedError {
 	constructor(
 		public readonly assetName: string,
@@ -581,9 +443,6 @@ export class DownloadAssetTooLargeError extends CodedError {
 	}
 }
 
-/**
-A release attestation bundle exceeded the action's bounded input size.
-*/
 export class ReleaseAttestationBundleTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumBytes: number,
@@ -596,9 +455,6 @@ export class ReleaseAttestationBundleTooLargeError extends CodedError {
 	}
 }
 
-/**
-An attestation lookup exceeded the bounded candidate or page policy.
-*/
 export class ReleaseAttestationSearchTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumCandidates: number,
@@ -613,9 +469,6 @@ export class ReleaseAttestationSearchTooLargeError extends CodedError {
 	}
 }
 
-/**
-A historical release cannot satisfy the current action's runtime contract.
-*/
 export class ReleaseCompatibilityError extends CodedError {
 	constructor(
 		public readonly tag: string,
@@ -628,9 +481,6 @@ export class ReleaseCompatibilityError extends CodedError {
 	}
 }
 
-/**
-A release archive's executable does not identify as the selected tag.
-*/
 export class InstalledReleaseVersionMismatchError extends CodedError {
 	constructor(
 		public readonly expected: string,
@@ -643,9 +493,6 @@ export class InstalledReleaseVersionMismatchError extends CodedError {
 	}
 }
 
-/**
-A verified release archive omitted an executable required at runtime.
-*/
 export class ReleaseInstallationIncompleteError extends CodedError {
 	constructor(
 		public readonly path: string,
@@ -659,9 +506,6 @@ export class ReleaseInstallationIncompleteError extends CodedError {
 	}
 }
 
-/**
-An installed executable no longer has the bytes in its verified archive.
-*/
 export class ReleaseInstallationIntegrityError extends CodedError {
 	constructor(
 		public readonly generationDirectory: string,
@@ -674,9 +518,6 @@ export class ReleaseInstallationIntegrityError extends CodedError {
 	}
 }
 
-/**
-Persisted installation state cannot be trusted for recovery.
-*/
 export class ReleaseInstallationStateError extends CodedError {
 	constructor(
 		public readonly statePath: string,
@@ -690,9 +531,6 @@ export class ReleaseInstallationStateError extends CodedError {
 	}
 }
 
-/**
-A persisted installation lock is corrupt or from an unsupported installer.
-*/
 export class ReleaseInstallationLockStateError extends CodedError {
 	constructor(public readonly lockPath: string) {
 		super(
@@ -702,9 +540,6 @@ export class ReleaseInstallationLockStateError extends CodedError {
 	}
 }
 
-/**
-The installer could not identify a process strongly enough to fence its lock.
-*/
 export class ReleaseInstallationProcessIdentityError extends CodedError {
 	constructor(
 		public readonly pid: number,
@@ -718,9 +553,6 @@ export class ReleaseInstallationProcessIdentityError extends CodedError {
 	}
 }
 
-/**
-The installer was fenced out before it could commit its release.
-*/
 export class ReleaseInstallationLockLostError extends CodedError {
 	constructor(
 		public readonly lockPath: string,
@@ -734,9 +566,6 @@ export class ReleaseInstallationLockLostError extends CodedError {
 	}
 }
 
-/**
-An expired lease still names the same process that acquired the lock.
-*/
 export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 	constructor(
 		public readonly lockPath: string,
@@ -751,9 +580,6 @@ export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 	}
 }
 
-/**
-A release failed to publish and its previous installation was not fully restored.
-*/
 export class ReleaseInstallationRollbackError extends CodedError {
 	constructor(
 		public readonly transactionPath: string,
@@ -767,9 +593,6 @@ export class ReleaseInstallationRollbackError extends CodedError {
 	}
 }
 
-/**
-A supplied executable succeeded but did not identify its version.
-*/
 export class CupboardVersionOutputMissingError extends CodedError {
 	constructor(public readonly binaryPath: string) {
 		super(`${binaryPath} --version produced no output`);
@@ -812,7 +635,6 @@ export class AttestationNotFoundError extends CodedError {
 }
 
 /**
- * Every published attestation candidate failed acquisition or verification.
  * `cause` contains the last candidate's failure; earlier attempts may have
  * failed for other reasons.
  */
@@ -830,9 +652,6 @@ export class AttestationVerificationFailedError extends CodedError {
 	}
 }
 
-/**
- * A receipt subject whose committed NAR hash differs from the destination's.
- */
 export class SubjectNarHashMovedError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -846,9 +665,6 @@ export class SubjectNarHashMovedError extends CodedError {
 	}
 }
 
-/**
- * A receipt subject whose committed deriver differs from the destination's.
- */
 export class SubjectDeriverMovedError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -862,9 +678,6 @@ export class SubjectDeriverMovedError extends CodedError {
 	}
 }
 
-/**
- * A receipt subject for which no committed destination metadata was supplied.
- */
 export class SubjectNotHeldError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -877,9 +690,6 @@ export class SubjectNotHeldError extends CodedError {
 	}
 }
 
-/**
-A committed narinfo could not be read from the destination cache.
-*/
 export class CommittedSubjectUnavailableError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -892,9 +702,6 @@ export class CommittedSubjectUnavailableError extends CodedError {
 	}
 }
 
-/**
-A destination response was not a valid narinfo for the requested subject.
-*/
 export class CommittedSubjectInvalidError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -908,9 +715,6 @@ export class CommittedSubjectInvalidError extends CodedError {
 	}
 }
 
-/**
-Realised outputs for which a current-run provenance receipt cannot be made.
-*/
 export class ProvenanceSubjectsIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
 		super(
@@ -920,9 +724,6 @@ export class ProvenanceSubjectsIncompleteError extends CodedError {
 	}
 }
 
-/**
-The installed CLI emitted no valid attachment result.
-*/
 export class AttestationAttachmentResultError extends CodedError {
 	constructor(message: string, options: { readonly cause?: unknown } = {}) {
 		super(message, withCause(options.cause));
@@ -930,9 +731,6 @@ export class AttestationAttachmentResultError extends CodedError {
 	}
 }
 
-/**
-Signed receipt subjects without a completed attachment.
-*/
 export class AttestationAttachmentIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
 		super(
@@ -942,9 +740,6 @@ export class AttestationAttachmentIncompleteError extends CodedError {
 	}
 }
 
-/**
-Receipt subjects whose signed checksum is absent or no longer exact.
-*/
 export class AttestationChecksumsMismatchError extends CodedError {
 	constructor(
 		public readonly storePaths: readonly string[],
@@ -981,9 +776,6 @@ export class AttestationSigningError extends CodedError {
 	}
 }
 
-/**
-The build-origin predicate file is not readable as a JSON object to sign.
-*/
 export class AttestationPredicateFileError extends CodedError {
 	constructor(
 		public readonly predicateFile: string,
@@ -1040,10 +832,6 @@ export class CachePublicKeyEmptyResponseError extends CodedError {
 	}
 }
 
-/**
- * The reuse-view priority check fetched `nix-cache-info` for the destination
- * cache or for the view, and the response had a non-2xx status.
- */
 export class CacheInfoFetchError extends CodedError {
 	constructor(
 		public readonly side: 'destination' | 'view',
@@ -1058,10 +846,8 @@ export class CacheInfoFetchError extends CodedError {
 }
 
 /**
- * The reuse-view priority check could not parse a `nix-cache-info` document it
- * fetched. Nix itself would default a missing priority to 30, but the check
- * must not guess: it needs the real value to compare, so the parse failure
- * carries through as the cause.
+ * Nix defaults a missing cache priority to 30. The reuse-view check must compare
+ * the configured values, so it rejects a document without a parseable priority.
  */
 export class CacheInfoInvalidError extends CodedError {
 	constructor(
@@ -1077,11 +863,8 @@ export class CacheInfoInvalidError extends CodedError {
 }
 
 /**
- * Raised when a configured reuse view's priority is not numerically greater
- * than the destination's. Nix tries lower priorities first, so this is the
- * destination-before-view invariant (see PLAN.md, "Named tenant reuse
- * views"): a divergent input-addressed path already adopted by the
- * destination must never be replaced by a view candidate.
+ * Nix tries lower priorities first. A reuse view must have a numerically higher
+ * priority so the destination wins when both caches provide a path.
  */
 export class ReuseViewPriorityError extends UsageError {
 	constructor(
@@ -1253,10 +1036,6 @@ export class DuplicateGroupKeyError extends CodedError {
 	}
 }
 
-/**
- * A cohort label requires its targets to run in one job. Targets with that label
- * must therefore have the same execution context (system, os, and remote).
- */
 export class CohortExecutionContextError extends UsageError {
 	constructor(
 		public readonly cohort: string,
@@ -1270,11 +1049,6 @@ export class CohortExecutionContextError extends UsageError {
 	}
 }
 
-/**
- * One cohort groups a best-effort target with a required target. A cohort runs
- * as one job, so its members must agree whether failure is tolerated rather
- * than silently overriding one target's declaration.
- */
 export class CohortFailureToleranceError extends UsageError {
 	constructor(
 		public readonly cohort: string,
@@ -1314,11 +1088,6 @@ export class PublishPlanInvariantError extends CodedError {
 	}
 }
 
-/**
- * A publish matrix asks for more jobs than GitHub runs for a single matrix.
- * Raised at plan time, naming the matrix and the counts, so the operator can
- * split the manifest.
- */
 export class MatrixJobLimitError extends UsageError {
 	constructor(
 		public readonly matrixName: string,
@@ -1373,7 +1142,7 @@ export class ComponentRootTargetLimitError extends UsageError {
 export class ProbeTimeoutError extends CodedError {
 	constructor(public readonly url: string) {
 		super(
-			`Timed out probing ${url}; the cache did not answer within the probe deadline`
+			`Timed out probing ${url}; the cache did not return a response before the deadline`
 		);
 		this.name = 'ProbeTimeoutError';
 	}
@@ -1415,9 +1184,6 @@ export class CacheAvailabilityResponseUnexpectedHashError extends CodedError {
 	}
 }
 
-/**
-A captured command exceeded the memory budget for its standard output.
-*/
 export class CommandOutputTooLargeError extends CodedError {
 	constructor(
 		public readonly command: string,
@@ -1463,9 +1229,6 @@ export interface RemoteCohortBuildFailure {
 	readonly message: string;
 }
 
-/**
-One or more remote builds ended with terminal failures.
-*/
 export class RemoteCohortBuildFailedError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
@@ -1475,9 +1238,6 @@ export class RemoteCohortBuildFailedError extends CodedError {
 	}
 }
 
-/**
-The remote daemon returned one or more invalid keyed result batches.
-*/
 export class RemoteCohortProtocolError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
@@ -1487,9 +1247,6 @@ export class RemoteCohortProtocolError extends CodedError {
 	}
 }
 
-/**
-Planning did not resolve a Nix derived path that the remote daemon can build.
-*/
 export class RemotePublicationTargetUnresolvedError extends UsageError {
 	constructor(public readonly installables: readonly string[]) {
 		super(
@@ -1499,9 +1256,6 @@ export class RemotePublicationTargetUnresolvedError extends UsageError {
 	}
 }
 
-/**
-A remote build result does not match any member of its cohort.
-*/
 export class RemoteBuildOwnerMissingError extends CodedError {
 	constructor(public readonly target: string) {
 		super(`Remote build result ${target} has no cohort owner.`);
@@ -1509,9 +1263,6 @@ export class RemoteBuildOwnerMissingError extends CodedError {
 	}
 }
 
-/**
-A local build result does not match any member of its cohort.
-*/
 export class LocalBuildOwnerMissingError extends CodedError {
 	constructor(public readonly installable: string) {
 		super(`Local build result ${installable} has no cohort owner.`);
@@ -1519,9 +1270,6 @@ export class LocalBuildOwnerMissingError extends CodedError {
 	}
 }
 
-/**
-A cohort target path does not have a declared retention root.
-*/
 export class CohortTargetOwnerMissingError extends CodedError {
 	constructor(public readonly targetPath: string) {
 		super(`Cohort target path ${targetPath} has no declared root owner.`);
@@ -1529,9 +1277,6 @@ export class CohortTargetOwnerMissingError extends CodedError {
 	}
 }
 
-/**
-Publish-by-reference paths were requested without a reuse view.
-*/
 export class ReuseViewRequiredError extends CodedError {
 	constructor() {
 		super('publish-by-reference paths require a reuse view');
@@ -1539,9 +1284,6 @@ export class ReuseViewRequiredError extends CodedError {
 	}
 }
 
-/**
-A planned target does not match any source installable in its cohort.
-*/
 export class PlannedTargetSourceMissingError extends CodedError {
 	constructor(public readonly target: string) {
 		super(
@@ -1551,9 +1293,6 @@ export class PlannedTargetSourceMissingError extends CodedError {
 	}
 }
 
-/**
-A planned remote target does not refer to a derivation.
-*/
 export class PlannedTargetNotDerivationError extends UsageError {
 	constructor(public readonly target: string) {
 		super(
@@ -1563,9 +1302,6 @@ export class PlannedTargetNotDerivationError extends UsageError {
 	}
 }
 
-/**
-A remote target selects an output that its derivation does not declare.
-*/
 export class RemoteBuildOutputUndeclaredError extends UsageError {
 	constructor(
 		public readonly installable: string,
@@ -1578,9 +1314,6 @@ export class RemoteBuildOutputUndeclaredError extends UsageError {
 	}
 }
 
-/**
-A remote target selects an output whose store path is not known before the build.
-*/
 export class RemoteBuildOutputPathUnknownError extends UsageError {
 	constructor(
 		public readonly installable: string,
@@ -1593,9 +1326,6 @@ export class RemoteBuildOutputPathUnknownError extends UsageError {
 	}
 }
 
-/**
-A local build result omitted the output path predicted during planning.
-*/
 export class LocalBuildExpectedPathMissingError extends CodedError {
 	constructor(
 		public readonly installable: string,
@@ -1608,9 +1338,6 @@ export class LocalBuildExpectedPathMissingError extends CodedError {
 	}
 }
 
-/**
-A local build result contained no output paths for its cohort member.
-*/
 export class LocalBuildOutputsMissingError extends CodedError {
 	constructor(public readonly installable: string) {
 		super(
@@ -1620,9 +1347,6 @@ export class LocalBuildOutputsMissingError extends CodedError {
 	}
 }
 
-/**
-A local build result included output paths that the completed cohort build did not produce.
-*/
 export class LocalBuildOutputsOutsideCohortError extends CodedError {
 	constructor(
 		public readonly installable: string,
@@ -1641,9 +1365,6 @@ export interface CohortEvaluationMismatch {
 	readonly evaluated: readonly string[];
 }
 
-/**
-A local installable no longer evaluates to its planned derivation.
-*/
 export class CohortEvaluationDriftError extends CodedError {
 	public readonly missing: readonly string[];
 	public readonly evaluated: readonly string[];
@@ -1681,12 +1402,6 @@ export class CupboardReportedError extends CodedError {
 	}
 }
 
-/**
- * A `cupboard push` succeeded but recorded no push summary, so the action has
- * no counts to publish as its outputs. `kinds` lists the result kinds the run
- * did record, so a caller inspecting the error can see what it produced
- * instead.
- */
 export class PushSummaryMissingError extends CodedError {
 	constructor(public readonly kinds: readonly string[]) {
 		super('the cupboard push finished without recording a summary result');
@@ -1787,9 +1502,6 @@ export interface MissingGracePath {
 	readonly reason: 'not-present' | 'pending';
 }
 
-// The remedy for each missing-grace reason. It is rendered alongside the
-// reason so the operator can act on the failure without reading cupboard's
-// source.
 const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
 	'not-present':
 		'no longer committed at the destination; rebuild or republish the path',
@@ -1797,10 +1509,6 @@ const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
 		'its deferred upload has not completed; retry once the push completes'
 };
 
-/**
- * Raised when `require-grace` is set and at least one path has no positive
- * grace deadline.
- */
 export class GraceDeadlineMissingError extends CodedError {
 	constructor(public readonly paths: readonly MissingGracePath[]) {
 		super(
@@ -1816,12 +1524,6 @@ export class GraceDeadlineMissingError extends CodedError {
 	}
 }
 
-/**
- * The destination cache has no grace policy while the push uses
- * `require-grace`. The publication fails because an unretained path would have
- * no retention deadline. Grace policies apply to the cache, so one missing
- * grace fact indicates that every path is uncovered.
- */
 export class GracePolicyMissingError extends CodedError {
 	constructor(public readonly cache: string) {
 		super(

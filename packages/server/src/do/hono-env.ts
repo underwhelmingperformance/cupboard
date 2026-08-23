@@ -6,11 +6,9 @@ import type { AccessClaims } from '../auth/auth.ts';
 import type { RuntimeEnv } from './context.ts';
 
 /**
- * The Hono environment for the tenant Durable Object's app: `logger` is the
- * request-scoped logger seeded before any route runs, `claims` is set by the
- * auth middleware on authenticated routes, and `cache` is always the cache the
- * request addresses (the default cache unless a `/cache/:cacheName/` prefix
- * selects another).
+ * Middleware installs `logger` before any route runs and installs `claims` on
+ * authenticated routes. `cache` is the cache addressed by the request: the
+ * default cache unless a `/cache/:cacheName/` prefix selects another one.
  */
 export interface TenantHonoEnv {
 	Bindings: RuntimeEnv;

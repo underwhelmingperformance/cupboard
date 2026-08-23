@@ -21,14 +21,11 @@ interface SigningKey {
 	readonly name: NixKeyName;
 	readonly published: NixPublicKey;
 	sign(over: NixFingerprint): Promise<NixSignature>;
-	/**
-	The key file Nix writes, whose last 32 bytes are the public half.
-	*/
 	secretFile(): Promise<string>;
 }
 
-// `generateKey` is typed as producing either a single key or a pair, and
-// Ed25519 always produces a pair, which this narrows to once.
+// Web Crypto types `generateKey` as returning a single key or a pair.
+// Ed25519 always returns a pair, so narrow the result once in this helper.
 async function signingKey(name: string): Promise<SigningKey> {
 	const keyName = nixKeyNameSchema.parse(name);
 	const pair = await generateSigningPair();
@@ -70,7 +67,7 @@ function base64UrlToBytes(value: string): Uint8Array {
 }
 
 describe('NixTrustedKeys', () => {
-	it('accepts a signature from a key it trusts', async () => {
+	it('verifies a signature from a trusted key', async () => {
 		const key = await signingKey('cache-1');
 		const signature = await key.sign(fingerprint);
 		const trusted = NixTrustedKeys.of([key.published.value]);
@@ -80,7 +77,7 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(true);
 	});
 
-	it('refuses a signature from a key it does not trust', async () => {
+	it('does not verify a signature from an untrusted key', async () => {
 		const signing = await signingKey('cache-1');
 		const other = await signingKey('cache-2');
 		const signature = await signing.sign(fingerprint);
@@ -91,9 +88,9 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(false);
 	});
 
-	// A key name says which key a signature claims to come from, so a
-	// signature naming a trusted key still has to verify against it.
-	it('refuses a signature naming a trusted key it does not verify against', async () => {
+	// The embedded key name selects a trusted public key. The signature bytes
+	// must still verify against that key.
+	it('does not verify an impostor signature that uses a trusted key name', async () => {
 		const signing = await signingKey('cache-1');
 		const impostor = await signingKey('cache-1');
 		const signature = await impostor.sign(fingerprint);
@@ -104,7 +101,7 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(false);
 	});
 
-	it('refuses a signature over a different fingerprint', async () => {
+	it('does not verify a signature over a different fingerprint', async () => {
 		const key = await signingKey('cache-1');
 		const signature = await key.sign(fingerprint);
 		const trusted = NixTrustedKeys.of([key.published.value]);
@@ -117,9 +114,9 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(false);
 	});
 
-	// A narinfo carries every signature its cache holds, most of them from
-	// keys a given reader does not know, and the ones it knows decide.
-	it('accepts one trusted signature among several it cannot read', async () => {
+	// Verification ignores malformed signatures and signatures from unknown
+	// keys, but succeeds if any remaining signature verifies.
+	it('verifies one trusted signature among malformed and untrusted entries', async () => {
 		const key = await signingKey('cache-1');
 		const signature = await key.sign(fingerprint);
 		const trusted = NixTrustedKeys.of([key.published.value]);
@@ -135,8 +132,8 @@ describe('NixTrustedKeys', () => {
 
 	it.each([
 		{ name: 'no signatures at all', signatures: [] },
-		{ name: 'only ones it cannot read', signatures: ['not a signature'] }
-	])('refuses a path carrying $name', async ({ signatures }) => {
+		{ name: 'only malformed signatures', signatures: ['not a signature'] }
+	])('returns false for $name', async ({ signatures }) => {
 		const key = await signingKey('cache-1');
 
 		await expect(
@@ -147,13 +144,13 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(false);
 	});
 
-	it('reports an empty set when none of the given values parse as a key', () => {
+	it('ignores malformed trusted-key values', () => {
 		expect(NixTrustedKeys.of(['not a key', '']).isEmpty).toBe(true);
 	});
 
-	// Nix keeps the first key it reads under a name, so a list naming one
-	// twice verifies against the first of them.
-	it('keeps the first key listed under a name', async () => {
+	// Nix indexes trusted keys by name and keeps the first public key for a
+	// duplicate name.
+	it('uses the first public key for a duplicate key name', async () => {
 		const first = await signingKey('cache-1');
 		const second = await signingKey('cache-1');
 		const trusted = NixTrustedKeys.of([
@@ -169,7 +166,7 @@ describe('NixTrustedKeys', () => {
 });
 
 describe('publicKeyOfSecret', () => {
-	it('reads the published half out of a secret key file', async () => {
+	it('extracts the public half from a secret key file', async () => {
 		const key = await signingKey('cache-1');
 
 		expect(publicKeyOfSecret(await key.secretFile())?.value).toBe(
@@ -177,7 +174,7 @@ describe('publicKeyOfSecret', () => {
 		);
 	});
 
-	it('verifies a signature made by the secret it was read from', async () => {
+	it('verifies a signature with the public half extracted from the same secret', async () => {
 		const key = await signingKey('cache-1');
 		const published = publicKeyOfSecret(await key.secretFile());
 		const signature = await key.sign(fingerprint);
@@ -193,11 +190,11 @@ describe('publicKeyOfSecret', () => {
 	it.each([
 		{ name: 'a file that is not a named value', contents: 'nonsense' },
 		{ name: 'an empty file', contents: '' }
-	])('reads no key out of $name', ({ contents }) => {
+	])('returns no public key for $name', ({ contents }) => {
 		expect(publicKeyOfSecret(contents)).toBeUndefined();
 	});
 
-	it('reads no key out of a public key, which is half the length', async () => {
+	it('returns no key from a 32-byte public-key value', async () => {
 		const key = await signingKey('cache-1');
 
 		expect(publicKeyOfSecret(key.published.value)).toBeUndefined();

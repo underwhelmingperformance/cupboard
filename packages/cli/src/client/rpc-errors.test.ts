@@ -14,7 +14,7 @@ describe('translateRpcError', () => {
 		{ code: 'UNAUTHORIZED', expected: SessionRejectedError },
 		{ code: 'FORBIDDEN', expected: ScopeForbiddenError },
 		{ code: 'INSUFFICIENT_STORAGE', expected: QuotaExceededError }
-	])('maps $code to a friendly error', ({ code, expected }) => {
+	])('translates $code into its CLI error type', ({ code, expected }) => {
 		const translated = translateRpcError(
 			new ORPCError(code, { status: 400, message: 'raw' })
 		);
@@ -22,7 +22,7 @@ describe('translateRpcError', () => {
 		expect(translated).toBeInstanceOf(expected);
 	});
 
-	it('carries the server detail in the quota error', () => {
+	it('uses the INSUFFICIENT_STORAGE message as the quota error detail', () => {
 		const translated = translateRpcError(
 			new ORPCError('INSUFFICIENT_STORAGE', {
 				status: 507,
@@ -44,7 +44,10 @@ describe('translateRpcError', () => {
 	});
 
 	it('returns an unrecognised oRPC code unchanged', () => {
-		const error = new ORPCError('NOT_FOUND', { status: 404, message: 'gone' });
+		const error = new ORPCError('NOT_FOUND', {
+			status: 404,
+			message: 'unchanged'
+		});
 
 		expect(translateRpcError(error)).toBe(error);
 	});

@@ -65,13 +65,7 @@ export class OidcLoginError extends CliError {
 	}
 }
 
-/**
-Base: the authorization server declined the login.
-*/
 export abstract class AuthorizationDeclinedError extends OidcLoginError {
-	/**
-	The specific error for an RFC 6749 authorize-endpoint error code.
-	*/
 	static fromProviderCode(code: string): AuthorizationDeclinedError {
 		switch (code) {
 			case 'access_denied': {
@@ -94,9 +88,6 @@ export abstract class AuthorizationDeclinedError extends OidcLoginError {
 	}
 }
 
-/**
-The user (or a policy) refused consent.
-*/
 export class AuthorizationAccessDeniedError extends AuthorizationDeclinedError {
 	constructor() {
 		super('access_denied');
@@ -104,9 +95,6 @@ export class AuthorizationAccessDeniedError extends AuthorizationDeclinedError {
 	}
 }
 
-/**
-The client's registration does not allow a requested scope.
-*/
 export class AuthorizationInvalidScopeError extends AuthorizationDeclinedError {
 	constructor() {
 		super('invalid_scope');
@@ -115,7 +103,7 @@ export class AuthorizationInvalidScopeError extends AuthorizationDeclinedError {
 }
 
 /**
-Any other RFC 6749 error code, carried verbatim.
+Preserves an unrecognised RFC 6749 error code for the caller.
 */
 export class AuthorizationProviderError extends AuthorizationDeclinedError {
 	constructor(providerError: string) {
@@ -124,9 +112,6 @@ export class AuthorizationProviderError extends AuthorizationDeclinedError {
 	}
 }
 
-/**
-The browser never completed the login within the bounded wait.
-*/
 export class LoginTimeoutError extends OidcLoginError {
 	constructor() {
 		super('Timed out waiting for the browser to complete login', {
@@ -136,9 +121,6 @@ export class LoginTimeoutError extends OidcLoginError {
 	}
 }
 
-/**
-The issuer refused to start a device authorization (RFC 8628).
-*/
 export class DeviceAuthorizationRequestError extends OidcLoginError {
 	constructor(public readonly status: number) {
 		super(`Device authorization request failed with HTTP ${String(status)}`, {
@@ -149,9 +131,6 @@ export class DeviceAuthorizationRequestError extends OidcLoginError {
 	}
 }
 
-/**
-None of the loopback redirect ports could be bound.
-*/
 export class LoopbackBindError extends OidcLoginError {
 	constructor(
 		public readonly ports: readonly number[],
@@ -170,9 +149,6 @@ export interface Pkce {
 	readonly challenge: string;
 }
 
-/**
-A PKCE verifier and its S256 challenge (RFC 7636).
-*/
 export function createPkce(): Pkce {
 	const verifier = randomBytes(32).toString('base64url');
 	const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -190,9 +166,9 @@ export interface OidcLoginEndpoints {
 	readonly deviceAuthorizationEndpoint?: string;
 }
 
-// The endpoints carry the authorization code, PKCE verifier and device code, so
-// they are held to the same transport rule as the issuer: HTTPS, or HTTP only
-// for loopback. A tampered discovery document cannot redirect them to plain HTTP.
+// The client sends the authorization code, PKCE verifier, or device code to
+// these endpoints. Require HTTPS, except on loopback, so a discovery document
+// cannot redirect those credentials to a plain-HTTP server.
 const endpointUrl = z.url().refine(isAllowedIssuerUrl);
 
 const endpointsSchema = z.object({
@@ -204,9 +180,9 @@ const endpointsSchema = z.object({
 
 /**
  * Reads an issuer's authorization, token and device endpoints from its OIDC
- * metadata. The issuer must be an HTTPS URL (loopback excepted) and the
- * document's own `issuer` must match it, so a misconfigured or hostile document
- * cannot send the login flow to another provider's endpoints.
+ * metadata. The issuer must be an HTTPS URL, except on loopback. Cupboard
+ * removes one trailing slash before comparing the metadata issuer with the
+ * requested issuer, then validates every returned endpoint independently.
  */
 export async function discoverOidcLogin(
 	issuer: string,
@@ -227,11 +203,8 @@ export async function discoverOidcLogin(
 	let response: Response;
 
 	try {
-		// Do not follow redirects, matching the server's discovery fetch: a
-		// redirect from the issuer's metadata endpoint could serve a document that
-		// keeps the issuer but points the token endpoint at an attacker, who would
-		// then receive the authorization code and PKCE verifier. A 3xx fails the
-		// `ok` check below.
+		// A redirected metadata document could retain the expected issuer while
+		// sending the authorization code and PKCE verifier to another token endpoint.
 		response = await fetcher(issuerUrl.discoveryUrl, {
 			redirect: 'manual',
 			signal
@@ -308,16 +281,17 @@ export interface LoopbackLoginOptions {
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
 	/**
-	Fixed redirect registration, for providers with exact-match URLs.
+	Fixed loopback settings for an exactly registered redirect URI.
 	*/
 	readonly loopback?: LoopbackOptions;
 }
 
 /**
- * The default owner-login flow: PKCE with a 127.0.0.1 loopback redirect. Binds a
- * throwaway server, opens the browser to the issuer's authorization endpoint,
- * catches the redirect, and exchanges the code for an `id_token`. `state` and the
- * PKCE verifier guard the exchange; the redirect is accepted only on loopback.
+ * The default owner-login flow: PKCE with a 127.0.0.1 loopback redirect. It
+ * binds a throwaway server, opens the browser to the issuer's authorization
+ * endpoint, accepts the redirect, and exchanges the code for an `id_token`.
+ * `state` and the PKCE verifier guard the exchange; the redirect is accepted
+ * only on loopback.
  */
 export async function loopbackLogin(
 	options: LoopbackLoginOptions
@@ -358,9 +332,6 @@ export interface AuthorizeUrlParameters {
 	readonly scope: string;
 }
 
-/**
-The authorization-endpoint URL for a PKCE authorization code request.
-*/
 export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	const url = new URL(parameters.endpoint);
 	url.searchParams.set('response_type', 'code');
@@ -374,12 +345,9 @@ export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	return url.href;
 }
 
-/**
-Where the loopback redirect is served; defaults match the tenant login.
-*/
 export interface LoopbackOptions {
 	/**
-	Ports to try in order; `[0]` (an ephemeral port) when not given.
+	Ports to try in order; `[0]` requests an ephemeral port.
 	*/
 	readonly ports?: readonly number[];
 	readonly host?: string;
@@ -399,20 +367,20 @@ export interface AuthorizationCodeOptions {
 export interface ObtainedAuthorizationCode {
 	readonly code: string;
 	/**
-	The exact redirect URI used; the token exchange must repeat it.
+	The exact redirect URI to repeat in the token exchange.
 	*/
 	readonly redirectUri: string;
 	/**
-	The PKCE verifier whose challenge the code is bound to.
+	The PKCE verifier whose challenge is bound to the code.
 	*/
 	readonly codeVerifier: string;
 }
 
 /**
- * The browser half of a PKCE authorization code flow, shared by every provider:
- * binds a loopback redirect server, opens the browser to the authorization
- * endpoint, and waits (bounded) for the matching redirect. The caller performs
- * the token exchange, which is where providers differ.
+ * Runs the browser half of a PKCE authorization code flow. It binds a loopback
+ * redirect server, opens the authorization endpoint, and waits for a matching
+ * redirect until the configured timeout. The caller performs the
+ * provider-specific token exchange.
  */
 export async function obtainAuthorizationCode(
 	options: AuthorizationCodeOptions
@@ -442,8 +410,6 @@ export async function obtainAuthorizationCode(
 			scope: options.scope
 		});
 
-		// A login the user never finishes would otherwise hang the CLI on the
-		// pending callback, so the wait is bounded; the timer is cleared below.
 		const timeout = new Promise<never>((_, reject) => {
 			timer = setTimeout(() => {
 				reject(new LoginTimeoutError());
@@ -485,13 +451,6 @@ interface LoopbackServerOptions {
 	readonly path?: string;
 }
 
-/**
- * Binds a throwaway HTTP server that waits for an authorization redirect. The
- * returned `code` promise settles on the first callback whose `state` matches;
- * stray requests are answered and ignored. Each port is tried in order, so a
- * provider with pre-registered redirect URLs can offer a few fixed ports while
- * the default remains an ephemeral one.
- */
 async function startLoopbackServer(
 	options: LoopbackServerOptions
 ): Promise<LoopbackServer> {
@@ -537,8 +496,7 @@ function bindLoopbackServer(
 			});
 			response.end(outcome.message);
 
-			// A stray request, or one whose `state` is not ours, is answered but
-			// otherwise ignored so it cannot abort an in-flight login; only the
+			// Return a response to stray requests without aborting the login; only the
 			// matching redirect resolves or rejects the wait.
 			switch (outcome.kind) {
 				case 'code': {
@@ -587,8 +545,6 @@ type CallbackOutcome =
 	| { readonly kind: 'ignore'; readonly message: string };
 
 function readCallback(url: URL, expectedState: string): CallbackOutcome {
-	// `state` is checked first: a request that is not for this login (no state or
-	// a stale one) is ignored.
 	if (url.searchParams.get('state') !== expectedState) {
 		return { kind: 'ignore', message: 'Unexpected callback; ignoring.' };
 	}
@@ -608,7 +564,7 @@ function readCallback(url: URL, expectedState: string): CallbackOutcome {
 	if (code === null || code === '') {
 		return {
 			kind: 'malformed',
-			message: 'Authorization response carried no code'
+			message: 'Authorization response did not include a code'
 		};
 	}
 
@@ -627,7 +583,7 @@ export interface DeviceLoginOptions {
 		readonly userCode: string;
 		readonly verificationUri: string;
 		/**
-		The verification URL with the code already filled in, when the issuer sends one.
+		The issuer's verification URL with the user code already included.
 		*/
 		readonly verificationUriComplete?: string;
 	}) => void;
@@ -658,8 +614,8 @@ const deviceSlowDownIncrementMs = 5 * 1000;
 const deviceErrorSchema = z.object({ error: z.string() });
 
 /**
- * The `--headless` owner-login flow: RFC 8628 device authorization. Asks the
- * issuer for a code, shows the user where to enter it, and polls the token
+ * The `--headless` owner-login flow: RFC 8628 device authorization. It requests
+ * a code, shows the user where to enter it, and polls the token
  * endpoint, honouring `authorization_pending` and `slow_down`, until an
  * `id_token` is issued.
  */
@@ -789,9 +745,12 @@ async function pollDeviceToken(
 		const parsed = idTokenSchema.safeParse(payload);
 
 		if (!parsed.success) {
-			throw new OidcLoginError('Device token response carried no id_token', {
-				kind: 'device-token-response'
-			});
+			throw new OidcLoginError(
+				'Device token response did not include id_token',
+				{
+					kind: 'device-token-response'
+				}
+			);
 		}
 
 		return { kind: 'token', idToken: parsed.data.id_token };
@@ -813,9 +772,6 @@ async function pollDeviceToken(
 	};
 }
 
-// A token endpoint can return a non-JSON body (an HTML error page, a proxy
-// notice); parse defensively so that such a body surfaces as an
-// `OidcLoginError`.
 async function readJson(
 	response: Response,
 	kind: OidcLoginErrorKind
@@ -853,7 +809,7 @@ async function exchangeCode(
 	);
 
 	if (!parsed.success) {
-		throw new OidcLoginError('Token response carried no id_token', {
+		throw new OidcLoginError('Token response did not include id_token', {
 			kind: 'token-response'
 		});
 	}
@@ -861,9 +817,6 @@ async function exchangeCode(
 	return parsed.data.id_token;
 }
 
-/**
-A `application/x-www-form-urlencoded` POST, as token endpoints expect.
-*/
 export function postForm(
 	form: Readonly<Record<string, string>>,
 	signal?: AbortSignal

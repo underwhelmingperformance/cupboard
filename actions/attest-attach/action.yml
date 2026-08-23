@@ -1,8 +1,8 @@
 name: Attach cupboard attestation bundles
 description:
-  Attach signed Sigstore bundles to the published paths recorded in a build
-  receipt. actions/attest produces bundles after publication, so this action
-  attaches them only to paths that the destination already serves.
+  Attach signed Sigstore bundles to published subjects in a build receipt.
+  actions/attest produces bundles after publication, so this action attaches
+  them only to paths that the destination already serves.
 inputs:
   url:
     description: cupboard Worker URL.
@@ -11,7 +11,7 @@ inputs:
     description: Path to the cupboard binary installed by actions/setup.
     required: true
   cache:
-    description: Named cache the paths were published to.
+    description: Named cache that received the paths.
     required: false
   audience:
     description: GitHub OIDC audience. Defaults to url.
@@ -27,13 +27,13 @@ inputs:
     required: true
   checksums-file:
     description:
-      Subject checksums produced by actions/attest and passed to the signing
-      action. Only matching receipt subjects are attached.
+      Checksums for the signed receipt subjects, produced by actions/attest.
+      Only matching receipt subjects are attached.
     required: true
   bundle:
     description:
-      Sigstore attestation bundles produced by the attest action, one path per
-      line. An empty line is ignored.
+      Signed Sigstore bundles from the attest action, one path per line. Empty
+      lines are ignored.
     required: true
 runs:
   using: composite

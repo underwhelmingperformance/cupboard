@@ -217,8 +217,6 @@ export class RetentionService {
 		};
 	}
 
-	// The coverage answer a grace-mode CI run reads before publishing anything:
-	// the same resolution a publication to the cache would be granted.
 	graceCoverage(cache: StoredCache): GraceCoverageResponse {
 		const graceSeconds = this.resolveGraceSeconds(cache);
 
@@ -227,8 +225,8 @@ export class RetentionService {
 			: { covered: true, graceSeconds };
 	}
 
-	// The grace in force for a cache: the longest matching cache-name prefix
-	// wins, and the empty prefix matches every cache as the tenant default.
+	// The longest matching cache prefix wins. An empty prefix is the tenant-wide
+	// default.
 	resolveGraceSeconds(cache: StoredCache): GraceSeconds | undefined {
 		return this.context.db
 			.select({
@@ -244,11 +242,10 @@ export class RetentionService {
 			.at(0)?.graceSeconds;
 	}
 
-	// Extends each path's grace deadline to at least `retainUntil`. Monotonic in
-	// a single statement: `max` over ISO-8601 UTC strings is chronological, so a
-	// concurrent or retried earlier event can never shorten a stored deadline.
-	// Takes a writer, not always `this.context.db`, so a caller that must write
-	// this atomically with another statement can pass its transaction handle.
+	// Extend deadlines monotonically in one statement. ISO-8601 UTC strings compare
+	// chronologically, so a concurrent or retried earlier event cannot shorten a
+	// deadline. Callers can supply their transaction to make this update atomic
+	// with the retention change that released the paths.
 	extendGraceDeadlines(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
@@ -265,9 +262,6 @@ export class RetentionService {
 		);
 	}
 
-	// Takes a writer for the same reason as {@link extendGraceDeadlines}: a
-	// caller that must write this atomically with another statement passes its
-	// transaction handle.
 	markCacheGraceManaged(
 		cache: StoredCache,
 		writer: SchemaWriter = this.context.db
@@ -279,13 +273,6 @@ export class RetentionService {
 			.run();
 	}
 
-	// Applies the matching grace policy to targets a retention transition has
-	// released: marking the cache grace-managed is a one-way boundary and happens
-	// even for a zero grace, which grants no lasting deadline. Takes a writer for
-	// the same reason as {@link extendGraceDeadlines}: a caller applying this
-	// alongside the retention delete that released these targets passes its
-	// transaction handle, so a failure between the two cannot lose the
-	// transition.
 	applyGraceTransition(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
@@ -299,9 +286,10 @@ export class RetentionService {
 		);
 	}
 
-	// Applies a bounded set of root transitions together. A path released by
-	// several roots receives the latest candidate deadline, while policy
-	// resolution, narinfo filtering and deadline writes each happen once.
+	// Mark the cache as grace-managed even when the matching policy grants zero
+	// seconds. For several releases of one path, use the latest resulting deadline.
+	// The caller can supply its transaction so removing retention and granting
+	// grace cannot be separated by a crash.
 	applyGraceTransitions(
 		cache: StoredCache,
 		transitions: readonly GraceTransition[],
@@ -323,11 +311,9 @@ export class RetentionService {
 			return;
 		}
 
-		// Deleting a path leaves its retention_root_target rows behind, so a
-		// released hash may have no narinfo row any more; granting it a deadline
-		// would wake maintenance for nothing and hand a recommitted path an
-		// inherited stale deadline. Only backed hashes receive one, read through
-		// the caller's writer so the check shares its transaction.
+		// Deleting a path can leave retention targets after its narinfo row is gone.
+		// Do not grant those hashes a deadline that a later recommit could inherit.
+		// Read through the supplied writer so this check shares the caller's transaction.
 		const latestAnchorByHash = new Map<StorePathHash, IsoTimestamp>();
 
 		for (const transition of transitions) {

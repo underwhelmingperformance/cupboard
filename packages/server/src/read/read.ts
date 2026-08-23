@@ -41,10 +41,8 @@ interface ReadEnv {
 	readonly CUPBOARD_DO: DurableObjectNamespace;
 }
 
-// Splits an optional `/cache/<name>/` prefix off a tenant-relative path.
-// Returns the default cache and the unchanged path for a bare route, mapping
-// the `_default` wire alias back to the default cache; `undefined` when the
-// prefix is present but malformed or names an invalid cache.
+// Bare paths and `/cache/_default/` select the stored default cache. Another
+// valid selector selects a named cache; a malformed cache prefix is rejected.
 export function cacheScope(
 	pathname: string
 ): undefined | { cache: StoredCache; rest: string } {
@@ -73,12 +71,11 @@ export function cacheScope(
 	};
 }
 
-// Returns a 401 when the cache is private and the request is unauthorised, or
-// `undefined` to let the read proceed (public, or authorised). A private cache
-// turns reads into Basic-auth reads that never touch the shared edge cache;
-// the verifier comes from the admission manifest, so the read path consults no
-// D1 row or Durable Object. A private cache with no verifier fails closed:
-// every read is rejected until a credential is set.
+// Private tenants require Basic authentication before content dispatch.
+// Admission reads the verifier from the authoritative D1 row on every request,
+// so credential rotation or revocation takes effect immediately. A missing
+// verifier fails closed. Successful private reads stay on the control Worker
+// and never enter the cache-owning tenant Worker.
 export async function guardRead(
 	request: Request,
 	entry: TenantEntry
@@ -96,15 +93,10 @@ export async function guardRead(
 	return unauthorisedResponse();
 }
 
-// NAR blobs are content-addressed and shared at rest across all tenants, but
-// read access is per-tenant: the serve is gated on the requesting tenant holding
-// its own presence edge for the hash, so one tenant's bytes are never readable
-// through another's path. The R2 object stays global for dedupe; the edge cache
-// key carries the tenant so a cached entry is only ever replayed to the tenant
-// that was authorised to populate it. An unowned hash reads as a miss,
-// indistinguishable from a hash no tenant has, so this route cannot be used to
-// learn that another tenant holds those bytes. Negotiation already blocks the
-// same disclosure.
+// NAR objects are shared by hash across tenants. On an origin read, require this
+// tenant's `tenant_blob` reference before reading R2. Return the same 404 for an
+// absent reference and an absent object, and keep the tenant in the public cache
+// URL so cached bytes cannot cross tenants.
 export function serveNar(
 	request: Request,
 	env: ReadEnv,
@@ -122,10 +114,8 @@ export function serveNar(
 	);
 }
 
-// Whether the tenant holds its own presence edge for the NAR hash. Mirrors the
-// `tenant_blob` ownership check `findReusableBlob` uses on the negotiate path.
-// The read gets one bounded retry; a persistent fault refuses retryably, since
-// answering it as a miss would tell the client the path does not exist.
+// A persistent D1 fault is a retryable 503. Returning 404 would turn a storage
+// failure into an apparent absence.
 async function hasTenantNarReference(
 	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
 	tenant: TenantId,
@@ -153,9 +143,9 @@ async function hasTenantNarReference(
 	}
 }
 
-// The narinfo edge-cache key carries the tenant prefix, matching the deletion
-// purge path, so two tenants sharing a host never collide on a store-path
-// hash.
+// The request URL isolates cached narinfos by tenant and cache. The response uses
+// the same tenant, cache, and path identity in its cache tag so deletion and
+// re-signing purge only this narinfo.
 export function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
@@ -205,8 +195,8 @@ export async function cacheInfoResponse(
 	cache: StoredCache,
 	isPrivate: boolean
 ): Promise<Response> {
-	// The default cache's info is rendered at the edge; a named cache's priority
-	// lives in the registry, so the DO renders its info.
+	// Default-cache priority is fixed, so render it locally. A named cache's
+	// priority comes from the Durable Object registry.
 	const response =
 		cache === DEFAULT_CACHE
 			? await textResponse(request, cacheInfoBody, {
@@ -218,18 +208,17 @@ export async function cacheInfoResponse(
 		return response;
 	}
 
-	// Private mode: an authorised nix-cache-info must not be cached anywhere,
-	// including a named cache's DO-rendered response.
+	// Override the Durable Object response too: authenticated cache metadata must
+	// carry `no-store`.
 	const headers = new Headers(response.headers);
 	headers.set('cache-control', 'no-store');
 
 	return new Response(response.body, { status: response.status, headers });
 }
 
-// `isAuthorised`, when provided, gates access to a shared object before its R2
-// read. The tenant Worker caches only public responses, after the control Worker
-// has admitted the tenant. Private reads call this function from the control
-// Worker and carry `no-store`.
+// Check the tenant's reference before reading R2. Public origin requests reach
+// the cache-owning tenant Worker only after control admission; private requests
+// stay on the uncached control Worker.
 async function serveR2(
 	request: Request,
 	env: ReadEnv,
@@ -276,9 +265,8 @@ function r2Response(
 	return new Response(body, { headers });
 }
 
-// In private mode the response body is served only after Basic auth, so it must
-// not be retained by any shared or intermediary cache: force `no-store`,
-// overriding the public read headers.
+// An authenticated body must not enter Workers Cache or an intermediary cache.
+// Replace its public cache policy with `no-store`.
 function privatise(headers: Headers, isPublicCache: boolean): Headers {
 	if (!isPublicCache) {
 		headers.set('cache-control', 'no-store');

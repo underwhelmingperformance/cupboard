@@ -56,8 +56,6 @@ interface Workspace {
 	readonly outputFile: string;
 }
 
-// The run published both paths and built the first, so the attest command
-// writes both into the checksums file and only the first into the built one.
 async function workspace(): Promise<Workspace> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-sign-'));
 	const checksumsFile = path.join(directory, 'subjects.txt');
@@ -94,10 +92,6 @@ function options(
 	};
 }
 
-/**
- * Records the subjects and the statement of each signing call, then returns a
- * fixed bundle. Each listed failure fails the call at the matching position.
- */
 function recordingSigner(
 	records: SigningRecord[],
 	failures: readonly Error[] = []
@@ -196,7 +190,7 @@ describe('resolveAttestSignInputs', () => {
 });
 
 describe('attestSignAction', () => {
-	it('signs the provenance over the built paths and the origin over every published path', async () => {
+	it('signs build provenance for built paths and build-origin for all accepted subjects', async () => {
 		const files = await workspace();
 		const records: SigningRecord[] = [];
 
@@ -278,7 +272,7 @@ describe('attestSignAction', () => {
 		}
 	});
 
-	it('signs the origin alone when the run built none of the paths it published', async () => {
+	it('signs build-origin alone when this run built none of the published paths', async () => {
 		const files = await workspace();
 		const records: SigningRecord[] = [];
 
@@ -327,7 +321,7 @@ describe('attestSignAction', () => {
 		}
 	});
 
-	it('refuses a predicate file that holds no JSON object, before signing', async () => {
+	it('rejects a predicate file that does not contain a JSON object before signing', async () => {
 		const files = await workspace();
 		const records: SigningRecord[] = [];
 

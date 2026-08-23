@@ -237,7 +237,6 @@ describe('tenant registry', () => {
 	});
 
 	it('rejects a conflicting re-create of a crash residue without writing a usage row', async () => {
-		// Crash residue: the tenant row exists (private) with no usage row.
 		await database()
 			.insert(d1Schema.tenant)
 			.values({
@@ -252,8 +251,6 @@ describe('tenant registry', () => {
 			})
 			.run();
 
-		// A conflicting re-create (public) is rejected without writing a usage row, so
-		// it cannot poison a later legitimate retry with a wrong-quota row.
 		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), createBody(acme, 'public'), now)
 		);
@@ -276,8 +273,6 @@ describe('tenant registry', () => {
 	it('creates the usage row on a retry after a crash left only the tenant row', async () => {
 		const body = quotaBody(acme, 1000);
 
-		// The residue of a crash between the tenant insert and the usage insert: the
-		// tenant row exists with no usage row.
 		await database()
 			.insert(d1Schema.tenant)
 			.values({
@@ -299,8 +294,6 @@ describe('tenant registry', () => {
 			.where(eq(d1Schema.tenantUsage.tenant, body.id))
 			.get();
 
-		// The retry succeeds idempotently and creates the missing usage row, so quota
-		// accounting is not silently absent.
 		expect({ id: summary.id, quotaBytes: usage?.quotaBytes }).toStrictEqual({
 			id: acme,
 			quotaBytes: 1000
@@ -356,8 +349,6 @@ describe('tenant registry', () => {
 		await setTenantStatus(database(), acme, 'offboarding');
 		await finaliseOffboardedTenant(database(), acme);
 
-		// A repeated delete after finalisation must not flip the tombstone back to
-		// offboarding.
 		const repeated = await setTenantStatus(database(), acme, 'offboarding');
 
 		const rejected = await rejectedBy(() =>
@@ -400,10 +391,7 @@ describe('tenant registry', () => {
 	});
 
 	it('finalises a drained tenant into a scrubbed tombstone that re-provisioning refuses', async () => {
-		await provision(
-			createBody(acme, 'private')
-			// A private cache, so the row carries a read verifier to scrub.
-		);
+		await provision(createBody(acme, 'private'));
 		await database()
 			.update(d1Schema.tenant)
 			.set({
@@ -428,8 +416,6 @@ describe('tenant registry', () => {
 			.from(d1Schema.tenant)
 			.where(eq(d1Schema.tenant.id, acme))
 			.get();
-		// A cleared credential reads back as undefined and the owner identity as empty,
-		// so the scrub is asserted without a null literal.
 		const row = {
 			status: stored?.status,
 			readUser: stored?.readUser ?? undefined,

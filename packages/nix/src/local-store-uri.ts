@@ -7,14 +7,8 @@ import {
 
 import { InvalidNixStoreParameterError } from './nix-store.ts';
 
-/**
-The logical and physical directories used by a local store.
-*/
 export interface LocalStoreDirectories {
 	readonly stateDirectory: string;
-	/**
-	The logical directory that prefixes store paths.
-	*/
 	readonly storeDirectory: StoreDirectory;
 	/**
 	 * The physical directory containing the store paths. A rooted store retains
@@ -23,9 +17,6 @@ export interface LocalStoreDirectories {
 	readonly realStoreDirectory?: string;
 }
 
-/**
-Default directories for a store URI that does not specify its own.
-*/
 export interface ConfiguredStoreDirectories {
 	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
@@ -126,9 +117,6 @@ export function storeUriParameters(query: string): ReadonlyMap<string, string> {
 	return parameters;
 }
 
-/**
-The query a store URI carries, without its leading `?`.
-*/
 export function storeUriQuery(uri: string): string {
 	const separator = uri.indexOf('?');
 
@@ -155,7 +143,6 @@ function namedStoreDirectory(
 	return parsed.data;
 }
 
-// Store directory parameters must be non-empty absolute paths.
 function absoluteParameter(
 	parameters: ReadonlyMap<string, string>,
 	name: string

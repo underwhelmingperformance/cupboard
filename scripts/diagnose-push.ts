@@ -23,7 +23,7 @@ import {
 // The diagnostic talks to Cloudflare as a dedicated public OAuth client (the id
 // lives in `cf_analytics_client_id` at the repo root), separate from the deploy
 // client: it needs only Workers Observability, which the deploy grant does not
-// carry. The loopback redirect ports below must be registered on that client as
+// include. The loopback redirect ports below must be registered on that client as
 // `http://localhost:<port>/oauth/callback`.
 const authorizationEndpoint = 'https://dash.cloudflare.com/oauth2/auth';
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
@@ -43,9 +43,6 @@ const observabilityScope =
 
 const repoRoot = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
-// Cloudflare caps a single telemetry page. The events view is walked by its
-// row-id cursor; the traces view, which has none, steps the window's upper
-// bound back to just before the oldest row seen.
 const pageLimit = 1000;
 
 // The window is cut into slices, each paged on its own and fetched concurrently:
@@ -120,7 +117,7 @@ export class CloudflareTokenRequestError extends DiagnoseError {
 
 export class InvalidCloudflareTokenResponseError extends DiagnoseError {
 	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
-		super('Token response carried no access token');
+		super('Token response did not include an access token');
 		this.name = 'InvalidCloudflareTokenResponseError';
 	}
 }
@@ -141,9 +138,6 @@ export class CloudflareAccountRequiredError extends DiagnoseError {
 	}
 }
 
-/**
-A log line a Worker emitted, normalised to the fields the report needs.
-*/
 export interface WorkerLog {
 	readonly requestId: string | undefined;
 	readonly timestamp: number;
@@ -154,15 +148,9 @@ export interface WorkerLog {
 	readonly status: number | undefined;
 	readonly rowsRead: number;
 	readonly rowsWritten: number;
-	/**
-	The operation bucket this line rolls up into.
-	*/
 	readonly bucket: string;
 }
 
-/**
-One distributed trace: a single invocation with its total duration.
-*/
 export interface TraceSummary {
 	readonly traceId: string;
 	readonly bucket: string;
@@ -172,18 +160,12 @@ export interface TraceSummary {
 	readonly errors: readonly string[];
 }
 
-/**
-One trace error, grouped by operation and message.
-*/
 export interface TraceErrorStat {
 	readonly bucket: string;
 	readonly message: string;
 	readonly occurrences: number;
 }
 
-/**
-One span: a unit of work inside a trace (a D1 query, an R2 op, ...).
-*/
 export interface SpanEvent {
 	readonly traceId: string;
 	readonly spanId: string | undefined;
@@ -205,9 +187,6 @@ export interface SpanStat {
 	readonly busyMs: number;
 }
 
-/**
-Per-operation rollup: timing from traces, row cost from logs.
-*/
 export interface OperationStat {
 	readonly bucket: string;
 	readonly group: string;
@@ -220,23 +199,14 @@ export interface OperationStat {
 	readonly rowsRead: number;
 	readonly rowsWritten: number;
 	readonly errors: number;
-	/**
-	Total spans across this operation's traces, from the trace summaries.
-	*/
 	readonly spanCount: number;
 	/**
-	Wall time not inside any traced subrequest: idle, blocked, or compute.
+	Wall time outside the operation's traced leaf spans.
 	*/
 	readonly unaccountedMs: number;
-	/**
-	The operation's span kinds, busiest first (from the span events).
-	*/
 	readonly spans: readonly SpanStat[];
 }
 
-/**
-Every operation sharing a trigger kind, with the group's own totals.
-*/
 export interface OperationGroup {
 	readonly group: string;
 	readonly tracedServerMs: number;
@@ -383,9 +353,6 @@ export function canonicalPath(rawPathOrUrl: string): string {
 	return normalisePath(stripTenantPrefix(pathOfUrl(rawPathOrUrl)));
 }
 
-/**
-The operation bucket for a log line: HTTP route, RPC method, or message.
-*/
 export function bucketForLog(
 	httpMethod: string | undefined,
 	rpcMethod: string | undefined,
@@ -403,9 +370,6 @@ export function bucketForLog(
 	return message;
 }
 
-/**
-The operation bucket for a trace, parsed from its root transaction name.
-*/
 export function bucketForTrace(rootTransactionName: string): string {
 	const firstSpace = rootTransactionName.indexOf(' ');
 
@@ -431,11 +395,6 @@ const httpMethods = new Set([
 
 const triggerKinds = new Set(['rpc', 'queue', 'alarm', 'scheduled', 'cron']);
 
-/**
- * The trigger that drove an operation, so the report can show one section per
- * kind: an HTTP fetch, a queue consumer, a Durable Object alarm, a cron, a
- * direct RPC entrypoint, or anything else a worker logged.
- */
 export function triggerGroup(bucket: string): string {
 	const first = bucket.split(' ', 1)[0] ?? bucket;
 
@@ -496,8 +455,6 @@ const spanSchema = z.object({
 	})
 });
 
-// An HTTP `request finished` log carries a path and status; an RPC `method
-// finished` log carries only a method name. Both carry the SQLite row cost.
 export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 	const parsed = eventSchema.safeParse(event);
 
@@ -505,9 +462,8 @@ export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 		return undefined;
 	}
 
-	// With tracing on, the events view also returns span events; they carry no
-	// structured `message`. Only an object source with a message is one of the
-	// worker's own `console.log` lines, which is what the row analysis needs.
+	// The events view also includes span events. Row accounting uses only Worker
+	// console events with a structured message.
 	if (typeof parsed.data.source !== 'object') {
 		return undefined;
 	}
@@ -524,9 +480,8 @@ export function parseWorkerLog(event: unknown): WorkerLog | undefined {
 		return undefined;
 	}
 
-	// A trace root surfaces in the events stream as a "METHOD https://..."
-	// message with no structured path; the traces view already represents it,
-	// so it would only double up the operation buckets.
+	// The traces view already supplies each root request. Omit its duplicate event
+	// from the operation totals.
 	if (data.path === undefined && traceArtifactMessage.test(data.message)) {
 		return undefined;
 	}
@@ -569,9 +524,6 @@ export function parseTraceSummary(trace: unknown): TraceSummary | undefined {
 	};
 }
 
-// The events view returns span events alongside logs. A span carries its trace,
-// a name (the D1/R2/DO operation) and a start and end, so its self-time is the
-// difference; spans without both ends contribute count but no duration.
 export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 	const parsed = spanSchema.safeParse(event);
 
@@ -879,9 +831,8 @@ export function analyse(
 		kinds.set(group.name, kind);
 	}
 
-	// Wall time the call spent outside any traced subrequest: its duration minus
-	// the union of all its leaf spans. This is the idle/blocked/compute time the
-	// per-span breakdown cannot show, and often the largest part.
+	// Subtract the union of the leaf spans from the trace duration. The remainder
+	// is time for which the trace contains no leaf-span attribution.
 	for (const trace of traces) {
 		const inSubrequests = mergeBusy(
 			leafIntervalsByTrace.get(trace.traceId) ?? []
@@ -958,9 +909,6 @@ export function analyse(
 	};
 }
 
-/**
-Collects operations by trigger group, each group most server time first.
-*/
 export function groupOperations(
 	operations: readonly OperationStat[]
 ): OperationGroup[] {
@@ -1005,13 +953,11 @@ function formatCount(count: number): string {
 	return String(count);
 }
 
-// Where an operation's time went: the bigger of its idle/blocked/compute time
-// and its busiest subrequest kind, so the headline points at the real cost.
 function dominantCost(op: OperationStat): string {
 	const topSpan = op.spans[0];
 
 	if (topSpan === undefined || op.unaccountedMs >= topSpan.busyMs) {
-		return `${formatMs(op.unaccountedMs)} not in subrequests (idle/blocked/compute)`;
+		return `${formatMs(op.unaccountedMs)} outside traced leaf spans`;
 	}
 
 	return `${formatMs(topSpan.busyMs)} in ${topSpan.name} (${formatCount(topSpan.count)} calls)`;
@@ -1020,7 +966,7 @@ function dominantCost(op: OperationStat): string {
 /**
  * The one-line headline, focused on the push request path (the `fetch` group)
  * when there is one: its costliest operation, how much of the group's time it
- * takes, and whether that time is subrequests or idle/blocked/compute.
+ * takes, and whether that time is inside or outside traced leaf spans.
  */
 export function buildVerdict(
 	groups: readonly OperationGroup[],
@@ -1044,7 +990,7 @@ export function buildVerdict(
 	const top = group?.operations.find((op) => op.totalMs > 0);
 
 	if (group === undefined || top === undefined) {
-		return 'Traces carried no duration.';
+		return 'No trace has a positive duration.';
 	}
 
 	const share = Math.round((top.totalMs / group.tracedServerMs) * 100);
@@ -1053,9 +999,6 @@ export function buildVerdict(
 	return `${lead}: most time (${formatMs(top.totalMs)} over ${formatCount(top.traceCount)} calls, ${String(share)}% of ${group.group}) is ${top.bucket}, ${dominantCost(top)}.`;
 }
 
-/**
-The result card: the window, the headline verdict and the run totals.
-*/
 export function summaryRows(analysis: Analysis): ResultRow[] {
 	const from = new Date(analysis.window.from).toISOString();
 	const to = new Date(analysis.window.to).toISOString();
@@ -1081,11 +1024,6 @@ export function summaryRows(analysis: Analysis): ResultRow[] {
 	];
 }
 
-/**
- * One row per operation, most server time first, each followed by indented rows
- * for its span kinds so the per-request fan-out (D1 runs, DO storage execs, R2
- * ops) is visible beneath the operation it belongs to.
- */
 export function operationRows(
 	operations: readonly OperationStat[]
 ): ResultRow[] {
@@ -1104,8 +1042,6 @@ export function operationRows(
 			value: `${formatMs(op.totalMs)} · p95 ${formatMs(op.p95Ms)} · ${formatCount(op.traceCount || op.logCount)}×${spanSummary} · r/w ${formatCount(op.rowsRead)}/${formatCount(op.rowsWritten)}${op.errors > 0 ? ` · ${String(op.errors)} err` : ''}`
 		};
 
-		// The idle/blocked/compute time is one more contributor, ranked against
-		// the span kinds by wall time so the dominant cost sits at the top.
 		const costs = [
 			...op.spans.map((span) => ({
 				label: span.name,
@@ -1115,7 +1051,7 @@ export function operationRows(
 			...(op.unaccountedMs > 0
 				? [
 						{
-							label: 'unaccounted (idle/blocked/compute)',
+							label: 'outside traced leaf spans',
 							value: formatMs(op.unaccountedMs),
 							weight: op.unaccountedMs
 						}
@@ -1129,9 +1065,6 @@ export function operationRows(
 	});
 }
 
-/**
-The slowest individual invocations, longest first.
-*/
 export function slowestRows(analysis: Analysis): ResultRow[] {
 	return analysis.slowest.map((trace) => ({
 		label: formatMs(trace.durationMs),
@@ -1564,22 +1497,13 @@ function serviceFilter(worker: string): {
 	};
 }
 
-/**
-Reports the number of rows in each page as it arrives.
-*/
 type PageProgress = (pageRows: number) => void;
 
-/**
-One page of a telemetry view, as the SDK's query returns it.
-*/
 export interface TelemetryPageResponse {
 	readonly events?: { readonly events?: unknown[] | null } | null;
 	readonly traces?: unknown[] | null;
 }
 
-/**
-The telemetry query as the pager consumes it: just the page parameters.
-*/
 export type TelemetryQuery = (parameters: {
 	readonly view: 'events' | 'traces';
 	readonly limit: number;
@@ -1593,13 +1517,9 @@ type Sleep = (ms: number) => Promise<void>;
 const defaultSleep: Sleep = (ms) =>
 	new Promise((resolve) => setTimeout(resolve, ms));
 
-// How many attempts a page query gets, and the base of the jittered linear
-// backoff between them.
 const telemetryQueryAttempts = 5;
 const telemetryRetryBaseDelayMs = 500;
 
-// The smallest a page shrinks to under repeated truncation, and the run of
-// clean pages that eases it back up; see {@link AdaptivePageLimit}.
 export const minPageLimit = 25;
 const relaxAfterCleanPages = 4;
 
@@ -1621,7 +1541,7 @@ function telemetryErrorStatus(error: unknown): number | undefined {
 }
 
 // The telemetry endpoint caps a response body at about a megabyte and truncates
-// past it, so a page of large rows (a burst of fault logs, each carrying a
+// past it, so a page of large rows (a burst of fault logs, each containing a
 // serialised error) arrives as an unterminated JSON body the SDK cannot parse.
 // The failure is a plain parse error, not an API status, so it is told apart by
 // its message.
@@ -1725,9 +1645,6 @@ function pageRowsOf(
 		: (response.traces ?? []);
 }
 
-// The smallest row id in a page, or undefined if no row carries one. The id
-// (a ULID) sorts lexicographically, so the minimum is the page's true oldest
-// row regardless of the order the view returns it in.
 function smallestCursor(
 	page: readonly unknown[],
 	cursorOf: (row: unknown) => string | undefined
@@ -1745,7 +1662,6 @@ function smallestCursor(
 	return smallest;
 }
 
-// The oldest (smallest) timestamp in a page, or undefined if none carries one.
 function oldestTimestamp(
 	page: readonly unknown[],
 	timestampOf: (row: unknown) => number | undefined
@@ -1763,20 +1679,6 @@ function oldestTimestamp(
 	return oldest;
 }
 
-// Pages a view with the API's cursor: within a fixed upper bound each page's
-// smallest row id becomes the next page's offset, so the walk reaches every
-// row, including bursts sharing one millisecond that a stepped timeframe
-// cannot subdivide. Within a millisecond the view has no stable order, so the
-// last row of a page is not its oldest; advancing by the smallest id keeps the
-// offset moving strictly downwards.
-//
-// The cursor eventually refuses to page a dense burst any further, answering a
-// full page whose smallest id is the offset it was already given. The walk
-// then steps the upper bound below the oldest timestamp it has seen and drops
-// the cursor: everything above that timestamp is already drained, so this
-// resumes older rows and, because the bound strictly decreases, guarantees the
-// walk terminates. Rows dedup by id across the whole walk. It ends on an empty
-// page or once the bound falls below the window.
 async function fetchByCursor(
 	query: TelemetryQuery,
 	view: 'events' | 'traces',
@@ -1869,8 +1771,8 @@ async function fetchByCursor(
 	return rows;
 }
 
-// Walks a telemetry view a page at a time. A view whose rows carry a cursor
-// id pages by cursor; otherwise the walk steps the timeframe's upper bound
+// Walks a telemetry view a page at a time. A view whose rows provide a cursor
+// ID pages by cursor; otherwise the walk steps the timeframe's upper bound
 // back to the oldest row's own millisecond: stepping past it would drop the
 // rows sharing that millisecond which did not fit the page, exactly the
 // bursts a push incident produces. The boundary millisecond is re-read on
@@ -1928,7 +1830,7 @@ export async function fetchPaged(
 		if (fresh.length === 0) {
 			if (page.length > 0) {
 				// The whole page sits at one already-collected millisecond: a burst
-				// larger than one page, which the view offers no cursor into. Say
+				// larger than one page, which the view offers no cursor into. Report
 				// so rather than silently presenting the walk as complete.
 				console.warn(
 					`telemetry ${view} truncated at ${String(upper)}: a same-millisecond burst exceeds one page`
@@ -1982,9 +1884,6 @@ export async function fetchPaged(
 	return rows;
 }
 
-/**
-Splits a window into up to `maxSlices` slices of about `sliceTargetMinutes`.
-*/
 export function sliceWindow(window: TimeWindow): TimeWindow[] {
 	const span = window.to - window.from;
 
@@ -2016,9 +1915,6 @@ export function sliceWindow(window: TimeWindow): TimeWindow[] {
 	return slices;
 }
 
-/**
-Runs `task` over `items`, at most `limit` in flight, preserving order.
-*/
 async function mapWithConcurrency<T, R>(
 	items: readonly T[],
 	limit: number,
@@ -2062,9 +1958,6 @@ const eventCursorSchema = z.object({
 	$metadata: z.object({ id: z.string() })
 });
 
-// An event's id is the API's pagination cursor. The traces view ignores the
-// offset parameter and replays its first page, so it has no cursor extractor
-// and pages by stepping the timeframe instead.
 const cursorOf: Record<
 	TelemetryView,
 	((row: unknown) => string | undefined) | undefined
@@ -2252,7 +2145,7 @@ async function main(): Promise<void> {
 		}
 	);
 
-	// The events view carries the worker's logs and its trace spans together; each
+	// The events view includes the Worker's logs and trace spans; each
 	// raw event is one or the other, so both are read from the one fetch.
 	const { logs, traces, spans } = await reporter.phase(
 		`Parsing ${formatCount(rawEvents.length + rawTraces.length)} telemetry rows`,

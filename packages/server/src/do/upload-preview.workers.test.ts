@@ -122,9 +122,6 @@ async function addGracePolicy(
 	expect(response.status).toBe(StatusCodes.OK);
 }
 
-// A snapshot of every table and durable queue `preview` must leave untouched:
-// the pending-upload backlog, every grace deadline the cache holds, the
-// grace-managed marker, and the reconcile queue.
 async function sideEffectSnapshot(cache: string): Promise<{
 	readonly pendingUploadCount: number;
 	readonly graceRows: readonly {
@@ -229,12 +226,8 @@ describe('upload preview', () => {
 		});
 
 		await pushPath(token, path);
-		// A second negotiate on the now-committed path is a skip, which confirms
-		// (and here, first grants) its grace deadline: the wire this scenario needs
-		// already stored before `preview` runs. It also queues the path for
-		// reconciliation, so the alarm is fired once to settle that queue before
-		// the snapshot, or its own background drain could land between the before
-		// and after snapshots and be mistaken for something `preview` did.
+		// Drain the reconcile entry created by setup before taking either snapshot.
+		// Otherwise the reconcile alarm could mutate the queue during preview.
 		await negotiateUploads(token, [path]);
 		await fireReconcile();
 
@@ -260,7 +253,7 @@ describe('upload preview', () => {
 		});
 	});
 
-	it('does not clear a reaper timer over a blob it only reports as reusable', async () => {
+	it('preserves the reaper timer when preview reports reuse', async () => {
 		const token = await initialise();
 		const source = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -292,14 +285,8 @@ describe('upload preview', () => {
 		});
 	});
 
-	it('previews the same action per path as a negotiate of the same closure', async () => {
+	it("matches negotiate's action for each path in the closure", async () => {
 		const token = await initialise();
-		// skipPath keeps its default (real, verifiable) NAR hash, since it is
-		// actually pushed. reusePath borrows that same hash under a different
-		// store path, so it reuses the blob skipPath's push already owns, without
-		// itself needing real bytes: it is never pushed, only classified.
-		// freshPath needs a distinct hash, or it would collide with skipPath's and
-		// preview as a reuse rather than a fresh upload.
 		const skipPath = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: repeated('d'),
@@ -337,8 +324,6 @@ describe('upload preview', () => {
 		const token = await initialise();
 		await addGracePolicy(token, '', dayGraceSeconds);
 
-		// See the classification-parity test above for why reusePath borrows
-		// skipPath's hash and freshPath needs its own.
 		const skipPath = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: repeated('1'),
@@ -358,7 +343,8 @@ describe('upload preview', () => {
 		});
 
 		await pushPath(token, skipPath);
-		// Grants skipPath's stored deadline before the preview under test reads it.
+		// Negotiate the committed path again to store its skip deadline before
+		// preview reads it.
 		await negotiateUploads(token, [skipPath]);
 
 		const stored = await sideEffectSnapshot(DEFAULT_CACHE);
@@ -392,8 +378,7 @@ describe('upload preview', () => {
 			name: 'skip-ungranted'
 		});
 
-		// Published before the policy exists, so no deadline is stored; the
-		// preview still reports the policy the cache now resolves.
+		// Publish before adding the policy so this row has no stored deadline.
 		await pushPath(token, path);
 		await addGracePolicy(token, '', dayGraceSeconds);
 
@@ -409,7 +394,7 @@ describe('upload preview', () => {
 		]);
 	});
 
-	it('reports a matched zero-grace policy as such', async () => {
+	it('reports zero grace when a zero-second policy matches', async () => {
 		const token = await initialise();
 		await addGracePolicy(token, '', 0);
 
@@ -453,7 +438,7 @@ describe('upload preview', () => {
 		]);
 	});
 
-	it('rejects a request body carrying a pushId', async () => {
+	it('rejects a preview request that includes pushId', async () => {
 		const token = await initialise();
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -477,7 +462,7 @@ describe('upload preview', () => {
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
-	it('refuses negotiate to a preview-only grant but allows preview', async () => {
+	it('rejects negotiate for a preview-only grant but allows preview', async () => {
 		await initialise();
 		const token = await issueServerSignedToken(previewOnlyGrants());
 		const path = uploadMetadata({

@@ -63,10 +63,9 @@ export const narInfos = sqliteTable(
 	},
 	(table) => [
 		primaryKey({ columns: [table.cache, table.storePathHash] }),
-		// The reuse-view local lookup range-scans from a hash: an exact selector
-		// is a point lookup and a prefix selector is a range bounded by both the
-		// hash and the cache-name prefix, so this leads with `store_path_hash`
-		// rather than `cache` the way the primary key does.
+		// Reuse-view lookup starts with a store-path hash. Exact cache selectors use
+		// a point lookup, while prefix selectors scan the cache-name range for that
+		// hash. Keep `store_path_hash` first in this index.
 		index('narinfo_store_path_hash_cache_idx').on(
 			table.storePathHash,
 			table.cache
@@ -81,11 +80,10 @@ export const narInfos = sqliteTable(
 	]
 );
 
-// The durable, strictly-increasing generation counter per store path. It is
-// advanced on every (re)commit and is never reset by a delete or offboarding, so
-// a delete-then-recommit (even one reproducing the same NAR hash) always lands a
-// higher generation than any captured deletion. It is per-tenant by virtue of
-// living in the tenant's own DO SQLite, so it carries no `tenant` column.
+// A delete or offboarding does not reset this counter. Recommitting the same NAR
+// therefore receives a generation above any deletion that captured the earlier
+// row. The tenant's Durable Object owns this database, so the counter does not
+// need a tenant column.
 export const generationSeq = sqliteTable(
 	'generation_seq',
 	{
@@ -109,40 +107,25 @@ export const pendingUploads = sqliteTable(
 		metadataJson: text('metadata_json').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
-		// The commit-saga status of an accepted upload, the durable marker a crashed
-		// commit is re-driven from and a `push --wait` client polls. `committing` once an
-		// inline commit starts, before it reserves the narinfo row; `pending` once a blob
-		// above the inline-verify budget is accepted, awaiting the background NAR-hash
-		// check; then a terminal `servable` once the background pass commits it, `mismatch`
-		// once the NAR-hash check fails, or `over-quota` once the background pass finds the
-		// canonical size exceeds the tenant's quota. The three terminal verdicts are
-		// retained through a status-observation window for a later reader to observe,
-		// distinguished so a quota rejection is not misreported as bad content; null while
-		// a row still awaits its bytes. The verdict is per-upload and never written globally
-		// by nar_hash, so a bad upload leaves no global trace. The background verify pass
-		// re-drives both `committing` and `pending` rows.
+		// This marker survives an interrupted commit and gives `push --wait` an
+		// observable result. Invalid content remains local to the upload rather than
+		// becoming a shared fact for its NAR hash.
 		verdict: text('verdict', {
 			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
 		}),
-		// The commit session socket a waiting client holds for this upload, read by
-		// the verify pass to route the terminal verdict to the right connection.
-		// Null until a commit attaches its session; re-pointed when a reconnected
-		// socket re-subscribes. Looked up by the upload's id, so it needs no index.
+		// Verification re-reads the subscribed session before sending a terminal
+		// verdict, so a reconnect can replace this value while verification is running.
 		sessionId: text('session_id').$type<SessionId>(),
-		// The lease a verify pass takes when it claims this row, so an overlapping
-		// pass (the alarm backstop's duplicate message, the cron crossing a
-		// consumer run) claims nothing already being worked. Null while unclaimed;
-		// a crashed pass's lease simply expires. A client re-drive resets it so
-		// the pass it requests need not wait the lease out.
+		// Overlapping queue, alarm, and cron passes must not claim the same upload.
+		// A crashed pass leaves this lease to expire, while a client re-drive clears
+		// it so the requested pass can start immediately.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
-		// The retention grace decision captured at negotiation, applied when this
-		// upload materialises. A policy changed afterwards does not alter it. Null
-		// on a row negotiated before the decision existed, which materialises as
-		// though no policy matched.
+		// Capture the retention decision during negotiation so a later policy change
+		// cannot alter this upload. Null also supports rows created before decisions
+		// were stored and is treated as no matching policy.
 		graceDecisionJson: text('grace_decision_json'),
-		// The run root the push bound at negotiate, inherited by this upload's
-		// commit: the finalising step attaches the committed path under this name.
-		// Null on a row whose push named no root, which commits without attaching.
+		// A commit attaches the path to the run root captured during negotiation.
+		// Null preserves the behaviour of pushes that did not request a root.
 		attachRootName: text('attach_root_name').$type<RootName>()
 	},
 	// The maintenance reconcile finds the soonest-expiring upload and probes for any
@@ -196,8 +179,8 @@ export const authKeys = sqliteTable(
 	'auth_key',
 	{
 		id: text('id').primaryKey(),
-		// The JWKS key id carried in each issued token's header so a verifier can
-		// pick the right key across a rotation. Always populated on key creation.
+		// New keys always have a JWKS key ID so verifiers can select a key across
+		// rotation. The empty default preserves rows created before key IDs existed.
 		kid: text('kid')
 			.$type<AuthKeyId>()
 			.notNull()
@@ -240,13 +223,10 @@ export const refreshTokens = sqliteTable(
 	(table) => [index('refresh_token_expires_at_idx').on(table.expiresAt)]
 );
 
-// The Durable Object's own identity, set by the control plane's `configure` RPC at
-// provision time and on config-version bumps. It is the sole identity source for a
-// configured tenant: the slug it serves, the path-based issuer and audience it pins
-// into issued tokens, and the owner OIDC triple its admin rule is seeded from.
-// `config_version` is a monotonic fence: a `configure` carrying a version no greater
-// than the applied one is ignored, so identity never moves backwards. A single row,
-// keyed `singleton`, since one Durable Object backs one tenant.
+// `configure` persists the identity assigned by the control plane. The Durable
+// Object uses these values for its tenant namespace, token identity, and fixed
+// owner rule. The version fence rejects equal or older deliveries so a retry
+// cannot restore stale identity or owner access.
 export const tenantIdentity = sqliteTable('tenant_identity', {
 	id: text('id').primaryKey(),
 	tenant: text('tenant').$type<TenantId>().notNull(),
@@ -349,12 +329,10 @@ export const retentionRootTargets = sqliteTable(
 	]
 );
 
-// A retention grace deadline: an internal, expiring reachability source the
-// collector walks exactly like a root target, so the deadline keeps the whole
-// closure its path references. Not durable retention anyone asked for: it is
-// extended monotonically, removed when it expires or its narinfo row is
-// deleted, and surfaced to admins only in aggregate, as a cache summary's
-// earliest live deadline.
+// The collector treats an unexpired grace deadline as another reachability
+// source, so it retains the path's whole closure. Deadlines extend monotonically
+// and disappear when they expire or when the narinfo is deleted. Admin summaries
+// expose only the earliest live deadline for each cache.
 export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{
@@ -444,10 +422,10 @@ export const retentionPolicies = sqliteTable('retention_policy', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
-// A retention grace policy applies a grace period to every path successfully
-// published to a cache whose name starts with `cache_prefix`; the empty prefix
-// is the tenant-wide default. The prefix is unique so a publication resolves at
-// most one matching policy per cache, and the longest matching prefix wins.
+// A policy applies to each path published to a cache whose name starts with
+// `cache_prefix`; the empty prefix is the tenant-wide default. Prefixes are
+// unique, and the longest matching prefix wins when several policies cover a
+// cache.
 export const retentionGracePolicies = sqliteTable(
 	'retention_grace_policy',
 	{
@@ -461,10 +439,8 @@ export const retentionGracePolicies = sqliteTable(
 	]
 );
 
-// Where the last background verification pass stopped, so the next pass resumes
-// from that point. A single `id = 'active'` row holding a composite
-// `(cache, store_path_hash)` position; an empty position starts (or wraps) at
-// the lowest hash of the first cache.
+// Background verification resumes after this composite cache and store-path
+// position. An empty position starts, or wraps, at the first cache and hash.
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
 	cache: text('cache').$type<StoredCache>().notNull().default(''),
@@ -472,14 +448,11 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
 
-// An OIDC trust rule federates an external identity into a set of cupboard
-// grants: an inbound token verified against `issuer`'s discovered JWKS, with
-// `audience` and every `claims_json` entry matched exactly, may exchange for the
-// grants `permitted_grants_json` permits. The issuer's `jwks_uri` and signing
-// algorithms come from its OIDC metadata, not this row. The owner's rule is
-// seeded from deploy config with a wildcard grant; `display_json` carries the
-// human-facing provenance a preset pins. `disabled_at` soft-disables a rule
-// without losing the audit row.
+// Decoded issuer, audience, and claim values select a candidate trust rule. The
+// caller must then verify the token against the issuer's discovered JWKS before
+// granting any authority from `permitted_grants_json`. The owner rule takes its
+// wildcard identity from `tenant_identity`. `display_json` records provenance
+// from a preset, and disabling a rule retains its audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {
 	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),
@@ -491,11 +464,6 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
-// A named reuse view: tenant configuration naming a set of caches another
-// cache's reads may substitute from. `revision` is issued by
-// `reuse_view_revision_seq`, its own persistent counter; source selectors
-// live in `reuse_view_selector`, keyed by name so a wholesale replace of a
-// view's selectors is a delete-and-reinsert under one name.
 export const reuseViews = sqliteTable('reuse_view', {
 	name: text('name').primaryKey(),
 	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
@@ -514,11 +482,9 @@ export const reuseViewSelectors = sqliteTable(
 	(table) => [primaryKey({ columns: [table.view, table.kind, table.pattern] })]
 );
 
-// The durable, strictly-increasing revision counter per reuse-view name.
-// Mirrors `generation_seq`: removing a view never deletes its counter row, so
-// a view recreated under the same name can never repeat a revision. The read
-// path's ABA fence (telling a genuine recreation apart from no change at all)
-// depends on that guarantee holding.
+// Removing a view does not delete its counter. A view recreated under the same
+// name therefore receives a new revision, which lets the read path distinguish
+// that replacement from an unchanged view.
 export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
 	name: text('name').primaryKey(),
 	nextRevision: integer('next_revision').$type<ReuseViewRevision>().notNull()

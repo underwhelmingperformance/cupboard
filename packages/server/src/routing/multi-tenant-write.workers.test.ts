@@ -41,9 +41,6 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 const acme = tenantIdSchema.parse('acme');
 
-// Orders strings by UTF-16 code unit, matching the default `Array#sort()` for
-// strings. Referenced so the comparator is not mistaken
-// for a numeric subtraction.
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {
 		return -1;
@@ -54,9 +51,6 @@ function byCodeUnit(a: string, b: string): number {
 	return 0;
 }
 
-// Stages a deferred upload for a freshly provisioned tenant, returning the write
-// token and the upload id to poll. Used to seed each tenant with work the cron's
-// background verify pass must reach.
 async function stageDeferredForNewTenant(
 	id: string
 ): Promise<{ readonly token: string; readonly uploadId: UploadId }> {
@@ -120,8 +114,6 @@ describe('multi-tenant writes', () => {
 		const served = await handlerFetch(
 			`/t/acme/${metadata.storePathHash}.narinfo`
 		);
-		// The same store-path hash is unknown under the fixture tenant: the narinfo
-		// object is tenant-scoped, so one tenant's mapping is invisible to another.
 		const atFixture = await handlerFetch(
 			`/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`
 		);
@@ -171,9 +163,6 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// The fixture tenant pushes the NAR, then the other tenant pushes the same NAR.
-		// Negotiate is existence-oracle-safe, so the second tenant still uploads; the
-		// promote dedups onto the one shared blob.
 		await pushPath(fixtureToken, metadata, undefined, nar);
 		await pushPathToTenant(acme, acmeToken, metadata, nar);
 
@@ -254,16 +243,11 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// A deferred upload only becomes servable once the background verify pass runs.
-		// The cron must reach acme's object, not just the fixture tenant's, or acme's
-		// pending uploads would never commit.
 		const uploadId = await stageDeferredForTenant(acme, token, metadata, nar);
 		const whilePending = await tenantUploadStatus(acme, token, uploadId);
 
 		await runQueuedMaintenanceTick();
 
-		// The settled upload leaves no residue, so its status clears and the proof
-		// of the commit is the narinfo serving under acme's prefix.
 		const afterCron = await tenantUploadStatus(acme, token, uploadId);
 		const served = await handlerFetch(
 			`/t/acme/${metadata.storePathHash}.narinfo`
@@ -277,15 +261,13 @@ describe('multi-tenant writes', () => {
 	});
 
 	it('maintains the most-overdue tenants first, covering the fleet over ticks', async () => {
-		// Three tenants, all never-maintained (NULL `last_maintained_at`); the fixture
-		// tenant is suspended so the active fleet is exactly these three.
+		// All three tenants have a null maintenance timestamp. Suspend the fixture
+		// tenant so it does not enter the scheduler's tie-break.
 		await stageDeferredForNewTenant('acme');
 		await stageDeferredForNewTenant('beta');
 		await stageDeferredForNewTenant('gamma');
 		await suspendTenant(fixtureTenant);
 
-		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
-		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.
 		await runMaintenanceBatch(rootLogger(), env, 2);
 		const afterFirst = {
 			acme: await servedAt('acme'),
@@ -295,8 +277,8 @@ describe('multi-tenant writes', () => {
 			gammaStamped: await wasTenantMaintained('gamma')
 		};
 
-		// The second tick: gamma is now the most overdue (still NULL, while acme and
-		// beta carry a stamp), so it is maintained next.
+		// Gamma still has a null timestamp, so the second bounded tick must process
+		// it before acme and beta.
 		await runMaintenanceBatch(rootLogger(), env, 2);
 		const gammaAfterSecond = await servedAt('gamma');
 
@@ -318,9 +300,6 @@ describe('multi-tenant writes', () => {
 	});
 });
 
-// The staged uploads all share the `'a'.repeat(32)` store path, so whether its
-// narinfo serves under a tenant's prefix shows whether that tenant's verify
-// pass has run.
 async function servedAt(id: string): Promise<number> {
 	const response = await handlerFetch(`/t/${id}/${'a'.repeat(32)}.narinfo`);
 

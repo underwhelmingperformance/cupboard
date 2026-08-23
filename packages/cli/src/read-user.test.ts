@@ -5,18 +5,18 @@ import { parseReadUser } from './read-user.ts';
 
 describe('parseReadUser', () => {
 	it.each([
-		{ name: 'a colon', value: 'a:b' },
-		{ name: 'a leading colon', value: ':alice' },
-		{ name: 'nothing', value: '' }
-	])('refuses a read user carrying $name', ({ value }) => {
+		['rejects a value containing a colon', 'a:b'],
+		['rejects a value beginning with a colon', ':alice'],
+		['rejects an empty value', '']
+	])('%s', (_name, value) => {
 		expect(() => parseReadUser(value)).toThrow(InvalidReadUserError);
 	});
 
-	it('accepts a name the credential format can carry', () => {
+	it('accepts a value without a colon', () => {
 		expect(parseReadUser('alice')).toBe('alice');
 	});
 
-	it('takes an absent value as no read user', () => {
+	it('returns undefined for an absent value', () => {
 		expect(parseReadUser(undefined)).toBeUndefined();
 	});
 });

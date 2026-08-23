@@ -23,7 +23,7 @@ function localSubject(): BuildOriginPredicate['subjects'][number] {
 }
 
 describe('buildOriginPredicateSchema', () => {
-	it('round-trips a statement covering every subject of a run', () => {
+	it('accepts a statement containing the accepted receipt subjects', () => {
 		const predicate: BuildOriginPredicate = {
 			subjects: [
 				localSubject(),
@@ -45,13 +45,13 @@ describe('buildOriginPredicateSchema', () => {
 	});
 
 	it.each([
-		{ name: 'no subject at all', value: { subjects: [] } },
+		{ name: 'an empty subject list', value: { subjects: [] } },
 		{
 			name: 'a subject list that is not an array',
 			value: { subjects: localSubject() }
 		},
 		{
-			name: 'a field the statement does not define',
+			name: 'an unknown statement field',
 			value: { subjects: [localSubject()], attempt: 1 }
 		}
 	])('rejects $name', ({ value }) => {
@@ -60,7 +60,7 @@ describe('buildOriginPredicateSchema', () => {
 });
 
 describe('buildOriginSubjectSchema', () => {
-	it('round-trips a subject with a recorded builder', () => {
+	it('accepts a subject with a recorded builder', () => {
 		const subject = {
 			origin: 'built' as const,
 			storePath,
@@ -76,7 +76,7 @@ describe('buildOriginSubjectSchema', () => {
 
 	it.each([
 		{
-			name: 'a path the store registered as its own work',
+			name: 'a store-held path',
 			subject: {
 				origin: 'store-held' as const,
 				storePath,
@@ -86,7 +86,7 @@ describe('buildOriginSubjectSchema', () => {
 			}
 		},
 		{
-			name: 'a path the run watched being copied',
+			name: 'a copied path with an observed source',
 			subject: {
 				origin: 'copied' as const,
 				storePath,
@@ -108,7 +108,7 @@ describe('buildOriginSubjectSchema', () => {
 			}
 		},
 		{
-			name: 'a copied path with neither a signature nor a watched source',
+			name: 'a copied path without signatures or an observed source',
 			subject: {
 				origin: 'copied' as const,
 				storePath,
@@ -116,7 +116,7 @@ describe('buildOriginSubjectSchema', () => {
 				signatures: []
 			}
 		}
-	])('round-trips $name', ({ subject }) => {
+	])('accepts $name', ({ subject }) => {
 		expect(buildOriginSubjectSchema.parse(subject)).toStrictEqual(subject);
 	});
 
@@ -130,11 +130,11 @@ describe('buildOriginSubjectSchema', () => {
 			value: { ...localSubject(), narHash: 'sha256:not-hex' }
 		},
 		{
-			name: 'a producer the receipt never records',
+			name: 'an unsupported verification method',
 			value: { ...localSubject(), verification: 'substituted' }
 		},
 		{
-			name: 'an origin the receipt never records',
+			name: 'an unsupported origin',
 			value: { ...localSubject(), origin: 'substituted' }
 		},
 		{
@@ -148,7 +148,7 @@ describe('buildOriginSubjectSchema', () => {
 			}
 		},
 		{
-			name: 'a store-held subject carrying signatures',
+			name: 'a store-held subject with signatures',
 			value: {
 				origin: 'store-held',
 				storePath,

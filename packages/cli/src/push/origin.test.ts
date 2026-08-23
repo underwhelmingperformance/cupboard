@@ -83,7 +83,7 @@ function referenceMetadata(
 }
 
 describe('republishedSubject', () => {
-	it('records the cache the metadata came from and what it reported', () => {
+	it('records the source URL and provenance fields from the narinfo', () => {
 		expect(
 			republishedSubject(
 				referenceMetadata({
@@ -103,7 +103,7 @@ describe('republishedSubject', () => {
 		});
 	});
 
-	it('omits what the served narinfo did not report', () => {
+	it('omits optional fields absent from the served narinfo', () => {
 		expect(
 			republishedSubject(referenceMetadata({}, []), metadataSource)
 		).toStrictEqual({
@@ -128,7 +128,7 @@ describe('publishedSubjects', () => {
 
 	it.each([
 		{
-			name: 'a path the store registered as its own work',
+			name: 'a path whose store metadata marks it as ultimate',
 			pathInfo: info(appPath, { ultimate: true, deriver: appDrv }),
 			expected: {
 				origin: 'store-held',
@@ -139,7 +139,7 @@ describe('publishedSubjects', () => {
 			}
 		},
 		{
-			name: 'a path the store registered with no deriver',
+			name: 'a store-held path without a deriver',
 			pathInfo: info(appPath, { ultimate: true }),
 			expected: {
 				origin: 'store-held',
@@ -149,7 +149,7 @@ describe('publishedSubjects', () => {
 			}
 		},
 		{
-			name: 'a copied path with the signatures the store holds for it',
+			name: 'a copied path with store-held signatures',
 			pathInfo: info(appPath, {
 				deriver: appDrv,
 				signatures: ['cache.example.org-1:c2ln']
@@ -163,7 +163,7 @@ describe('publishedSubjects', () => {
 			}
 		},
 		{
-			name: 'a copied path the store holds no signature for',
+			name: 'a copied path without a store-held signature',
 			pathInfo: info(appPath),
 			expected: {
 				origin: 'copied',
@@ -173,7 +173,7 @@ describe('publishedSubjects', () => {
 			}
 		},
 		{
-			name: 'a copied path that has a content address',
+			name: 'a content-addressed copied path',
 			pathInfo: info(appPath, { ca: 'fixed:r:sha256:abc' }),
 			expected: {
 				origin: 'copied',
@@ -187,7 +187,7 @@ describe('publishedSubjects', () => {
 		expect(subjectsFor([pathInfo])).toStrictEqual([expected]);
 	});
 
-	it('records the stores the run watched a path being copied from', () => {
+	it('records copy sources observed during the run', () => {
 		expect(
 			subjectsFor([info(appPath)], {
 				copiedFrom: new Map([[appPath, [firstCache, secondCache]]])
@@ -203,7 +203,7 @@ describe('publishedSubjects', () => {
 		]);
 	});
 
-	it('leaves out a path the run copied but did not publish', () => {
+	it('excludes a copied path that the run did not publish', () => {
 		expect(
 			subjectsFor([info(appPath)], {
 				servable: new Set(),
@@ -212,7 +212,7 @@ describe('publishedSubjects', () => {
 		).toStrictEqual([]);
 	});
 
-	it('keeps the attribution subject for a path the run built', () => {
+	it('preserves build attribution over later store metadata', () => {
 		expect(
 			subjectsFor([info(appPath, { ultimate: true, deriver: appDrv })], {
 				described: new Map([[appPath, builtSubject]])
@@ -220,7 +220,7 @@ describe('publishedSubjects', () => {
 		).toStrictEqual([builtSubject]);
 	});
 
-	it('describes every published path once, sorted by store path', () => {
+	it('returns one subject per published path in store-path order', () => {
 		expect(
 			subjectsFor(
 				[

@@ -100,16 +100,11 @@ import {
 
 export const hookScriptFileName = 'post-build-hook.sh';
 
-/**
-Maximum attempts a constructed build invocation runs.
-*/
 export const defaultBuildAttempts = 3;
 
 /**
- * A nix invocation the run constructs itself: `nix build` over the given
- * installables, wrapped in the bounded attempt loop with per-attempt activity
- * logs, so a transient build failure retries and the receipt attributes each
- * built path to the attempt that produced it.
+ * A bounded attempt loop retries transient build failures. Per-attempt activity
+ * logs associate each built path with the attempt that produced it.
  */
 export interface ConstructedBuild {
 	readonly installables: readonly string[];
@@ -118,7 +113,7 @@ export interface ConstructedBuild {
 	*/
 	readonly attempts?: number;
 	/**
-	Execute every selected derivation even when its outputs are already valid.
+	Execute selected derivations even when their outputs are already valid.
 	*/
 	readonly rebuild?: boolean;
 	/**
@@ -130,11 +125,8 @@ export interface ConstructedBuild {
 }
 
 /**
- * What the run builds: a user-supplied command supervised unchanged, with its
- * own semantics and no attempts added, or a constructed Nix invocation run
- * under the attempt loop. A user-supplied command must use the inherited Nix
- * store configuration. Cupboard cannot protect or publish outputs if the
- * command selects another store itself.
+ * A user command must inherit the configured Nix store. Cupboard cannot protect
+ * or publish outputs from a store selected inside the command.
  */
 export type BuildInvocation =
 	| { readonly kind: 'command'; readonly command: ChildCommand }
@@ -142,36 +134,17 @@ export type BuildInvocation =
 
 export interface BuildPushRunOptions {
 	readonly invocation: BuildInvocation;
-	/**
-	The target root reconciliation replaces once every target confirms.
-	*/
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
-	/**
-	The run root every streamed and re-driven commit binds at negotiate.
-	*/
 	readonly runRoot?: UploadAttachRoot;
-	/**
-	Publish the complete realised closure of the built targets.
-	*/
 	readonly closure?: boolean;
-	/**
-	Paths published alongside the targets without being retained as targets.
-	*/
 	readonly intermediatePaths?: readonly StorePathString[];
-	/**
-	Where the build receipt is written, as JSON.
-	*/
 	readonly receiptFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
 }
 
-/**
- * The store used by reconciliation and publication. It also reports which of a
- * cohort's declared outputs are already valid.
- */
 export type BuildPushStore = ReconcileOptions['store'] &
 	PushStore &
 	Pick<Nix, 'queryPathInfo' | 'queryValidPaths' | 'readDerivation'>;
@@ -179,44 +152,25 @@ export type BuildPushStore = ReconcileOptions['store'] &
 export interface BuildPushDependencies {
 	readonly client: PushClient;
 	readonly store: BuildPushStore;
-	/**
-	The daemon-backed store used to protect completed outputs during a streamed run.
-	*/
 	readonly batchStore: BatchStore;
 	readonly storeDirectory: StoreDirectory;
 	readonly invocationId: InvocationId;
-	/**
-	Checks whether the run can stream and returns the required resources.
-	*/
 	readonly preflight: () => Promise<BuildPushPreflight>;
-	/**
-	Where a run that hosts no hook endpoint keeps its own directory.
-	*/
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 	readonly environment?: ChildEnvironment;
 	readonly signalSource?: SignalSource;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
-	/**
-	Generates identifiers for a constructed invocation's attempts.
-	*/
 	readonly nextAttemptId?: () => string;
-	/**
-	Starts the cancellable wait between attempts; injectable for tests.
-	*/
 	readonly startDelay?: StartDelay;
-	/**
-	Receives the successfully published targets before this run returns.
-	*/
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
 	) => Promise<void> | void;
 }
 
 /**
- * The process exit code a child's ending maps to: its own status, or 128 plus
- * the number of the signal that killed it, which is the shell convention that
- * retry systems branch on.
+ * Converts a child exit to the shell status used by retry systems: the child's
+ * status, or 128 plus its terminating signal number.
  */
 export function childExitCode(exit: ChildExit): number {
 	if (exit.status !== undefined) {
@@ -309,13 +263,6 @@ function abortReason(signal: AbortSignal): Error {
 		: new Error('Output protection was cancelled.');
 }
 
-/**
- * Runs a build with streaming publication. The run creates the hook endpoint,
- * supervises the child, consumes hook events, drains uploads, reconciles the
- * results and writes a receipt. Build failures preserve the child's status.
- * Publication and retention failures after a successful build use a classified
- * sysexits code, so callers can distinguish them from build failures.
- */
 async function runStreamedBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -379,9 +326,8 @@ async function runProtectedStreamedBuildPush(
 
 	let maxQueueDepth = 0;
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
-	// One session for the whole run: the streaming flushes and the
-	// reconciliation that follows them commit over the same socket, so the cache
-	// paces the run as a whole and sees one publication rather than two.
+	// Share one commit session between streaming and reconciliation so the server
+	// applies one credit budget across the whole run.
 	const commitOptions: CommitOptions = {
 		...(options.waitTimeoutSeconds !== undefined && {
 			timeoutSeconds: options.waitTimeoutSeconds
@@ -598,11 +544,10 @@ async function runInvocation(
 	});
 }
 
-// One constructed attempt's argv: a plain `nix build` over the installables,
-// with the attempt's activity log requested so attribution can read which
-// derivation ran where. An out-link is the run's own record of what the build
-// realised, and holds those paths while they are published; a run whose hook
-// events name the outputs asks for no links at all.
+// Construct a `nix build` invocation and request an activity log for derivation
+// and builder attribution. When provided, the out-link records realised outputs
+// and keeps them alive during publication. Streaming hook events identify their
+// own outputs and therefore require no out-link.
 function constructedNixCommand(
 	build: ConstructedBuild,
 	logFile: string,
@@ -641,10 +586,9 @@ function watchedCopySources(
 	);
 }
 
-// The receipt subjects a constructed build attributes: the built paths
-// joined with the attempts' activity logs. A hook event only fires for an
-// executed build, so a path that was valid before the run never appears
-// here.
+// Join completed hook paths to build-start activity by deriver. The hook emits
+// events only for builds executed in this run, so these paths do not need a
+// pre-run validity exclusion.
 async function attributeSubjects(
 	invocation: BuildInvocation,
 	dependencies: BuildPushDependencies,
@@ -670,11 +614,10 @@ async function attributeSubjects(
 	return receiptSubjects(observed, infos, new Set(), autoBuildStore);
 }
 
-// A child failure is attributed to a requested target only when the invocation
-// was constructed, requested a single installable, exited with a status, and
-// recorded at least one build activity. A command, a signal, a grouped
-// request, or a failure before any build activity remains a command failure
-// for callers to treat as fatal.
+// Classify a non-zero exit as a target build failure only when a constructed
+// invocation requested one installable and emitted build activity. Commands,
+// signals, grouped requests, and failures before activity remain command
+// failures.
 function terminalFailureFor(
 	invocation: BuildInvocation,
 	attempts: readonly SupervisedAttempt[],
@@ -706,13 +649,9 @@ const buildDirectoryName = 'build';
 const outLinkDirectoryName = 'out-links';
 const outLinkName = 'result';
 
-/**
- * Runs a reconciled local build without a post-build hook, then publishes all
- * realised outputs together. The run reads the output metadata from the store
- * and excludes paths that were already valid before the build from its
- * provenance claims. A user-supplied command does not declare outputs that can
- * be reconciled, so this mode returns the preflight error.
- */
+// Exclude paths that were valid before the build from current-run provenance.
+// A user command declares no outputs that can be reconciled, so this mode
+// returns the preflight error for one.
 async function runReconciledLocalBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -898,19 +837,11 @@ async function outLinkTargets(
 	});
 }
 
-// Evidence collected by a reconciled local build and used to construct its
-// receipt.
 interface RealisedBuild {
 	readonly realised: readonly string[];
 	readonly declared: readonly string[];
 	readonly alreadyHeld: readonly string[];
-	/**
-	The builder for each delegated derivation, taken from the activity logs.
-	*/
 	readonly delegated: ReadonlyMap<string, string>;
-	/**
-	The stores each copied path came from, read from the activity logs.
-	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly exit: ChildExit;
 	readonly terminalFailure?: TerminalBuildFailure;
@@ -1006,9 +937,8 @@ async function publishRealised(
 	});
 }
 
-// Creates the publication failure that the run's exit contract requires: the
-// sysexits category the cause maps to, and the paths the push reported as
-// unfinished.
+// Preserve both parts of the publication exit contract: the sysexits category
+// derived from the cause and any unfinished paths reported by the push.
 function publicationFailure(cause: unknown): BuildPublicationFailedError {
 	const failedPaths =
 		cause instanceof PushIncompleteError ? cause.failedPaths : [];
@@ -1024,16 +954,10 @@ interface RunFacts {
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
 	readonly commitOptions: CommitOptions;
-	/**
-	The run's shared commit session, absent for a client that opens none.
-	*/
 	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
 	readonly subjects: readonly BuildSubjectV3[];
-	/**
-	The stores the run watched each path being copied from.
-	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly selectedTargetPaths?: readonly StorePathString[];
 	readonly terminalFailure?: TerminalBuildFailure;
@@ -1051,9 +975,8 @@ function requireCompleteProvenance(
 		return;
 	}
 
-	// Every published path has a subject, so counting subjects alone would
-	// accept a target the run merely found in the store. Only a `built` subject
-	// satisfies the requirement.
+	// Receipts also contain store-held subjects. Require a `built` subject for
+	// every target so a path merely found in the store cannot satisfy provenance.
 	const claimed = new Set(
 		subjects
 			.filter((subject) => subject.origin === 'built')
@@ -1066,9 +989,6 @@ function requireCompleteProvenance(
 	}
 }
 
-// After the child exits, drain uploads, reconcile paths and write the receipt.
-// Preserve a failed build's status; classify any later failure as a publication
-// failure.
 async function settleRun(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -1213,7 +1133,6 @@ async function closureExpansion(
 		.filter((storePath) => !targets.has(storePath));
 }
 
-// Writes the run's receipt where the run was asked to leave one.
 async function writeReceiptFile(
 	receiptFile: string | undefined,
 	receipt: ParsedBuildReceiptV3
@@ -1248,8 +1167,6 @@ function reportSummary(
 	});
 }
 
-// The run's final summary result, in both modes: the machine payload as the
-// schema validates it, and the rows a reader sees.
 function reportBuildSummary(reporter: Reporter, summary: BuildSummary): void {
 	const rows: ResultRow[] = [
 		{ label: 'Store', value: summary.store },

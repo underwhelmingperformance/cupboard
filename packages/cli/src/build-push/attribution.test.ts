@@ -70,7 +70,7 @@ function attempt(
 describe('parseBuildActivities', () => {
 	it.each([
 		{
-			name: 'local and remote build starts, sorted by derivation',
+			name: 'returns local and remote build starts in derivation order',
 			log: [
 				startLine(libraryDrv, 'ssh://builder-1'),
 				startLine(appDrv, '')
@@ -81,14 +81,14 @@ describe('parseBuildActivities', () => {
 			]
 		},
 		{
-			name: 'a repeated derivation, the later record winning',
+			name: 'uses the later record for a repeated derivation',
 			log: [startLine(appDrv, 'ssh://builder-1'), startLine(appDrv, '')].join(
 				'\n'
 			),
 			expected: [{ derivation: appDrv, machine: '' }]
 		},
 		{
-			name: 'lines of every other shape, skipped',
+			name: 'skips non-build records and malformed lines',
 			log: [
 				'not json at all',
 				JSON.stringify({ action: 'stop', id: 1 }),
@@ -100,11 +100,11 @@ describe('parseBuildActivities', () => {
 			expected: []
 		},
 		{
-			name: 'an empty log',
+			name: 'returns no activities for an empty log',
 			log: '',
 			expected: []
 		}
-	])('parses $name', ({ log, expected }) => {
+	])('$name', ({ log, expected }) => {
 		expect(parseBuildActivities(log)).toStrictEqual(expected);
 	});
 });
@@ -112,17 +112,17 @@ describe('parseBuildActivities', () => {
 describe('delegatedMachines', () => {
 	it.each([
 		{
-			name: 'a delegated build to its builder',
+			name: 'maps a delegated derivation to its builder',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
 			expected: new Map([[appDrv, 'ssh://b1']])
 		},
 		{
-			name: 'a local build to nothing',
+			name: 'omits locally built derivations',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: '' }])],
 			expected: new Map()
 		},
 		{
-			name: 'the first recorded builder when attempts repeat a derivation',
+			name: 'uses the first builder recorded across repeated attempts',
 			attempts: [
 				attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }]),
 				attempt(2, [{ derivation: appDrv, machine: 'ssh://b2' }])
@@ -130,7 +130,7 @@ describe('delegatedMachines', () => {
 			expected: new Map([[appDrv, 'ssh://b1']])
 		},
 		{
-			name: 'each derivation independently',
+			name: 'maps each derivation independently',
 			attempts: [
 				attempt(1, [
 					{ derivation: appDrv, machine: '' },
@@ -139,7 +139,7 @@ describe('delegatedMachines', () => {
 			],
 			expected: new Map([[libraryDrv, 'ssh://b2']])
 		}
-	])('maps $name', ({ attempts, expected }) => {
+	])('$name', ({ attempts, expected }) => {
 		expect(delegatedMachines(attempts)).toStrictEqual(expected);
 	});
 });
@@ -147,7 +147,7 @@ describe('delegatedMachines', () => {
 describe('receiptSubjects', () => {
 	it.each([
 		{
-			name: 'multi-attempt attribution, the earliest attempt winning',
+			name: 'uses the earliest attempt for multi-attempt attribution',
 			attempts: [
 				attempt(1, [{ derivation: libraryDrv, machine: '' }]),
 				attempt(2, [
@@ -181,7 +181,7 @@ describe('receiptSubjects', () => {
 			]
 		},
 		{
-			name: 'a delegated build, recording its builder',
+			name: 'records the builder for a delegated build',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
 			infos: [info(appPath, appDrv)],
 			preExisting: new Set<string>(),
@@ -200,33 +200,33 @@ describe('receiptSubjects', () => {
 			]
 		},
 		{
-			name: 'a pre-existing path, excluded',
+			name: 'excludes a pre-existing path',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: '' }])],
 			infos: [info(appPath, appDrv)],
 			preExisting: new Set<string>([appPath]),
 			expected: []
 		},
 		{
-			name: 'a path with no deriver, excluded',
+			name: 'excludes a path without a deriver',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: '' }])],
 			infos: [info(appPath, undefined)],
 			preExisting: new Set<string>(),
 			expected: []
 		},
 		{
-			name: 'a path whose deriver no attempt built, excluded',
+			name: 'excludes a path whose deriver has no observed build',
 			attempts: [attempt(1, [{ derivation: libraryDrv, machine: '' }])],
 			infos: [info(appPath, appDrv)],
 			preExisting: new Set<string>(),
 			expected: []
 		}
-	])('attributes $name', ({ attempts, infos, preExisting, expected }) => {
+	])('$name', ({ attempts, infos, preExisting, expected }) => {
 		expect(receiptSubjects(attempts, infos, preExisting, 'auto')).toStrictEqual(
 			expected
 		);
 	});
 
-	it('attributes the subjects to the store the run selected', () => {
+	it('records the selected build store in each subject', () => {
 		expect(
 			receiptSubjects(
 				[attempt(1, [{ derivation: appDrv, machine: '' }])],

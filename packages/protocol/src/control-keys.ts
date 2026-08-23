@@ -3,8 +3,8 @@ import { z } from 'zod';
 
 import { isoTimestampSchema } from './scalars.ts';
 
-// The control-plane signing keys, as the admin surface sees them. `retired` keys
-// no longer verify; the rest are the live set, with the newest one issuing.
+// Retired control-plane keys no longer verify tokens. Every other listed key
+// remains live, and the newest key issues new tokens.
 export const controlKeySummarySchema = z.strictObject({
 	kid: authKeyIdSchema,
 	retired: z.boolean(),

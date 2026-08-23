@@ -49,14 +49,9 @@ function offer(
 interface SigningKey {
 	readonly published: string;
 	sign(over: NixSubstituterOffer): Promise<string>;
-	/**
-	The key file Nix writes, whose last 32 bytes are the public half.
-	*/
 	secretFile(): Promise<string>;
 }
 
-// `generateKey` is typed as producing either a single key or a pair, and
-// Ed25519 always produces a pair, which this narrows to once.
 async function signingKey(name: string): Promise<SigningKey> {
 	const keyName: NixKeyName = nixKeyNameSchema.parse(name);
 	const pair = await generateSigningPair();
@@ -106,9 +101,6 @@ function fingerprintOf(info: NixSubstituterOffer): string {
 	);
 }
 
-/**
-A machine holding none of the configured secret key files.
-*/
 const missingKeyFiles = new Map<string, string>();
 const noKeyFiles: ReadKeyFile = (filePath) => missingKeyFiles.get(filePath);
 
@@ -119,7 +111,7 @@ function settings(
 }
 
 describe('offerAcceptance', () => {
-	it('takes a path signed by a key the configuration trusts', async () => {
+	it('accepts an offer signed with a configured trusted key', async () => {
 		const key = await signingKey('cache-1');
 		const signed = offer({ signatures: [await key.sign(offer())] });
 		const accepts = offerAcceptance(
@@ -130,7 +122,7 @@ describe('offerAcceptance', () => {
 		await expect(accepts(signed)).resolves.toBe(true);
 	});
 
-	it('refuses a path signed by a key the configuration does not trust', async () => {
+	it('rejects an offer signed only with an untrusted key', async () => {
 		const signing = await signingKey('cache-1');
 		const other = await signingKey('cache-2');
 		const signed = offer({ signatures: [await signing.sign(offer())] });
@@ -142,8 +134,6 @@ describe('offerAcceptance', () => {
 		await expect(accepts(signed)).resolves.toBe(false);
 	});
 
-	// A signature commits to the NAR hash, size and references, so a
-	// substituter serving those differently has not signed what it offers.
 	it.each<{
 		readonly name: string;
 		readonly moved: Partial<NixSubstituterOffer>;
@@ -156,7 +146,7 @@ describe('offerAcceptance', () => {
 		},
 		{ name: 'a different NAR size', moved: { narSize: narSize + 1 } },
 		{ name: 'a different reference list', moved: { references: [] } }
-	])('refuses a signature made over $name', async ({ moved }) => {
+	])('rejects an offer with $name after signing', async ({ moved }) => {
 		const key = await signingKey('cache-1');
 		const signature = await key.sign(offer());
 		const accepts = offerAcceptance(
@@ -169,7 +159,7 @@ describe('offerAcceptance', () => {
 		).resolves.toBe(false);
 	});
 
-	it('refuses a path carrying no signature at all', async () => {
+	it('rejects an unsigned offer', async () => {
 		const key = await signingKey('cache-1');
 		const accepts = offerAcceptance(
 			settings({ trustedPublicKeys: [key.published] }),
@@ -179,9 +169,7 @@ describe('offerAcceptance', () => {
 		await expect(accepts(offer())).resolves.toBe(false);
 	});
 
-	// A store trusts the published half of every key it signs with, so a
-	// runner's own key file names a key without listing it twice.
-	it('takes a path signed by a key it holds the secret for', async () => {
+	it('accepts an offer signed with a configured secret key', async () => {
 		const key = await signingKey('cache-1');
 		const secret = await key.secretFile();
 		const signed = offer({ signatures: [await key.sign(offer())] });
@@ -193,7 +181,7 @@ describe('offerAcceptance', () => {
 		await expect(accepts(signed)).resolves.toBe(true);
 	});
 
-	it('carries on past a secret key file it cannot read', async () => {
+	it('ignores an unreadable secret key file', async () => {
 		const key = await signingKey('cache-1');
 		const signed = offer({ signatures: [await key.sign(offer())] });
 		const accepts = offerAcceptance(
@@ -207,9 +195,7 @@ describe('offerAcceptance', () => {
 		await expect(accepts(signed)).resolves.toBe(true);
 	});
 
-	// A substituter named as trusted is taken at its word, which is what
-	// `?trusted=1` on its store URI asks for.
-	it('takes an unsigned path from a substituter configured as trusted', async () => {
+	it('accepts an unsigned offer from a trusted substituter', async () => {
 		const accepts = offerAcceptance(settings(), noKeyFiles);
 
 		await expect(
@@ -217,7 +203,7 @@ describe('offerAcceptance', () => {
 		).resolves.toBe(true);
 	});
 
-	it('takes any path with the signature requirement turned off', async () => {
+	it('accepts every offer when signature checks are disabled', async () => {
 		const accepts = offerAcceptance(
 			settings({ requireSignatures: false }),
 			noKeyFiles

@@ -37,9 +37,6 @@ function requestUrl(input: string | URL | Request): string {
 	return input.url;
 }
 
-// A fetcher answering the GitHub OIDC request with a fresh subject token and
-// the cupboard exchange with a write token derived from it, so a refresh yields
-// a distinct token end to end.
 function federatingClient(): CupboardClient {
 	let issued = 0;
 
@@ -65,8 +62,6 @@ function federatingClient(): CupboardClient {
 	});
 }
 
-// Like `federatingClient`, but recording the subject token each exchange
-// presented, so a test can assert the exchange sequence itself.
 function renewingClient(): {
 	readonly client: CupboardClient;
 	readonly exchanged: () => readonly string[];
@@ -87,7 +82,6 @@ function renewingClient(): {
 				);
 			}
 
-			// The token endpoint takes a urlencoded string body.
 			const form = new URLSearchParams(
 				typeof init?.body === 'string' ? init.body : ''
 			);

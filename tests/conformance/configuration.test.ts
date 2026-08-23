@@ -14,11 +14,8 @@ import {
 } from './configuration.ts';
 import { describeConformance } from './oracle.ts';
 
-/**
- * The in-scope settings these four groups do not model. The suite reports them
- * rather than ignoring them. Asserting the list prevents a setting from
- * being modelled, or dropped by Nix, without the record moving with it.
- */
+// Keep this explicit list in sync with the four mapped groups. The assertion
+// detects settings that Nix adds or removes and settings moved into a group.
 const recordedUnmodelledSettings: readonly string[] = [
 	'build-hook',
 	'build-poll-interval',
@@ -379,7 +376,7 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 		expect(settingsMissingFromOracle(settings)).toStrictEqual([]);
 	});
 
-	it('reports the settings in scope that these groups leave unmodelled', async (context) => {
+	it('reports every in-scope setting omitted from the mapping groups', async (context) => {
 		const settings = settingsOf(await resolveFixture(oracle, { nixConf: '' }));
 		const unmodelled = unmodelledSettings(settings);
 

@@ -30,10 +30,8 @@ function selectorSort(
 export class ReuseViewAdminService {
 	constructor(private readonly context: ServerContext) {}
 
-	// The stored summary when the view already holds exactly the requested
-	// definition, else undefined. Runs inside setView's transaction so the
-	// comparison and any subsequent write cannot interleave with another
-	// definition change.
+	// Compare the complete definition inside setView's transaction so another
+	// writer cannot change it between this read and the subsequent update.
 	private unchangedView(
 		tx: Parameters<Parameters<ServerContext['db']['transaction']>[0]>[0],
 		name: ParsedReuseViewName,
@@ -112,12 +110,9 @@ export class ReuseViewAdminService {
 		return { views: summaries };
 	}
 
-	// An upsert of the view's whole definition: a fresh revision, replacing its
-	// selector set wholesale, in one transaction so a reader never observes a
-	// revision bump without its matching selectors or the other way round. The
-	// revision counter is read-and-incremented inside the same transaction as
-	// the write it stamps, so a losing racer's revision is never issued to a
-	// winner that committed first.
+	// Replace the complete definition in one transaction. Readers must not see a
+	// new revision with the old selectors, and concurrent writers must receive
+	// revisions in commit order.
 	setView(
 		name: ParsedReuseViewName,
 		body: ParsedReuseViewSetBody
@@ -125,11 +120,8 @@ export class ReuseViewAdminService {
 		const now = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
-			// An identical re-apply changes nothing and returns the stored
-			// definition as it stands: a revision bump would force every
-			// concurrent lookup through its revalidate-and-retry path, so a
-			// content-free re-apply (a routine CI convergence run, say) must
-			// not issue one.
+			// An unchanged definition keeps its revision. Issuing a new revision
+			// would make concurrent lookups revalidate and retry unnecessarily.
 			const unchanged = this.unchangedView(tx, name, body);
 
 			if (unchanged !== undefined) {
@@ -192,10 +184,8 @@ export class ReuseViewAdminService {
 		});
 	}
 
-	// Deletes the view and its selectors, but NEVER the revision sequence: a
-	// view later recreated under the same name must never repeat a revision
-	// the removed view already issued, since the read path's ABA fence depends
-	// on a revision uniquely identifying one definition.
+	// Preserve the revision sequence when deleting a view. A recreated view must
+	// not reuse a revision because lookups use it as an ABA fence.
 	removeView(name: ParsedReuseViewName): ReuseViewRemoveResponse {
 		const existing = this.context.db
 			.select({ name: schema.reuseViews.name })
@@ -215,10 +205,6 @@ export class ReuseViewAdminService {
 		return { name, removed: existing !== undefined };
 	}
 
-	/**
-	 * Renders a reuse view's nix-cache-info body from its stored priority, or
-	 * `undefined` when no view of that name exists.
-	 */
 	cacheInfoBody(name: ParsedReuseViewName): string | undefined {
 		const row = this.context.db
 			.select({ priority: schema.reuseViews.priority })

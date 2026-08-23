@@ -24,7 +24,6 @@ function authed(token: string, method = 'POST'): RequestInit {
 	return { method, headers: { authorization: `Bearer ${token}` } };
 }
 
-// The kids of the live (non-retired) control keys, from the published JWKS.
 async function liveControlKids(): Promise<string[]> {
 	const response = await controlFetch('/.well-known/jwks.json');
 	const body = controlJwksSchema.parse(await response.json());
@@ -35,7 +34,7 @@ async function liveControlKids(): Promise<string[]> {
 describe('control key administration', () => {
 	beforeEach(resetTestServer);
 
-	it('rejects an unauthenticated rotate', async () => {
+	it('rejects key rotation without authentication', async () => {
 		const response = await controlFetch('/control/keys/rotate', {
 			method: 'POST'
 		});
@@ -44,8 +43,6 @@ describe('control key administration', () => {
 	});
 
 	it('rejects a tenant token at the control surface', async () => {
-		// A tenant admin token is signed by a tenant key, with the tenant issuer and
-		// audience; it must not verify against the control key set.
 		const tenantToken = await issueServerSignedToken(adminGrants());
 		const response = await controlFetch(
 			'/control/keys/rotate',
@@ -83,8 +80,8 @@ describe('control key administration', () => {
 		);
 		const afterRetire = await liveControlKids();
 
-		// The token is signed by the first key, which is still live, so this call
-		// authenticates, and is refused only because it would retire the last key.
+		// Keep the first key live until this request because it signed the admin
+		// token. The request must reach the last-key guard after authentication.
 		const retireLast = await controlFetch(
 			`/control/keys/retire/${firstKid}`,
 			authed(token)

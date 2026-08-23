@@ -29,10 +29,8 @@ import type { PendingCacheResolver } from './authorise.ts';
 export interface TenantRpcServices {
 	authenticate(request: Request): Promise<AccessClaims>;
 	pendingCache: PendingCacheResolver;
-	// Runs a mutating procedure and reconciles the maintenance-eligibility wake time
-	// inline, before the request returns. A push runs the procedure once per store
-	// path; the reconcile is flat in the in-flight set, and it skips the D1 write when
-	// the wake time is unchanged, so a push publishes the wake time once.
+	// Reconcile maintenance eligibility before a mutation returns. Concurrent
+	// calls share one reconciliation, and an unchanged wake time avoids a D1 write.
 	afterMutation<T>(body: () => Promise<T>): Promise<T>;
 	// Takes the Worker-staged negotiate hints the request's token header
 	// references, at most once; absent, unknown or expired tokens read as no
@@ -68,9 +66,6 @@ export interface TenantRpcServices {
 	): Promise<VerifyReport>;
 }
 
-/**
-The initial oRPC context for every tenant procedure call.
-*/
 export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;

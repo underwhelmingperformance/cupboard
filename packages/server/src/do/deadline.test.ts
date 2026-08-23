@@ -9,7 +9,6 @@ import {
 	withDeadlineBudget
 } from './deadline.ts';
 
-// A promise that never settles, standing in for a hung subrequest.
 function never(): Promise<never> {
 	return Promise.race([]);
 }
@@ -23,7 +22,7 @@ describe('boundedSubrequest', () => {
 		expect(result).toBe('ok');
 	});
 
-	it('rejects, naming the subrequest, when it outlasts the section budget', async () => {
+	it('includes the subrequest name when the section budget expires', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -88,7 +87,7 @@ describe('boundedSubrequest', () => {
 		}
 	});
 
-	it("carries the abandoned call's settled-signal, resolving once it settles", async () => {
+	it('exposes a promise that resolves after the timed-out operation settles', async () => {
 		vi.useFakeTimers();
 
 		try {
@@ -126,7 +125,7 @@ describe('boundedSubrequest', () => {
 		}
 	});
 
-	it('produces no abandoned signal on the exhausted-budget fast-reject path', async () => {
+	it('omits abandoned when the budget is already exhausted', async () => {
 		vi.useFakeTimers();
 
 		try {

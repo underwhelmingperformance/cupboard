@@ -109,9 +109,8 @@ describe('pushAuthorizationDetails', () => {
 		]);
 	});
 
-	// `--no-retain` carries no `root` on the grant intent, the same shape as a
-	// push that simply never names one: no separate "unretained" signal exists at
-	// this layer, since the CLI never requests root:set unless it names a root.
+	// `--no-retain` is represented by omitting `root`; grant intent has no
+	// separate unretained flag.
 	it('requests no root:set detail for an unretained (--no-retain) push', () => {
 		const [grant] = pushAuthorizationDetails({
 			cacheSelector: 'pr-1',

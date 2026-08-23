@@ -63,7 +63,7 @@ describe('buildEventSchema', () => {
 			}
 		},
 		{
-			name: 'no completed output paths',
+			name: 'an empty output-path list',
 			value: {
 				version: 1,
 				invocationId: 'invocation-1',
@@ -115,7 +115,7 @@ describe('targetOutcomeSchema', () => {
 			value: { outcome: 'failed', storePath, reason: 'upload' }
 		},
 		{ outcome: 'collected', value: { outcome: 'collected', storePath } }
-	])('round-trips a $outcome outcome', ({ value }) => {
+	])('accepts a $outcome outcome', ({ value }) => {
 		expect(targetOutcomeSchema.parse(value)).toStrictEqual(value);
 	});
 
@@ -150,7 +150,7 @@ describe('buildReceiptSchema', () => {
 		attemptId: 'one'
 	};
 
-	it('accepts a receipt carrying only what a bare build knows', () => {
+	it('accepts a receipt with the required bare-build fields', () => {
 		const receipt = {
 			version: 2,
 			paths: [storePath, outputPath],
@@ -160,7 +160,7 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
-	it('accepts a receipt carrying every planned-run section', () => {
+	it('accepts a receipt with every planned-run section', () => {
 		const receipt = {
 			version: 2,
 			paths: [storePath, outputPath],
@@ -201,7 +201,7 @@ describe('buildReceiptSchema', () => {
 		verification: 'build-store'
 	};
 
-	it('accepts a receipt whose subjects carry their provenance', () => {
+	it('accepts a receipt with provenance for each subject', () => {
 		const receipt = {
 			version: 3,
 			paths: [storePath, outputPath],
@@ -221,7 +221,7 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
-	it('accepts a receipt describing a path the run did not build', () => {
+	it('accepts a receipt with store-held and copied subjects', () => {
 		const receipt = {
 			version: 3,
 			paths: [storePath, outputPath],
@@ -248,7 +248,7 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
-	it('accepts a receipt describing a path republished from another cache', () => {
+	it('accepts a receipt with a republished subject', () => {
 		const receipt = {
 			version: 3,
 			paths: [storePath],
@@ -267,7 +267,7 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
-	it('accepts a copied subject the run holds no signature for', () => {
+	it('accepts a copied subject without signatures', () => {
 		const receipt = {
 			version: 3,
 			paths: [storePath],
@@ -299,7 +299,7 @@ describe('buildReceiptSchema', () => {
 		]).toStrictEqual([version2, version3]);
 	});
 
-	it('refuses a version-1 receipt', () => {
+	it('rejects a version-1 receipt', () => {
 		const result = buildReceiptSchema.safeParse({
 			version: 1,
 			paths: [storePath],
@@ -326,7 +326,7 @@ describe('buildReceiptSchema', () => {
 			value: { version: 2, paths: ['app'], subjects: [] }
 		},
 		{
-			name: 'a subject attributed to attempt zero',
+			name: 'a subject with attempt zero',
 			value: {
 				version: 2,
 				paths: [storePath],
@@ -358,7 +358,7 @@ describe('buildReceiptSchema', () => {
 			}
 		},
 		{
-			name: 'a copied subject claiming a build store',
+			name: 'a copied subject with a build store',
 			value: {
 				version: 3,
 				paths: [storePath],
@@ -405,7 +405,7 @@ describe('buildReceiptSchema', () => {
 			}
 		},
 		{
-			name: 'a copied subject whose list of sources is empty',
+			name: 'a copied subject with an empty source list',
 			value: {
 				version: 3,
 				paths: [storePath],
@@ -487,7 +487,7 @@ describe('buildReceiptSchema', () => {
 			}
 		},
 		{
-			name: 'a subject naming an empty machine',
+			name: 'a subject with an empty machine',
 			value: {
 				version: 3,
 				paths: [storePath],

@@ -92,7 +92,7 @@ describe('control key wrapping', () => {
 		);
 	});
 
-	it('refuses to unwrap with a different wrapping key', async () => {
+	it('rejects a different wrapping key', async () => {
 		const { privateJwk } = await generateAuthKeyPair();
 		const wrapped = await wrapControlPrivateJwk(wrappingKey(), privateJwk);
 
@@ -108,7 +108,7 @@ describe('control key wrapping', () => {
 		});
 	});
 
-	it('refuses a tampered ciphertext', async () => {
+	it('rejects a tampered ciphertext', async () => {
 		const key = wrappingKey();
 		const { privateJwk } = await generateAuthKeyPair();
 		const wrapped = await wrapControlPrivateJwk(key, privateJwk);
@@ -129,7 +129,7 @@ describe('control key wrapping', () => {
 		});
 	});
 
-	it('refuses a malformed envelope', async () => {
+	it('rejects a malformed envelope', async () => {
 		const outcome = await unwrapToOutcome(
 			unwrapControlPrivateJwk(wrappingKey(), 'not-an-envelope')
 		);

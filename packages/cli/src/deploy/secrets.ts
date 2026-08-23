@@ -50,13 +50,11 @@ const requiredTenantR2 = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
 const requiredShared = ['PUSH_ID_SIGNING_KEY'];
 
 /**
- * How a deploy settles the push id signing key when the environment does not
- * supply it, decided from which Workers already hold one. Both Workers need
- * the same key, and an applied secret cannot be read back: a deployment
- * holding it on both keeps what it has, one holding it nowhere generates a
- * first key, and one holding it on a single Worker is realigned by rotating a
- * fresh key onto both. A rotation invalidates in-flight push ids, so a push
- * running at that moment fails and is re-run.
+ * Both Workers must use the same push-ID signing key, but a deployed secret
+ * cannot be read back. Keep the existing key when both Workers have one,
+ * generate the first key when neither does, and rotate both Workers when only
+ * one has a key. Rotation invalidates in-flight push IDs, so those pushes must
+ * be run again.
  */
 export type PushIdKeySettlement = 'keep' | 'generate' | 'rotate';
 

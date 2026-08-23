@@ -93,9 +93,9 @@ const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
  * Re-queries paths whose availability remained unknown, bypassing the negative
  * narinfo cache when the selected store accepts the override.
  *
- * A store that does not cache substituter responses needs no second query. A
- * caching store is queried through a client with a negative-cache bypass. The
- * bypass reaches substituters only when the store honours client settings.
+ * A store that does not cache substituter responses needs no second query. For
+ * a caching store, a separate client sets the negative narinfo TTL to zero.
+ * The daemon applies that setting only when it honours client overrides.
  */
 export async function requeryUnknownWith(
 	store: Pick<Nix, 'cachesSubstituterQueries' | 'honoursSubstituterSettings'>,
@@ -185,27 +185,18 @@ export interface PlanCohortOptions {
 }
 
 /**
- * Records that capacity checking was skipped for a remote store. SSH does not
- * expose the remote filesystem to `statfs`, and local runner capacity does not
- * constrain a build performed in the remote store.
+ * SSH does not expose the remote filesystem to `statfs`, and local runner
+ * capacity does not constrain a build performed in the remote store.
  */
 export interface RemoteStoreCapacitySkip {
 	readonly skipped: 'remote-store';
 }
 
-/**
-The realisation and publication partition {@link runPlanCohort} reports.
-*/
 export interface PlanCohortResult {
 	readonly partition: AvailabilityPartition;
 	readonly capacity: CapacityCheckResult | RemoteStoreCapacitySkip;
 }
 
-/**
- * A typed cohort-plan failure. The plan either exceeded the unknown-path
- * ceiling or measured more substitutable data than the store can accommodate.
- * The result protocol reports the measurements before the command exits.
- */
 export type PlanCohortRefusal =
 	| {
 			readonly reason: 'unknown-paths-ceiling';
@@ -225,13 +216,6 @@ export type PlanCohortRefusal =
 			readonly detected: DetectedCapacityOptions;
 	  };
 
-/**
- * Dependencies that {@link runPlanCohort} obtains from the environment. Tests
- * can inject each one: a root client for ensure calls, the selected store's
- * availability queries, the daemon trust and re-query facilities used by
- * {@link partitionAvailability}, the destination, view and attestation probes,
- * and the store capacity probe.
- */
 export interface PlanCohortDependencies {
 	readonly rootClient: Pick<RootClient, 'ensure'>;
 	readonly store: Pick<
@@ -269,9 +253,6 @@ export interface PlanCohortRunOptions {
 	readonly plannedLocalOutputs?: readonly ParsedPlannedLocalOutput[];
 	readonly cacheName: string;
 	readonly ttlSeconds?: TtlSeconds;
-	/**
-	The kind and URI of the selected store, for refusal diagnostics.
-	*/
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
@@ -285,11 +266,8 @@ export interface PlanCohortRunOptions {
 	readonly headroom?: Partial<HeadroomConfig>;
 }
 
-/**
- * Reads a configured secret key file. When the file cannot be read this returns
- * `undefined`, which is ordinary on a machine whose keys belong to another
- * user.
- */
+// An unreadable key file is ordinary on a machine whose keys belong to another
+// user, so it does not fail the plan.
 const readKeyFile: ReadKeyFile = (filePath) => {
 	try {
 		return readFileSync(filePath, 'utf8');
@@ -353,11 +331,11 @@ export function registerPlanCommands(
 		)
 		.option(
 			'--store-path <path>',
-			`store path the capacity probe measures (default: ${defaultStorePath})`
+			`store path for the capacity probe (default: ${defaultStorePath})`
 		)
 		.option(
 			'--require-attested',
-			'build a target the cache already serves unless the cache also holds build provenance for it'
+			'rebuild a cached target unless the cache also holds its build provenance'
 		)
 		.option(
 			'--unknown-ceiling <count>',
@@ -415,8 +393,8 @@ export function registerPlanCommands(
 				signal: programOptions.signal
 			});
 			const credentials = readCredentials(options);
-			// Every store this plan opens carries the run's signal, so giving
-			// up on the plan gives up on the substituters it is waiting for.
+			// Pass the run's abort signal to every store. Aborting the plan then
+			// cancels any substituter query still in progress.
 			const storeSelection = {
 				...(options.store !== undefined && { storeUri: options.store }),
 				...(programOptions.signal !== undefined && {
@@ -437,11 +415,9 @@ export function registerPlanCommands(
 				nix,
 				substitution
 			);
-			// A separate store for the upstream confirmation: its substituter
-			// list holds only what a consumer elsewhere could also reach, so
-			// content the tenant alone holds never reads as available
-			// upstream. It asks those substituters for each path's narinfo
-			// itself, so the answers are the ones they give now.
+			// Confirm upstream availability through a separate store. Its override
+			// includes only externally usable, non-tenant substituters and disables
+			// positive narinfo caching, so each check uses their current offer.
 			const permittedStore = Nix.openForAvailability(undefined, {
 				...storeSelection,
 				overrides: upstreamConfirmationOverrides(substitution, url)
@@ -514,9 +490,8 @@ export function registerPlanCommands(
 					confirmUpstreamAvailability: confirmUpstreamAvailabilityWith({
 						substitution,
 						store: permittedStore,
-						// Exclude a target from publication only if a consumer
-						// would accept the signatures published by its upstream
-						// substituter. Use the consumer's signature policy here.
+						// Exclude a target from publication only when the consumer's
+						// signature policy accepts each source narinfo in its closure.
 						accepts: offerAcceptance(signatures, readKeyFile),
 						closure:
 							programOptions.signal === undefined
@@ -535,14 +510,6 @@ export function registerPlanCommands(
 	registerPlanReprobeCommand(plan, program, programOptions);
 }
 
-/**
- * Computes a cohort's availability partition and checks it against this
- * store's capacity, reporting the result (or a typed refusal) over `reporter`
- * and writing the detailed JSON to `options.planFile`. Every external effect
- * is injected through `dependencies`, so a command test drives this with
- * doubles for the root client, the store, the destination probes and the
- * capacity probe.
- */
 export async function runPlanCohort(
 	options: PlanCohortRunOptions,
 	reporter: Reporter,
@@ -636,7 +603,7 @@ export async function runPlanCohort(
 				rows: [
 					{
 						label: 'Refusal',
-						value: 'One or more required store paths are unavailable to Nix'
+						value: 'Nix cannot obtain one or more required store paths'
 					},
 					{ label: 'Unavailable paths', value: String(error.unknownCount) },
 					{ label: 'Limit', value: String(error.ceiling.value) },
@@ -667,9 +634,9 @@ export async function runPlanCohort(
 		throw error;
 	}
 
-	// A remote store's paths never land on this runner's filesystem, and ssh
-	// cannot statfs the remote one, so the capacity preflight only applies to
-	// a store on this machine; a remote plan records the skip.
+	// Remote store paths do not exist on the runner's filesystem, and ssh-ng
+	// cannot expose statfs for the remote filesystem. Skip the local capacity
+	// preflight for a remote plan.
 	const capacity: PlanCohortResult['capacity'] =
 		options.storeIdentity.kind === 'ssh-ng'
 			? { skipped: 'remote-store' }
@@ -715,9 +682,9 @@ export async function runPlanCohort(
 							value: String(partition.unattested.length)
 						}
 					]),
-			// None of the substituters listed here answered any of the availability
-			// questions above, so the reader can tell "nobody serves this path"
-			// from "not every substituter was asked".
+			// Availability results exclude these substituters because their queries
+			// failed. Report them beside the counts so a miss is not read as a check
+			// of every configured cache.
 			...(partition.unreachableSubstituters.length === 0
 				? []
 				: [
@@ -733,8 +700,6 @@ export async function runPlanCohort(
 	});
 }
 
-// The local store's capacity preflight, reporting a typed refusal with the
-// measured numbers before the underlying error propagates.
 async function checkLocalCapacity(
 	options: PlanCohortRunOptions,
 	partition: AvailabilityPartition,
@@ -780,10 +745,10 @@ async function checkLocalCapacity(
 	}
 }
 
-// One `roots.ensure` call per completely known root, carrying every target the
-// root declares. The call reconciles the root's whole target set, so a root
-// containing a floating or multi-output target must remain untouched until
-// publication knows that target's complete outputs.
+// Send one `roots.ensure` request per completely known root. Each request
+// includes the root's full target list. A root with a floating or multi-output
+// target must remain untouched until publication knows all of that target's
+// outputs.
 async function ensureCohortRoots(
 	targets: readonly ParsedCohortTarget[],
 	cacheName: string,
@@ -834,9 +799,6 @@ async function ensureCohortRoots(
 	return new Map(entries);
 }
 
-/**
-Reads the complete input for a cohort plan.
-*/
 export async function readCohortPlanInput(
 	targetsFile: string
 ): Promise<ParsedCohortPlanInput> {
@@ -860,9 +822,6 @@ export async function readCohortPlanInput(
 	return parsed.data;
 }
 
-/**
-Reads the targets used by both the initial plan and the later re-probe.
-*/
 export async function readCohortTargets(
 	targetsFile: string
 ): Promise<readonly ParsedCohortTarget[]> {
@@ -871,19 +830,13 @@ export async function readCohortTargets(
 	return input.targets;
 }
 
-/**
-The read-credential options a private cache's own probes are given.
-*/
 export interface ReadCredentialOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 }
 
-/**
- * The credential pair a private cache's probes carry, or nothing at all for a
- * public one. A half-supplied pair refuses: a probe that quietly dropped the
- * password would report a private cache as serving nothing.
- */
+// Reject an incomplete pair before a private-cache probe makes an
+// unauthenticated request and receives a 401 response.
 export function readCredentials(
 	options: ReadCredentialOptions
 ): { readonly user: ReadUser; readonly password: string } | undefined {

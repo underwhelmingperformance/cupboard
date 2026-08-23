@@ -15,11 +15,9 @@ import {
 export const buildOriginPredicateType =
 	'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2';
 
-// One path's origin, copied from the receipt subject that recorded it. The
-// four cases carry different fields because the run has different evidence for
-// each: a path it built, a path the store registered as its own work, a path
-// that entered the store from elsewhere, and a path no store the push could
-// query held.
+// Each subject records the origin of one path from the receipt. The four cases
+// distinguish paths that the run built, paths that the store identifies as
+// builds, paths copied into the store, and paths that no queried store held.
 //
 // These are the receipt's own facts. The statement reports what the run
 // established about where a path came from. It does not claim that the path is
@@ -38,9 +36,9 @@ export type ParsedBuildOriginSubject = z.output<
 	typeof buildOriginSubjectSchema
 >;
 
-// One statement covers every path the run published from its store, so a reader
-// who verified the statement for one path can also read the origin of every
-// other path in the same run.
+// One statement contains the receipt subjects that the attestation step
+// accepted. After verifying the statement for one subject, a reader can inspect
+// the evidence for the other accepted subjects from the same receipt.
 export const buildOriginPredicateSchema = z.strictObject({
 	subjects: z.array(buildOriginSubjectSchema).min(1)
 });
@@ -48,7 +46,5 @@ export type ParsedBuildOriginPredicate = z.output<
 	typeof buildOriginPredicateSchema
 >;
 
-// Input types for constructing a predicate: a schema's input is unbranded, so
-// the attest command constructs a predicate from these types directly.
 export type BuildOriginSubject = z.input<typeof buildOriginSubjectSchema>;
 export type BuildOriginPredicate = z.input<typeof buildOriginPredicateSchema>;

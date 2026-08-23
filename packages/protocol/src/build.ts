@@ -7,10 +7,6 @@ import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
 
-// Each wire format has one schema. Builders use the input type to create events
-// and receipts. Consumers use the branded output type after successful
-// validation.
-
 // The store path of the derivation itself. A separate brand distinguishes the
 // `.drv` path from its output paths.
 export const derivationPathSchema = storePathSchema
@@ -18,8 +14,6 @@ export const derivationPathSchema = storePathSchema
 	.brand('DerivationPath');
 export type DerivationPath = z.output<typeof derivationPathSchema>;
 
-// The identity of one supervising invocation. Opaque: beyond being non-empty,
-// the brand is its only constraint.
 export const invocationIdSchema = z.string().min(1).brand('InvocationId');
 export type InvocationId = z.output<typeof invocationIdSchema>;
 
@@ -33,17 +27,17 @@ export const buildEventSchema = z.strictObject({
 	derivation: derivationPathSchema,
 	outputPaths: z.array(storePathSchema).min(1),
 	/**
-	The hook could not protect these outputs from garbage collection. The
-	supervisor records them for publication after the build but does not stream
-	them.
-	*/
+	 * The hook could not protect these outputs from garbage collection. The
+	 * supervisor records them for publication after the build but does not stream
+	 * them.
+	 */
 	outputProtection: z.literal('failed').optional()
 });
 export type ParsedBuildEvent = z.output<typeof buildEventSchema>;
 
-// One path this run built, attributed to the attempt whose activity produced
-// it. The attestation step verifies a subject's NAR hash and deriver against
-// the live store before it emits a checksum for it.
+// A version 2 subject links a path built during this run to the attempt that
+// produced it. Before emitting a checksum, the attestation step verifies the
+// subject's NAR hash and deriver against the live store.
 export const buildSubjectV2Schema = z.strictObject({
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema,
@@ -59,9 +53,6 @@ export type ParsedBuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
 export const buildStoreSchema = z.string().min(1).brand('BuildStore');
 export type BuildStore = z.output<typeof buildStoreSchema>;
 
-/**
-The value recorded when Nix selects the store.
-*/
 export const autoBuildStore = 'auto';
 
 // How the run established that a producer built this subject.
@@ -119,8 +110,6 @@ const subjectIdentityFields = {
 	narHash: sha256HexDigestSchema
 };
 
-// A path realised by the run, including its derivation, build store, verification
-// method, and the builder recorded by the activity log when available.
 export const builtOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema,
@@ -129,8 +118,6 @@ export const builtOriginFields = {
 	verification: subjectVerificationSchema
 };
 
-// A path the store registered as one of its builds without the run observing the
-// build. The subject records the store but contains no build time.
 export const storeHeldOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema.optional(),
@@ -165,9 +152,9 @@ export const republishedOriginFields = {
 	metadataSource: z.url()
 };
 
-// The copies a run watched while it built: one entry per path, listing the
-// stores the path was read from in the order the run observed them. A build and
-// the push that publishes its results run as separate processes, so the
+// The supervising process records each copy that it observes during a build.
+// Each entry lists the source stores for one path in observation order. A build
+// and the push that publishes its results run as separate processes, so the
 // supervising process writes this document and the push reads it.
 export const observedCopiesSchema = z.record(
 	storePathSchema,
@@ -176,9 +163,10 @@ export const observedCopiesSchema = z.record(
 export type ParsedObservedCopies = z.output<typeof observedCopiesSchema>;
 export type ObservedCopies = z.input<typeof observedCopiesSchema>;
 
-// One published path and its observed origin. A supervised build includes the
-// attempt that produced the path. A reconciled build inspects the store after
-// completion and therefore omits the attempt fields.
+// A version 3 subject describes one published path and the origin that the run
+// observed. A supervised build includes the attempt that produced the path. A
+// reconciled build inspects the store after completion and therefore omits the
+// attempt fields.
 export const buildSubjectV3Schema = z.discriminatedUnion('origin', [
 	z.strictObject({
 		origin: z.literal('built'),
@@ -213,8 +201,8 @@ export type TargetFailureReason = z.output<typeof targetFailureReasonSchema>;
 // One target path's terminal state in a run: built and published, already
 // served by the destination, published by reference from a durable upstream,
 // deliberately left upstream, failed for a recorded reason, or collected
-// locally before publication (terminal for an intermediate; a collected
-// target is a failure and carries that reason instead).
+// locally before publication. `collected` is terminal for an intermediate. A
+// requested target that was collected is `failed` with reason `collected`.
 export const targetOutcomeSchema = z.discriminatedUnion('outcome', [
 	z.strictObject({
 		outcome: z.literal('built'),
@@ -323,16 +311,12 @@ export const buildReceiptV3Schema = z.strictObject({
 });
 export type ParsedBuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
 
-// All supported receipt versions, discriminated by `version`.
 export const buildReceiptSchema = z.discriminatedUnion('version', [
 	buildReceiptV2Schema,
 	buildReceiptV3Schema
 ]);
 export type ParsedBuildReceipt = z.output<typeof buildReceiptSchema>;
 
-// The shapes a builder assembles: a schema's input is unbranded, so the hook
-// constructs an event and the build command a receipt from these forms
-// directly.
 export type BuildEvent = z.input<typeof buildEventSchema>;
 export type BuildSubjectV2 = z.input<typeof buildSubjectV2Schema>;
 export type BuildSubjectV3 = z.input<typeof buildSubjectV3Schema>;

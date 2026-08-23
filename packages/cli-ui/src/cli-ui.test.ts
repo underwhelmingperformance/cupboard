@@ -25,9 +25,6 @@ import { fakeCliUi } from './testing.ts';
 const escape = String.fromCodePoint(27);
 const plain = pc.createColors(false);
 
-/**
-Collects everything written to an in-memory stream.
-*/
 function captureStream(): { stream: Writable; written: () => string } {
 	const chunks: string[] = [];
 	const stream = new Writable({
@@ -89,13 +86,13 @@ describe('resultTitle', () => {
 		['oidc-trust-rules', 'OIDC trust rules'],
 		['push-summary', 'Push summary'],
 		['', 'Result']
-	])('renders %s as %s', (kind, expected) => {
+	])('renders "%s" as "%s"', (kind, expected) => {
 		expect(resultTitle(kind)).toBe(expected);
 	});
 });
 
 describe('terminalLink', () => {
-	it('wraps the text in an OSC 8 hyperlink to the URL', () => {
+	it('encodes the text and URL as an OSC 8 sequence', () => {
 		const bel = String.fromCodePoint(7);
 
 		expect(terminalLink('cupboard', 'https://example.com')).toBe(
@@ -111,7 +108,7 @@ describe('isInteractive', () => {
 		{ mode: 'terminal', stdin: false, stdout: true, expected: false },
 		{ mode: 'json', stdin: true, stdout: true, expected: false }
 	] as const)(
-		'$mode mode with stdin=$stdin stdout=$stdout is $expected',
+		'returns $expected for $mode mode with stdin=$stdin stdout=$stdout',
 		({ mode, stdin, stdout, expected }) => {
 			expect(
 				isInteractive({
@@ -124,9 +121,6 @@ describe('isInteractive', () => {
 	);
 });
 
-/**
-A machine-mode UI whose JSON output is captured for assertions.
-*/
 function machineUi(overrides: Partial<CliUiOptions> = {}): {
 	ui: CliUi;
 	out: () => string;
@@ -177,7 +171,7 @@ describe('createCliUi confirm', () => {
 });
 
 describe('createCliUi machine narration', () => {
-	it('keeps decorative narration silent and routes data to stdout', () => {
+	it('writes data to out and JSON events to the diagnostic stream', () => {
 		const { ui, out, stream } = machineUi();
 
 		ui.intro('cupboard');
@@ -195,19 +189,19 @@ describe('createCliUi machine narration', () => {
 		).toStrictEqual([{ event: 'info', message: 'a diagnostic' }]);
 	});
 
-	it('reports a non-interactive menu as no choice', async () => {
+	it('returns undefined for a non-interactive menu', async () => {
 		const { ui } = machineUi();
 
 		expect(await ui.menu('Pick', [{ value: 'a', label: 'A' }])).toBeUndefined();
 	});
 
-	it('hands out one shared reporter so narration and work units coordinate', () => {
+	it('returns one reporter for narration and work units', () => {
 		const { ui } = machineUi();
 
 		expect(ui.reporter()).toBe(ui.reporter());
 	});
 
-	it('routes progress and steps through the JSON reporter', async () => {
+	it('emits JSON phase events for progress and grouped steps', async () => {
 		const { ui, stream } = machineUi();
 		const reporter = ui.reporter();
 
@@ -245,7 +239,7 @@ describe('createCliUi machine narration', () => {
 });
 
 describe('createCliUi reporter routing', () => {
-	it('routes github mode to the github reporter', () => {
+	it('writes GitHub result rows to out', () => {
 		const payload = captureStream();
 		const ui = createCliUi({
 			mode: 'github' satisfies ReporterMode,
@@ -299,8 +293,6 @@ describe('createCliUi result file', () => {
 	it('appends result events in terminal mode', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-cli-ui-'));
 		const resultFile = path.join(directory, 'results.jsonl');
-		// Clack renders the result card straight to `process.stdout`; swallow it so
-		// the assertion is about the result file, not the terminal drawing.
 		vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
 		try {
@@ -328,15 +320,10 @@ describe('createCliUi result file', () => {
 
 const ansiStyling = new RegExp(`${escape}${String.raw`\[[\d;]*m`}`, 'gu');
 
-// Clack styles its guide bar and its markers, and whether it does so depends on
-// the terminal the tests run in. Strip the styling so an assertion can match the
-// text of each line.
 function withoutStyling(text: string): string {
 	return text.replaceAll(ansiStyling, '');
 }
 
-// Everything the terminal reporter wrote while `body` ran. Clack draws to
-// `process.stdout` directly, so the test captures it there.
 function captureTerminal(body: (ui: CliUi) => void, hasColour = false): string {
 	const chunks: string[] = [];
 	vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {

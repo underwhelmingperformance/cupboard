@@ -32,15 +32,11 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// Stored for a tenant with work due now: a fixed past instant, so the many mutations
-// of a push leave the row unchanged. Mirrors the sentinel in the service.
 const wakeImmediately = isoTimestamp(new Date(0));
 
-// The maintenance reconcile runs synchronously on each mutation, publishing the
-// tenant's wake time to D1 before the request returns: an existence check plus
-// index-backed lookups, cheap enough to run inline.
-// Running it inline narrows the window in which an eviction can strand a stale
-// not-due row to the gap between the committed write and the trailing reconcile.
+// Mutations invalidate the projection before writing and reconcile it before
+// returning. An eviction can therefore strand a stale projection only between
+// the durable mutation and its trailing reconciliation.
 describe('maintenance reconcile', () => {
 	beforeEach(resetTestServer);
 
@@ -52,8 +48,6 @@ describe('maintenance reconcile', () => {
 			negotiateViaInstance(instance, token, 'a'.repeat(32))
 		);
 
-		// The seeded upload awaits verification, so the tenant is due now and the row
-		// is published immediately, with nothing deferred to an alarm.
 		expect(await wakeTime()).toBe(wakeImmediately);
 	});
 
@@ -71,8 +65,6 @@ describe('maintenance reconcile', () => {
 		);
 		const afterSecond = await reconciledAt();
 
-		// The wake time is still "now", so the second mutation skips the redundant
-		// write and `reconciled_at` does not advance.
 		expect({
 			published: afterFirst !== undefined,
 			unchanged: afterSecond === afterFirst
@@ -86,8 +78,6 @@ describe('maintenance reconcile', () => {
 		const status = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				// The negotiate's own write throws partway through, but the reconcile runs
-				// in a `finally`, so the wake time is still published.
 				Object.defineProperty(instance.context.db, 'insert', {
 					value: () => {
 						throw new Error('insert failed mid-body');
@@ -115,13 +105,9 @@ describe('maintenance reconcile', () => {
 		const token = await initialise();
 		await insertPendingUpload('pending');
 
-		// The projection exists before the failing reconcile, so its disappearance below
-		// is an observable drop, not a row that configure never wrote.
 		const before = await eligibilityRow();
 
 		await runInDurableObject(currentServer(), async (instance) => {
-			// The reconcile publishes through D1; make its write fail. The hook drops the
-			// row instead, so the periodic maintenance batch reads the tenant as due.
 			const realD1 = instance.context.d1;
 			Object.defineProperty(instance.context, 'd1', {
 				value: {
@@ -150,8 +136,8 @@ describe('maintenance reconcile', () => {
 		const upload = expectSingleUploadDecision(negotiate, metadata);
 		await putNarBytes(upload.r2Key);
 
-		// A stale projection left from before the commit: a sentinel wake no real state
-		// produces, stamped far in the past. The commit's reconcile must overwrite it.
+		// Use a wake time that current local state cannot produce, so the commit must
+		// replace the seeded projection.
 		const staleReconciledAt = isoTimestampSchema.parse(
 			'2000-01-01T00:00:00.000Z'
 		);
@@ -173,11 +159,6 @@ describe('maintenance reconcile', () => {
 
 		await commitUpload(token, upload.uploadId);
 
-		// The commit runs through `afterMutation`, so its reconcile republishes the wake
-		// time: the settled upload leaves no immediate work, so the sentinel wake clears
-		// to null and the timestamp advances off the seeded-stale value. Dropping the
-		// commit's reconcile would leave the stale row untouched. `reconciledAt` is the
-		// commit's wall-clock stamp, so assert it moved.
 		const row = await eligibilityRow();
 		expect({
 			tenant: row?.tenant,
@@ -191,13 +172,6 @@ describe('maintenance reconcile', () => {
 	});
 });
 
-// A commit replies without waiting on the eligibility publish: the publish
-// runs behind the reply, with concurrent requests coalescing onto a shared
-// drain. These drive it through a reuse commit, which settles with no
-// verification pass, so the trailing coalesced publish is the only reconcile
-// in play.
-// A tenant owning a hash, plus a fresh reuse decision for it: the commit
-// settles synchronously from the canonical object.
 async function ownedReuseDecision(): Promise<{
 	token: string;
 	uploadId: UploadId;
@@ -231,9 +205,8 @@ async function ownedReuseDecision(): Promise<{
 	return { token, uploadId: decision.uploadId };
 }
 
-// A hold the wedged eligibility publish parks on, so the test observes the
-// reply not waiting on it. Released before the test ends: a promise left
-// pending inside the Durable Object races the suite's final teardown.
+// Release this hold before teardown; a pending Durable Object promise can race
+// the suite cleanup.
 function parkUntilReleased(): {
 	readonly park: () => Promise<void>;
 	readonly release: () => void;
@@ -250,19 +223,16 @@ function parkUntilReleased(): {
 	};
 }
 
-// A commit replies without waiting on the eligibility publish: the publish
-// runs behind the reply, with concurrent requests coalescing onto a shared
-// drain. These drive it through a reuse commit, which settles with no
-// verification pass, so the trailing coalesced publish is the only reconcile
-// in play.
+// Reuse commits settle without a verification pass, isolating the coalesced
+// eligibility publication exercised here.
 describe('coalesced maintenance reconcile', () => {
 	beforeEach(resetTestServer);
 
 	it('publishes the wake time behind a settled reuse commit', async () => {
 		const { token, uploadId } = await ownedReuseDecision();
 
-		// A stale projection with a sentinel wake no real state produces. The
-		// commit's coalesced publish must overwrite it after the reply.
+		// Current local state cannot produce this wake, so the asynchronous publish
+		// must replace it.
 		const staleReconciledAt = isoTimestampSchema.parse(
 			'2000-01-01T00:00:00.000Z'
 		);
@@ -286,7 +256,6 @@ describe('coalesced maintenance reconcile', () => {
 
 		expect(response.status).toBe('committed');
 
-		// The publish is not awaited by the reply, so observe it land.
 		await vi.waitFor(async () => {
 			const row = await eligibilityRow();
 
@@ -302,8 +271,7 @@ describe('coalesced maintenance reconcile', () => {
 		const hold = parkUntilReleased();
 
 		try {
-			// Wedge every eligibility publish on the hold. The commit must still
-			// reply, since the publish runs behind it.
+			// Hold the publication so a reply proves that the commit does not await it.
 			await runInDurableObject(currentServer(), (instance) => {
 				const realD1 = instance.context.d1;
 

@@ -102,8 +102,6 @@
           };
         });
 
-      # A cache to substitute from: the tenant or named-cache URL that `cupboard
-      # config` prints, and the public key(s) from `cupboard pubkey`.
       cacheType =
         lib:
         lib.types.submodule {
@@ -122,10 +120,9 @@
           };
         };
 
-      # The substituter half of a Nix module, shared by the NixOS and
-      # home-manager modules: both expose `nix.cupboard.caches` and fold it into
-      # the relevant `nix.settings`. List settings merge by concatenation, so
-      # cache.nixos.org and its key are kept alongside these.
+      # Both modules expose `nix.cupboard.caches`. Nix merges these list settings
+      # by concatenation, so the configured caches are added to existing
+      # substituters and trusted keys.
       cupboardModule =
         { config, lib, ... }:
         let
@@ -135,7 +132,7 @@
           options.nix.cupboard.caches = lib.mkOption {
             type = lib.types.listOf (cacheType lib);
             default = [ ];
-            description = "cupboard caches to add as Nix substituters.";
+            description = "Cupboard caches to add as Nix substituters.";
           };
 
           config = lib.mkIf (cfg.caches != [ ]) {

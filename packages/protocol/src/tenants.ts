@@ -22,9 +22,6 @@ export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
 export const readPasswordMinLength = 20;
 
-// The Basic-auth user a reader presents when the cache configuration supplies
-// no name. It is parsed with the same schema as an operator-supplied name, so
-// it is a `ReadUser` wherever a command falls back to it.
 export const defaultReadUser = readUserInputSchema.parse('cupboard');
 
 export const readPasswordSchema = z
@@ -32,11 +29,11 @@ export const readPasswordSchema = z
 	.min(readPasswordMinLength)
 	.regex(/^[!-~]+$/);
 
-// The Basic-auth credential a private cache requires from a reader. The user is
-// supplied by an operator, so it is parsed with `readUserInputSchema` and
-// cannot contain a colon. The password is an opaque secret: the CLI generates
-// one by default, and explicit values must be netrc-safe visible ASCII. The
-// control plane hashes it before persistence.
+// Basic authentication uses the first colon to separate the user from the
+// password, so `readUserInputSchema` excludes colons. The CLI generates the
+// password by default; explicit values must be visible ASCII that netrc can
+// store without escaping. The control plane hashes the password before
+// persistence.
 export const tenantReadCredentialSchema = z.strictObject({
 	user: readUserInputSchema,
 	password: readPasswordSchema
@@ -45,10 +42,11 @@ export type ParsedTenantReadCredential = z.output<
 	typeof tenantReadCredentialSchema
 >;
 
-// Creating a tenant requires an explicit read mode, chosen by the caller, and
-// the owner's OIDC identity, which becomes the tenant's first admin trust rule.
-// The hosted deployment chooses private. A private cache may include the read
-// credential that authorises its reads; without one it fails closed.
+// The caller selects the read mode and supplies the OIDC identity for the first
+// admin trust rule. Deployment onboarding creates its first tenant in public
+// mode; `tenant create` defaults to private unless the operator passes
+// `--public`. A private tenant may include its read credential. Without one,
+// every read fails closed.
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema,
@@ -56,14 +54,13 @@ export const tenantCreateBodySchema = z.strictObject({
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
 	read: tenantReadCredentialSchema.optional(),
-	// The storage quota in bytes; omitted means unlimited. Charged once per tenant
-	// per unique NAR hash, so it bounds the tenant's stored compressed bytes.
+	// The quota covers this tenant's unique compressed NAR objects and unique
+	// attestation CAS objects. Omission means unlimited storage.
 	quotaBytes: z.number().int().nonnegative().optional()
 });
 export type ParsedTenantCreateBody = z.output<typeof tenantCreateBodySchema>;
 export type TenantCreateBody = z.input<typeof tenantCreateBodySchema>;
 
-// A tenant as the operator admin surface sees it.
 export const tenantSummarySchema = z.strictObject({
 	id: tenantIdSchema,
 	status: tenantStatusSchema,
@@ -85,8 +82,6 @@ export type ParsedTenantListResponse = z.output<
 >;
 export type TenantListResponse = z.input<typeof tenantListResponseSchema>;
 
-// The body returned by a tenant status mutation (suspend / resume / delete): the
-// slug and its resulting status.
 export const tenantMutateResponseSchema = z.strictObject({
 	id: tenantIdSchema,
 	status: tenantStatusSchema
@@ -96,10 +91,9 @@ export type ParsedTenantMutateResponse = z.output<
 >;
 export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
 
-// The body returned by a deployment-level membership rebuild: how many live
-// tenants the gate now admits. The rebuild reasserts every live tenant's marker
-// and rebuilds the filter from the registry, so it repairs the admission state
-// without touching any tenant's data.
+// A membership rebuild reasserts every live tenant's marker and reconstructs
+// the admission filter from the registry. The response reports how many tenants
+// the gate now admits. No tenant data changes.
 export const membershipRebuildResponseSchema = z.strictObject({
 	tenants: z.number().int().nonnegative()
 });
@@ -110,9 +104,8 @@ export type MembershipRebuildResponse = z.input<
 	typeof membershipRebuildResponseSchema
 >;
 
-// The body returned by a readMode or read-credential mutation: the slug and its
-// resulting read mode, so the caller can see whether a credential it just set
-// actually gates reads (it is moot for a public cache).
+// Read-mode and read-credential mutations return the resulting mode. A read
+// credential gates requests only when the tenant is private.
 export const tenantReadModeResponseSchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema

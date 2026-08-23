@@ -95,8 +95,6 @@ function storeDouble(
 	};
 }
 
-// The acceptance policy is exercised where it lives; these cases are about
-// what the confirmation does with the verdict it gets back.
 const acceptEveryOffer: AcceptsOffer = () => Promise.resolve(true);
 
 interface ClosureRefusalCase {
@@ -112,12 +110,12 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 		expected: { kind: 'closure-not-served', missing: missingPath }
 	},
 	{
-		name: 'a reference this store does not hold',
+		name: 'a reference absent from this store',
 		closure: { kind: 'not-held-locally', storePath: missingPath },
 		expected: { kind: 'closure-not-held-locally', missing: missingPath }
 	},
 	{
-		name: 'a reference offered under a NAR hash this store does not hold',
+		name: 'a reference whose offered NAR hash differs from the local hash',
 		closure: {
 			kind: 'divergent',
 			storePath: missingPath,
@@ -132,7 +130,7 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 		}
 	},
 	{
-		name: 'a reference carrying no signature this configuration accepts',
+		name: 'a reference with no signature accepted by this configuration',
 		closure: { kind: 'refused', storePath: missingPath },
 		expected: { kind: 'closure-unsigned', storePath: missingPath }
 	},
@@ -144,7 +142,7 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 ];
 
 describe('confirmUpstreamAvailabilityWith', () => {
-	it('confirms a candidate whose whole closure the permitted substituters hold', async () => {
+	it('confirms a candidate with a complete closure from permitted substituters', async () => {
 		const store = storeDouble();
 
 		const verdict = await confirmUpstreamAvailabilityWith({
@@ -164,9 +162,9 @@ describe('confirmUpstreamAvailabilityWith', () => {
 		});
 	});
 
-	// Whether the daemon trusts a connection is a property of the client it
-	// accepted, so one answer holds for every candidate the confirmation checks.
-	it('asks whether the connection is trusted only once, for any number of candidates', async () => {
+	// The daemon grants trust to the connection, not to individual candidates.
+	// The confirmation therefore queries trust once for this store.
+	it('queries connection trust once for any number of candidates', async () => {
 		const store = storeDouble();
 		const confirm = confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
@@ -185,9 +183,9 @@ describe('confirmUpstreamAvailabilityWith', () => {
 		});
 	});
 
-	// A daemon drops an untrusted client's overrides, so the substituters such
-	// a connection asked are the runner's own and its answers may come from a
-	// narinfo cache the confirmation never bypassed.
+	// An untrusted daemon ignores the client's overrides. Its query can therefore
+	// use the runner's substituters or cached narinfos instead of the requested
+	// confirmation settings.
 	it.each([
 		{ name: 'refuses the client', trust: 'not-trusted' as const },
 		{ name: 'leaves the trust unstated', trust: 'unknown' as const }
@@ -212,7 +210,7 @@ describe('confirmUpstreamAvailabilityWith', () => {
 	});
 
 	it.each(closureRefusalCases)(
-		'refuses a candidate over $name',
+		'refuses a candidate when $name',
 		async ({ closure, expected }) => {
 			const verdict = await confirmUpstreamAvailabilityWith({
 				substitution: defaultSubstitution,
@@ -228,7 +226,7 @@ describe('confirmUpstreamAvailabilityWith', () => {
 	// `always-allow-substitutes` overrules the derivation's own refusal.
 	it.each([
 		{
-			name: 'substitution is turned off outright',
+			name: 'refuses without reading the derivation or closure when substitution is off',
 			substitution: { ...defaultSubstitution, substitute: false },
 			allowsSubstitutes: true,
 			expected: { kind: 'substitution-disabled' },
@@ -236,7 +234,7 @@ describe('confirmUpstreamAvailabilityWith', () => {
 			derivationsRead: [] as readonly string[]
 		},
 		{
-			name: 'the derivation withholds substitution',
+			name: 'refuses after the derivation withholds substitution',
 			substitution: defaultSubstitution,
 			allowsSubstitutes: false,
 			expected: { kind: 'substitutes-not-allowed' },
@@ -244,7 +242,7 @@ describe('confirmUpstreamAvailabilityWith', () => {
 			derivationsRead: [drvPath] as readonly string[]
 		},
 		{
-			name: 'always-allow-substitutes overrules the derivation',
+			name: 'checks the closure without reading the derivation when always-allow-substitutes applies',
 			substitution: { ...defaultSubstitution, alwaysAllowSubstitutes: true },
 			allowsSubstitutes: false,
 			expected: { kind: 'confirmed' },
@@ -252,7 +250,7 @@ describe('confirmUpstreamAvailabilityWith', () => {
 			derivationsRead: [] as readonly string[]
 		}
 	])(
-		'applies the substitution settings when $name',
+		'$name',
 		async ({
 			substitution,
 			allowsSubstitutes,
@@ -292,9 +290,9 @@ describe('confirmUpstreamAvailabilityWith', () => {
 		});
 	});
 
-	// A plain store path is substituted without any derivation being consulted,
-	// so there is no option to read and nothing to refuse it on.
-	it('reads no derivation for an installable naming a store path', async () => {
+	// A plain store path has no derivation policy, so confirmation does not read
+	// a derivation before checking its closure.
+	it('reads no derivation for a store-path installable', async () => {
 		const store = storeDouble();
 
 		const verdict = await confirmUpstreamAvailabilityWith({
@@ -316,7 +314,7 @@ describe('upstreamConfirmationOverrides', () => {
 
 	it.each([
 		{
-			name: 'the tenant destination cache',
+			name: 'excludes the tenant destination cache',
 			substituters: [
 				'https://cache.nixos.org/',
 				'https://cupboard.example.workers.dev/t/acme/c/nightly'
@@ -324,7 +322,7 @@ describe('upstreamConfirmationOverrides', () => {
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'a tenant reuse view',
+			name: 'excludes a tenant reuse view',
 			substituters: [
 				'https://cache.nixos.org/',
 				'https://cupboard.example.workers.dev/t/acme/v/main'
@@ -332,7 +330,7 @@ describe('upstreamConfirmationOverrides', () => {
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'the tenant base itself',
+			name: 'excludes the tenant base itself',
 			substituters: [
 				'https://cupboard.example.workers.dev/t/acme',
 				'https://cache.nixos.org/'
@@ -340,7 +338,7 @@ describe('upstreamConfirmationOverrides', () => {
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'nothing, leaving another tenant on the same host alone',
+			name: 'keeps an endpoint from another tenant on the same host',
 			substituters: [
 				'https://cupboard.example.workers.dev/t/other',
 				'https://cache.nixos.org/'
@@ -349,17 +347,17 @@ describe('upstreamConfirmationOverrides', () => {
 				'https://cupboard.example.workers.dev/t/other https://cache.nixos.org/'
 		},
 		{
-			name: 'a substituter that is not a URL',
+			name: 'excludes a substituter that is not a URL',
 			substituters: ['daemon', 'https://cache.nixos.org/'],
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'a directory on the runner',
+			name: 'excludes a directory on the runner',
 			substituters: ['file:///var/cache/nix', 'https://cache.nixos.org/'],
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'a cache on the loopback interface',
+			name: 'excludes a cache on the loopback interface',
 			substituters: [
 				'http://localhost:5000/',
 				'http://127.0.0.1:5001/',
@@ -369,7 +367,7 @@ describe('upstreamConfirmationOverrides', () => {
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'a cache on the runner network',
+			name: 'excludes a cache on the runner network',
 			substituters: [
 				'http://10.1.2.3/',
 				'http://172.16.9.9/',
@@ -382,11 +380,11 @@ describe('upstreamConfirmationOverrides', () => {
 			expected: 'https://cache.nixos.org/'
 		},
 		{
-			name: 'every substituter, leaving the list empty',
+			name: 'excludes every substituter when none is externally usable',
 			substituters: ['https://cupboard.example.workers.dev/t/acme/c/nightly'],
 			expected: ''
 		}
-	])('excludes $name', ({ substituters, expected }) => {
+	])('$name', ({ substituters, expected }) => {
 		expect(
 			upstreamConfirmationOverrides(
 				{ ...defaultSubstitution, substituters },
@@ -403,13 +401,13 @@ describe('upstreamConfirmationOverrides', () => {
 
 	it.each([
 		{
-			name: 'keeps what an injected reach admits',
+			name: 'keeps an endpoint allowed by the supplied reachability policy',
 			isReachable: (substituter: string) => substituter === loopbackCache,
 			substituters: [loopbackCache, 'https://cache.nixos.org/'],
 			expected: loopbackCache
 		},
 		{
-			name: 'excludes the tenant endpoints an injected reach admits',
+			name: 'excludes a tenant endpoint even when the supplied reachability policy allows it',
 			isReachable: () => true,
 			substituters: [tenantCache, loopbackCache],
 			expected: loopbackCache
@@ -427,7 +425,7 @@ describe('upstreamConfirmationOverrides', () => {
 		});
 	});
 
-	it('falls back to the reach of a consumer elsewhere when none is injected', () => {
+	it('excludes a loopback endpoint when no reachability policy is supplied', () => {
 		expect(
 			upstreamConfirmationOverrides(
 				{

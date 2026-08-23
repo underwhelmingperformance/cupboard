@@ -22,9 +22,6 @@ export interface PlanMeasureOptions {
 	readonly measureFile?: string;
 }
 
-/**
-One target's own substitutable size, as the store's `queryMissing` prices it.
-*/
 export interface TargetMeasurement {
 	readonly downloadSize: number;
 	readonly narSize: number;
@@ -32,7 +29,7 @@ export interface TargetMeasurement {
 
 /**
  * The per-target measurements {@link runPlanMeasure} reports and writes,
- * keyed by each target's attr. A target the store could not price carries no
+ * keyed by each target's attr. A target the store could not price has no
  * entry at all, so a consumer can tell "measured at zero" from "unmeasured".
  */
 export interface PlanMeasureResult {
@@ -44,11 +41,6 @@ export interface PlanMeasureRunOptions {
 	readonly measureFile: string;
 }
 
-/**
- * What {@link runPlanMeasure} needs from this run's environment: the selected
- * store's own missing-path query, injectable so a command test can drive the
- * measurement with a double.
- */
 export interface PlanMeasureDependencies {
 	readonly store: Pick<Nix, 'queryMissing'>;
 }
@@ -61,7 +53,7 @@ export function registerPlanMeasureCommand(
 	plan
 		.command('measure')
 		.description(
-			"Measure each target's own substitutable size against this store."
+			'Measure the paths this store must download to realise each target.'
 		)
 		.requiredOption(
 			'--targets-file <path>',
@@ -79,8 +71,6 @@ export function registerPlanMeasureCommand(
 		.action(async (options: PlanMeasureOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const targets = await readMeasureTargets(options.targetsFile);
-			// The store carries the run's signal, so giving up gives up on
-			// the substituters it is waiting for.
 			const storeSelection = {
 				...(options.store !== undefined && { storeUri: options.store }),
 				...(programOptions.signal !== undefined && {
@@ -103,12 +93,11 @@ export function registerPlanMeasureCommand(
 }
 
 /**
- * Prices each target's own substitutable size against the selected store: one
- * `queryMissing` per target, so every answer is that target's own bytes
- * rather than a grouping's union. A target the store cannot price is left out
- * of the measurements with a warning, never a failure: a consumer packs only
- * what carries a measurement. The result is reported over `reporter` and the
- * same mapping written to `options.measureFile`.
+ * Calls `queryMissing` separately for each target. The sizes include every
+ * missing substitutable path needed to realise that target, and do not merge
+ * shared paths across targets. A failed target is omitted with a warning so a
+ * caller can distinguish it from a target measured at zero. The result is
+ * reported and written to `options.measureFile`.
  */
 export async function runPlanMeasure(
 	options: PlanMeasureRunOptions,

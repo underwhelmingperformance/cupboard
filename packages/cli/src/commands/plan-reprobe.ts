@@ -26,16 +26,9 @@ export interface PlanReprobeOptions {
 }
 
 export interface PlanReprobeRunOptions {
-	/**
-	The current build set, with one entry for each target Nix will realise.
-	*/
 	readonly targets: readonly ParsedCohortTarget[];
 }
 
-/**
- * The destination probes for the same tenant and cache used by the initial
- * partition. Tests can inject these dependencies.
- */
 export interface PlanReprobeDependencies {
 	readonly destinationProbes: DestinationProbes;
 }
@@ -50,7 +43,7 @@ export function registerPlanReprobeCommand(
 	plan
 		.command('reprobe')
 		.description(
-			'Confirm a build set still needs realising, immediately before it is built.'
+			'Confirm which planned targets still require realisation immediately before dispatch.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
@@ -85,10 +78,10 @@ export function registerPlanReprobeCommand(
 }
 
 /**
- * Queries a planned build set again and reports paths that became available
- * after the initial partition. It only confirms availability; it does not
- * update retention, apply the unknown-path ceiling, or repartition the plan. If
- * no target became available, it reports the original build set unchanged.
+ * Queries the destination and reuse view again, then reports paths that became
+ * available after the initial partition. It does not update retention, repeat
+ * upstream confirmation, apply the unknown-path ceiling, or repartition the
+ * plan. If no target became available, it reports the original build set.
  */
 export async function runPlanReprobe(
 	options: PlanReprobeRunOptions,

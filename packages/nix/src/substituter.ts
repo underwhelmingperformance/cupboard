@@ -67,8 +67,8 @@ export const maxSubstituterConcurrency = 64;
  */
 export const maxRetryWaitMs = 60_000;
 
-// When a server rate-limits this client, or reports that it is overloaded, the
-// client waits the longer delay before retrying.
+// Rate-limit and overload responses use `filetransfer-retry-delay-rate-limited`
+// instead of the ordinary retry delay.
 const rateLimitedStatuses = new Set([429, 503]);
 
 /**
@@ -84,30 +84,24 @@ function isTransientStatus(status: number): boolean {
 	return status >= 500 && ![501, 505, 511].includes(status);
 }
 
-/**
-The default for a substituter that advertises no priority.
-*/
 const defaultPriority = 0;
 
 const cacheInfoFile = 'nix-cache-info';
 const servedStoreDirectory = storeDirectorySchema.parse('/nix/store');
 
-// Request settings, with Nix's compiled-in defaults.
 function transferSettings(
 	dependencies: SubstituterEnvironment
 ): NixFileTransferSettings {
 	return dependencies.transfer ?? defaultFileTransferSettings;
 }
 
-// The requested store directory, also used when a substituter does not
-// advertise one.
 function queriedStoreDirectory(
 	dependencies: SubstituterEnvironment
 ): StoreDirectory {
 	return dependencies.storeDirectory ?? servedStoreDirectory;
 }
 
-// `http-connections` reads zero as no limit, which still needs a bound here:
+// Nix interprets zero `http-connections` as no limit, which still needs a bound here:
 // a query over a whole closure would otherwise open a connection per path.
 function requestConcurrency(dependencies: SubstituterEnvironment): number {
 	const { httpConnections } = transferSettings(dependencies);
@@ -115,13 +109,7 @@ function requestConcurrency(dependencies: SubstituterEnvironment): number {
 	return httpConnections === 0 ? maxSubstituterConcurrency : httpConnections;
 }
 
-/**
-A substituter that could not respond to a query.
-*/
 export class SubstituterUnreachableError extends NixStoreError {
-	/**
-	The delay requested by the substituter, if provided.
-	*/
 	readonly retryAfterMs?: number;
 
 	constructor(
@@ -131,8 +119,8 @@ export class SubstituterUnreachableError extends NixStoreError {
 	) {
 		super(
 			status === undefined
-				? `Substituter did not answer: ${substituter}`
-				: `Substituter answered ${String(status)}: ${substituter}`,
+				? `Could not query substituter: ${substituter}`
+				: `Substituter returned HTTP status ${String(status)}: ${substituter}`,
 			options
 		);
 		this.name = 'SubstituterUnreachableError';
@@ -143,15 +131,12 @@ export class SubstituterUnreachableError extends NixStoreError {
 	}
 }
 
-/**
-A substituter that returned a malformed response.
-*/
 export class SubstituterAnswerUnreadableError extends NixStoreError {
 	constructor(
 		public readonly substituter: string,
 		options?: ErrorOptions
 	) {
-		super(`Substituter answered something unreadable: ${substituter}`, options);
+		super(`Could not read substituter metadata: ${substituter}`, options);
 		this.name = 'SubstituterAnswerUnreadableError';
 	}
 }
@@ -162,21 +147,12 @@ export class SubstituterAnswerUnreadableError extends NixStoreError {
  * priority zero and disables mass queries.
  */
 export interface SubstituterDescription {
-	/**
-	The store directory this substituter serves paths for.
-	*/
 	readonly storeDirectory: StoreDirectory;
-	/**
-	 * Whether the substituter accepts batch availability queries.
-	 */
 	readonly hasMassQuery: boolean;
-	/**
-	Query priority. Lower-numbered substituters are queried first.
-	*/
 	readonly priority: number;
 	/**
-	 * Whether paths from this substituter may be accepted without a signature.
-	 */
+	Allows Nix to accept this substituter's paths without signatures.
+	*/
 	readonly isTrusted: boolean;
 }
 
@@ -197,69 +173,46 @@ export type SubstituterLocation =
 	| {
 			readonly kind: 'http';
 			readonly baseUrl: URL;
-			/**
-			 * Credentials supplied by the store URI or netrc.
-			 */
 			readonly credential?: BasicCredential;
 	  }
 	| { readonly kind: 'file'; readonly directory: string };
 
-/**
-A configured substituter ready to query.
-*/
 export interface Substituter extends SubstituterDescription {
-	/**
-	The configured URI used to identify the substituter in errors.
-	*/
 	readonly uri: string;
-	/**
-	Where each of its documents is read from.
-	*/
 	readonly location: SubstituterLocation;
 }
 
 export interface SubstituterEnvironment {
 	readonly fetch?: typeof undiciFetch;
 	readonly signal?: AbortSignal;
-	/**
-	 * Retry settings from the effective Nix configuration.
-	 */
 	readonly transfer?: NixFileTransferSettings;
-	/**
-	Retry delay implementation, injected to avoid waiting in tests.
-	*/
 	readonly delay?: (
 		milliseconds: number,
 		signal: AbortSignal | undefined
 	) => Promise<void>;
 	/**
-	 * Jitter source in the range zero to one, injected for deterministic tests.
-	 */
+	Produces a value from zero through one for retry jitter.
+	*/
 	readonly spread?: () => number;
 	/**
-	 * The store directory used when `nix-cache-info` does not specify one.
+	 * Selects the directory queried for paths and supplies the fallback when
+	 * `nix-cache-info` omits `StoreDir`.
 	 */
 	readonly storeDirectory?: StoreDirectory;
 	/**
-	 * The state directory for a local store that does not specify its own root.
-	 */
-	readonly stateDirectory?: string;
-	/**
-	Opens a local store database, injected for tests.
+	Supplies the state directory for a local-store URI with no root.
 	*/
+	readonly stateDirectory?: string;
 	readonly openStore?: (stateDirectory: string) => NixStoreDatabase;
 	/**
-	 * Parsed netrc credentials. Requests use the credentials for their host.
-	 */
+	Supplies netrc contents for selecting credentials for each HTTP host.
+	*/
 	readonly netrc?: string;
 }
 
-/**
-The reachable and unreachable configured substituters.
-*/
 export interface OpenedSubstituters {
 	/**
-	 * Ordered the way Nix orders them: by ascending priority, ties keeping
+	 * Ordered the way Nix orders them: by ascending priority, with ties preserving
 	 * configured order.
 	 */
 	readonly substituters: readonly Substituter[];
@@ -346,53 +299,33 @@ export async function openSubstituters(
 	};
 }
 
-// The result of opening one configured substituter.
 type OpenOutcome =
 	| { readonly opened: true; readonly substituter: Substituter }
 	| { readonly opened: false; readonly unreachable: UnreachableSubstituter };
 
-/**
- * Open substituters, or a lazy operation that opens them on the first query.
- */
 export type SubstituterSource =
 	readonly Substituter[] | (() => Promise<OpenedSubstituters>);
 
 /**
-Store-wide settings used by substituter queries.
-*/
+ * Effective store policy for direct substituter queries. Disabling
+ * `substitute` prevents every request. `fallback` allows a per-path lookup to
+ * return no offer after its final substituter fails; it does not suppress a
+ * failed mass query.
+ */
 export interface SubstituterClientOptions extends SubstituterEnvironment {
-	/**
-	The store directory for which availability is being queried.
-	*/
 	readonly storeDirectory: StoreDirectory;
-	/**
-	The `substitute` setting. When disabled, no paths are substitutable.
-	*/
 	readonly substitute: boolean;
-	/**
-	 * The `fallback` setting. By default, a failed substituter makes the result
-	 * incomplete and raises an error. When fallback is enabled, queries continue
-	 * with the remaining substituters, matching Nix.
-	 */
 	readonly fallback: boolean;
 }
 
 /**
- * Queries a store's substituters directly when no daemon manages the
- * substituter configuration.
+ * Queries substituters directly, without the daemon's narinfo cache. Opening
+ * metadata is retained after the first query, but each path lookup reads the
+ * current cache document or local store database.
  *
- * Every result comes from the substituter itself. Nix keeps a database of the
- * narinfos it has read and reuses an entry for as long as
- * `narinfo-cache-positive-ttl` or `narinfo-cache-negative-ttl` allows, so a
- * cached positive result can be a month old and a cached negative result an
- * hour old. This client does not cache narinfos, so each query observes current
- * substituter state.
- *
- * Planning decides which targets to publish and which to leave for consumers to
- * fetch, so it needs current results. A cached absence would make it publish a
- * path that is already available, and a cached presence would make it leave a
- * target on a substituter that no longer has it. The cost is one request per
- * path per run.
+ * Nix's default positive cache lifetime is one month and its default negative
+ * lifetime is one hour. Those stale results can make a publication plan omit a
+ * path that has disappeared or publish one that is already available.
  */
 export class SubstituterClient {
 	private opening?: Promise<OpenedSubstituters>;
@@ -402,8 +335,6 @@ export class SubstituterClient {
 		private readonly options: SubstituterClientOptions
 	) {}
 
-	// Opening a substituter reads its `nix-cache-info`. Open configured URIs on
-	// the first query and reuse them for later queries.
 	private open(): Promise<OpenedSubstituters> {
 		const source = this.source;
 
@@ -422,7 +353,9 @@ export class SubstituterClient {
 		return substituters;
 	}
 
-	// Nix queries substituters in order and uses the first offer.
+	// After a failure, a later absence proves the path unavailable and a later
+	// offer supplies it. With fallback disabled, the query rejects only when the
+	// final applicable substituter fails.
 	private async firstOffer(
 		storePath: StorePathString
 	): Promise<NixSubstituterOffer | undefined> {
@@ -434,7 +367,6 @@ export class SubstituterClient {
 				continue;
 			}
 
-			// A later successful response supersedes an earlier failure.
 			failure = undefined;
 
 			const outcome = await this.offerFor(substituter, storePath);
@@ -453,14 +385,12 @@ export class SubstituterClient {
 		return undefined;
 	}
 
-	// If no substituter returns a result, report the final failure.
 	private raiseIfLastFailed(failure: SubstituterFailure | undefined): void {
 		if (failure !== undefined && !this.options.fallback) {
 			throw failure;
 		}
 	}
 
-	// Query only substituters that serve the requested store directory.
 	private serves(substituter: Substituter): boolean {
 		return substituter.storeDirectory === this.options.storeDirectory;
 	}
@@ -518,9 +448,9 @@ export class SubstituterClient {
 	}
 
 	/**
-	 * Reads a path offer from a local store database. A local store does not
-	 * publish a transfer size, so the download size is zero and the NAR size
-	 * comes from the database.
+	 * Local stores provide availability and NAR metadata through their database,
+	 * not cache documents. They have no transfer size, so local offers report a
+	 * zero download and use the database's uncompressed NAR size.
 	 */
 	private offerFromStore(
 		substituter: Substituter,
@@ -584,8 +514,8 @@ export class SubstituterClient {
 	}
 
 	/**
-	 * The configured substituters that this client could not query. This list is
-	 * empty until the first query opens the configured substituters.
+	 * Substituters that were unreachable during opening. The list is empty until
+	 * the first query opens the configured substituters.
 	 */
 	async unreachable(): Promise<readonly UnreachableSubstituter[]> {
 		const opening = this.opening;
@@ -600,13 +530,10 @@ export class SubstituterClient {
 	}
 
 	/**
-	 * The subset of the given paths some substituter offers, deduplicated and
-	 * sorted. Only substituters advertising `WantMassQuery` are asked, since
-	 * the others have disabled batch queries. Each substituter receives only the
-	 * paths not offered by a higher-priority substituter.
-	 *
-	 * Each path uses the same narinfo lookup as a single-path query. Nix
-	 * implements its mass query through the same path-info operation.
+	 * Returns the paths offered by caches that enable `WantMassQuery`. Each cache
+	 * receives only paths that no higher-priority cache offered. Any cache failure
+	 * rejects the operation because `fallback` applies to realisation after a
+	 * failed substitution, not to this availability query.
 	 */
 	async querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
@@ -637,9 +564,6 @@ export class SubstituterClient {
 			for (const [index, storePath] of remaining.entries()) {
 				const answer = answers[index];
 
-				// Nix calls this substituter's mass query as one operation. A
-				// failure escapes that operation directly: `fallback` belongs to
-				// realising/building after a substitute fails, not to this query.
 				if (answer?.kind === 'failed') {
 					throw answer.error;
 				}
@@ -656,9 +580,10 @@ export class SubstituterClient {
 	}
 
 	/**
-	 * The offer from the first substituter that has each path, sorted by store
-	 * path. Paths with no offer are omitted. Priority order matches the
-	 * substituter Nix would fetch from.
+	 * Returns the first offer for each path in substituter priority order.
+	 * Paths with no offer are omitted. Signatures and the trusted-substituter flag
+	 * are evidence for the separate acceptance policy; discovery does not reject
+	 * an offer on policy grounds.
 	 */
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
@@ -679,39 +604,25 @@ export class SubstituterClient {
 	}
 }
 
-/**
-The result from one substituter for one path.
-*/
 type SubstituterOffer = NarInfoOffer & {
 	readonly fromTrustedSubstituter: boolean;
 };
 
-/**
-A substituter that failed before reporting whether it has a path.
-*/
 type SubstituterFailure =
 	SubstituterUnreachableError | SubstituterAnswerUnreadableError;
 
-/**
- * The result from one substituter for one path: an offer, an absence or a
- * failure. A later substituter may still provide the path after a failure.
- */
 type SubstituterOutcome =
 	| { readonly kind: 'held'; readonly offer: SubstituterOffer }
 	| { readonly kind: 'absent' }
 	| { readonly kind: 'failed'; readonly error: SubstituterFailure };
 
 /**
- * Statuses that indicate a substituter does not have a path. A missing object
- * returns 404, a bucket that will not list its contents returns 403 for an
- * object it does not have, and a bucket that once had a path may return 410, so
- * Nix treats all three as an absence.
+ * Nix treats these responses as evidence that the substituter does not have a
+ * path: 404 for a missing object, 403 from a bucket that disables listing, and
+ * 410 for an object that the cache removed.
  */
 const absentStatuses = new Set([403, 404, 410]);
 
-/**
-The complete result of one request attempt.
-*/
 type DocumentOutcome =
 	| { readonly kind: 'answered'; readonly document: string }
 	| { readonly kind: 'absent' }
@@ -844,7 +755,7 @@ async function shouldWaitToRetry(
 }
 
 /**
- * The delay before the next transfer attempt, or `undefined` when
+ * Computes the delay before the next transfer attempt. Returns `undefined` when
  * `Retry-After` exceeds {@link maxRetryWaitMs}.
  *
  * The backoff doubles with each attempt up to `filetransfer-retry-max-delay`,
@@ -852,7 +763,8 @@ async function shouldWaitToRetry(
  * jitter enabled, the delay falls between the minimum and the minimum plus the
  * backoff.
  *
- * The bound decides only whether a substituter is worth waiting for at all.
+ * `maxRetryWaitMs` applies only to `Retry-After`; it does not cap the configured
+ * backoff.
  */
 function retryDelayMs(
 	attempt: number,
@@ -956,19 +868,16 @@ function sleep(
 }
 
 /**
-Cancels an unread response body so its connection can be reused promptly.
-*/
+ * Cancels an unread response body so its connection can be reused promptly.
+ */
 async function discard(response: Response): Promise<void> {
 	await response.body?.cancel();
 }
 
-/**
-A substituter response that exceeds the configured size limit.
-*/
 class OversizedSubstituterDocumentError extends NixStoreError {
 	constructor(public readonly maxByteLength: number) {
 		super(
-			`A substituter answered with more than ${String(maxByteLength)} bytes`
+			`Substituter response exceeded the ${String(maxByteLength)}-byte limit`
 		);
 		this.name = 'OversizedSubstituterDocumentError';
 	}
@@ -976,7 +885,8 @@ class OversizedSubstituterDocumentError extends NixStoreError {
 
 // `BinaryCacheStore::init()` gives the advertised value to `std::stoi`: leading
 // whitespace and either sign are accepted, conversion stops after the decimal
-// digits, and a missing or out-of-range integer refuses the cache info.
+// digits, and a missing or out-of-range integer causes the cache info to be
+// rejected.
 function cacheInfoPriority(value: string): number {
 	const digits = /^\s*([+-]?\d+)/u.exec(value);
 	const parsed = digits === null ? undefined : Number(digits[1]);
@@ -998,7 +908,7 @@ function cacheInfoPriority(value: string): number {
 }
 
 /**
- * Reads a file as text, refusing a file larger than `maxByteLength`. A
+ * Reads a file as text and rejects a file larger than `maxByteLength`. A
  * directory substituter serves its documents from disk, and the caller passes
  * `maxSubstituterDocumentByteLength`, so the same bound applies to a file and
  * to a response.
@@ -1022,9 +932,6 @@ async function boundedFileText(
 	}
 }
 
-/**
- * Reads a response body as text while enforcing the size limit on each chunk.
- */
 async function boundedText(
 	response: Response,
 	maxByteLength: number
@@ -1109,8 +1016,8 @@ function substituterConfiguration(
 	return describedBy(location, parsed.search.replace(/^\?/u, ''));
 }
 
-// Store URI parameters override the corresponding settings. Reject parameter
-// values that the setting type cannot parse.
+// Store URI parameters override advertised settings. Reject values outside the
+// setting grammar.
 function describedBy(
 	location: SubstituterLocation,
 	query: string
@@ -1219,7 +1126,6 @@ function withoutParameters(parsed: URL): URL {
  * Reads one document from an HTTP or directory cache. A missing file reports
  * an absence; other filesystem errors report an unreachable substituter.
  */
-// A local store publishes no documents, so only a cache reaches this.
 async function readDocument(
 	location: Exclude<SubstituterLocation, { kind: 'local-store' }>,
 	uri: string,
@@ -1291,9 +1197,9 @@ async function describeSubstituter(
 	const asked = await readDocument(location, uri, cacheInfoFile, dependencies);
 
 	// A missing `nix-cache-info` is equivalent to an empty document. Nix writes
-	// the file with the compiled-in defaults when it opens a directory cache;
-	// over HTTP a cache that serves reads alone refuses that write, so Nix
-	// reports that the URL is not a binary cache.
+	// the file with the compiled-in defaults when it opens a directory cache. A
+	// read-only HTTP cache cannot accept that write, so Nix reports that the URL
+	// is not a binary cache.
 	if (asked.kind === 'absent') {
 		return location.kind === 'file'
 			? { kind: 'described', description: parseCacheInfo('', servedBy) }
@@ -1314,9 +1220,6 @@ async function describeSubstituter(
 	}
 }
 
-/**
-Metadata parsed from a substituter's own document.
-*/
 type CacheInfoOutcome =
 	| { readonly kind: 'described'; readonly description: SubstituterDescription }
 	| {
@@ -1324,10 +1227,6 @@ type CacheInfoOutcome =
 			readonly reason: 'no-cache-info' | 'needs-credentials';
 	  };
 
-/**
- * Classification of a cache metadata response. Authentication failures are
- * distinct from missing or malformed metadata.
- */
 function reasonFor(
 	failure: SubstituterFailure
 ): 'no-cache-info' | 'needs-credentials' {
@@ -1343,9 +1242,6 @@ function reasonFor(
  */
 const credentialStatuses = new Set([401, 407]);
 
-/**
- * Substituter settings from the store URI, which override `nix-cache-info`.
- */
 function configuredDescription(query: string): Partial<SubstituterDescription> {
 	const parameters = storeUriParameters(query);
 	const priority = parameters.get('priority');
@@ -1364,10 +1260,10 @@ function configuredDescription(query: string): Partial<SubstituterDescription> {
 }
 
 /**
- * Parses a `priority` parameter using Nix's integer-setting rules:
- * an optional binary unit multiplying what comes before it, and before that a
- * signed decimal number within the setting's declared width. Suffixes,
- * fractions, other bases and out-of-range values are invalid.
+ * Parses a `priority` parameter using Nix's integer-setting rules: an optional
+ * sign and decimal digits, followed optionally by a binary unit. The resulting
+ * value must fit the setting's declared width. Suffixes, fractions, other bases
+ * and out-of-range values are invalid.
  */
 function settingPriority(value: string): number {
 	const priority = nixIntegerOfWidth(value, 'int32');
@@ -1385,9 +1281,8 @@ const priorityExpectation =
 const minPriority = -(2 ** 31);
 const maxPriority = 2 ** 31 - 1;
 
-// Nix reads the document line by line and applies its own default to every
-// field the document leaves out, so a cache publishing a partial one is
-// usable.
+// Nix applies its compiled-in default to each field omitted from the document,
+// so a partial document remains usable.
 function parseCacheInfo(
 	source: string,
 	servedBy: StoreDirectory

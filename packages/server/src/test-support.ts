@@ -257,11 +257,10 @@ export async function resetTestServer(): Promise<void> {
 }
 
 /**
- * Writes the fixture tenant's D1 registry row and publishes the admission
- * manifest, the way provisioning would, so a Worker-routed read or write is
- * admitted. A `read` credential makes the cache private; omitting it leaves it
- * public. The row is upserted so a test can switch a public fixture tenant to
- * private mid-test.
+ * Writes the fixture tenant's registry, usage, membership, and filter state so
+ * Worker-routed requests can reach it. `readMode` controls whether reads are
+ * public; `read` supplies the verifier for a private tenant. Repeated calls can
+ * change the fixture's read mode without resetting its usage counters.
  */
 export async function provisionFixtureTenant(
 	options: {
@@ -1584,8 +1583,6 @@ export async function deleteBlobState(
 		.run();
 }
 
-// Retires a D1 reference edge directly, standing in for a delete that retired the
-// edge but crashed before deleting the narinfo object or clearing its marker.
 export async function deleteBlobReferenceEdge(
 	storePathHash: StorePathHash,
 	generation: number
@@ -1732,10 +1729,8 @@ export async function negotiateViaWorker(
 }
 
 /**
- * Runs a store path through negotiate, prepare, upload and commit. Unlike the
- * step helpers it asserts nothing time-dependent, so a test can push several
- * paths in sequence without tripping over the upload-expiry comparison.
- */
+Pushes one path without making assertions against the upload expiry clock.
+*/
 export async function pushPath(
 	token: string,
 	metadata: ParsedUploadPathMetadata,
@@ -1757,9 +1752,6 @@ export async function pushPath(
 	await commitUpload(token, decision.uploadId, cache);
 }
 
-// Drives a full negotiate, prepare, upload and commit for a path through the Worker
-// under a named tenant's `/t/<tenant>/` prefix, the multi-tenant write path. The
-// token must be a write token issued by that tenant's Durable Object.
 export async function pushPathToTenant(
 	tenant: TenantId,
 	token: string,
@@ -1864,10 +1856,8 @@ export async function attemptPushToTenant(
 	return StatusCodes.OK;
 }
 
-// Stages a deferred upload for a named tenant through the Worker (negotiate, prepare,
-// upload) and marks it pending on that tenant's object without committing, returning
-// its uploadId. Lets a test assert the cron fan-out drives a named tenant's
-// background verify pass.
+// Leave the upload pending so a test can run scheduled verification for the
+// named tenant without first opening a commit session.
 export async function stageDeferredForTenant(
 	tenant: TenantId,
 	token: string,
@@ -2346,7 +2336,7 @@ export async function runGcResult(): Promise<GcResult> {
 }
 
 /**
-Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache.
+Calls the HTTP GC route from an origin that has no edge-cache purge binding.
 */
 export async function runGcFromInternalOrigin(): Promise<void> {
 	const token = await initialise();
@@ -2954,9 +2944,8 @@ export async function deferFreshUpload(
 }
 
 /**
- * Marks a negotiated upload `pending` background verification, the verdict a
- * commit records for a blob above the inline-verify budget. Lets a test exercise
- * the background verify-and-commit pass without a multi-megabyte fixture.
+ * Marks a staged upload as pending so a test can run background verification
+ * without opening a commit session.
  */
 export async function markUploadPendingVerification(
 	uploadId: UploadId,
@@ -2973,9 +2962,8 @@ export async function markUploadPendingVerification(
 	});
 }
 
-// Plants the `committing` saga marker on a staged upload, the state an inline
-// commit leaves if it crashes after marking commit-in-progress but before it
-// finishes: the verify pass must re-drive it to servable.
+// Reproduce a commit interrupted after its durable marker was written. A later
+// verification pass must resume the same upload.
 export async function markUploadCommitting(uploadId: UploadId): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { pendingUploads } })

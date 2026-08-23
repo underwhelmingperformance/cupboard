@@ -55,27 +55,24 @@ const defaultNixEvaluator: NixEvaluator = (arguments_) =>
 		maxBuffer: 256 * 1024 * 1024
 	});
 
-// Remove leading and trailing slashes so equivalent suffixes produce the same
-// root. Interior slashes remain significant to the server.
+// Strip only leading and trailing slashes. Equivalent suffix spellings must
+// produce the same root, while interior slashes remain significant.
 export function canonicalRootSuffix(suffix: string): string {
 	return suffix.replace(/^\/+/u, '').replace(/\/+$/u, '');
 }
 
 /**
- * Joins a root prefix and suffix in the canonical form used by every target
- * root consumer. Cached-target checks and build jobs therefore use identical
- * root names.
+ * Retained-target checks and build jobs must construct byte-identical root
+ * names. Canonicalise the prefix and suffix here for every consumer.
  */
 export function joinRoot(prefix: string, suffix: string): string {
 	return `${prefix.replace(/\/+$/u, '')}/${canonicalRootSuffix(suffix)}`;
 }
 
 /**
- * Whether a runner label may be used at all: printable ASCII with no spaces.
- * GitHub matches labels case-insensitively with .NET's ordinal comparison,
- * whose case folding differs from JavaScript's full case conversion outside
- * ASCII (the sharp s, the sigma family), so a non-ASCII `os` label is
- * refused when the manifest is parsed.
+ * GitHub compares runner labels case-insensitively with .NET's ordinal rules.
+ * JavaScript's full case conversion differs outside ASCII, so manifest parsing
+ * permits only printable ASCII labels without spaces.
  */
 export function isValidRunnerLabel(label: string): boolean {
 	return /^[!-~]+$/u.test(label);
@@ -101,10 +98,8 @@ const publishOutputsSchema = z
 	.transform((outputs) => [...new Set(outputs)]);
 
 /**
- * One member of a component-publication target. The component supplies its
- * attribute and optional derivation path. It inherits its execution context,
- * retention root, failure policy and cohort from the aggregate target; see
- * {@link expandComponents}.
+ * Component entries inherit the aggregate target's execution context,
+ * retention root, failure policy and cohort; see {@link expandComponents}.
  */
 export const publishComponentSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
@@ -133,8 +128,8 @@ export const publishTargetSchema = z.strictObject({
 			message: 'root suffix must contain more than slashes'
 		}),
 	outputs: publishOutputsSchema,
-	// Two targets naming the same cohort form one cohort (see cohortsFor); a
-	// target that omits it is its own cohort, keyed by its own identity.
+	// Targets with the same cohort label form one cohort (see cohortsFor). A
+	// target without a label forms its own cohort, keyed by its identity.
 	cohort: z
 		.string()
 		.min(1)
@@ -143,9 +138,9 @@ export const publishTargetSchema = z.strictObject({
 			message: `cohort must be a printable ASCII label of at most ${String(cohortLabelMaxLength)} characters without spaces`
 		})
 		.optional(),
-	// Component publication: see expandComponents. When it is present, this
-	// target's own attr and rootDrvPath are never evaluated or built; its
-	// components are published in its place, under its rootSuffix.
+	// When components are present, do not evaluate or build this target's own
+	// attr and rootDrvPath. Publish its components under its rootSuffix instead;
+	// see expandComponents.
 	components: z.array(publishComponentSchema).min(1).optional()
 });
 
@@ -241,10 +236,9 @@ export interface TargetEvaluation {
 }
 
 /**
- * One cohort from the manifest: the targets that run together in one job. A
- * target without an explicit `cohort` label is its own cohort. Before checking
- * destination availability, cohorts form a complete partition of the manifest,
- * including retained targets. Destination contents do not affect membership.
+ * Targets in one cohort run in one job. A target without an explicit `cohort`
+ * label forms its own cohort. Cohorts partition the complete manifest before
+ * destination availability is checked, so retained targets remain members.
  */
 export interface Cohort {
 	readonly key: string;
@@ -252,17 +246,9 @@ export interface Cohort {
 	readonly os: string;
 	readonly remote: boolean;
 	readonly targets: readonly PublishTarget[];
-	// The installables a cohort job passes to `nix build`: one `attr^outputs`
-	// form per member, in the same form a single-target job uses.
 	readonly installables: readonly string[];
 }
 
-/**
- * One derivation and the target identities (attrs) whose evaluated graph
- * contains it. Built from the recursive graph {@link evaluateTargets} has
- * already read, so a streamed build's post-build hook can map a `DRV_PATH` to
- * its target, and from there to that target's root, without asking Nix again.
- */
 export interface DerivationToTargetsEntry {
 	readonly drvPath: string;
 	readonly targets: readonly string[];
@@ -312,9 +298,8 @@ export function planPublish(options: {
 		...(options.unevaluated ?? [])
 	];
 
-	// Cohorts partition the whole declared manifest, not just what still needs
-	// building, so a target already retained still keeps its place in the
-	// cohort a later run's cohort job would see.
+	// Cohort membership comes from the complete manifest, not the pending build
+	// set. A retained target must remain in any cohort job that still runs.
 	const allTargets = [
 		...options.evaluations.map((evaluation) => evaluation.target),
 		...(options.unevaluated ?? [])
@@ -328,8 +313,8 @@ export function planPublish(options: {
 	};
 }
 
-// The availability probe asks only about the paths the retained-target check
-// reads: each evaluated target's own predictable outputs.
+// Probe only the predictable outputs used by the retained-target check, not
+// every path in each target's dependency graph.
 export function cacheProbePaths(
 	evaluations: readonly TargetEvaluation[]
 ): StorePathString[] {
@@ -457,10 +442,8 @@ async function evaluateResolvedTarget(
 	}
 }
 
-// A best-effort target's failure becomes a workflow warning instead of a thrown
-// error, so the reason must keep the evaluator's own message. A
-// {@link TargetEvaluationError} names the attribute and keeps that message as
-// its cause, so the two are joined back into one line.
+// Best-effort failures become workflow warnings. Include the evaluator's cause
+// so the warning explains the failure instead of reporting only the target.
 function evaluationFailureReason(error: unknown): string {
 	if (error instanceof TargetEvaluationError && error.cause instanceof Error) {
 		return `${error.message}: ${error.cause.message}`;
@@ -571,9 +554,8 @@ function parseDerivationResponse(label: string, stdout: string): unknown {
 	}
 }
 
-// A node's declared inputs: either the bare list of consumed output names, or
-// the object form `nix derivation show` prints, whose `outputs` list holds the
-// same names.
+// Nix prints an input either as a list of consumed output names or as an object
+// whose `outputs` field contains that list.
 const outputNamesSchema = z.array(z.string());
 const derivationInputSchema = z.union([
 	outputNamesSchema,
@@ -586,12 +568,10 @@ const derivationInputsFieldSchema = z.looseObject({
 });
 const derivationOutputSchema = z.looseObject({ path: z.string().optional() });
 
-// One derivation as `nix derivation show` prints it. The schema declares only
-// the fields used by planning and allows additional fields.
-// `inputs.drvs` is the current spelling and `inputDrvs` the older one. An
-// output's store path comes from `path` or from the matching value in `env`. A
-// content-addressed placeholder is not a store path, so that output remains
-// unresolved.
+// Accept both `inputs.drvs`, which current Nix versions print, and the older
+// `inputDrvs` spelling. An output path can appear in `path` or in the matching
+// `env` value. Content-addressed placeholders are not store paths, so those
+// outputs remain unresolved. Ignore fields that planning does not use.
 const derivationNodeBaseSchema = z.looseObject({
 	inputs: derivationInputsFieldSchema.optional(),
 	inputDrvs: derivationInputsSchema.optional(),
@@ -608,9 +588,8 @@ function derivationNodeSchema(storeDirectory: StoreDirectory) {
 	}));
 }
 
-// `nix derivation show` prints a bare map of drvPath to node; the Determinate
-// evaluator wraps the same map under `derivations`. Unwrapping to the inner map
-// leaves one document shape to parse.
+// Nix prints a bare map from derivation path to node. The Determinate evaluator
+// wraps the same map in `derivations`; unwrap it before parsing the nodes.
 const derivationWrapperSchema = z.looseObject({
 	derivations: z.record(z.string(), z.unknown())
 });
@@ -683,9 +662,8 @@ function nodeOutputs(
 	});
 }
 
-// A derivation reference is printed either absolute or as a bare basename. A
-// basename refers to the store the evaluating Nix reads, and the runner's
-// configuration decides that store's directory.
+// A bare derivation basename refers to the store used by the Nix evaluator.
+// Resolve it against that store's configured directory, not `/nix/store`.
 function absoluteStorePath(
 	storePath: string,
 	storeDirectory: StoreDirectory
@@ -776,8 +754,7 @@ async function queryMissingStorePathHashes(
 	storePathHashes: readonly StorePathHash[],
 	headers: Readonly<Record<string, string>>
 ): Promise<StorePathHash[]> {
-	// The query hangs off the base under a fixed protocol path, so the base is
-	// rendered once and the path appended as text.
+	// Append the protocol path to one canonical rendering of the cache URL.
 	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
 
 	return fetchWithProbeDeadline(
@@ -856,19 +833,14 @@ function executionContextKey(target: PublishTarget): string {
 	]);
 }
 
-/**
- * Whether a cohort's failure is one the manifest tolerates. {@link cohortsFor}
- * rejects a labelled cohort whose members disagree, so every member has the
- * same value here. Cohorts themselves are never empty.
- */
 export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
 	return members.every((member) => member.bestEffort);
 }
 
 /**
- * Partitions the complete manifest into cohorts. An explicit `cohort` label
- * groups targets in one job; otherwise each target forms its own cohort.
- * Destination availability does not change cohort membership.
+ * Destination availability does not change cohort membership. Partition the
+ * complete manifest by explicit `cohort` label, with an individual cohort for
+ * each target that has no label.
  */
 export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
 	const byLabel = new Map<string, PublishTarget[]>();
@@ -941,11 +913,9 @@ function cohortKey(label: string, target: PublishTarget): string {
 }
 
 /**
- * Maps each derivation in the evaluated dependency graphs to its owning target
- * attributes. The post-build hook uses this map to attribute a `DRV_PATH`
- * without querying Nix during the build. The graph records attribution
- * evidence; it does not instruct the build to realise every derivation in the
- * graph.
+ * Record which target graphs contain each derivation. This map is attribution
+ * evidence only; it does not instruct a build to realise every derivation in
+ * those graphs.
  */
 export function derivationToTargetsFor(
 	evaluations: readonly TargetEvaluation[]
@@ -977,10 +947,9 @@ export type TargetCoverageStatus =
 	'covered' | 'not-covered' | 'unknown-output' | 'failed';
 
 /**
- * The advisory pre-filter result for one target. `covered` requires the root's
- * last reconciled list to contain every current output. Unknown output paths
- * and failed reads use distinct statuses so callers do not treat them as cache
- * misses.
+ * `covered` requires the root's last reconciled list to contain every current
+ * output. Keep unknown output paths and failed reads distinct so callers do not
+ * treat them as cache misses.
  */
 export interface TargetCoverage {
 	readonly attr: string;
@@ -989,9 +958,9 @@ export interface TargetCoverage {
 }
 
 /**
- * Determines whether a known-output target remains retained and whether its
- * reconciled root contains every current output. Callers produce
- * `unknown-output` and `failed` before reaching this check.
+ * A retained root covers a known-output target only when its last reconciled
+ * path list contains every current output. Callers handle unknown outputs and
+ * failed reads before this check.
  */
 export function evaluateTargetCoverage(
 	target: PublishTarget,
@@ -1019,13 +988,10 @@ export interface CohortPreFilterDecision {
 }
 
 /**
- * Reduces a cohort's member coverage to one prune decision. The pre-filter
- * prunes jobs, never composes build sets, so this only ever decides whether
- * the cohort's job is needed at all: pruned when every member is covered,
- * and never pruned when any member is uncovered, unknown, or failed. A failed
- * member never refuses the plan: the cohort's job still runs and the decision
- * records the failure reason, so a pre-filter that exists only to save runner
- * minutes cannot fail the plan.
+ * The advisory pre-filter may prune a cohort only when every member is covered.
+ * An uncovered, unknown or failed member keeps the job in the plan. Failures
+ * record their reasons but do not fail planning because this check exists only
+ * to avoid unnecessary runner work.
  */
 export function cohortPreFilterDecision(
 	cohort: Cohort,

@@ -52,23 +52,18 @@ import {
 
 import { tenantServer } from './durable-object.ts';
 
-// One cron tick maintains at most this many tenants. The batch picks the
-// most-overdue active tenants by `last_maintained_at`, so the whole fleet is
-// covered over successive ticks. Provisional, pending a fleet-scale measurement.
+// Rotate through active tenants in bounded batches ordered by
+// `last_maintained_at`.
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
 
-// Per cron tick, the offboard drain works at most this many tenants, each for at
-// most this many bounded rounds of this many rows/objects. The product bounds the
-// tick's subrequest fan-out; the per-round chunk matches R2's 1000-key delete so a
-// large tenant reclaims many batches per tick. Provisional, pending
-// a fleet-scale measurement.
+// Bound offboarding by tenants, rounds, and objects per round. The object chunk
+// matches R2's 1,000-key delete limit.
 const offboardTenantsPerTick = 10;
 const offboardRoundsPerTick = 10;
 const offboardDrainChunk = 1000;
 
-// The KV key holding the demote scan's resume position (see DemoteCursor).
 const demoteCursorKey = 'reaper:demote-cursor';
 const casDemoteCursorKey = 'reaper:cas-demote-cursor';
 
@@ -131,18 +126,13 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'control-key-retirement' };
 
 /**
- * One hourly cron tick: the bounded tenant maintenance batch, then the global blob
- * reaper on its reserved budget after the fan-out, in its three passes (arm and
- * collect unreferenced blobs, then demote those whose object has gone missing). Each
- * pass runs independently of the others' outcome, and their failures are surfaced
- * together so neither a stalled batch nor a stalled reaper is silently swallowed.
+ * Runs every maintenance pass in sequence and reports their failures together.
+ * Reaper passes run after tenant fan-out so tenant work cannot consume the
+ * subrequest budget reserved for global cleanup.
  */
 export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	const failures: unknown[] = [];
 
-	// Sequential, not concurrent: the reaper runs on its reserved budget after the
-	// fan-out so a long fan-out cannot starve it, and each pass is isolated so one
-	// stalling does not hold back the next.
 	for (const pass of [
 		() => runMaintenanceBatch(logger, env),
 		() => runOffboardBatch(logger, env),
@@ -171,9 +161,8 @@ export async function enqueueMaintenanceJobs(
 	env: Env,
 	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
 ): Promise<MaintenanceQueueMessage[]> {
-	// Rebuild the membership filter and reassert per-tenant markers inline each
-	// tick, before fanning work out: new-tenant liveness and dropped-marker healing
-	// must not depend on a queue send that can be dropped.
+	// Refresh membership before sending queue messages. New tenants and missing
+	// markers must not depend on successful queue delivery.
 	await refreshTenantMembership(env);
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -206,9 +195,6 @@ export async function enqueueMaintenanceJobs(
 	return messages;
 }
 
-// Raised when one or more maintenance queue batches fail to send. The aggregate
-// contains the underlying send errors, distinct from the tenant maintenance
-// failures that cron also collects.
 export class QueueBatchSendError extends AggregateError {
 	constructor(failures: readonly unknown[]) {
 		super(failures);
@@ -220,10 +206,8 @@ export async function sendQueueMessages(
 	queue: MaintenanceQueue,
 	messages: readonly MaintenanceQueueMessage[]
 ): Promise<void> {
-	// Attempt every chunk even if one fails, so a failed send of an earlier chunk
-	// does not skip the global passes (reaper, demote, control-key retirement) that
-	// trail the per-tenant messages. Failures are aggregated and rethrown so the
-	// tick still records that the send was incomplete.
+	// Attempt every chunk so one failed tenant batch does not prevent global
+	// maintenance messages from being enqueued. Report all send failures together.
 	const failures: unknown[] = [];
 
 	for (let offset = 0; offset < messages.length; offset += queueSendBatchSize) {
@@ -374,10 +358,8 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 }
 
 /**
- * The global blob reaper, run Worker-side over the shared D1 facts and R2 objects
- * in the Worker, so the only actor that sees every
- * tenant's reference edges does the collecting. Returns how many shared blobs it
- * collected.
+ * Collects unreferenced canonical NAR objects. This runs on the Worker because
+ * tenant Durable Objects cannot see reference edges owned by other tenants.
  */
 export function runBlobReaper(
 	logger: Logger,
@@ -396,11 +378,9 @@ export function runCasReaper(
 }
 
 /**
- * The reaper's demote pass: a bounded, cursored scan of `blob_state` for shared
- * objects that have gone missing, removing the fact and de-materialising the
- * referencing narinfos through their owning tenant Durable Objects. Run Worker-side
- * for the same reason as the collect pass: only the Worker can scan every tenant's
- * facts. Returns how many shared facts it demoted.
+ * Scans a bounded page of `blob_state` for missing canonical objects. It removes
+ * stale global facts and asks each tenant Durable Object to retire the affected
+ * narinfos.
  */
 export function runReaperDemote(
 	logger: Logger,
@@ -426,8 +406,7 @@ export function runCasReaperDemote(
 	);
 }
 
-// Stores the demotion scan cursor in KV because it is cron state, not shared-blob
-// data. A missing or empty value restarts the scan from the beginning.
+// An empty cursor restarts the scan from the first shared blob.
 function demoteCursor(env: Env): DemoteCursor {
 	return {
 		read: async () => (await env.CRON_STATE.get(demoteCursorKey)) ?? '',
@@ -451,9 +430,7 @@ function blobReaper(env: Env): BlobReaperService {
 	);
 }
 
-// Routes a demote to the owning tenant's Durable Object, the single writer of that
-// tenant's narinfo objects. The service binding authorises the direct RPC, so the
-// reaper never touches a tenant's objects itself.
+// Each tenant Durable Object remains the single writer for its narinfo objects.
 class TenantNarInfoDemoter implements NarInfoDemoter {
 	constructor(private readonly env: Env) {}
 
@@ -479,12 +456,9 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
 }
 
 /**
- * Drains a bounded batch of offboarding tenants. Each tenant removes a bounded
- * batch of reference and presence rows through its Durable Object, which is the
- * only writer for those rows. The Worker removes a bounded batch of R2 objects.
- * After both stores are empty, the tenant is finalised as a scrubbed tombstone.
- * Maintenance selects only active tenants, so it cannot process the same tenant.
- * The function reports every tenant failure.
+ * Drains a bounded batch of offboarding tenants. Each tenant Durable Object
+ * removes its reference rows, while the Worker removes namespaced R2 objects.
+ * The registry becomes an offboarded tombstone only after both stores are empty.
  */
 export async function runOffboardBatch(
 	logger: Logger,
@@ -528,12 +502,8 @@ function selectOffboardTenants(
 		.all();
 }
 
-// Drains a single tenant for up to a bounded number of rounds this tick, finalising
-// it once its rows and objects are both exhausted. Each round sheds a chunk of edge
-// rows through the Durable Object (the single writer of those rows) and a chunk of R2
-// objects directly (content-addressed and idempotent, so the Worker may delete them);
-// looping lets a large tenant reclaim many chunks per tick while the round cap keeps
-// the tick within its subrequest budget.
+// Drain several bounded chunks per tick, then finalise only when both the tenant
+// Durable Object and its R2 prefix are empty.
 async function drainTenant(
 	logger: Logger,
 	env: Env,
@@ -558,9 +528,8 @@ async function drainTenant(
 	}
 }
 
-// Deletes a bounded batch of a tenant's namespaced R2 objects, returning whether
-// more remain so the drain runs again next tick. Listing from the prefix each tick
-// (the deleted keys gone) makes progress without a persisted cursor.
+// Restart each listing at the tenant prefix. Deleted keys disappear, so repeated
+// bounded passes make progress without a cursor.
 async function hasRemainingTenantObjects(
 	env: Env,
 	id: TenantId,
@@ -575,10 +544,8 @@ async function hasRemainingTenantObjects(
 	return listed.truncated;
 }
 
-// Finalises a tenant after all data has been drained. First purge its Durable
-// Object storage. Then write the terminal `offboarded` registry tombstone,
-// remove its usage row, and delete its membership marker. Repeating these steps
-// after an interruption is safe.
+// Purge Durable Object storage before writing the terminal registry tombstone.
+// Each step is safe to repeat after an interruption.
 async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 	await tenantServer(env, id).purgeStorage();
 
@@ -588,11 +555,9 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 }
 
 /**
- * Maintains the active tenants with the oldest `last_maintained_at` values, then
- * updates that timestamp for the selected batch. Successive ticks therefore
- * rotate through the fleet. The function reports every tenant failure and still
- * advances the selected timestamps so one failing tenant does not prevent later
- * tenants from running.
+ * Maintains the oldest active tenant batch. It advances every selected
+ * `last_maintained_at` value even when a tenant fails so later tenants are not
+ * starved.
  */
 export async function runMaintenanceBatch(
 	logger: Logger,
@@ -603,9 +568,8 @@ export async function runMaintenanceBatch(
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const batch = await overdueActiveTenants(database, batchSize);
 
-	// Each tenant runs independently so one tenant's failure does not stall the
-	// rest, but the fan-out is explicitly capped so the platform does not have to
-	// provide the backpressure policy.
+	// Bound the fan-out and isolate each tenant's failure from the rest of the
+	// batch.
 	const results = await settleWithConcurrency(
 		batch,
 		maintenanceConcurrency,
@@ -672,29 +636,23 @@ function maintainTenant(logger: Logger, env: Env, id: TenantId): Promise<void> {
 	);
 }
 
-// How many staging objects the queue consumer decodes at once for one tenant.
-// Bounded so a single tenant's verify pass does not monopolise the consumer's
-// isolate; the heavy decode is off the DO thread regardless.
+// Bound concurrent decoding so one tenant does not monopolise the queue
+// consumer isolate.
 const verifyDecodeConcurrency = 4;
 
-// How a recorder reaches the DO through a fault: a couple of in-place retries
-// keep a pass's decodes from being wasted on a transient blip, short enough
-// that a genuinely down DO fails the message while its claims' leases still
-// hold.
+// Retry briefly while claim leases are still valid, then fail the queue message
+// so it can be redelivered.
 const recordAttempts = 3;
 const recordRetryDelayMs = 500;
 
-// How many times the promotion batch retries a D1 fault before falling back to
-// per-statement execution. The shape mirrors the recorder's retry loop.
 const promotionBatchAttempts = 3;
 const promotionBatchRetryDelayMs = 500;
 
 /**
- * Buffers completed verdicts and records them incrementally. Only one
- * `recordVerifications` RPC runs at a time, and verdicts completed during that
- * call form the next batch. If the invocation stops, it loses at most the active
- * batch and the buffer. A failed RPC preserves its batch and makes
- * `finishRecording` reject. The queue can then retry the idempotent writes.
+ * Records completed verdicts incrementally through one RPC at a time. Verdicts
+ * completed during an RPC form the next batch. A failed RPC keeps its batch at
+ * the front of the buffer and makes `finishRecording` reject so the queue can
+ * redeliver the idempotent writes.
  */
 export class VerdictRecorder {
 	private buffer: VerificationResult[] = [];
@@ -719,10 +677,8 @@ export class VerdictRecorder {
 			try {
 				this.applied += await this.recordWithRetry(batch);
 			} catch (error) {
-				// The batch could not record: keep it buffered (ahead of anything
-				// added meanwhile, preserving order) and stop to avoid spinning
-				// against a Durable Object that is down. `finishRecording` reports
-				// the failure to the caller.
+				// Preserve order and stop flushing after a failure. The queue retry will
+				// redeliver the idempotent verdicts.
 				this.buffer = [...batch, ...this.buffer];
 				this.failure = { error };
 				break;
@@ -766,13 +722,12 @@ export class VerdictRecorder {
 	}
 
 	/**
-	 * Waits for every buffered verdict to record and returns how many actually
-	 * applied. Rethrows a recording failure the in-flush retries could not
-	 * clear, so the pass's queue message fails and redelivers.
+	 * Waits until all buffered verdicts are recorded. A persistent RPC failure
+	 * rejects the queue message for redelivery.
 	 */
 	async finishRecording(): Promise<number> {
-		// A verdict added while a flush is in flight starts a fresh one when it
-		// ends, so quiescence means waiting out each successor in turn.
+		// A verdict added during a flush starts another flush. Wait for each
+		// successor until the buffer is quiescent.
 		while (this.flushing !== undefined) {
 			await this.flushing;
 		}
@@ -785,24 +740,19 @@ export class VerdictRecorder {
 	}
 }
 
-// A claim whose R2 promotion has succeeded. The pass applies its `blob_state`
-// upsert as part of one batch, then records `onSuccess`. If the batch fails, it
-// records `onFailure` instead.
 interface PendingPromotion {
 	readonly upsert: BlobStateUpsert;
 	readonly onSuccess: VerificationResult;
 	readonly onFailure: VerificationResult;
 }
 
-// Either a verdict to record now, or a promotion whose upsert the pass batches.
 type PromotionOutcome =
 	| { readonly kind: 'verdict'; readonly result: VerificationResult }
 	| { readonly kind: 'promotion'; readonly promotion: PendingPromotion };
 
-// Verifies and promotes one claimed upload. If R2 promotion succeeds, return the
-// D1 upsert for the caller's batch. If R2 promotion fails, return the verified
-// result without an upsert; the Durable Object will perform promotion while
-// applying that result.
+// Return a staged D1 upsert after successful R2 promotion. If promotion fails,
+// return the verified result so the Durable Object can retry promotion while it
+// applies the verdict.
 async function stagePromotionForClaim(
 	database: CronDatabase,
 	blobs: R2Bucket,
@@ -844,11 +794,9 @@ async function stagePromotionForClaim(
 	}
 }
 
-// Applies the collected `blob_state` upserts in one D1 batch, with retries for
-// transient failures and a per-statement fallback after the retries. Each claim
-// receives a success verdict if its upsert succeeds and a failure verdict if it
-// fails. The upserts are idempotent `onConflictDoUpdate` statements, so both
-// retry paths are safe.
+// Apply promotion upserts in one D1 batch. After transient retries fail, execute
+// them individually so one invalid statement does not block the others. The
+// upserts are idempotent across both paths.
 async function recordPromotionBatch(
 	logger: Logger,
 	database: CronDatabase,
@@ -861,7 +809,6 @@ async function recordPromotionBatch(
 
 	const upserts = promotions.map((promotion) => promotion.upsert);
 
-	// Attempt the batch with retries, mirroring the recorder's retry shape.
 	let wasBatchApplied = false;
 
 	for (let attempt = 0; attempt < promotionBatchAttempts; attempt += 1) {
@@ -892,10 +839,7 @@ async function recordPromotionBatch(
 		return;
 	}
 
-	// Retries exhausted: fall back per-statement so one poisoned upsert cannot
-	// sink its batch-mates. Each is individually idempotent, and the concurrency
-	// stays bounded so the fallback does not fan a whole pass's statements at a
-	// database that just refused the batch.
+	// Keep individual fallback concurrency bounded after D1 rejected the batch.
 	const applied = await mapWithConcurrency(
 		upserts,
 		maxOutgoingConnections,
@@ -916,13 +860,9 @@ async function recordPromotionBatch(
 	}
 }
 
-// The prompt verify path. The CPU-bound NAR decode is the work that saturated
-// the single DO thread, so it runs here in the queue consumer instead: claim a
-// batch of deferred uploads (a read on the DO), fetch, decode and promote each
-// staging object off the DO thread, then report the verdicts back so only the
-// state transitions run on the single writer. A transient fetch/decode fault
-// leaves the row for the next pass (the consumer simply does not report it); a
-// definitively missing staging object fails it terminally.
+// Fetch, decode, and promote claimed uploads in the queue consumer. Only the
+// fenced state transitions run on the tenant's single-writer Durable Object.
+// Transient faults release a claim; a definitively missing object is terminal.
 export async function verifyTenant(
 	logger: Logger,
 	env: Env,
@@ -936,18 +876,16 @@ export async function verifyTenant(
 		maxNarBytes
 	);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	// Verdicts record as they are reached: a waiter unparks as soon as its own
-	// upload settles, and an invocation dying mid-pass keeps everything already
-	// recorded.
+	// Record verdicts as they complete so waiters do not depend on slower siblings
+	// and a failed invocation preserves earlier progress.
 	const recorder = new VerdictRecorder(
 		logger.with({ job: 'verify-verdicts' }),
 		(results) => server.recordVerifications(results)
 	);
 
-	// Pin all claimed hashes immediately: clear any reaper grace timer so the
-	// reaper cannot delete an armed row (and its canonical R2 object) before the
-	// pass-end upsert re-arms it via `delete_after = NULL`. The pin only affects
-	// rows that already exist; missing rows are fine (their upsert inserts later).
+	// Clear reaper deadlines for all claimed hashes before doing external work.
+	// Missing rows are inserted later; existing rows must not be reaped before
+	// their promotion upsert runs.
 	await pinClaimedNarHashes(
 		database,
 		claims.map((claim) => claim.narHash)
@@ -956,10 +894,8 @@ export async function verifyTenant(
 	const reuseClaims = claims.filter((claim) => claim.reuse);
 	const freshClaims = claims.filter((claim) => !claim.reuse);
 
-	// Reuse rows need no decode: their bytes are the shared canonical object,
-	// verified when it was first promoted. Promote each (a canonical head) ahead
-	// of the decodes, so the cheap rows are never hostage to the expensive ones,
-	// and collect their `blob_state` upserts to settle in one D1 batch.
+	// Reuse claims need only a canonical-object head. Process them before fresh
+	// decodes and batch their `blob_state` upserts together.
 	const reusePromotions: PendingPromotion[] = [];
 
 	await mapWithConcurrency(
@@ -980,19 +916,16 @@ export async function verifyTenant(
 						uploadId: claim.uploadId,
 						verdict: { kind: 'promoted' }
 					},
-					// The canonical head succeeded, so a claim whose upsert ultimately
-					// fails still settles: the verified verdict has the settle run its
-					// own promote on the DO thread.
+					// If the batched upsert fails, let the Durable Object repeat promotion
+					// while applying the verified verdict.
 					onFailure: {
 						uploadId: claim.uploadId,
 						verdict: { kind: 'verified', verification: { ok: true } }
 					}
 				});
 			} catch (error) {
-				// A vanished canonical object cannot reappear, so report it gone and
-				// let the settle answer the waiter without waiting for the commit
-				// timeout. Anything else is transient; hand the claim back for a
-				// prompt retry.
+				// A missing canonical object is definitive. Other promotion failures
+				// release the claim for retry.
 				recorder.add({
 					uploadId: claim.uploadId,
 					verdict:
@@ -1023,9 +956,7 @@ export async function verifyTenant(
 					return;
 				}
 
-				// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed
-				// only as `ReadableStream`; narrow it to the byte stream the verifier
-				// expects.
+				// The Workers type omits the byte element type used by the verifier.
 				const verification = await verifyDecompressedNar(
 					object.body as ReadableStream<Uint8Array>,
 					{ narHash: claim.narHash, narSize: claim.narSize }
@@ -1045,8 +976,7 @@ export async function verifyTenant(
 
 				recorder.add(outcome.result);
 			} catch {
-				// A transient fetch or decode fault: hand the claim back so the next
-				// pass retries promptly on the next cycle.
+				// Release transient fetch and decode failures for the next pass.
 				recorder.add({
 					uploadId: claim.uploadId,
 					verdict: { kind: 'abandoned' }
@@ -1059,10 +989,8 @@ export async function verifyTenant(
 
 	const applied = await recorder.finishRecording();
 
-	// One verification message can combine all deferrals from a push, while each
-	// pass claims only a bounded chunk. Request another pass only when rows remain
-	// and at least one verdict was applied. If no verdict was applied, leave the
-	// retry to cron so a continuation does not repeatedly claim the same rows.
+	// Continue a truncated claim only after applying progress. With no progress,
+	// leave retry to cron rather than immediately reclaiming the same rows.
 	const isProgressed = applied > 0;
 
 	if (truncated && isProgressed) {
@@ -1070,9 +998,6 @@ export async function verifyTenant(
 	}
 }
 
-// Clears the reaper grace timer on any claimed hashes that already have a
-// `blob_state` row, so the reaper cannot evict a row between the claim and the
-// pass-end upsert that would re-arm it. Missing rows are unaffected.
 async function pinClaimedNarHashes(
 	database: CronDatabase,
 	narHashes: readonly NixSha256HashString[]
@@ -1179,9 +1104,8 @@ async function tenantStatus(
 	return row?.status;
 }
 
-// The most-overdue active tenants. NULL `last_maintained_at` (never maintained) sorts
-// first in SQLite ascending order, so a new tenant is picked up promptly; the id is
-// the tiebreaker for a stable batch among equal timestamps.
+// SQLite sorts NULL first in ascending order, so new tenants precede tenants
+// with a maintenance timestamp. Tenant ID provides a stable tie-breaker.
 function overdueActiveTenants(
 	database: CronDatabase,
 	batchSize: number
@@ -1235,8 +1159,8 @@ function tenantMaintenanceDueCondition() {
 }
 
 /**
- * Builds the UPDATE stamping one chunk of tenants' `last_maintained_at`.
- * Exported for the D1 parameter guard test.
+ * Builds one bounded update for the selected tenants. The caller chunks the
+ * full batch to stay within D1's parameter limit.
  */
 export function buildStampMaintainedStatement(
 	database: CronDatabase,
@@ -1249,10 +1173,8 @@ export function buildStampMaintainedStatement(
 		.where(inArray(d1Schema.tenant.id, tenantIds));
 }
 
-// Stamps the maintained batch so the next tick advances to the next-oldest tenants.
-// Stamped after the passes run and regardless of their outcome, so a failing tenant
-// is not retried until the cycle comes round again, while a whole-tick crash before
-// this leaves the batch unstamped and reprocesses it.
+// Stamp every selected tenant after its pass, including failures, so one failing
+// tenant cannot starve the fleet. A crash before this write repeats the batch.
 async function stampMaintained(
 	database: CronDatabase,
 	batch: readonly { readonly id: TenantId }[]
@@ -1273,10 +1195,8 @@ async function stampMaintained(
 }
 
 /**
- * Runs the maintenance passes for one tenant. Each pass runs independently, so
- * a verification failure does not prevent collection or key retirement. If
- * several passes fail, the function reports the garbage-collection failure
- * first because that cleanup is more time-sensitive.
+ * Runs garbage collection, verification, and optional key retirement
+ * independently. If several fail, reports the garbage-collection failure first.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
@@ -1289,8 +1209,6 @@ export async function runScheduledMaintenance(
 	]);
 	const authKeyRetirement = await settleAuthKeyRetirement(runAuthKeyRetirement);
 
-	// Surface a garbage-collection failure first (its cleanup is the more
-	// time-sensitive pass), then verification, then key retirement.
 	for (const result of [gc, verify, authKeyRetirement]) {
 		if (result.status === 'rejected') {
 			throw result.reason;
@@ -1298,9 +1216,6 @@ export async function runScheduledMaintenance(
 	}
 }
 
-// Runs the optional key-retirement pass after collection and verification
-// finish. Returning a settled result lets the caller report its failure with the
-// other pass failures. An omitted callback produces a fulfilled result.
 async function settleAuthKeyRetirement(
 	runAuthKeyRetirement: (() => Promise<void>) | undefined
 ): Promise<PromiseSettledResult<void>> {

@@ -13,10 +13,10 @@ import {
 } from './grants.ts';
 import { type OidcClaims } from './oidc-trust-match.ts';
 
-// A trust rule's resource bindings are evaluated against the verified claims to
-// decide whether a requested grant is permitted. Rendering fails closed: a
-// missing claim, a capture that does not match, or a rendered value that fails
-// its grammar yields no value, so the requested grant is refused.
+// Grant bindings resolve resource names only from string-valued claims. Callers
+// that issue authority must verify the claims first. Resolution fails closed:
+// an absent claim, a capture that does not match, or a rendered value outside
+// the resource grammar prevents the binding from permitting the request.
 
 type CacheBinding = Extract<
 	PermittedGrant,
@@ -30,8 +30,6 @@ type TenantBinding = Extract<
 	{ type: 'cupboard_tenant' }
 >['resources']['tenant'];
 
-// Only string claims can render into a resource value; a numeric or structured
-// claim never satisfies a template by coincidence.
 function stringClaims(claims: OidcClaims): Record<string, string> {
 	const rendered: Record<string, string> = {};
 
@@ -54,9 +52,6 @@ function renderTemplate(
 	let rendered = '';
 	let lastIndex = 0;
 
-	// Stitch the literal spans and the rendered substitutions together. A missing
-	// substitution or a transform that throws fails the whole render: the caller
-	// reads `undefined` and refuses the grant.
 	for (const match of template.matchAll(placeholderPattern)) {
 		const name = match[1];
 		const substitution = name === undefined ? undefined : substitutions?.[name];
@@ -80,7 +75,6 @@ function renderTemplate(
 	return rendered + template.slice(lastIndex);
 }
 
-// The raw value a template-or-exact binding names, before grammar validation.
 function renderBindingValue(
 	binding: {
 		readonly exact?: string;
@@ -114,8 +108,7 @@ function renderCache(
 		return undefined;
 	}
 
-	// Render to a wire selector (a cache name or `_default`), matching the
-	// selector a requested grant carries, so a rule can permit the default cache.
+	// Use the wire-selector grammar so `_default` can bind the default cache.
 	return cacheSelectorSchema.safeParse(raw).data;
 }
 
@@ -124,7 +117,8 @@ function renderRoot(
 	cache: string,
 	claims: Record<string, string>
 ): string | undefined {
-	// The relational binding ties the root to the cache the same grant resolved.
+	// An `equalsResource` binding uses the cache resolved for this grant as the
+	// root.
 	const raw =
 		binding.equalsResource === 'cache'
 			? cache
@@ -144,8 +138,8 @@ function renderTenant(
 	return renderBindingValue(binding, claims);
 }
 
-// A requested root is within a granted root selector: an exact name, or any name
-// beneath a trailing-slash prefix. The same containment `isCoveredByToken` applies.
+// A trailing slash grants every root below the prefix. Without it, the names
+// must match exactly. Token authorisation uses the same containment rule.
 function isRootWithin(requested: string, granted: string): boolean {
 	return granted.endsWith('/')
 		? requested.startsWith(granted)
@@ -181,7 +175,6 @@ function isGrantPermitted(
 	switch (permitted.type) {
 		case 'cupboard_domain':
 		case 'cupboard_control': {
-			// Resource-free: the actions subset is the whole test.
 			return true;
 		}
 		case 'cupboard_tenant': {
@@ -220,10 +213,9 @@ function isGrantPermitted(
 }
 
 /**
- * Whether the rule permits the requested concrete grant, evaluating the rule's
- * bindings against the verified claims. The operations must be a subset of a
- * permitted grant's, and each requested resource must fall within what that
- * grant's bindings render. A wildcard permitted grant permits anything.
+ * A rule permits a concrete grant only when it includes every requested
+ * operation and each resource binding resolves to the requested resource. A
+ * wildcard permitted grant permits every request.
  */
 export function isGrantPermittedByRule(
 	permittedGrants: readonly PermittedGrant[],

@@ -319,8 +319,6 @@ describe('loopbackLogin', () => {
 			return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
 		};
 
-		// The browser stand-in plays the identity provider: it follows the
-		// authorize URL straight back to the loopback redirect with a code.
 		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
@@ -467,7 +465,6 @@ describe('loopbackLogin', () => {
 		const openBrowser = async (target: string): Promise<void> => {
 			const { redirectUri, state } = authorizeParameters(target);
 
-			// A stray request with the wrong state must be answered but ignored.
 			const stray = new URL(redirectUri);
 			stray.searchParams.set('code', 'stray-code');
 			stray.searchParams.set('state', 'not-the-state');
@@ -494,7 +491,7 @@ describe('loopbackLogin', () => {
 		});
 	});
 
-	it('wraps a non-JSON token response as an OidcLoginError', async () => {
+	it('reports a non-JSON token response as token-non-json', async () => {
 		const tokenRequests: string[] = [];
 		const caught = await rejectedBy(() =>
 			loopbackLogin({

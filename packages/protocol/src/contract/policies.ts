@@ -50,10 +50,9 @@ export const policiesContract = {
 		.input(z.strictObject({ id: z.string() }))
 		.output(gracePolicyRemoveResponseSchema),
 
-	// Readable with the confirm capability, not the policy-admin scope: a
-	// grace-mode CI run must be able to establish before publishing anything
-	// that its intermediates will receive a deadline, and a confirm response
-	// already discloses the same resolution per path.
+	// `upload:confirm` may read grace coverage; policy-admin authority is not
+	// required. A grace-mode CI run checks coverage before it publishes, and a
+	// confirm response already reports the resolved grace for each path.
 	graceCoverage: baseProcedure
 		.meta({
 			requires: 'upload:confirm',

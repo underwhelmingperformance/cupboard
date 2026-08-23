@@ -311,35 +311,35 @@ export function registerBuildCommand(
 		.command('build')
 		.option(
 			'--installables <value>',
-			'installable to build (repeatable or newline-delimited)',
+			'build this installable (repeatable or newline-delimited)',
 			collectLines,
 			[]
 		)
 		.option(
 			'--installables-file <path>',
-			'file containing newline-delimited installables'
+			'read newline-delimited installables from this file'
 		)
-		.option('--attempts <count>', 'maximum build attempts', '3')
+		.option('--attempts <count>', 'maximum number of build attempts', '3')
 		.option(
 			'--keep-going <boolean>',
-			'continue after an individual build failure',
+			'continue building other installables after one fails',
 			'false'
 		)
-		.option('--max-jobs <count>', 'maximum local build jobs')
+		.option('--max-jobs <count>', 'limit local build jobs to this number')
 		.option(
 			'--allow-failure <boolean>',
-			'return successfully after exhausting attempts',
+			'exit successfully if every build attempt fails',
 			'false'
 		)
 		.option(
 			'--require-provenance <boolean>',
-			'rebuild outputs without current-run build evidence',
+			'locally rebuild outputs without evidence from this run',
 			'false'
 		)
-		.option('--paths-file <path>', 'where to write realised output paths')
+		.option('--paths-file <path>', 'write realised output paths to this file')
 		.option(
 			'--receipt-file <path>',
-			'where to write the current-run build receipt'
+			'write the current-run build receipt to this file'
 		)
 		.action((options: BuildOptions) =>
 			buildAction(options, environment, {
@@ -459,8 +459,8 @@ export async function buildAction(
 		try {
 			log = await readFile(logFile, 'utf8');
 		} catch {
-			// Nix can fail before it writes the event log, and the attempt then
-			// records no activities.
+			// Nix can fail before it creates the event log. Record the attempt with
+			// no activities so its failure still triggers the configured retry.
 		}
 		const buildAttempt = {
 			attempt,

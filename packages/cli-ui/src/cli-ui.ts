@@ -38,9 +38,6 @@ import pc from 'picocolors';
 
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
 
-/**
-A picocolors palette with its colour enablement fixed at creation.
-*/
 type Colours = ReturnType<typeof pc.createColors>;
 
 export { clackSink } from './clack-sink.ts';
@@ -78,34 +75,25 @@ const OSC8 = `${String.fromCodePoint(0x1b)}]8;;`;
 const BEL = String.fromCodePoint(0x07);
 
 /**
- * An OSC 8 terminal hyperlink. Terminals that support it make `text`
- * clickable; the rest ignore the control sequence and just show `text`.
+ * Emits the OSC 8 escape sequence that associates `text` with `url`. Whether
+ * the text becomes clickable depends on the terminal's OSC 8 support.
  */
 export function terminalLink(text: string, url: string): string {
 	return `${OSC8}${url}${BEL}${text}${OSC8}${BEL}`;
 }
 
-/**
-One choice in a menu prompt.
-*/
 export interface MenuEntry<T extends string> {
 	readonly value: T;
 	readonly label: string;
 	readonly hint?: string;
 }
 
-/**
-The choices and defaults for a multiple-choice prompt.
-*/
 export interface MultiSelectOptions<T extends string> {
 	readonly message: string;
 	readonly entries: readonly MenuEntry<T>[];
 	readonly initialValues?: readonly T[];
 }
 
-/**
-The outcome of a text edit.
-*/
 export type TextEdit =
 	| { readonly kind: 'set'; readonly value: string }
 	| { readonly kind: 'clear' }
@@ -137,9 +125,6 @@ export interface PrefixedTextOptions {
 	readonly problem: (value: string) => string | undefined;
 }
 
-/**
-The user's answer to a confirmation.
-*/
 export type ConfirmOutcome = 'yes' | 'no' | 'cancelled';
 
 export interface ConfirmOptions {
@@ -185,17 +170,14 @@ async function confirmInteractive(
 	return answer ? 'yes' : 'no';
 }
 
-/**
-A stream's terminal status; both `process.stdin` and `process.stdout` fit.
-*/
 interface TtyStream {
 	readonly isTTY?: boolean;
 }
 
 /**
- * Whether prompts can be shown: only when the output is the terminal UI and
- * both stdin and stdout are a terminal. A piped or redirected run is not
- * interactive even with `--colour`, because nobody is there to answer.
+ * Checks only whether the selected mode and streams can support prompts:
+ * terminal mode with TTY stdin and stdout. {@link createCliUi} separately
+ * disables prompts when Clack reports a CI environment.
  */
 export function isInteractive(streams: {
 	readonly mode: ReporterMode;
@@ -210,53 +192,41 @@ export function isInteractive(streams: {
 }
 
 /**
- * UI abstraction for command narration, structured output, and prompts.
- * Terminal mode uses Clack. Machine mode suppresses introductions, conclusions
- * and notes, and writes structured events through {@link CliUi.reporter}.
+ * Terminal mode uses Clack. JSON and GitHub modes suppress introductions,
+ * conclusions and notes, then use the selected {@link CliUi.reporter}.
  */
 export interface CliUi {
 	/**
-	Whether {@link CliUi.confirm} and the prompts can interact with the user.
-	*/
+	 * When false, confirmations require `--yes` and the other prompt methods
+	 * return their cancelled or undefined outcome without prompting.
+	 */
 	readonly interactive: boolean;
 	intro(title: string): void;
 	outro(message: string): void;
 	cancelled(message: string): void;
 	info(message: string): void;
-	/**
-	Reports a step that completed its work.
-	*/
 	success(message: string): void;
-	/**
-	Reports a step skipped because there was nothing to do.
-	*/
 	step(message: string): void;
 	warn(message: string): void;
 	note(title: string, rows: readonly ResultRow[]): void;
 	/**
-	Writes a payload to stdout; delegates to {@link Reporter.data}.
-	*/
+	 * Delegates to {@link Reporter.data}; `out` selects the destination.
+	 */
 	data(text: string): void;
-	/**
-	Ask the user to confirm a (typically destructive) action.
-	*/
 	confirm(options: ConfirmOptions): Promise<ConfirmOutcome>;
 	/**
-	Pick from a menu; undefined when cancelled or non-interactive.
+	Returns undefined when cancelled or non-interactive.
 	*/
 	menu<T extends string>(
 		message: string,
 		entries: readonly MenuEntry<T>[]
 	): Promise<T | undefined>;
 	/**
-	Pick any number of entries; undefined when cancelled or non-interactive.
+	Returns undefined when cancelled or non-interactive.
 	*/
 	multiSelect<T extends string>(
 		options: MultiSelectOptions<T>
 	): Promise<readonly T[] | undefined>;
-	/**
-	Edit a single text value.
-	*/
 	editText(options: TextEditOptions): Promise<TextEdit>;
 	/**
 	 * Ask for a value typed inline after a fixed prefix (a URL the value
@@ -264,7 +234,7 @@ export interface CliUi {
 	 */
 	prefixedText(options: PrefixedTextOptions): Promise<string | undefined>;
 	/**
-	Ask for a secret value, masked; undefined when cancelled.
+	Masks the value and returns undefined when cancelled.
 	*/
 	secret(
 		message: string,
@@ -272,8 +242,8 @@ export interface CliUi {
 	): Promise<string | undefined>;
 	openBrowser(url: string): void;
 	/**
-	 * A {@link Reporter} for this command's phases and results: clack spinners in
-	 * terminal mode, line-delimited JSON in machine mode.
+	 * The command's shared reporter: Clack in terminal mode, line-delimited JSON
+	 * in JSON mode, or GitHub rendering in GitHub mode.
 	 */
 	reporter(): Reporter;
 }
@@ -285,26 +255,24 @@ export interface CliUiOptions {
 	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
 	 */
 	readonly colour?: boolean;
-	/**
-	Treat confirmations as already accepted (the `--yes` flag).
-	*/
 	readonly assumeYes?: boolean;
 	/**
-	 * Override the computed interactivity. Defaults to {@link isInteractive} over
-	 * the process streams; tests pass it explicitly.
+	 * Overrides both the stream eligibility from {@link isInteractive} and
+	 * Clack's CI check. Tests use this to exercise prompt-independent paths.
 	 */
 	readonly interactive?: boolean;
 	/**
-	Where progress and diagnostics go; defaults to `process.stderr`.
-	*/
+	 * Destination for JSON events. Terminal and GitHub modes do not use it.
+	 */
 	readonly stream?: NodeJS.WritableStream;
 	/**
-	Where `data` payloads go; defaults to `process.stdout`.
-	*/
+	 * Destination for JSON and terminal data, and for all GitHub rendering.
+	 * Defaults to stdout.
+	 */
 	readonly out?: NodeJS.WritableStream;
 	/**
-	 * An absolute path to append one JSONL result event to per result, in every
-	 * mode (the CLI's `--result-file`).
+	 * A path to which every mode appends one JSONL event per result (the CLI's
+	 * `--result-file`).
 	 */
 	readonly resultFile?: string;
 	/**
@@ -314,9 +282,9 @@ export interface CliUiOptions {
 	readonly signal?: AbortSignal;
 }
 
-// The reporter for a UI's output mode: clack spinners in the terminal, GitHub
-// Actions workflow commands under a runner, or line-delimited JSON otherwise.
-// Every mode records to the result file when one is configured.
+// Terminal mode uses Clack, JSON mode writes line-delimited events, and GitHub
+// mode uses workflow-command syntax only when `GITHUB_ACTIONS=true`. Every mode
+// records to the result file when one is configured.
 function reporterFor(
 	mode: ReporterMode,
 	colours: Colours,
@@ -349,15 +317,13 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	const { mode } = options;
 	const colours = pc.createColors(options.colour ?? pc.isColorSupported);
 	const isAssumeYesDefault = options.assumeYes ?? false;
-	// A continuous-integration run is never interactive, even when it captures a
-	// terminal: there is no human at the keyboard to answer a prompt.
+	// `isInteractive` checks the streams. Clack's CI detection is a separate
+	// reason to disable prompts even if a CI process has terminal streams.
 	const isInteractiveRun =
 		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
-	// One reporter per UI, shared between the UI's own narration and every
-	// `ui.reporter()` caller. Both write to the same terminal, so a phase started
-	// through `ui.reporter()` and an `info` raised through the UI must not corrupt
-	// each other's redraw. Sharing the reporter also keeps both paths emitting the
-	// same structured events in machine mode.
+	// Clack has one live region. Share one reporter between UI narration and every
+	// `ui.reporter()` caller so their updates do not corrupt its redraw. The same
+	// sharing preserves event order in JSON and GitHub modes.
 	const reporter: Reporter = reporterFor(mode, colours, options);
 
 	const browserMessages: BrowserMessages = {
@@ -450,7 +416,6 @@ export function createCliUi(options: CliUiOptions): CliUi {
 				return;
 			}
 
-			// Resolve back through the entries so the value keeps its narrow type.
 			return entries.find((entry) => entry.value === choice)?.value;
 		},
 
@@ -575,13 +540,10 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	return ui;
 }
 
-// Slug words that are acronyms, so a result title renders them in capitals
-// (`oidc-trust-rules` becomes `OIDC trust rules`, not `Oidc trust rules`).
+// Preserve known acronyms when a result kind becomes a terminal heading. For
+// example, `oidc-trust-rules` renders as `OIDC trust rules`.
 const titleAcronyms = new Set(['oidc']);
 
-/**
-A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`.
-*/
 export function resultTitle(kind: string): string {
 	const words = kind.replaceAll(/[-_]+/g, ' ').trim().split(' ');
 	const [first, ...rest] = words;
@@ -600,9 +562,8 @@ export function resultTitle(kind: string): string {
 	return [head, ...tail].join(' ');
 }
 
-// The label followed by its accumulated facts, dimmed, for a spinner or bar
-// title. Facts are keyed by label, so a repeated fact (an attempt counter,
-// say) updates its entry and the title stays bounded.
+// Replace a fact with the same label instead of extending the spinner or bar
+// title indefinitely, for example when an attempt counter changes.
 function renderFacts(
 	label: string,
 	facts: ReadonlyMap<string, string>,
@@ -619,8 +580,6 @@ function renderFacts(
 	return `${label} ${colours.dim(`· ${annotations}`)}`;
 }
 
-// A completion line with its elapsed time appended, dimmed, so every phase,
-// bar and task reports how long it took at a precision that suits the duration.
 function withElapsed(
 	message: string,
 	startedAt: number,
@@ -633,10 +592,9 @@ function warnText(label: string, value?: string): string {
 	return value === undefined ? label : `${label}: ${value}`;
 }
 
-// A failure message with the error's `cause` chain indented beneath it, one
-// line per level. `log.error` splits the text on newlines and draws its guide
-// bar before each one, so the causes line up under the message. They are dimmed
-// like the other supporting detail this renderer prints.
+// Clack splits an error on newlines and draws its guide bar before each line.
+// Indent and dim each cause so the whole chain remains attached to the main
+// failure message.
 function errorText(error: unknown, colours: Colours): string {
 	const message = error instanceof Error ? error.message : String(error);
 
@@ -652,10 +610,10 @@ interface UnitNotes {
 }
 
 /**
- * Buffers warnings while a spinner or task animation is active. Clack renders
- * one live region, so writing a warning immediately would corrupt the next
- * redraw. The adapter flushes buffered warnings when the animation ends. An
- * optional live sink lets a task log render each warning immediately.
+ * Clack has one live region, so spinners and progress bars buffer warnings until
+ * their animation ends. A task log can show a warning inside its live region;
+ * the warning is still repeated after the task closes so clearing or collapsing
+ * the task cannot hide it.
  */
 function unitNotes(live?: (message: string) => void): UnitNotes {
 	const pending: string[] = [];
@@ -675,12 +633,6 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
 	return { warn, flush };
 }
 
-/**
- * Adapts {@link Reporter} to Clack. A phase uses a spinner, progress uses a
- * progress bar, steps use a task log, and a result uses a framed card. Narration
- * outside a unit renders immediately. {@link unitNotes} buffers warnings until
- * the unit ends.
- */
 function clackReporter(
 	colours: Colours,
 	out: NodeJS.WritableStream = stdout,

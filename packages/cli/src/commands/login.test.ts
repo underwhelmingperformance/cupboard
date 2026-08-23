@@ -95,9 +95,6 @@ describe('loginScopeForClient', () => {
 
 const now = 1_700_000_000_000;
 
-/**
-An unsigned id_token whose payload carries the given expiry (seconds).
-*/
 function tokenExpiringAt(expSeconds: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
 		'base64url'
@@ -159,7 +156,7 @@ function idTokenDependencies(world: IdTokenWorld): {
 }
 
 describe('cupboardIdToken', () => {
-	it('answers from the cached grant without a browser', async () => {
+	it('returns the ID token from a cached grant without opening a browser', async () => {
 		const idToken = tokenExpiringAt(now / 1000 + 3600);
 		const { deps, calls } = idTokenDependencies({
 			storedGrant: grantWith(idToken)
@@ -188,7 +185,6 @@ describe('cupboardIdToken', () => {
 		expect({
 			token: await cupboardIdToken(deps),
 			logins: calls.logins,
-			// The new grant is persisted, so the deploy shares the login.
 			written: calls.written
 		}).toStrictEqual({
 			token: fresh,
@@ -213,7 +209,7 @@ describe('cupboardIdToken', () => {
 		});
 	});
 
-	it('rejects a login that carried no id_token', async () => {
+	it('rejects a login response without an id_token', async () => {
 		const { deps, calls } = idTokenDependencies({ loginGrant: grantWith() });
 		const outcome = await (async () => {
 			try {

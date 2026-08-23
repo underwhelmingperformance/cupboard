@@ -92,9 +92,6 @@ function postToken(form: Record<string, string>): Promise<Response> {
 	});
 }
 
-// A real, well-formed inbound token whose issuer matches no trust rule, so
-// matching fails before any JWKS fetch; the verification network is never
-// touched in these tests.
 async function untrustedToken(): Promise<string> {
 	const { privateKey } = await generateKeyPair('RS256', { extractable: true });
 	const signer = new SignJWT({});
@@ -267,7 +264,7 @@ describe('POST /token', () => {
 		});
 	});
 
-	it('retries an issuer fetch blip before refusing the exchange', async () => {
+	it('retries one issuer fetch failure and completes the exchange', async () => {
 		const subjectToken = await installTrustedIdp('admin', {
 			failFirstFetches: 1
 		});
@@ -278,11 +275,6 @@ describe('POST /token', () => {
 	});
 });
 
-// Installs a trust rule for a stub issuer whose discovery and JWKS documents
-// are served from memory, and returns a subject token it signed: a full,
-// successful exchange without any network.
-// An interactive (owner) rule permits a wildcard and may exchange without
-// naming grants; a CI rule permits one cache and must request what it wants.
 const trustClassGrants = {
 	admin: [{ type: 'cupboard_wildcard' }],
 	write: [
@@ -377,7 +369,6 @@ async function exchange(
 	return { ...body, status: response.status };
 }
 
-// The grant a CI rule permits, as a concrete request its exchange can name.
 const ciRequest = [
 	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
 ];
@@ -394,7 +385,7 @@ function refreshTokenRows(): Promise<{ id: string; expiresAt: string }[]> {
 describe('refresh grant', () => {
 	beforeEach(resetTestServer);
 
-	it('grants a rotating refresh token alongside an admin exchange', async () => {
+	it('rotates an admin refresh token and rejects its replay', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 
@@ -442,7 +433,7 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('grants once when the same refresh token is presented concurrently', async () => {
+	it('accepts only one concurrent presentation of the same refresh token', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
@@ -701,7 +692,7 @@ async function exchangeWith(
 	return { status: response.status, body: await response.json() };
 }
 
-describe('request and verify', () => {
+describe('requested grants', () => {
 	beforeEach(resetTestServer);
 
 	it('issues a token confined to the requested grant', async () => {
@@ -722,9 +713,10 @@ describe('request and verify', () => {
 		});
 	});
 
-	// Commit authority is confined to upload-specific state, while confirmation
-	// can refresh any committed path in a cache.
-	it('refuses upload:confirm when the rule only names upload:commit', async () => {
+	// `upload:commit` can modify only state created by upload negotiation.
+	// `upload:confirm` can refresh any committed path, so commit permission must
+	// not imply confirm permission.
+	it('refuses upload:confirm when the rule permits only upload:commit', async () => {
 		const confirmRequest = [
 			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'ci' }
 		];
@@ -735,13 +727,13 @@ describe('request and verify', () => {
 			shape: {
 				error: 'invalid_authorization_details',
 				error_description:
-					'the requested authorization_details are not permitted',
+					'The requested authorization_details are not permitted',
 				problem: 'not-permitted'
 			}
 		});
 	});
 
-	it('rejects a CI exchange that names no grants as invalid_request', async () => {
+	it('rejects a CI exchange with no requested grants as invalid_request', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
@@ -778,14 +770,14 @@ describe('request and verify', () => {
 			problem: 'empty'
 		},
 		{
-			name: 'a grant for a cache the rule does not permit',
+			name: "a grant outside the rule's permitted caches",
 			details: JSON.stringify([
 				{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'other' }
 			]),
 			problem: 'not-permitted'
 		},
 		{
-			name: 'an operation the rule does not permit',
+			name: "an operation outside the rule's permissions",
 			details: JSON.stringify([
 				{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'ci' }
 			]),
@@ -801,7 +793,7 @@ describe('request and verify', () => {
 				shape: {
 					error: 'invalid_authorization_details',
 					error_description:
-						'the requested authorization_details are not permitted',
+						'The requested authorization_details are not permitted',
 					problem
 				}
 			});
@@ -818,8 +810,6 @@ function attenuate(token: string, details: unknown): Promise<Response> {
 	});
 }
 
-// A wildcard owner token, obtained the real way so it verifies against the
-// tenant's own keys.
 async function ownerToken(): Promise<string> {
 	const subjectToken = await installTrustedIdp('admin');
 	const exchanged = await exchange(subjectToken);
@@ -857,8 +847,6 @@ describe('attenuation', () => {
 		]);
 		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
 
-		// The narrowed token holds only `upload:commit` on `pr-1`; a request for
-		// another cache, or another operation, is not a subset.
 		const otherCache = await attenuate(narrowed.access_token, [
 			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-2' }
 		]);
@@ -877,9 +865,6 @@ describe('attenuation', () => {
 		});
 	});
 
-	// upload:commit is trusted with upload-specific state; upload:confirm
-	// refreshes any already-committed path in the cache. A commit-only token
-	// must not attenuate into confirm authority it was never issued.
 	it('refuses to narrow a commit-only token into confirm authority', async () => {
 		const owner = await ownerToken();
 		const narrowResponse = await attenuate(owner, [
@@ -901,9 +886,9 @@ describe('attenuation', () => {
 	});
 
 	it('does not attenuate a token signed by a foreign key', async () => {
-		// A token carrying the tenant's issuer but signed by another key fails the
-		// self-verification, so it routes to the trust path and is refused rather
-		// than narrowed.
+		// Matching issuer and audience values do not select attenuation. This token
+		// uses a foreign signing key, so self-verification fails and external trust
+		// matching rejects it.
 		const foreign = await generateKeyPair('RS256', { extractable: true });
 		const signer = new SignJWT({
 			authorization_details: [{ type: 'cupboard_wildcard' }]
@@ -927,7 +912,7 @@ describe('attenuation', () => {
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
-	it('lets a refresh narrow the reissued session', async () => {
+	it('reissues a narrower session when refresh requests a subset', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const subset = [
@@ -954,8 +939,7 @@ describe('attenuation', () => {
 describe('owner rule seeding', () => {
 	beforeEach(resetTestServer);
 
-	it('seeds the owner admin rule from deploy config on init', async () => {
-		// Any DO request runs initialisation, which seeds the rule.
+	it('seeds the owner admin rule from the assigned identity during initialisation', async () => {
 		await fetchPath('/.well-known/jwks.json');
 
 		const rules = await runInDurableObject(
@@ -1107,10 +1091,7 @@ describe('auth discovery endpoints', () => {
 			status: StatusCodes.OK,
 			cacheControl: 'no-store',
 			body: {
-				// The tenant's issuer is its own path-based URL, the same value
-				// provisioning stamps into the Durable Object's identity.
 				issuer: `${origin}/t/v1`,
-				// The endpoints carry this tenant's `/t/<tenant>/` prefix.
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
@@ -1125,10 +1106,6 @@ describe('auth discovery endpoints', () => {
 	});
 });
 
-// A GitHub-shaped branch rule pinning both repository ids, with an in-memory
-// issuer, so refusal diagnostics can be exercised without any network. `sign`
-// issues genuine tokens; `forge` signs the same claims with a key the issuer
-// never published.
 const githubIssuer = 'https://gh.test';
 const githubAudience = 'cupboard-aud';
 const branchRuleClaims = {
@@ -1222,7 +1199,7 @@ describe('untrusted exchange diagnostics', () => {
 		vi.unstubAllGlobals();
 	});
 
-	it('names the first failing claim for a verified token from the pinned repository', async () => {
+	it('reports the first failing claim for a verified token from the pinned repository', async () => {
 		const { sign } = await installGithubBranchRule();
 		const subjectToken = await sign({
 			...branchRuleClaims,
@@ -1250,7 +1227,7 @@ describe('untrusted exchange diagnostics', () => {
 		});
 	});
 
-	it('stays flat for a token whose claimed repository matches no rule', async () => {
+	it('returns the generic refusal when the claimed repository matches no rule', async () => {
 		const { sign } = await installGithubBranchRule();
 		const subjectToken = await sign({
 			...branchRuleClaims,
@@ -1265,7 +1242,7 @@ describe('untrusted exchange diagnostics', () => {
 		expect(refused.body.detail).toBeUndefined();
 	});
 
-	it('stays flat for a forged token claiming the pinned repository', async () => {
+	it('returns the generic refusal for a forged token that claims the pinned repository', async () => {
 		const { forge } = await installGithubBranchRule();
 		const subjectToken = await forge({
 			...branchRuleClaims,

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { bearerAttempt, type TokenProvider } from './credentials.ts';
 
 describe('bearerAttempt', () => {
-	it('refreshes a provider credential once after an authentication refusal', async () => {
+	it('refreshes a provider credential once after a 401', async () => {
 		const get = vi.fn(() => Promise.resolve('initial-token'));
 		const refresh = vi.fn(() => Promise.resolve('renewed-token'));
 		const provider: TokenProvider = {
@@ -35,7 +35,7 @@ describe('bearerAttempt', () => {
 		});
 	});
 
-	it('does not retry a fixed credential', async () => {
+	it('does not refresh a fixed credential after a 401', async () => {
 		const attempt = await bearerAttempt('fixed-token');
 
 		expect({

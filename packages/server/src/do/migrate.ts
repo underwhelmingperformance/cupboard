@@ -1,27 +1,20 @@
 import { sql } from 'drizzle-orm';
 import type { DrizzleSqliteDODatabase } from 'drizzle-orm/durable-sqlite';
 
-/**
-One record from `drizzle/meta/_journal.json` for a generated migration.
-*/
 interface JournalEntry {
 	readonly idx: number;
 	readonly when: number;
 	readonly tag: string;
 }
 
-/**
- * The shape of `drizzle/migrations.js`: the ordered journal and each
- * migration's SQL, keyed `m0000`, `m0001`, and so on.
- */
 export interface MigrationBundle {
 	readonly journal: { readonly entries: readonly JournalEntry[] };
 	readonly migrations: Record<string, string>;
 }
 
-// Drizzle's own migrator writes its bookkeeping here, so reusing the table keeps
-// the two interchangeable: a row this migrator writes carries the migration tag
-// in `hash` (Drizzle leaves it empty) and the journal timestamp in `created_at`.
+// Share Drizzle's bookkeeping table so either migrator recognises the latest
+// recorded timestamp. Drizzle stores the migration content hash in `hash`; this
+// migrator stores the stable journal tag there.
 const trackingTable = '__drizzle_migrations';
 
 const statementBreakpoint = '--> statement-breakpoint';
@@ -43,9 +36,8 @@ export class DurableObjectMigrationError extends Error {
 	}
 }
 
-// Drizzle wraps a failed statement in its own error ("Failed to run the query
-// ...") and keeps the database's own error as the cause, so the telling message
-// (the SQLite fault) is reached by walking to the end of the chain.
+// Drizzle wraps the SQLite error, so use the last error in the cause chain in
+// the migration diagnostic.
 function causeMessages(error: unknown): string[] {
 	const messages: string[] = [];
 	const seen = new Set<unknown>();
@@ -100,9 +92,6 @@ type MigrationDatabase<TSchema extends Record<string, unknown>> =
 
 interface TrackingState {
 	readonly appliedTags: ReadonlySet<string>;
-	/**
-	The highest `created_at` already recorded, or `-Infinity` when none.
-	*/
 	readonly threshold: number;
 }
 
@@ -165,12 +154,11 @@ function applyMigration<TSchema extends Record<string, unknown>>(
 /**
  * Brings a Durable Object's SQLite schema up to the bundled migrations.
  *
- * A migration is applied unless its tag is already recorded or it predates the
- * latest recorded timestamp, so a store Drizzle's migrator already tracked is
- * reconciled once and tag-tracked thereafter. Tag tracking ensures a regenerated
- * migration does not re-run when its journal timestamp changes. Each migration
- * runs in its own transaction, and a genuine statement failure is raised with
- * its cause attached.
+ * A migration is skipped when its tag is recorded or its timestamp is no later
+ * than the latest recorded migration. This recognises stores managed by
+ * Drizzle, then records stable journal tags for later runs. Each migration runs
+ * in its own transaction, and an unexpected statement failure retains its
+ * cause.
  */
 export function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,

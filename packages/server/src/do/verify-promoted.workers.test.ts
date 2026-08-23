@@ -32,10 +32,8 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-// A `promoted` verdict says the reporter already promoted the verified bytes:
-// the canonical object and its `blob_state` row are durable, so the settle owes
-// only the reserve, materialise and notify. This drives one through the batch
-// RPC and proves the settle ran no promote of its own.
+// A `promoted` verdict guarantees that the canonical object and its `blob_state`
+// row are durable. The Durable Object must not promote those bytes again.
 describe('recording a promoted verdict', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -56,7 +54,6 @@ describe('recording a promoted verdict', () => {
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
 
-		// The reporter's promote, as the queue consumer runs it after decoding.
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		await promoteVerifiedBlob(
 			d1,
@@ -93,20 +90,14 @@ describe('recording a promoted verdict', () => {
 			blobState
 		}).toStrictEqual({
 			applied: 1,
-			// A settled upload leaves no residue: the row clears and the staging
-			// bytes go.
 			verdict: undefined,
 			servable: true,
 			stagingGone: true,
-			// The `verified_at` stamped by the reporter's promote survives, so the
-			// settle ran no promote of its own.
 			blobState: [{ narHash: metadata.narHash, verifiedAt: promotedAt }]
 		});
 	});
 });
 
-// The queue consumer's pass end to end: it decodes, promotes and reports off
-// the DO thread, leaving the settle only the state transitions.
 describe('consumer verify pass', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -145,14 +136,13 @@ describe('consumer verify pass', () => {
 		});
 	});
 
-	it('keeps recorded verdicts when a later decode fails', async () => {
+	it('keeps the first upload settled when decoding the second upload fails', async () => {
 		const token = await initialise();
 		const first = await deferFreshUpload(token, 'progress-a', 'a'.repeat(32));
 		const second = await deferFreshUpload(token, 'progress-b', 'b'.repeat(32));
 
-		// The second upload's staging read fails, so its decode never reaches a
-		// verdict. The first upload's verdict recorded incrementally and stays
-		// settled regardless.
+		// The second upload's staging read fails before it produces a verdict. The
+		// first upload's verdict is recorded incrementally and remains settled.
 		const originalGet = env.BLOBS.get.bind(env.BLOBS);
 		const get = vi
 			.spyOn(env.BLOBS, 'get')
@@ -173,7 +163,6 @@ describe('consumer verify pass', () => {
 			second: await pendingUploadVerdict(second.uploadId)
 		}).toStrictEqual({ first: undefined, second: 'pending' });
 
-		// With the fault gone, the next pass settles the remainder.
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
@@ -196,8 +185,6 @@ describe('consumer verify pass', () => {
 
 		await commitPath(token, first, nar);
 
-		// A second store path reuses the committed blob; deferring its commit
-		// leaves a pending row pointing at the shared canonical key.
 		const second = uploadMetadata({
 			name: 'second',
 			storePathHash: 'b'.repeat(32),
@@ -212,8 +199,8 @@ describe('consumer verify pass', () => {
 		);
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// A reuse verdict needs no bytes: the pass may head the canonical object
-		// but must never fetch a body, its or anyone's.
+		// A reuse claim may head the canonical object but must not fetch any object
+		// body.
 		const get = vi.spyOn(env.BLOBS, 'get');
 
 		try {
@@ -239,7 +226,7 @@ describe('consumer verify pass', () => {
 		});
 	});
 
-	it('answers absent for a deferred reuse whose canonical object vanished', async () => {
+	it('clears a deferred reuse row when its canonical object is missing', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reuse-vanished');
 		const first = uploadMetadata({
@@ -268,9 +255,7 @@ describe('consumer verify pass', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// The canonical object was collected between the negotiate and this pass.
-		// It cannot reappear, so the row must settle to a terminal answer (the
-		// waiter is told absent and re-drives the push).
+		// Delete after negotiation to reproduce collection before verification.
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
@@ -287,7 +272,7 @@ describe('consumer verify pass', () => {
 		});
 	});
 
-	it('frees a reuse claim a transient promote fault abandoned', async () => {
+	it('releases a reuse claim after a transient promotion fault', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reuse-transient');
 		const first = uploadMetadata({
@@ -316,9 +301,8 @@ describe('consumer verify pass', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// The promote's canonical head fails transiently; the pass abandons the
-		// claim, and abandoning must free the lease so the next pass retries at
-		// at once.
+		// The next pass can settle only if a transient canonical-head failure
+		// releases the claim immediately.
 		const canonicalKey = narObjectKey(nar.narHash);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let shouldFail = true;
@@ -338,7 +322,6 @@ describe('consumer verify pass', () => {
 
 			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
 
-			// With the fault gone, the very next pass settles it.
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			head.mockRestore();

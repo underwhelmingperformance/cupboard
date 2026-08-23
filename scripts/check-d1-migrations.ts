@@ -4,8 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 
-// Applies every D1 migration in order against a throwaway in-memory SQLite
-// database. drizzle generates migrations by diffing the schema against the
+// Drizzle generates migrations by diffing the schema against the
 // latest snapshot, so a snapshot that has drifted from the live schema makes the
 // next `generate` re-emit an ALTER for a column that already exists. That ALTER
 // is valid SQL on its own but fails when applied after the migration that first
@@ -32,7 +31,6 @@ const migrationsDirectory = path.resolve(
 	'packages/server/drizzle-d1'
 );
 
-// Order filenames by UTF-16 code unit, matching the default `Array#sort` order.
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {
 		return -1;

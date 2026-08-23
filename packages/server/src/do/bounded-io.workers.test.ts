@@ -8,9 +8,6 @@ import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 
-// A gated subrequest that hangs must not hold the input gate to the runtime's
-// ~30s reset. The bounded-I/O layer times it out; the critical section releases
-// the gate cleanly, so the object survives and later work still runs.
 describe('bounded gated subrequest', () => {
 	beforeEach(resetTestServer);
 
@@ -44,7 +41,6 @@ describe('bounded gated subrequest', () => {
 			hang.mockRestore();
 		}
 
-		// The gate is free again: a fresh critical section runs to completion.
 		const afterTimeout = await runInDurableObject(server, (instance) =>
 			instance.context.criticalSection(() => Promise.resolve('ok'))
 		);
@@ -65,9 +61,6 @@ describe('bounded gated subrequest', () => {
 	});
 });
 
-// A session or multipart handle issues its own network calls outside the
-// bounded proxies, so handing one out through a bounded wrapper would be a
-// silent escape from the per-call limit.
 describe('unboundable members', () => {
 	it('refuses an R2 multipart handle through the bounded bucket', () => {
 		const blobs = boundedBlobs(env.BLOBS);

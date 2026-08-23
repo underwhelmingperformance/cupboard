@@ -90,7 +90,7 @@ class ControlledScheduler implements ChildProcessEscalationScheduler {
 }
 
 describe('waitForChildProcess', () => {
-	it('records an error without settling before process closure', async () => {
+	it('waits for close after recording a spawn error', async () => {
 		const child = new ControlledChildProcess();
 		const failure = new Error('spawn failed');
 		const settled = vi.fn();

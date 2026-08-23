@@ -27,7 +27,7 @@ describe('serverErrorHandler', () => {
 		capture.stop();
 	});
 
-	it('maps a modelled ServerHttpError to its status and message', async () => {
+	it('returns the modelled status and message without logging', async () => {
 		const response = await appThatThrows(new UnauthenticatedError()).request(
 			'/'
 		);
@@ -55,7 +55,7 @@ describe('serverErrorHandler', () => {
 			expectedBody: { error: 'internal_error' }
 		}
 	])(
-		'answers an unmodelled error as a no-store 500, $name',
+		'returns a no-store 500 for an unmodelled error, $name',
 		async ({ headers, expectedBody }) => {
 			const response = await appThatThrows(new Error('boom')).request('/', {
 				headers
@@ -91,7 +91,7 @@ describe('serverErrorHandler', () => {
 		{ flag: 'durableObjectReset' },
 		{ flag: 'overloaded' }
 	])(
-		'answers a runtime fault marked $flag as a retryable 503',
+		'returns a retryable 503 for a runtime fault marked $flag',
 		async ({ flag }) => {
 			const fault = Object.assign(new Error('dispatch died'), {
 				[flag]: true
@@ -111,7 +111,7 @@ describe('serverErrorHandler', () => {
 				status: 503,
 				retryAfter: '5',
 				cacheControl: 'no-store',
-				body: 'Tenant is temporarily unavailable\n',
+				body: 'The service was temporarily unavailable\n',
 				errorLogged: []
 			});
 		}
@@ -142,22 +142,19 @@ describe('serverErrorHandler', () => {
 				)
 			})
 		}
-	])(
-		'maps a D1 overload fault to a retryable 503 ($name)',
-		async ({ error }) => {
-			const response = await appThatThrows(error).request('/');
+	])('returns a retryable 503 for a D1 overload ($name)', async ({ error }) => {
+		const response = await appThatThrows(error).request('/');
 
-			expect({
-				status: response.status,
-				retryAfter: response.headers.get('retry-after'),
-				cacheControl: response.headers.get('cache-control'),
-				body: await response.text()
-			}).toStrictEqual({
-				status: 503,
-				retryAfter: '5',
-				cacheControl: 'no-store',
-				body: 'Database is temporarily overloaded\n'
-			});
-		}
-	);
+		expect({
+			status: response.status,
+			retryAfter: response.headers.get('retry-after'),
+			cacheControl: response.headers.get('cache-control'),
+			body: await response.text()
+		}).toStrictEqual({
+			status: 503,
+			retryAfter: '5',
+			cacheControl: 'no-store',
+			body: 'Database is temporarily overloaded\n'
+		});
+	});
 });

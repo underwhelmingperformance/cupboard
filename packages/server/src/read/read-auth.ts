@@ -8,18 +8,16 @@ import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
 const textEncoder = new TextEncoder();
 const readPasswordHashDomain = 'cupboard-read-password-v1';
 
-// The read verifier's remaining fields are otherwise interchangeable strings, so
-// each carries its own brand: a hash cannot be handed to a comparison expecting
-// a salt, and neither can be handed to one expecting the user.
+// Separate brands prevent callers from passing a password hash where a salt or
+// read user is required.
 export const readPasswordHashSchema = z.string().brand('ReadPasswordHash');
 export type ReadPasswordHash = z.infer<typeof readPasswordHashSchema>;
 
 export const readPasswordSaltSchema = z.string().brand('ReadPasswordSalt');
 export type ReadPasswordSalt = z.infer<typeof readPasswordSaltSchema>;
 
-// A private cache's read verifier: the Basic-auth user and the hash of its
-// password. The hash is what the KV admission manifest carries, so the read path
-// authorises without a plaintext secret ever leaving the control plane.
+// The Basic user and stored password verifier for a private tenant. The
+// plaintext password is neither persisted nor forwarded to the tenant Worker.
 export interface ReadVerifier {
 	readonly user: ReadUser;
 	readonly passwordHash: ReadPasswordHash;
@@ -27,8 +25,9 @@ export interface ReadVerifier {
 }
 
 /**
-Hashes a read password the same way the verifier stores it, for comparison.
-*/
+ * Uses the stable, versioned encoding for stored read verifiers. Changing it
+ * invalidates existing credentials.
+ */
 export async function hashReadPassword(
 	password: string,
 	salt: ReadPasswordSalt
@@ -48,10 +47,9 @@ export function generateReadPasswordSalt(): ReadPasswordSalt {
 }
 
 /**
- * Whether a request carries HTTP Basic credentials matching the tenant's read
- * verifier. The user and the password's hash are compared in constant time and
- * unconditionally, so a mismatch in the user does not short-circuit the password
- * comparison.
+ * After parsing a valid Basic credential, always hashes the password and
+ * performs both comparisons before combining their results. A different user
+ * does not skip the password comparison.
  */
 export async function isReadAuthorised(
 	request: Request,

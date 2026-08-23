@@ -11,12 +11,6 @@ import {
 	type StorePathString
 } from './scalars.ts';
 
-// Pure store-path helpers, kept dependency-free so both the wire schemas and
-// the `StorePath` value object share one implementation. These return
-// `undefined` on failure; callers that need a hard failure add their own typed
-// error on top.
-
-// Order strings by UTF-16 code unit, matching the default `Array#sort` order.
 export function byCodeUnit(a: string, b: string): number {
 	if (a < b) {
 		return -1;

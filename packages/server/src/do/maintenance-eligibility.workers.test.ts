@@ -32,7 +32,6 @@ import {
 
 const now = new Date('2026-01-01T00:00:00.000Z');
 
-// A tenant with work due now stores a fixed past instant. Mirrors the service.
 const wakeImmediately = isoTimestamp(new Date(0));
 
 class MaintenanceProjectionTestError extends Error {
@@ -417,10 +416,6 @@ describe('maintenance wake conflict resolution', () => {
 	const soonFuture = isoTimestampSchema.parse('2026-03-01T00:00:00.000Z');
 	const farFuture = isoTimestampSchema.parse('2026-09-01T00:00:00.000Z');
 
-	// Each case seeds a stored projection row, then reconciles against Durable Object
-	// state that drives the incoming wake (`immediate` from a pending upload, a future
-	// deadline from a retention root, or none) with `now` setting its `reconciled_at`.
-	// The conditional upsert decides which survives.
 	const cases = [
 		{
 			name: 'keeps a fresher wake when a staler reconcile computes a later one',

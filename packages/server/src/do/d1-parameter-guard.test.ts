@@ -1,12 +1,11 @@
-// Guards Cloudflare SQLite's 100-bound-parameter cap across every chunked
-// statement this server issues. Local SQLite (workerd and vitest-pool-workers)
-// allows 32,766 variables, so worker tests never catch an overrun; only this
-// plain node test can catch them by inspecting .toSQL().params before execution.
+// Guards Cloudflare SQLite's 100-bound-parameter cap for selected statements
+// that use production chunk limits. Local SQLite in workerd and
+// vitest-pool-workers allows 32,766 variables, so worker tests do not expose an
+// overrun. This Node test inspects `.toSQL().params` before execution.
 //
-// For each statement, the test builds it at the maximum chunk width its
-// constant permits and asserts params.length <= 100. A production change that
-// widens a chunk or embeds an extra parameter breaks this test before it breaks
-// any request in production.
+// Each case builds one selected statement at its maximum production chunk
+// width. Widening that chunk or adding a bound parameter must keep the statement
+// at or below the Cloudflare limit.
 import {
 	cacheNameSchema,
 	narInfoGenerationSchema,
@@ -45,13 +44,10 @@ import {
 } from './offboarding-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
 
-// A D1Database stub whose methods throw: query building via .toSQL() never
-// reaches the client, so nothing is ever executed.
 const throwStub = (): never => {
 	throw new Error('D1 stub: not executed');
 };
 
-// D1Database is an abstract class; plain structural satisfaction works here.
 const stubD1 = {
 	prepare: throwStub,
 	batch: throwStub,
@@ -65,12 +61,10 @@ const tenant = tenantIdSchema.parse('fixture-tenant');
 const cache = cacheNameSchema.parse('builds');
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
-// A syntactically valid NAR hash; value does not matter for param-count checks.
 const testNarHash = nixSha256HashSchema.parse(
 	'sha256:0000000000000000000000000000000000000000000000000000'
 );
 
-// A syntactically valid store-path hash.
 const testStorePathHash = storePathHashSchema.parse(
 	'00000000000000000000000000000000'
 );
@@ -101,7 +95,7 @@ function fencedEdgeFilter(count: number) {
 	);
 }
 
-describe('D1 bound-parameter guard', () => {
+describe('selected D1 statements', () => {
 	describe('retention-root target writes (roots-service)', () => {
 		it('target INSERT stays within 100 params at maxRootTargetInsertRows', () => {
 			const query = database.insert(schema.retentionRootTargets).values(

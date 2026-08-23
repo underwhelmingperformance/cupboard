@@ -285,8 +285,6 @@ describe('attestAttachArguments', () => {
 		]);
 	});
 
-	// The attest action signs the same subjects twice, and the workflow passes
-	// both bundles on separate lines of one input.
 	it('attaches the build-provenance and build-origin bundles of one run', () => {
 		const inputs = resolveAttestAttachInputs(
 			options({
@@ -313,7 +311,7 @@ describe('attestAttachArguments', () => {
 });
 
 describe('attestAttachAction', () => {
-	it('shells the installed cupboard with the receipt paths and bundle', async () => {
+	it('invokes the installed cupboard with the receipt paths and bundle', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
 		const controller = new AbortController();
 		const invocations: {
@@ -466,7 +464,7 @@ describe('attestAttachAction', () => {
 		).rejects.toBeInstanceOf(AttestationChecksumsMismatchError);
 	});
 
-	it('rejects checksums that name subjects outside the eligible receipt', async () => {
+	it('rejects checksums that list subjects outside the eligible receipt', async () => {
 		const fixture = await writeReceipt([appPath]);
 		await writeFile(
 			fixture.checksumsFile,
@@ -483,7 +481,7 @@ describe('attestAttachAction', () => {
 		);
 	});
 
-	it('warns and runs nothing for a receipt with no paths', async () => {
+	it('warns and skips cupboard for a receipt with no subjects', async () => {
 		const fixture = await writeReceipt([]);
 		const warnings: string[] = [];
 		const invocations: unknown[] = [];
@@ -501,9 +499,11 @@ describe('attestAttachAction', () => {
 			}
 		);
 
-		expect({ invocations, warningCount: warnings.length }).toStrictEqual({
+		expect({ invocations, warnings }).toStrictEqual({
 			invocations: [],
-			warningCount: 1
+			warnings: [
+				'The build receipt contains no provenance subjects; skipping attachment'
+			]
 		});
 	});
 
@@ -542,7 +542,7 @@ describe('attestAttachAction', () => {
 		);
 	});
 
-	it('fails when the CLI records no attachment result', async () => {
+	it('fails when the CLI emits no attachment result', async () => {
 		const fixture = await writeReceipt([appPath]);
 
 		await expect(
@@ -550,7 +550,7 @@ describe('attestAttachAction', () => {
 				runCupboard: () => Promise.resolve([])
 			})
 		).rejects.toThrow(
-			'The installed cupboard recorded no attestation attachment result'
+			'The installed cupboard emitted no attestation attachment result'
 		);
 	});
 });

@@ -4,27 +4,21 @@ import { withDeadline } from '@cupboard/shared/timeout';
 
 import { SubrequestTimeoutError } from '../errors.ts';
 
-// A critical section holds the Durable Object's input gate; the runtime resets
-// the whole object if a `blockConcurrencyWhile` callback runs past ~30s. This
-// budget bounds the gated subrequests collectively so a stall surfaces as a
-// clean retryable refusal well before that reset.
+// A `blockConcurrencyWhile` callback that runs for about 30 seconds resets the
+// Durable Object. Keep the collective critical-section budget below that limit
+// so a stalled subrequest returns a retryable error before the reset.
 export const criticalSectionBudgetMs = 25_000;
 
-// No single metadata subrequest may outlast this, even outside a critical
-// section, so a stalled call on an ungated path cannot silently consume a whole
-// invocation. Byte-transfer calls (R2 get/put) pass an unbounded cap instead:
-// off the gate a large blob legitimately takes longer, and on the gate the
-// section budget already bounds them.
+// Metadata calls always use the per-call limit. R2 byte transfers may take
+// longer outside a critical section and inherit only the collective budget
+// when they run inside one.
 const perCallCapMs = 15_000;
 
-// The absolute epoch-millisecond deadline for the current scope. A nested scope
-// only ever tightens it (see {@link withDeadlineBudget}), so every subrequest
-// reads the innermost deadline.
 const deadlineScope = new AsyncLocalStorage<number>();
 
-// Runs `body` under a deadline `budgetMs` from now, never looser than any
-// deadline already in force: a section nested inside a request budget cannot
-// extend past the request's own deadline.
+/**
+A nested budget can shorten, but never extend, the current deadline.
+*/
 export function withDeadlineBudget<T>(
 	budgetMs: number,
 	body: () => Promise<T>
@@ -36,12 +30,12 @@ export function withDeadlineBudget<T>(
 	return deadlineScope.run(deadline, body);
 }
 
-// Bounds one subrequest by the time left on the scope's deadline, capped at
-// `capMs` (default {@link perCallCapMs}). Byte-transfer calls pass an unbounded
-// cap so only an enclosing deadline bounds them; outside any scope those run
-// unbounded by this layer. A timeout rejects with a retryable
-// {@link SubrequestTimeoutError}; the underlying call is abandoned, so
-// `operation` must be idempotent.
+/**
+ * Bounds one subrequest by the remaining scope budget and `capMs`. Byte
+ * transfers pass an infinite cap, so this layer limits them only inside a
+ * deadline scope. A timed-out operation can still finish and must be safe to
+ * retry.
+ */
 export function boundedSubrequest<T>(
 	operation: () => Promise<T>,
 	subrequest: string,
@@ -66,6 +60,4 @@ export function boundedSubrequest<T>(
 	);
 }
 
-// The unbounded cap for byte-transfer calls: only an enclosing critical-section
-// deadline bounds them.
 export const unboundedCapMs = Infinity;

@@ -32,14 +32,14 @@ describe('resolveReporterMode', () => {
 		expect(resolveReporterMode('json')).toBe('json');
 	});
 
-	it('uses JSON output when running under pre-commit', () => {
+	it('uses JSON output when PRE_COMMIT=1', () => {
 		process.env.PRE_COMMIT = '1';
 		setIsTty(true);
 
 		expect(resolveReporterMode()).toBe('json');
 	});
 
-	it('lets FORCE_COLOR force the spinner over pre-commit and a non-TTY', () => {
+	it('lets FORCE_COLOR select terminal mode over pre-commit and a non-TTY', () => {
 		process.env.FORCE_COLOR = '1';
 		process.env.PRE_COMMIT = '1';
 		setIsTty(false);
@@ -47,7 +47,7 @@ describe('resolveReporterMode', () => {
 		expect(resolveReporterMode()).toBe('terminal');
 	});
 
-	it('uses GitHub Actions output under a runner, over a TTY', () => {
+	it('uses GitHub output when GITHUB_ACTIONS=true, over a TTY', () => {
 		vi.stubEnv('GITHUB_ACTIONS', 'true');
 		delete process.env.PRE_COMMIT;
 		setIsTty(true);
@@ -64,7 +64,7 @@ describe('resolveReporterMode', () => {
 			mode: 'terminal'
 		}
 	] as const)(
-		'lets $name win over a runner',
+		'lets $name override GITHUB_ACTIONS=true',
 		({ preCommit, forceColor, mode }) => {
 			vi.stubEnv('GITHUB_ACTIONS', 'true');
 			setIsTty(false);
@@ -86,7 +86,7 @@ describe('resolveReporterMode', () => {
 	it.each([
 		{ name: 'FORCE_COLOR=0', value: '0' },
 		{ name: 'an empty FORCE_COLOR', value: '' }
-	] as const)('does not force the spinner for $name', ({ value }) => {
+	] as const)('does not select terminal mode for $name', ({ value }) => {
 		process.env.FORCE_COLOR = value;
 		delete process.env.PRE_COMMIT;
 		setIsTty(false);

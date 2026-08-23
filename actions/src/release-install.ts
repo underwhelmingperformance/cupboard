@@ -190,7 +190,8 @@ export function assertExpectedSourceCommit(
 }
 
 /**
-Reject known historical archive layouts before downloading their assets.
+Releases before v0.0.19 use an unsupported archive layout. Reject them before
+downloading any assets.
 */
 export function assertReleaseCompatible(tagName: string): void {
 	const version = semverValid(tagName);
@@ -217,7 +218,8 @@ export function assetNameFor(
 }
 
 /**
-Prefer release-scoped names while retaining compatibility with old releases.
+Try the stable platform name first, then the tag-qualified name used by older
+releases.
 */
 export function assetNamesFor(
 	tagName: string,
@@ -230,9 +232,6 @@ export function assetNamesFor(
 	return [stableName, `cupboard-${tagName}-${suffix}`];
 }
 
-/**
-Select the stable platform asset, falling back to a legacy tag-named asset.
-*/
 export function releaseAssetFor(
 	release: Release,
 	runtimePlatform: string = platform,
@@ -339,7 +338,8 @@ interface PublishReleaseDependencies {
 	readonly signal?: AbortSignal;
 	readonly publicationHook?: (stage: ReleasePublicationStage) => Promise<void>;
 	/**
-	Already verified archive digest; direct callers may omit it to hash locally.
+	`installCupboard` passes the digest verified during download. Direct callers
+	can omit it and let publication hash the archive locally.
 	*/
 	readonly archiveSha256?: string;
 }
@@ -347,9 +347,6 @@ interface PublishReleaseDependencies {
 export type ReleasePublicationStage =
 	'contended' | 'locked' | 'prepared' | 'activated';
 
-/**
-The dependencies injected while downloading a release asset.
-*/
 export interface DownloadAssetDependencies {
 	readonly fetch?: typeof fetch;
 	readonly githubApiOrigin?: string;
@@ -362,14 +359,13 @@ export interface DownloadedAsset {
 	readonly sha256: string;
 }
 
-// A current SEA archive is tens of MiB. 256 MiB leaves ample room for runtime
-// and embedded-worker growth while bounding an unauthenticated response well
-// below a typical GitHub-hosted runner's memory and disk capacity.
+// A current SEA archive is tens of MiB. The 256 MiB limit permits the runtime
+// and embedded worker to grow while bounding the resources used for an asset.
 export const maximumReleaseAssetBytes = 256 * 1024 * 1024;
 const maximumAttestationBundleBytes = 16 * 1024 * 1024;
 
-// Small pages bound the list response Octokit buffers before this code sees it;
-// the total limits bound both retained candidates and a sparse cursor chain.
+// The small page size bounds each response that Octokit buffers. The candidate
+// and page limits bound both retained bundles and traversal of sparse pages.
 export const maximumReleaseAttestationCandidates = 100;
 export const maximumReleaseAttestationPages = 10;
 const releaseAttestationsPerPage = 10;
@@ -431,10 +427,9 @@ const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
 };
 
 /**
- * The Fulcio SAN a release attestation is signed under: the release workflow's
- * path in the release repository. A regex (anchored, with a trailing `@`) so it
- * matches whichever ref the workflow ran on, since the build runs on the
- * default branch before the tag exists.
+ * Release builds run on the default branch before the tag exists. Match any ref
+ * for the exact release workflow path; `verifyReleaseAttestation` separately
+ * requires the SLSA source commit to equal the tag commit.
  */
 export function releaseWorkflowIdentityRegex(
 	releaseRepository: string
@@ -456,7 +451,7 @@ export async function installCupboard(
 		options.expectedSourceCommit
 	);
 	const release = await reporter.phase(
-		'Resolve cupboard release',
+		'Resolving cupboard release',
 		async (phase) => {
 			const resolved = await githubRequest(options.signal, () =>
 				fetchRelease(buildOctokit(options, dependencies.fetch), options)
@@ -507,7 +502,7 @@ export async function installCupboard(
 			}
 		);
 
-		await reporter.phase('Verify checksum', async () => {
+		await reporter.phase('Checking archive checksum', async () => {
 			const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
 			const expectedChecksum = checksums.get(assetName);
 
@@ -519,7 +514,7 @@ export async function installCupboard(
 		});
 
 		const sourceCommit = await reporter.phase(
-			'Verify release attestation',
+			'Checking release attestation',
 			async (phase) => {
 				const builtFrom = await verifyReleaseAttestation(
 					options,
@@ -538,7 +533,7 @@ export async function installCupboard(
 			}
 		);
 
-		await reporter.phase('Install cupboard binary', () =>
+		await reporter.phase('Installing cupboard binary', () =>
 			publishReleaseArchive(
 				archivePath,
 				options.installDirectory,
@@ -561,7 +556,7 @@ export async function installCupboard(
 }
 
 /**
-Validate a release in isolation before replacing the installed executables.
+Extract and validate the new release before changing the active generation.
 */
 export async function publishReleaseArchive(
 	archivePath: string,
@@ -1568,9 +1563,6 @@ function isPathError(error: unknown, code: string): boolean {
 	);
 }
 
-/**
-Require a release archive member to be a runnable regular file.
-*/
 export async function prepareReleaseExecutable(
 	candidate: string
 ): Promise<void> {
@@ -1610,9 +1602,6 @@ async function validateReleaseExecutable(candidate: string): Promise<void> {
 	}
 }
 
-/**
-Require a release executable to report the exact selected release tag.
-*/
 export function assertInstalledReleaseVersion(
 	expected: string,
 	actual: string
@@ -1779,9 +1768,6 @@ function findFirstReleaseAsset(
 	throw new ReleaseAssetNotFoundError(release.tagName, names.join(' or '));
 }
 
-/**
-Download one release asset while honouring the setup invocation's cancellation.
-*/
 export async function downloadAsset(
 	asset: ReleaseAsset,
 	destination: string,
@@ -1926,10 +1912,9 @@ function verifyChecksum(
 }
 
 /**
- * Verify that the downloaded archive was built by the release repository's
- * release workflow, and return the source commit the build came from (which
- * equals the commit the tag points at). Throws when no published attestation
- * verifies.
+ * Verify that the archive has exactly one subject and was built by the release
+ * workflow. Its SLSA source commit must equal the commit for the release tag.
+ * Returns that commit, or throws if no published attestation verifies.
  */
 export async function verifyReleaseAttestation(
 	options: Omit<InstallCupboardOptions, 'installDirectory'>,

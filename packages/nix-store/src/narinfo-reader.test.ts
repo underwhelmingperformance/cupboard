@@ -26,9 +26,6 @@ const fileDigest = Uint8Array.from({ length: 32 }, (_, index) => index * 3);
 const narHash = NixSha256Hash.fromDigest(narDigest);
 const signature = `cache.example.org-1:${bytesToBase64(new Uint8Array(64).fill(9))}`;
 
-/**
-The fields a cache serves, in the order and spellings Nix writes them.
-*/
 const wellFormedFields: readonly (readonly [string, string])[] = [
 	['StorePath', appPath],
 	['URL', 'nar/example.nar.xz'],
@@ -42,28 +39,14 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 	['Sig', signature]
 ];
 
-/**
-One document to read, stated as what it changes about a well-formed one.
-*/
 interface NarInfoFixture {
-	/**
-	Values replacing the well-formed ones, keyed by field name.
-	*/
 	readonly fields?: Readonly<Record<string, string | undefined>>;
-	/**
-	Whole lines written after the document, for a field written twice.
-	*/
 	readonly extraLines?: readonly string[];
-	/**
-	Whether the last line ends the way Nix requires it to.
-	*/
 	readonly endsWithNewline?: boolean;
 }
 
 const wellFormedValues = new Map(wellFormedFields);
 
-// A field the well-formed document does not carry is written after it, so a
-// fixture can state one Nix reads only when it is there.
 function narInfoDocument(fixture: NarInfoFixture): string {
 	const changed = fixture.fields ?? {};
 	const names = [
@@ -87,7 +70,7 @@ function read(fixture: NarInfoFixture, storePath: StorePathString = appPath) {
 }
 
 describe('offerFromNarInfo', () => {
-	it('reads what the document offers for the path it describes', () => {
+	it('returns every offer field from a well-formed narinfo', () => {
 		expect(read({})).toStrictEqual({
 			source: 'substituter',
 			references: [libraryPath],
@@ -99,9 +82,7 @@ describe('offerFromNarInfo', () => {
 		});
 	});
 
-	// Nix reads a document naming the deriver and the references by basename
-	// into the store it is asking about.
-	it('names the deriver and the references the way the store does', () => {
+	it('expands deriver and reference basenames in the queried store', () => {
 		const offer = read({
 			fields: {
 				References:
@@ -118,8 +99,7 @@ describe('offerFromNarInfo', () => {
 		});
 	});
 
-	// The literal a cache serves for a path whose deriver it does not know.
-	it('reads the `unknown-deriver` value as no deriver', () => {
+	it('parses `unknown-deriver` as an absent deriver', () => {
 		expect(read({ fields: { Deriver: 'unknown-deriver' } })).toStrictEqual({
 			source: 'substituter',
 			references: [libraryPath],
@@ -138,14 +118,12 @@ describe('offerFromNarInfo', () => {
 		{ name: 'no References', fields: { References: undefined } },
 		{ name: 'no Deriver', fields: { Deriver: undefined } },
 		{ name: 'no Sig', fields: { Sig: undefined } },
-		{ name: 'a field it does not know', fields: { Unknown: 'whatever' } },
+		{ name: 'an unrecognised field', fields: { Unknown: 'whatever' } },
 		{ name: 'an empty content address', fields: { CA: '' } }
-	])('reads a document carrying $name', ({ fields }) => {
+	])('accepts a narinfo with $name', ({ fields }) => {
 		expect(() => read({ fields })).not.toThrow();
 	});
 
-	// Nix reads a document missing any of these as one the substituter did not
-	// finish writing.
 	it.each([
 		{ name: 'no StorePath', fields: { StorePath: undefined } },
 		{ name: 'no URL', fields: { URL: undefined } },
@@ -153,17 +131,18 @@ describe('offerFromNarInfo', () => {
 		{ name: 'no NarHash', fields: { NarHash: undefined } },
 		{ name: 'no NarSize', fields: { NarSize: undefined } },
 		{ name: 'a NarSize of zero', fields: { NarSize: '0' } }
-	])('refuses a document carrying $name', ({ fields }) => {
+	])('rejects a narinfo with $name', ({ fields }) => {
 		expect(() => read({ fields })).toThrow(CorruptNarInfoError);
 	});
 
-	it('refuses a document whose last line does not end', () => {
+	it('rejects a narinfo without a final newline', () => {
 		expect(() => read({ endsWithNewline: false })).toThrow(CorruptNarInfoError);
 	});
 
-	// Nix reads a value from two characters past the colon, so a document
-	// written without the space states a different value than it looks like.
-	it('refuses a document written without the space after a colon', () => {
+	// Nix starts a field value two characters after the colon rather than
+	// trimming whitespace. Without the required space, the parser drops the
+	// value's first character.
+	it('rejects a narinfo without the space after a colon', () => {
 		const document = narInfoDocument({}).replace(
 			'NarSize: 1000',
 			'NarSize:1000'
@@ -174,16 +153,13 @@ describe('offerFromNarInfo', () => {
 		);
 	});
 
-	it('refuses a line carrying no colon at all', () => {
+	it('rejects a line without a colon', () => {
 		expect(() => read({ extraLines: ['no colon here'] })).toThrow(
 			CorruptNarInfoError
 		);
 	});
 
-	// The answer stands for the path it was asked about, and one naming another
-	// path is reported as such: a substituter answering about something else
-	// holds nothing for the path the caller asked after.
-	it('reports a document describing another path as a mismatch', () => {
+	it('rejects a narinfo for another path with a mismatch error', () => {
 		expect(() => read({}, libraryPath)).toThrow(MismatchedNarInfoPathError);
 	});
 
@@ -192,29 +168,24 @@ describe('offerFromNarInfo', () => {
 		{ name: 'uppercase base16', digest: bytesToHex(narDigest).toUpperCase() },
 		{ name: "nix's own base32", digest: toNixBase32(narDigest) },
 		{ name: 'padded base64', digest: bytesToBase64(narDigest) }
-	])('reads a NAR hash written in $name', ({ digest }) => {
+	])('parses a NAR hash written in $name', ({ digest }) => {
 		expect(
 			read({ fields: { NarHash: `sha256:${digest}` } }).narHash
 		).toStrictEqual(narHash);
 	});
 
-	// Nix reads a hash written the way a subresource integrity value is, with a
-	// dash and base64, and takes it by the length it decodes to.
 	it.each([
 		{ name: 'padded', digest: bytesToBase64(narDigest) },
 		{ name: 'unpadded', digest: bytesToBase64(narDigest).replace(/=+$/u, '') }
-	])('reads a $name NAR hash in the integrity spelling', ({ digest }) => {
+	])('parses a $name NAR hash in the integrity spelling', ({ digest }) => {
 		expect(
 			read({ fields: { NarHash: `sha256-${digest}` } }).narHash
 		).toStrictEqual(narHash);
 	});
 
-	// A hash field states an algorithm and a digest that algorithm writes. Nix
-	// decides the encoding by the digest's length and then decodes it, so a
-	// digest of the right length in the wrong alphabet is one it cannot read.
 	it.each([
 		{ name: 'no algorithm at all', value: toNixBase32(narDigest) },
-		{ name: 'an algorithm it does not know', value: `md4:${'a'.repeat(32)}` },
+		{ name: 'an unsupported algorithm', value: `md4:${'a'.repeat(32)}` },
 		{
 			name: 'an algorithm behind an experimental feature',
 			value: `blake3:${bytesToHex(narDigest)}`
@@ -242,17 +213,17 @@ describe('offerFromNarInfo', () => {
 			value: `sha256-${bytesToBase64(new Uint8Array(31))}`
 		},
 		{
-			name: 'a digest of another algorithm than the one it names',
+			name: 'a sha256-sized digest labelled sha1',
 			value: `sha1:${bytesToHex(narDigest)}`
 		}
-	])('refuses a NAR hash carrying $name', ({ value }) => {
+	])('rejects a NAR hash with $name', ({ value }) => {
 		expect(() => read({ fields: { NarHash: value } })).toThrow(
 			CorruptNarInfoError
 		);
 	});
 
-	// Nix reads the file hash through the same parser as the NAR hash, so a
-	// document is refused over one the same way it is over the other.
+	// The offer does not retain FileHash, but Nix still validates it. A malformed
+	// FileHash therefore invalidates the whole narinfo.
 	it.each([
 		{
 			name: 'a base16 digest outside its alphabet',
@@ -262,27 +233,26 @@ describe('offerFromNarInfo', () => {
 			name: 'a base32 digest outside its alphabet',
 			value: `sha256:${'e'.repeat(52)}`
 		},
-		{ name: 'an algorithm it does not know', value: `md4:${'a'.repeat(32)}` }
-	])('refuses a file hash carrying $name', ({ value }) => {
+		{ name: 'an unsupported algorithm', value: `md4:${'a'.repeat(32)}` }
+	])('rejects a FileHash with $name', ({ value }) => {
 		expect(() => read({ fields: { FileHash: value } })).toThrow(
 			CorruptNarInfoError
 		);
 	});
 
-	// A NAR hash is kept only when it is sha256, the algorithm a store path's
-	// own hash uses and so the only one an offer can be compared under.
+	// Offers compare NAR contents with sha256, so NarHash must use that algorithm
+	// even though the general hash parser supports others.
 	it.each([
 		{ name: 'sha1', value: `sha1:${bytesToHex(narDigest.slice(0, 20))}` },
 		{ name: 'sha512', value: `sha512:${bytesToHex(new Uint8Array(64))}` }
-	])('refuses a NAR hash written under $name', ({ value }) => {
+	])('rejects a NAR hash using $name', ({ value }) => {
 		expect(() => read({ fields: { NarHash: value } })).toThrow(
 			CorruptNarInfoError
 		);
 	});
 
-	// A file hash under another algorithm is one Nix reads and keeps, since
-	// nothing compares an offer under it.
-	it('reads a file hash written under another algorithm', () => {
+	// FileHash may use any supported algorithm; only NarHash must use sha256.
+	it('accepts a FileHash using another supported algorithm', () => {
 		expect(() =>
 			read({ fields: { FileHash: `sha512:${bytesToHex(new Uint8Array(64))}` } })
 		).not.toThrow();
@@ -296,14 +266,14 @@ describe('offerFromNarInfo', () => {
 			name: 'a size larger than can be counted',
 			fields: { FileSize: '1'.repeat(20) }
 		}
-	])('refuses a document carrying $name', ({ fields }) => {
+	])('rejects a narinfo with $name', ({ fields }) => {
 		expect(() => read({ fields })).toThrow(CorruptNarInfoError);
 	});
 
 	it.each([
-		{ name: 'one it has no decompressor for', value: 'banana' },
-		{ name: 'one written in another case', value: 'XZ' }
-	])('refuses a compression naming $name', ({ value }) => {
+		{ name: 'an unsupported algorithm', value: 'banana' },
+		{ name: 'a spelling in another case', value: 'XZ' }
+	])('rejects compression with $name', ({ value }) => {
 		expect(() => read({ fields: { Compression: value } })).toThrow(
 			CorruptNarInfoError
 		);
@@ -322,11 +292,11 @@ describe('offerFromNarInfo', () => {
 		},
 		{ name: 'a deriver that is not a store path', fields: { Deriver: 'nope' } },
 		{ name: 'an empty deriver', fields: { Deriver: '' } }
-	])('refuses a document carrying $name', ({ fields }) => {
+	])('rejects a narinfo with $name', ({ fields }) => {
 		expect(() => read({ fields })).toThrow(CorruptNarInfoError);
 	});
 
-	it('refuses a document naming its references twice', () => {
+	it('rejects a repeated References field', () => {
 		expect(() =>
 			read({
 				extraLines: ['References: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app']
@@ -334,8 +304,8 @@ describe('offerFromNarInfo', () => {
 		).toThrow(CorruptNarInfoError);
 	});
 
-	// A signature names the key that made it and carries base64 that decodes.
-	// Nix refuses the whole document over one it cannot read.
+	// Every Sig value must parse as `<key-name>:<base64>`. One malformed Sig line
+	// invalidates the whole narinfo.
 	it.each([
 		{ name: 'no colon at all', value: 'not-a-signature' },
 		{ name: 'no key name', value: `:${bytesToBase64(new Uint8Array(64))}` },
@@ -349,16 +319,16 @@ describe('offerFromNarInfo', () => {
 			value: 'cache.example.org-1:aaaaa'
 		},
 		{
-			// Six bits are no whole byte, so the line names a key and states
-			// nothing signed under it.
+			// One base64 character cannot encode a whole byte, so this value decodes
+			// to empty material.
 			name: 'material decoding to no bytes at all',
 			value: 'cache.example.org-1:A'
 		}
-	])('refuses a signature carrying $name', ({ value }) => {
+	])('rejects a signature with $name', ({ value }) => {
 		expect(() => read({ fields: { Sig: value } })).toThrow(CorruptNarInfoError);
 	});
 
-	it('carries every signature the document publishes', () => {
+	it('returns every Sig entry in document order', () => {
 		const second = `cache.example.org-2:${bytesToBase64(new Uint8Array(64).fill(4))}`;
 
 		expect(read({ extraLines: [`Sig: ${second}`] }).signatures).toStrictEqual([
@@ -367,7 +337,6 @@ describe('offerFromNarInfo', () => {
 		]);
 	});
 
-	// A content address states how the path was made before the hash it is.
 	it.each([
 		{
 			name: 'a flat fixed output',
@@ -382,15 +351,15 @@ describe('offerFromNarInfo', () => {
 			name: 'another algorithm',
 			value: `fixed:md5:${bytesToHex(narDigest.slice(0, 16))}`
 		}
-	])('reads a content address naming $name', ({ value }) => {
+	])('accepts a content address for $name', ({ value }) => {
 		expect(() => read({ fields: { CA: value } })).not.toThrow();
 	});
 
 	it.each([
-		{ name: 'nothing readable at all', value: 'not a valid content address' },
+		{ name: 'invalid syntax', value: 'not a valid content address' },
 		{ name: 'no method', value: `sha256:${toNixBase32(narDigest)}` },
 		{
-			name: 'a method it does not know',
+			name: 'an unsupported method',
 			value: `flat:sha256:${toNixBase32(narDigest)}`
 		},
 		{
@@ -399,7 +368,7 @@ describe('offerFromNarInfo', () => {
 		},
 		{ name: 'no hash at all', value: 'fixed:r:' },
 		{
-			name: 'an algorithm it does not know',
+			name: 'an unsupported algorithm',
 			value: `fixed:md4:${'a'.repeat(32)}`
 		},
 		{
@@ -410,11 +379,11 @@ describe('offerFromNarInfo', () => {
 			name: 'a hash in the integrity spelling',
 			value: `fixed:sha256-${bytesToBase64(narDigest)}`
 		}
-	])('refuses a content address carrying $name', ({ value }) => {
+	])('rejects a content address with $name', ({ value }) => {
 		expect(() => read({ fields: { CA: value } })).toThrow(CorruptNarInfoError);
 	});
 
-	it('refuses a document stating its content address twice', () => {
+	it('rejects repeated non-empty CA fields', () => {
 		expect(() =>
 			read({
 				fields: { CA: `fixed:sha256:${toNixBase32(narDigest)}` },
@@ -423,9 +392,9 @@ describe('offerFromNarInfo', () => {
 		).toThrow(CorruptNarInfoError);
 	});
 
-	// An empty value states no content address, so the one that follows it is
-	// the document's first.
-	it('reads a content address following an empty one', () => {
+	// An empty CA does not set the content address, so a later non-empty CA is
+	// still the first value.
+	it('accepts a non-empty CA after an empty CA', () => {
 		expect(() =>
 			read({
 				fields: { CA: '' },

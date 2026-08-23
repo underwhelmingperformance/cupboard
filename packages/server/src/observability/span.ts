@@ -1,17 +1,13 @@
 import { tracing } from 'cloudflare:workers';
 
-/**
-Attribute values a span accepts; `undefined` entries are skipped.
-*/
 export type SpanAttributes = Readonly<
 	Record<string, boolean | number | string | undefined>
 >;
 
 /**
- * Runs `body` inside a custom trace span named `name`, tagged with `attributes`.
- * The span nests under Cloudflare's automatic instrumentation and is exported to
- * the configured OTLP backend. The callback always runs, so wrapping is safe even
- * when tracing records nothing.
+ * Runs `body` inside a Cloudflare custom span beneath the active automatic span.
+ * Undefined attributes are omitted. The callback still runs when tracing does
+ * not record the span.
  */
 export function withSpan<T>(
 	name: string,

@@ -20,8 +20,6 @@ function requestUrl(input: RequestInfo | URL): string {
 	return input.url;
 }
 
-// A fetch that answers the one repository URL under test, standing in for the
-// GitHub API without a network or a mock-server dependency.
 function stubFetch(url: string, response: Response): typeof fetch {
 	return (input) => {
 		const requested = requestUrl(input);
@@ -41,7 +39,7 @@ describe('lookupRepository', () => {
 		vi.unstubAllEnvs();
 	});
 
-	it('resolves a repository to its immutable ids', async () => {
+	it('returns the repository ids and current full name from GitHub', async () => {
 		const fetch = stubFetch(
 			repoUrl,
 			Response.json({
@@ -60,8 +58,6 @@ describe('lookupRepository', () => {
 		});
 	});
 
-	// A private repository answers 404 to an unauthenticated lookup, so a
-	// token from the environment must reach GitHub when one is set.
 	it('authenticates the lookup with a GH_TOKEN from the environment', async () => {
 		vi.stubEnv('GH_TOKEN', 'gh-token-under-test');
 
@@ -129,7 +125,7 @@ describe('lookupRepository', () => {
 		).rejects.toBeInstanceOf(InvalidRepositoryError);
 	});
 
-	it('maps a missing repository to a typed error', async () => {
+	it('throws RepositoryNotFoundError for a 404 response', async () => {
 		const fetch = stubFetch(repoUrl, new Response(undefined, { status: 404 }));
 
 		await expect(
@@ -137,7 +133,7 @@ describe('lookupRepository', () => {
 		).rejects.toBeInstanceOf(RepositoryNotFoundError);
 	});
 
-	it('maps an exhausted rate limit to a typed error', async () => {
+	it('throws GithubRateLimitError when the rate limit is exhausted', async () => {
 		const fetch = stubFetch(
 			repoUrl,
 			new Response(undefined, {
@@ -151,7 +147,7 @@ describe('lookupRepository', () => {
 		).rejects.toBeInstanceOf(GithubRateLimitError);
 	});
 
-	it('maps a secondary rate limit to a typed error', async () => {
+	it('throws GithubRateLimitError for a secondary rate limit', async () => {
 		const fetch = stubFetch(
 			repoUrl,
 			new Response(undefined, {
@@ -168,7 +164,7 @@ describe('lookupRepository', () => {
 		).rejects.toBeInstanceOf(GithubRateLimitError);
 	});
 
-	it('maps a non-exhausted forbidden response to a permission error', async () => {
+	it('throws GithubPermissionError for a forbidden response outside a rate limit', async () => {
 		const fetch = stubFetch(
 			repoUrl,
 			new Response(undefined, {

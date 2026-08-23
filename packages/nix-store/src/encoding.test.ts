@@ -19,7 +19,7 @@ describe('encoding', () => {
 		expect(bytesToBase64(Uint8Array.from([104, 105]))).toBe('aGk=');
 	});
 
-	it('encodes url-safe base64 without padding or + and /', () => {
+	it('uses the URL-safe base64 alphabet and omits padding', () => {
 		expect(bytesToBase64Url(Uint8Array.from([251, 255, 191]))).toBe('-_-_');
 		expect(bytesToBase64Url(Uint8Array.from([104, 105]))).toBe('aGk');
 	});

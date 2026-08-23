@@ -64,27 +64,18 @@ export interface TokenPolicyInput {
 export interface CreatedApiToken {
 	readonly id: string;
 	/**
-	The token's secret value; only ever returned at creation or roll.
+	The secret value, which Cloudflare returns only on creation or rotation.
 	*/
 	readonly value: string;
 }
 
-/**
-A full-text query over a Worker's recent log events.
-*/
 export interface WorkerLogQuery {
-	/**
-	The text to match across each event (e.g. a request's cf-ray).
-	*/
 	readonly needle: string;
 	readonly fromMs: number;
 	readonly toMs: number;
 	readonly limit: number;
 }
 
-/**
-One matched log event, reduced to the fields a deploy surfaces.
-*/
 export interface WorkerLogEvent {
 	readonly message: string | undefined;
 	readonly error: string | undefined;
@@ -93,8 +84,7 @@ export interface WorkerLogEvent {
 
 /**
  * The Cloudflare operations the deploy pipeline performs, as a narrow interface
- * over the official SDK so the orchestration is testable against a fake. Every
- * method is reconcile-friendly: resource creators return the live id and are
+ * over the official SDK. Resource-creation methods return the live id and are
  * safe to call when the resource already exists.
  */
 export interface CloudflareApi {
@@ -117,9 +107,9 @@ export interface CloudflareApi {
 
 	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
 	/**
-	The live bindings and cache settings needed for deployment convergence, or
-	undefined when the script is not deployed.
-	*/
+	 * The live bindings and cache settings needed for deployment convergence.
+	 * Returns `undefined` when the script is not deployed.
+	 */
 	getScriptConfiguration(
 		scriptName: ScriptName
 	): Promise<ScriptConfiguration | undefined>;
@@ -142,9 +132,6 @@ export interface CloudflareApi {
 	listScriptSecrets(scriptName: ScriptName): Promise<string[]>;
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
-	/**
-	The custom domain currently routed to the script, when one is.
-	*/
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
 	ensureCustomDomain(
 		scriptName: ScriptName,
@@ -158,14 +145,8 @@ export interface CloudflareApi {
 		name: string,
 		policy: TokenPolicyInput
 	): Promise<CreatedApiToken>;
-	/**
-	Rolls the token's secret, returning the new value.
-	*/
 	rollApiTokenSecret(tokenId: string): Promise<string>;
 
-	/**
-	The account's workers.dev subdomain, or undefined when unregistered.
-	*/
 	getWorkersDevSubdomain(): Promise<string | undefined>;
 	setWorkersDevRoutes(
 		scriptName: ScriptName,
@@ -174,7 +155,7 @@ export interface CloudflareApi {
 
 	/**
 	 * Recent Workers Observability log events matching a full-text needle in a
-	 * time window. Empty when observability is off for the script or nothing
+	 * time window. Returns an empty array when observability is off or no event
 	 * matches yet, since ingestion lags the request by a few seconds.
 	 */
 	queryWorkerLogs(query: WorkerLogQuery): Promise<readonly WorkerLogEvent[]>;
@@ -194,9 +175,9 @@ async function firstMatch<T>(
 }
 
 /**
- * A queue consumer as the live API answers it. The published schema (and the
+ * A queue consumer as the live API returns it. The published schema (and the
  * SDK's types) say the Worker is named by `script_name`, but the live
- * endpoint answers `script` (and `service` for service bindings), which is
+ * endpoint returns `script` (and `service` for service bindings), which is
  * also what wrangler matches on. All spellings are read, and the parse is
  * deliberately independent of the SDK's view of the wire.
  */
@@ -218,7 +199,7 @@ const liveConsumerSchema = z.object({
 });
 
 /**
- * Whether a live queue consumer already carries every setting the deploy
+ * Whether a live queue consumer already has every setting the deploy
  * would write. Settings the config leaves undefined are the platform's to
  * default, so they do not count against a match.
  */

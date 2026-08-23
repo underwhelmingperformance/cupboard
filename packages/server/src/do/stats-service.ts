@@ -35,7 +35,6 @@ export class StatsService {
 			eq(d1Schema.attestationReference.cache, cache)
 		);
 
-		// Two independent joins for the same cache; read them in one round-trip.
 		const [narObjects, casObjects] = await this.context.d1.batch([
 			this.context.d1
 				.select({

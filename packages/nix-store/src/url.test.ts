@@ -5,45 +5,58 @@ import { canonicalHref, parseBaseUrl } from './url.ts';
 
 describe('parseBaseUrl', () => {
 	it.each([
-		['a bare host', 'https://cupboard.example.workers.dev', '/'],
-		['a tenant path', 'https://cupboard.example.workers.dev/t/acme', '/t/acme'],
-		['an http URL', 'http://localhost:8787/t/acme', '/t/acme'],
 		[
-			'redundant trailing slashes',
+			'normalises a bare host to the root path',
+			'https://cupboard.example.workers.dev',
+			'/'
+		],
+		[
+			'preserves a tenant path',
+			'https://cupboard.example.workers.dev/t/acme',
+			'/t/acme'
+		],
+		['accepts an HTTP URL', 'http://localhost:8787/t/acme', '/t/acme'],
+		[
+			'collapses redundant trailing slashes to the root path',
 			'https://cupboard.example.workers.dev///',
 			'/'
 		],
 		[
-			'a trailing slash on a tenant path',
+			'removes trailing slashes from a tenant path',
 			'https://cupboard.example.workers.dev/t/acme///',
 			'/t/acme'
 		]
-	])('accepts %s', (_name, value, pathname) => {
+	])('%s', (_name, value, pathname) => {
 		expect(parseBaseUrl(new URL(value)).pathname).toBe(pathname);
 	});
 
-	// Every URL built from a base derives from its origin and path alone, so a
-	// base smuggling anything else in, credentials that would be sent on every
-	// request or a query or fragment that would corrupt the built URL, is
-	// refused rather than partially honoured.
 	it.each([
-		['an FTP scheme', 'ftp://cupboard.example.workers.dev/t/acme'],
-		['a file scheme', 'file:///tmp/cupboard'],
-		['a mail scheme', 'mailto:cupboard@example.test'],
-		['a query string', 'https://cupboard.example.workers.dev/t/acme?tab=keys'],
-		['a fragment', 'https://cupboard.example.workers.dev/t/acme#copied'],
-		['an embedded username', 'https://ci@cupboard.example.workers.dev/t/acme'],
+		['rejects an FTP URL', 'ftp://cupboard.example.workers.dev/t/acme'],
+		['rejects a file URL', 'file:///tmp/cupboard'],
+		['rejects a mailto URL', 'mailto:cupboard@example.test'],
 		[
-			'embedded credentials',
+			'rejects a base URL with a query',
+			'https://cupboard.example.workers.dev/t/acme?tab=keys'
+		],
+		[
+			'rejects a base URL with a fragment',
+			'https://cupboard.example.workers.dev/t/acme#copied'
+		],
+		[
+			'rejects a base URL with a username',
+			'https://ci@cupboard.example.workers.dev/t/acme'
+		],
+		[
+			'rejects a base URL with credentials',
 			'https://ci:secret@cupboard.example.workers.dev/t/acme'
 		]
-	])('refuses a base carrying %s', (_name, value) => {
+	])('%s', (_name, value) => {
 		expect(() => parseBaseUrl(new URL(value))).toThrow(
 			new InvalidCacheUrlBaseError()
 		);
 	});
 
-	it('leaves the URL it was given untouched', () => {
+	it('does not mutate the input URL', () => {
 		const url = new URL('https://cupboard.example.workers.dev/t/acme/');
 
 		parseBaseUrl(url).pathname = '/edited';
@@ -55,22 +68,22 @@ describe('parseBaseUrl', () => {
 describe('canonicalHref', () => {
 	it.each([
 		[
-			'a bare origin loses the slash `URL` adds',
+			'removes the slash URL adds to a bare origin',
 			'https://cupboard.example.workers.dev',
 			'https://cupboard.example.workers.dev'
 		],
 		[
-			'a tenant path is rendered verbatim',
+			'preserves a tenant path exactly',
 			'https://cupboard.example.workers.dev/t/acme',
 			'https://cupboard.example.workers.dev/t/acme'
 		],
 		[
-			'a trailing slash on a path is dropped',
+			'removes a trailing slash from a path',
 			'https://cupboard.example.workers.dev/t/acme/',
 			'https://cupboard.example.workers.dev/t/acme'
 		],
 		[
-			'a port is kept',
+			'preserves an explicit port',
 			'http://localhost:8787/t/acme',
 			'http://localhost:8787/t/acme'
 		]

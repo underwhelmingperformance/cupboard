@@ -31,7 +31,7 @@ function storedRow(
 }
 
 describe('signingKeyFromRow', () => {
-	it('carries the stored public key with the name it renders', () => {
+	it('reads the key name from the stored public key', () => {
 		expect(signingKeyFromRow(storedRow('cupboard-1:cHVi'))).toStrictEqual({
 			id: 'active',
 			privateJwk: { kty: 'OKP' },
@@ -43,23 +43,20 @@ describe('signingKeyFromRow', () => {
 		});
 	});
 
-	// A stored key with no separator names no signer, so the read fails here
-	// rather than handing back a name clients have no reason to trust.
 	it.each([
 		{ name: 'no separator', publicKey: 'cupboard-1' },
 		{ name: 'an empty name', publicKey: ':cHVi' },
 		{ name: 'empty material', publicKey: 'cupboard-1:' }
-	])('refuses a stored key with $name', ({ publicKey }) => {
+	])('rejects a stored public key with $name', ({ publicKey }) => {
 		expect(() => signingKeyFromRow(storedRow(publicKey))).toThrow(
 			InvalidNixPublicKeyError
 		);
 	});
 
-	// An id the key contract cannot address is a key no operator could retire.
 	it.each([
 		{ name: 'an unknown fixed id', id: 'primary' },
 		{ name: 'a truncated uuid', id: '123e4567-e89b-12d3-a456' }
-	])('refuses a stored key with $name', ({ id }) => {
+	])('rejects a stored key identifier with $name', ({ id }) => {
 		expect(() => signingKeyFromRow(storedRow('cupboard-1:cHVi', id))).toThrow(
 			ZodError
 		);
@@ -67,7 +64,7 @@ describe('signingKeyFromRow', () => {
 });
 
 describe('signingKeyName', () => {
-	it('includes the instance, tenant and monotonic generation', () => {
+	it('formats the instance, tenant, and generation as a Nix key name', () => {
 		expect(
 			signingKeyName(
 				instanceNameSchema.parse('forge'),

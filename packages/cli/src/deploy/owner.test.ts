@@ -67,7 +67,7 @@ describe('defaultOwnerChoice', () => {
 		});
 	});
 
-	it('is ownerless when nothing is configured and nobody is known', () => {
+	it('is ownerless when no owner is configured and no deployer is known', () => {
 		const config = parseDeploymentConfig(configWithVariables({}), tenantSource);
 
 		expect(defaultOwnerChoice(config)).toStrictEqual({

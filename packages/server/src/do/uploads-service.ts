@@ -58,22 +58,13 @@ import { type UploadStateService } from './upload-state-service.ts';
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
-// The blob facts a reuse decision plans from, satisfied by a `blob_state` row
-// and by a Worker-computed hint alike.
 type ReusableBlob = Pick<
 	BlobStateRow,
 	'fileHash' | 'fileSize' | 'compression' | 'narSize'
 >;
 
-// A pending upload, and a reuse upload's reclaim window, both live for fifteen
-// minutes from when they are negotiated.
 const uploadTtlMs = 15 * 60 * 1000;
 
-// The read-only classification `negotiate` and `preview` share: what a closure
-// looks like against the tenant's committed rows and shared blobs, before
-// either decides what to do about it. `committed` is broader than `skippable`
-// (a committed path can still lack its `blob_state` backing), so a caller that
-// heals a stale narinfo can tell the two apart.
 interface ClosureClassification {
 	readonly facts: NegotiateFacts | undefined;
 	readonly existingByStorePathHash: ReadonlyMap<StorePathHash, NarInfoRow>;
@@ -83,19 +74,14 @@ interface ClosureClassification {
 	readonly reusableByNarHash: ReadonlyMap<string, ReusableBlob>;
 }
 
-// What `classifyClosure` needs of a request body. Negotiate's body carries a
-// pushId beside the paths; preview's carries no pushId at all. Both satisfy
-// this narrower shape structurally, so shared classification never needs a
-// pushId, real or fabricated.
 interface ClosureRequest {
 	readonly paths: readonly ParsedUploadPathNegotiation[];
 }
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
 
-// Maps a polled upload's durable verdict to the status a `push --wait` client reads.
-// An absent row is `absent`; a terminal verdict maps straight across; any in-flight
-// or not-yet-committed verdict (null, `pending`, `committing`) is `pending`.
+// Successful materialisation removes the pending row. An `absent` status is
+// therefore not proof of failure; clients check narinfo to confirm servability.
 export function uploadStatusOf(
 	pending: undefined | { readonly verdict: PendingVerdict }
 ): UploadStatusResponse['status'] {
@@ -130,9 +116,8 @@ export class UploadsService {
 		private readonly roots: RootsService
 	) {}
 
-	// The committed narinfo rows for a closure, read in cache-scoped chunks that
-	// stay under D1's bound-parameter cap. The DO's own SQLite backs this table,
-	// so the reads are local, but chunking keeps every batched lookup uniform.
+	// D1 caps the number of bound parameters in one statement. Chunk closure
+	// lookups so a large request stays within that limit.
 	private existingNarInfos(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -154,10 +139,8 @@ export class UploadsService {
 		return new Map(rows.map((row) => [row.storePathHash, row]));
 	}
 
-	// Records a pending upload for one path and returns its decision: a reuse of an
-	// existing shared blob commits against the canonical object, while a fresh
-	// upload stages its bytes under a private, per-upload key so no client write
-	// can race or overwrite the shared one.
+	// A fresh upload uses a private staging key. Reuse records the canonical key but
+	// gives the client no write access to the shared object.
 	private planUpload(
 		cache: StoredCache,
 		pushId: PushId,
@@ -175,9 +158,9 @@ export class UploadsService {
 				? metadata
 				: {
 						...commitMetadataFromPathAndBlob(metadata, existingBlob),
-						// Sign the blob's verified narSize, never the client's declared
-						// one: a reuse skips re-verification, so an unchecked size must
-						// not reach the signed narinfo.
+						// The server already verified the reusable blob's `narSize`. Use
+						// that value because reuse skips content verification and the
+						// client's declared size remains untrusted.
 						narSize: existingBlob.narSize
 					};
 		const r2Key =
@@ -189,8 +172,8 @@ export class UploadsService {
 			.insert(schema.pendingUploads)
 			.values({
 				id: uploadId,
-				// Bind the upload to its cache so a later commit cannot redirect it
-				// to a different one.
+				// Store the cache in the pending row. Commit accepts only the upload
+				// identifier, so this binding prevents cross-cache redirection.
 				cache,
 				narHash: metadata.narHash,
 				r2Key,
@@ -221,12 +204,10 @@ export class UploadsService {
 		};
 	}
 
-	// The NAR hashes whose `blob_state` row confirms a backing canonical object.
-	// The Worker's hints read `blob_state` only for the hashes the request body
-	// carries, so they answer nothing about an existing row whose committed NAR
-	// differs from the one now pushed (the same store path rebuilt to different
-	// bytes). Those rows read their own presence here; treating absence from the
-	// hint set as a lost NAR would reconcile a healthy row away.
+	// Worker hints cover only NAR hashes in the current request. An existing
+	// narinfo can refer to a different hash when the same store path has been
+	// rebuilt. Query those uncovered hashes here so absence from the hint set does
+	// not cause negotiate to remove healthy narinfo.
 	private async backedNarHashes(
 		facts: NegotiateFacts | undefined,
 		body: ClosureRequest,
@@ -250,33 +231,15 @@ export class UploadsService {
 		return new Set([...facts.backedNarHashes, ...present]);
 	}
 
-	// Classifies a closure from pure-database facts, so a closure of any size
-	// costs a bounded number of D1 queries and no R2 head on the hot path: a
-	// negotiate that headed R2 per path hit the per-invocation subrequest cap
-	// around a few hundred cached paths and broke large pushes.
-	//
-	// A `blob_state` row exists exactly while the canonical NAR object does, so it
-	// stands in for the head: a committed path whose row is present is skippable;
-	// one whose row is gone has lost its NAR (`committed` still names it, so a
-	// caller that reconciles stale narinfos can tell the two apart from
-	// `skippable`). Shared by `negotiate`, which acts on the classification, and
-	// `preview`, which only reports it.
-	//
-	// `shouldClaim` selects the reusable-blob read's claiming or read-only twin
-	// (see {@link UploadStateService.findReusableBlobs} and {@link
-	// UploadStateService.peekReusableBlobs}): only a caller that will actually
-	// decide the closure (negotiate) may claim, since claiming un-arms a reaper
-	// timer over bytes it is about to bind a fresh reference to; a caller that
-	// only reports what it would do (preview) must never do that.
+	// Per-path R2 heads exceed the Worker's subrequest limit for large closures, so
+	// availability comes from the D1 reference and blob indexes. Preview must use
+	// the non-claiming lookup because classification must not clear reaper timers.
 	private async classifyClosure(
 		cache: StoredCache,
 		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
 		shouldClaim: boolean
 	): Promise<ClosureClassification> {
-		// With Worker-staged hints the shared-fact reads are already done, and the
-		// caller spends no time on D1 for them; without (an older Worker, a lost or
-		// expired token) it reads its own.
 		const facts = hints === undefined ? undefined : factsFromHints(hints);
 
 		const existingByStorePathHash = this.existingNarInfos(
@@ -284,10 +247,8 @@ export class UploadsService {
 			body.paths.map((path) => path.storePathHash)
 		);
 		const existingRows = existingByStorePathHash.values().toArray();
-		// The edge check and the `blob_state` presence check are independent
-		// reads over the same row set, so they run concurrently. Presence is read
-		// for every existing row's hash, a superset that includes mid-saga
-		// reservations, so both checks complete in one D1 wave.
+		// The presence query must include every existing row, including mid-saga
+		// reservations, because request hints do not cover all of their hashes.
 		const [committed, backedNarHashes] = await Promise.all([
 			facts?.committedEdges === undefined
 				? this.narInfoObjects.committedReferences(cache, existingRows)
@@ -298,18 +259,12 @@ export class UploadsService {
 			this.backedNarHashes(facts, body, existingRows)
 		]);
 
-		// A committed path is skippable only while a `blob_state` row still backs
-		// its NAR. The reaper drops that row before the object, so its presence
-		// confirms the NAR without an R2 head.
 		const skippableRows = existingRows.filter(
 			(row) =>
 				committed.has(row.storePathHash) && backedNarHashes.has(row.narHash)
 		);
 		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
 
-		// Only a path that will actually plan an upload needs a reusable blob, so a
-		// fully cached re-push (every path a skip) reads no reuse facts at all. The
-		// hinted map may cover skippable hashes too; only planned uploads read it.
 		const candidateNarHashes = body.paths
 			.filter((path) => !skippable.has(path.storePathHash))
 			.map((path) => path.narHash);
@@ -329,10 +284,6 @@ export class UploadsService {
 		};
 	}
 
-	// The status of a deferred upload, polled on the uploadId the client holds.
-	// Derived from the durable per-upload verdict: a row that is gone is
-	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
-	// while it still verifies (a null or in-flight verdict).
 	uploadStatus(uploadId: UploadId): UploadStatusResponse {
 		const pending = this.context.db
 			.select({ verdict: schema.pendingUploads.verdict })
@@ -343,12 +294,6 @@ export class UploadsService {
 		return { status: uploadStatusOf(pending) };
 	}
 
-	// Plans the per-path uploads for a whole closure. A stale narinfo (committed,
-	// but no `blob_state` row backs it) is reconciled here and its path re-plans
-	// an upload. The skippable closure is then queued for an off-hot-path
-	// reconcile (see {@link ReconcileQueueService}) that probes R2 and repairs any
-	// drift the database could not see, so a missing narinfo object is restored
-	// in one re-push and a genuinely lost NAR is removed for the next.
 	async negotiate(
 		cache: StoredCache,
 		body: ParsedUploadNegotiateRequest,
@@ -360,10 +305,8 @@ export class UploadsService {
 			throw new InvalidPushIdError();
 		}
 
-		// The run root is bound where the push is established: created on the
-		// push's first negotiate, extended forward-only after that, before any
-		// upload is planned, so every row this negotiation plans carries the
-		// root its commit attaches to.
+		// Bind the run root before planning any upload. Each pending row then records
+		// the root that its eventual commit must attach to.
 		if (body.attachRoot !== undefined) {
 			this.roots.bindRunRoot(
 				cache,
@@ -387,11 +330,9 @@ export class UploadsService {
 			reusableByNarHash
 		} = await this.classifyClosure(cache, body, hints, true);
 
-		// The grace in force is captured once per negotiation and stored with each
-		// pending upload, so a policy changed before the commit settles cannot
-		// alter what this negotiation promised. Grace facts are attached only when
-		// the client declared the corresponding capability, preserving the exact
-		// legacy decision and commit-frame shapes otherwise.
+		// Capture grace once and store it with every pending upload. A later policy
+		// change cannot alter the decision before commit finishes. Attach grace facts
+		// only when the client requested them, preserving the legacy wire shape.
 		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 		const graceDecision: GraceDecision = {
 			reportsGrace: shouldReportGrace,
@@ -404,14 +345,11 @@ export class UploadsService {
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
 
-		// An already-present decision is a successful publication too, so its
-		// grace is confirmed whether or not the client accepted grace facts; only
-		// the reported fact is capability-gated. One batched application covers every
-		// skippable path, so a large already-present closure costs a bounded
-		// number of statements rather than one transaction per path. The
-		// skippable snapshot was read before awaited shared-facts checks, so a
-		// row can have moved by now; a moved row is absent from the map, grants
-		// nothing, and reports the empty fact.
+		// A skip completes publication during negotiate, so confirm its grace even
+		// when the client did not request grace facts. Capability negotiation controls
+		// only the response shape. The batch re-checks each row identity because the
+		// classification awaited shared facts; a replaced row receives no grace and
+		// will not be returned as a skip below.
 		const skipFacts = confirmGraceBatch(
 			this.context,
 			this.retention,
@@ -424,11 +362,8 @@ export class UploadsService {
 			resolvedGraceSeconds
 		);
 
-		// A skip settles wholly at negotiate: it plans no upload and no commit
-		// finalises it, so the bound run root gains each skipped path here. The
-		// map holds exactly the paths the loop below answers as skips, and the
-		// attach shares the synchronous stretch with the identity re-check
-		// above, so every row it references was just confirmed to serve.
+		// A skip has no later commit step. Attach each confirmed skip to the run root
+		// now, using the same identity-checked set that the response loop uses.
 		if (body.attachRoot !== undefined) {
 			this.roots.attachRunRootTargets(
 				cache,
@@ -447,12 +382,9 @@ export class UploadsService {
 					? skipFacts.get(metadata.storePathHash)
 					: undefined;
 
-			// A skip answers only from a row whose identity the batch just
-			// re-checked. A skippable row absent from the map moved during the
-			// shared-fact reads, so its snapshot no longer describes what holds
-			// the path: fall through and plan this push's own bytes, leaving the
-			// concurrent publication untouched. The commit saga arbitrates the
-			// race exactly as it does for any contested path.
+			// `skipFacts` contains only rows that survived the identity check. If the
+			// row changed during classification, plan this request's bytes and let the
+			// commit saga resolve the concurrent publication.
 			if (existing !== undefined && skipFact !== undefined) {
 				uploads.push({
 					action: 'skip',
@@ -463,10 +395,9 @@ export class UploadsService {
 				continue;
 			}
 
-			// Committed, but no `blob_state` row backs its NAR: reconcile the stale
-			// narinfo so a re-upload at the requested hash heals it, then plan that
-			// upload. A moved row is not stale: whatever holds the path now is a
-			// live concurrent publication, so it is planned without reconciling.
+			// A committed row without a present NAR is stale. Remove it before
+			// planning the replacement. Do not remove a replacement row written by a
+			// concurrent publication.
 			if (
 				existing !== undefined &&
 				!skippable.has(metadata.storePathHash) &&
@@ -495,16 +426,12 @@ export class UploadsService {
 			);
 		}
 
-		// Reusing is a fresh reference, so cancel any armed reaper grace timer
-		// before the response commits the client to the plan; the fallback read
-		// (`findReusableBlobs`) clears its own. A clear deferred past the
-		// response can be lost, leaving the reaper racing the client across its
-		// whole negotiate-to-commit window.
+		// Worker hints bypass `findReusableBlobs`, which normally clears armed
+		// timers. Clear the hinted timers before returning the decisions. Otherwise
+		// the reaper could remove a canonical object after the client receives a
+		// commit decision but before that commit binds its new reference.
 		await this.uploadState.clearReaperTimers([...armedReuseHashes]);
 
-		// Queue the skippable closure for the off-hot-path reconcile and arm the
-		// alarm. The push returns at once; the alarm probes R2 for each path and
-		// restores a missing narinfo object or removes one whose NAR is truly gone.
 		await this.reconcileQueue.enqueue(
 			origin,
 			skippableRows.map((row) => ({ cache, storePathHash: row.storePathHash }))
@@ -513,13 +440,10 @@ export class UploadsService {
 		return { uploads };
 	}
 
-	// The read-only twin of `negotiate`: classifies a closure exactly as
-	// negotiate would (skip / reuse-commit / fresh upload) without planning
-	// anything. It inserts no pending upload, heals no stale narinfo, queues no
-	// reconcile, clears no reaper timer, and extends no grace deadline; a skip
-	// reports the deadline already on the row, unstretched, and a commit or
-	// upload reports the grace a publication would currently capture. Facts are
-	// always attached, since preview has no legacy shape to preserve.
+	// Preview does not create pending rows, repair stale publications, enqueue
+	// reconciliation, claim reusable blobs, or extend grace. A skip reports its
+	// stored deadline; commit and upload actions report the policy that a new
+	// publication would capture.
 	async preview(
 		cache: StoredCache,
 		body: ParsedUploadPreviewRequest,
@@ -539,8 +463,6 @@ export class UploadsService {
 			resolvedGraceSeconds === undefined
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
-		// One chunked read covers every skip answer: a large previewed closure
-		// must not cost a stored-deadline query per path.
 		const storedDeadlines = storedGraceDeadlines(
 			this.context.db,
 			cache,
@@ -560,8 +482,8 @@ export class UploadsService {
 				if (existing !== undefined && skippable.has(metadata.storePathHash)) {
 					const retainUntil = storedDeadlines.get(metadata.storePathHash);
 
-					// A skip with no stored deadline still reports the resolved
-					// policy: an empty fact strictly means no policy matched.
+					// A skip without a stored deadline reports the current policy. An
+					// empty grace fact means that no policy matched.
 					const decision = {
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
@@ -590,15 +512,9 @@ export class UploadsService {
 		};
 	}
 
-	// Confirms an unretained publication by store path, without uploading bytes:
-	// the same conditions and monotonic grace extension a negotiate applies to
-	// an already-present decision, reused wholesale through {@link
-	// confirmGraceBatch}. A path confirms only while it is genuinely
-	// substitutable: it needs a committed reference edge, a live `blob_state`
-	// backing exactly as negotiate's skippable check does, and a row identity
-	// that still holds when the grace is applied, since a caller confirms a
-	// path precisely to rely on substituting it afterwards. Anything less
-	// confirms false and extends nothing.
+	// Confirmation requires a committed reference, a present canonical NAR, and the
+	// same narinfo identity when grace is applied. If any condition fails, the path
+	// is reported as unconfirmed and receives no grace extension.
 	async confirmPaths(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -607,8 +523,7 @@ export class UploadsService {
 			return { paths: [] };
 		}
 
-		// The work runs once per distinct hash; every occurrence in the request
-		// still gets its own response entry.
+		// Deduplicate the storage queries without removing duplicate response entries.
 		const uniqueHashes = [...new Set(storePathHashes)];
 		const existingByStorePathHash = this.existingNarInfos(cache, uniqueHashes);
 		const existingRows = existingByStorePathHash.values().toArray();
@@ -637,10 +552,8 @@ export class UploadsService {
 				}
 			];
 		});
-		// The checks above awaited shared facts, so a row can have moved since
-		// its snapshot; the batch re-checks each row's identity and applies the
-		// grace only to the rows that still match. A moved row is absent from
-		// the map and confirms false.
+		// The shared-fact reads allow a concurrent publication to replace a row.
+		// Re-check identity while applying grace and confirm only unchanged rows.
 		const facts = confirmGraceBatch(
 			this.context,
 			this.retention,
@@ -662,10 +575,8 @@ export class UploadsService {
 		};
 	}
 
-	// Issues a push's upload credential, scoped to its staging prefix and the
-	// write-only upload actions, and never outliving the access token that asked
-	// for it. Without a push id the server signs a fresh one; with one it refreshes
-	// the credential for that push, having checked it signed the id.
+	// The credential is write-only and restricted to one push's staging prefix. Its
+	// expiry cannot exceed the access-token expiry.
 	async issuePushCredential(
 		tokenExpiresAt: Date,
 		pushId?: PushId

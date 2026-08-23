@@ -491,11 +491,9 @@ describe('attestation CAS lifecycle', () => {
 			usage: await tenantUsageRow()
 		};
 
-		// The reaper routes a demote for this digest, but the shared object is present
-		// in the Durable Object: a concurrent re-promote restored it, or the reaper's
-		// head was stale. Stripping the references and crediting quota would corrupt a
-		// live object's accounting, so the demote re-checks and is a no-op. The stale
-		// fence value is never consulted because the presence check short-circuits.
+		// The object is present by the time the Durable Object handles the stale
+		// demotion. The presence check must stop reference deletion and quota credit
+		// before the storedAt fence is considered.
 		await currentServer().demoteAttestationReferences([
 			{
 				digest: bundle.digest,
@@ -527,12 +525,9 @@ describe('attestation CAS lifecycle', () => {
 			usage: await tenantUsageRow()
 		};
 
-		// The reaper observed the object gone at one storedAt, but a concurrent
-		// re-promote rewrote the object and bumped cas_object.storedAt by the time the
-		// Durable Object acts. The object is absent again here, so the re-head guard
-		// passes and the per-reference storedAt fence is what must abort: a row carrying
-		// a different storedAt means the reference is live and must not be stripped, nor
-		// its charge credited away.
+		// Re-promotion changes storedAt after the reaper observes the object missing.
+		// Delete the object again so only the storedAt fence can protect the new
+		// reference and its quota charge from the stale demotion.
 		await env.BLOBS.delete(casObjectKey(bundle.digest));
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.update(d1Schema.casObject)

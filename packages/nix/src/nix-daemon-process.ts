@@ -7,9 +7,6 @@ import {
 	type NixDaemonTransport
 } from './nix-daemon.ts';
 
-/**
-The child-process pieces the transport drives, injected for tests.
-*/
 export interface DaemonChildProcess {
 	readonly stdin: {
 		write(chunk: Uint8Array, callback: (error?: Error | null) => void): unknown;
@@ -25,20 +22,14 @@ export type DaemonCommandRunner = (
 ) => DaemonChildProcess;
 
 /**
-How long a daemon child has to exit after TERM before cleanup sends KILL.
-*/
+ * Cleanup sends SIGKILL if the child has not exited this long after SIGTERM.
+ */
 export const daemonProcessTerminationGraceMs = 5000;
 
-/**
-A pending daemon-process escalation that can be cancelled after child exit.
-*/
 export interface ScheduledDaemonProcessKill {
 	cancel(): void;
 }
 
-/**
-Starts the cancellable grace period before daemon-process cleanup escalates.
-*/
 export type ScheduleDaemonProcessKill = (
 	delayMs: number,
 	onElapsed: () => void
@@ -58,9 +49,6 @@ const scheduleDaemonProcessKill: ScheduleDaemonProcessKill = (
 	};
 };
 
-/**
-Starts the daemon command as a child of this process.
-*/
 export const spawnDaemonProcess: DaemonCommandRunner = (
 	command,
 	commandArguments
@@ -70,11 +58,9 @@ export const spawnDaemonProcess: DaemonCommandRunner = (
 	});
 
 /**
- * A connector that reaches a daemon speaking the worker protocol over a child
- * process's pipes: each connection starts the given command and speaks the
- * protocol on its stdin and stdout, so the handshake, SetOptions and every
- * operation behave exactly as they do over a local socket. Closing the
- * connection kills the child.
+ * Runs one daemon child for each connection and exchanges the worker protocol
+ * through its standard input and output. Closing the connection sends SIGTERM,
+ * waits for the grace period, then sends SIGKILL if the child has not exited.
  */
 export function createProcessNixDaemonConnector(
 	command: string,
@@ -128,9 +114,9 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 		child.once('exit', () => {
 			this.finish();
 		});
-		// A spawn failure surfaces on the child, never on its stdout, and a
-		// child that never spawned emits no exit. The error therefore fails any
-		// read waiting for bytes and resolves the promise that `close()` awaits.
+		// Node reports a spawn failure through the child's `error` event. The child
+		// does not close stdout or emit `exit`, so fail pending reads and mark it as
+		// finished here.
 		child.once('error', (error) => {
 			this.reader.fail(error);
 			this.finish();

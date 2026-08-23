@@ -171,7 +171,7 @@ describe('reprobeAvailability', () => {
 		});
 	});
 
-	it('asks nothing at all when no target has a predictable output', async () => {
+	it('skips both probes when no target has a predictable output', async () => {
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: undefined })],

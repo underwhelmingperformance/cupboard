@@ -43,7 +43,7 @@ describe('signing key schemas', () => {
 		expect(signingKeyEntrySchema.parse(value)).toStrictEqual(expected);
 	});
 
-	it('keeps state-specific backfill fields distinct', () => {
+	it('rejects a remaining count on a complete backfill', () => {
 		const complete = {
 			state: 'complete',
 			startedAt: running.startedAt,

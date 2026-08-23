@@ -1,13 +1,12 @@
-// Byte encoders shared across the workspace. They use `btoa`/`atob`, which are
-// available in both Node and workerd. Looping over the bytes keeps them safe
-// for inputs of any length.
-
 /**
-Encode bytes as standard (padded) base64.
-*/
+ * Encodes bytes with the standard base64 alphabet and `=` padding.
+ */
 export function bytesToBase64(bytes: Uint8Array): string {
 	let binary = '';
 
+	// Passing the whole array to String.fromCodePoint can exceed the engine's
+	// argument limit. Append one byte at a time so input length does not affect
+	// call arity.
 	for (const byte of bytes) {
 		binary += String.fromCodePoint(byte);
 	}
@@ -16,8 +15,9 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
-Decode standard base64 into bytes.
-*/
+ * Decodes standard base64 into bytes. `atob` rejects malformed input with a
+ * `DOMException`.
+ */
 export function base64ToBytes(value: string): Uint8Array {
 	return Uint8Array.from(
 		atob(value),
@@ -26,8 +26,8 @@ export function base64ToBytes(value: string): Uint8Array {
 }
 
 /**
-Encode bytes as URL-safe base64 without padding.
-*/
+ * Encodes bytes with the URL-safe base64 alphabet and no padding.
+ */
 export function bytesToBase64Url(bytes: Uint8Array): string {
 	return bytesToBase64(bytes)
 		.replaceAll('+', '-')
@@ -36,8 +36,8 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
 }
 
 /**
-Encode bytes as lowercase hex.
-*/
+ * Encodes bytes as lowercase hexadecimal.
+ */
 export function bytesToHex(bytes: Uint8Array): string {
 	let hex = '';
 
@@ -49,8 +49,10 @@ export function bytesToHex(bytes: Uint8Array): string {
 }
 
 /**
-Decode a hex string into bytes; throws `RangeError` on malformed input.
-*/
+ * Decodes uppercase or lowercase hexadecimal into bytes. Throws `RangeError`
+ * when the input has an odd length or contains a character outside the
+ * hexadecimal alphabet.
+ */
 export function hexToBytes(value: string): Uint8Array {
 	if (value.length % 2 !== 0 || /[^\da-f]/iu.test(value)) {
 		throw new RangeError(`not a valid hex string: ${value}`);

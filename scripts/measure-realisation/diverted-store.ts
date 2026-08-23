@@ -23,28 +23,6 @@ import {
 
 import type { RealisationPlanner, ResolvedDerivation } from './measurement.ts';
 
-/**
- * Only this module invokes `nix`. The store protocol cannot evaluate a flake
- * attribute or copy a derivation closure, so those operations use the CLI.
- * Measurements use this repository's daemon client over `nix daemon --stdio`.
- *
- * Three invocations make up a run:
- *
- * - `nix path-info --derivation <flake>#<attr>` resolves a target to the
- *   derivation the store plans against.
- * - `nix copy --derivation --to <diverted store>` adds those derivations to the
- *   empty store. A store without the derivations cannot plan the installables.
- *   A CI runner does not incur this cost because it evaluates and builds in the
- *   same store.
- * - `nix daemon --stdio` serves the diverted store, and
- *   {@link NixDaemonStoreClient} speaks the worker protocol to it over the
- *   child's pipes.
- *
- * Pass `--substituters` to all three commands to replace the configured list. A
- * developer machine can have an `ssh://` substituter that opens an SSH
- * connection for each availability query. Replacing the list prevents host
- * configuration from changing measurements between machines.
- */
 export class NixCommandError extends CodedError {
 	constructor(
 		readonly command: string,
@@ -91,10 +69,6 @@ const defaultCommandRunner: CommandRunner = (command, commandArguments) =>
 		maxBuffer: 256 * 1024 * 1024
 	});
 
-// The fixture drives `nix` through its flake and store URI interfaces, so it
-// asks for those features explicitly rather than depending on how the host
-// happens to be configured. Extending the set leaves whatever else the host
-// enables in place.
 const requiredFeatures = [
 	'--extra-experimental-features',
 	'nix-command flakes'
@@ -102,7 +76,7 @@ const requiredFeatures = [
 
 /**
  * A diverted store whose logical store directory matches the host but whose
- * files live in an empty directory. The logical directory participates in
+ * files live in a separate directory. The logical directory participates in
  * store-path hashes and must remain unchanged. Using the temporary directory
  * as `--store` would change every derivation and prevent substitution, so the
  * measurements would not represent a runner.
@@ -180,12 +154,9 @@ export interface DivertedStoreOptions {
 }
 
 /**
- * Creates the diverted store directories and returns their resolved parent
- * path. Each run uses a fresh directory, so no manifest target is already
- * realised.
- *
- * Resolve the path because Nix rejects a store below a symlink. On macOS, the
- * normal temporary directory is reached through `/var`, which is a symlink.
+ * Nix rejects a store below a symlink. Return the resolved directory so the
+ * store URI does not use one, including the `/var` symlink used by temporary
+ * directories on macOS.
  */
 export async function createDivertedStoreDirectory(
 	directory: string
@@ -235,8 +206,9 @@ async function makeWritable(directory: string): Promise<void> {
 }
 
 /**
- * Creates a planner backed by a store containing only the seeded derivations.
- * The resulting measurements model a cold runner.
+ * Evaluates targets and copies their derivations with the Nix CLI, then plans
+ * through a daemon that serves the diverted store. Every Nix process receives
+ * the selected substituters so host configuration does not change the result.
  */
 export function createDivertedStorePlanner(
 	options: DivertedStoreOptions

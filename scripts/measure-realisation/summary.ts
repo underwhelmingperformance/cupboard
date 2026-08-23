@@ -26,12 +26,9 @@ export function formatBytes(bytes: number): string {
 	return `${sign}${remaining.toFixed(digits)} ${binaryUnits[unit] ?? 'B'}`;
 }
 
-/**
-The report as lines a person reads, one table of targets then the groups.
-*/
 export function renderSummary(report: RealisationReport): string {
 	const lines = [
-		`Realising ${report.flake} against an empty store`,
+		`Realising ${report.flake} in the diverted store`,
 		`Substituters: ${report.substituters.join(' ') || '(none)'}`,
 		'',
 		'Per target:'
@@ -42,7 +39,7 @@ export function renderSummary(report: RealisationReport): string {
 			`  ${target.attr}: ${String(target.measurement.willBuild)} to build, ` +
 				`${String(target.measurement.willSubstitute)} to fetch ` +
 				`(${formatBytes(target.measurement.downloadSize)} download, ` +
-				`${formatBytes(target.measurement.narSize)} unpacked)`
+				`${formatBytes(target.measurement.narSize)} NAR)`
 		);
 	}
 
@@ -65,19 +62,16 @@ function groupLines(key: string, group: GroupMeasurement): readonly string[] {
 		`  together: ${String(together.willBuild)} to build, ` +
 			`${String(together.willSubstitute)} to fetch ` +
 			`(${formatBytes(together.downloadSize)} download, ` +
-			`${formatBytes(together.narSize)} unpacked)`,
+			`${formatBytes(together.narSize)} NAR)`,
 		`  apart:    ${String(apart.willBuild)} to build, ` +
 			`${String(apart.willSubstitute)} to fetch ` +
 			`(${formatBytes(apart.downloadSize)} download, ` +
-			`${formatBytes(apart.narSize)} unpacked)`,
+			`${formatBytes(apart.narSize)} NAR)`,
 		`  grouping saves ${String(saved.willBuild)} derivation(s) and ` +
-			`${formatBytes(saved.narSize)} unpacked`
+			`${formatBytes(saved.narSize)} NAR bytes`
 	];
 }
 
-/**
-The gate's verdict as lines a person reads.
-*/
 export function renderBudgetResult(result: BudgetResult): string {
 	const lines = [
 		`Gate: tolerance ${(result.tolerance * 100).toFixed(1)}%`,

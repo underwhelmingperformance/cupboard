@@ -371,9 +371,7 @@ describe('local attestation verification', () => {
 		]);
 	});
 
-	// The result carries the predicate itself, so a caller that understands its
-	// own predicate type reads the statement from there.
-	it('returns the predicate a bundle of another type carries', async () => {
+	it('returns the predicate from a bundle of another type', async () => {
 		const predicate = {
 			subjects: [
 				{
@@ -649,10 +647,9 @@ describe('remote attestation verification', () => {
 		]);
 	});
 
-	// A cache signs with every key it holds, so a narinfo routinely carries
-	// signatures naming keys the caller does not trust, and a served line may be
-	// anything at all. Neither stops the trusted key's own signature verifying.
-	it('verifies through the signature naming the trusted key', async () => {
+	// A narinfo can include signatures for untrusted keys and malformed lines.
+	// Neither prevents cryptographic verification of the trusted key's signature.
+	it('verifies the trusted signature despite other narinfo entries', async () => {
 		const signed = await signedNarInfo();
 		const source = NarInfo.parse(signed.source)
 			.withSignature('other-cache:c2lnbmVk')

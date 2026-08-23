@@ -53,8 +53,8 @@ async function snapshotPendingRow(uploadId: UploadId): Promise<PendingRow> {
 	return row;
 }
 
-// Re-plants a cleared pending row as still awaiting its verdict, the state an
-// eviction leaves when the object published but the clear-marker step never ran.
+// Replant the pending row to reproduce a crash after publication and before the
+// marker was cleared.
 async function replantStuckPending(row: PendingRow): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { pendingUploads } })
@@ -64,11 +64,10 @@ async function replantStuckPending(row: PendingRow): Promise<void> {
 	});
 }
 
-// A retention root may reference any target backed by a committed narinfo row,
-// including one still verifying, so a push records retention before the background
-// pass materialises the path. A target with no row at all is rejected. `present`
-// reflects the serve predicate (the materialised narinfo object, repairing a
-// merely-lost one first), so it reads false until the target verifies.
+// A root can reference a reserved narinfo row before verification materialises
+// the path. A target with no row is rejected. `present` reports whether the
+// target is currently servable, after repairing a missing narinfo object when
+// possible.
 
 describe('root activation gating', () => {
 	beforeEach(async () => {
@@ -86,8 +85,6 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key);
-		// Negotiated and staged, but never committed, so no narinfo row backs the
-		// path: a root cannot reference it.
 		await markUploadPendingVerification(upload.uploadId);
 
 		const response = await authorisedFetch(
@@ -115,9 +112,8 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key);
-		// A deferred commit reserves the narinfo row before verification, so the
-		// root binds now and the target reads `present: false` until the pass
-		// materialises the object.
+		// The deferred commit has reserved the narinfo row, but verification has
+		// not made the target servable yet.
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
 		const reserved = await setRoot(token, {
@@ -152,8 +148,8 @@ describe('root activation gating', () => {
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
-		// A collection landing in the verify window must spare the reserved,
-		// still-unmaterialised row: the root reaches it and its upload is in flight.
+		// The root protects the reserved row while verification is still using its
+		// staged upload.
 		await currentServer().runGarbageCollection();
 		await currentServer().runVerification();
 
@@ -172,8 +168,7 @@ describe('root activation gating', () => {
 		const token = await initialise();
 		const good = await verifiableNar('prune-good');
 		const wrong = await verifiableNar('prune-wrong');
-		// Bytes whose checksum matches the declared fileHash but which decompress to a
-		// different NAR than the declared narHash: a background mismatch.
+		// The compressed hash matches, but the bytes decode to a different NAR.
 		const metadata = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
 			narHash: good.narHash,
@@ -189,8 +184,6 @@ describe('root activation gating', () => {
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
-		// The NAR-hash check fails, so the target can never become servable and is
-		// dropped from the root.
 		await currentServer().runVerification();
 
 		const { targets } = await listRootTargets(token, 'main');
@@ -208,10 +201,9 @@ describe('root activation gating', () => {
 			targets: [upload.metadata.storePath]
 		});
 
-		// Delete only the narinfo object, so the already-committed short-circuit
-		// (which needs the object present) does not fire; the reference edge still
-		// proves the path committed. A straggling mismatch verdict on the re-planted
-		// row must not retire the row's root, since these bytes are servable.
+		// Delete only the narinfo object so verification cannot take the
+		// already-committed short circuit. The current reference edge still proves
+		// that the path was committed, so a stale mismatch must not remove its root.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash)
 		);
@@ -247,8 +239,6 @@ describe('root activation gating', () => {
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
-		// The tenant is suspended before the deferred path verifies, so it can never
-		// materialise; its root target must be pruned, not left dangling.
 		await suspendTenant(fixtureTenant);
 		await currentServer().runVerification();
 
@@ -267,8 +257,8 @@ describe('root activation gating', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(token, metadata);
-		// Lose only the materialised object: the row and the shared blob remain, so
-		// the path is still servable once the object is re-materialised.
+		// Keep the row and shared blob so ensureRoot can restore the missing narinfo
+		// object.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
@@ -305,8 +295,7 @@ describe('root activation gating', () => {
 			targets: [metadata.storePath]
 		});
 
-		// Demote: drop the shared fact and the materialised object, leaving the
-		// narinfo row. The row exists, but the path is no longer servable.
+		// Keep the narinfo row while removing its shared blob and published object.
 		await deleteBlobState(metadata.narHash);
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)

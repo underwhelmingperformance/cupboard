@@ -20,12 +20,9 @@ import { authoriseAttachRoot, authoriseRequest } from './authorise.ts';
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
 
-// The implementer carries the cross-cutting middleware every procedure runs:
-// the error bridge, authentication against the scope the contract's meta
-// declares (an admin token satisfies every scope), and the post-mutation
-// maintenance hook for procedures whose meta marks them mutating. The contract
-// supplies the scope and maintenance declarations, so nothing is repeated per
-// procedure here.
+// Apply the contract's scope and maintenance metadata centrally. Every
+// procedure uses the same error bridge and authentication rules, while admin
+// tokens satisfy every tenant scope.
 const os = implement(tenantContract)
 	.$context<TenantOrpcContext>()
 	.use(async ({ context, next }) => {

@@ -14,7 +14,7 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Local R2 credential env files used for manual testing; contain secrets.
+# These local R2 credential files contain secrets.
 .r2_*
 .dev.vars
 

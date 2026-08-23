@@ -23,8 +23,8 @@ export const maxOutgoingConnections = 6;
 export const maxR2DeleteKeys = 1000;
 
 /**
- * Deletes `keys` from `bucket` in as few `delete` calls as R2's per-call key
- * limit allows (batching calls to minimise round trips). An empty set issues no call.
+ * Deletes the keys in batches that satisfy R2's per-call limit. An empty set
+ * issues no request.
  */
 export async function deleteObjects(
 	bucket: R2Bucket,

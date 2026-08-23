@@ -21,11 +21,6 @@ interface RetireOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the key commands use, in the
- * contract's input and output shapes. The real `tenantRpc(...).keys.signing`
- * satisfies this interface by construction.
- */
 export interface KeyClient {
 	list(): Promise<ParsedKeyListResponse>;
 	rotate(): Promise<ParsedKeyRotateResponse>;

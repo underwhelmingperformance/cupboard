@@ -64,8 +64,6 @@ async function negotiateWithRoot(
 	return uploadNegotiateResponseSchema.parse(await response.json());
 }
 
-// Runs one path through negotiate, upload and commit under a run root, the
-// way a build-time push does.
 async function pushWithRoot(
 	token: string,
 	metadata: ReturnType<typeof uploadMetadata>,
@@ -111,9 +109,6 @@ async function retentionRootRows(): Promise<readonly unknown[]> {
 	);
 }
 
-// A synthetic already-attached target, the shape a long run's earlier batches
-// left behind: a valid hash and path that never need to be servable for the
-// attach bound question.
 function seededTarget(index: number): {
 	storePathHash: string;
 	storePath: string;
@@ -179,9 +174,8 @@ describe('run root lifecycle', () => {
 			storePathHash: 'b'.repeat(32)
 		});
 
-		// The bound applies to one set-root request, never to a root: a long
-		// run's earlier batches already attached a full request's worth, and
-		// the next commit still attaches through the gate.
+		// The limit applies to one attachment request, not to the total number of
+		// targets accumulated by a run root.
 		await seedRunRootTargets(rootSetMaxTargets);
 		await pushWithRoot(token, gated, runRoot);
 
@@ -218,8 +212,7 @@ describe('run root lifecycle', () => {
 			storePathHash: 'b'.repeat(32)
 		});
 
-		// The interrupted shape: one target row already applied while the
-		// settle that wrote it never finished.
+		// Seed a partial earlier attempt before replaying both batches.
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.retentionRootTargets)
@@ -236,8 +229,6 @@ describe('run root lifecycle', () => {
 		await pushWithRoot(token, second, runRoot);
 		const afterFirstPass = await rootTargetRows();
 
-		// The whole sequence re-driven in the reverse order: every commit
-		// negotiates as already present and attach applies nothing new.
 		await pushWithRoot(token, second, runRoot);
 		await pushWithRoot(token, first, runRoot);
 
@@ -275,16 +266,13 @@ describe('run root lifecycle', () => {
 			storePathHash: 'b'.repeat(32)
 		});
 
-		// The released target is deliberately outside the run root, so losing
-		// its target root really releases it; the replacement target is run-root
-		// attached like any streamed path.
+		// Leave the released target outside the run root so replacing the target
+		// root genuinely releases it.
 		await pushWithRoot(token, previous);
 		await pushWithRoot(token, next, runRoot);
 		await setRoot(token, { name: 'main', targets: [previous.storePath] });
 		await enableGracePolicy();
 
-		// Reconciliation replaces the target root; the released target gains
-		// grace, and the run root's rows and expiry stay exactly as attached.
 		await setRoot(token, { name: 'main', targets: [next.storePath] });
 
 		const grace = await runInDurableObject(currentServer(), (instance) =>
@@ -359,8 +347,8 @@ describe('run root lifecycle', () => {
 
 		const whileLive = await runGcResult();
 
-		// Past the run root's expiry, both batches' attachments have nothing
-		// retaining them; the permanently rooted path stays.
+		// After the run root expires, no remaining root retains either batch. The
+		// permanently rooted path remains.
 		vi.setSystemTime(new Date(testBase.getTime() + 2 * 3600 * 1000));
 		const afterExpiry = await runGcResult();
 
@@ -420,8 +408,8 @@ describe('run root lifecycle', () => {
 
 		await pushWithRoot(token, shared, runRoot);
 
-		// The second run's negotiate answers the shared path as a skip; its
-		// longer-lived root must hold the path once the first run's expires.
+		// The second run reuses the shared path and attaches it to a longer-lived
+		// root.
 		const decision = singleDecision(
 			await negotiateWithRoot(token, [shared], {
 				name: 'ci/run-2',
@@ -429,13 +417,12 @@ describe('run root lifecycle', () => {
 			})
 		);
 
-		// Between the two expiries only the first run root has lapsed, and the
-		// second's attachment keeps the shared path servable.
+		// The second run root still retains the path after the first one expires.
 		vi.setSystemTime(new Date(testBase.getTime() + 1.5 * 3600 * 1000));
 		const afterFirstExpiry = await runGcResult();
 		const heldTargets = await rootTargetRows();
 
-		// Past the second run root's expiry, nothing retains the shared path.
+		// No root retains the shared path after the second run root expires.
 		vi.setSystemTime(new Date(testBase.getTime() + 3 * 3600 * 1000));
 		const afterSecondExpiry = await runGcResult();
 
@@ -499,9 +486,8 @@ describe('run root lifecycle', () => {
 
 		await pushWithRoot(token, shared, runRoot);
 
-		// The second cohort's negotiate finds the shared path already
-		// canonical: nothing to upload, and collection while the first run
-		// root is live reclaims nothing.
+		// The second run reuses the shared path while the first run root keeps it
+		// servable.
 		const decision = singleDecision(
 			await negotiateWithRoot(token, [shared], {
 				name: 'ci/run-2',

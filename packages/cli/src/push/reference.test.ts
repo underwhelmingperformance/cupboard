@@ -63,7 +63,7 @@ function respondingFetcher(
 }
 
 describe('fetchReferenceMetadata', () => {
-	it('maps a served narinfo into the upload fields and keeps its signatures', async () => {
+	it('maps a served narinfo to upload metadata and retains its signatures', async () => {
 		const requests: RecordedRequest[] = [];
 		const metadata = await fetchReferenceMetadata(
 			{ url: new URL('https://cache.example.workers.dev/t/acme/') },
@@ -111,7 +111,7 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('omits the deriver and content address a narinfo does not carry, and records no signature', async () => {
+	it('omits optional upload metadata absent from the narinfo', async () => {
 		const metadata = await fetchReferenceMetadata(
 			{ url: new URL('https://cache.example.workers.dev/t/acme') },
 			storePathHash,
@@ -136,7 +136,7 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('sends the read credential pair as basic authentication', async () => {
+	it('sends the read username and password in the Basic authorization header', async () => {
 		const requests: RecordedRequest[] = [];
 
 		await fetchReferenceMetadata(
@@ -160,36 +160,42 @@ describe('fetchReferenceMetadata', () => {
 	it.each([
 		{ name: 'a missing narinfo', status: 404 },
 		{ name: 'a refused read', status: 403 }
-	])('types $name as unavailable with its status', async ({ status }) => {
-		let error: unknown;
-		try {
-			await fetchReferenceMetadata(
-				{ url: new URL('https://cache.example.workers.dev/t/acme') },
-				storePathHash,
-				{
-					fetch: respondingFetcher([], () => new Response('absent', { status }))
-				}
-			);
-		} catch (error_: unknown) {
-			error = error_;
+	])(
+		'returns an unavailable error with the response status for $name',
+		async ({ status }) => {
+			let error: unknown;
+			try {
+				await fetchReferenceMetadata(
+					{ url: new URL('https://cache.example.workers.dev/t/acme') },
+					storePathHash,
+					{
+						fetch: respondingFetcher(
+							[],
+							() => new Response('absent', { status })
+						)
+					}
+				);
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expect(error).toBeInstanceOf(NarInfoUnavailableError);
+
+			if (!(error instanceof NarInfoUnavailableError)) {
+				return;
+			}
+
+			expect({
+				name: error.name,
+				target: error.target.href,
+				status: error.status
+			}).toStrictEqual({
+				name: 'NarInfoUnavailableError',
+				target: `https://cache.example.workers.dev/t/acme/${storePathHash}.narinfo`,
+				status
+			});
 		}
-
-		expect(error).toBeInstanceOf(NarInfoUnavailableError);
-
-		if (!(error instanceof NarInfoUnavailableError)) {
-			return;
-		}
-
-		expect({
-			name: error.name,
-			target: error.target.href,
-			status: error.status
-		}).toStrictEqual({
-			name: 'NarInfoUnavailableError',
-			target: `https://cache.example.workers.dev/t/acme/${storePathHash}.narinfo`,
-			status
-		});
-	});
+	);
 
 	it.each([
 		{ name: 'a body with no separators', body: 'not a narinfo' },
@@ -197,7 +203,7 @@ describe('fetchReferenceMetadata', () => {
 			name: 'a narinfo whose store path is outside the store',
 			body: narInfoText().replace(storePath, '/tmp/example')
 		}
-	])('types $name as unparsable', async ({ body }) => {
+	])('returns an unparsable error for $name', async ({ body }) => {
 		let error: unknown;
 		try {
 			await fetchReferenceMetadata(
@@ -221,7 +227,7 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('refuses a read user without its password', async () => {
+	it('rejects incomplete read credentials', async () => {
 		let error: unknown;
 		try {
 			await fetchReferenceMetadata(

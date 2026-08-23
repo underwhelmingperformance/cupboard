@@ -16,9 +16,12 @@ describe('isPatternMatch', () => {
 		{ pattern: '^a/b@.+$', value: 'a/c@refs/heads/main', expected: false },
 		{ pattern: '^a/b@.+$', value: 'xa/b@refs/heads/main', expected: false },
 		{ pattern: 'a/b@.+', value: 'a/b@x', expected: false }
-	])('$pattern against $value is $expected', ({ pattern, value, expected }) => {
-		expect(isPatternMatch(pattern, value)).toBe(expected);
-	});
+	])(
+		'returns $expected for $pattern against $value',
+		({ pattern, value, expected }) => {
+			expect(isPatternMatch(pattern, value)).toBe(expected);
+		}
+	);
 });
 
 describe('isAnchoredRe2', () => {
@@ -26,7 +29,7 @@ describe('isAnchoredRe2', () => {
 		{ pattern: '^a@.+$', expected: true },
 		{ pattern: 'a@.+', expected: false },
 		{ pattern: '^(unterminated$', expected: false }
-	])('$pattern is $expected', ({ pattern, expected }) => {
+	])('returns $expected for $pattern', ({ pattern, expected }) => {
 		expect(isAnchoredRe2(pattern)).toBe(expected);
 	});
 });

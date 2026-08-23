@@ -10,10 +10,10 @@ import { uploadIdSchema } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
 
-// The attestation upload conversation: negotiation decides per bundle whether
-// to upload or skip, the bundle streams to its staging key with the push
-// credential, and attach verifies and references the staged bundle. The
-// Nix-facing list and bundle reads stay outside the contract.
+// Negotiation tells the client which bundles to upload or skip. The client uses
+// the push credential to stream each required bundle to its staging key, then
+// attach verifies the staged bundle and records its reference. Nix-facing list
+// and bundle reads stay outside this contract.
 export const attestationsContract = {
 	negotiate: baseProcedure
 		.meta({
@@ -30,8 +30,9 @@ export const attestationsContract = {
 		)
 		.output(attestationNegotiateResponseSchema),
 
-	// The cache is taken from the pending attestation row the id addresses, not
-	// the path: the bundle was negotiated against that row's cache.
+	// Authorisation uses the cache recorded on the pending attestation row for
+	// `id`. The path does not select the cache because negotiation already bound
+	// the pending row to one.
 	attach: baseProcedure
 		.meta({
 			requires: 'attestation:attach',

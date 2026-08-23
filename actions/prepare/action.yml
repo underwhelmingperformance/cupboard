@@ -6,23 +6,23 @@ description:
 inputs:
   ssh-key:
     description:
-      SSH key for private flake inputs. Empty still installs an isolated Git SSH
-      policy that disables ambient identities.
+      SSH key for private flake inputs. When empty, the isolated Git SSH policy
+      still disables ambient identities.
     required: false
   input-known-hosts:
     description:
-      Required known_hosts lines pinning private flake input SSH hosts whenever
-      ssh-key is supplied.
+      known_hosts lines for private flake input hosts. Required when ssh-key is
+      supplied.
     required: false
   nix-config:
     description:
-      Flake installable that evaluates to extra nix.conf text for builders.
-      Leave empty to skip this configuration.
+      Flake installable that evaluates to nix.conf settings for builders. Leave
+      empty to skip this configuration.
     required: false
   maximise-space:
     description:
-      When true, reclaim disk space before installing Nix (macOS Xcode removal,
-      Linux nothing-but-nix).
+      When true, reclaim disk space before installing Nix by removing Xcode on
+      macOS or running nothing-but-nix on Linux.
     required: false
     default: 'false'
   remote:
@@ -31,54 +31,53 @@ inputs:
     default: 'false'
   store:
     description:
-      Direct ssh-ng store selected for this job. Mutually exclusive with remote
-      builder mode; empty selects no direct store. Must not select a key through
-      a non-empty ssh-key; pass a private key through store-ssh-key.
+      Direct ssh-ng store for this job. It is mutually exclusive with remote
+      builder mode. Leave it empty to use no direct store. Supply its private
+      key through store-ssh-key, not through an ssh-key URI parameter.
     required: false
   builders:
     description:
-      One-line nix.conf builders specification naming the remote builders; use
-      semicolons for multiple entries. Empty skips. The machine SSH-key column
-      must be - and builder store URIs must not select a non-empty ssh-key; pass
-      a private key through builder-ssh-key.
+      One-line nix.conf builders specification. Separate multiple entries with
+      semicolons. Leave it empty to skip remote builders. Set the machine
+      SSH-key column to -, and supply the private key through builder-ssh-key
+      instead of an ssh-key URI parameter.
     required: false
   builder-ssh-key:
     description: SSH private key authenticating to the remote builders.
     required: false
   builder-ssh-config:
     description:
-      ssh_config text for the remote builder connections, appended after the
-      action's mandatory transport policy. A strict allowlist accepts Host
-      blocks containing endpoint, transport tuning, algorithm, liveness and
-      SetEnv directives. Commands, proxies, forwarding, identity sources,
-      verbose logging, Include and Match are rejected.
+      ssh_config text appended after the action's mandatory policy for remote
+      builders. A strict allowlist permits Host blocks with endpoint, transport
+      tuning, algorithm, liveness and SetEnv directives. Commands, proxies,
+      forwarding, identity sources, verbose logging, Include and Match are
+      rejected.
     required: false
   builder-known-hosts:
-    description:
-      Required known_hosts lines pinning every enabled remote builder.
+    description: Required known_hosts lines for every enabled remote builder.
     required: false
   store-ssh-key:
     description: SSH private key authenticating to a direct ssh-ng store.
     required: false
   store-ssh-config:
     description:
-      ssh_config text for the direct store connection, appended after the
-      action's mandatory transport policy. A strict allowlist accepts Host
-      blocks containing endpoint, transport tuning, algorithm, liveness and
-      SetEnv directives. Commands, proxies, forwarding, identity sources,
-      verbose logging, Include and Match are rejected.
+      ssh_config text appended after the action's mandatory policy for the
+      direct store. A strict allowlist permits Host blocks with endpoint,
+      transport tuning, algorithm, liveness and SetEnv directives. Commands,
+      proxies, forwarding, identity sources, verbose logging, Include and Match
+      are rejected.
     required: false
   store-known-hosts:
     description:
-      known_hosts lines pinning the direct store. Required unless the store uses
-      the default SSH port and its URI supplies base64-ssh-public-host-key.
+      known_hosts lines for the direct store. Required unless the store uses the
+      default SSH port and its URI supplies base64-ssh-public-host-key.
     required: false
   store-ambient-identity:
     description:
       When true, authenticate the direct store with the runner's SSH agent or
-      default identity files instead of a job-scoped store-ssh-key. Intended
-      only for explicitly provisioned self-hosted runners and mutually exclusive
-      with store-ssh-key.
+      default identity files instead of a job-scoped store-ssh-key. This mode is
+      only for explicitly provisioned self-hosted runners and is mutually
+      exclusive with store-ssh-key.
     required: false
     default: 'false'
 runs:
@@ -105,17 +104,14 @@ runs:
       env:
         INPUT_SSH_KEY: ${{ inputs.ssh-key }}
         INPUT_KNOWN_HOSTS: ${{ inputs.input-known-hosts }}
-      # The github-env audit treats every environment-file write as a
-      # potential code-execution channel; the value written here is built
-      # solely from runner-owned paths (the key content goes into the key
-      # file, never the environment), which is the false-positive shape the
-      # audit documents (https://docs.zizmor.sh/audits/#github-env).
+      # Only runner-owned paths are written to GITHUB_ENV. The caller's key is
+      # written to a separate file, so this is the safe case documented by the
+      # github-env audit (https://docs.zizmor.sh/audits/#github-env).
       run: | # zizmor: ignore[github-env]
-        # Nix fetches private flake inputs through the git executable, which
-        # honours GIT_SSH_COMMAND. Its isolated config accepts only the pinned
-        # hosts below and the managed identity. The environment file is
-        # job-scoped, so on a persistent self-hosted runner the configuration
-        # cannot outlive the key it references.
+        # Nix fetches private flake inputs through Git, which honours
+        # GIT_SSH_COMMAND. The isolated configuration accepts only pinned hosts
+        # and the managed identity. GITHUB_ENV is job-scoped, so the
+        # configuration cannot outlive the key on a persistent runner.
         bash "${GITHUB_ACTION_PATH}/ssh-transport.sh" configure-input
 
     - name: Free disk space
@@ -140,19 +136,18 @@ runs:
         hatchet-protocol: holster
         nix-permission-edict: true
 
-    # Single-user Nix: evaluation and builds run as this user, so they read
-    # the git SSH configuration above and the builder SSH configuration below;
-    # a multi-user daemon would use neither.
+    # Evaluation and builds must run as this user so they read the Git and
+    # builder SSH configurations from this job. A multi-user daemon would read
+    # neither configuration.
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
       with:
         nix_version: 2.34.7
 
-    # Extra settings and the builders below accumulate in a job-scoped file
-    # under RUNNER_TEMP and reach Nix through NIX_USER_CONF_FILES. The runner's
-    # configuration is listed after it and remains unchanged. This prevents a
-    # persistent self-hosted runner from retaining these settings for later jobs.
-    # The value written to GITHUB_ENV contains only runner-owned paths, which is
-    # the false-positive shape the github-env audit documents
+    # Write the additional settings to a job-scoped file under RUNNER_TEMP and
+    # put that file first in NIX_USER_CONF_FILES. The runner's configuration
+    # remains unchanged, so a persistent runner cannot retain these settings for
+    # later jobs. GITHUB_ENV receives only runner-owned paths, which is the safe
+    # case documented by the github-env audit
     # (https://docs.zizmor.sh/audits/#github-env).
     - name: Configure extra Nix settings
       if: ${{ inputs.nix-config != '' }}
@@ -169,16 +164,13 @@ runs:
         } >> "${RUNNER_TEMP}/cupboard-prepare-nix.conf"
         echo "NIX_USER_CONF_FILES=${RUNNER_TEMP}/cupboard-prepare-nix.conf:${HOME}/.config/nix/nix.conf" >> "${GITHUB_ENV}"
 
-    # Nix reaches both ssh:// builders and ssh-ng:// stores through options in
-    # NIX_SSHOPTS. Only the caller inputs for the selected mode enter this
-    # job-scoped configuration under RUNNER_TEMP. This prevents either identity
-    # from being offered to the other service and prevents the settings from
-    # persisting across jobs on a self-hosted runner. ssh uses the first value it
-    # obtains for an option, so the action's host-key policy and managed identity
-    # restrictions live in the first `Host *` block. Caller Host blocks follow
-    # it and can add connection settings without weakening that policy. The
-    # values written to GITHUB_ENV contain only runner-owned paths, which is the
-    # false-positive shape the github-env audit documents
+    # Nix uses NIX_SSHOPTS for both ssh:// builders and ssh-ng:// stores. Put
+    # only the selected mode's inputs in the job-scoped configuration so neither
+    # identity is offered to the other service. SSH uses the first value it
+    # finds for an option, so the first `Host *` block enforces the host-key and
+    # identity policy. Later caller Host blocks can add settings without
+    # weakening that policy. GITHUB_ENV receives only runner-owned paths, which
+    # is the safe case documented by the github-env audit
     # (https://docs.zizmor.sh/audits/#github-env).
     - name: Configure Nix SSH transport
       if: >-

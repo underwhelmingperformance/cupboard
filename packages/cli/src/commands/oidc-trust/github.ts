@@ -11,8 +11,9 @@ import { authExitCode, CliError, transientExitCode } from '../../errors.ts';
 
 const forbiddenStatus: number = StatusCodes.FORBIDDEN;
 
-// The immutable identifiers a per-PR rule pins, so a repository rename never
-// silently widens or breaks the rule.
+// The numeric ids remain stable when a repository is renamed. `fullName`
+// supplies name-based claims and root names, so setup must still rewrite the
+// rule after a rename.
 export interface RepositoryIdentity {
 	readonly repositoryId: number;
 	readonly repositoryOwnerId: number;
@@ -44,9 +45,6 @@ export class GithubRateLimitError extends CliError {
 	}
 }
 
-/**
-GitHub rejected credentials or denied access to the requested resource.
-*/
 export class GithubPermissionError extends CliError {
 	constructor(public readonly resource: string) {
 		super(
@@ -62,15 +60,10 @@ export class GithubPermissionError extends CliError {
 }
 
 export interface LookupRepositoryOptions {
-	// Injected in tests; defaults to a caching `make-fetch-happen` over the real
-	// GitHub API.
 	readonly fetch?: typeof fetch;
 	readonly signal?: AbortSignal;
 }
 
-/**
-Builds the authenticated, cached GitHub client shared by CLI lookups.
-*/
 export function githubApi(
 	options: LookupRepositoryOptions = {}
 ): ReturnType<typeof createOctokitClient> {
@@ -90,13 +83,12 @@ export function githubApi(
 }
 
 /**
- * Resolve a repository's immutable numeric ids from `owner/name`. A GitHub
- * token in `GH_TOKEN` or `GITHUB_TOKEN` authenticates the lookup when set,
- * which a private repository needs; without one the lookup is public-only.
- * Uses a conditional-request HTTP cache so repeated rule edits do not re-spend
- * the rate budget. Throws {@link RepositoryNotFoundError} for a 404 and
- * {@link GithubRateLimitError} when the budget is exhausted. Authentication
- * and permission failures become {@link GithubPermissionError}.
+ * Reads a repository's numeric ids and current full name from GitHub. The
+ * lookup uses `GH_TOKEN`, then `GITHUB_TOKEN`, when either is set. Without a
+ * token, GitHub only returns public repositories. Conditional requests reuse a
+ * local HTTP cache. A 404 throws {@link RepositoryNotFoundError}; rate limits
+ * throw {@link GithubRateLimitError}; and authentication or permission failures
+ * throw {@link GithubPermissionError}.
  */
 export async function lookupRepository(
 	repository: string,
@@ -145,9 +137,6 @@ export async function lookupRepository(
 	}
 }
 
-/**
-Whether GitHub reports a rate limit through its status or response metadata.
-*/
 export function isGithubRateLimitResponse(error: unknown): boolean {
 	if (isStatus(error, StatusCodes.TOO_MANY_REQUESTS)) {
 		return true;

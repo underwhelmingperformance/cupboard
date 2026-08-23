@@ -26,35 +26,18 @@ import {
 interface Fixture {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly files?: Readonly<Record<string, string>>;
-	/**
-	Files that are there and that this process may not read.
-	*/
 	readonly unreadable?: readonly string[];
 	readonly home?: string;
-	/**
-	The directory the fixture runs in. A relative path resolves against it.
-	*/
 	readonly workingDirectory?: string;
-	/**
-	The machine the fixture discovers on, defaulting to an Apple silicon one.
-	*/
 	readonly currentSystem?: () => string | undefined;
-	/**
-	 * What that machine offers a build. The default offers nothing beyond the
-	 * portable names, so a fixture states the capability it is describing.
-	 */
 	readonly probes?: Partial<NixMachineProbes>;
 }
 
-/**
-The directory a fixture runs in by default.
-*/
 const defaultWorkingDirectory = '/work/dir';
 
-// Nix reads a store reference in one of three ways: as a URI, as a word that
-// names a store, or as a path. A path names a local store rooted at that path,
-// and Nix writes it as a `local://` URI. Every setting that holds a store
-// reference is resolved this way, so this table drives each of them.
+// Every store-reference setting uses the same parser. It preserves URIs and
+// store keywords, but resolves paths against the working directory and encodes
+// them as `local://` URIs.
 const storeReferenceCases = [
 	{
 		name: 'an absolute path',
@@ -148,9 +131,6 @@ const storeReferenceCases = [
 	{ name: 'the local store', written: 'local', resolved: 'local' }
 ];
 
-/**
-A machine offering nothing a build can ask for beyond the portable names.
-*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
 	isFilePresent: () => false,
@@ -159,9 +139,6 @@ const bareMachine: NixMachineProbes = {
 	microarchitectureLevels: () => []
 };
 
-/**
-What the filesystem raises for a file this process may not read.
-*/
 function permissionDenied(filePath: string): Error {
 	return Object.assign(new Error(`EACCES: permission denied, ${filePath}`), {
 		code: 'EACCES'
@@ -199,17 +176,12 @@ function thrownBy(fixture: Fixture): unknown {
 	return undefined;
 }
 
-// What an include failure states, or whatever was thrown when it is not one,
-// so a case that throws something else reports what it threw.
 function includeFailure(thrown: unknown): unknown {
 	return thrown instanceof NixConfigIncludeError
 		? { name: thrown.name, target: thrown.target, reason: thrown.reason }
 		: thrown;
 }
 
-/**
-What a machine file failure states, on the same terms.
-*/
 function machineFileFailure(thrown: unknown): unknown {
 	return thrown instanceof NixMachineFileError
 		? { name: thrown.name, source: thrown.source, reason: thrown.reason }
@@ -218,11 +190,8 @@ function machineFileFailure(thrown: unknown): unknown {
 
 const overlongStoreDirectory = `/${'d'.repeat(storeDirectoryMaxLength)}`;
 
-// A machine whose CPU or kernel has no Nix name, so nothing reports a system.
 const unnamedMachine = new Map<string, string>();
 
-// Nix's own defaults: substitution on, a derivation's `allowSubstitutes`
-// honoured, and the one compiled-in substituter.
 const defaultSubstitution: NixSubstitutionSettings = {
 	substitute: true,
 	alwaysAllowSubstitutes: false,
@@ -230,26 +199,16 @@ const defaultSubstitution: NixSubstitutionSettings = {
 	substituters: ['https://cache.nixos.org/']
 };
 
-// The bare Apple silicon machine the fixtures describe: no Rosetta, so it
-// runs only its own system, and no hardware virtualisation to offer.
 const defaultBuilding: NixBuildSettings = {
 	systems: ['aarch64-darwin'],
 	features: ['nixos-test', 'benchmark', 'big-parallel']
 };
 
-/**
-A machine with Rosetta 2 installed, which Nix reads from that one file.
-*/
 const rosettaInstalled = {
 	isFilePresent: (filePath: string) =>
 		filePath === '/Library/Apple/usr/libexec/oah/libRosettaRuntime'
 };
 
-// The features each psABI level asks of a CPU, as libcpuid's
-// `architecture_x86_64_v1` to `_v4` arrays state them and Linux spells them.
-// Nix reads its levels from that library, so these are the arrays its answer
-// comes from. Each level subsumes the one below it, so a CPU short of one
-// feature of a level has none of the levels above it either.
 const firstLevelFlags = ['cmov', 'cx8', 'fpu', 'fxsr', 'mmx', 'sse', 'sse2'];
 const secondLevelFlags = [
 	'cx16',
@@ -287,8 +246,6 @@ const everyLevelFlags = [
 
 describe('microarchitectureLevelsOf', () => {
 	it.each([
-		// libcpuid reports a CPU short of the first level as an architecture it
-		// has no name for, which leaves nix naming no level at all.
 		{ name: 'no flags at all', flags: [], expected: [] },
 		{
 			name: 'the first level one flag short',
@@ -330,7 +287,7 @@ describe('microarchitectureLevelsOf', () => {
 	});
 
 	// Linux may report that the CPU offers XSAVE while withholding AVX when
-	// the operating system has not enabled the state AVX needs.
+	// the operating system has not enabled the state required by AVX.
 	it('does not infer the third level from xsave without avx', () => {
 		const offered = [
 			...everyLevelFlags.filter((flag) => flag !== 'avx'),
@@ -343,9 +300,7 @@ describe('microarchitectureLevelsOf', () => {
 		]);
 	});
 
-	// Each level names exactly what libcpuid names, so a flag no level asks
-	// for changes nothing.
-	it.each(everyLevelFlags)('asks for %s', (flag) => {
+	it.each(everyLevelFlags)('requires %s', (flag) => {
 		const short = everyLevelFlags.filter((offered) => offered !== flag);
 
 		expect(microarchitectureLevelsOf(new Set(short))).not.toStrictEqual([
@@ -378,7 +333,7 @@ describe('discoverNixStoreConfig', () => {
 		expect(discover({ env: { NIX_REMOTE: 'daemon' } }).storeUri).toBe('daemon');
 	});
 
-	it('lets the store setting override NIX_REMOTE', () => {
+	it('uses the store setting in preference to NIX_REMOTE', () => {
 		const config = discover({
 			env: { NIX_REMOTE: 'daemon' },
 			files: { '/etc/nix/nix.conf': 'store = local\n' }
@@ -387,7 +342,7 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.storeUri).toBe('local');
 	});
 
-	it('lets an empty store setting select auto over NIX_REMOTE', () => {
+	it('uses auto when an empty store setting overrides NIX_REMOTE', () => {
 		const config = discover({
 			env: { NIX_REMOTE: 'dummy://' },
 			files: { '/etc/nix/nix.conf': 'store =\n' }
@@ -418,16 +373,16 @@ describe('discoverNixStoreConfig', () => {
 			expected: undefined
 		}
 	])(
-		'surfaces the effective post-build-hook from $name',
+		'reports the effective post-build-hook from $name',
 		({ fixture, expected }) => {
 			expect(discover(fixture).postBuildHook).toBe(expected);
 		}
 	);
 
-	// No configuration file names the store directory: a store serving
-	// another one says so in its own URI, so a `store-dir` line is a setting
-	// Nix does not have.
-	it('takes no store directory from a configuration file', () => {
+	// The store directory comes from its environment variables. A store with a
+	// different logical directory declares it in the store URI; `store-dir` is
+	// not a Nix setting.
+	it('does not read the store directory from configuration files', () => {
 		const config = discover({
 			home: '/home/u',
 			files: {
@@ -449,18 +404,16 @@ describe('discoverNixStoreConfig', () => {
 			name: 'NIX_STORE_DIR ahead of NIX_STORE',
 			env: { NIX_STORE_DIR: '/env/store', NIX_STORE: '/other/store' }
 		}
-	])('takes the store directory from $name', ({ env }) => {
+	])('uses the store directory from $name', ({ env }) => {
 		expect(discover({ env }).storeDirectory).toBe('/env/store');
 	});
 
-	// Nix canonicalises the directory, so a value naming the same one a
-	// different way names the same store.
 	it.each([
 		{ name: 'a trailing slash', value: '/nix/store/' },
 		{ name: 'a doubled slash', value: '/nix//store' },
 		{ name: 'a current segment', value: '/nix/./store' },
 		{ name: 'a parent segment', value: '/nix/other/../store' }
-	])('reads a store directory named with $name', ({ value }) => {
+	])('normalises a store directory with $name', ({ value }) => {
 		expect(discover({ env: { NIX_STORE_DIR: value } }).storeDirectory).toBe(
 			'/nix/store'
 		);
@@ -484,7 +437,7 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	it('lets NIX_DAEMON_SOCKET_PATH override the derived socket path', () => {
+	it('uses NIX_DAEMON_SOCKET_PATH instead of the derived socket path', () => {
 		const config = discover({
 			env: { NIX_DAEMON_SOCKET_PATH: '/run/nix-daemon.sock' }
 		});
@@ -492,7 +445,7 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.daemonSocketPath).toBe('/run/nix-daemon.sock');
 	});
 
-	it('applies inline NIX_CONFIG above the files', () => {
+	it('gives inline NIX_CONFIG precedence over configuration files', () => {
 		const config = discover({
 			env: { NIX_CONFIG: 'store = daemon' },
 			files: { '/etc/nix/nix.conf': 'store = local\n' }
@@ -536,11 +489,9 @@ describe('discoverNixStoreConfig', () => {
 		).toThrow(NixConfigIncludeError);
 	});
 
-	// Nix joins a relative include onto the directory of the file the line was
-	// written in and then requires an absolute path. `NIX_CONFIG` is a value
-	// rather than a file, so a relative target written there has no directory to
-	// be joined onto and nix refuses the configuration.
-	it('refuses a relative include written in NIX_CONFIG', () => {
+	// `NIX_CONFIG` is not a file, so it has no directory for resolving a relative
+	// include. Nix rejects the include instead of using the working directory.
+	it('rejects a relative include written in NIX_CONFIG', () => {
 		const thrown = includeFailure(
 			thrownBy({
 				env: { NIX_CONFIG: 'include extra.conf' },
@@ -564,12 +515,11 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.storeUri).toBe('local');
 	});
 
-	// Nix reads a configuration file and an include that is there inside a
-	// `try` that swallows whatever the filesystem says, so one this process may
-	// not read leaves the settings where the rest of them stand.
+	// Nix ignores read errors for configuration files and includes. It continues
+	// with the values from the remaining sources.
 	it.each<{ readonly name: string; readonly fixture: Fixture }>([
 		{
-			name: 'a system file',
+			name: 'system file',
 			fixture: {
 				files: { '/home/u/.config/nix/nix.conf': 'store = local\n' },
 				unreadable: ['/etc/nix/nix.conf'],
@@ -577,35 +527,34 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			name: 'an include it names',
+			name: 'included file',
 			fixture: {
 				files: { '/etc/nix/nix.conf': 'include extra.conf\nstore = local\n' },
 				unreadable: ['/etc/nix/extra.conf']
 			}
 		}
-	])('passes over $name that cannot be read', ({ fixture }) => {
+	])('ignores an unreadable $name', ({ fixture }) => {
 		expect(discover(fixture).storeUri).toBe('local');
 	});
 
-	// Nix reads a line as whitespace-separated tokens and requires
-	// `<name> = <value…>`, refusing the whole configuration over anything
-	// else. A client reading past a line Nix would not start with would run
-	// under settings Nix does not have.
+	// Configuration parsing is fail-closed. A malformed line rejects the merged
+	// configuration instead of silently skipping settings.
 	it.each([
 		{ name: 'a bare word', line: 'store' },
 		{ name: 'an assignment with no spaces around it', line: 'store=local' },
 		{ name: 'a name with no separator', line: 'store local' },
-		{ name: 'an include naming nothing', line: 'include' },
-		{ name: 'an include naming two files', line: 'include one.conf two.conf' },
+		{ name: 'an include directive without a path', line: 'include' },
+		{
+			name: 'an include directive with two paths',
+			line: 'include one.conf two.conf'
+		},
 		{ name: 'a setting called include', line: 'include = local' }
-	])('refuses $name', ({ line }) => {
+	])('rejects $name', ({ line }) => {
 		expect(() =>
 			discover({ files: { '/etc/nix/nix.conf': `${line}\n` } })
 		).toThrow(NixConfigSyntaxError);
 	});
 
-	// The value is the tokens after the separator joined by single spaces, so
-	// however a line spaces them out the setting holds the same value.
 	it('collapses the whitespace inside a value', () => {
 		const config = discover({
 			files: { '/etc/nix/nix.conf': 'post-build-hook =\t/hook.sh   --flag\n' }
@@ -673,9 +622,8 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// Nix clears every setting's overridden mark once it has read the system
-	// file, so a daemon is told what a user's own configuration said and
-	// nothing the system file resolved, however the value reached it.
+	// The daemon reads the system file itself. SetOptions therefore forwards only
+	// assignments from user configuration and `NIX_CONFIG`.
 	it('uses system daemon settings as a base without forwarding them', () => {
 		const config = discover({
 			files: {
@@ -706,9 +654,8 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// A list this client resolves no default for states what it appends: a
-	// daemon appends that to the list it holds, which is the list the append
-	// was written against.
+	// Without a known base value, an append must remain an `extra-` override so
+	// the daemon applies it to the list from its own configuration.
 	it('forwards an append to a list it resolves no default for as an append', () => {
 		const config = discover({
 			env: {
@@ -725,9 +672,8 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// Nix accepts an `extra-` prefix only on a list setting, so an `extra-`
-	// assignment to any other setting matches no setting and produces no daemon
-	// override.
+	// `extra-` applies only to appendable list settings. A scalar with this prefix
+	// is unknown and cannot become a daemon override.
 	it('forwards no override for an `extra-` assignment to a scalar setting', () => {
 		const config = discover({
 			env: {
@@ -741,7 +687,7 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.daemonOverrides).toStrictEqual({});
 	});
 
-	it('forwards the key files a configuration signs with as it resolves them', () => {
+	it('forwards resolved signing-key file paths', () => {
 		const config = discover({
 			home: '/home/u',
 			files: {
@@ -807,15 +753,13 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// Nix renamed this setting and kept the older spelling as an alias, so a
-	// configuration states it either way and means the same setting.
 	it.each([
-		{ name: 'the name nix released it under', setting: 'download-attempts' },
+		{ name: 'the released spelling', setting: 'download-attempts' },
 		{
-			name: 'the name nix master gave it',
+			name: 'the spelling on Nix master',
 			setting: 'filetransfer-retry-attempts'
 		}
-	])('reads the transfer attempts from $name', ({ setting }) => {
+	])('parses the transfer attempts from $name', ({ setting }) => {
 		const config = discover({ env: { NIX_CONFIG: `${setting} = 9` } });
 
 		expect(config.fileTransfer).toStrictEqual({
@@ -824,14 +768,13 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// A daemon knows this setting by the name nix released it under, whichever
-	// spelling the configuration used, and one built from master knows that
-	// name as an alias of its own.
+	// Forward the released spelling because daemons from both naming eras accept
+	// it.
 	it.each([
 		{ name: 'the released spelling', setting: 'download-attempts' },
 		{ name: 'the master spelling', setting: 'filetransfer-retry-attempts' }
 	])(
-		'forwards the transfer attempts stated as $name by one name',
+		'forwards transfer attempts from $name under the released spelling',
 		({ setting }) => {
 			const config = discover({ env: { NIX_CONFIG: `${setting} = 9` } });
 
@@ -841,10 +784,9 @@ describe('discoverNixStoreConfig', () => {
 		}
 	);
 
-	// The rest of the retry settings arrived with the rename, so no released
-	// daemon has a name for them: this client reads them and tells a daemon
-	// nothing about them.
-	it('reads the retry settings nix master added without forwarding them', () => {
+	// The pinned daemon does not recognise the newer retry settings, so the client
+	// parses them without forwarding them.
+	it('parses newer retry settings without forwarding them', () => {
 		const config = discover({
 			env: {
 				NIX_CONFIG: [
@@ -948,7 +890,7 @@ describe('discoverNixStoreConfig', () => {
 			setting: 'max-silent-time',
 			value: '1.5'
 		}
-	])('refuses $name', ({ line, setting, value }) => {
+	])('rejects $name', ({ line, setting, value }) => {
 		const error = thrownBy({ env: { NIX_CONFIG: line } });
 
 		expect(error).toBeInstanceOf(NixConfigSettingError);
@@ -964,9 +906,8 @@ describe('discoverNixStoreConfig', () => {
 		}).toStrictEqual({ name: 'NixConfigSettingError', setting, value });
 	});
 
-	// Nix knows a setting by name and refuses the whole configuration over a
-	// value the setting cannot hold, whether or not this client reads it for
-	// anything of its own.
+	// Validate every known setting, including settings unused by this client.
+	// Otherwise this process could accept a configuration that Nix rejects.
 	it.each([
 		{ name: 'a boolean spelling neither', line: 'keep-outputs = maybe' },
 		{
@@ -979,33 +920,30 @@ describe('discoverNixStoreConfig', () => {
 		{ name: 'an integer written with a fraction', line: 'log-lines = 1.5' },
 		{ name: 'an integer written in hex', line: 'log-lines = 0x10' },
 		{ name: 'an integer among other words', line: 'log-lines = 10 20' },
-		{ name: 'the word only one setting takes', line: 'cores = auto' }
-	])('refuses a setting it does not read carrying $name', ({ line }) => {
+		{ name: 'auto in a setting other than max-jobs', line: 'cores = auto' }
+	])('validates $name in an otherwise unused setting', ({ line }) => {
 		expect(thrownBy({ env: { NIX_CONFIG: line } })).toBeInstanceOf(
 			NixConfigSettingError
 		);
 	});
 
-	// Nix reads these, so a configuration carrying one is a configuration to
-	// carry on with.
 	it.each([
 		{ name: 'a boolean nix spells true', line: 'keep-outputs = yes' },
 		{ name: 'an integer', line: 'log-lines = 10' },
 		{ name: 'an integer written with a sign', line: 'log-lines = +5' },
-		// Nix declares a few of its integer settings signed, and which they are
-		// is not something the settings table carries.
 		{ name: 'a negative integer', line: 'gc-reserved-space = -1' },
-		{ name: 'the parallelism max-jobs takes', line: 'max-jobs = auto' },
-		// A string, a list and a map are read by shapes the table does not
-		// carry, so the value stands as it is written.
-		{ name: 'a key that is not a key', line: 'trusted-public-keys = garbage' },
-		{ name: 'a map entry that is not one', line: 'access-tokens = nonsense' }
-	])('reads a configuration carrying $name', ({ line }) => {
+		{ name: 'the auto value for max-jobs', line: 'max-jobs = auto' },
+		{
+			name: 'an opaque public-key value',
+			line: 'trusted-public-keys = garbage'
+		},
+		{ name: 'an opaque map value', line: 'access-tokens = nonsense' }
+	])('accepts a configuration with $name', ({ line }) => {
 		expect(thrownBy({ env: { NIX_CONFIG: line } })).toBeUndefined();
 	});
 
-	// Nix reads a few of its settings by a shape the kind of value cannot
-	// carry: a path from the filesystem root, and a store it could open.
+	// Some setting types have validation beyond their generated value kind. Paths
+	// must be absolute, and store references must have a recognised shape.
 	it.each([
 		{
 			name: 'a netrc file that is not an absolute path',
@@ -1016,24 +954,26 @@ describe('discoverNixStoreConfig', () => {
 			name: 'a certificate file that is not an absolute path',
 			line: 'ssl-cert-file = certs/ca.pem'
 		},
-		{ name: 'a substituter naming no store', line: 'substituters = notastore' },
 		{
-			name: 'one substituter of several naming no store',
+			name: 'an invalid substituter reference',
+			line: 'substituters = notastore'
+		},
+		{
+			name: 'one invalid reference among several substituters',
 			line: 'substituters = https://ok.example/ notastore'
 		},
 		{
-			name: 'a trusted substituter naming no store',
+			name: 'an invalid trusted-substituter reference',
 			line: 'trusted-substituters = notastore'
 		}
-	])('refuses $name', ({ line }) => {
+	])('rejects $name', ({ line }) => {
 		expect(thrownBy({ env: { NIX_CONFIG: line } })).toBeInstanceOf(
 			NixConfigSettingError
 		);
 	});
 
-	// A store reference is a URI, one of the names nix has for a store, or a
-	// path to one. A scheme nix has no store for is read all the same: what
-	// refuses that is opening the store, not reading the setting.
+	// Parsing validates the shape of a store reference, not whether this client
+	// implements its scheme. Backend selection reports an unsupported scheme.
 	it.each([
 		{ name: 'an absolute path', value: '/var/cache/nix' },
 		{ name: 'a relative path', value: './cache' },
@@ -1042,17 +982,15 @@ describe('discoverNixStoreConfig', () => {
 		{ name: 'the automatic store', value: 'auto' },
 		{ name: 'the daemon', value: 'daemon' },
 		{ name: 'the local store', value: 'local' },
-		{ name: 'a local store naming a root', value: 'local?root=/rooted' },
+		{ name: 'a local store with a root', value: 'local?root=/rooted' },
 		{ name: 'no substituter at all', value: '' }
-	])('reads a substituter named as $name', ({ value }) => {
+	])('accepts $name as a substituter reference', ({ value }) => {
 		expect(
 			thrownBy({ env: { NIX_CONFIG: `substituters = ${value}` } })
 		).toBeUndefined();
 	});
 
-	// Nix counts the silent time in a signed width, so it reads a negative
-	// there and refuses one for the settings it counts unsigned.
-	it('reads a negative silent time as the number it states', () => {
+	it('preserves a negative max-silent-time value', () => {
 		const config = discover({ env: { NIX_CONFIG: 'max-silent-time = -1' } });
 
 		expect(config.daemonSetOptions).toStrictEqual({ maxSilentTime: -1 });
@@ -1061,15 +999,15 @@ describe('discoverNixStoreConfig', () => {
 	it.each([
 		{ name: 'the number of cores', line: 'cores = -4' },
 		{ name: 'the number of jobs', line: 'max-jobs = -1' }
-	])('refuses a negative $name', ({ line }) => {
+	])('rejects a negative $name', ({ line }) => {
 		expect(thrownBy({ env: { NIX_CONFIG: line } })).toBeInstanceOf(
 			NixConfigSettingError
 		);
 	});
 
-	// Nix warns about a name it has no setting for and carries on, so the
-	// configuration stands and the name is reported rather than acted on.
-	it('reports a setting name Nix does not have, and reads the remaining settings', () => {
+	// Unknown names do not invalidate Nix configuration. Preserve them for the
+	// caller's warning and ignore their values.
+	it('reports an unknown setting and reads the remaining settings', () => {
 		const config = discover({
 			env: {
 				NIX_CONFIG: [
@@ -1089,7 +1027,7 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	it('recognises a setting nix reads behind an experimental feature', () => {
+	it('recognises a setting gated by an experimental feature in Nix', () => {
 		const config = discover({
 			env: { NIX_CONFIG: 'impure-env = FOO=bar' }
 		});
@@ -1103,9 +1041,9 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// A setting this client reads under the name Nix master gave it is still a
-	// valid setting, whatever the pinned Nix calls it.
-	it('reads a setting that only Nix master defines', () => {
+	// Settings added after the pinned release are recognised separately from the
+	// generated table.
+	it('parses a setting added on Nix master', () => {
 		const config = discover({
 			env: { NIX_CONFIG: 'filetransfer-retry-delay = 250' }
 		});
@@ -1204,7 +1142,7 @@ describe('discoverNixStoreConfig', () => {
 		},
 
 		{
-			name: 'NIX_STORE_DIR shadowing a usable store-dir setting',
+			name: 'an invalid NIX_STORE_DIR with an ignored store-dir assignment',
 			fixture: {
 				env: { NIX_STORE_DIR: 'relative/store' },
 				files: { '/etc/nix/nix.conf': 'store-dir = /file/store\n' }
@@ -1212,7 +1150,7 @@ describe('discoverNixStoreConfig', () => {
 			storeDirectory: 'relative/store',
 			source: 'NIX_STORE_DIR'
 		}
-	])('refuses $name', ({ fixture, storeDirectory, source }) => {
+	])('rejects $name', ({ fixture, storeDirectory, source }) => {
 		const error = thrownBy(fixture);
 
 		expect(error).toBeInstanceOf(InvalidNixStoreDirectoryError);
@@ -1312,8 +1250,6 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			// Nix holds the substituters as a list, so one named twice is held
-			// twice and the resolved setting says so.
 			name: 'a substituter listed twice',
 			fixture: {
 				files: {
@@ -1327,7 +1263,7 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			name: 'a substituter appended after the list already names it',
+			name: 'a duplicate appended substituter',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': 'substituters = https://one.example\n'
@@ -1375,8 +1311,6 @@ describe('discoverNixStoreConfig', () => {
 		}
 	);
 
-	// Nix reads an integer setting as a sign, digits and an optional binary
-	// unit, and bounds it by the width it declared the setting with.
 	it.each([
 		{ name: 'a plain count', written: '7', expected: 7 },
 		{ name: 'a kibi unit', written: '1K', expected: 1024 },
@@ -1388,14 +1322,13 @@ describe('discoverNixStoreConfig', () => {
 		{ name: 'a signed count', written: '+7', expected: 7 },
 		{ name: 'a leading zero', written: '07', expected: 7 },
 		{
-			// The widest value the setting holds reaches past the range a number
-			// states exactly, so it is held to the nearest one. Nothing this
-			// client acts on comes near it.
-			name: 'the widest value the setting holds',
+			// JavaScript rounds the maximum unsigned 64-bit value. The settings used
+			// by this client remain far below that range.
+			name: 'the maximum unsigned 64-bit value',
 			written: '18446744073709551615',
 			expected: Number(2n ** 64n - 1n)
 		}
-	])('reads $name in http-connections', ({ written, expected }) => {
+	])('parses $name for http-connections', ({ written, expected }) => {
 		const fixture = {
 			files: { '/etc/nix/nix.conf': `http-connections = ${written}\n` }
 		};
@@ -1405,7 +1338,7 @@ describe('discoverNixStoreConfig', () => {
 
 	it.each([
 		{
-			name: 'a unit nix has none of',
+			name: 'an unsupported unit',
 			setting: 'http-connections',
 			written: '1P'
 		},
@@ -1422,26 +1355,26 @@ describe('discoverNixStoreConfig', () => {
 		{ name: 'another base', setting: 'http-connections', written: '0x10' },
 		{ name: 'a fraction', setting: 'http-connections', written: '1.5' },
 		{
-			name: 'a negative for a setting nix counts unsigned',
+			name: 'a negative value for an unsigned setting',
 			setting: 'http-connections',
 			written: '-1'
 		},
 		{
-			name: 'a negative unit for a setting nix counts unsigned',
+			name: 'a negative unit value for an unsigned setting',
 			setting: 'http-connections',
 			written: '-1K'
 		},
 		{
-			name: 'a value above the width nix declared',
+			name: 'a value outside the declared width',
 			setting: 'cores',
 			written: '4294967296'
 		},
 		{
-			name: 'a count above that width even with a unit after it',
+			name: 'unit multiplication outside the declared width',
 			setting: 'cores',
 			written: '4294967296K'
 		}
-	])('refuses $name', ({ setting, written }) => {
+	])('rejects $name', ({ setting, written }) => {
 		const fixture = {
 			files: { '/etc/nix/nix.conf': `${setting} = ${written}\n` }
 		};
@@ -1449,16 +1382,15 @@ describe('discoverNixStoreConfig', () => {
 		expect(thrownBy(fixture)).toBeInstanceOf(NixConfigSettingError);
 	});
 
-	// A width nix counts signed takes a negative, with or without a unit.
 	it.each([
 		{ name: 'a negative', written: '-1', expected: -1 },
 		{ name: 'a negative with a unit', written: '-1K', expected: -1024 },
 		{
-			name: 'the widest value the setting holds',
+			name: 'the maximum signed 32-bit value',
 			written: '4294967295',
 			expected: 4_294_967_295
 		}
-	])('reads $name in max-silent-time', ({ written, expected }) => {
+	])('parses $name for max-silent-time', ({ written, expected }) => {
 		const fixture = {
 			files: { '/etc/nix/nix.conf': `max-silent-time = ${written}\n` }
 		};
@@ -1466,28 +1398,28 @@ describe('discoverNixStoreConfig', () => {
 		expect(discover(fixture).daemonSetOptions.maxSilentTime).toBe(expected);
 	});
 
-	it('reads a unit in a setting the daemon frame carries', () => {
+	it('parses a unit for a dedicated SetOptions integer', () => {
 		const fixture = { files: { '/etc/nix/nix.conf': 'cores = 4M\n' } };
 
 		expect(discover(fixture).daemonSetOptions.buildCores).toBe(4_194_304);
 	});
 
-	// Nix reads the digits into the declared width, then multiplies, and holds
-	// the product in that same width, which wraps.
+	// Nix parses the digits at the declared width and performs the unit
+	// multiplication in that width, so overflow wraps.
 	it.each([
-		{ name: 'a whole number of widths', written: '1T', expected: 0 },
+		{ name: 'beyond the width by a whole width', written: '1T', expected: 0 },
 		{
-			name: 'past the width by part of one',
+			name: 'past the width by part of a width',
 			written: '4294967295K',
 			expected: 4_294_966_272
 		}
-	])('wraps a count multiplied $name', ({ written, expected }) => {
+	])('wraps multiplication $name', ({ written, expected }) => {
 		const fixture = { files: { '/etc/nix/nix.conf': `cores = ${written}\n` } };
 
 		expect(discover(fixture).daemonSetOptions.buildCores).toBe(expected);
 	});
 
-	it('resolves a path in NIX_REMOTE to the store it names', () => {
+	it('resolves a path-shaped NIX_REMOTE as a local store URI', () => {
 		expect(discover({ env: { NIX_REMOTE: '/var/cache/nix' } }).storeUri).toBe(
 			'local:///var/cache/nix'
 		);
@@ -1540,7 +1472,7 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			name: 'an appended trusted key, which keeps the compiled-in one',
+			name: 'an appended trusted key alongside the compiled-in key',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': 'extra-trusted-public-keys = mine-1:key\n'
@@ -1572,9 +1504,7 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			// Nix holds both of these as lists, so a key or a file stated twice
-			// is held twice.
-			name: 'a trusted key and a secret key file each stated twice',
+			name: 'duplicate trusted-key and secret-key-file entries',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': [
@@ -1604,19 +1534,17 @@ describe('discoverNixStoreConfig', () => {
 			expected: defaultBuilding
 		},
 		{
-			name: 'a machine Nix has no name for',
+			name: 'an unknown host system',
 			fixture: { currentSystem: () => unnamedMachine.get('system') },
 			expected: {
 				systems: [],
 				features: ['nixos-test', 'benchmark', 'big-parallel']
 			}
 		},
-		// The computed platforms and features describe the machine, and Nix
-		// takes them from the system it was compiled for and the kernel it
-		// probes. Assigning `system` moves what a build is dispatched as, and
-		// nothing else: this Mac gains no `i686-linux` and no `uid-range`.
+		// `system` changes the build dispatch identity. Host-derived platforms and
+		// features still come from the compiled system and runtime probes.
 		{
-			name: 'an assigned system, which moves nothing the machine decides',
+			name: 'an assigned system with unchanged host-derived defaults',
 			fixture: { files: { '/etc/nix/nix.conf': 'system = x86_64-linux\n' } },
 			expected: {
 				systems: ['x86_64-linux'],
@@ -1631,8 +1559,7 @@ describe('discoverNixStoreConfig', () => {
 				features: ['nixos-test', 'benchmark', 'big-parallel', 'uid-range']
 			}
 		},
-		// Nix opens `/dev/kvm` to decide, since a build asking for `kvm` opens
-		// it too. A machine without one does not claim the feature.
+		// Nix advertises `kvm` only when `/dev/kvm` is readable and writable.
 		{
 			name: 'a Linux machine offering hardware virtualisation',
 			fixture: {
@@ -1650,8 +1577,8 @@ describe('discoverNixStoreConfig', () => {
 				]
 			}
 		},
-		// WSL 1 carries no kernel that runs i686 binaries, so Nix leaves the
-		// platform out there.
+		// WSL 1 cannot execute i686 binaries, so it does not gain that compatible
+		// platform.
 		{
 			name: 'an x86_64 machine running WSL 1',
 			fixture: {
@@ -1663,8 +1590,7 @@ describe('discoverNixStoreConfig', () => {
 				features: ['nixos-test', 'benchmark', 'big-parallel', 'uid-range']
 			}
 		},
-		// Nix adds every psABI level the CPU supports as a platform of its own,
-		// so a build pinned to one is dispatched here.
+		// Each supported psABI level becomes a local build platform.
 		{
 			name: 'a Linux machine whose CPU reaches the third psABI level',
 			fixture: {
@@ -1684,8 +1610,8 @@ describe('discoverNixStoreConfig', () => {
 				features: ['nixos-test', 'benchmark', 'big-parallel', 'uid-range']
 			}
 		},
-		// A guest reports its host's support as its own, so Nix asks whether
-		// this machine is itself a guest before claiming the feature.
+		// A guest can report its host's virtualisation capability. Nix excludes
+		// guests before advertising `apple-virt`.
 		{
 			name: 'a Mac offering hardware virtualisation',
 			fixture: { probes: { hasHardwareVirtualisation: () => true } },
@@ -1762,9 +1688,7 @@ describe('discoverNixStoreConfig', () => {
 			expected: { ...defaultBuilding, features: ['kvm'] }
 		},
 		{
-			// Nix holds the platforms and the features as sets, so neither a
-			// repeated name nor one appended over itself names a second.
-			name: 'a platform and a feature each stated twice',
+			name: 'duplicate platform and feature entries',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': [
@@ -1798,9 +1722,7 @@ describe('discoverNixStoreConfig', () => {
 			fixture: { files: { '/etc/nix/nix.conf': 'builders =\n' } },
 			expected: defaultBuilding
 		},
-		// Nix's compiled-in default names the machines file, so a machine
-		// declaring its builders there has them without the setting appearing
-		// in any configuration file.
+		// The compiled default references `machines` beside the system configuration.
 		{
 			name: 'builders declared only in the machines file',
 			fixture: {
@@ -1815,17 +1737,17 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			name: 'no machines file, which names no builders',
+			name: 'no machines file and therefore no builders',
 			fixture: {},
 			expected: defaultBuilding
 		},
 		{
-			name: 'a machines file holding only comments',
+			name: 'a machines file containing only comments',
 			fixture: { files: { '/etc/nix/machines': '# nothing here\n' } },
 			expected: defaultBuilding
 		},
 		{
-			name: 'a builders setting naming a file of its own',
+			name: 'a builders setting with an @file entry',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': 'builders = @/etc/nix/other-machines\n',
@@ -1849,10 +1771,10 @@ describe('discoverNixStoreConfig', () => {
 				builders: 'ssh://listed.example\nssh://direct.example'
 			}
 		},
-		// The variable Nix reads for backwards compatibility names files, not
-		// builders.
+		// `NIX_REMOTE_SYSTEMS` is a colon-separated list of machines files, not a
+		// list of builder declarations.
 		{
-			name: 'builders named by NIX_REMOTE_SYSTEMS',
+			name: 'builders from the machines files in NIX_REMOTE_SYSTEMS',
 			fixture: {
 				env: { NIX_REMOTE_SYSTEMS: '/etc/nix/a:/etc/nix/b' },
 				files: {
@@ -1866,18 +1788,16 @@ describe('discoverNixStoreConfig', () => {
 				builders: 'ssh://first.example\nssh://second.example'
 			}
 		},
-		// Set but empty, the variable names no files, and the compiled-in
-		// machines file is not consulted either.
+		// A set-but-empty `NIX_REMOTE_SYSTEMS` suppresses the default machines file.
 		{
-			name: 'an empty NIX_REMOTE_SYSTEMS, which names no builders at all',
+			name: 'an empty NIX_REMOTE_SYSTEMS with no builders',
 			fixture: {
 				env: { NIX_REMOTE_SYSTEMS: '' },
 				files: { '/etc/nix/machines': 'ssh://ignored.example\n' }
 			},
 			expected: defaultBuilding
 		},
-		// Nix reads both `nix.conf` and the machines file from the directory
-		// `NIX_CONF_DIR` names.
+		// `NIX_CONF_DIR` relocates both `nix.conf` and the default machines file.
 		{
 			name: 'a machines file beside a relocated nix.conf',
 			fixture: {
@@ -1889,8 +1809,6 @@ describe('discoverNixStoreConfig', () => {
 			},
 			expected: { ...defaultBuilding, builders: 'ssh://relocated.example' }
 		},
-		// A `#` ends its line before the line splits on `;`, so a comment
-		// takes the entries after it on the same line with it.
 		{
 			name: 'a machines file with an entry commented out mid-line',
 			fixture: {
@@ -1916,10 +1834,8 @@ describe('discoverNixStoreConfig', () => {
 				builders: 'ssh://one.example\nssh://two.example'
 			}
 		},
-		// A machines file may name another, and Nix expands what it finds
-		// there the same way.
 		{
-			name: 'a machines file naming another machines file',
+			name: 'a machines file with a recursive @file entry',
 			fixture: {
 				files: {
 					'/etc/nix/machines': '@/etc/nix/more\nssh://direct.example\n',
@@ -1932,7 +1848,7 @@ describe('discoverNixStoreConfig', () => {
 			}
 		},
 		{
-			name: 'a builders entry naming a file with space after the marker',
+			name: 'a builders @file entry with space after the marker',
 			fixture: {
 				files: {
 					'/etc/nix/nix.conf': 'builders = @ /etc/nix/spaced\n',
@@ -1956,18 +1872,15 @@ describe('discoverNixStoreConfig', () => {
 		expect(discover(fixture).building).toStrictEqual(expected);
 	});
 
-	// A machines file naming itself would expand without end, so the chain of
-	// them is followed only so far.
-	it('refuses a machines file that names itself', () => {
+	it('rejects a self-referential machines file', () => {
 		expect(() =>
 			discover({ files: { '/etc/nix/machines': '@/etc/nix/machines\n' } })
 		).toThrow(NixMachineFileError);
 	});
 
-	// Nix passes over a machines file that is not there and raises whatever
-	// else the filesystem said about one, so a file it may not read is a
-	// configuration it cannot resolve rather than a list of no builders.
-	it('refuses a machines file that cannot be read', () => {
+	// A missing machines file means no builders. Other read failures leave the
+	// builder configuration unresolved and must remain errors.
+	it('rejects an unreadable machines file', () => {
 		const thrown = machineFileFailure(
 			thrownBy({
 				files: { '/etc/nix/nix.conf': 'builders = @/etc/nix/machines\n' },

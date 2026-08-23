@@ -78,8 +78,6 @@ function summaryFromRow(row: ControlTrustRow): OidcTrustSummary {
 	};
 }
 
-// Every enabled control trust rule, mapped to the shape the OIDC matcher reads.
-// The control plane is its own issuer, entirely separate from any tenant's.
 export async function controlTrustRules(
 	database: Database
 ): Promise<OidcTrustRule[]> {

@@ -11,11 +11,6 @@ export function parseLines(value: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
-/**
- * Read a runner-contract variable (such as `RUNNER_TEMP`) that the workflow
- * environment must supply, throwing {@link MissingInputError} when it is absent
- * or empty.
- */
 export function requireEnvironment(
 	environment: Environment,
 	name: string

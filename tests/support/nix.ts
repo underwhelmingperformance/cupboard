@@ -135,13 +135,7 @@ export class NixStore {
 }
 
 export interface DivertedNixDaemonOptions {
-	/**
-	The diverted store's filesystem root.
-	*/
 	readonly root: string;
-	/**
-	Home directory for the daemon's isolated configuration.
-	*/
 	readonly home: string;
 	/**
 	Where the daemon listens; must be short enough for `sun_path`.
@@ -205,9 +199,6 @@ export class DivertedNixDaemon {
 	}
 }
 
-/**
-Waits for socket creation unless the daemon process closes first.
-*/
 export async function waitForDaemonSocket(
 	child: ChildProcess,
 	socketPath: string,
