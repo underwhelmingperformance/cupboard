@@ -6,6 +6,7 @@ import {
 	lstat,
 	mkdir,
 	mkdtemp,
+	open,
 	readdir,
 	readFile,
 	readlink,
@@ -26,6 +27,7 @@ import {
 	type VerifiedBundle
 } from '@cupboard/shared/sigstore';
 import { githubWorkflowBuildType } from '@cupboard/shared/slsa';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -1030,11 +1032,21 @@ describe('publishReleaseArchive', () => {
 			'cupboard-hook-relay': 'helper'
 		});
 
+		const reapers: string[] = [];
 		await expect(
 			publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
-				processIdentity: () => Promise.resolve('current process start')
+				processIdentity: () => Promise.resolve('current process start'),
+				removePath: (target, options) => {
+					if (target.includes('.reaper-')) {
+						reapers.push(target);
+						return Promise.reject(new Error('reaper removal failed'));
+					}
+
+					return rm(target, options);
+				}
 			})
 		).rejects.toBeInstanceOf(ReleaseInstallationLockOwnerAliveError);
+		expect(reapers).toHaveLength(1);
 		await expect(
 			readFile(path.join(stateDirectory, 'install.lock'), 'utf8')
 		).resolves.toContain('"processStartedAt":"current process start"');
@@ -1566,6 +1578,52 @@ describe('publishReleaseArchive', () => {
 		}
 	);
 
+	it('runs both final directory syncs and preserves the first failure', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+		const primary = new Error('state directory sync failed');
+		const synced: string[] = [];
+		let wasActivated = false;
+
+		await expect(
+			publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+				publicationHook: (stage) => {
+					wasActivated ||= stage === 'activated';
+					return Promise.resolve();
+				},
+				syncDirectory: (directory) => {
+					if (!wasActivated) {
+						return Promise.resolve();
+					}
+
+					const relative = path.relative(installDirectory, directory);
+					if (
+						relative !== '.cupboard-releases' &&
+						relative !== '.cupboard-releases/generations'
+					) {
+						return Promise.resolve();
+					}
+
+					synced.push(relative);
+					return Promise.reject(
+						relative === '.cupboard-releases'
+							? primary
+							: new Error('generations directory sync failed')
+					);
+				}
+			})
+		).rejects.toBe(primary);
+		expect(synced).toStrictEqual([
+			'.cupboard-releases',
+			'.cupboard-releases/generations'
+		]);
+	});
+
 	it('rejects a transaction whose generation escapes the state directory', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
@@ -1705,6 +1763,176 @@ describe('publishReleaseArchive', () => {
 			helper: 'stale relay'
 		});
 	});
+
+	it('runs every lock cleanup and preserves the lock acquisition failure', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+		const primary = new Error('lock publication failed');
+		const removed: string[] = [];
+
+		await expect(
+			publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+				linkPath: () => Promise.reject(primary),
+				removePath: (target) => {
+					removed.push(path.basename(target));
+					return Promise.reject(
+						new Error(`remove ${path.basename(target)} failed`)
+					);
+				}
+			})
+		).rejects.toBe(primary);
+		expect(removed).toStrictEqual([
+			expect.stringMatching(/^\.lock-/u),
+			expect.stringMatching(/^\.lease-/u)
+		]);
+	});
+
+	it('runs every lock release cleanup and reports its first failure', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+		const primary = new Error('lock removal failed');
+		const removed: string[] = [];
+
+		await expect(
+			publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+				removePath: (target, options) => {
+					const name = path.basename(target);
+					if (
+						name === 'install.lock' ||
+						name.startsWith('.lock-') ||
+						name.startsWith('.lease-')
+					) {
+						removed.push(name);
+						return Promise.reject(
+							name === 'install.lock'
+								? primary
+								: new Error(`remove ${name} failed`)
+						);
+					}
+
+					return rm(target, options);
+				}
+			})
+		).rejects.toBe(primary);
+		expect(removed).toStrictEqual([
+			'install.lock',
+			expect.stringMatching(/^\.lock-/u),
+			expect.stringMatching(/^\.lease-/u)
+		]);
+	});
+
+	it.each([
+		{ name: 'publication link', temporaryPrefix: '.current-' },
+		{ name: 'entry link', temporaryPrefix: '.entry-cupboard-' }
+	])(
+		'preserves a failed $name replacement when temporary removal fails',
+		async ({ temporaryPrefix }) => {
+			const installDirectory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-release-install-')
+			);
+			const archive = await releaseArchive({
+				cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+				'cupboard-hook-relay': 'helper'
+			});
+			const primary = new Error(`${temporaryPrefix} move failed`);
+			const removed: string[] = [];
+
+			await expect(
+				publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+					rename: async (source, destination) => {
+						if (path.basename(source.toString()).startsWith(temporaryPrefix)) {
+							throw primary;
+						}
+
+						await renameFile(source, destination);
+					},
+					removePath: (target, options) => {
+						if (path.basename(target).startsWith(temporaryPrefix)) {
+							removed.push(path.basename(target));
+							return Promise.reject(new Error('temporary removal failed'));
+						}
+
+						return rm(target, options);
+					}
+				})
+			).rejects.toBe(primary);
+			expect(removed).toStrictEqual([
+				expect.stringMatching(new RegExp(`^${temporaryPrefix}`, 'u'))
+			]);
+		}
+	);
+
+	it.each([
+		{
+			name: 'journal write',
+			basename: 'transaction.json.new',
+			method: 'write'
+		},
+		{ name: 'generation sync', basename: 'cupboard', method: 'sync' },
+		{
+			name: 'activation marker write',
+			basename: '.activated',
+			method: 'write'
+		},
+		{ name: 'directory sync', basename: 'generations', method: 'sync' }
+	] as const)(
+		'preserves a failed $name when closing the file also fails',
+		async ({ name, basename, method }) => {
+			const installDirectory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-release-install-')
+			);
+			const archive = await releaseArchive({
+				cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+				'cupboard-hook-relay': 'helper'
+			});
+			const primary = new Error(`${name} failed`);
+			const closed: string[] = [];
+
+			await expect(
+				publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+					openFile: async (target, flags, mode) => {
+						const handle = await open(target, flags, mode);
+						if (path.basename(target) !== basename) {
+							return handle;
+						}
+
+						return {
+							writeFile: async (...arguments_) => {
+								if (method === 'write') {
+									throw primary;
+								}
+
+								await handle.writeFile(...arguments_);
+							},
+							sync: async () => {
+								if (method === 'sync') {
+									throw primary;
+								}
+
+								await handle.sync();
+							},
+							close: async () => {
+								await handle.close();
+								closed.push(name);
+								throw new Error(`${name} close failed`);
+							}
+						};
+					}
+				})
+			).rejects.toBe(primary);
+			expect(closed).toStrictEqual([name]);
+		}
+	);
 });
 
 describe('downloadAsset', () => {
@@ -1894,6 +2122,170 @@ describe('downloadAsset', () => {
 		).rejects.toBeInstanceOf(DownloadAssetTooLargeError);
 		await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
+
+	it('preserves a download failure while close and removal also fail', async () => {
+		const primary = new Error('destination write failed');
+		const cleanups: string[] = [];
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(Uint8Array.of(1));
+				},
+				cancel() {
+					cleanups.push('cancel');
+					throw new Error('cancel failed');
+				}
+			})
+		);
+
+		await expect(
+			downloadAsset(
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
+				'/unused/cupboard.tar.gz',
+				'',
+				{
+					fetch: () => Promise.resolve(response),
+					openDestination: () =>
+						Promise.resolve({
+							write: () => Promise.reject(primary),
+							close: () => {
+								cleanups.push('close');
+								return Promise.reject(new Error('close failed'));
+							}
+						}),
+					removeDestination: () => {
+						cleanups.push('remove');
+						return Promise.reject(new Error('remove failed'));
+					}
+				}
+			)
+		).rejects.toBe(primary);
+		expect(cleanups).toStrictEqual(['close', 'cancel', 'remove']);
+	});
+
+	it('cancels the response body when opening the destination fails', async () => {
+		const primary = new Error('destination open failed');
+		let wasCancelled = false;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.enqueue(Uint8Array.of(1));
+				},
+				cancel() {
+					wasCancelled = true;
+				}
+			})
+		);
+
+		await expect(
+			downloadAsset(
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
+				'/unused/cupboard.tar.gz',
+				'',
+				{
+					fetch: () => Promise.resolve(response),
+					openDestination: () => Promise.reject(primary)
+				}
+			)
+		).rejects.toBe(primary);
+		expect(wasCancelled).toBe(true);
+	});
+
+	it('does not remove an existing destination when exclusive creation fails', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-download-'));
+		const destination = path.join(directory, 'cupboard.tar.gz');
+		await writeFile(destination, 'existing release');
+		let wasCancelled = false;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.enqueue(Uint8Array.of(1));
+				},
+				cancel() {
+					wasCancelled = true;
+				}
+			})
+		);
+
+		await expect(
+			downloadAsset(
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
+				destination,
+				'',
+				{ fetch: () => Promise.resolve(response) }
+			)
+		).rejects.toMatchObject({ code: 'EEXIST' });
+		expect({
+			contents: await readFile(destination, 'utf8'),
+			wasCancelled
+		}).toStrictEqual({ contents: 'existing release', wasCancelled: true });
+	});
+
+	it('exclusively creates the destination for a response without a body', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-download-'));
+		const destination = path.join(directory, 'cupboard.tar.gz');
+		await writeFile(destination, 'existing release');
+
+		await expect(
+			downloadAsset(
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
+				destination,
+				'',
+				{
+					fetch: () =>
+						Promise.resolve(
+							new Response(undefined, { status: StatusCodes.NO_CONTENT })
+						)
+				}
+			)
+		).rejects.toMatchObject({ code: 'EEXIST' });
+		expect(await readFile(destination, 'utf8')).toBe('existing release');
+	});
+
+	it.each(['fetch completion', 'destination creation'] as const)(
+		'does not retain a destination when cancellation occurs during %s',
+		async (stage) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-download-')
+			);
+			const destination = path.join(directory, 'cupboard.tar.gz');
+			const controller = new AbortController();
+			const reason = new Error(`cancel during ${stage}`);
+
+			await expect(
+				downloadAsset(
+					{
+						name: 'cupboard.tar.gz',
+						url: 'https://api.github.com/cupboard'
+					},
+					destination,
+					'',
+					{
+						fetch: () => {
+							if (stage === 'fetch completion') {
+								controller.abort(reason);
+							}
+
+							return Promise.resolve(
+								new Response(undefined, { status: StatusCodes.NO_CONTENT })
+							);
+						},
+						openDestination: async (target, flags, mode) => {
+							const handle = await open(target, flags, mode);
+
+							if (stage === 'destination creation') {
+								controller.abort(reason);
+							}
+
+							return handle;
+						},
+						signal: controller.signal
+					}
+				)
+			).rejects.toBe(reason);
+			await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
+		}
+	);
 
 	it('preserves cancellation while waiting for the next response chunk', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-download-'));

@@ -164,6 +164,7 @@ export interface BuildPushDependencies {
 	readonly compressNar?: CompressNar;
 	readonly nextAttemptId?: () => string;
 	readonly startDelay?: StartDelay;
+	readonly removeRuntimeDirectory?: (directory: string) => Promise<void>;
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
 	) => Promise<void> | void;
@@ -323,8 +324,6 @@ async function runProtectedStreamedBuildPush(
 	let batcher: BuildOutputBatcher;
 	let listener: BuildEventListener;
 
-	await createRuntimeDirectory(plan.directory);
-
 	let maxQueueDepth = 0;
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 	// Share one commit session between streaming and reconciliation so the server
@@ -335,9 +334,14 @@ async function runProtectedStreamedBuildPush(
 		}),
 		onWaiting: capacityWaitReporter(reporter)
 	};
-	const session = await dependencies.client.openCommitSession?.(commitOptions);
+	const removeRuntimeDirectory =
+		dependencies.removeRuntimeDirectory ?? removeInvocationRuntimeDirectory;
+	let session: CommitSession | undefined;
 
 	try {
+		await createRuntimeDirectory(plan.directory);
+		session = await dependencies.client.openCommitSession?.(commitOptions);
+
 		if (rootLinkDirectory !== undefined) {
 			roots = await createRootLinkDirectory(
 				rootLinkDirectory,
@@ -414,11 +418,8 @@ async function runProtectedStreamedBuildPush(
 
 				return Promise.resolve();
 			},
-			() =>
-				Promise.all([
-					removeInvocationRuntimeDirectory(plan.directory),
-					removeInvocationRuntimeDirectory(targetLinkDirectory)
-				])
+			() => removeRuntimeDirectory(plan.directory),
+			() => removeRuntimeDirectory(targetLinkDirectory)
 		]);
 	}
 
@@ -486,11 +487,8 @@ async function runProtectedStreamedBuildPush(
 		},
 		() => roots?.close() ?? Promise.resolve(),
 		() => listener.close(),
-		() =>
-			Promise.all([
-				removeInvocationRuntimeDirectory(plan.directory),
-				removeInvocationRuntimeDirectory(targetLinkDirectory)
-			])
+		() => removeRuntimeDirectory(plan.directory),
+		() => removeRuntimeDirectory(targetLinkDirectory)
 	]);
 }
 
@@ -514,6 +512,9 @@ async function runInvocation(
 			runtimeDirectory,
 			...(dependencies.signalSource !== undefined && {
 				signalSource: dependencies.signalSource
+			}),
+			...(dependencies.removeRuntimeDirectory !== undefined && {
+				removeRuntimeDirectory: dependencies.removeRuntimeDirectory
 			})
 		});
 
@@ -538,6 +539,9 @@ async function runInvocation(
 		}),
 		...(dependencies.startDelay !== undefined && {
 			startDelay: dependencies.startDelay
+		}),
+		...(dependencies.removeRuntimeDirectory !== undefined && {
+			removeRuntimeDirectory: dependencies.removeRuntimeDirectory
 		})
 	});
 }
@@ -669,8 +673,10 @@ async function runReconciledLocalBuildPush(
 	});
 	const buildDirectory = path.join(directory, buildDirectoryName);
 	const outLinkDirectory = path.join(directory, outLinkDirectoryName);
+	const removeRuntimeDirectory =
+		dependencies.removeRuntimeDirectory ?? removeInvocationRuntimeDirectory;
 
-	try {
+	return withCleanups(async () => {
 		await createRuntimeDirectory(buildDirectory);
 		await createRuntimeDirectory(outLinkDirectory);
 
@@ -695,7 +701,8 @@ async function runReconciledLocalBuildPush(
 				}),
 				...(dependencies.startDelay !== undefined && {
 					startDelay: dependencies.startDelay
-				})
+				}),
+				removeRuntimeDirectory
 			})
 		);
 		const realised = await realisedOutputs(
@@ -764,9 +771,7 @@ async function runReconciledLocalBuildPush(
 		);
 
 		return receipt;
-	} finally {
-		await removeInvocationRuntimeDirectory(directory);
-	}
+	}, [() => removeRuntimeDirectory(directory)]);
 }
 
 // Resolve predictable output paths from derivation installables before the

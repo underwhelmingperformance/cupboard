@@ -94,6 +94,25 @@ function ignoreSignalsUntilKilled(): string {
 }
 
 describe('superviseBuild', () => {
+	it('preserves an on-exit failure when runtime removal also fails', async () => {
+		const primary = new Error('on-exit failed');
+		const removed: string[] = [];
+
+		await expect(
+			superviseBuild({
+				command: ['sh', '-c', 'exit 0'],
+				environment: {},
+				runtimeDirectory: '/unused/runtime',
+				onExit: () => Promise.reject(primary),
+				removeRuntimeDirectory: (directory) => {
+					removed.push(directory);
+					return Promise.reject(new Error('removal failed'));
+				}
+			})
+		).rejects.toBe(primary);
+		expect(removed).toStrictEqual(['/unused/runtime']);
+	});
+
 	it.each([
 		{
 			name: 'a successful child',
@@ -352,6 +371,28 @@ describe('superviseBuild', () => {
 			}
 		}
 	);
+});
+
+describe('runChild cleanup', () => {
+	it('preserves a child-start failure while removing every signal listener', async () => {
+		const removed: string[] = [];
+		const source: SignalSource = {
+			on: () => source,
+			off(signal) {
+				removed.push(signal);
+				throw new Error(`${signal} removal failed`);
+			}
+		};
+
+		await expect(
+			runChild({
+				command: ['/definitely/missing/cupboard-child'],
+				environment: {},
+				signalSource: source
+			})
+		).rejects.toMatchObject({ code: 'ENOENT' });
+		expect(removed).toStrictEqual(['SIGINT', 'SIGTERM']);
+	});
 });
 
 function attemptIds(): () => string {

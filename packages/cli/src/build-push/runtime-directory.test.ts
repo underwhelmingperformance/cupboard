@@ -226,4 +226,124 @@ describe('invocation runtime directory', () => {
 			}
 		}
 	);
+
+	it('removes every stale root record in order and preserves the first failure', async () => {
+		const base = await mkdtemp(path.join(tmpdir(), 'cup-roots-stale-'));
+		bases.push(base);
+		const parent = path.join(base, 'cupboard');
+		const staleDirectories = [
+			path.join(parent, 'stale-a-roots'),
+			path.join(parent, 'stale-b-roots')
+		];
+		const orphanOwner = path.join(parent, '.orphan-roots.cupboard-owner');
+		const current = path.join(parent, 'current-roots');
+		const currentOwner = path.join(base, 'current.sock');
+		const failures = {
+			directory: new Error('stale directory removal failed'),
+			owner: new Error('stale owner removal failed')
+		};
+		const cleaned: string[] = [];
+
+		for (const staleDirectory of staleDirectories) {
+			await mkdir(staleDirectory, { recursive: true });
+			await symlink(
+				path.join(base, `${path.basename(staleDirectory)}.sock`),
+				path.join(parent, `.${path.basename(staleDirectory)}.cupboard-owner`)
+			);
+		}
+		await symlink(path.join(base, 'orphan.sock'), orphanOwner);
+
+		await expect(
+			createRootLinkDirectory(current, currentOwner, {
+				removeDirectory: async (target) => {
+					await rm(target, { recursive: true, force: true });
+					cleaned.push(`directory:${path.basename(target)}`);
+					if (target === staleDirectories[0]) {
+						throw failures.directory;
+					}
+				},
+				removeOwnerFile: async (target) => {
+					await rm(target, { force: true });
+					cleaned.push(`owner:${path.basename(target)}`);
+					if (target.endsWith('.stale-a-roots.cupboard-owner')) {
+						throw failures.owner;
+					}
+				}
+			})
+		).rejects.toBe(failures.directory);
+
+		expect(cleaned).toStrictEqual([
+			'directory:stale-a-roots',
+			'owner:.stale-a-roots.cupboard-owner',
+			'directory:stale-b-roots',
+			'owner:.stale-b-roots.cupboard-owner',
+			'owner:.orphan-roots.cupboard-owner'
+		]);
+	});
+
+	it('runs every close operation and preserves the first cleanup failure', async () => {
+		const base = await mkdtemp(path.join(tmpdir(), 'cupboard-roots-cleanup-'));
+		bases.push(base);
+		const directory = path.join(base, 'roots');
+		const ownerSocket = path.join(base, 'owner.sock');
+		const failures = {
+			close: new Error('owner close failed'),
+			directory: new Error('directory removal failed'),
+			owner: new Error('owner-file removal failed')
+		};
+		const cleaned: string[] = [];
+		const roots = await createRootLinkDirectory(directory, ownerSocket, {
+			closeOwner: async (close) => {
+				await close();
+				cleaned.push('close');
+				throw failures.close;
+			},
+			removeDirectory: async (target) => {
+				await rm(target, { recursive: true, force: true });
+				cleaned.push('directory');
+				throw failures.directory;
+			},
+			removeOwnerFile: async (target) => {
+				await rm(target, { force: true });
+				cleaned.push('owner');
+				throw failures.owner;
+			}
+		});
+
+		await expect(roots.close()).rejects.toBe(failures.close);
+		expect(cleaned).toStrictEqual(['close', 'directory', 'owner']);
+	});
+
+	it('closes the owner server when setting the socket mode fails', async () => {
+		const base = await mkdtemp(path.join(tmpdir(), 'cupboard-roots-mode-'));
+		bases.push(base);
+		const directory = path.join(base, 'roots');
+		const ownerSocket = path.join(base, 'owner.sock');
+		const failure = new Error('socket chmod failed');
+		const cleaned: string[] = [];
+
+		await expect(
+			createRootLinkDirectory(directory, ownerSocket, {
+				setOwnerSocketMode: () => Promise.reject(failure),
+				closeOwner: async (close) => {
+					await close();
+					cleaned.push('close');
+					throw new Error('close failed');
+				},
+				removeDirectory: async (target) => {
+					await rm(target, { recursive: true, force: true });
+					cleaned.push('directory');
+					throw new Error('directory removal failed');
+				},
+				removeOwnerFile: async (target) => {
+					await rm(target, { force: true });
+					cleaned.push('owner');
+					throw new Error('owner-file removal failed');
+				}
+			})
+		).rejects.toBe(failure);
+
+		expect(cleaned).toStrictEqual(['close', 'directory', 'owner']);
+		await expect(stat(ownerSocket)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
 });

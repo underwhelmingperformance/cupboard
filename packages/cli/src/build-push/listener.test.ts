@@ -255,6 +255,26 @@ describe('BuildEventListener', () => {
 		}
 	);
 
+	it('closes the listener when setting the socket mode fails', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-hook-mode-'));
+		directories.push(directory);
+		const socketPath = path.join(directory, 'hook.sock');
+		const failure = new Error('socket chmod failed');
+
+		await expect(
+			BuildEventListener.listen({
+				socketPath,
+				storeDirectory,
+				onEvent: () => Promise.resolve(),
+				onRejected: (error) => {
+					throw error;
+				},
+				setSocketMode: () => Promise.reject(failure)
+			})
+		).rejects.toBe(failure);
+		await expect(stat(socketPath)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
 	it.each([
 		{
 			name: 'an event with an unknown format version',
