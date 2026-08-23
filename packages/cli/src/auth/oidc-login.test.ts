@@ -17,10 +17,22 @@ import {
 } from './oidc-login.ts';
 
 const endpoints: OidcLoginEndpoints = {
+	issuer: 'https://idp.example.com',
 	authorizationEndpoint: 'https://idp.example.com/authorize',
 	tokenEndpoint: 'https://idp.example.com/token',
 	deviceAuthorizationEndpoint: 'https://idp.example.com/device'
 };
+
+const providerCapabilities = {
+	response_types_supported: ['id_token', 'code'],
+	subject_types_supported: ['public'],
+	id_token_signing_alg_values_supported: ['RS256']
+} as const;
+
+const discoveryCapabilities = {
+	...providerCapabilities,
+	authorization_response_iss_parameter_supported: true
+} as const;
 
 function pendingPromise(): Promise<never> {
 	return new Promise<never>(() => {
@@ -66,6 +78,7 @@ async function approveLoopbackBrowser(target: string): Promise<void> {
 	const callback = new URL(redirectUri);
 	callback.searchParams.set('code', 'auth-code');
 	callback.searchParams.set('state', state);
+	callback.searchParams.set('iss', 'https://idp.example.com');
 	await fetch(callback);
 }
 
@@ -112,6 +125,7 @@ describe('discoverOidcLogin', () => {
 			Promise.resolve(
 				Response.json({
 					issuer: 'https://idp.example.com/',
+					...discoveryCapabilities,
 					authorization_endpoint: endpoints.authorizationEndpoint,
 					token_endpoint: endpoints.tokenEndpoint,
 					device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
@@ -119,7 +133,10 @@ describe('discoverOidcLogin', () => {
 			)
 		);
 
-		expect(discovered).toStrictEqual(endpoints);
+		expect(discovered).toStrictEqual({
+			...endpoints,
+			issuer: 'https://idp.example.com/'
+		});
 	});
 
 	it('passes the abort signal to the metadata request', async () => {
@@ -134,6 +151,7 @@ describe('discoverOidcLogin', () => {
 				return Promise.resolve(
 					Response.json({
 						issuer: 'https://idp.example.com/',
+						...discoveryCapabilities,
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: endpoints.tokenEndpoint
 					})
@@ -172,6 +190,74 @@ describe('discoverOidcLogin', () => {
 			},
 			requests: ['https://idp.example.com/.well-known/openid-configuration']
 		});
+	});
+
+	it.each([
+		{
+			name: 'authorization-code response support',
+			response: () =>
+				Response.json({
+					issuer: endpoints.issuer,
+					...discoveryCapabilities,
+					response_types_supported: ['id_token'],
+					authorization_endpoint: endpoints.authorizationEndpoint,
+					token_endpoint: endpoints.tokenEndpoint
+				})
+		},
+		{
+			name: 'RS256 support',
+			response: () =>
+				Response.json({
+					issuer: endpoints.issuer,
+					...discoveryCapabilities,
+					id_token_signing_alg_values_supported: ['ES256'],
+					authorization_endpoint: endpoints.authorizationEndpoint,
+					token_endpoint: endpoints.tokenEndpoint
+				})
+		},
+		{
+			name: 'an application/json media type',
+			response: () =>
+				Response.json(
+					{
+						issuer: endpoints.issuer,
+						...discoveryCapabilities,
+						authorization_endpoint: endpoints.authorizationEndpoint,
+						token_endpoint: endpoints.tokenEndpoint
+					},
+					{ headers: { 'content-type': 'text/plain' } }
+				)
+		}
+	])('rejects metadata without $name', async ({ response }) => {
+		await expect(
+			discoverOidcLogin(endpoints.issuer, () => Promise.resolve(response()))
+		).rejects.toBeInstanceOf(OidcLoginError);
+	});
+
+	it.each([
+		{ name: 'omits issuer response support', capability: {} },
+		{
+			name: 'disables issuer response support',
+			capability: { authorization_response_iss_parameter_supported: false }
+		},
+		{
+			name: 'uses a non-boolean issuer response support value',
+			capability: { authorization_response_iss_parameter_supported: 'true' }
+		}
+	])('rejects metadata that $name', async ({ capability }) => {
+		await expect(
+			discoverOidcLogin(endpoints.issuer, () =>
+				Promise.resolve(
+					Response.json({
+						issuer: endpoints.issuer,
+						...providerCapabilities,
+						...capability,
+						authorization_endpoint: endpoints.authorizationEndpoint,
+						token_endpoint: endpoints.tokenEndpoint
+					})
+				)
+			)
+		).rejects.toBeInstanceOf(OidcLoginError);
 	});
 
 	it('rejects an issuer that is not an allowed URL before fetching', async () => {
@@ -213,6 +299,7 @@ describe('discoverOidcLogin', () => {
 				return Promise.resolve(
 					Response.json({
 						issuer: 'https://evil.example.com',
+						...discoveryCapabilities,
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: endpoints.tokenEndpoint
 					})
@@ -294,6 +381,7 @@ describe('discoverOidcLogin', () => {
 				return Promise.resolve(
 					Response.json({
 						issuer: 'https://idp.example.com',
+						...discoveryCapabilities,
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: 'http://idp.example.com/token',
 						device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
@@ -323,6 +411,141 @@ describe('discoverOidcLogin', () => {
 });
 
 describe('loopbackLogin', () => {
+	it('requires the callback issuer before the token request', async () => {
+		const tokenRequests: string[] = [];
+		const caught = await rejectedBy(() =>
+			loopbackLogin({
+				endpoints,
+				clientId: 'client-123',
+				openBrowser: async (target) => {
+					const { redirectUri, state } = authorizeParameters(target);
+					const callback = new URL(redirectUri);
+					callback.searchParams.set('code', 'unbound-code');
+					callback.searchParams.set('state', state);
+					await fetch(callback);
+				},
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				}
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+		expect(tokenRequests).toStrictEqual([]);
+	});
+
+	it('refuses a callback from another issuer before the token request', async () => {
+		const tokenRequests: string[] = [];
+		const caught = await rejectedBy(() =>
+			loopbackLogin({
+				endpoints: { ...endpoints, issuer: 'https://idp.example.com' },
+				clientId: 'client-123',
+				openBrowser: async (target) => {
+					const { redirectUri, state } = authorizeParameters(target);
+					const callback = new URL(redirectUri);
+					callback.searchParams.set('code', 'attacker-code');
+					callback.searchParams.set('state', state);
+					callback.searchParams.set('iss', 'https://evil.example.com');
+					await fetch(callback);
+				},
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				}
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+		expect(tokenRequests).toStrictEqual([]);
+	});
+
+	it.each([
+		{
+			name: 'a duplicate issuer',
+			responseIssuers: [endpoints.issuer, endpoints.issuer]
+		},
+		{ name: 'a malformed issuer', responseIssuers: ['not an issuer'] }
+	])('refuses $name before the token request', async ({ responseIssuers }) => {
+		const tokenRequests: string[] = [];
+		const caught = await rejectedBy(() =>
+			loopbackLogin({
+				endpoints,
+				clientId: 'client-123',
+				openBrowser: async (target) => {
+					const { redirectUri, state } = authorizeParameters(target);
+					const callback = new URL(redirectUri);
+					callback.searchParams.set('code', 'unbound-code');
+					callback.searchParams.set('state', state);
+					for (const responseIssuer of responseIssuers) {
+						callback.searchParams.append('iss', responseIssuer);
+					}
+					await fetch(callback);
+				},
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				}
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+		expect(tokenRequests).toStrictEqual([]);
+	});
+
+	it.each(['state', 'iss', 'code', 'error'] as const)(
+		'refuses a repeated %s parameter before the token request',
+		async (parameter) => {
+			const tokenRequests: string[] = [];
+			const caught = await rejectedBy(() =>
+				loopbackLogin({
+					endpoints,
+					clientId: 'client-123',
+					openBrowser: async (target) => {
+						const { redirectUri, state } = authorizeParameters(target);
+						const callback = new URL(redirectUri);
+						callback.searchParams.set('code', 'auth-code');
+						callback.searchParams.set('state', state);
+						callback.searchParams.set('iss', endpoints.issuer);
+
+						if (parameter === 'error') {
+							callback.searchParams.set('error', 'access_denied');
+						}
+
+						const duplicateValues = {
+							state,
+							iss: endpoints.issuer,
+							code: 'duplicate',
+							error: 'duplicate'
+						} as const;
+
+						callback.searchParams.append(parameter, duplicateValues[parameter]);
+						await fetch(callback);
+					},
+					fetcher: (input) => {
+						tokenRequests.push(requestUrl(input));
+
+						return Promise.resolve(Response.json({ id_token: 'unused' }));
+					}
+				})
+			);
+
+			expect(caught).toBeInstanceOf(OidcLoginError);
+
+			if (!(caught instanceof OidcLoginError)) {
+				return;
+			}
+
+			expect({ message: caught.message, tokenRequests }).toStrictEqual({
+				message: `Authorization response includes repeated ${parameter} parameter`,
+				tokenRequests: []
+			});
+		}
+	);
+
 	it('completes the PKCE loopback flow and exchanges the code', async () => {
 		let exchange: URLSearchParams | undefined;
 		const tokenRequests: unknown[] = [];
@@ -460,6 +683,7 @@ describe('loopbackLogin', () => {
 				const callback = new URL(redirectUri);
 				callback.searchParams.set('code', 'auth-code');
 				callback.searchParams.set('state', parameters.state);
+				callback.searchParams.set('iss', 'https://idp.example.com');
 				await fetch(callback);
 			},
 			fetcher: () =>
@@ -489,6 +713,7 @@ describe('loopbackLogin', () => {
 			const callback = new URL(redirectUri);
 			callback.searchParams.set('code', 'auth-code');
 			callback.searchParams.set('state', state);
+			callback.searchParams.set('iss', 'https://idp.example.com');
 			await fetch(callback);
 		};
 
@@ -648,6 +873,7 @@ describe('deviceLogin', () => {
 		const caught = await rejectedBy(() =>
 			deviceLogin({
 				endpoints: {
+					issuer: endpoints.issuer,
 					authorizationEndpoint: endpoints.authorizationEndpoint,
 					tokenEndpoint: endpoints.tokenEndpoint
 				},
