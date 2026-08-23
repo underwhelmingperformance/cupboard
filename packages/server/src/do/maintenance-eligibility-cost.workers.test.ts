@@ -38,6 +38,7 @@ async function maintenancePassCost(
 ): Promise<{
 	isLogged: boolean;
 	rowsRead: number;
+	rowsWritten: number;
 }> {
 	const capture = startCapture();
 
@@ -52,7 +53,11 @@ async function maintenancePassCost(
 		.map((entry) => methodLineSchema.parse(entry.properties))
 		.find((entry) => entry.method === method);
 
-	return { isLogged: line !== undefined, rowsRead: line?.rowsRead ?? -1 };
+	return {
+		isLogged: line !== undefined,
+		rowsRead: line?.rowsRead ?? -1,
+		rowsWritten: line?.rowsWritten ?? -1
+	};
 }
 
 // Negotiation runs once per path, so its row cost must remain independent of the
@@ -189,15 +194,17 @@ describe('maintenance pass cost', () => {
 		expect(isLogged).toBe(true);
 	});
 
-	it('deletes expired refresh tokens without scanning the backlog', async () => {
+	// Garbage collection selects expired families through the family-expiry
+	// index. A live-family backlog must not increase the number of rows read.
+	it('checks for expired refresh-token families without scanning the live backlog', async () => {
 		await initialise();
 
-		await seedRefreshTokens(3, 'small');
+		await seedRefreshTokenFamilies(3, 'small', '2099-01-01T00:00:00.000Z');
 		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
 
-		await seedRefreshTokens(197, 'large');
+		await seedRefreshTokenFamilies(197, 'large', '2099-01-01T00:00:00.000Z');
 		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
@@ -226,6 +233,77 @@ describe('maintenance pass cost', () => {
 				usesIndex: true,
 				sorts: false
 			}
+		});
+	});
+
+	// A burst can give many families the same millisecond deadline. The selector
+	// must use the complete `(expires_at, id)` ordering from the index, or SQLite
+	// reads and sorts every family at the oldest deadline before applying `LIMIT 1`.
+	it('selects one equal-deadline expired family at constant cost', async () => {
+		await initialise();
+		await seedRefreshTokenFamilies(
+			3,
+			'expired-small',
+			'2020-01-01T00:00:00.000Z'
+		);
+		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+		await clearRefreshTokenFamilyFixtures();
+
+		await resetTestServer();
+		await initialise();
+		await seedRefreshTokenFamilies(
+			197,
+			'expired-large',
+			'2020-01-01T00:00:00.000Z'
+		);
+		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+		await clearRefreshTokenFamilyFixtures();
+
+		expect({
+			smallBacklogCost: smallBacklog.rowsRead,
+			largeBacklogCost: largeBacklog.rowsRead
+		}).toStrictEqual({
+			smallBacklogCost: 54,
+			largeBacklogCost: 54
+		});
+	});
+
+	// A family can contain more members than one pass may delete. Both fixtures
+	// exceed that cap, so the exact cost must stay the same when the remaining
+	// backlog grows from one member to 4,001 members.
+	it('bounds the cost of deleting an oversized refresh-token family', async () => {
+		await initialise();
+
+		await seedExpiredRefreshFamily(1001, 'small-oversized');
+		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+		await clearRefreshTokenFamilyFixtures();
+
+		await resetTestServer();
+		await initialise();
+		await seedExpiredRefreshFamily(5001, 'large-oversized');
+		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+		await clearRefreshTokenFamilyFixtures();
+
+		expect({
+			smallBacklog: {
+				rowsRead: smallBacklog.rowsRead,
+				rowsWritten: smallBacklog.rowsWritten
+			},
+			largeBacklog: {
+				rowsRead: largeBacklog.rowsRead,
+				rowsWritten: largeBacklog.rowsWritten
+			}
+		}).toStrictEqual({
+			smallBacklog: { rowsRead: 5046, rowsWritten: 1011 },
+			largeBacklog: { rowsRead: 5046, rowsWritten: 1011 }
 		});
 	});
 
@@ -317,24 +395,98 @@ async function terminalUploadCollectionCost(
 	};
 }
 
-async function seedRefreshTokens(count: number, label: string): Promise<void> {
+async function clearRefreshTokenFamilyFixtures(): Promise<void> {
+	await runInDurableObject(currentServer(), async (instance, state) => {
+		instance.context.db.transaction((transaction) => {
+			transaction.delete(schema.refreshTokenMembers).run();
+			transaction.delete(schema.refreshTokenFamilies).run();
+		});
+		await state.storage.deleteAlarm();
+	});
+}
+
+async function seedRefreshTokenFamilies(
+	count: number,
+	label: string,
+	expiresAt: string
+): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
 		for (let index = 0; index < count; index += 1) {
-			instance.context.db
-				.insert(schema.refreshTokens)
-				.values({
-					id: `${label}-${String(index)}`,
-					secretHash: 'hash',
-					ruleId: trustRuleIdSchema.parse('rule'),
-					subject: oidcSubjectSchema.parse('subject'),
-					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-					expiresAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
-				})
-				.run();
+			const id = `${label}-${String(index)}`;
+			const activeMemberId = `${id}-member`;
+
+			instance.context.db.transaction((transaction) => {
+				transaction
+					.insert(schema.refreshTokenFamilies)
+					.values({
+						id,
+						activeMemberId,
+						generation: 0,
+						ruleId: trustRuleIdSchema.parse('rule'),
+						subject: oidcSubjectSchema.parse('subject'),
+						grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+						expiresAt: isoTimestampSchema.parse(expiresAt)
+					})
+					.run();
+				transaction
+					.insert(schema.refreshTokenMembers)
+					.values({
+						id: activeMemberId,
+						familyId: id,
+						generation: 0,
+						secretHash: 'hash',
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+					})
+					.run();
+			});
 		}
 	});
 }
 
+async function seedExpiredRefreshFamily(
+	memberCount: number,
+	label: string
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const activeGeneration = memberCount - 1;
+		const activeMemberId = `${label}-${String(activeGeneration)}`;
+
+		instance.context.db
+			.insert(schema.refreshTokenFamilies)
+			.values({
+				id: label,
+				activeMemberId,
+				generation: activeGeneration,
+				ruleId: trustRuleIdSchema.parse('rule'),
+				subject: oidcSubjectSchema.parse('subject'),
+				grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+				createdAt: isoTimestampSchema.parse('2019-01-01T00:00:00.000Z'),
+				expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+			})
+			.run();
+		state.storage.sql.exec(
+			`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+			 generations(value) AS (
+			   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+			   FROM digits AS ones
+			   CROSS JOIN digits AS tens
+			   CROSS JOIN digits AS hundreds
+			   CROSS JOIN digits AS thousands
+			 )
+			 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+			 SELECT printf('%s-%d', ?, value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
+			 FROM generations
+			 WHERE value < ?`,
+			label,
+			label,
+			memberCount
+		);
+	});
+}
+
+// Rows read while the Durable Object rebuilds the eligibility projection,
+// measured around one reconciliation pass.
 async function reconcileCost(): Promise<number> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const service = new MaintenanceEligibilityService(instance.context);

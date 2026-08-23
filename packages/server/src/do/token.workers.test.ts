@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
@@ -21,7 +22,16 @@ import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { oidcTrust, refreshTokens } from '../db/schema.ts';
+import {
+	maxRefreshTokenFamilyMembers,
+	refreshTokenFamilyTtlSeconds
+} from '../auth/auth.ts';
+import { sha256Hex } from '../crypto/crypto.ts';
+import {
+	oidcTrust,
+	refreshTokenFamilies,
+	refreshTokenMembers
+} from '../db/schema.ts';
 import {
 	OwnerConfigurationInvalidError,
 	RefreshTokenRequiredError,
@@ -47,7 +57,13 @@ import {
 } from '../test-support.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
+import { ownerRuleId } from './context.ts';
+import {
+	maxPathsCollectedPerRun,
+	maxRefreshTokenMembersDeletedPerRun
+} from './garbage-collection-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { gcContinuationKey } from './server.ts';
 import { TenantIdentityService } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
 
@@ -129,7 +145,7 @@ function tokenExchangeError(body: Record<string, string>): Promise<unknown> {
 		});
 
 		try {
-			return await service.handleToken(request);
+			return await service.handleToken(rootLogger(), request);
 		} catch (error: unknown) {
 			return error;
 		}
@@ -630,6 +646,25 @@ async function installTrustedIdp(
 	return subjectToken;
 }
 
+async function installTrustedOwner(): Promise<string> {
+	const subjectToken = await installTrustedIdp('admin');
+
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, { schema: { oidcTrust } });
+
+		database.transaction((transaction) => {
+			transaction.delete(oidcTrust).where(eq(oidcTrust.id, ownerRuleId)).run();
+			transaction
+				.update(oidcTrust)
+				.set({ id: ownerRuleId })
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
+				.run();
+		});
+	});
+
+	return subjectToken;
+}
+
 type SuccessfulTokenExchange = TokenResponse & { readonly status: number };
 
 async function exchange(
@@ -653,13 +688,63 @@ const ciRequest = [
 	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
 ];
 
-function refreshTokenRows(): Promise<{ id: string; expiresAt: string }[]> {
+function refreshTokenRows(): Promise<
+	{
+		id: string;
+		activeMemberId: string;
+		generation: number;
+		expiresAt: string;
+	}[]
+> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
-		drizzle(state.storage, { schema: { refreshTokens } })
-			.select({ id: refreshTokens.id, expiresAt: refreshTokens.expiresAt })
-			.from(refreshTokens)
+		drizzle(state.storage, { schema: { refreshTokenFamilies } })
+			.select({
+				id: refreshTokenFamilies.id,
+				activeMemberId: refreshTokenFamilies.activeMemberId,
+				generation: refreshTokenFamilies.generation,
+				expiresAt: refreshTokenFamilies.expiresAt
+			})
+			.from(refreshTokenFamilies)
 			.all()
 	);
+}
+
+function refreshTokenMemberRows(): Promise<
+	{ id: string; familyId: string; generation: number }[]
+> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { refreshTokenMembers } })
+			.select({
+				id: refreshTokenMembers.id,
+				familyId: refreshTokenMembers.familyId,
+				generation: refreshTokenMembers.generation
+			})
+			.from(refreshTokenMembers)
+			.orderBy(refreshTokenMembers.generation)
+			.all()
+	);
+}
+
+function refresh(refreshToken: string): Promise<Response> {
+	return postToken({
+		grant_type: refreshTokenGrantType,
+		refresh_token: refreshToken
+	});
+}
+
+async function staleRefreshOutcome(refreshToken: string): Promise<{
+	readonly status: number;
+	readonly error: string;
+	readonly problem: string | undefined;
+}> {
+	const response = await refresh(refreshToken);
+	const body = oauthErrorShape(await response.json());
+
+	return {
+		status: response.status,
+		error: body.error,
+		problem: body.problem
+	};
 }
 
 describe('refresh grant', () => {
@@ -669,18 +754,9 @@ describe('refresh grant', () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 
-		const refreshed = await postToken({
-			grant_type: refreshTokenGrantType,
-			refresh_token: exchanged.refresh_token ?? ''
-		});
+		const refreshed = await refresh(exchanged.refresh_token ?? '');
 		const refreshedBody = tokenResponseSchema.parse(await refreshed.json());
 		const claims = decodeJwt(refreshedBody.access_token);
-
-		const replayed = await postToken({
-			grant_type: refreshTokenGrantType,
-			refresh_token: exchanged.refresh_token ?? ''
-		});
-		const replayedBody = oauthErrorShape(await replayed.json());
 
 		expect({
 			exchangeStatus: exchanged.status,
@@ -692,10 +768,7 @@ describe('refresh grant', () => {
 			refreshedHasRefreshToken: typeof refreshedBody.refresh_token,
 			rotated: refreshedBody.refresh_token !== exchanged.refresh_token,
 			subject: claims.sub,
-			grantsClaim: claims.authorization_details,
-			replayedStatus: replayed.status,
-			replayedError: replayedBody.error,
-			replayedProblem: replayedBody.problem
+			grantsClaim: claims.authorization_details
 		}).toStrictEqual({
 			exchangeStatus: StatusCodes.OK,
 			exchangedHasRefreshToken: 'string',
@@ -706,14 +779,426 @@ describe('refresh grant', () => {
 			refreshedHasRefreshToken: 'string',
 			rotated: true,
 			subject: 'alice',
-			grantsClaim: [{ type: 'cupboard_wildcard' }],
-			replayedStatus: StatusCodes.BAD_REQUEST,
-			replayedError: 'invalid_grant',
-			replayedProblem: 'stale-refresh-token'
+			grantsClaim: [{ type: 'cupboard_wildcard' }]
 		});
 	});
 
-	it('accepts only one concurrent presentation of the same refresh token', async () => {
+	it('revokes the family when a consumed refresh token is replayed', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const refreshToken = exchanged.refresh_token ?? '';
+		const first = await refresh(refreshToken);
+		const firstBody = tokenResponseSchema.parse(await first.json());
+		const successor = firstBody.refresh_token ?? '';
+
+		const capture = startCapture();
+		let replay;
+		let successorAfterReplay;
+
+		try {
+			replay = await staleRefreshOutcome(refreshToken);
+			successorAfterReplay = await staleRefreshOutcome(successor);
+		} finally {
+			capture.stop();
+		}
+
+		const revocations = capture.logs
+			.filter((entry) => entry.message === 'refresh-token family revoked')
+			.map((entry) => ({
+				level: entry.level,
+				properties: entry.properties
+			}));
+
+		expect({
+			firstStatus: first.status,
+			replay,
+			successorAfterReplay,
+			revocations,
+			rows: await refreshTokenRows()
+		}).toStrictEqual({
+			firstStatus: StatusCodes.OK,
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			successorAfterReplay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			revocations: [
+				{
+					level: 'warning',
+					properties: { method: 'POST', path: '/token', reason: 'replay' }
+				}
+			],
+			rows: []
+		});
+	});
+
+	it('revokes the active family member when an earlier generation is replayed', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const original = exchanged.refresh_token ?? '';
+		const firstResponse = await refresh(original);
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const firstSuccessor = first.refresh_token ?? '';
+		const secondResponse = await refresh(firstSuccessor);
+		const second = tokenResponseSchema.parse(await secondResponse.json());
+		const active = second.refresh_token ?? '';
+		const [activeMemberId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(active.split('.'));
+		const beforeReplay = {
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		};
+
+		const replay = await staleRefreshOutcome(original);
+		const activeAfterReplay = await staleRefreshOutcome(active);
+
+		expect({
+			beforeReplay: {
+				families: beforeReplay.families.map((family) => ({
+					activeMemberId: family.activeMemberId,
+					generation: family.generation
+				})),
+				memberGenerations: beforeReplay.members.map(
+					(member) => member.generation
+				)
+			},
+			replay,
+			activeAfterReplay,
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		}).toStrictEqual({
+			beforeReplay: {
+				families: [{ activeMemberId, generation: 2 }],
+				memberGenerations: [0, 1, 2]
+			},
+			replay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			activeAfterReplay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			families: [],
+			members: []
+		});
+	});
+
+	it('ends a refresh family at its original deadline', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const startedAt = new Date('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(startedAt);
+			const subjectToken = await installTrustedIdp('admin');
+			const exchanged = await exchange(subjectToken);
+			const [initialFamily] = z
+				.tuple([z.object({ expiresAt: z.string() })])
+				.parse(await refreshTokenRows());
+
+			vi.setSystemTime(
+				new Date(
+					startedAt.getTime() + refreshTokenFamilyTtlSeconds * 1000 - 60_000
+				)
+			);
+			const refreshed = await refresh(exchanged.refresh_token ?? '');
+			const refreshedBody = tokenResponseSchema.parse(await refreshed.json());
+			const [rotatedFamily] = z
+				.tuple([z.object({ expiresAt: z.string() })])
+				.parse(await refreshTokenRows());
+
+			vi.setSystemTime(
+				new Date(startedAt.getTime() + refreshTokenFamilyTtlSeconds * 1000)
+			);
+			const afterDeadline = await staleRefreshOutcome(
+				refreshedBody.refresh_token ?? ''
+			);
+
+			expect({
+				initialDeadline: initialFamily.expiresAt,
+				rotatedDeadline: rotatedFamily.expiresAt,
+				afterDeadline,
+				families: await refreshTokenRows(),
+				members: await refreshTokenMemberRows()
+			}).toStrictEqual({
+				initialDeadline: '2026-01-31T00:00:00.000Z',
+				rotatedDeadline: '2026-01-31T00:00:00.000Z',
+				afterDeadline: {
+					status: StatusCodes.BAD_REQUEST,
+					error: 'invalid_grant',
+					problem: 'stale-refresh-token'
+				},
+				families: [],
+				members: []
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('stores only member ids and SHA-256 secret hashes', async () => {
+		vi.useFakeTimers();
+
+		try {
+			vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+			const subjectToken = await installTrustedIdp('admin');
+			const exchanged = await exchange(subjectToken);
+			const original = exchanged.refresh_token ?? '';
+			const refreshedResponse = await refresh(original);
+			const refreshed = tokenResponseSchema.parse(
+				await refreshedResponse.json()
+			);
+			const successor = refreshed.refresh_token ?? '';
+			const [originalId, originalSecret] = z
+				.tuple([z.uuid(), z.string().min(1)])
+				.parse(original.split('.'));
+			const [successorId, successorSecret] = z
+				.tuple([z.uuid(), z.string().min(1)])
+				.parse(successor.split('.'));
+			const hash = async (secret: string): Promise<string> =>
+				[
+					...new Uint8Array(
+						await crypto.subtle.digest(
+							'SHA-256',
+							new TextEncoder().encode(secret)
+						)
+					)
+				]
+					.map((byte) => byte.toString(16).padStart(2, '0'))
+					.join('');
+			const [originalHash, successorHash] = await Promise.all([
+				hash(originalSecret),
+				hash(successorSecret)
+			]);
+			const persisted = await runInDurableObject(
+				currentServer(),
+				(_instance, state) => ({
+					families: state.storage.sql
+						.exec(
+							'SELECT id, active_member_id, generation, rule_id, subject, created_at, expires_at FROM refresh_token_family'
+						)
+						.toArray(),
+					members: state.storage.sql
+						.exec('SELECT * FROM refresh_token_member ORDER BY generation')
+						.toArray(),
+					legacy: {
+						live: state.storage.sql
+							.exec('SELECT id FROM refresh_token ORDER BY id')
+							.toArray()
+					}
+				})
+			);
+			const serialised = JSON.stringify(persisted);
+
+			expect({
+				persisted,
+				containsOriginalSecret: serialised.includes(originalSecret),
+				containsSuccessorSecret: serialised.includes(successorSecret),
+				containsCiphertext: serialised.includes('ciphertext'),
+				containsIv: serialised.includes('"iv"')
+			}).toStrictEqual({
+				persisted: {
+					families: [
+						{
+							id: persisted.families[0]?.id,
+							active_member_id: successorId,
+							generation: 1,
+							rule_id: 'admin-rule',
+							subject: 'alice',
+							created_at: '2026-01-01T00:00:00.000Z',
+							expires_at: '2026-01-31T00:00:00.000Z'
+						}
+					],
+					members: [
+						{
+							id: originalId,
+							family_id: persisted.families[0]?.id,
+							generation: 0,
+							secret_hash: originalHash,
+							created_at: '2026-01-01T00:00:00.000Z'
+						},
+						{
+							id: successorId,
+							family_id: persisted.families[0]?.id,
+							generation: 1,
+							secret_hash: successorHash,
+							created_at: '2026-01-01T00:00:00.000Z'
+						}
+					],
+					legacy: { live: [] }
+				},
+				containsOriginalSecret: false,
+				containsSuccessorSecret: false,
+				containsCiphertext: false,
+				containsIv: false
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not accept a token stored only in the retained legacy table', async () => {
+		await installTrustedIdp('admin');
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				"INSERT INTO refresh_token (id, secret_hash, rule_id, subject, created_at, expires_at) VALUES ('legacy', 'unused-hash', 'admin-rule', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')"
+			);
+		});
+
+		expect(await staleRefreshOutcome('legacy.old-secret')).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token'
+		});
+	});
+
+	it('fails closed for a family inserted by the preceding worker', async () => {
+		await installTrustedIdp('admin');
+		const memberId = 'preceding-member';
+		const familyId = 'preceding-family';
+		const secret = 'preceding-secret';
+		const secretHash = await sha256Hex(secret);
+
+		await runInDurableObject(currentServer(), async (_instance, state) => {
+			await migrateThrough(state, latestMigrationIndex);
+			state.storage.sql.exec(
+				"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, created_at, expires_at) VALUES (?, ?, 0, 'admin-rule', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
+				familyId,
+				memberId
+			);
+			state.storage.sql.exec(
+				"INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at) VALUES (?, ?, 0, ?, '2026-01-01T00:00:00.000Z')",
+				memberId,
+				familyId,
+				secretHash
+			);
+		});
+
+		expect({
+			outcome: await staleRefreshOutcome(`${memberId}.${secret}`),
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		}).toStrictEqual({
+			outcome: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			families: [],
+			members: []
+		});
+	});
+
+	it('revokes a rapidly rotated family at its member bound', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const original = exchanged.refresh_token ?? '';
+		const [originalMemberId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(original.split('.'));
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			const [family] = z
+				.tuple([z.object({ id: z.string(), createdAt: z.string() })])
+				.parse(
+					drizzle(state.storage, { schema: { refreshTokenFamilies } })
+						.select()
+						.from(refreshTokenFamilies)
+						.all()
+				);
+			const activeGeneration = maxRefreshTokenFamilyMembers - 2;
+
+			state.storage.sql.exec(
+				'UPDATE refresh_token_family SET generation = ? WHERE id = ?',
+				activeGeneration,
+				family.id
+			);
+			state.storage.sql.exec(
+				'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+				activeGeneration,
+				originalMemberId
+			);
+			state.storage.sql.exec(
+				`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+				 generations(value) AS (
+				   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+				   FROM digits AS ones
+				   CROSS JOIN digits AS tens
+				   CROSS JOIN digits AS hundreds
+				   CROSS JOIN digits AS thousands
+				 )
+				 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+				 SELECT printf('spent-%d', value), ?, value, lower(hex(randomblob(32))), ?
+				 FROM generations
+				 WHERE value < ?`,
+				family.id,
+				family.createdAt,
+				activeGeneration
+			);
+		});
+
+		const lastAllowedResponse = await refresh(original);
+		const lastAllowed = tokenResponseSchema.parse(
+			await lastAllowedResponse.json()
+		);
+		const atBound = await refreshTokenMemberRows();
+		const capture = startCapture();
+		let beyondBound;
+
+		try {
+			beyondBound = await staleRefreshOutcome(lastAllowed.refresh_token ?? '');
+		} finally {
+			capture.stop();
+		}
+
+		const revocations = capture.logs
+			.filter((entry) => entry.message === 'refresh-token family revoked')
+			.map((entry) => ({
+				level: entry.level,
+				properties: entry.properties
+			}));
+
+		expect({
+			lastAllowedStatus: lastAllowedResponse.status,
+			membersAtBound: atBound.length,
+			lastGeneration: atBound.at(-1)?.generation,
+			beyondBound,
+			revocations,
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		}).toStrictEqual({
+			lastAllowedStatus: StatusCodes.OK,
+			membersAtBound: maxRefreshTokenFamilyMembers,
+			lastGeneration: maxRefreshTokenFamilyMembers - 1,
+			beyondBound: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			revocations: [
+				{
+					level: 'warning',
+					properties: {
+						method: 'POST',
+						path: '/token',
+						reason: 'member-limit'
+					}
+				}
+			],
+			families: [],
+			members: []
+		});
+	});
+
+	it('revokes the family when the same refresh token is presented concurrently', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
@@ -744,13 +1229,10 @@ describe('refresh grant', () => {
 					responses.map(async (response) => {
 						if (response.status === okStatusCode) {
 							const body = tokenResponseSchema.parse(await response.json());
-							const [refreshTokenId] = z
-								.tuple([z.uuid(), z.string()])
-								.parse((body.refresh_token ?? '').split('.'));
 
 							return {
 								status: response.status,
-								refreshTokenId
+								refreshToken: body.refresh_token ?? ''
 							};
 						}
 
@@ -765,35 +1247,48 @@ describe('refresh grant', () => {
 				);
 			}
 		);
-		const rows = await refreshTokenRows();
-		const [granted, refused] = z
-			.tuple([
-				z.strictObject({
-					status: z.literal(StatusCodes.OK),
-					refreshTokenId: z.uuid()
-				}),
-				z.strictObject({
-					status: z.literal(StatusCodes.BAD_REQUEST),
-					error: z.literal('invalid_grant'),
-					problem: z.literal('stale-refresh-token')
-				})
-			])
-			.parse(outcomes.toSorted((left, right) => left.status - right.status));
+		const granted = outcomes.find(
+			(outcome): outcome is { status: number; refreshToken: string } =>
+				'refreshToken' in outcome
+		);
+		const refused = outcomes.find(
+			(
+				outcome
+			): outcome is {
+				status: number;
+				error: string;
+				problem: string | undefined;
+			} => 'error' in outcome
+		);
+		const grantedToken = z.string().min(1).parse(granted?.refreshToken);
+		const successorAfterReplay = await staleRefreshOutcome(grantedToken);
 
 		expect({
 			exchangeStatus: exchanged.status,
-			grantedStatus: granted.status,
+			statuses: outcomes
+				.map((outcome) => outcome.status)
+				.toSorted((left, right) => left - right),
 			refused,
-			rows: rows.map((row) => row.id)
+			successorAfterReplay,
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
 		}).toStrictEqual({
 			exchangeStatus: StatusCodes.OK,
-			grantedStatus: StatusCodes.OK,
+			statuses: [StatusCodes.OK, StatusCodes.BAD_REQUEST].toSorted(
+				(left, right) => left - right
+			),
 			refused: {
 				status: StatusCodes.BAD_REQUEST,
 				error: 'invalid_grant',
 				problem: 'stale-refresh-token'
 			},
-			rows: [granted.refreshTokenId]
+			successorAfterReplay: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			families: [],
+			members: []
 		});
 	});
 
@@ -817,8 +1312,8 @@ describe('refresh grant', () => {
 		const exchanged = await exchange(subjectToken);
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
-			drizzle(state.storage, { schema: { refreshTokens } })
-				.update(refreshTokens)
+			drizzle(state.storage, { schema: { refreshTokenFamilies } })
+				.update(refreshTokenFamilies)
 				.set({
 					expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
 				})
@@ -873,6 +1368,201 @@ describe('refresh grant', () => {
 			status: StatusCodes.BAD_REQUEST,
 			error: 'invalid_grant',
 			problem: 'stale-refresh-token'
+		});
+	});
+
+	it('ends an owner session when the owner identity changes', async () => {
+		const subjectToken = await installTrustedOwner();
+		const exchanged = await exchange(subjectToken);
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			await instance.configure({
+				tenant: tenantIdSchema.parse('v1'),
+				issuer: oidcIssuerSchema.parse('cupboard'),
+				audience: oidcAudienceSchema.parse('cupboard'),
+				ownerIssuer: oidcIssuerSchema.parse('https://new-idp.test'),
+				ownerSubject: oidcSubjectSchema.parse('new-owner'),
+				ownerAudience: oidcAudienceSchema.parse('new-audience'),
+				configVersion: 2
+			});
+		});
+
+		const refreshed = await refresh(exchanged.refresh_token ?? '');
+		const body = oauthErrorShape(await refreshed.json());
+
+		expect({
+			status: refreshed.status,
+			error: body.error,
+			problem: body.problem,
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token',
+			families: [],
+			members: []
+		});
+	});
+
+	it('refuses a refresh completed after its trust rule is removed', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const ruleId = trustRuleIdSchema.parse('admin-rule');
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const signingStarted = Promise.withResolvers<undefined>();
+				const releaseSigning = Promise.withResolvers<undefined>();
+				const tenantIdentity = new TenantIdentityService(instance.context);
+				const authKeys = new AuthKeysService(instance.context, tenantIdentity);
+				const oidcTrustService = new OidcTrustService(
+					instance.context,
+					tenantIdentity
+				);
+				const key = await authKeys.activeAuthKey();
+
+				vi.spyOn(authKeys, 'activeAuthKey').mockImplementation(async () => {
+					signingStarted.resolve(undefined);
+					await releaseSigning.promise;
+
+					return key;
+				});
+
+				const service = new TokenExchangeService(
+					instance.context,
+					authKeys,
+					oidcTrustService
+				);
+				const parameters = new URLSearchParams({
+					grant_type: refreshTokenGrantType,
+					refresh_token: exchanged.refresh_token ?? ''
+				});
+				const request = new Request(new URL('/token', currentOrigin()), {
+					method: 'POST',
+					headers: { 'content-type': 'application/x-www-form-urlencoded' },
+					body: parameters.toString()
+				});
+				const refreshing = service.handleToken(rootLogger(), request);
+
+				await signingStarted.promise;
+
+				try {
+					oidcTrustService.removeRule(ruleId);
+				} finally {
+					releaseSigning.resolve(undefined);
+				}
+
+				let result: { readonly kind: 'refused' | 'issued' };
+
+				try {
+					await refreshing;
+					result = { kind: 'issued' };
+				} catch (error) {
+					expect(error).toBeInstanceOf(StaleRefreshTokenError);
+					result = { kind: 'refused' };
+				}
+
+				const database = drizzle(state.storage, {
+					schema: { refreshTokenFamilies, refreshTokenMembers }
+				});
+
+				return {
+					result,
+					families: database.select().from(refreshTokenFamilies).all(),
+					members: database.select().from(refreshTokenMembers).all()
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			result: { kind: 'refused' },
+			families: [],
+			members: []
+		});
+	});
+
+	it('refuses an owner exchange completed after the owner changes', async () => {
+		const subjectToken = await installTrustedOwner();
+		const issuerFetch = fetch;
+		const verificationStarted = Promise.withResolvers<undefined>();
+		const releaseVerification = Promise.withResolvers<undefined>();
+		let isHeld = false;
+
+		vi.stubGlobal(
+			'fetch',
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = input instanceof Request ? input.url : String(input);
+
+				if (
+					!isHeld &&
+					url === 'https://idp.test/.well-known/openid-configuration'
+				) {
+					isHeld = true;
+					verificationStarted.resolve(undefined);
+					await releaseVerification.promise;
+				}
+
+				return issuerFetch(input, init);
+			}
+		);
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const parameters = new URLSearchParams({
+					grant_type: tokenExchangeGrantType,
+					subject_token: subjectToken,
+					subject_token_type: subjectTokenTypeIdToken
+				});
+				const requestUrl = new URL('/token', currentOrigin());
+				const request = new Request(requestUrl, {
+					method: 'POST',
+					headers: {
+						'content-type': 'application/x-www-form-urlencoded'
+					},
+					body: parameters.toString()
+				});
+				const exchangeRequest = instance.fetch(request);
+
+				await verificationStarted.promise;
+
+				try {
+					await instance.configure({
+						tenant: tenantIdSchema.parse('v1'),
+						issuer: oidcIssuerSchema.parse('cupboard'),
+						audience: oidcAudienceSchema.parse('cupboard'),
+						ownerIssuer: oidcIssuerSchema.parse('https://new-idp.test'),
+						ownerSubject: oidcSubjectSchema.parse('new-owner'),
+						ownerAudience: oidcAudienceSchema.parse('new-audience'),
+						configVersion: 2
+					});
+				} finally {
+					releaseVerification.resolve(undefined);
+				}
+
+				const response = await exchangeRequest;
+
+				return {
+					status: response.status,
+					body: oauthErrorShape(await response.json())
+				};
+			}
+		);
+
+		expect({
+			status: outcome.status,
+			error: outcome.body.error,
+			problem: outcome.body.problem,
+			families: await refreshTokenRows(),
+			members: await refreshTokenMemberRows()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'subject-token-untrusted',
+			families: [],
+			members: []
 		});
 	});
 
@@ -956,6 +1646,32 @@ describe('refresh grant', () => {
 		}
 	);
 
+	it('does not revoke a family for a forged secret with a valid member id', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const refreshToken = exchanged.refresh_token ?? '';
+		const [memberId] = z
+			.tuple([z.uuid(), z.string()])
+			.parse(refreshToken.split('.'));
+		const forged = await staleRefreshOutcome(`${memberId}.deadbeef`);
+		const valid = await refresh(refreshToken);
+		const validBody = tokenResponseSchema.parse(await valid.json());
+
+		expect({
+			forged,
+			validStatus: valid.status,
+			hasSuccessor: typeof validBody.refresh_token
+		}).toStrictEqual({
+			forged: {
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_grant',
+				problem: 'stale-refresh-token'
+			},
+			validStatus: StatusCodes.OK,
+			hasSuccessor: 'string'
+		});
+	});
+
 	it('reaps expired refresh tokens in the garbage-collection pass', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const firstExchange = await exchange(subjectToken);
@@ -967,32 +1683,274 @@ describe('refresh grant', () => {
 			.parse(await refreshTokenRows());
 
 		await runInDurableObject(currentServer(), (_instance, state) => {
-			const database = drizzle(state.storage, { schema: { refreshTokens } });
-			const rows = database.select().from(refreshTokens).all();
+			const database = drizzle(state.storage, {
+				schema: { refreshTokenFamilies }
+			});
+			const rows = database.select().from(refreshTokenFamilies).all();
 			const staleRows = rows.filter((row) => row.id !== live.id);
 			const [stale] = z
 				.tuple([z.looseObject({ id: z.string() })])
 				.parse(staleRows);
 
 			database
-				.update(refreshTokens)
+				.update(refreshTokenFamilies)
 				.set({
 					expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
 				})
-				.where(eq(refreshTokens.id, stale.id))
+				.where(eq(refreshTokenFamilies.id, stale.id))
 				.run();
 		});
 
 		await currentServer().runGarbageCollection();
 
 		const survivors = await refreshTokenRows();
+		const survivingMembers = await refreshTokenMemberRows();
 
 		expect({
 			exchangeStatuses: [firstExchange.status, secondExchange.status],
-			survivors: survivors.map((row) => row.id)
+			survivors: survivors.map((row) => row.id),
+			memberFamilies: survivingMembers.map((member) => member.familyId)
 		}).toStrictEqual({
 			exchangeStatuses: [StatusCodes.OK, StatusCodes.OK],
-			survivors: [live.id]
+			survivors: [live.id],
+			memberFamilies: [live.id]
+		});
+	});
+
+	it('collects families at their deadline and continues to the next family', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const deadline = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(new Date(deadline));
+			const subjectToken = await installTrustedIdp('admin');
+			await exchange(subjectToken);
+			await exchange(subjectToken);
+
+			const firstPass = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const database = drizzle(state.storage, {
+						schema: { refreshTokenFamilies, refreshTokenMembers }
+					});
+					database
+						.update(refreshTokenFamilies)
+						.set({ expiresAt: deadline })
+						.run();
+
+					await instance.runGarbageCollection();
+					const continuation = await state.storage.get(gcContinuationKey);
+					await state.storage.deleteAlarm();
+
+					return {
+						families: database.select().from(refreshTokenFamilies).all(),
+						members: database.select().from(refreshTokenMembers).all(),
+						continuation
+					};
+				}
+			);
+
+			expect({
+				families: firstPass.families.length,
+				members: firstPass.members.length,
+				continuation: firstPass.continuation
+			}).toStrictEqual({
+				families: 1,
+				members: 1,
+				continuation: [
+					{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }
+				]
+			});
+
+			await runInDurableObject(currentServer(), (instance) => instance.alarm());
+
+			const drained = await runInDurableObject(
+				currentServer(),
+				async (_instance, state) => {
+					const database = drizzle(state.storage, {
+						schema: { refreshTokenFamilies, refreshTokenMembers }
+					});
+
+					return {
+						families: database.select().from(refreshTokenFamilies).all(),
+						members: database.select().from(refreshTokenMembers).all(),
+						continuation: await state.storage.get(gcContinuationKey)
+					};
+				}
+			);
+
+			expect(drained).toStrictEqual({
+				families: [],
+				members: [],
+				continuation: undefined
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('drains expired refresh families through bounded continuation passes', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		await exchange(subjectToken);
+		await exchange(subjectToken);
+
+		const capture = startCapture();
+		const firstPass = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const database = drizzle(state.storage, {
+					schema: { refreshTokenFamilies, refreshTokenMembers }
+				});
+				const [largeFamily, smallFamily] = z
+					.tuple([
+						z.object({ id: z.string(), activeMemberId: z.string() }),
+						z.object({ id: z.string(), activeMemberId: z.string() })
+					])
+					.parse(database.select().from(refreshTokenFamilies).all());
+				state.storage.sql.exec(
+					"UPDATE refresh_token_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
+					maxRefreshTokenMembersDeletedPerRun,
+					largeFamily.id
+				);
+				state.storage.sql.exec(
+					'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
+					maxRefreshTokenMembersDeletedPerRun,
+					largeFamily.activeMemberId
+				);
+				state.storage.sql.exec(
+					"UPDATE refresh_token_family SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?",
+					smallFamily.id
+				);
+				state.storage.sql.exec(
+					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+					 generations(value) AS (
+					   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+					   FROM digits AS ones
+					   CROSS JOIN digits AS tens
+					   CROSS JOIN digits AS hundreds
+					   CROSS JOIN digits AS thousands
+					 )
+					 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+					 SELECT printf('gc-spent-%d', value), ?, value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
+					 FROM generations
+					 WHERE value < ?`,
+					largeFamily.id,
+					maxRefreshTokenMembersDeletedPerRun
+				);
+				await instance.runGarbageCollection();
+				const continuation = await state.storage.get(gcContinuationKey);
+				await state.storage.deleteAlarm();
+
+				return {
+					families: database
+						.select()
+						.from(refreshTokenFamilies)
+						.orderBy(refreshTokenFamilies.id)
+						.all(),
+					members: database
+						.select()
+						.from(refreshTokenMembers)
+						.orderBy(refreshTokenMembers.familyId)
+						.all(),
+					continuation
+				};
+			}
+		);
+		capture.stop();
+		const backlogs = capture.logs
+			.filter(
+				(entry) =>
+					entry.message ===
+					'refresh-token family backlog remains after bounded collection'
+			)
+			.map((entry) => ({
+				level: entry.level,
+				properties: entry.properties
+			}));
+
+		expect({
+			remainingFamilies: firstPass.families.length,
+			remainingMembers: firstPass.members.length,
+			remainingMemberFamilies: firstPass.members.map(
+				(member) => member.familyId
+			),
+			remainingFamilyIds: firstPass.families.map((family) => family.id),
+			continuation: firstPass.continuation,
+			backlogs
+		}).toStrictEqual({
+			remainingFamilies: 2,
+			remainingMembers: 2,
+			remainingMemberFamilies: firstPass.families.map((family) => family.id),
+			remainingFamilyIds: firstPass.families.map((family) => family.id),
+			continuation: [
+				{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }
+			],
+			backlogs: [
+				{
+					level: 'warning',
+					properties: {
+						job: 'garbage-collection',
+						method: 'garbage-collection',
+						membersDeleted: maxRefreshTokenMembersDeletedPerRun,
+						familiesDeleted: 0
+					}
+				}
+			]
+		});
+
+		const afterSecondPass = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.alarm();
+				const database = drizzle(state.storage, {
+					schema: { refreshTokenFamilies, refreshTokenMembers }
+				});
+				const continuation = await state.storage.get(gcContinuationKey);
+				await state.storage.deleteAlarm();
+
+				return {
+					families: database.select().from(refreshTokenFamilies).all(),
+					members: database.select().from(refreshTokenMembers).all(),
+					continuation
+				};
+			}
+		);
+
+		expect({
+			families: afterSecondPass.families.length,
+			members: afterSecondPass.members.length,
+			memberFamily: afterSecondPass.members[0]?.familyId,
+			familyId: afterSecondPass.families[0]?.id,
+			continuation: afterSecondPass.continuation
+		}).toStrictEqual({
+			families: 1,
+			members: 1,
+			memberFamily: afterSecondPass.families[0]?.id,
+			familyId: afterSecondPass.families[0]?.id,
+			continuation: [{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }]
+		});
+
+		await runInDurableObject(currentServer(), (instance) => instance.alarm());
+
+		const drained = await runInDurableObject(
+			currentServer(),
+			async (_instance, state) => {
+				const database = drizzle(state.storage, {
+					schema: { refreshTokenFamilies, refreshTokenMembers }
+				});
+
+				return {
+					families: database.select().from(refreshTokenFamilies).all(),
+					members: database.select().from(refreshTokenMembers).all(),
+					continuation: await state.storage.get(gcContinuationKey)
+				};
+			}
+		);
+
+		expect(drained).toStrictEqual({
+			families: [],
+			members: [],
+			continuation: undefined
 		});
 	});
 });
@@ -1251,6 +2209,77 @@ describe('attenuation', () => {
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			granted: subset
+		});
+	});
+
+	it('keeps the original grant ceiling across refresh rotations', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const subset = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		];
+		const exchanged = await exchange(subjectToken, subset);
+
+		const firstResponse = await refresh(exchanged.refresh_token ?? '');
+		const first = tokenResponseSchema.parse(await firstResponse.json());
+		const widenedResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: first.refresh_token ?? '',
+			authorization_details: JSON.stringify([{ type: 'cupboard_wildcard' }])
+		});
+		const widened = oauthErrorShape(await widenedResponse.json());
+
+		expect({
+			exchanged: exchanged.authorization_details,
+			firstStatus: firstResponse.status,
+			firstGrants: first.authorization_details,
+			widenedStatus: widenedResponse.status,
+			widenedError: widened.error,
+			widenedProblem: widened.problem
+		}).toStrictEqual({
+			exchanged: subset,
+			firstStatus: StatusCodes.OK,
+			firstGrants: subset,
+			widenedStatus: StatusCodes.BAD_REQUEST,
+			widenedError: 'invalid_authorization_details',
+			widenedProblem: 'not-permitted'
+		});
+	});
+
+	it('persists a narrower grant ceiling across refresh rotations', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const initial = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate', 'upload:commit'],
+				cache: 'pr-1'
+			}
+		];
+		const narrower = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		];
+		const exchanged = await exchange(subjectToken, initial);
+
+		const narrowedResponse = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? '',
+			authorization_details: JSON.stringify(narrower)
+		});
+		const narrowed = tokenResponseSchema.parse(await narrowedResponse.json());
+		const preservedResponse = await refresh(narrowed.refresh_token ?? '');
+		const preserved = tokenResponseSchema.parse(await preservedResponse.json());
+
+		expect({
+			exchanged: exchanged.authorization_details,
+			narrowedStatus: narrowedResponse.status,
+			narrowed: narrowed.authorization_details,
+			preservedStatus: preservedResponse.status,
+			preserved: preserved.authorization_details
+		}).toStrictEqual({
+			exchanged: initial,
+			narrowedStatus: StatusCodes.OK,
+			narrowed: narrower,
+			preservedStatus: StatusCodes.OK,
+			preserved: narrower
 		});
 	});
 });

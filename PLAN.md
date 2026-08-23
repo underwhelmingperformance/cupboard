@@ -1047,11 +1047,12 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
       reuse it across invocations. `init` and the admin commands take the cached
       token through the existing `TokenProvider` contract. The tenant token
       endpoint implements the RFC 6749 `refresh_token` grant (rotating,
-      single-use, a thirty-day window renewed on use; admin sessions only), and
-      an expired or refused access token renews silently: first by rotating the
-      cupboard refresh token, then by exchanging a fresh `id_token` from the
-      deploy's stored Cloudflare grant. Only when neither silent path can mint
-      does a command prompt for `cupboard login`.
+      single-use, with an absolute thirty-day deadline; admin sessions only),
+      and an expired or refused access token renews silently: first by rotating
+      the cupboard refresh token, then by exchanging a fresh `id_token` from the
+      deploy's stored Cloudflare grant. After the refresh family reaches its
+      deadline, the command falls back to the Cloudflare grant. If that grant
+      cannot mint a new session, the command prompts for `cupboard login`.
 
 ### CI federation
 

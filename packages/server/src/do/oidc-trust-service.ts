@@ -16,7 +16,7 @@ import {
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import type { JWTPayload } from 'jose';
 
 import * as schema from '../db/schema.ts';
@@ -50,6 +50,11 @@ import {
 import { type TenantIdentityService } from './tenant-identity-service.ts';
 
 const issuerRetryDelayMs = 100;
+
+export interface OidcTrustRuleSnapshot {
+	readonly rule: OidcTrustRule;
+	readonly row: typeof schema.oidcTrust.$inferSelect;
+}
 
 export class OidcTrustService {
 	constructor(
@@ -260,15 +265,50 @@ export class OidcTrustService {
 	}
 
 	enabledOidcTrustRules(): OidcTrustRule[] {
+		return this.enabledOidcTrustRuleSnapshots().map(({ rule }) => rule);
+	}
+
+	enabledOidcTrustRuleSnapshots(): OidcTrustRuleSnapshot[] {
 		return this.context.db
 			.select()
 			.from(schema.oidcTrust)
 			.where(isNull(schema.oidcTrust.disabledAt))
 			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
 			.all()
-			.map((row) =>
-				oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env))
-			);
+			.map((row) => ({
+				rule: oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env)),
+				row
+			}));
+	}
+
+	isEnabledSnapshotCurrent(
+		snapshot: OidcTrustRuleSnapshot,
+		database: SchemaWriter = this.context.db
+	): boolean {
+		const { row } = snapshot;
+		const displayMatches =
+			row.displayJson === null
+				? isNull(schema.oidcTrust.displayJson)
+				: eq(schema.oidcTrust.displayJson, row.displayJson);
+
+		return (
+			database
+				.select({ id: schema.oidcTrust.id })
+				.from(schema.oidcTrust)
+				.where(
+					and(
+						eq(schema.oidcTrust.id, row.id),
+						eq(schema.oidcTrust.issuer, row.issuer),
+						eq(schema.oidcTrust.audience, row.audience),
+						eq(schema.oidcTrust.claimsJson, row.claimsJson),
+						eq(schema.oidcTrust.permittedGrantsJson, row.permittedGrantsJson),
+						displayMatches,
+						eq(schema.oidcTrust.createdAt, row.createdAt),
+						isNull(schema.oidcTrust.disabledAt)
+					)
+				)
+				.get() !== undefined
+		);
 	}
 
 	seedOwnerRule(database: SchemaWriter = this.context.db): void {

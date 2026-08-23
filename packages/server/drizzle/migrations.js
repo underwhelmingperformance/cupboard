@@ -38,6 +38,7 @@ import m0035 from './0035_chunky_unicorn.sql';
 import m0036 from './0036_retention_policy_identity.sql';
 import m0037 from './0037_wakeful_longshot.sql';
 import m0038 from './0038_pending_staging_indexes.sql';
+import m0039 from './0039_refresh_token_families.sql';
 
 export default {
 	journal,
@@ -80,6 +81,7 @@ export default {
 		m0035,
 		m0036,
 		m0037,
-		m0038
+		m0038,
+		m0039
 	}
 };

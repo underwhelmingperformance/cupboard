@@ -213,13 +213,11 @@ export const authKeys = sqliteTable(
 	]
 );
 
-// A live refresh grant: the wire token is `<id>.<secret>` and only the secret's
-// SHA-256 is held here, so a copy of this table issues nothing. Presenting the
-// token rotates the row (the spent row is deleted, a successor inserted), which
-// makes each refresh token single-use: a replayed one finds no row and fails as
-// `invalid_grant`. The rule id re-reads the rule's grants at refresh time, so
-// retiring or disabling a trust rule ends its sessions.
-export const refreshTokens = sqliteTable(
+// Keep the retired table empty for one expand-contract window. A preceding
+// Worker can then finish or be restored after this migration applies: its token
+// lookup returns no row and its expiry cleanup remains valid. Current runtime
+// services do not read or write this table.
+export const legacyRefreshTokens = sqliteTable(
 	'refresh_token',
 	{
 		id: text('id').primaryKey(),
@@ -229,9 +227,54 @@ export const refreshTokens = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
-	// The GC pass deletes expired refresh tokens by `expires_at`; the index spares
-	// it a scan of every live grant.
 	(table) => [index('refresh_token_expires_at_idx').on(table.expiresAt)]
+);
+
+// A refresh-token family has one active member and an absolute expiry. Rotation
+// advances the active member. Spent members remain so replay can revoke the
+// family. The stored grants start with the authority granted by the external
+// exchange and narrow when a refresh requests less authority. Every later
+// rotation is bounded by the stored grants.
+export const refreshTokenFamilies = sqliteTable(
+	'refresh_token_family',
+	{
+		id: text('id').primaryKey(),
+		activeMemberId: text('active_member_id').notNull(),
+		generation: integer('generation').notNull(),
+		ruleId: text('rule_id').$type<TrustRuleId>().notNull(),
+		subject: text('subject').$type<OidcSubject>().notNull(),
+		grantsJson: text('grants_json'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_token_family_active_member_unique').on(
+			table.activeMemberId
+		),
+		index('refresh_token_family_rule_idx').on(table.ruleId, table.id),
+		index('refresh_token_family_expires_at_idx').on(table.expiresAt, table.id)
+	]
+);
+
+// Every member remains until its family expires or is revoked. Only the hash of
+// the bearer secret is stored. A spent member can therefore identify its family
+// and prove possession without recovering any successor token.
+export const refreshTokenMembers = sqliteTable(
+	'refresh_token_member',
+	{
+		id: text('id').primaryKey(),
+		familyId: text('family_id').notNull(),
+		generation: integer('generation').notNull(),
+		secretHash: text('secret_hash').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('refresh_token_member_family_generation_unique').on(
+			table.familyId,
+			table.generation
+		),
+		index('refresh_token_member_family_idx').on(table.familyId)
+	]
 );
 
 // `configure` persists the identity assigned by the control plane. The Durable
