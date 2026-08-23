@@ -2097,6 +2097,36 @@ async function ownerToken(): Promise<string> {
 describe('attenuation', () => {
 	beforeEach(resetTestServer);
 
+	it('does not extend the presented token lifetime', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const issuedAt = new Date('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(issuedAt);
+			const owner = await ownerToken();
+			const parent = decodeJwt(owner);
+
+			vi.setSystemTime(new Date(issuedAt.getTime() + 9 * 60 * 1000));
+			const response = await attenuate(owner, adminGrants());
+			const body = tokenResponseSchema.parse(await response.json());
+			const child = decodeJwt(body.access_token);
+
+			expect({
+				status: response.status,
+				expiresIn: body.expires_in,
+				parentExpiresAt: parent.exp,
+				childExpiresAt: child.exp
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				expiresIn: 60,
+				parentExpiresAt: parent.exp,
+				childExpiresAt: parent.exp
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('narrows a self-issued token to a requested subset, with no refresh', async () => {
 		const owner = await ownerToken();
 		const subset = [

@@ -40,6 +40,7 @@ import {
 } from '../auth/auth.ts';
 import {
 	attenuatedGrants,
+	issueAttenuatedAccessToken,
 	parseRequestedGrants,
 	resolveRequestedGrants
 } from '../authz/issuance.ts';
@@ -257,28 +258,20 @@ export class TokenExchangeService {
 		presented: AccessClaims,
 		requested: AuthorizationDetails | undefined
 	): Promise<Response> {
-		const granted = attenuatedGrants(presented.grants, requested);
 		const key = await this.authKeys.activeAuthKey();
-		const accessToken = await issueAccessJwt(
-			key.privateJwk,
+		const response = await issueAttenuatedAccessToken(
 			{
+				privateJwk: key.privateJwk,
+				kid: key.kid,
 				issuer: this.authKeys.authIssuer(),
 				audience: this.authKeys.authAudience(),
-				subject: presented.subject,
-				grants: granted,
-				kid: key.kid,
-				ttlSeconds: writeJwtTtlSeconds
+				presented,
+				requested
 			},
 			new Date()
 		);
 
-		return oauthJsonResponse({
-			access_token: accessToken,
-			token_type: 'Bearer',
-			expires_in: writeJwtTtlSeconds,
-			issued_token_type: issuedAccessTokenType,
-			authorization_details: granted
-		} satisfies TokenResponse);
+		return oauthJsonResponse(response);
 	}
 
 	private async refresh(

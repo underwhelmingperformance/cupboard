@@ -1,3 +1,4 @@
+import { type AuthKeyId, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
 	type AuthorizationDetails,
@@ -5,14 +6,26 @@ import {
 	isAuthorizationDetailCovered
 } from '@cupboard/protocol/grants';
 import {
+	issuedAccessTokenType,
+	type OidcAudience,
+	type OidcIssuer,
+	type TokenResponse
+} from '@cupboard/protocol/oidc';
+import {
 	isRuleInteractive,
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
 
 import {
+	type AccessClaims,
+	issueAccessJwt,
+	writeJwtTtlSeconds
+} from '../auth/auth.ts';
+import {
 	AuthorizationDetailsRequiredError,
-	InvalidAuthorizationDetailsError
+	InvalidAuthorizationDetailsError,
+	SubjectTokenVerificationFailedError
 } from '../errors.ts';
 
 /**
@@ -103,4 +116,57 @@ export function attenuatedGrants(
 	}
 
 	return requested;
+}
+
+interface AttenuatedAccessTokenOptions {
+	readonly privateJwk: JsonWebKey;
+	readonly kid: AuthKeyId;
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
+	readonly presented: AccessClaims;
+	readonly requested: AuthorizationDetails | undefined;
+}
+
+/**
+ * Issues a self-attenuated access token without extending the lifetime of the
+ * presented token. The issuer refuses a token whose remaining lifetime is not
+ * positive, including one accepted only because of verification tolerance.
+ */
+export async function issueAttenuatedAccessToken(
+	options: AttenuatedAccessTokenOptions,
+	now: Date
+): Promise<TokenResponse> {
+	const granted = attenuatedGrants(options.presented.grants, options.requested);
+	const issuedAtSeconds = Math.floor(now.getTime() / 1000);
+	const presentedExpirySeconds = Math.floor(
+		options.presented.expiresAt.getTime() / 1000
+	);
+	const ttlResult = ttlSecondsSchema.safeParse(
+		Math.min(writeJwtTtlSeconds, presentedExpirySeconds - issuedAtSeconds)
+	);
+
+	if (!ttlResult.success) {
+		throw new SubjectTokenVerificationFailedError();
+	}
+
+	const accessToken = await issueAccessJwt(
+		options.privateJwk,
+		{
+			issuer: options.issuer,
+			audience: options.audience,
+			subject: options.presented.subject,
+			grants: granted,
+			kid: options.kid,
+			ttlSeconds: ttlResult.data
+		},
+		now
+	);
+
+	return {
+		access_token: accessToken,
+		token_type: 'Bearer',
+		expires_in: ttlResult.data,
+		issued_token_type: issuedAccessTokenType,
+		authorization_details: granted
+	};
 }

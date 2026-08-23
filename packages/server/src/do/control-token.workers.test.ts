@@ -6,7 +6,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -437,6 +437,40 @@ describe('control plane POST /token', () => {
 			granted: subset,
 			refresh: undefined
 		});
+	});
+
+	it('does not extend a self-issued control token lifetime', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const issuedAt = new Date('2026-01-01T00:00:00.000Z');
+			vi.setSystemTime(issuedAt);
+			const presented = await issueControlAdminToken('global-admin');
+			const parent = decodeJwt(presented);
+
+			vi.setSystemTime(new Date(issuedAt.getTime() + 9 * 60 * 1000));
+			const response = await postToken({
+				grant_type: tokenExchangeGrantType,
+				subject_token: presented,
+				subject_token_type: issuedAccessTokenType
+			});
+			const body = tokenResponseSchema.parse(await response.json());
+			const child = decodeJwt(body.access_token);
+
+			expect({
+				status: response.status,
+				expiresIn: body.expires_in,
+				parentExpiresAt: parent.exp,
+				childExpiresAt: child.exp
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				expiresIn: 60,
+				parentExpiresAt: parent.exp,
+				childExpiresAt: parent.exp
+			});
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('does not relabel an external access JWT as an ID token', async () => {
