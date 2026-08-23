@@ -22,6 +22,7 @@ function requestWith(headers: Record<string, string>): Request {
 const cases: readonly {
 	name: string;
 	headers: Record<string, string>;
+	responseEtag?: string;
 	expected: boolean;
 }[] = [
 	{
@@ -42,6 +43,12 @@ const cases: readonly {
 	{
 		name: 'an If-None-Match list contains the response ETag',
 		headers: { 'if-none-match': '"zzz", "abc"' },
+		expected: true
+	},
+	{
+		name: 'an opaque ETag containing a comma',
+		headers: { 'if-none-match': '"a,b"' },
+		responseEtag: '"a,b"',
 		expected: true
 	},
 	{
@@ -68,21 +75,67 @@ const cases: readonly {
 		expected: false
 	},
 	{
-		name: 'the request has no conditional headers',
-		headers: {},
+		name: 'an RFC 850 If-Modified-Since date',
+		headers: { 'if-modified-since': 'Friday, 02-Jan-26 00:00:00 GMT' },
+		expected: true
+	},
+	{
+		name: 'an asctime If-Modified-Since date',
+		headers: { 'if-modified-since': 'Fri Jan  2 00:00:00 2026' },
+		expected: true
+	},
+	{
+		name: 'a preferred date with a leap second',
+		headers: { 'if-modified-since': 'Wed, 31 Dec 2025 23:59:60 GMT' },
+		expected: true
+	},
+	{
+		name: 'an RFC 850 date with a leap second',
+		headers: { 'if-modified-since': 'Wednesday, 31-Dec-25 23:59:60 GMT' },
+		expected: true
+	},
+	{
+		name: 'an asctime date with a leap second',
+		headers: { 'if-modified-since': 'Wed Dec 31 23:59:60 2025' },
+		expected: true
+	},
+	{
+		name: 'a date with seconds above the leap-second value',
+		headers: { 'if-modified-since': 'Wed, 31 Dec 2025 23:59:61 GMT' },
 		expected: false
-	}
+	},
+	{
+		name: 'a date with a leap-second value in the minutes field',
+		headers: { 'if-modified-since': 'Wed, 31 Dec 2025 23:60:59 GMT' },
+		expected: false
+	},
+	{
+		name: 'an ISO If-Modified-Since date',
+		headers: { 'if-modified-since': '2026-01-02T00:00:00Z' },
+		expected: false
+	},
+	{
+		name: 'an impossible If-Modified-Since date',
+		headers: { 'if-modified-since': 'Tue, 31 Feb 2026 00:00:00 GMT' },
+		expected: false
+	},
+	{ name: 'no conditional headers', headers: {}, expected: false }
 ];
 
 describe('isNotModified', () => {
-	it.each(cases)('returns $expected when $name', ({ headers, expected }) => {
-		const responseHeaders = new Headers({
-			etag,
-			'last-modified': lastModified
-		});
+	it.each(cases)(
+		'returns $expected when $name',
+		({ headers, responseEtag = etag, expected }) => {
+			const responseHeaders = new Headers({
+				etag: responseEtag,
+				'last-modified': lastModified
+			});
 
-		expect(isNotModified(requestWith(headers), responseHeaders)).toBe(expected);
-	});
+			expect(isNotModified(requestWith(headers), responseHeaders)).toBe(
+				expected
+			);
+		}
+	);
 });
 
 describe('narInfoObjectKey', () => {
