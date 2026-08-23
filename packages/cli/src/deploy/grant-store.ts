@@ -7,11 +7,22 @@ import {
 	readSecretFile,
 	writeSecretFile
 } from '../auth/secret-file.ts';
+import { withSecretFileLock } from '../auth/secret-lock.ts';
 
 import type { CloudflareGrant } from './cloudflare-oauth.ts';
 
 function grantFilePath(): string {
 	return path.join(configDirectory(), 'cloudflare-grant.json');
+}
+
+/**
+ * Serialises Cloudflare grant renewal and replacement across CLI processes.
+ */
+export function withCachedGrantLock<T>(
+	action: (signal?: AbortSignal) => Promise<T>,
+	signal?: AbortSignal
+): Promise<T> {
+	return withSecretFileLock(grantFilePath(), action, signal);
 }
 
 const storedGrantSchema = z.object({
@@ -58,9 +69,12 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 }
 
 /**
-Writes the cached grant with permissions restricted to the current user.
-*/
-export async function writeCachedGrant(grant: CloudflareGrant): Promise<void> {
+ * Writes the cached grant to an owner-only `0600` file.
+ */
+export async function writeCachedGrant(
+	grant: CloudflareGrant,
+	signal?: AbortSignal
+): Promise<void> {
 	const stored: z.infer<typeof storedGrantSchema> = {
 		access_token: grant.accessToken,
 		...(grant.refreshToken !== undefined && {
@@ -71,5 +85,5 @@ export async function writeCachedGrant(grant: CloudflareGrant): Promise<void> {
 		...(grant.idToken !== undefined && { id_token: grant.idToken })
 	};
 
-	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`);
+	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`, signal);
 }

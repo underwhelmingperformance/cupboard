@@ -52,7 +52,7 @@ describe('writeSecretFile', () => {
 		const failure = new Error('secret write failed');
 
 		await expect(
-			writeSecretFile(destination, 'secret', {
+			writeSecretFile(destination, 'secret', undefined, {
 				write: async (...arguments_) => {
 					await writeFile(...arguments_);
 					throw failure;
@@ -71,7 +71,7 @@ describe('writeSecretFile', () => {
 		let error: unknown;
 
 		try {
-			await writeSecretFile(destination, 'secret', {
+			await writeSecretFile(destination, 'secret', undefined, {
 				write: async (...arguments_) => {
 					await writeFile(...arguments_);
 					throw failure;

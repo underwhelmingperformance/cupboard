@@ -1,19 +1,71 @@
-import { describe, expect, it } from 'vitest';
+import { setTimeout as delay } from 'node:timers/promises';
+
+import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
+import { describe, expect, it, vi } from 'vitest';
 
 import { DeviceAuthorizationRequestError } from '../auth/oidc-login.ts';
+import {
+	type CachedSession,
+	readCachedSession,
+	withCachedSessionLock,
+	writeCachedSession
+} from '../auth/token-store.ts';
 import {
 	type CloudflareGrant,
 	cloudflareOauthClientId,
 	deployScopes
 } from '../deploy/cloudflare-oauth.ts';
+import { testWithConfigHome } from '../test-support.ts';
 
 import {
+	cacheLoginSession,
 	cupboardIdToken,
 	DeviceGrantNotEnabledError,
 	LoginIdTokenMissingError,
 	loginScopeForClient,
 	mapDeviceLoginError
 } from './login.ts';
+
+const sessionTarget = new URL('https://cupboard.test/t/acme');
+
+function sessionToken(name: string): string {
+	const header = Buffer.from(
+		JSON.stringify({ alg: 'EdDSA', typ: 'cupboard-access+jwt' })
+	).toString('base64url');
+	const issuer = sessionTarget.href.replace(/\/$/u, '');
+	const payload = Buffer.from(
+		JSON.stringify({ iss: issuer, aud: issuer, name })
+	).toString('base64url');
+
+	return `${header}.${payload}.signature`;
+}
+
+function tokenResponse(name: string): ParsedTokenResponse {
+	return {
+		access_token: sessionToken(name),
+		token_type: 'Bearer',
+		expires_in: 600,
+		refresh_token: `refresh-${name}`
+	};
+}
+
+type Outcome<T> =
+	| { readonly kind: 'resolved'; readonly value: T }
+	| { readonly kind: 'rejected'; readonly error: unknown };
+
+async function outcomeOf<T>(promise: Promise<T>): Promise<Outcome<T>> {
+	try {
+		return { kind: 'resolved', value: await promise };
+	} catch (error) {
+		return { kind: 'rejected', error };
+	}
+}
+
+async function pendingAfter(ms: number): Promise<{ readonly kind: 'pending' }> {
+	await delay(ms);
+
+	return { kind: 'pending' };
+}
 
 describe('mapDeviceLoginError', () => {
 	it.each([[400], [401], [403]])(
@@ -142,6 +194,7 @@ function idTokenDependencies(world: IdTokenWorld): {
 					written.push(grant);
 					return Promise.resolve();
 				},
+				withGrantLock: (action, signal) => action(signal),
 				refreshGrant: () => Promise.resolve(world.renewedGrant),
 				now: () => now
 			},
@@ -209,6 +262,51 @@ describe('cupboardIdToken', () => {
 		});
 	});
 
+	it('reuses a grant written before the fallback login lock', async () => {
+		const winner = grantWith(tokenExpiringAt(now / 1000 + 3600));
+		const login = vi.fn<() => Promise<CloudflareGrant>>(() =>
+			Promise.reject(new Error('browser login was not expected'))
+		);
+		const writeGrant = vi.fn<(grant: CloudflareGrant) => Promise<void>>(() =>
+			Promise.resolve()
+		);
+		let reads = 0;
+		let locks = 0;
+
+		const token = await cupboardIdToken({
+			chain: {
+				readGrant: () => {
+					reads += 1;
+
+					return Promise.resolve(reads === 1 ? undefined : winner);
+				},
+				writeGrant,
+				withGrantLock: (action, signal) => {
+					locks += 1;
+
+					return action(signal);
+				},
+				refreshGrant: () => Promise.resolve(undefined),
+				now: () => now
+			},
+			login
+		});
+
+		expect({
+			token,
+			reads,
+			locks,
+			loginCalls: login.mock.calls.length,
+			writeCalls: writeGrant.mock.calls.length
+		}).toStrictEqual({
+			token: winner.idToken,
+			reads: 2,
+			locks: 2,
+			loginCalls: 0,
+			writeCalls: 0
+		});
+	});
+
 	it('rejects a login response without an id_token', async () => {
 		const { deps, calls } = idTokenDependencies({ loginGrant: grantWith() });
 		const outcome = await (async () => {
@@ -257,4 +355,92 @@ describe('cupboardIdToken', () => {
 			]
 		});
 	});
+});
+
+describe('login session cache', () => {
+	testWithConfigHome(
+		'serialises explicit login after an in-flight session renewal',
+		async () => {
+			const renewalEntered = Promise.withResolvers<undefined>();
+			const releaseRenewal = Promise.withResolvers<undefined>();
+			const renewed: CachedSession = {
+				accessToken: sessionToken('renewal'),
+				refreshToken: 'refresh-renewal'
+			};
+			const renewal = withCachedSessionLock(sessionTarget, async (signal) => {
+				renewalEntered.resolve(undefined);
+				await releaseRenewal.promise;
+				await writeCachedSession(renewed, sessionTarget, signal);
+			});
+
+			await renewalEntered.promise;
+			const login = cacheLoginSession(
+				tokenResponse('explicit-login'),
+				sessionTarget
+			);
+			const beforeRenewalFinishes = await Promise.race([
+				outcomeOf(login),
+				pendingAfter(50)
+			]);
+
+			releaseRenewal.resolve(undefined);
+			await Promise.all([renewal, login]);
+
+			expect({
+				beforeRenewalFinishes,
+				session: await readCachedSession(sessionTarget)
+			}).toStrictEqual({
+				beforeRenewalFinishes: { kind: 'pending' },
+				session: {
+					accessToken: sessionToken('explicit-login'),
+					refreshToken: 'refresh-explicit-login'
+				}
+			});
+		}
+	);
+
+	testWithConfigHome(
+		'refuses the final session rename when login is cancelled after exchange',
+		async () => {
+			const previous: CachedSession = {
+				accessToken: sessionToken('previous'),
+				refreshToken: 'refresh-previous'
+			};
+			const writeStarted = Promise.withResolvers<AbortSignal | undefined>();
+			const continueWrite = Promise.withResolvers<undefined>();
+			const controller = new AbortController();
+			const reason = new Error('stop after token exchange');
+
+			await writeCachedSession(previous, sessionTarget);
+			const login = cacheLoginSession(
+				tokenResponse('cancelled-login'),
+				sessionTarget,
+				controller.signal,
+				{
+					withSessionLock: withCachedSessionLock,
+					writeSession: async (session, target, signal) => {
+						writeStarted.resolve(signal);
+						await continueWrite.promise;
+						await writeCachedSession(session, target, signal);
+					}
+				}
+			);
+
+			const writeSignal = await writeStarted.promise;
+			controller.abort(reason);
+			continueWrite.resolve(undefined);
+
+			await expect(login).rejects.toBe(reason);
+			const writeSignalReason: unknown = writeSignal?.reason;
+			expect({
+				writeSignalAborted: writeSignal?.aborted,
+				writeSignalReason,
+				session: await readCachedSession(sessionTarget)
+			}).toStrictEqual({
+				writeSignalAborted: true,
+				writeSignalReason: reason,
+				session: previous
+			});
+		}
+	);
 });

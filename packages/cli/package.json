@@ -28,6 +28,7 @@
 		"json5": "^2.2.3",
 		"make-fetch-happen": "^16.0.0",
 		"picocolors": "^1.1.1",
+		"proper-lockfile": "^4.1.2",
 		"tldts": "^7.4.10",
 		"ws": "^8.21.3",
 		"zod": "^4.4.3"
@@ -35,6 +36,7 @@
 	"devDependencies": {
 		"@types/make-fetch-happen": "^10.0.4",
 		"@types/node": "^25.9.1",
+		"@types/proper-lockfile": "^4.1.4",
 		"@types/ws": "^8.18.1",
 		"esbuild": "^0.28.1",
 		"miniflare": "^4.20260603.0",

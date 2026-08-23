@@ -12,6 +12,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import { throwIfAborted } from '../abort.ts';
+
 /**
  * The CLI's configuration directory: under `$XDG_CONFIG_HOME` when set,
  * otherwise `~/.config`, always within a `cupboard` subdirectory.
@@ -72,14 +74,13 @@ interface SecretFileOperations {
 export async function writeSecretFile(
 	file: string,
 	contents: string,
+	signal?: AbortSignal,
 	operations: SecretFileOperations = {}
 ): Promise<void> {
+	throwIfAborted(signal);
 	const directory = path.dirname(file);
 
-	await verifyNoSymlinkComponents(directory);
-	await mkdir(directory, { recursive: true, mode: 0o700 });
-	await verifySecretDirectory(directory);
-	await chmod(directory, 0o700);
+	await ensureSecretDirectory(directory);
 
 	const temporary = path.join(
 		directory,
@@ -92,6 +93,7 @@ export async function writeSecretFile(
 	try {
 		await write(temporary, contents, { mode: 0o600, flag: 'wx' });
 		await verifySecretDirectory(directory);
+		throwIfAborted(signal);
 		await move(temporary, file);
 	} catch (error) {
 		try {
@@ -123,6 +125,20 @@ class SecretFileCleanupError extends Error {
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * Creates the final directory for credential files with mode `0700`, or
+ * reasserts that mode when the directory already exists. The final directory
+ * must be owned by the current user. A path component may be a symlink only
+ * when root owns the symlink.
+ */
+export async function ensureSecretDirectory(directory: string): Promise<void> {
+	await verifyNoSymlinkComponents(directory);
+	await mkdir(directory, { recursive: true, mode: 0o700 });
+	await verifySecretDirectory(directory);
+	await chmod(directory, 0o700);
+}
+
 async function verifySecretDirectory(directory: string): Promise<void> {
 	await verifyNoSymlinkComponents(directory);
 

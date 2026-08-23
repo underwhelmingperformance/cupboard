@@ -1,6 +1,9 @@
 import { openBrowser } from '@cupboard/cli-ui';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
+import {
+	type ParsedTokenResponse,
+	subjectTokenTypeIdToken
+} from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
 import {
@@ -12,22 +15,30 @@ import {
 import {
 	sessionFromTokenResponse,
 	tokensDirectory,
+	withCachedSessionLock,
 	writeCachedSession
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
+import {
+	type CredentialChain,
+	freshIdToken,
+	freshIdTokenFromGrant
+} from '../deploy/auth.ts';
 import {
 	type CloudflareGrant,
 	cloudflareLogin,
 	cloudflareLoopback,
 	cloudflareOauthClientId,
 	deployScopes,
-	jwtExpiryMs,
 	refreshCloudflareGrant
 } from '../deploy/cloudflare-oauth.ts';
-import { readCachedGrant, writeCachedGrant } from '../deploy/grant-store.ts';
+import {
+	readCachedGrant,
+	withCachedGrantLock,
+	writeCachedGrant
+} from '../deploy/grant-store.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 
@@ -111,31 +122,69 @@ export class LoginIdTokenMissingError extends CliError {
 export async function cupboardIdToken(dependencies: {
 	readonly chain: Pick<
 		CredentialChain,
-		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
+		| 'signal'
+		| 'readGrant'
+		| 'writeGrant'
+		| 'withGrantLock'
+		| 'refreshGrant'
+		| 'now'
 	>;
-	readonly login: () => Promise<CloudflareGrant>;
+	readonly login: (signal?: AbortSignal) => Promise<CloudflareGrant>;
 }): Promise<string> {
 	const cached = await freshIdToken(dependencies.chain);
-	const expiry = cached === undefined ? undefined : jwtExpiryMs(cached);
 
-	// `freshIdToken` can return a stale ID token when refresh fails because the
-	// deployment path can still use its claims. Login must not present a token
-	// known to be expired, so it starts the browser flow instead.
-	if (
-		cached !== undefined &&
-		(expiry === undefined || expiry > dependencies.chain.now())
-	) {
+	if (cached !== undefined) {
 		return cached;
 	}
 
-	const grant = await dependencies.login();
-	await dependencies.chain.writeGrant(grant);
+	return dependencies.chain.withGrantLock(async (signal) => {
+		const successor = await dependencies.chain.readGrant();
+		const successorToken =
+			successor === undefined
+				? undefined
+				: freshIdTokenFromGrant(successor, dependencies.chain.now());
 
-	if (grant.idToken === undefined) {
-		throw new LoginIdTokenMissingError();
-	}
+		if (successorToken !== undefined) {
+			return successorToken;
+		}
 
-	return grant.idToken;
+		const grant = await dependencies.login(signal);
+		await dependencies.chain.writeGrant(grant, signal);
+
+		if (grant.idToken === undefined) {
+			throw new LoginIdTokenMissingError();
+		}
+
+		return grant.idToken;
+	}, dependencies.chain.signal);
+}
+
+interface LoginSessionDependencies {
+	readonly writeSession: typeof writeCachedSession;
+	readonly withSessionLock: typeof withCachedSessionLock;
+}
+
+const defaultLoginSessionDependencies: LoginSessionDependencies = {
+	writeSession: writeCachedSession,
+	withSessionLock: withCachedSessionLock
+};
+
+export async function cacheLoginSession(
+	response: ParsedTokenResponse,
+	target: URL,
+	signal?: AbortSignal,
+	dependencies: LoginSessionDependencies = defaultLoginSessionDependencies
+): Promise<void> {
+	await dependencies.withSessionLock(
+		target,
+		(lockSignal) =>
+			dependencies.writeSession(
+				sessionFromTokenResponse(response),
+				target,
+				lockSignal ?? signal
+			),
+		signal
+	);
 }
 
 export function registerLoginCommand(
@@ -194,13 +243,16 @@ export function registerLoginCommand(
 						chain: {
 							readGrant: readCachedGrant,
 							writeGrant: writeCachedGrant,
-							refreshGrant: (previous) => refreshCloudflareGrant(previous),
+							withGrantLock: withCachedGrantLock,
+							refreshGrant: (previous, signal) =>
+								refreshCloudflareGrant(previous, fetch, Date.now, signal),
+							signal: programOptions.signal,
 							now: Date.now
 						},
-						login: () =>
+						login: (signal) =>
 							cloudflareLogin({
 								openBrowser: browserPrompt,
-								signal: programOptions.signal
+								signal
 							})
 					});
 				}
@@ -241,7 +293,7 @@ export function registerLoginCommand(
 				idToken,
 				subjectTokenTypeIdToken
 			);
-			await writeCachedSession(sessionFromTokenResponse(exchanged), url);
+			await cacheLoginSession(exchanged, url, programOptions.signal);
 
 			const target = canonicalHref(url);
 

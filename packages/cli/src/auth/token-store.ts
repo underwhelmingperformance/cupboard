@@ -11,6 +11,7 @@ import {
 	readSecretFile,
 	writeSecretFile
 } from './secret-file.ts';
+import { withSecretFileLock } from './secret-lock.ts';
 
 /**
  * Where cached sessions live, within the CLI's configuration directory.
@@ -45,6 +46,21 @@ function tokenFilePath(normalisedTarget: string): string {
 	return path.join(tokensDirectory(), key);
 }
 
+/**
+ * Serialises the session read, refresh-token rotation, and replacement for one
+ * target across CLI processes. The lock directory is kept alive while the
+ * operation runs, so a slow token endpoint does not make a live lock stale.
+ */
+export async function withCachedSessionLock<T>(
+	target: URL,
+	action: (signal?: AbortSignal) => Promise<T>,
+	signal?: AbortSignal
+): Promise<T> {
+	const file = tokenFilePath(canonicalHref(target));
+
+	return withSecretFileLock(file, action, signal);
+}
+
 export async function readCachedSession(
 	target: URL
 ): Promise<CachedSession | undefined> {
@@ -71,20 +87,19 @@ export async function readCachedSession(
 }
 
 /**
- * Persists the session for a target, readable only by the current user. It is
- * written to a fresh `0600` temporary file (exclusive create, so a pre-planted
- * symlink is not followed) and renamed over the target atomically; the directory
- * is created and its mode reasserted to `0700`. The file is therefore never
- * readable by anyone else, not even for the moment between its creation and
- * its mode being set.
+ * Persists the session for a target in the CLI's owner-only configuration
+ * directory. The file is replaced atomically so readers see the previous
+ * session or the complete replacement.
  */
 export async function writeCachedSession(
 	session: CachedSession,
-	target: URL
+	target: URL,
+	signal?: AbortSignal
 ): Promise<void> {
 	await writeSecretFile(
 		tokenFilePath(canonicalHref(target)),
-		`${JSON.stringify(session)}\n`
+		`${JSON.stringify(session)}\n`,
+		signal
 	);
 }
 

@@ -61,6 +61,7 @@ function chainWith(world: ChainWorld): {
 			written.push(grant);
 			return Promise.resolve();
 		},
+		withGrantLock: (action, signal) => action(signal),
 		refreshGrant: (previous) => {
 			refreshedWith.push(previous);
 			return Promise.resolve(world.renewedGrant);

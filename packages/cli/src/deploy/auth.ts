@@ -7,6 +7,7 @@ import type {
 import { fetchWithBoundedResponseBodies } from '@cupboard/shared/response-body';
 import Cloudflare from 'cloudflare';
 
+import { throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
 import type { AccountSummary, CloudflareApi } from './cloudflare-api.ts';
@@ -17,7 +18,11 @@ import {
 	jwtExpiryMs,
 	refreshCloudflareGrant
 } from './cloudflare-oauth.ts';
-import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
+import {
+	readCachedGrant,
+	withCachedGrantLock,
+	writeCachedGrant
+} from './grant-store.ts';
 import {
 	type CloudflareAccountId,
 	cloudflareAccountIdSchema
@@ -54,15 +59,23 @@ export interface CredentialChain {
 	readonly signal?: AbortSignal;
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
-	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
+	readonly writeGrant: (
+		grant: CloudflareGrant,
+		signal?: AbortSignal
+	) => Promise<void>;
+	readonly withGrantLock: <T>(
+		action: (signal?: AbortSignal) => Promise<T>,
+		signal?: AbortSignal
+	) => Promise<T>;
 	readonly refreshGrant: (
-		previous: CloudflareGrant
+		previous: CloudflareGrant,
+		signal?: AbortSignal
 	) => Promise<CloudflareGrant | undefined>;
 	/**
 	Omitted when the chain must not use Wrangler's stored token.
 	*/
 	readonly readWranglerToken?: () => Promise<string | undefined>;
-	readonly login: () => Promise<CloudflareGrant>;
+	readonly login: (signal?: AbortSignal) => Promise<CloudflareGrant>;
 	/**
 	 * Whether an incomplete cached grant may be replaced by a fresh browser
 	 * login. A grant issued before the `openid` scope was requested has no
@@ -90,13 +103,14 @@ export function defaultCredentialChain(
 		env: process.env,
 		readGrant: readCachedGrant,
 		writeGrant: writeCachedGrant,
-		refreshGrant: (previous) =>
-			refreshCloudflareGrant(previous, fetch, Date.now, options.signal),
+		withGrantLock: withCachedGrantLock,
+		refreshGrant: (previous, signal = options.signal) =>
+			refreshCloudflareGrant(previous, fetch, Date.now, signal),
 		...(options.wrangler && { readWranglerToken }),
-		login: () =>
+		login: (signal = options.signal) =>
 			cloudflareLogin({
 				openBrowser: options.openBrowser,
-				signal: options.signal
+				signal
 			}),
 		upgradeLogin: options.interactive,
 		now: Date.now
@@ -173,7 +187,20 @@ export async function resolveCredential(
 		};
 	}
 
+	return chain.withGrantLock(
+		(signal) => resolveStoredCredential(chain, signal),
+		chain.signal
+	);
+}
+
+async function resolveStoredCredential(
+	chain: CredentialChain,
+	signal?: AbortSignal
+): Promise<CloudflareCredential> {
+	throwIfAborted(signal);
+
 	const cached = await chain.readGrant();
+	throwIfAborted(signal);
 
 	if (cached !== undefined && isUsable(cached, chain.now())) {
 		if (cached.subject !== undefined && cached.idToken !== undefined) {
@@ -187,13 +214,13 @@ export async function resolveCredential(
 
 		// A grant with a subject but no stored id_token was issued with the
 		// openid scope, so a refresh reissues the id_token without a browser.
-		// Persist the renewal even when it has no ID token because the refresh token may have
-		// rotated on use.
+		// Persist the renewal even when it has no ID token. The refresh token can
+		// rotate on use.
 		if (cached.subject !== undefined) {
-			const renewed = await chain.refreshGrant(cached);
+			const renewed = await chain.refreshGrant(cached, signal);
 
 			if (renewed !== undefined) {
-				await chain.writeGrant(renewed);
+				await chain.writeGrant(renewed, signal);
 			}
 
 			const best = renewed ?? cached;
@@ -222,8 +249,8 @@ export async function resolveCredential(
 		// A grant from before the openid scope cannot learn its identity from a
 		// refresh, and a refresh that did not issue an ID token leaves the identity
 		// unproven; only a fresh login can supply it.
-		const upgraded = await chain.login();
-		await chain.writeGrant(upgraded);
+		const upgraded = await chain.login(signal);
+		await chain.writeGrant(upgraded, signal);
 
 		return {
 			token: upgraded.accessToken,
@@ -234,10 +261,10 @@ export async function resolveCredential(
 	}
 
 	if (cached?.refreshToken !== undefined) {
-		const renewed = await chain.refreshGrant(cached);
+		const renewed = await chain.refreshGrant(cached, signal);
 
 		if (renewed !== undefined) {
-			await chain.writeGrant(renewed);
+			await chain.writeGrant(renewed, signal);
 
 			return {
 				token: renewed.accessToken,
@@ -259,8 +286,8 @@ export async function resolveCredential(
 		};
 	}
 
-	const grant = await chain.login();
-	await chain.writeGrant(grant);
+	const grant = await chain.login(signal);
+	await chain.writeGrant(grant, signal);
 
 	return {
 		token: grant.accessToken,
@@ -317,33 +344,62 @@ export function createCloudflareClient(
 export async function freshIdToken(
 	chain: Pick<
 		CredentialChain,
-		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
-	>
+		| 'signal'
+		| 'readGrant'
+		| 'writeGrant'
+		| 'withGrantLock'
+		| 'refreshGrant'
+		| 'now'
+	>,
+	signal?: AbortSignal
 ): Promise<string | undefined> {
+	const callerSignal = signal ?? chain.signal;
+
+	return chain.withGrantLock(
+		(lockSignal) => freshIdTokenUnderLock(chain, lockSignal),
+		callerSignal
+	);
+}
+
+async function freshIdTokenUnderLock(
+	chain: Pick<
+		CredentialChain,
+		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
+	>,
+	signal?: AbortSignal
+): Promise<string | undefined> {
+	throwIfAborted(signal);
 	const cached = await chain.readGrant();
+	throwIfAborted(signal);
 
 	if (cached === undefined) {
 		return undefined;
 	}
 
-	const cachedToken = freshTokenFromGrant(cached, chain.now());
+	const cachedToken = freshIdTokenFromGrant(cached, chain.now());
 
 	if (cachedToken !== undefined) {
 		return cachedToken;
 	}
 
-	const renewed = await chain.refreshGrant(cached);
+	const renewed = await chain.refreshGrant(cached, signal);
+	throwIfAborted(signal);
 
 	if (renewed === undefined) {
 		return undefined;
 	}
 
-	await chain.writeGrant(renewed);
+	await chain.writeGrant(renewed, signal);
+	throwIfAborted(signal);
 
-	return freshTokenFromGrant(renewed, chain.now());
+	return freshIdTokenFromGrant(renewed, chain.now());
 }
 
-function freshTokenFromGrant(
+/**
+ * Returns a grant's ID token when it remains valid beyond the presentation
+ * margin.
+ */
+export function freshIdTokenFromGrant(
 	grant: CloudflareGrant,
 	now: number
 ): string | undefined {
