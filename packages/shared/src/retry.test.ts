@@ -425,6 +425,47 @@ describe('retryingFetcher', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('stops retrying when the input Request aborts during the wait', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const controller = new AbortController();
+			const request = new Request('https://x.test', {
+				signal: controller.signal
+			});
+			const { fetcher, attempts } = scriptedFetcher([
+				status(StatusCodes.SERVICE_UNAVAILABLE),
+				ok
+			]);
+
+			const pending = rejectedBy(() => retryingFetcher(fetcher)(request));
+			controller.abort(new TestAbortError());
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect(await pending).toBeInstanceOf(TestAbortError);
+			expect(attempts()).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('uses an init signal instead of the input Request signal', async () => {
+		const input = new AbortController();
+		const init = new AbortController();
+		input.abort(new TestAbortError());
+		const { fetcher, attempts } = scriptedFetcher([ok]);
+
+		const response = await retryingFetcher(fetcher)(
+			new Request('https://x.test', { signal: input.signal }),
+			{ signal: init.signal }
+		);
+
+		expect({ status: response.status, attempts: attempts() }).toStrictEqual({
+			status: StatusCodes.OK,
+			attempts: 1
+		});
+	});
 });
 
 class HostDownError extends Error {
