@@ -1,5 +1,7 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { type AuthzMeta } from '@cupboard/protocol/contract';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { readResponseText } from '@cupboard/shared/response-body';
 import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
 import {
 	createORPCClient,
@@ -19,7 +21,11 @@ import { StatusCodes } from 'http-status-codes';
 import { throwIfAborted } from '../abort.ts';
 import { CupboardHttpError } from '../errors.ts';
 
-import { type AccessCredential, bearerAttempt } from './credentials.ts';
+import {
+	type AccessCredential,
+	type BearerAttempt,
+	bearerAttempt
+} from './credentials.ts';
 import { reachableFetcher } from './transport.ts';
 
 export type TenantRpc = JsonifiedClient<
@@ -33,6 +39,7 @@ export interface TenantRpcOptions {
 }
 
 const unauthorizedStatusCode = 401;
+const maximumServerErrorBytes = 64 * 1024;
 
 export type ControlRpc = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
@@ -84,6 +91,7 @@ function derivedClient<C extends AnyContractRouter>(
 		fetch: async (request, init, _options, path) => {
 			const requestHeaders = Object.fromEntries(request.headers.entries());
 			let attempt = await bearerAttempt(credential, requestHeaders);
+			let canRefresh = typeof credential === 'object';
 			let current = new Request(request, { headers: attempt.headers });
 			const replaySafety = replaySafetyFor(contract, path);
 			const transport = reachableFetcher(
@@ -95,10 +103,14 @@ function derivedClient<C extends AnyContractRouter>(
 				const response = await transport(current.clone(), { ...init, signal });
 
 				if (
+					canRefresh &&
 					replaySafety === 'replay-safe' &&
 					response.status === unauthorizedStatusCode
 				) {
-					const refreshed = await attempt.refreshAfterAuthenticationFailure();
+					canRefresh = false;
+					await discardResponseBody(response);
+					const refreshed: BearerAttempt | undefined =
+						await attempt.refreshAfterAuthenticationFailure();
 
 					if (refreshed !== undefined) {
 						attempt = refreshed;
@@ -170,15 +182,22 @@ async function settleServerError(
 		request.method,
 		new URL(request.url).pathname,
 		response.status,
-		await serverErrorDetail(response),
+		await serverErrorDetail(response, request.signal),
 		response.headers.get('cf-ray') ?? undefined
 	);
 }
 
 // Use the decoded message when the body is an oRPC error envelope. Otherwise
 // preserve the trimmed response text without attributing its source.
-async function serverErrorDetail(response: Response): Promise<string> {
-	const body = await response.text();
+async function serverErrorDetail(
+	response: Response,
+	signal: AbortSignal
+): Promise<string> {
+	const body = await readResponseText(response, {
+		description: 'Cupboard server error response',
+		maximumBytes: maximumServerErrorBytes,
+		signal
+	});
 
 	try {
 		const json: unknown = JSON.parse(body);

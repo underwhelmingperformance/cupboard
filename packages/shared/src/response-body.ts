@@ -24,14 +24,26 @@ export interface BoundedResponseBodyOptions {
 	readonly signal?: AbortSignal;
 }
 
+export interface BoundedFetchResponseOptions {
+	readonly description: string;
+	readonly errorMaximumBytes: number;
+	readonly successMaximumBytes: number;
+	readonly signal?: AbortSignal;
+}
+
+export type RemoteBodySizeSource = 'declared' | 'received';
+
 export class RemoteBodyTooLargeError extends Error {
 	constructor(
 		public readonly description: string,
 		public readonly maximumBytes: number,
-		public readonly observedBytes: number
+		public readonly observedBytes: number,
+		public readonly sizeSource: RemoteBodySizeSource = 'received'
 	) {
 		super(
-			`${description} exceeded the ${String(maximumBytes)}-byte limit after ${String(observedBytes)} bytes`
+			sizeSource === 'declared'
+				? `${description} declared ${String(observedBytes)} bytes, above the ${String(maximumBytes)}-byte limit`
+				: `${description} exceeded the ${String(maximumBytes)}-byte limit after receiving ${String(observedBytes)} bytes`
 		);
 		this.name = 'RemoteBodyTooLargeError';
 	}
@@ -152,7 +164,8 @@ export async function readResponseBytes(
 		throw new RemoteBodyTooLargeError(
 			options.description,
 			options.maximumBytes,
-			declaredBytes
+			declaredBytes,
+			'declared'
 		);
 	}
 
@@ -210,4 +223,79 @@ export async function readResponseJson(
 	options: BoundedResponseBodyOptions
 ): Promise<unknown> {
 	return JSON.parse(await readResponseText(response, options));
+}
+/**
+ * Reads a response within a byte limit and returns a response backed by those
+ * bytes. Use this for clients that catch errors from `text()` or `json()`.
+ */
+export async function responseWithBufferedBoundedBody(
+	response: Response,
+	options: BoundedResponseBodyOptions
+): Promise<Response> {
+	const bytes = await readResponseBytes(response, options);
+	const headers = new Headers(response.headers);
+	headers.set('content-length', String(bytes.byteLength));
+	const body =
+		bytes.byteLength === 0 ? undefined : Uint8Array.from(bytes).buffer;
+	const bounded = new Response(body, {
+		headers,
+		status: response.status,
+		statusText: response.statusText
+	});
+
+	Object.defineProperties(bounded, {
+		redirected: { value: response.redirected },
+		type: { value: response.type },
+		url: { value: response.url }
+	});
+
+	return bounded;
+}
+
+function signalFrom(
+	input: Parameters<typeof fetch>[0],
+	init: Parameters<typeof fetch>[1]
+): AbortSignal | undefined {
+	return init?.signal ?? (input instanceof Request ? input.signal : undefined);
+}
+
+function combinedSignal(
+	caller: AbortSignal | undefined,
+	request: AbortSignal | undefined
+): AbortSignal | undefined {
+	if (caller === undefined) {
+		return request;
+	}
+
+	if (request === undefined || request === caller) {
+		return caller;
+	}
+
+	return AbortSignal.any([caller, request]);
+}
+
+/**
+ * Wraps a fetch implementation and buffers each response within its byte
+ * limit before a downstream client can parse it.
+ */
+export function fetchWithBufferedBoundedResponseBodies(
+	fetcher: typeof fetch,
+	options: BoundedFetchResponseOptions
+): typeof fetch {
+	return async (input, init) => {
+		const signal = combinedSignal(options.signal, signalFrom(input, init));
+		const response = await fetcher(input, {
+			...init,
+			...(signal !== undefined && { signal })
+		});
+		const maximumBytes = response.ok
+			? options.successMaximumBytes
+			: options.errorMaximumBytes;
+
+		return responseWithBufferedBoundedBody(response, {
+			description: options.description,
+			maximumBytes,
+			...(signal !== undefined && { signal })
+		});
+	};
 }

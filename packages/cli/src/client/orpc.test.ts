@@ -1,5 +1,6 @@
 import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
 import { StatusCodes } from 'http-status-codes';
@@ -98,6 +99,23 @@ const nonIdempotentNegotiations = [
 ] as const;
 
 describe('tenantRpc', () => {
+	it('rejects an oversized raw server error before decoding it', async () => {
+		const { fetcher } = capturingFetcher([
+			() =>
+				new Response('failure', {
+					status: StatusCodes.NOT_IMPLEMENTED,
+					headers: { 'content-length': String(64 * 1024 + 1) }
+				})
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+			fetcher
+		});
+
+		await expect(rpc.caches.list()).rejects.toBeInstanceOf(
+			RemoteBodyTooLargeError
+		);
+	});
+
 	it('requests a tenant procedure under the existing path prefix with the configured credential', async () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })
@@ -154,8 +172,18 @@ describe('tenantRpc', () => {
 			get: () => Promise.resolve('stale-token'),
 			refresh: () => Promise.resolve('fresh-token')
 		};
+		const cancel = vi.fn();
 		const { fetcher, captured } = capturingFetcher([
-			() => new Response('Unauthorised\n', { status: 401 }),
+			() =>
+				new Response(
+					new ReadableStream({
+						cancel,
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode('Unauthorised\n'));
+						}
+					}),
+					{ status: StatusCodes.UNAUTHORIZED }
+				),
 			() => Response.json({ caches: [] })
 		]);
 		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
@@ -167,11 +195,82 @@ describe('tenantRpc', () => {
 
 		expect({
 			listed,
-			authorisations: captured.map((request) => request.authorization)
+			authorisations: captured.map((request) => request.authorization),
+			cancelCalls: cancel.mock.calls.length
 		}).toStrictEqual({
 			listed: { caches: [] },
-			authorisations: ['Bearer stale-token', 'Bearer fresh-token']
+			authorisations: ['Bearer stale-token', 'Bearer fresh-token'],
+			cancelCalls: 1
 		});
+	});
+
+	it('cancels the 401 body before awaiting credential refresh', async () => {
+		const refreshEntered = Promise.withResolvers<undefined>();
+		const refreshedToken = Promise.withResolvers<string>();
+		const provider: TokenProvider = {
+			get: () => Promise.resolve('stale-token'),
+			refresh: () => {
+				refreshEntered.resolve(undefined);
+
+				return refreshedToken.promise;
+			}
+		};
+		const cancel = vi.fn();
+		const { fetcher } = capturingFetcher([
+			() =>
+				new Response(
+					new ReadableStream({
+						cancel,
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode('Unauthorised\n'));
+						}
+					}),
+					{ status: StatusCodes.UNAUTHORIZED }
+				),
+			() => Response.json({ caches: [] })
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
+			credential: provider,
+			fetcher
+		});
+		const pending = rpc.caches.list();
+
+		await refreshEntered.promise;
+
+		try {
+			expect(cancel).toHaveBeenCalledOnce();
+		} finally {
+			refreshedToken.resolve('fresh-token');
+			await pending;
+		}
+	});
+
+	it('cancels the 401 body when credential refresh fails', async () => {
+		const failure = new Error('credential refresh failed');
+		const provider: TokenProvider = {
+			get: () => Promise.resolve('stale-token'),
+			refresh: () => Promise.reject(failure)
+		};
+		const cancel = vi.fn();
+		const { fetcher } = capturingFetcher([
+			() =>
+				new Response(
+					new ReadableStream({
+						cancel,
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode('Unauthorised\n'));
+						}
+					}),
+					{ status: StatusCodes.UNAUTHORIZED }
+				)
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
+			credential: provider,
+			fetcher
+		});
+
+		await expect(rpc.caches.list()).rejects.toBe(failure);
+		expect(cancel).toHaveBeenCalledOnce();
 	});
 
 	it('does not retry a fixed string token on 401', async () => {

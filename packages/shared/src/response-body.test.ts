@@ -21,7 +21,9 @@ describe('bounded response bodies', () => {
 				description: 'test response',
 				maximumBytes: 8
 			})
-		).rejects.toStrictEqual(new RemoteBodyTooLargeError('test response', 8, 9));
+		).rejects.toStrictEqual(
+			new RemoteBodyTooLargeError('test response', 8, 9, 'declared')
+		);
 		expect(cancel).toHaveBeenCalledOnce();
 	});
 

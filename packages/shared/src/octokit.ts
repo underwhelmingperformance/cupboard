@@ -8,6 +8,7 @@ import {
 	findProgressively,
 	type ProgressivePage
 } from './collections.ts';
+import { fetchWithBufferedBoundedResponseBodies } from './response-body.ts';
 import { type ReplaySafety } from './retry.ts';
 
 // The single retry policy for the project: the throttling plugin handles the
@@ -32,9 +33,11 @@ const doNotRetryStatuses = [
 
 export const githubReplaySafeRequest = { retries: 3 } as const;
 
-type OctokitClientConstructorOptions = NonNullable<
-	ConstructorParameters<typeof OctokitClient>[0]
->;
+interface OctokitRequestOptions {
+	readonly fetch?: typeof fetch;
+	readonly retries?: number;
+	readonly signal?: AbortSignal;
+}
 
 export type CupboardOctokit = InstanceType<typeof OctokitClient>;
 
@@ -49,13 +52,15 @@ export type GithubRelease = Awaited<
 
 export const maximumGithubReleaseCandidates = 1000;
 export const maximumGithubReleasePages = 20;
+export const maximumGithubSuccessResponseBytes = 16 * 1024 * 1024;
+export const maximumGithubErrorResponseBytes = 64 * 1024;
 const githubReleasesPerPage = 100;
 
 export interface OctokitClientOptions {
 	readonly auth?: string;
 	readonly apiVersion?: string;
 	readonly baseUrl?: string;
-	readonly request?: OctokitClientConstructorOptions['request'];
+	readonly request?: OctokitRequestOptions;
 	readonly replaySafety?: ReplaySafety;
 }
 
@@ -69,10 +74,19 @@ export interface OctokitClientOptions {
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
 ): InstanceType<typeof OctokitClient> {
+	const fetcher = options.request?.fetch ?? globalThis.fetch;
+	const request = {
+		...options.request,
+		fetch: fetchWithBufferedBoundedResponseBodies(fetcher, {
+			description: 'GitHub API response',
+			successMaximumBytes: maximumGithubSuccessResponseBytes,
+			errorMaximumBytes: maximumGithubErrorResponseBytes
+		})
+	};
 	const octokit = new OctokitClient({
 		...(options.auth !== undefined && { auth: options.auth }),
 		...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
-		...(options.request !== undefined && { request: options.request }),
+		request,
 		throttle: {
 			onRateLimit: () => false,
 			onSecondaryRateLimit: () => false
@@ -107,8 +121,7 @@ async function githubReleasePage(
 	const response = await octokit.rest.repos.listReleases({
 		...repository,
 		page,
-		per_page: githubReleasesPerPage,
-		request: githubReplaySafeRequest
+		per_page: githubReleasesPerPage
 	});
 
 	return {

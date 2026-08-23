@@ -1,10 +1,16 @@
 import { env } from 'node:process';
 
+import {
+	readResponseJson,
+	readResponseText
+} from '@cupboard/shared/response-body';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
+
+const maximumGithubOidcResponseBytes = 1024 * 1024;
 
 // The OIDC token request endpoint, and the bearer token that GitHub Actions
 // injects when a workflow grants `id-token: write`. Both are required to issue
@@ -90,7 +96,14 @@ export async function fetchGithubOidcToken(options: {
 	});
 
 	if (!response.ok) {
-		throw new GithubOidcRequestError(response.status, await response.text());
+		throw new GithubOidcRequestError(
+			response.status,
+			await readResponseText(response, {
+				description: 'GitHub Actions OIDC error response',
+				maximumBytes: maximumGithubOidcResponseBytes,
+				signal: options.signal
+			})
+		);
 	}
 
 	// A 200 with a non-JSON body (a proxy notice, an HTML page) would otherwise
@@ -98,8 +111,16 @@ export async function fetchGithubOidcToken(options: {
 	let body: unknown;
 
 	try {
-		body = await response.json();
-	} catch {
+		body = await readResponseJson(response, {
+			description: 'GitHub Actions OIDC token response',
+			maximumBytes: maximumGithubOidcResponseBytes,
+			signal: options.signal
+		});
+	} catch (error) {
+		if (!(error instanceof SyntaxError)) {
+			throw error;
+		}
+
 		throw new GithubOidcResponseError('non-json');
 	}
 
