@@ -1,6 +1,13 @@
 import { readFile } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
+import { z } from 'zod';
+
+import {
+	nixSystemRunners,
+	nixSystemRunnerSchema
+} from '../packages/nix/src/nix-systems.ts';
 
 const flakeWorkflow = new URL(
 	'../.github/workflows/cupboard-flake-publish.yml',
@@ -45,6 +52,21 @@ const remoteStoreDockerfile = new URL(
 	'../tests/fixtures/nix-ssh-store/Dockerfile',
 	import.meta.url
 );
+
+const releaseCacheMatrixSchema = z.strictObject({
+	include: z.array(nixSystemRunnerSchema)
+});
+const releaseCacheStrategySchema = z.looseObject({
+	matrix: releaseCacheMatrixSchema
+});
+const releaseCachePublishSchema = z.looseObject({
+	strategy: releaseCacheStrategySchema,
+	with: z.looseObject({ 'runs-on': z.string() })
+});
+const releaseCacheJobsSchema = z.looseObject({
+	publish: releaseCachePublishSchema
+});
+const releaseCacheSchema = z.looseObject({ jobs: releaseCacheJobsSchema });
 
 function actionSteps(lines: readonly string[], action: RegExp): string[][] {
 	const steps: string[][] = [];
@@ -688,6 +710,20 @@ describe('cupboard release cache', () => {
 			releaseVersionPinned: true,
 			releaseSourcePinned: false,
 			flakehubRequiresCacheMatrix: true
+		});
+	});
+
+	it('publishes the flake on every supported Nix system', async () => {
+		const source = await readFile(releaseCacheWorkflow, 'utf8');
+		const document: unknown = parse(source);
+		const workflow = releaseCacheSchema.parse(document);
+
+		expect({
+			matrix: workflow.jobs.publish.strategy.matrix.include,
+			runnerInput: workflow.jobs.publish.with['runs-on']
+		}).toStrictEqual({
+			matrix: nixSystemRunners,
+			runnerInput: '${{ matrix.runner }}'
 		});
 	});
 });

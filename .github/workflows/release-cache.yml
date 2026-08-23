@@ -26,10 +26,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runs-on:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
-          - macos-15
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-26-intel
+          - system: aarch64-darwin
+            runner: macos-15
     permissions:
       attestations: write # record the build provenance on the repository
       contents: read # check out the flake source
@@ -38,7 +43,7 @@ jobs:
     # job_workflow_ref claim to this file at refs/heads/main.
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
     with:
-      runs-on: ${{ matrix.runs-on }}
+      runs-on: ${{ matrix.runner }}
       url: https://cupboard.supply/t/cupboard
       cache: releases
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
