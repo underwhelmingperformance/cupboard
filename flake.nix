@@ -15,7 +15,7 @@
       nixpkgs-x86_64-darwin,
     }:
     let
-      systems = nixpkgs.lib.importJSON ./packages/nix/src/nix-systems.json;
+      systems = map (entry: entry.system) (nixpkgs.lib.importJSON ./packages/nix/src/nix-systems.json);
       forAllSystems = nixpkgs.lib.genAttrs systems;
       packageSets = forAllSystems (
         system:
