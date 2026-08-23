@@ -28,10 +28,11 @@ export interface ObjectIncarnation {
 	readonly state: 'pending' | 'live';
 }
 
-// Incarnation one identifies objects written before the registry existed. A
-// new registry row must start above it because the corresponding `blob_state`
-// or `cas_object` row may already have been deleted while a response for the
-// old immutable key remains cached.
+// The persisted `incarnation` value is a monotonically increasing object
+// version. Version one identifies objects written before the registry existed.
+// A new registry row must start above it because the corresponding `blob_state`
+// or `cas_object` row may already have been deleted while a response for the old
+// immutable key remains cached.
 export const firstVersionedObjectIncarnation = 2;
 
 // An older Queue Consumer can publish during its 15-minute wall-time allowance.
@@ -132,7 +133,7 @@ type LegacyObjectIncarnations =
 	  };
 
 /**
- * Registers incarnation-one rows that an older Worker wrote after the registry
+ * Registers version-one rows that an older Worker wrote after the registry
  * migration had finished. A current registry row always wins the conflict.
  */
 export async function registerLegacyObjectIncarnations(
@@ -200,7 +201,7 @@ function lateWriteRemovalDeadline(now: Date): IsoTimestamp {
 }
 
 /**
- * Records an exact physical incarnation for the deletion retry pass.
+ * Records the exact physical object version for the deletion retry pass.
  */
 export async function queueObjectDeletion(
 	database: DrizzleD1Database<typeof d1Schema>,
@@ -221,9 +222,9 @@ export async function queueObjectDeletion(
 }
 
 /**
- * Returns the current incarnation, reserving a greater one when the previous
+ * Returns the current object version, reserving a greater one when the previous
  * object is absent. D1 serialises the conditional update, so concurrent
- * promoters share one pending incarnation.
+ * promoters share one pending version.
  */
 export async function reserveObjectIncarnation(
 	database: DrizzleD1Database<typeof d1Schema>,

@@ -1668,8 +1668,9 @@ export class CommitPipelineService {
 			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
 		);
 
-		// Read the shared blob row and tenant ownership edge in one D1 batch. Use the
-		// row's `incarnation` field to construct the physical R2 key.
+		// Read the shared blob row and tenant ownership edge in one D1 batch. The
+		// persisted `incarnation` value identifies the object version to use in the
+		// physical R2 key.
 		const d1Rows = await this.context.d1.batch([
 			this.context.d1
 				.select({

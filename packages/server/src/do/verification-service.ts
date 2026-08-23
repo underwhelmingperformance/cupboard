@@ -711,10 +711,10 @@ export class VerificationService {
 			return didApply ? 'applied' : 'ignored';
 		}
 
-		// Stream the R2 write outside the input gate. A replacement owner reserves a
-		// greater incarnation and cannot adopt bytes from the revoked owner. Re-enter
-		// the gate to check ownership before activating the object and writing
-		// `blob_state`.
+		// Stream the R2 write outside the input gate. A replacement owner reserves
+		// a greater object version and cannot adopt bytes from the revoked owner.
+		// Re-enter the gate to check ownership before activating the object and
+		// writing `blob_state`.
 		if (promotion === 'promote') {
 			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
 				return 'ignored';

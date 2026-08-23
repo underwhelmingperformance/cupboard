@@ -99,9 +99,10 @@ async function ensureCanonicalObject(
 
 /**
  * Promotes verified staging bytes to a versioned shared R2 object and returns
- * its compressed metadata. A conditional put makes each physical incarnation
- * write-once, so concurrent uploads adopt one encoding. The staging object
- * remains until the commit is durable so a retry can recover after a crash.
+ * its compressed metadata. A conditional put makes each physical object
+ * version write-once, so concurrent uploads adopt one encoding. The staging
+ * object remains until the commit is durable so a retry can recover after a
+ * crash.
  *
  * R2 completes before the `blob_state` write. A crash between them can leave an
  * unrecorded canonical object; retrying adopts that object and writes the row.
@@ -283,8 +284,8 @@ export async function commitStagedBlobPromotion(
 	return 'live';
 }
 
-// The first writer for an incarnation fixes its compressed metadata. A later
-// promotion of that incarnation retains the metadata and clears its reaper
+// The first writer for an object version fixes its compressed metadata. A later
+// promotion of that version retains the metadata and clears its reaper
 // deadline. Verified frames use zstd, the only encoding stored here.
 function blobStateUpsert(
 	d1: DrizzleD1Database<typeof d1Schema>,
