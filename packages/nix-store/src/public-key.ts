@@ -20,7 +20,10 @@ export class NixPublicKey extends NamedMaterial {
 	constructor(value: string) {
 		super(value, (invalid) => new InvalidNixPublicKeyError(invalid));
 
-		if (this.bytes.byteLength !== 32) {
+		if (
+			this.bytes.byteLength !== 32 ||
+			bytesToBase64(this.bytes) !== this.material
+		) {
 			throw new InvalidNixPublicKeyError(value);
 		}
 	}
@@ -49,7 +52,7 @@ export function parsePublishedNixPublicKeys(
 		} catch (error) {
 			if (error instanceof InvalidNixPublicKeyError) {
 				throw new InvalidNixPublicKeySetError(
-					`entry ${String(index + 1)} is not a 32-byte Ed25519 public key`
+					`entry ${String(index + 1)} is not a canonical 32-byte Ed25519 public key`
 				);
 			}
 
