@@ -33,6 +33,7 @@ import {
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
+import { withCleanups } from '@cupboard/shared/cleanup';
 import { genericExitCode } from '@cupboard/shared/errors';
 
 import { isAbortError } from '../abort.ts';
@@ -404,20 +405,24 @@ async function runProtectedStreamedBuildPush(
 			}
 		});
 	} catch (error) {
-		try {
-			await roots?.close();
-		} finally {
-			session?.close();
-			await Promise.all([
-				removeInvocationRuntimeDirectory(plan.directory),
-				removeInvocationRuntimeDirectory(targetLinkDirectory)
-			]);
-		}
+		return withCleanups(() => {
+			throw error;
+		}, [
+			() => roots?.close() ?? Promise.resolve(),
+			() => {
+				session?.close();
 
-		throw error;
+				return Promise.resolve();
+			},
+			() =>
+				Promise.all([
+					removeInvocationRuntimeDirectory(plan.directory),
+					removeInvocationRuntimeDirectory(targetLinkDirectory)
+				])
+		]);
 	}
 
-	try {
+	return withCleanups(async () => {
 		const environment = environmentWithPostBuildHook(
 			dependencies.environment ?? process.env,
 			hookScriptPath
@@ -458,7 +463,7 @@ async function runProtectedStreamedBuildPush(
 			exit
 		);
 
-		return await settleRun(options, reporter, dependencies, {
+		return settleRun(options, reporter, dependencies, {
 			mode: 'streamed',
 			exit,
 			batcher,
@@ -471,29 +476,22 @@ async function runProtectedStreamedBuildPush(
 			...(selectedTargetPaths !== undefined && { selectedTargetPaths }),
 			...(terminalFailure !== undefined && { terminalFailure })
 		});
-	} finally {
-		try {
-			await listener.drain();
-		} finally {
-			try {
-				await batcher.stop();
-				session?.close();
-			} finally {
-				try {
-					await roots?.close();
-				} finally {
-					try {
-						await listener.close();
-					} finally {
-						await Promise.all([
-							removeInvocationRuntimeDirectory(plan.directory),
-							removeInvocationRuntimeDirectory(targetLinkDirectory)
-						]);
-					}
-				}
-			}
-		}
-	}
+	}, [
+		() => listener.drain(),
+		() => batcher.stop(),
+		() => {
+			session?.close();
+
+			return Promise.resolve();
+		},
+		() => roots?.close() ?? Promise.resolve(),
+		() => listener.close(),
+		() =>
+			Promise.all([
+				removeInvocationRuntimeDirectory(plan.directory),
+				removeInvocationRuntimeDirectory(targetLinkDirectory)
+			])
+	]);
 }
 
 // A user-supplied command runs exactly once, its semantics untouched; a
