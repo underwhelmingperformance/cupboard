@@ -6,9 +6,9 @@ import {
 import type { PushCredential, PushId } from '@cupboard/protocol/upload';
 
 import {
+	InvalidAccessTokenError,
 	InvalidPushIdError,
-	PushIdSigningKeyMissingError,
-	UnauthenticatedError
+	PushIdSigningKeyMissingError
 } from '../errors.ts';
 import { stagingPushPrefix } from '../http/http.ts';
 
@@ -45,7 +45,7 @@ export function pushCredentialTtlSeconds(
 	);
 
 	if (remaining <= 0) {
-		throw new UnauthenticatedError();
+		throw new InvalidAccessTokenError();
 	}
 
 	return ttlSecondsSchema.parse(

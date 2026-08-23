@@ -6,6 +6,8 @@ import { z } from 'zod';
 import { isD1Overload } from '../db/transient.ts';
 import {
 	DatabaseOverloadedError,
+	InsufficientScopeError,
+	InvalidAccessTokenError,
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError,
@@ -61,8 +63,31 @@ export function serverHttpErrorHeaders(error: ServerHttpError): Headers {
 		headers.set('cache-control', 'no-store');
 	}
 
+	if (
+		error instanceof UnauthenticatedError ||
+		error instanceof InsufficientScopeError
+	) {
+		headers.set('cache-control', 'no-store');
+	}
+
+	if (error instanceof InvalidAccessTokenError) {
+		headers.set(
+			'www-authenticate',
+			'Bearer realm="cupboard", error="invalid_token"'
+		);
+		return headers;
+	}
+
 	if (error instanceof UnauthenticatedError) {
-		headers.set('www-authenticate', 'Bearer');
+		headers.set('www-authenticate', 'Bearer realm="cupboard"');
+		return headers;
+	}
+
+	if (error instanceof InsufficientScopeError) {
+		headers.set(
+			'www-authenticate',
+			'Bearer realm="cupboard", error="insufficient_scope"'
+		);
 	}
 
 	return headers;

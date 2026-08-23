@@ -4,10 +4,13 @@ import {
 	issuedAccessTokenType,
 	type OidcSubject,
 	oidcSubjectSchema,
-	type ParsedTokenRequest,
+	type ParsedRefreshTokenGrantRequest,
+	type ParsedTokenExchangeGrantRequest,
+	refreshTokenGrantRequestSchema,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
+	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
 	type TokenResponse,
@@ -50,7 +53,7 @@ import {
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { oauthJsonResponse } from '../http/oauth-response.ts';
-import { parseFormBody } from '../http/parse.ts';
+import { parseFormBody, parseFormValue } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
@@ -63,30 +66,35 @@ export class TokenExchangeService {
 		private readonly oidcTrust: OidcTrustService
 	) {}
 
-	private async exchange(body: ParsedTokenRequest): Promise<Response> {
-		if (body.subject_token === undefined) {
-			throw new SubjectTokenRequiredError();
+	private async exchange(
+		body: ParsedTokenExchangeGrantRequest
+	): Promise<Response> {
+		if (
+			body.subject_token_type !== subjectTokenTypeIdToken &&
+			body.subject_token_type !== subjectTokenTypeJwt &&
+			body.subject_token_type !== issuedAccessTokenType
+		) {
+			throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 		}
 
-		// Verification with this tenant's keys selects attenuation. The declared
-		// token type cannot force a self-issued token through external trust matching
-		// or make an external token eligible for attenuation.
+		// Verify the signature before deciding whether this is a self-issued access
+		// token. The declared type cannot route a self-issued token through external
+		// trust or make an external token eligible for attenuation.
 		const presented = await this.verifySelfIssued(body.subject_token);
 
 		if (presented !== undefined) {
+			if (body.subject_token_type !== issuedAccessTokenType) {
+				throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
+			}
+
 			return this.attenuatedResponse(
 				presented,
 				parseRequestedGrants(body.authorization_details)
 			);
 		}
 
-		if (
-			body.subject_token_type !== subjectTokenTypeIdToken &&
-			body.subject_token_type !== subjectTokenTypeJwt
-		) {
-			throw new UnsupportedSubjectTokenTypeError(
-				String(body.subject_token_type)
-			);
+		if (body.subject_token_type === issuedAccessTokenType) {
+			throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 		}
 
 		// Decode the claims only to select a trust rule. Verify the token against that
@@ -245,11 +253,9 @@ export class TokenExchangeService {
 		} satisfies TokenResponse);
 	}
 
-	private async refresh(body: ParsedTokenRequest): Promise<Response> {
-		if (body.refresh_token === undefined) {
-			throw new RefreshTokenRequiredError();
-		}
-
+	private async refresh(
+		body: ParsedRefreshTokenGrantRequest
+	): Promise<Response> {
 		const presented = parseRefreshToken(body.refresh_token);
 
 		if (presented === undefined) {
@@ -402,11 +408,21 @@ export class TokenExchangeService {
 		const body = await parseFormBody(tokenRequestSchema, request);
 
 		if (body.grant_type === tokenExchangeGrantType) {
-			return this.exchange(body);
+			if (body.subject_token === undefined) {
+				throw new SubjectTokenRequiredError();
+			}
+
+			return this.exchange(
+				parseFormValue(tokenExchangeGrantRequestSchema, body)
+			);
 		}
 
 		if (body.grant_type === refreshTokenGrantType) {
-			return this.refresh(body);
+			if (body.refresh_token === undefined) {
+				throw new RefreshTokenRequiredError();
+			}
+
+			return this.refresh(parseFormValue(refreshTokenGrantRequestSchema, body));
 		}
 
 		throw new UnsupportedGrantTypeError(body.grant_type);

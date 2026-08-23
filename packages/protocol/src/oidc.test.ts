@@ -6,7 +6,13 @@ import {
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
 	oidcTrustSummarySchema,
+	refreshTokenGrantRequestSchema,
+	refreshTokenGrantType,
+	subjectTokenProblems,
+	subjectTokenProblemSchema,
+	tokenExchangeGrantRequestSchema,
 	tokenExchangeRequestSchema,
+	tokenRequestSchema,
 	tokenResponseSchema
 } from './oidc.ts';
 
@@ -34,17 +40,39 @@ describe('tokenExchangeRequestSchema', () => {
 		expect(tokenExchangeRequestSchema.safeParse(value).success).toBe(false);
 	});
 
-	it.each(['audience', 'resource', 'scope', 'requested_token_type'])(
-		'rejects the unsupported %s field',
-		(field) => {
-			expect(
-				tokenExchangeRequestSchema.safeParse({
-					...request,
-					[field]: 'unsupported'
-				}).success
-			).toBe(false);
-		}
-	);
+	it.each([
+		'audience',
+		'resource',
+		'scope',
+		'requested_token_type',
+		'actor_token',
+		'actor_token_type'
+	])('rejects the unsupported %s field', (field) => {
+		expect(
+			tokenExchangeRequestSchema.safeParse({
+				...request,
+				[field]: 'unsupported'
+			}).success
+		).toBe(false);
+	});
+
+	it('ignores an unknown extension parameter', () => {
+		expect(
+			tokenExchangeRequestSchema.parse({
+				...request,
+				'urn:example:extension': 'value'
+			})
+		).toStrictEqual(request);
+	});
+
+	it('rejects a repeated singleton parameter', () => {
+		expect(
+			tokenExchangeRequestSchema.safeParse({
+				...request,
+				subject_token: ['first', 'second']
+			}).success
+		).toBe(false);
+	});
 
 	it('leaves authorization_details encoded for the token service', () => {
 		// The body validator keeps it raw; the token service parses it, so a
@@ -66,6 +94,124 @@ describe('tokenExchangeRequestSchema', () => {
 				...request,
 				authorization_details: ''
 			}).success
+		).toBe(false);
+	});
+});
+
+describe('tokenRequestSchema', () => {
+	it('preserves singleton fields without applying grant-specific validation', () => {
+		const request = {
+			grant_type: 'authorization_code',
+			subject_token: '',
+			resource: 'https://resource.example',
+			extension: 'value'
+		};
+
+		expect(tokenRequestSchema.parse(request)).toStrictEqual(request);
+	});
+});
+
+describe('tokenExchangeGrantRequestSchema', () => {
+	const request = {
+		grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+		subject_token: 'inbound.jwt.value',
+		subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+	};
+
+	it.each([
+		{
+			name: 'a missing subject token',
+			value: { ...request, subject_token: undefined }
+		},
+		{
+			name: 'a missing subject token type',
+			value: { ...request, subject_token_type: undefined }
+		},
+		{
+			name: 'a refresh token',
+			value: { ...request, refresh_token: 'refresh-token' }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(tokenExchangeGrantRequestSchema.safeParse(value).success).toBe(
+			false
+		);
+	});
+});
+
+describe('refreshTokenGrantRequestSchema', () => {
+	const request = {
+		grant_type: refreshTokenGrantType,
+		refresh_token: 'refresh-token'
+	};
+
+	it('accepts a well-formed refresh request', () => {
+		expect(refreshTokenGrantRequestSchema.parse(request)).toStrictEqual(
+			request
+		);
+	});
+
+	it.each([
+		{
+			name: 'a missing refresh token',
+			value: { ...request, refresh_token: undefined }
+		},
+		{
+			name: 'a subject token',
+			value: { ...request, subject_token: 'inbound.jwt.value' }
+		},
+		{
+			name: 'a subject token type',
+			value: {
+				...request,
+				subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+			}
+		}
+	])('rejects $name', ({ value }) => {
+		expect(refreshTokenGrantRequestSchema.safeParse(value).success).toBe(false);
+	});
+
+	it.each([
+		'audience',
+		'resource',
+		'scope',
+		'requested_token_type',
+		'actor_token',
+		'actor_token_type'
+	])('rejects the unsupported %s field', (field) => {
+		expect(
+			refreshTokenGrantRequestSchema.safeParse({
+				...request,
+				[field]: 'unsupported'
+			}).success
+		).toBe(false);
+	});
+
+	it('ignores an unknown extension parameter', () => {
+		expect(
+			refreshTokenGrantRequestSchema.parse({
+				...request,
+				'urn:example:extension': 'value'
+			})
+		).toStrictEqual(request);
+	});
+});
+
+describe('subjectTokenProblemSchema', () => {
+	it('owns every stable subject-token problem wire value', () => {
+		expect(
+			Object.values(subjectTokenProblems).map((problem) =>
+				subjectTokenProblemSchema.parse(problem)
+			)
+		).toStrictEqual([
+			'subject-token-invalid',
+			'subject-token-untrusted',
+			'subject-token-claim-mismatch'
+		]);
+	});
+
+	it('rejects an unknown subject-token problem', () => {
+		expect(
+			subjectTokenProblemSchema.safeParse('subject-token-new-problem').success
 		).toBe(false);
 	});
 });

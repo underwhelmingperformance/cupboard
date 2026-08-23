@@ -13,8 +13,9 @@ import {
 	oidcSubjectSchema,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
+	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
-	tokenExchangeRequestSchema,
+	tokenRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import {
@@ -60,15 +61,17 @@ import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
 	ControlNotConfiguredError,
 	ControlSubjectTokenUntrustedError,
+	InvalidAccessTokenError,
 	IssuerUnavailableError,
 	SubjectTokenNotJwtError,
+	SubjectTokenRequiredError,
 	SubjectTokenVerificationFailedError,
 	UnauthenticatedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { oauthJsonResponse } from '../http/oauth-response.ts';
-import { parseFormBody } from '../http/parse.ts';
+import { parseFormBody, parseFormValue } from '../http/parse.ts';
 import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
@@ -149,32 +152,51 @@ export async function controlTokenExchange(
 	request: Request,
 	env: Env
 ): Promise<Response> {
-	const wrappingSecret = controlWrappingSecret(env);
-	const audience = controlAudience(env);
-	const body = await parseFormBody(tokenExchangeRequestSchema, request);
+	const body = await parseFormBody(tokenRequestSchema, request);
 
 	if (body.grant_type !== tokenExchangeGrantType) {
 		throw new UnsupportedGrantTypeError(body.grant_type);
 	}
 
+	if (body.subject_token === undefined) {
+		throw new SubjectTokenRequiredError();
+	}
+
+	const exchange = parseFormValue(tokenExchangeGrantRequestSchema, body);
+
+	if (
+		exchange.subject_token_type !== subjectTokenTypeIdToken &&
+		exchange.subject_token_type !== subjectTokenTypeJwt &&
+		exchange.subject_token_type !== issuedAccessTokenType
+	) {
+		throw new UnsupportedSubjectTokenTypeError(exchange.subject_token_type);
+	}
+
+	const wrappingSecret = controlWrappingSecret(env);
+	const audience = controlAudience(env);
+
 	const database = controlDatabase(env);
 	const now = new Date();
 
-	// Attenuation is detected by signature: a subject token this control plane
-	// itself issued is narrowed to a requested subset of its own grants, never
-	// routed to a trust rule.
+	// Signature verification distinguishes a self-issued access token from an
+	// external subject. It can enter attenuation only when it declares the
+	// access-token type, and it is never routed to a trust rule.
 	const presented = await verifyControlSelfIssued(
 		request,
 		env,
-		body.subject_token
+		exchange.subject_token
 	);
 
 	if (presented !== undefined) {
+		if (exchange.subject_token_type !== issuedAccessTokenType) {
+			throw new UnsupportedSubjectTokenTypeError(exchange.subject_token_type);
+		}
+
 		await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 		const active = await activeControlKey(database, wrappingSecret);
 		const granted = attenuatedGrants(
 			presented.grants,
-			parseRequestedGrants(body.authorization_details)
+			parseRequestedGrants(exchange.authorization_details)
 		);
 		const accessToken = await issueAccessJwt(
 			active.privateJwk,
@@ -198,17 +220,14 @@ export async function controlTokenExchange(
 		} satisfies TokenResponse);
 	}
 
-	if (
-		body.subject_token_type !== subjectTokenTypeIdToken &&
-		body.subject_token_type !== subjectTokenTypeJwt
-	) {
-		throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
+	if (exchange.subject_token_type === issuedAccessTokenType) {
+		throw new UnsupportedSubjectTokenTypeError(exchange.subject_token_type);
 	}
 
 	let claims;
 
 	try {
-		claims = decodeInboundClaims(body.subject_token);
+		claims = decodeInboundClaims(exchange.subject_token);
 	} catch {
 		throw new SubjectTokenNotJwtError();
 	}
@@ -221,11 +240,11 @@ export async function controlTokenExchange(
 
 	const verified = await verifyControlInbound(
 		rule,
-		body.subject_token,
-		body.subject_token_type === subjectTokenTypeIdToken
+		exchange.subject_token,
+		exchange.subject_token_type === subjectTokenTypeIdToken
 	);
 	const requiresIdTokenClaims =
-		body.subject_token_type === subjectTokenTypeIdToken;
+		exchange.subject_token_type === subjectTokenTypeIdToken;
 	const verifiedSubject =
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
@@ -242,7 +261,7 @@ export async function controlTokenExchange(
 	const grants = resolveRequestedGrants(
 		rule,
 		verified,
-		parseRequestedGrants(body.authorization_details)
+		parseRequestedGrants(exchange.authorization_details)
 	);
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
@@ -358,6 +377,7 @@ export function controlAsMetadata(
 		issuer: controlIssuer(request),
 		token_endpoint: `${origin}/token`,
 		jwks_uri: `${origin}/.well-known/jwks.json`,
+		response_types_supported: [],
 		grant_types_supported: [tokenExchangeGrantType],
 		authorization_details_types_supported: [
 			'cupboard_tenant',
@@ -393,7 +413,7 @@ export async function controlAuthenticate(
 			new Date()
 		);
 	} catch {
-		throw new UnauthenticatedError();
+		throw new InvalidAccessTokenError();
 	}
 }
 

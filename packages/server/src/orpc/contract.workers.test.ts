@@ -90,30 +90,61 @@ describe('tenant contract round trip', () => {
 	it('hardens every matched tenant response and Bearer challenge', async () => {
 		await useTestServer('contract-response-headers');
 		const init = await bootstrap();
+		const underScopedToken = await issueServerSignedToken(cacheWriteGrants());
 		const cachesUrl = new URL('/caches', currentOrigin());
 		const authorised = await currentServer().fetch(
 			new Request(cachesUrl, {
 				headers: { authorization: `Bearer ${init.token}` }
 			})
 		);
-		const unauthorised = await currentServer().fetch(new Request(cachesUrl));
+		const missing = await currentServer().fetch(new Request(cachesUrl));
+		const invalid = await currentServer().fetch(
+			new Request(cachesUrl, {
+				headers: { authorization: 'Bearer invalid' }
+			})
+		);
+		const forbidden = await currentServer().fetch(
+			new Request(cachesUrl, {
+				headers: { authorization: `Bearer ${underScopedToken}` }
+			})
+		);
 
 		expect({
 			authorised: {
 				status: authorised.status,
 				cacheControl: authorised.headers.get('cache-control')
 			},
-			unauthorised: {
-				status: unauthorised.status,
-				cacheControl: unauthorised.headers.get('cache-control'),
-				challenge: unauthorised.headers.get('www-authenticate')
+			missing: {
+				status: missing.status,
+				cacheControl: missing.headers.get('cache-control'),
+				challenge: missing.headers.get('www-authenticate')
+			},
+			invalid: {
+				status: invalid.status,
+				cacheControl: invalid.headers.get('cache-control'),
+				challenge: invalid.headers.get('www-authenticate')
+			},
+			forbidden: {
+				status: forbidden.status,
+				cacheControl: forbidden.headers.get('cache-control'),
+				challenge: forbidden.headers.get('www-authenticate')
 			}
 		}).toStrictEqual({
 			authorised: { status: StatusCodes.OK, cacheControl: 'no-store' },
-			unauthorised: {
+			missing: {
 				status: StatusCodes.UNAUTHORIZED,
 				cacheControl: 'no-store',
-				challenge: 'Bearer'
+				challenge: 'Bearer realm="cupboard"'
+			},
+			invalid: {
+				status: StatusCodes.UNAUTHORIZED,
+				cacheControl: 'no-store',
+				challenge: 'Bearer realm="cupboard", error="invalid_token"'
+			},
+			forbidden: {
+				status: StatusCodes.FORBIDDEN,
+				cacheControl: 'no-store',
+				challenge: 'Bearer realm="cupboard", error="insufficient_scope"'
 			}
 		});
 	});

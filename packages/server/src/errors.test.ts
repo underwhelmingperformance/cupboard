@@ -59,31 +59,31 @@ describe('OAuth errors', () => {
 		{
 			error: new SubjectTokenNotJwtError(),
 			name: 'SubjectTokenNotJwtError',
-			code: 'invalid_grant',
+			code: 'invalid_request',
 			problem: 'subject-token-invalid'
 		},
 		{
 			error: new SubjectTokenVerificationFailedError(),
 			name: 'SubjectTokenVerificationFailedError',
-			code: 'invalid_grant',
+			code: 'invalid_request',
 			problem: 'subject-token-invalid'
 		},
 		{
 			error: new SubjectTokenSubjectMissingError(),
 			name: 'SubjectTokenSubjectMissingError',
-			code: 'invalid_grant',
+			code: 'invalid_request',
 			problem: 'subject-token-invalid'
 		},
 		{
 			error: new TenantSubjectTokenUntrustedError(),
 			name: 'TenantSubjectTokenUntrustedError',
-			code: 'invalid_grant',
+			code: 'invalid_request',
 			problem: 'subject-token-untrusted'
 		},
 		{
 			error: new ControlSubjectTokenUntrustedError(),
 			name: 'ControlSubjectTokenUntrustedError',
-			code: 'invalid_grant',
+			code: 'invalid_request',
 			problem: 'subject-token-untrusted'
 		}
 	])(

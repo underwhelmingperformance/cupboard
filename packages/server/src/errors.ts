@@ -9,7 +9,11 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import { type OidcIssuer } from '@cupboard/protocol/oidc';
+import {
+	type OidcIssuer,
+	type SubjectTokenProblem,
+	subjectTokenProblems
+} from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type UploadId } from '@cupboard/protocol/upload';
@@ -417,6 +421,13 @@ export class UnauthenticatedError extends ServerHttpError {
 	}
 }
 
+export class InvalidAccessTokenError extends UnauthenticatedError {
+	constructor() {
+		super();
+		this.name = 'InvalidAccessTokenError';
+	}
+}
+
 export class InsufficientScopeError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
@@ -577,8 +588,8 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 	}
 }
 
-export abstract class SubjectTokenInvalidError extends InvalidGrantError {
-	readonly problem = 'subject-token-invalid';
+export abstract class SubjectTokenInvalidError extends InvalidRequestError {
+	readonly problem = subjectTokenProblems.invalid;
 }
 
 export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
@@ -602,8 +613,9 @@ export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	}
 }
 
-export abstract class SubjectTokenUntrustedError extends InvalidGrantError {
-	override readonly problem: string = 'subject-token-untrusted';
+export abstract class SubjectTokenUntrustedError extends InvalidRequestError {
+	override readonly problem: SubjectTokenProblem =
+		subjectTokenProblems.untrusted;
 }
 
 export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
@@ -621,7 +633,7 @@ export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError
  * {@link TenantSubjectTokenUntrustedError}.
  */
 export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedError {
-	override readonly problem = 'subject-token-claim-mismatch';
+	override readonly problem = subjectTokenProblems.claimMismatch;
 	override readonly detail: Readonly<Record<string, string>>;
 
 	constructor(ruleId: string, mismatch: ClaimMismatch) {

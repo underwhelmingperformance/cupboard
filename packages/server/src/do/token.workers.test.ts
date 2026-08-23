@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	issuedAccessTokenType,
@@ -33,11 +34,14 @@ import {
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import {
+	adminGrants,
 	currentOrigin,
 	currentServer,
 	fetchPath,
+	issueServerSignedToken,
 	latestMigrationIndex,
 	migrateThrough,
+	provisionNamedTenant,
 	readFetch,
 	resetTestServer
 } from '../test-support.ts';
@@ -77,6 +81,7 @@ const authorizationServerMetadataSchema = z.strictObject({
 	issuer: z.string(),
 	token_endpoint: z.string(),
 	jwks_uri: z.string(),
+	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
 	token_endpoint_auth_methods_supported: z.array(z.string())
@@ -221,6 +226,216 @@ describe('POST /token', () => {
 		}
 	])('rejects $name', async ({ body, error }) => {
 		expect(await tokenExchangeError(await body())).toBeInstanceOf(error);
+	});
+
+	it('ignores an unknown extension parameter', async () => {
+		const presented = await issueServerSignedToken(adminGrants());
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: presented,
+			subject_token_type: issuedAccessTokenType,
+			'urn:example:extension': 'value'
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+	});
+
+	it.each([
+		{
+			name: 'an external subject token without its type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await untrustedToken()
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued subject token without its type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueServerSignedToken(adminGrants())
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued subject token with an unsupported type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueServerSignedToken(adminGrants()),
+				subject_token_type: 'unsupported'
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'a self-issued access token declared as an ID token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueServerSignedToken(adminGrants()),
+				subject_token_type: subjectTokenTypeIdToken
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'a self-issued access token declared as a generic JWT',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueServerSignedToken(adminGrants()),
+				subject_token_type: subjectTokenTypeJwt
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'an external exchange with a refresh token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await untrustedToken(),
+				subject_token_type: subjectTokenTypeIdToken,
+				refresh_token: 'refresh-token'
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued exchange with a refresh token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueServerSignedToken(adminGrants()),
+				subject_token_type: issuedAccessTokenType,
+				refresh_token: 'refresh-token'
+			}),
+			problem: 'schema-mismatch'
+		}
+	])('rejects $name', async ({ form, problem }) => {
+		const response = await postToken(await form());
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem
+		});
+	});
+
+	it.each([
+		{
+			name: 'grant_type',
+			body:
+				'grant_type=first&grant_type=second&' +
+				'subject_token=x&subject_token_type=unsupported'
+		},
+		{
+			name: 'an unknown extension',
+			body: 'grant_type=authorization_code&extension=first&extension=second'
+		}
+	])('rejects a repeated $name parameter', async ({ body: requestBody }) => {
+		const response = await fetchPath('/token', {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: requestBody
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({ status: response.status, error: body.error }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request'
+		});
+	});
+
+	it.each([
+		'grant_type=authorization_code&subject_token=',
+		'grant_type=authorization_code&resource=https%3A%2F%2Fresource.example'
+	])(
+		'dispatches an unsupported grant before validating its fields: %s',
+		async (requestBody) => {
+			const response = await fetchPath('/token', {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: requestBody
+			});
+			const body = oauthErrorShape(await response.json());
+
+			expect({ status: response.status, error: body.error }).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error: 'unsupported_grant_type'
+			});
+		}
+	);
+
+	it.each([
+		'resource',
+		'audience',
+		'scope',
+		'requested_token_type',
+		'actor_token',
+		'actor_token_type'
+	])('rejects the known unsupported %s parameter', async (parameter) => {
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: 'x',
+			subject_token_type: subjectTokenTypeIdToken,
+			[parameter]: 'unsupported'
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({ status: response.status, error: body.error }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request'
+		});
+	});
+
+	it('logs token refusals without recording either credential', async () => {
+		const subjectMarker = 'subject-token-do-not-log';
+		const refreshMarker = 'refresh-token-do-not-log';
+		const capture = startCapture();
+		let response: Response;
+
+		try {
+			response = await fetchPath('/token', {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/x-www-form-urlencoded',
+					'cf-ray': 'ray-token-redaction'
+				},
+				body: new URLSearchParams({
+					grant_type: 'authorization_code',
+					subject_token: subjectMarker,
+					refresh_token: refreshMarker
+				}).toString()
+			});
+		} finally {
+			capture.stop();
+		}
+
+		const lines = capture.logs.map((entry) => ({
+			message: entry.message,
+			method: entry.properties.method,
+			path: entry.properties.path,
+			ray: entry.properties.ray,
+			status: entry.properties.status,
+			rowsRead: entry.properties.rowsRead,
+			rowsWritten: entry.properties.rowsWritten
+		}));
+		const serialised = JSON.stringify(capture.logs);
+
+		expect({ status: response.status, lines }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			lines: [
+				{
+					message: 'request finished',
+					method: 'POST',
+					path: '/token',
+					ray: 'ray-token-redaction',
+					status: StatusCodes.BAD_REQUEST,
+					rowsRead: 1,
+					rowsWritten: 0
+				}
+			]
+		});
+		expect(serialised).not.toContain(subjectMarker);
+		expect(serialised).not.toContain(refreshMarker);
 	});
 
 	it('reports 503, not invalid_grant, when the issuer cannot be reached', async () => {
@@ -641,6 +856,45 @@ describe('refresh grant', () => {
 			problem: 'refresh-token-required'
 		});
 	});
+
+	it.each<{
+		name: string;
+		field: 'subject_token' | 'subject_token_type';
+		value: string;
+	}>([
+		{
+			name: 'subject_token',
+			field: 'subject_token',
+			value: 'inbound.jwt.value'
+		},
+		{
+			name: 'subject_token_type',
+			field: 'subject_token_type',
+			value: subjectTokenTypeIdToken
+		}
+	])(
+		'rejects the exchange-only $name field on refresh',
+		async ({ field, value }) => {
+			const subjectToken = await installTrustedIdp('admin');
+			const exchanged = await exchange(subjectToken);
+			const response = await postToken({
+				grant_type: refreshTokenGrantType,
+				refresh_token: exchanged.refresh_token ?? '',
+				[field]: value
+			});
+			const body = oauthErrorShape(await response.json());
+
+			expect({
+				status: response.status,
+				error: body.error,
+				problem: body.problem
+			}).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error: 'invalid_request',
+				problem: 'schema-mismatch'
+			});
+		}
+	);
 
 	it('reaps expired refresh tokens in the garbage-collection pass', async () => {
 		const subjectToken = await installTrustedIdp('admin');
@@ -1085,6 +1339,7 @@ describe('auth discovery endpoints', () => {
 	});
 
 	it('serves OAuth authorization-server metadata at the edge', async () => {
+		await provisionNamedTenant('v1');
 		const response = await readFetch('/.well-known/oauth-authorization-server');
 		const origin = currentOrigin();
 
@@ -1099,6 +1354,7 @@ describe('auth discovery endpoints', () => {
 				issuer: `${origin}/t/v1`,
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
+				response_types_supported: [],
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_cache',
@@ -1220,7 +1476,7 @@ describe('untrusted exchange diagnostics', () => {
 		expect(refused).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
 			body: {
-				error: 'invalid_grant',
+				error: 'invalid_request',
 				error_description:
 					"Trust rule github-main does not match the subject token's job_workflow_ref claim",
 				problem: 'subject-token-claim-mismatch',

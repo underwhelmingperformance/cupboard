@@ -33,10 +33,11 @@ export async function parseRequestBody<S extends z.ZodType>(
 
 /**
  * Validates an `application/x-www-form-urlencoded` request body against a
- * schema, returning the parsed (branded) value. Repeated keys become arrays, so
- * a schema for a singleton OAuth parameter rejects duplicates. A body the schema
- * rejects becomes an OAuth `invalid_request` carrying the schema's diagnostics,
- * so the `/token` endpoint reports it in the RFC 6749 §5.2 envelope.
+ * schema, returning the parsed (branded) value. The form boundary rejects every
+ * repeated parameter before the schema can strip an unknown extension. A body
+ * the schema rejects becomes an OAuth `invalid_request` with the schema's
+ * diagnostics, so the `/token` endpoint reports it in the RFC 6749 §5.2
+ * envelope.
  */
 export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
@@ -67,22 +68,29 @@ export async function parseFormBody<S extends z.ZodType>(
 	}
 
 	const parameters = new URLSearchParams(body);
-	const values: Record<string, string | string[]> = {};
+	const names = new Set<string>();
 
-	for (const [name, value] of parameters) {
-		const current = values[name];
-
-		if (current === undefined) {
-			values[name] = value;
-			continue;
+	for (const name of parameters.keys()) {
+		if (names.has(name)) {
+			throw invalidForm('Form parameters must not occur more than once');
 		}
 
-		values[name] = Array.isArray(current)
-			? [...current, value]
-			: [current, value];
+		names.add(name);
 	}
 
-	const result = schema.safeParse(values);
+	const values = Object.fromEntries(parameters);
+
+	return parseFormValue(schema, values);
+}
+
+/**
+Validates singleton fields from a form which has already passed raw parsing.
+*/
+export function parseFormValue<S extends z.ZodType>(
+	schema: S,
+	value: unknown
+): z.output<S> {
+	const result = schema.safeParse(value);
 
 	if (!result.success) {
 		throw new TokenRequestBodyInvalidError(result.error);

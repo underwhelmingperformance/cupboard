@@ -26,11 +26,11 @@ import {
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
+	InvalidAccessTokenError,
 	LastAuthKeyError,
 	TenantNotConfiguredError,
 	UnauthenticatedError
 } from '../errors.ts';
-import { type RequestOrigin } from '../http/http.ts';
 
 import { type AuthKey, type ServerContext } from './context.ts';
 import {
@@ -42,6 +42,7 @@ export interface AuthorizationServerMetadata {
 	issuer: string;
 	token_endpoint: string;
 	jwks_uri: string;
+	response_types_supported: string[];
 	grant_types_supported: string[];
 	authorization_details_types_supported: string[];
 	token_endpoint_auth_methods_supported: string[];
@@ -159,17 +160,16 @@ export class AuthKeysService {
 			}));
 	}
 
-	// Build RFC 8414 metadata from the assigned tenant URL. An unconfigured tenant
-	// publishes no issuer, and the advertised issuer matches its token `iss` value.
-	authorizationServerMetadata(
-		origin: RequestOrigin
-	): AuthorizationServerMetadata {
-		const base = `${origin}/t/${this.context.requireTenant()}`;
+	// Build metadata from the stored issuer so an alias advertises the same
+	// identity as the tokens this tenant signs.
+	authorizationServerMetadata(): AuthorizationServerMetadata {
+		const base = this.authIssuer();
 
 		return {
 			issuer: base,
 			token_endpoint: `${base}/token`,
 			jwks_uri: `${base}/.well-known/jwks.json`,
+			response_types_supported: [],
 			grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 			authorization_details_types_supported: [
 				'cupboard_cache',
@@ -367,7 +367,7 @@ export class AuthKeysService {
 				new Date()
 			);
 		} catch {
-			throw new UnauthenticatedError();
+			throw new InvalidAccessTokenError();
 		}
 	}
 }
