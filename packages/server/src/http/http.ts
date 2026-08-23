@@ -10,6 +10,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type { PushId, UploadId } from '@cupboard/protocol/upload';
+import { isWeakEtagMatch, parseHttpDate } from '@cupboard/shared/http-fields';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -204,36 +205,21 @@ export function isNotModified(request: Request, headers: Headers): boolean {
 		return false;
 	}
 
-	return Date.parse(ifModifiedSince) >= Date.parse(lastModified);
+	const parsedIfModifiedSince = parseHttpDate(ifModifiedSince);
+	const parsedLastModified = parseHttpDate(lastModified);
+
+	return (
+		parsedIfModifiedSince !== undefined &&
+		parsedLastModified !== undefined &&
+		parsedIfModifiedSince >= parsedLastModified
+	);
 }
 
 function isIfNoneMatchSatisfied(
 	ifNoneMatch: string,
 	etag: string | null
 ): boolean {
-	const candidates = ifNoneMatch.split(',').map((value) => value.trim());
-
-	// `*` matches whenever a representation exists, which it always does where
-	// this is evaluated.
-	if (candidates.includes('*')) {
-		return true;
-	}
-
-	if (etag === null) {
-		return false;
-	}
-
-	// If-None-Match uses weak comparison: a `W/` prefix on either side is
-	// ignored, only the opaque tag is compared.
-	const target = withoutWeakPrefix(etag);
-
-	return candidates.some(
-		(candidate) => withoutWeakPrefix(candidate) === target
-	);
-}
-
-function withoutWeakPrefix(etag: string): string {
-	return etag.startsWith('W/') ? etag.slice(2) : etag;
+	return isWeakEtagMatch(ifNoneMatch, etag);
 }
 
 export function notFoundResponse(): Response {
