@@ -224,6 +224,100 @@ export async function readResponseJson(
 ): Promise<unknown> {
 	return JSON.parse(await readResponseText(response, options));
 }
+
+function responseWithBoundedBody(
+	response: Response,
+	options: BoundedResponseBodyOptions
+): Response {
+	if (response.body === null) {
+		return response;
+	}
+
+	const source = response.body.getReader();
+	let observedBytes = 0;
+	let isAborted = false;
+	let abortListener: (() => void) | undefined;
+	const removeAbortListener = (): void => {
+		if (abortListener === undefined) {
+			return;
+		}
+
+		options.signal?.removeEventListener('abort', abortListener);
+		abortListener = undefined;
+	};
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			if (options.signal === undefined) {
+				return;
+			}
+
+			abortListener = (): void => {
+				isAborted = true;
+				removeAbortListener();
+				controller.error(options.signal?.reason);
+				void bestEffort(() => source.cancel(options.signal?.reason));
+			};
+
+			if (options.signal.aborted) {
+				abortListener();
+				return;
+			}
+
+			options.signal.addEventListener('abort', abortListener, { once: true });
+		},
+		async pull(controller) {
+			try {
+				const chunk = await source.read();
+
+				if (isAborted) {
+					return;
+				}
+
+				if (chunk.done) {
+					removeAbortListener();
+					controller.close();
+					return;
+				}
+
+				observedBytes += chunk.value.byteLength;
+
+				if (observedBytes > options.maximumBytes) {
+					throw new RemoteBodyTooLargeError(
+						options.description,
+						options.maximumBytes,
+						observedBytes
+					);
+				}
+
+				controller.enqueue(chunk.value);
+			} catch (error) {
+				removeAbortListener();
+
+				if (isAborted) {
+					return;
+				}
+
+				await bestEffort(() => source.cancel(error));
+				controller.error(error);
+			}
+		},
+		cancel(reason) {
+			removeAbortListener();
+
+			return source.cancel(reason);
+		}
+	});
+	const bounded = new Response(body, response);
+
+	Object.defineProperties(bounded, {
+		redirected: { value: response.redirected },
+		type: { value: response.type },
+		url: { value: response.url }
+	});
+
+	return bounded;
+}
+
 /**
  * Reads a response within a byte limit and returns a response backed by those
  * bytes. Use this for clients that catch errors from `text()` or `json()`.
@@ -272,6 +366,32 @@ function combinedSignal(
 	}
 
 	return AbortSignal.any([caller, request]);
+}
+
+/**
+ * Wraps a fetch implementation so every response body is bounded while it is
+ * consumed. Request bodies and successful response streams remain streaming.
+ */
+export function fetchWithBoundedResponseBodies(
+	fetcher: typeof fetch,
+	options: BoundedFetchResponseOptions
+): typeof fetch {
+	return async (input, init) => {
+		const signal = combinedSignal(options.signal, signalFrom(input, init));
+		const response = await fetcher(input, {
+			...init,
+			...(signal !== undefined && { signal })
+		});
+		const maximumBytes = response.ok
+			? options.successMaximumBytes
+			: options.errorMaximumBytes;
+
+		return responseWithBoundedBody(response, {
+			description: options.description,
+			maximumBytes,
+			...(signal !== undefined && { signal })
+		});
+	};
 }
 
 /**

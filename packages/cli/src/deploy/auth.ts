@@ -4,6 +4,7 @@ import type {
 	AuthConfigStorage,
 	UserAuthConfig
 } from '@cloudflare/workers-auth';
+import { fetchWithBoundedResponseBodies } from '@cupboard/shared/response-body';
 import Cloudflare from 'cloudflare';
 
 import { CliError } from '../errors.ts';
@@ -50,6 +51,7 @@ export interface CloudflareCredential {
  * is testable without real files, endpoints, or a browser.
  */
 export interface CredentialChain {
+	readonly signal?: AbortSignal;
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
 	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
@@ -84,6 +86,7 @@ export function defaultCredentialChain(
 	options: CredentialChainOptions
 ): CredentialChain {
 	return {
+		signal: options.signal,
 		env: process.env,
 		readGrant: readCachedGrant,
 		writeGrant: writeCachedGrant,
@@ -271,6 +274,39 @@ export async function resolveCredential(
 // request it authorises may land after the cut-off.
 const idTokenFreshnessMarginMs = 5 * 60 * 1000;
 
+const maximumCloudflareErrorBytes = 64 * 1024;
+const maximumCloudflareResponseBytes = 16 * 1024 * 1024;
+
+interface CloudflareResponseLimits {
+	readonly errorMaximumBytes: number;
+	readonly successMaximumBytes: number;
+}
+
+const cloudflareResponseLimits: CloudflareResponseLimits = {
+	errorMaximumBytes: maximumCloudflareErrorBytes,
+	successMaximumBytes: maximumCloudflareResponseBytes
+};
+
+/**
+Creates the Cloudflare SDK client with retries disabled and bounded responses.
+*/
+export function createCloudflareClient(
+	apiToken: string,
+	fetcher: typeof fetch = fetch,
+	limits: CloudflareResponseLimits = cloudflareResponseLimits,
+	signal?: AbortSignal
+): Cloudflare {
+	return new Cloudflare({
+		apiToken,
+		fetch: fetchWithBoundedResponseBodies(fetcher, {
+			description: 'Cloudflare API response',
+			...limits,
+			signal
+		}),
+		maxRetries: 0
+	});
+}
+
 /**
  * An id_token fit to present as a subject token right now: the cached one
  * while it has time left, otherwise one reissued by refreshing the grant. A
@@ -350,10 +386,12 @@ export async function resolveCloudflare(
 	chain: CredentialChain
 ): Promise<ResolvedAccount> {
 	const credential = await resolveCredential(chain);
-	const client = new Cloudflare({
-		apiToken: credential.token,
-		maxRetries: 0
-	});
+	const client = createCloudflareClient(
+		credential.token,
+		fetch,
+		cloudflareResponseLimits,
+		chain.signal
+	);
 
 	const fromEnv = accountOption ?? chain.env.CLOUDFLARE_ACCOUNT_ID;
 

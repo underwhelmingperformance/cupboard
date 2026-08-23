@@ -1,8 +1,10 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import type { CredentialChain } from './auth.ts';
 import {
+	createCloudflareClient,
 	defaultCredentialChain,
 	freshIdToken,
 	resolveCloudflare,
@@ -479,5 +481,75 @@ describe('resolveCloudflare', () => {
 		);
 
 		expect(resolved.client.maxRetries).toBe(0);
+	});
+
+	it.each([
+		{
+			name: 'success',
+			status: StatusCodes.OK,
+			body: '{"result":"abcdef"}',
+			expected:
+				'Cloudflare API response exceeded the 8-byte limit after receiving 19 bytes'
+		},
+		{
+			name: 'error',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			body: '{"error":"abcdef"}',
+			expected:
+				'Cloudflare API response exceeded the 4-byte limit after receiving 18 bytes'
+		}
+	])(
+		'bounds an oversized SDK $name response',
+		async ({ status, body, expected }) => {
+			const client = createCloudflareClient(
+				'token',
+				() =>
+					Promise.resolve(
+						new Response(body, {
+							status,
+							headers: { 'content-type': 'application/json' }
+						})
+					),
+				{ errorMaximumBytes: 4, successMaximumBytes: 8 }
+			);
+
+			await expect(client.get('/test')).rejects.toThrow(expected);
+		}
+	);
+
+	it('cancels an SDK request when the deploy signal aborts', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop the deploy');
+		let observedSignal: AbortSignal | null | undefined;
+		const fetcher: typeof fetch = (_input, init) => {
+			observedSignal = init?.signal;
+
+			return new Promise((_resolve, reject) => {
+				if (init?.signal?.aborted === true) {
+					reject(reason);
+					return;
+				}
+
+				init?.signal?.addEventListener(
+					'abort',
+					() => {
+						reject(reason);
+					},
+					{ once: true }
+				);
+			});
+		};
+		const client = createCloudflareClient(
+			'token',
+			fetcher,
+			{ errorMaximumBytes: 4, successMaximumBytes: 8 },
+			controller.signal
+		);
+		const request = client.get('/test');
+
+		controller.abort(reason);
+
+		await expect(request).rejects.toThrow();
+		expect(observedSignal?.aborted).toBe(true);
 	});
 });
