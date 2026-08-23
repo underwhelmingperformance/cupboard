@@ -6,6 +6,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 
+import { throwIfAborted } from '../abort.ts';
 import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
@@ -13,7 +14,11 @@ import {
 	jwtExpiryMs,
 	refreshCloudflareGrant
 } from '../deploy/cloudflare-oauth.ts';
-import { readCachedGrant, writeCachedGrant } from '../deploy/grant-store.ts';
+import {
+	readCachedGrant,
+	withCachedGrantLock,
+	writeCachedGrant
+} from '../deploy/grant-store.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 
 import {
@@ -25,6 +30,7 @@ import {
 	type CachedSession,
 	readCachedSession,
 	sessionFromTokenResponse,
+	withCachedSessionLock,
 	writeCachedSession
 } from './token-store.ts';
 
@@ -38,7 +44,7 @@ interface SessionTokenClient {
 
 type GrantChain = Pick<
 	CredentialChain,
-	'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
+	'readGrant' | 'writeGrant' | 'withGrantLock' | 'refreshGrant' | 'now'
 >;
 
 export interface OwnerSessionDependencies {
@@ -47,8 +53,14 @@ export interface OwnerSessionDependencies {
 	readonly readSession?: (target: URL) => Promise<CachedSession | undefined>;
 	readonly writeSession?: (
 		session: CachedSession,
-		target: URL
+		target: URL,
+		signal?: AbortSignal
 	) => Promise<void>;
+	readonly withSessionLock?: <T>(
+		target: URL,
+		action: (signal?: AbortSignal) => Promise<T>,
+		signal?: AbortSignal
+	) => Promise<T>;
 	readonly now?: () => number;
 	readonly signal?: AbortSignal;
 }
@@ -70,45 +82,104 @@ export function cachedOwnerProvider(
 	target: URL,
 	dependencies: OwnerSessionDependencies = {}
 ): TokenProvider {
-	const client =
-		dependencies.client ??
-		CupboardClient.fromUrl(target, { signal: dependencies.signal });
 	const readSession = dependencies.readSession ?? readCachedSession;
 	const writeSession = dependencies.writeSession ?? writeCachedSession;
+	const withSessionLock = dependencies.withSessionLock ?? withCachedSessionLock;
 	const grantChain = dependencies.grantChain ?? {
 		readGrant: readCachedGrant,
 		writeGrant: writeCachedGrant,
-		refreshGrant: (previous) => refreshCloudflareGrant(previous),
+		withGrantLock: withCachedGrantLock,
+		refreshGrant: (previous, signal = dependencies.signal) =>
+			refreshCloudflareGrant(previous, undefined, Date.now, signal),
 		now: Date.now
 	};
 	const now = dependencies.now ?? Date.now;
 
-	const renew = async (): Promise<string> => {
-		const session = await readSession(target);
-		const rotated =
-			session?.refreshToken === undefined
-				? undefined
-				: await rotateSession(client, session.refreshToken);
-		const renewed =
-			rotated ?? (await establishSession(client, grantChain, now));
+	const renew = (observed: CachedSession | undefined): Promise<string> =>
+		withSessionLock(
+			target,
+			async (lockSignal) => {
+				const signal = lockSignal ?? dependencies.signal;
+				const client =
+					dependencies.client ?? CupboardClient.fromUrl(target, { signal });
+				const session = await readSession(target);
+				throwIfAborted(signal);
 
-		await writeSession(renewed, target);
+				if (
+					session !== undefined &&
+					!isSameSession(session, observed) &&
+					!isExpired(session.accessToken, now())
+				) {
+					return session.accessToken;
+				}
 
-		return renewed.accessToken;
+				const rotated =
+					session?.refreshToken === undefined
+						? undefined
+						: await rotateSession(client, session.refreshToken);
+				const renewed =
+					rotated ?? (await establishSession(client, grantChain, now, signal));
+
+				throwIfAborted(signal);
+				await writeSession(renewed, target, signal);
+				throwIfAborted(signal);
+
+				return renewed.accessToken;
+			},
+			dependencies.signal
+		);
+	let activeRenewal: Promise<string> | undefined;
+	const renewOnce = async (
+		observed: CachedSession | undefined
+	): Promise<string> => {
+		if (activeRenewal !== undefined) {
+			return activeRenewal;
+		}
+
+		const pending = renew(observed);
+		activeRenewal = pending;
+
+		try {
+			return await pending;
+		} finally {
+			if (activeRenewal === pending) {
+				activeRenewal = undefined;
+			}
+		}
 	};
 
 	return {
 		async get(): Promise<string> {
 			const session = await readSession(target);
+			throwIfAborted(dependencies.signal);
 
 			if (session !== undefined && !isExpired(session.accessToken, now())) {
 				return session.accessToken;
 			}
 
-			return renew();
+			return renewOnce(session);
 		},
-		refresh: renew
+		async refresh(): Promise<string> {
+			const session = await readSession(target);
+			throwIfAborted(dependencies.signal);
+
+			return renewOnce(session);
+		}
 	};
+}
+
+function isSameSession(
+	left: CachedSession,
+	right: CachedSession | undefined
+): boolean {
+	if (right === undefined) {
+		return false;
+	}
+
+	return (
+		left.accessToken === right.accessToken &&
+		left.refreshToken === right.refreshToken
+	);
 }
 
 function isExpired(accessToken: string, nowMs: number): boolean {
@@ -142,9 +213,10 @@ async function rotateSession(
 async function establishSession(
 	client: SessionTokenClient,
 	chain: GrantChain,
-	now: () => number
+	now: () => number,
+	signal?: AbortSignal
 ): Promise<CachedSession> {
-	const idToken = await freshIdToken(chain);
+	const idToken = await freshIdToken(chain, signal);
 	const expiry = idToken === undefined ? undefined : jwtExpiryMs(idToken);
 
 	if (idToken === undefined || (expiry !== undefined && expiry <= now())) {
@@ -240,7 +312,9 @@ export function authenticateForPush(
 		});
 	}
 
-	return Promise.resolve(cachedOwnerProvider(client.baseUrl));
+	return Promise.resolve(
+		cachedOwnerProvider(client.baseUrl, { signal: client.signal })
+	);
 }
 
 // A CI exchange issues an access token with no refresh token, so a token this

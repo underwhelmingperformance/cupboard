@@ -44,7 +44,11 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
-import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
+import {
+	readCachedGrant,
+	withCachedGrantLock,
+	writeCachedGrant
+} from './grant-store.ts';
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
@@ -1419,6 +1423,7 @@ async function deployFlow(
 				freshIdToken({
 					readGrant: readCachedGrant,
 					writeGrant: writeCachedGrant,
+					withGrantLock: withCachedGrantLock,
 					refreshGrant: (previous) =>
 						refreshCloudflareGrant(
 							previous,
@@ -1426,7 +1431,8 @@ async function deployFlow(
 							Date.now,
 							runtimeOptions.signal
 						),
-					now: Date.now
+					now: Date.now,
+					signal: runtimeOptions.signal
 				})
 		})
 	});

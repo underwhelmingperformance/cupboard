@@ -11,6 +11,25 @@ function grantFile(configHome: string): string {
 	return path.join(configHome, 'cupboard', 'cloudflare-grant.json');
 }
 
+function abortOnSecondCheck(reason: Error): AbortSignal {
+	const controller = new AbortController();
+	let checks = 0;
+
+	return new Proxy(controller.signal, {
+		get(target, property): unknown {
+			if (property === 'aborted') {
+				checks += 1;
+
+				if (checks === 2) {
+					controller.abort(reason);
+				}
+			}
+
+			return Reflect.get(target, property, target);
+		}
+	});
+}
+
 describe('grant store', () => {
 	testWithConfigHome(
 		'round-trips a grant, readable only by the owner',
@@ -47,6 +66,34 @@ describe('grant store', () => {
 			await writeCachedGrant(grant);
 
 			expect(await readCachedGrant()).toStrictEqual(grant);
+		}
+	);
+
+	testWithConfigHome(
+		'does not let an aborted late grant commit replace its successor',
+		async () => {
+			const loser = {
+				accessToken: 'loser-access',
+				refreshToken: 'loser-refresh',
+				expiresAt: 1,
+				subject: 'cf-user',
+				idToken: 'loser-id'
+			};
+			const winner = {
+				accessToken: 'winner-access',
+				refreshToken: 'winner-refresh',
+				expiresAt: 2,
+				subject: 'cf-user',
+				idToken: 'winner-id'
+			};
+			const reason = new Error('grant lock was lost before commit');
+
+			await expect(
+				writeCachedGrant(loser, abortOnSecondCheck(reason))
+			).rejects.toBe(reason);
+			await writeCachedGrant(winner);
+
+			expect(await readCachedGrant()).toStrictEqual(winner);
 		}
 	);
 

@@ -1,14 +1,22 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	ParsedTokenResponse,
 	TokenResponse
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { abortReason } from '../abort.ts';
 import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
 import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
+import {
+	readCachedGrant,
+	withCachedGrantLock,
+	writeCachedGrant
+} from '../deploy/grant-store.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
@@ -217,6 +225,57 @@ describe('authenticateForPush', () => {
 const farFuture = 4_000_000_000;
 const past = 1_000_000_000;
 
+type Outcome<T> =
+	| { readonly kind: 'resolved'; readonly value: T }
+	| { readonly kind: 'rejected'; readonly error: unknown };
+
+async function outcomeOf<T>(promise: Promise<T>): Promise<Outcome<T>> {
+	try {
+		return { kind: 'resolved', value: await promise };
+	} catch (error) {
+		return { kind: 'rejected', error };
+	}
+}
+
+async function pendingAfter(ms: number): Promise<{ readonly kind: 'pending' }> {
+	await delay(ms);
+
+	return { kind: 'pending' };
+}
+
+function heldResponseFetch(): {
+	readonly fetcher: typeof fetch;
+	readonly started: Promise<AbortSignal | undefined>;
+	readonly resolve: (response: Response) => void;
+} {
+	const started = Promise.withResolvers<AbortSignal | undefined>();
+	const response = Promise.withResolvers<Response>();
+	const fetcher = (
+		_input: string | URL | Request,
+		init?: RequestInit
+	): Promise<Response> => {
+		const signal = init?.signal ?? undefined;
+		started.resolve(signal);
+		signal?.addEventListener(
+			'abort',
+			() => {
+				response.reject(abortReason(signal));
+			},
+			{ once: true }
+		);
+
+		return response.promise;
+	};
+
+	return {
+		fetcher,
+		started: started.promise,
+		resolve(value) {
+			response.resolve(value);
+		}
+	};
+}
+
 function accessToken(name: string, expSeconds: number): string {
 	const issuer = canonicalHref(target);
 
@@ -243,6 +302,10 @@ interface FakeSessionClient {
 interface FakeGrantChain {
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
 	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
+	readonly withGrantLock: <T>(
+		action: (signal?: AbortSignal) => Promise<T>,
+		signal?: AbortSignal
+	) => Promise<T>;
 	readonly refreshGrant: (
 		previous: CloudflareGrant
 	) => Promise<CloudflareGrant | undefined>;
@@ -288,6 +351,7 @@ function sessionHarness(initial?: CachedSession): {
 			grantChain: {
 				readGrant: () => Promise.resolve(stored.grant),
 				writeGrant: () => Promise.resolve(),
+				withGrantLock: (action, signal) => action(signal),
 				refreshGrant: () => Promise.resolve(stored.grant),
 				now: () => past * 1000
 			},
@@ -298,6 +362,7 @@ function sessionHarness(initial?: CachedSession): {
 
 				return Promise.resolve();
 			},
+			withSessionLock: (_target, action) => action(),
 			now: () => past * 1000
 		},
 		clientCalls: () => clientCalls,
@@ -362,6 +427,359 @@ describe('cachedOwnerProvider', () => {
 				{
 					accessToken: accessToken('rotated', farFuture),
 					refreshToken: 'refresh-rotated'
+				}
+			]
+		});
+	});
+
+	it('shares one refresh rotation between concurrent callers', async () => {
+		const { promise, resolve } = Promise.withResolvers<ParsedTokenResponse>();
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+		const rotatedWith: string[] = [];
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: (refreshToken) => {
+					rotatedWith.push(refreshToken);
+
+					return promise;
+				}
+			}
+		});
+
+		const first = provider.get();
+		const second = provider.get();
+		await Promise.resolve();
+		resolve(tokenResponse('rotated'));
+
+		expect({
+			tokens: await Promise.all([first, second]),
+			rotatedWith,
+			sessions: sessions()
+		}).toStrictEqual({
+			tokens: [
+				accessToken('rotated', farFuture),
+				accessToken('rotated', farFuture)
+			],
+			rotatedWith: ['refresh-stale'],
+			sessions: [
+				{
+					accessToken: accessToken('rotated', farFuture),
+					refreshToken: 'refresh-rotated'
+				}
+			]
+		});
+	});
+
+	it('serialises rotation between independent provider instances', async () => {
+		const rotation = Promise.withResolvers<ParsedTokenResponse>();
+		const bothEntered = Promise.withResolvers<undefined>();
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+		const rotatedWith: string[] = [];
+		let entrants = 0;
+		let tail: Promise<undefined> = Promise.resolve(undefined);
+		const withSessionLock = async <T>(
+			_unusedTarget: URL,
+			action: () => Promise<T>
+		): Promise<T> => {
+			entrants += 1;
+
+			if (entrants === 2) {
+				bothEntered.resolve(undefined);
+			}
+
+			const preceding = tail;
+			const next = Promise.withResolvers<undefined>();
+			tail = next.promise;
+			await preceding;
+
+			try {
+				return await action();
+			} finally {
+				next.resolve(undefined);
+			}
+		};
+		const dependencies: OwnerSessionDependencies = {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: (refreshToken) => {
+					rotatedWith.push(refreshToken);
+
+					return rotation.promise;
+				}
+			},
+			withSessionLock
+		};
+		const firstProvider = cachedOwnerProvider(target, dependencies);
+		const secondProvider = cachedOwnerProvider(target, dependencies);
+
+		const first = firstProvider.get();
+		const second = secondProvider.get();
+		await bothEntered.promise;
+		rotation.resolve(tokenResponse('rotated'));
+
+		expect({
+			tokens: await Promise.all([first, second]),
+			entrants,
+			rotatedWith,
+			sessions: sessions()
+		}).toStrictEqual({
+			tokens: [
+				accessToken('rotated', farFuture),
+				accessToken('rotated', farFuture)
+			],
+			entrants: 2,
+			rotatedWith: ['refresh-stale'],
+			sessions: [
+				{
+					accessToken: accessToken('rotated', farFuture),
+					refreshToken: 'refresh-rotated'
+				}
+			]
+		});
+	});
+
+	testWithConfigHome(
+		'serialises one Cloudflare grant refresh across different targets',
+		async () => {
+			const otherTarget = new URL('https://cupboard.test/t/other');
+			const staleGrant = cloudflareGrant(
+				jwt({ sub: 'cf-user', exp: past - 60 })
+			);
+			const renewedGrant = cloudflareGrant(
+				jwt({ sub: 'cf-user', exp: farFuture })
+			);
+			const refresh = Promise.withResolvers<CloudflareGrant | undefined>();
+			const refreshedWith: CloudflareGrant[] = [];
+			const sessions = new Map<string, CachedSession>();
+			const { harness } = sessionHarness();
+			const grantChain = {
+				readGrant: readCachedGrant,
+				writeGrant: writeCachedGrant,
+				withGrantLock: withCachedGrantLock,
+				refreshGrant: (previous: CloudflareGrant) => {
+					refreshedWith.push(previous);
+
+					return refresh.promise;
+				},
+				now: harness.now
+			};
+			const dependencies: OwnerSessionDependencies = {
+				client: {
+					tokenRefresh: harness.client.tokenRefresh,
+					tokenExchange: () => Promise.resolve(tokenResponse('exchanged'))
+				},
+				grantChain,
+				readSession: (sessionTarget) =>
+					Promise.resolve(sessions.get(canonicalHref(sessionTarget))),
+				writeSession: (session, sessionTarget) => {
+					sessions.set(canonicalHref(sessionTarget), session);
+
+					return Promise.resolve();
+				},
+				now: harness.now
+			};
+
+			await writeCachedGrant(staleGrant);
+			const first = cachedOwnerProvider(target, dependencies).get();
+			const second = cachedOwnerProvider(otherTarget, dependencies).get();
+			await vi.waitFor(() => {
+				expect(refreshedWith).toStrictEqual([staleGrant]);
+			});
+			refresh.resolve(renewedGrant);
+
+			expect({
+				tokens: await Promise.all([first, second]),
+				refreshedWith,
+				grant: await readCachedGrant()
+			}).toStrictEqual({
+				tokens: [
+					accessToken('exchanged', farFuture),
+					accessToken('exchanged', farFuture)
+				],
+				refreshedWith: [staleGrant],
+				grant: renewedGrant
+			});
+		}
+	);
+
+	it("does not return another process's session after the caller aborts", async () => {
+		const enteredLock = Promise.withResolvers<undefined>();
+		const releaseLock = Promise.withResolvers<undefined>();
+		const stale = {
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		};
+		const winner = {
+			accessToken: accessToken('winner', farFuture),
+			refreshToken: 'refresh-winner'
+		};
+		const { harness } = sessionHarness(stale);
+		const controller = new AbortController();
+		const reason = new Error('stop renewing');
+		let session = stale;
+		let lockSignal: AbortSignal | undefined;
+		const withSessionLock = async <T>(
+			_unusedTarget: URL,
+			action: () => Promise<T>,
+			signal?: AbortSignal
+		): Promise<T> => {
+			lockSignal = signal;
+			enteredLock.resolve(undefined);
+			await releaseLock.promise;
+
+			return action();
+		};
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			readSession: () => Promise.resolve(session),
+			withSessionLock,
+			signal: controller.signal
+		});
+		const renewing = provider.get();
+
+		await enteredLock.promise;
+		session = winner;
+		controller.abort(reason);
+		releaseLock.resolve(undefined);
+
+		await expect(renewing).rejects.toBe(reason);
+		expect(lockSignal).toBe(controller.signal);
+	});
+
+	it('cancels Cupboard session establishment when the lock is compromised', async () => {
+		const exchange = heldResponseFetch();
+		const compromise = new AbortController();
+		const reason = new Error('session lock was compromised');
+		const idToken = jwt({ sub: 'cf-user', exp: farFuture });
+		const { harness } = sessionHarness();
+
+		vi.stubGlobal('fetch', exchange.fetcher);
+
+		const provider = cachedOwnerProvider(target, {
+			grantChain: {
+				...harness.grantChain,
+				readGrant: () => Promise.resolve(cloudflareGrant(idToken))
+			},
+			readSession: harness.readSession,
+			writeSession: harness.writeSession,
+			withSessionLock: (_target, action) => action(compromise.signal),
+			now: harness.now
+		});
+		const renewing = provider.get();
+
+		try {
+			const requestSignal = await exchange.started;
+			compromise.abort(reason);
+
+			const outcome = await Promise.race([
+				outcomeOf(renewing),
+				pendingAfter(50)
+			]);
+
+			expect(outcome).toStrictEqual({ kind: 'rejected', error: reason });
+			expect(requestSignal).toMatchObject({ aborted: true });
+		} finally {
+			exchange.resolve(Response.json(tokenResponse('late')));
+			await outcomeOf(renewing);
+			vi.unstubAllGlobals();
+		}
+	});
+
+	testWithConfigHome(
+		'cancels Cloudflare grant refresh when the caller aborts',
+		async () => {
+			const refresh = heldResponseFetch();
+			const controller = new AbortController();
+			const reason = new Error('stop refreshing the Cloudflare grant');
+			const { harness } = sessionHarness();
+
+			await writeCachedGrant(
+				cloudflareGrant(jwt({ sub: 'cf-user', exp: past - 60 }))
+			);
+			vi.stubGlobal('fetch', refresh.fetcher);
+
+			const provider = cachedOwnerProvider(target, {
+				client: harness.client,
+				readSession: harness.readSession,
+				writeSession: harness.writeSession,
+				withSessionLock: harness.withSessionLock,
+				now: harness.now,
+				signal: controller.signal
+			});
+			const renewing = provider.get();
+
+			try {
+				const requestSignal = await refresh.started;
+				controller.abort(reason);
+
+				const outcome = await Promise.race([
+					outcomeOf(renewing),
+					pendingAfter(50)
+				]);
+
+				expect(outcome).toStrictEqual({ kind: 'rejected', error: reason });
+				expect(requestSignal).toMatchObject({ aborted: true });
+			} finally {
+				refresh.resolve(
+					Response.json({ access_token: 'late', expires_in: 3600 })
+				);
+				await outcomeOf(renewing);
+				vi.unstubAllGlobals();
+			}
+		}
+	);
+
+	it('starts a new rotation after a shared renewal fails', async () => {
+		const failed = Promise.withResolvers<ParsedTokenResponse>();
+		const failure = new Error('refresh transport failed');
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+		let attempts = 0;
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: () => {
+					attempts += 1;
+
+					return attempts === 1
+						? failed.promise
+						: Promise.resolve(tokenResponse('retried'));
+				}
+			}
+		});
+
+		const first = provider.get();
+		const second = provider.get();
+		await Promise.resolve();
+		failed.reject(failure);
+		const failedOutcomes = await Promise.allSettled([first, second]);
+		const retried = await provider.get();
+
+		expect({
+			failed: failedOutcomes.map((outcome) => outcome.status),
+			attempts,
+			retried,
+			sessions: sessions()
+		}).toStrictEqual({
+			failed: ['rejected', 'rejected'],
+			attempts: 2,
+			retried: accessToken('retried', farFuture),
+			sessions: [
+				{
+					accessToken: accessToken('retried', farFuture),
+					refreshToken: 'refresh-retried'
 				}
 			]
 		});

@@ -27,6 +27,25 @@ function tokensDirectory(configHome: string): string {
 	return path.join(configHome, 'cupboard', 'tokens');
 }
 
+function abortOnSecondCheck(reason: Error): AbortSignal {
+	const controller = new AbortController();
+	let checks = 0;
+
+	return new Proxy(controller.signal, {
+		get(target, property): unknown {
+			if (property === 'aborted') {
+				checks += 1;
+
+				if (checks === 2) {
+					controller.abort(reason);
+				}
+			}
+
+			return Reflect.get(target, property, target);
+		}
+	});
+}
+
 async function cachedFileMode(configHome: string): Promise<number> {
 	const directory = tokensDirectory(configHome);
 	const [file] = await readdir(directory);
@@ -61,6 +80,26 @@ describe('session cache', () => {
 			await writeCachedSession(session, tenantTarget);
 
 			expect(await readCachedSession(tenantTarget)).toStrictEqual(session);
+		}
+	);
+
+	testWithConfigHome(
+		'does not let an aborted late session commit replace its successor',
+		async () => {
+			const loser = {
+				accessToken: jwt({ iss: tenant, aud: tenant, name: 'loser' })
+			};
+			const winner = {
+				accessToken: jwt({ iss: tenant, aud: tenant, name: 'winner' })
+			};
+			const reason = new Error('session lock was lost before commit');
+
+			await expect(
+				writeCachedSession(loser, tenantTarget, abortOnSecondCheck(reason))
+			).rejects.toBe(reason);
+			await writeCachedSession(winner, tenantTarget);
+
+			expect(await readCachedSession(tenantTarget)).toStrictEqual(winner);
 		}
 	);
 
