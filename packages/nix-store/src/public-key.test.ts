@@ -46,6 +46,12 @@ describe('NixPublicKey', () => {
 	});
 
 	it.each([
+		'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+		'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh9='
+	])('rejects non-canonical Base64 material in %s', (value) => {
+		expect(() => new NixPublicKey(value)).toThrow(InvalidNixPublicKeyError);
+	});
+	it.each([
 		{ name: 'no separator', value: 'cupboard-1' },
 		{ name: 'an empty name', value: ':cHVibGlj' },
 		{ name: 'empty material', value: 'cupboard-1:' },
