@@ -42,7 +42,11 @@ export function retryingFetcher(
 	replaySafety: ReplaySafety
 ): typeof fetch {
 	return async (input, init) => {
-		const signal = init?.signal ?? undefined;
+		const signal =
+			init?.signal === null
+				? undefined
+				: (init?.signal ??
+					(input instanceof Request ? input.signal : undefined));
 
 		if (replaySafety === 'replay-unsafe') {
 			signal?.throwIfAborted();
