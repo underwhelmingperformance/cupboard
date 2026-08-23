@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import type { InvocationId } from '@cupboard/protocol/build';
+import { withCleanups } from '@cupboard/shared/cleanup';
 
 import { SocketPathTooLongError } from '../errors.ts';
 
@@ -129,6 +130,16 @@ export interface RootLinkDirectory {
 	close(): Promise<void>;
 }
 
+/**
+Cleanup hooks for the root-link owner and its filesystem records.
+*/
+export interface RootLinkDirectoryCleanup {
+	readonly closeOwner?: (close: () => Promise<void>) => Promise<void>;
+	readonly removeDirectory?: (directory: string) => Promise<void>;
+	readonly removeOwnerFile?: (ownerFile: string) => Promise<void>;
+	readonly setOwnerSocketMode?: (socketPath: string) => Promise<void>;
+}
+
 function rootOwnerFile(directory: string): string {
 	return path.join(
 		path.dirname(directory),
@@ -180,6 +191,19 @@ function listen(server: Server, socketPath: string): Promise<void> {
 	});
 }
 
+function closeServer(server: Server): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.close((error) => {
+			if (error === undefined) {
+				resolve();
+				return;
+			}
+
+			reject(error);
+		});
+	});
+}
+
 /**
  * Creates a daemonless run's GC-root directory and records the private socket
  * that identifies its owner. A later invocation removes a directory that has no
@@ -190,12 +214,22 @@ function listen(server: Server, socketPath: string): Promise<void> {
  */
 export async function createRootLinkDirectory(
 	directory: string,
-	ownerSocket: string
+	ownerSocket: string,
+	cleanup: RootLinkDirectoryCleanup = {}
 ): Promise<RootLinkDirectory> {
 	const parent = path.dirname(directory);
+	const removeDirectory = (target: string): Promise<void> =>
+		cleanup.removeDirectory?.(target) ??
+		removeInvocationRuntimeDirectory(target);
+	const removeOwnerFile = (target: string): Promise<void> =>
+		cleanup.removeOwnerFile?.(target) ?? rm(target, { force: true });
 
 	await createRuntimeDirectory(parent);
-	const entries = await readdir(parent, { withFileTypes: true });
+	const directoryEntries = await readdir(parent, { withFileTypes: true });
+	const entries = directoryEntries.toSorted((left, right) =>
+		left.name.localeCompare(right.name)
+	);
+	const staleRecordCleanups: (() => Promise<void>)[] = [];
 
 	for (const entry of entries) {
 		if (!entry.isDirectory()) {
@@ -212,10 +246,10 @@ export async function createRootLinkDirectory(
 			continue;
 		}
 
-		await Promise.all([
-			removeInvocationRuntimeDirectory(candidate),
-			rm(rootOwnerFile(candidate), { force: true })
-		]);
+		staleRecordCleanups.push(
+			() => removeDirectory(candidate),
+			() => removeOwnerFile(rootOwnerFile(candidate))
+		);
 	}
 
 	const directoryNames = new Set(
@@ -249,32 +283,32 @@ export async function createRootLinkDirectory(
 			continue;
 		}
 
-		await rm(ownerFile, { force: true });
+		staleRecordCleanups.push(() => removeOwnerFile(ownerFile));
 	}
+
+	await withCleanups(() => Promise.resolve(), staleRecordCleanups);
 
 	const server = createServer((socket) => {
 		socket.end();
 	});
-
-	await listen(server, ownerSocket);
-	await chmod(ownerSocket, 0o600);
-
 	const ownerFile = rootOwnerFile(directory);
+	const closeOwner = (): Promise<void> =>
+		cleanup.closeOwner?.(() => closeServer(server)) ?? closeServer(server);
+	const removeCurrentDirectory = (): Promise<void> =>
+		removeDirectory(directory);
+	const removeCurrentOwnerFile = (): Promise<void> =>
+		removeOwnerFile(ownerFile);
 
 	try {
+		await listen(server, ownerSocket);
+		await (cleanup.setOwnerSocketMode?.(ownerSocket) ??
+			chmod(ownerSocket, 0o600));
 		await symlink(ownerSocket, ownerFile);
 		await createRuntimeDirectory(directory);
 	} catch (error) {
-		await new Promise<void>((resolve) => {
-			server.close(() => {
-				resolve();
-			});
-		});
-		await Promise.all([
-			removeInvocationRuntimeDirectory(directory),
-			rm(ownerFile, { force: true })
-		]);
-		throw error;
+		return withCleanups(() => {
+			throw error;
+		}, [closeOwner, removeCurrentDirectory, removeCurrentOwnerFile]);
 	}
 
 	let isClosed = false;
@@ -287,23 +321,10 @@ export async function createRootLinkDirectory(
 			}
 
 			isClosed = true;
-			try {
-				await new Promise<void>((resolve, reject) => {
-					server.close((error) => {
-						if (error === undefined) {
-							resolve();
-							return;
-						}
-
-						reject(error);
-					});
-				});
-			} finally {
-				await Promise.all([
-					removeInvocationRuntimeDirectory(directory),
-					rm(ownerFile, { force: true })
-				]);
-			}
+			await withCleanups(closeOwner, [
+				removeCurrentDirectory,
+				removeCurrentOwnerFile
+			]);
 		}
 	};
 }

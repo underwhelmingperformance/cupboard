@@ -359,6 +359,8 @@ interface FlowConfig {
 	readonly uploadFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
+	readonly sessionOpenFailure?: Error;
+	readonly runtimeRemovalFailure?: Error;
 	readonly options?: Partial<BuildPushRunOptions>;
 }
 
@@ -510,6 +512,8 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	let attemptIdsIssued = 0;
 	let batchSessions = 0;
 	let protectionCalls = 0;
+	const sessionOpenFailure = config.sessionOpenFailure;
+	const runtimeRemovalFailure = config.runtimeRemovalFailure;
 	const isStreamed = config.preflightFailure === undefined;
 	const environment =
 		config.constructed === undefined
@@ -530,6 +534,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 
 	const client: PushClient = {
+		...(sessionOpenFailure !== undefined && {
+			openCommitSession: () => Promise.reject(sessionOpenFailure)
+		}),
 		negotiate: (body) => {
 			negotiatedPaths.push(
 				body.paths.map((candidate) =>
@@ -687,6 +694,12 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				}
 			};
 		},
+		...(runtimeRemovalFailure !== undefined && {
+			removeRuntimeDirectory: (directory: string) =>
+				path.basename(directory) === 'build'
+					? rm(directory, { recursive: true, force: true })
+					: Promise.reject(runtimeRemovalFailure)
+		}),
 		settledTargets: (targets) => {
 			settledTargets = targets;
 		}
@@ -1289,6 +1302,18 @@ describe('runBuildPush', () => {
 		});
 	});
 
+	it('preserves a reconciled publication failure when directory removal fails', async () => {
+		const run = await runFlow({
+			constructed: { succeedOn: 1 },
+			declaredOutputs: [pathA],
+			valid: [pathA],
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
+			runtimeRemovalFailure: new Error('runtime removal failed'),
+			unwritableReceipt: true
+		});
+
+		expect(run.error).toBeInstanceOf(BuildPublicationFailedError);
+	});
 	it('publishes nothing and exits with its own status when the build fails', async () => {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),
@@ -1480,6 +1505,19 @@ describe('runBuildPush', () => {
 				failed: [],
 				collected: []
 			}
+		});
+	});
+
+	it('removes the runtime directory when opening the commit session fails', async () => {
+		const failure = new Error('commit session failed');
+		const run = await runFlow({ sessionOpenFailure: failure });
+
+		expect({
+			error: run.error,
+			runtimeDirectoryExists: existsSync(run.preflight.runtimePlan.directory)
+		}).toStrictEqual({
+			error: failure,
+			runtimeDirectoryExists: false
 		});
 	});
 

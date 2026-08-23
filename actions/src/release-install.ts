@@ -28,7 +28,8 @@ import type { Reporter } from '@cupboard/reporter';
 import {
 	bestEffort,
 	discardResponseBody,
-	withCleanup
+	withCleanup,
+	withCleanups
 } from '@cupboard/shared/cleanup';
 import {
 	createOctokitClient,
@@ -343,6 +344,9 @@ type RenameFile = typeof rename;
 
 interface PublishReleaseDependencies {
 	readonly rename?: RenameFile;
+	readonly linkPath?: ReleaseLinkPath;
+	readonly openFile?: ReleaseOpenFile;
+	readonly removePath?: ReleaseRemovePath;
 	readonly runCommand?: ReleaseCommandRunner;
 	readonly processCommandRunner?: ReleaseCommandRunner;
 	readonly processPlatform?: NodeJS.Platform;
@@ -357,6 +361,28 @@ interface PublishReleaseDependencies {
 	readonly archiveSha256?: string;
 }
 
+type ReleaseFileHandle = Pick<
+	Awaited<ReturnType<typeof open>>,
+	'writeFile' | 'sync' | 'close'
+>;
+type ReleaseOpenFile = (
+	filePath: string,
+	flags: string | number,
+	mode?: number
+) => Promise<ReleaseFileHandle>;
+type ReleaseRemovePath = (
+	filePath: string,
+	options?: Parameters<typeof rm>[1]
+) => Promise<void>;
+type ReleaseLinkPath = (existingPath: string, newPath: string) => Promise<void>;
+
+interface ReleaseInstallationIo {
+	readonly linkPath: ReleaseLinkPath;
+	readonly openFile: ReleaseOpenFile;
+	readonly removePath: ReleaseRemovePath;
+	readonly syncDirectory: (directoryPath: string) => Promise<void>;
+}
+
 export type ReleasePublicationStage =
 	'contended' | 'locked' | 'prepared' | 'activated';
 
@@ -365,6 +391,19 @@ export interface DownloadAssetDependencies {
 	readonly githubApiOrigin?: string;
 	readonly signal?: AbortSignal;
 	readonly maximumBytes?: number;
+	readonly openDestination?: (
+		path: string,
+		flags: 'wx',
+		mode: number
+	) => Promise<{
+		close(): Promise<void>;
+		write(
+			buffer: Uint8Array,
+			offset: number,
+			length: number
+		): Promise<{ readonly bytesWritten: number }>;
+	}>;
+	readonly removeDestination?: (path: string) => Promise<void>;
 }
 
 export interface DownloadedAsset {
@@ -582,7 +621,15 @@ export async function publishReleaseArchive(
 
 	const move = dependencies.rename ?? rename;
 	const runCommand = dependencies.runCommand ?? defaultReleaseCommandRunner;
-	const syncInstallationDirectory = dependencies.syncDirectory ?? syncDirectory;
+	const openFile = dependencies.openFile ?? open;
+	const io: ReleaseInstallationIo = {
+		linkPath: dependencies.linkPath ?? link,
+		openFile,
+		removePath: dependencies.removePath ?? rm,
+		syncDirectory:
+			dependencies.syncDirectory ??
+			((directoryPath) => syncDirectory(directoryPath, openFile))
+	};
 	const paths = releaseInstallationPaths(installDirectory);
 	const archiveSha256 =
 		dependencies.archiveSha256 ??
@@ -593,6 +640,7 @@ export async function publishReleaseArchive(
 	await mkdir(paths.generationsDirectory, { recursive: true });
 	const releaseLock = await acquireReleaseInstallationLock(
 		paths,
+		io,
 		dependencies.signal,
 		() => dependencies.publicationHook?.('contended'),
 		dependencies.processIdentity ??
@@ -607,11 +655,11 @@ export async function publishReleaseArchive(
 	return withCleanup(
 		async () => {
 			await releaseLock.assertOwned();
-			await cleanupOrphanReleaseReapers(paths);
+			await cleanupOrphanReleaseReapers(paths, io);
 			await releaseLock.assertOwned();
-			await recoverReleaseInstallation(paths, move);
+			await recoverReleaseInstallation(paths, move, io);
 			await releaseLock.assertOwned();
-			await cleanupIncompleteReleaseGenerations(paths);
+			await cleanupIncompleteReleaseGenerations(paths, io);
 			await releaseLock.assertOwned();
 			await dependencies.publicationHook?.('locked');
 
@@ -625,7 +673,8 @@ export async function publishReleaseArchive(
 				generationDirectory,
 				expectedVersion,
 				runCommand,
-				dependencies.signal
+				dependencies.signal,
+				io
 			);
 
 			await withCleanup(
@@ -645,7 +694,10 @@ export async function publishReleaseArchive(
 								throw error;
 							}
 
-							await rm(generationDirectory, { recursive: true, force: true });
+							await io.removePath(generationDirectory, {
+								recursive: true,
+								force: true
+							});
 						}
 					}
 
@@ -654,13 +706,13 @@ export async function publishReleaseArchive(
 						await installReleaseGenerationCandidate(
 							stagingDirectory,
 							generationDirectory,
-							syncInstallationDirectory
+							io
 						);
 					}
 
 					if (activeGeneration === path.resolve(generationDirectory)) {
-						await ensureReleaseEntryLinks(paths, move);
-						await syncInstallationDirectory(paths.installDirectory);
+						await ensureReleaseEntryLinks(paths, move, io);
+						await io.syncDirectory(paths.installDirectory);
 						return;
 					}
 
@@ -669,11 +721,11 @@ export async function publishReleaseArchive(
 						generationDirectory,
 						move,
 						dependencies,
-						syncInstallationDirectory,
+						io,
 						releaseLock
 					);
 				},
-				() => rm(stagingDirectory, { recursive: true, force: true })
+				() => io.removePath(stagingDirectory, { recursive: true, force: true })
 			);
 		},
 		() => releaseLock.release()
@@ -825,7 +877,8 @@ async function prepareReleaseGenerationCandidate(
 	generationDirectory: string,
 	expectedVersion: string,
 	runCommand: ReleaseCommandRunner,
-	signal?: AbortSignal
+	signal: AbortSignal | undefined,
+	io: ReleaseInstallationIo
 ): Promise<string> {
 	const stagingDirectory = await mkdtemp(
 		path.join(
@@ -846,7 +899,7 @@ async function prepareReleaseGenerationCandidate(
 		return stagingDirectory;
 	} catch (error) {
 		await bestEffort(() =>
-			rm(stagingDirectory, { recursive: true, force: true })
+			io.removePath(stagingDirectory, { recursive: true, force: true })
 		);
 		throw error;
 	}
@@ -855,11 +908,11 @@ async function prepareReleaseGenerationCandidate(
 async function installReleaseGenerationCandidate(
 	stagingDirectory: string,
 	generationDirectory: string,
-	syncInstallationDirectory: (directoryPath: string) => Promise<void>
+	io: ReleaseInstallationIo
 ): Promise<void> {
-	await syncReleaseGeneration(stagingDirectory, syncInstallationDirectory);
+	await syncReleaseGeneration(stagingDirectory, io);
 	await rename(stagingDirectory, generationDirectory);
-	await syncInstallationDirectory(path.dirname(generationDirectory));
+	await io.syncDirectory(path.dirname(generationDirectory));
 }
 
 async function extractReleaseGeneration(
@@ -887,20 +940,21 @@ async function extractReleaseGeneration(
 }
 
 async function cleanupIncompleteReleaseGenerations(
-	paths: ReleaseInstallationPaths
+	paths: ReleaseInstallationPaths,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	const entries = await readdir(paths.generationsDirectory);
-
-	await Promise.all(
-		entries
-			.filter((entry) => entry.startsWith('.staging-sha256-'))
-			.map((entry) =>
-				rm(path.join(paths.generationsDirectory, entry), {
+	const cleanups = entries
+		.filter((entry) => entry.startsWith('.staging-sha256-'))
+		.map(
+			(entry) => () =>
+				io.removePath(path.join(paths.generationsDirectory, entry), {
 					recursive: true,
 					force: true
 				})
-			)
-	);
+		);
+
+	await withCleanups(() => Promise.resolve(), cleanups);
 }
 
 interface ReleaseInstallationLock {
@@ -1013,6 +1067,7 @@ const releaseLockLeaseDurationMs = 30_000;
 
 async function acquireReleaseInstallationLock(
 	paths: ReleaseInstallationPaths,
+	io: ReleaseInstallationIo,
 	signal?: AbortSignal,
 	onContention?: () => Promise<void> | undefined,
 	processIdentity: ReleaseProcessIdentity = releaseProcessIdentity
@@ -1045,7 +1100,7 @@ async function acquireReleaseInstallationLock(
 
 			try {
 				await utimes(leasePath, new Date(), new Date());
-				await link(candidate, paths.lock);
+				await io.linkPath(candidate, paths.lock);
 				let heartbeatError: unknown;
 				const heartbeat = setInterval(() => {
 					void utimes(leasePath, new Date(), new Date()).catch(
@@ -1070,14 +1125,13 @@ async function acquireReleaseInstallationLock(
 					},
 					async release() {
 						clearInterval(heartbeat);
-						try {
-							await didRemoveLockIfMatches(candidate, paths.lock);
-						} finally {
-							await Promise.all([
-								rm(candidate, { force: true }),
-								rm(leasePath, { force: true })
-							]);
-						}
+						await withCleanups(
+							() => didRemoveLockIfMatches(candidate, paths.lock, io),
+							[
+								() => io.removePath(candidate, { force: true }),
+								() => io.removePath(leasePath, { force: true })
+							]
+						);
 					}
 				};
 			} catch (error) {
@@ -1087,7 +1141,7 @@ async function acquireReleaseInstallationLock(
 			}
 
 			if (
-				await didRemoveStaleReleaseLock(paths.lock, processIdentity, signal)
+				await didRemoveStaleReleaseLock(paths.lock, processIdentity, io, signal)
 			) {
 				continue;
 			}
@@ -1102,17 +1156,19 @@ async function acquireReleaseInstallationLock(
 			}
 		}
 	} catch (error) {
-		await Promise.all([
-			rm(candidate, { force: true }),
-			rm(leasePath, { force: true })
+		return withCleanups(() => {
+			throw error;
+		}, [
+			() => io.removePath(candidate, { force: true }),
+			() => io.removePath(leasePath, { force: true })
 		]);
-		throw error;
 	}
 }
 
 async function didRemoveStaleReleaseLock(
 	lockPath: string,
 	processIdentity: ReleaseProcessIdentity,
+	io: ReleaseInstallationIo,
 	signal?: AbortSignal
 ): Promise<boolean> {
 	let contents: string;
@@ -1158,7 +1214,7 @@ async function didRemoveStaleReleaseLock(
 	const reaperPath = `${lockPath}.reaper-${randomUUID()}`;
 
 	try {
-		await link(lockPath, reaperPath);
+		await io.linkPath(lockPath, reaperPath);
 	} catch (error) {
 		if (isMissingPathError(error)) {
 			return true;
@@ -1171,41 +1227,42 @@ async function didRemoveStaleReleaseLock(
 		throw error;
 	}
 
-	try {
-		if (!(await arePathsSameInode(reaperPath, lockPath))) {
-			return false;
-		}
+	return withCleanup(
+		async () => {
+			if (!(await arePathsSameInode(reaperPath, lockPath))) {
+				return false;
+			}
 
-		const reaperContents = await readFile(reaperPath, 'utf8');
-		const reaperOwner = releaseLockOwnerSchema.safeParse(
-			parseJson(reaperContents)
-		);
+			const reaperContents = await readFile(reaperPath, 'utf8');
+			const reaperOwner = releaseLockOwnerSchema.safeParse(
+				parseJson(reaperContents)
+			);
 
-		if (
-			!reaperOwner.success ||
-			reaperOwner.data.pid !== owner.pid ||
-			reaperOwner.data.instanceId !== owner.instanceId ||
-			reaperOwner.data.leaseId !== owner.leaseId ||
-			!(await hasReleaseLeaseExpired(leasePath))
-		) {
-			return false;
-		}
+			if (
+				!reaperOwner.success ||
+				reaperOwner.data.pid !== owner.pid ||
+				reaperOwner.data.instanceId !== owner.instanceId ||
+				reaperOwner.data.leaseId !== owner.leaseId ||
+				!(await hasReleaseLeaseExpired(leasePath))
+			) {
+				return false;
+			}
 
-		const currentProcessStartedAt = await processIdentity(owner.pid, signal);
+			const currentProcessStartedAt = await processIdentity(owner.pid, signal);
 
-		if (currentProcessStartedAt === owner.processStartedAt) {
-			throw new ReleaseInstallationLockOwnerAliveError(lockPath, owner.pid);
-		}
+			if (currentProcessStartedAt === owner.processStartedAt) {
+				throw new ReleaseInstallationLockOwnerAliveError(lockPath, owner.pid);
+			}
 
-		const wasRemoved = await didRemoveLockIfMatches(reaperPath, lockPath);
-		if (wasRemoved) {
-			await rm(leasePath, { force: true });
-		}
+			const wasRemoved = await didRemoveLockIfMatches(reaperPath, lockPath, io);
+			if (wasRemoved) {
+				await io.removePath(leasePath, { force: true });
+			}
 
-		return wasRemoved;
-	} finally {
-		await rm(reaperPath, { force: true });
-	}
+			return wasRemoved;
+		},
+		() => io.removePath(reaperPath, { force: true })
+	);
 }
 
 async function hasReleaseLeaseExpired(leasePath: string): Promise<boolean> {
@@ -1222,35 +1279,42 @@ async function hasReleaseLeaseExpired(leasePath: string): Promise<boolean> {
 }
 
 async function cleanupOrphanReleaseReapers(
-	paths: ReleaseInstallationPaths
+	paths: ReleaseInstallationPaths,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	const entries = await readdir(paths.stateDirectory);
-	await Promise.all(
-		entries
-			.filter(
-				(entry) =>
-					entry === `${releaseLockName}.reaper` ||
-					entry.startsWith(`${releaseLockName}.reaper-`)
-			)
-			.map((entry) =>
-				rm(path.join(paths.stateDirectory, entry), { force: true })
-			)
-	);
+	const cleanups = entries
+		.filter(
+			(entry) =>
+				entry === `${releaseLockName}.reaper` ||
+				entry.startsWith(`${releaseLockName}.reaper-`)
+		)
+		.map(
+			(entry) => () =>
+				io.removePath(path.join(paths.stateDirectory, entry), { force: true })
+		);
+
+	await withCleanups(() => Promise.resolve(), cleanups);
 }
 
 async function didRemoveLockIfMatches(
 	referencePath: string,
-	lockPath: string
+	lockPath: string,
+	io: ReleaseInstallationIo
 ): Promise<boolean> {
 	if (!(await arePathsSameInode(referencePath, lockPath))) {
 		return false;
 	}
 
 	try {
-		await rm(lockPath);
+		await io.removePath(lockPath);
 		return true;
 	} catch (error) {
-		return isMissingPathError(error);
+		if (isMissingPathError(error)) {
+			return true;
+		}
+
+		throw error;
 	}
 }
 
@@ -1287,7 +1351,7 @@ async function publishReleaseGeneration(
 	generationDirectory: string,
 	move: RenameFile,
 	dependencies: PublishReleaseDependencies,
-	syncInstallationDirectory: (directoryPath: string) => Promise<void>,
+	io: ReleaseInstallationIo,
 	releaseLock: ReleaseInstallationLock
 ): Promise<void> {
 	const previousGenerationDirectory = await currentGenerationDirectory(paths);
@@ -1300,7 +1364,7 @@ async function publishReleaseGeneration(
 	};
 
 	await releaseLock.assertOwned();
-	await writeDurableJournal(paths, journal);
+	await writeDurableJournal(paths, journal, io);
 
 	await dependencies.publicationHook?.('prepared');
 
@@ -1309,33 +1373,42 @@ async function publishReleaseGeneration(
 		`.current-${path.basename(generationDirectory)}`
 	);
 
-	try {
-		const generationTarget = path.relative(
-			paths.installDirectory,
-			generationDirectory
-		);
+	await withCleanup(
+		async () => {
+			try {
+				const generationTarget = path.relative(
+					paths.installDirectory,
+					generationDirectory
+				);
 
-		await symlink(generationTarget, nextLink);
-		dependencies.signal?.throwIfAborted();
-		await releaseLock.assertOwned();
-		await move(nextLink, paths.currentLink);
-		await syncInstallationDirectory(paths.installDirectory);
-	} catch (publicationError) {
-		if (publicationError instanceof ReleaseInstallationLockLostError) {
-			throw publicationError;
-		}
+				await symlink(generationTarget, nextLink);
+				dependencies.signal?.throwIfAborted();
+				await releaseLock.assertOwned();
+				await move(nextLink, paths.currentLink);
+				await io.syncDirectory(paths.installDirectory);
+			} catch (publicationError) {
+				if (publicationError instanceof ReleaseInstallationLockLostError) {
+					throw publicationError;
+				}
 
-		await releaseLock.assertOwned();
-		await rollbackReleaseInstallation(paths, journal, move, publicationError);
-		throw publicationError;
-	} finally {
-		await rm(nextLink, { force: true });
-	}
+				await releaseLock.assertOwned();
+				await rollbackReleaseInstallation(
+					paths,
+					journal,
+					move,
+					io,
+					publicationError
+				);
+				throw publicationError;
+			}
+		},
+		() => io.removePath(nextLink, { force: true })
+	);
 
 	await dependencies.publicationHook?.('activated');
-	await ensureReleaseEntryLinks(paths, move);
-	await syncInstallationDirectory(paths.installDirectory);
-	await finishActivatedReleaseInstallation(paths);
+	await ensureReleaseEntryLinks(paths, move, io);
+	await io.syncDirectory(paths.installDirectory);
+	await finishActivatedReleaseInstallation(paths, io);
 }
 
 async function currentGenerationDirectory(
@@ -1357,7 +1430,8 @@ async function currentGenerationDirectory(
 
 async function recoverReleaseInstallation(
 	paths: ReleaseInstallationPaths,
-	move: RenameFile
+	move: RenameFile,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	let journal: ReleaseInstallationJournal;
 
@@ -1378,12 +1452,12 @@ async function recoverReleaseInstallation(
 	const activeGeneration = await currentGenerationDirectory(paths);
 
 	if (activeGeneration === path.resolve(journal.generationDirectory)) {
-		await ensureReleaseEntryLinks(paths, move);
-		await finishActivatedReleaseInstallation(paths);
+		await ensureReleaseEntryLinks(paths, move, io);
+		await finishActivatedReleaseInstallation(paths, io);
 		return;
 	}
 
-	await rollbackReleaseInstallation(paths, journal, move);
+	await rollbackReleaseInstallation(paths, journal, move, io);
 }
 
 function assertReleaseInstallationJournalTopology(
@@ -1420,7 +1494,8 @@ function isReleaseGenerationDirectory(
 
 async function ensureReleaseEntryLinks(
 	paths: ReleaseInstallationPaths,
-	move: RenameFile
+	move: RenameFile,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	for (const name of releaseExecutableNames) {
 		const destination = path.join(paths.installDirectory, name);
@@ -1441,17 +1516,19 @@ async function ensureReleaseEntryLinks(
 			`.entry-${name}-${randomUUID()}`
 		);
 
-		try {
-			await symlink(expected, replacement);
-			await move(replacement, destination);
-		} finally {
-			await rm(replacement, { force: true });
-		}
+		await withCleanup(
+			async () => {
+				await symlink(expected, replacement);
+				await move(replacement, destination);
+			},
+			() => io.removePath(replacement, { force: true })
+		);
 	}
 }
 
 async function finishActivatedReleaseInstallation(
-	paths: ReleaseInstallationPaths
+	paths: ReleaseInstallationPaths,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	const activeGeneration = await currentGenerationDirectory(paths);
 
@@ -1462,36 +1539,41 @@ async function finishActivatedReleaseInstallation(
 		throw new ReleaseInstallationStateError(paths.currentLink);
 	}
 
-	const marker = await open(
+	const marker = await io.openFile(
 		path.join(activeGeneration, releaseActivatedMarkerName),
 		'w',
 		0o600
 	);
 
-	try {
-		await marker.writeFile('activated\n');
-		await marker.sync();
-	} finally {
-		await marker.close();
-	}
+	await withCleanup(
+		async () => {
+			await marker.writeFile('activated\n');
+			await marker.sync();
+		},
+		() => marker.close()
+	);
 
-	await syncDirectory(activeGeneration);
-	await rm(paths.journal, { force: true });
-	await Promise.all([
-		syncDirectory(paths.stateDirectory),
-		syncDirectory(paths.generationsDirectory)
-	]);
+	await io.syncDirectory(activeGeneration);
+	await io.removePath(paths.journal, { force: true });
+	await withCleanups(
+		() => Promise.resolve(),
+		[
+			() => io.syncDirectory(paths.stateDirectory),
+			() => io.syncDirectory(paths.generationsDirectory)
+		]
+	);
 }
 
 async function rollbackReleaseInstallation(
 	paths: ReleaseInstallationPaths,
 	journal: ReleaseInstallationJournal,
 	move: RenameFile,
+	io: ReleaseInstallationIo,
 	publicationError?: unknown
 ): Promise<void> {
 	try {
 		if (journal.previousGenerationDirectory === undefined) {
-			await rm(paths.currentLink, { force: true });
+			await io.removePath(paths.currentLink, { force: true });
 		} else {
 			const previousLink = path.join(paths.stateDirectory, '.previous-current');
 			const previousTarget = path.relative(
@@ -1499,12 +1581,17 @@ async function rollbackReleaseInstallation(
 				journal.previousGenerationDirectory
 			);
 
-			await rm(previousLink, { force: true });
-			await symlink(previousTarget, previousLink);
-			await move(previousLink, paths.currentLink);
+			await io.removePath(previousLink, { force: true });
+			await withCleanup(
+				async () => {
+					await symlink(previousTarget, previousLink);
+					await move(previousLink, paths.currentLink);
+				},
+				() => io.removePath(previousLink, { force: true })
+			);
 		}
 
-		await syncDirectory(paths.installDirectory);
+		await io.syncDirectory(paths.installDirectory);
 	} catch (error) {
 		const failures =
 			publicationError === undefined ? [error] : [publicationError, error];
@@ -1516,56 +1603,66 @@ async function rollbackReleaseInstallation(
 		});
 	}
 
-	await rm(paths.journal, { force: true });
-	await Promise.all([
-		syncDirectory(paths.stateDirectory),
-		syncDirectory(paths.generationsDirectory)
-	]);
+	await io.removePath(paths.journal, { force: true });
+	await withCleanups(
+		() => Promise.resolve(),
+		[
+			() => io.syncDirectory(paths.stateDirectory),
+			() => io.syncDirectory(paths.generationsDirectory)
+		]
+	);
 }
 
 async function writeDurableJournal(
 	paths: ReleaseInstallationPaths,
-	journal: ReleaseInstallationJournal
+	journal: ReleaseInstallationJournal,
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	const temporary = `${paths.journal}.new`;
-	const handle = await open(temporary, 'w', 0o600);
+	const handle = await io.openFile(temporary, 'w', 0o600);
 
-	try {
-		await handle.writeFile(`${JSON.stringify(journal)}\n`);
-		await handle.sync();
-	} finally {
-		await handle.close();
-	}
+	await withCleanup(
+		async () => {
+			await handle.writeFile(`${JSON.stringify(journal)}\n`);
+			await handle.sync();
+		},
+		() => handle.close()
+	);
 
 	await rename(temporary, paths.journal);
-	await syncDirectory(paths.stateDirectory);
+	await io.syncDirectory(paths.stateDirectory);
 }
 
 async function syncReleaseGeneration(
 	generationDirectory: string,
-	syncInstallationDirectory: (directoryPath: string) => Promise<void>
+	io: ReleaseInstallationIo
 ): Promise<void> {
 	for (const name of releaseExecutableNames) {
-		const handle = await open(path.join(generationDirectory, name), 'r');
+		const handle = await io.openFile(path.join(generationDirectory, name), 'r');
 
-		try {
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
+		await withCleanup(
+			async () => {
+				await handle.sync();
+			},
+			() => handle.close()
+		);
 	}
 
-	await syncInstallationDirectory(generationDirectory);
+	await io.syncDirectory(generationDirectory);
 }
 
-async function syncDirectory(directoryPath: string): Promise<void> {
-	const directory = await open(directoryPath, constants.O_RDONLY);
+async function syncDirectory(
+	directoryPath: string,
+	openFile: ReleaseOpenFile = open
+): Promise<void> {
+	const directory = await openFile(directoryPath, constants.O_RDONLY);
 
-	try {
-		await directory.sync();
-	} finally {
-		await directory.close();
-	}
+	await withCleanup(
+		async () => {
+			await directory.sync();
+		},
+		() => directory.close()
+	);
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -1823,67 +1920,103 @@ export async function downloadAsset(
 		);
 	}
 
-	const body = response.body;
-	if (body === null) {
-		await writeFile(destination, '', { mode: 0o600 });
-		return { bytes: 0, sha256: createHash('sha256').digest('hex') };
-	}
-
-	const reader = body.getReader();
-	const handle = await open(destination, 'wx', 0o600);
+	const reader = response.body?.getReader();
 	const digest = createHash('sha256');
 	let bytes = 0;
-	let downloadError: unknown;
+	let didCompleteBody = false;
+	const destinationState = { didCreate: false };
 	const abort = (): void => {
-		void bestEffort(() => reader.cancel(dependencies.signal?.reason));
+		if (reader !== undefined) {
+			void bestEffort(() => reader.cancel(dependencies.signal?.reason));
+		}
 	};
-	dependencies.signal?.addEventListener('abort', abort, { once: true });
+	if (reader !== undefined) {
+		dependencies.signal?.addEventListener('abort', abort, { once: true });
+	}
 
 	try {
-		for (;;) {
-			dependencies.signal?.throwIfAborted();
-			const chunk = await reader.read();
-			dependencies.signal?.throwIfAborted();
-
-			if (chunk.done) {
-				break;
-			}
-
-			bytes += chunk.value.byteLength;
-			if (bytes > maximumBytes) {
-				await bestEffort(() => reader.cancel());
-				throw new DownloadAssetTooLargeError(asset.name, maximumBytes, bytes);
-			}
-
-			digest.update(chunk.value);
-			let offset = 0;
-			while (offset < chunk.value.byteLength) {
-				const written = await handle.write(
-					chunk.value,
-					offset,
-					chunk.value.byteLength - offset
+		return await withCleanups(
+			async () => {
+				dependencies.signal?.throwIfAborted();
+				const handle = await (dependencies.openDestination ?? open)(
+					destination,
+					'wx',
+					0o600
 				);
-				offset += written.bytesWritten;
-			}
-		}
+				destinationState.didCreate = true;
+
+				return withCleanups(async () => {
+					dependencies.signal?.throwIfAborted();
+
+					if (reader === undefined) {
+						return { bytes: 0, sha256: digest.digest('hex') };
+					}
+
+					for (;;) {
+						dependencies.signal?.throwIfAborted();
+						const chunk = await reader.read();
+						dependencies.signal?.throwIfAborted();
+
+						if (chunk.done) {
+							didCompleteBody = true;
+							break;
+						}
+
+						bytes += chunk.value.byteLength;
+						if (bytes > maximumBytes) {
+							throw new DownloadAssetTooLargeError(
+								asset.name,
+								maximumBytes,
+								bytes
+							);
+						}
+
+						digest.update(chunk.value);
+						let offset = 0;
+						while (offset < chunk.value.byteLength) {
+							const written = await handle.write(
+								chunk.value,
+								offset,
+								chunk.value.byteLength - offset
+							);
+							offset += written.bytesWritten;
+						}
+					}
+
+					return { bytes, sha256: digest.digest('hex') };
+				}, [() => handle.close()]);
+			},
+			reader === undefined
+				? []
+				: [
+						() =>
+							didCompleteBody
+								? Promise.resolve()
+								: reader.cancel(dependencies.signal?.reason),
+						() => {
+							reader.releaseLock();
+
+							return Promise.resolve();
+						}
+					]
+		);
 	} catch (error) {
-		downloadError = error;
+		return await withCleanups(() => {
+			throw error instanceof Error
+				? error
+				: new Error(`failed to download ${asset.name}`, { cause: error });
+		}, [
+			() =>
+				destinationState.didCreate
+					? (dependencies.removeDestination?.(destination) ??
+						rm(destination, { force: true }))
+					: Promise.resolve()
+		]);
 	} finally {
-		dependencies.signal?.removeEventListener('abort', abort);
-		await handle.close();
+		if (reader !== undefined) {
+			dependencies.signal?.removeEventListener('abort', abort);
+		}
 	}
-
-	if (downloadError !== undefined) {
-		await rm(destination, { force: true });
-		dependencies.signal?.throwIfAborted();
-		throw downloadError instanceof Error
-			? downloadError
-			: new Error(`failed to download ${asset.name}`, {
-					cause: downloadError
-				});
-	}
-
-	return { bytes, sha256: digest.digest('hex') };
 }
 
 function authenticatedReleaseAssetUrl(

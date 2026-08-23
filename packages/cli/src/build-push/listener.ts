@@ -7,6 +7,7 @@ import {
 	buildEventSchema,
 	type ParsedBuildEvent
 } from '@cupboard/protocol/build';
+import { withCleanups } from '@cupboard/shared/cleanup';
 
 import {
 	BuildEventConnectionClosedError,
@@ -51,6 +52,7 @@ export interface BuildEventListenerOptions {
 		signal: AbortSignal
 	) => Promise<void> | void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
+	readonly setSocketMode?: (socketPath: string) => Promise<void>;
 	readonly drainTimeoutMs?: number;
 }
 
@@ -93,9 +95,16 @@ export class BuildEventListener {
 			});
 		});
 
-		// The invocation directory excludes other users while the fresh socket
-		// briefly has its umask-derived mode.
-		await chmod(this.options.socketPath, 0o600);
+		try {
+			// The invocation directory excludes other users while the fresh socket
+			// briefly has its umask-derived mode.
+			await (this.options.setSocketMode?.(this.options.socketPath) ??
+				chmod(this.options.socketPath, 0o600));
+		} catch (error) {
+			await withCleanups(() => {
+				throw error;
+			}, [() => this.close()]);
+		}
 	}
 
 	private handleConnection(socket: Socket): void {

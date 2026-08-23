@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+import { withCleanups } from '@cupboard/shared/cleanup';
+
 import type { ChildEnvironment } from './nix-config.ts';
 import { removeInvocationRuntimeDirectory } from './runtime-directory.ts';
 
@@ -62,6 +64,11 @@ export interface SuperviseOptions {
 	readonly onExit?: (exit: ChildExit) => Promise<void>;
 	readonly signalSource?: SignalSource;
 	readonly terminationScheduler?: ChildTerminationScheduler;
+	/**
+	Removes the invocation runtime directory after the child exits and `onExit`
+	completes.
+	*/
+	readonly removeRuntimeDirectory?: (directory: string) => Promise<void>;
 }
 
 function waitForExit(child: ChildProcess): Promise<ChildExit> {
@@ -127,19 +134,35 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 		abort();
 	}
 
-	try {
+	return withCleanups(async () => {
 		const exit = await waitForExit(child);
 		isChildExited = true;
 		const signal = interrupted ?? exit.signal;
 
 		return signal === undefined ? exit : { status: undefined, signal };
-	} finally {
-		isChildExited = true;
-		scheduledTermination?.cancel();
-		options.signal?.removeEventListener('abort', abort);
-		signalSource.off('SIGINT', forwardInt);
-		signalSource.off('SIGTERM', forwardTerm);
-	}
+	}, [
+		() => {
+			isChildExited = true;
+			scheduledTermination?.cancel();
+
+			return Promise.resolve();
+		},
+		() => {
+			options.signal?.removeEventListener('abort', abort);
+
+			return Promise.resolve();
+		},
+		() => {
+			signalSource.off('SIGINT', forwardInt);
+
+			return Promise.resolve();
+		},
+		() => {
+			signalSource.off('SIGTERM', forwardTerm);
+
+			return Promise.resolve();
+		}
+	]);
 }
 
 /**
@@ -156,7 +179,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 export async function superviseBuild(
 	options: SuperviseOptions
 ): Promise<ChildExit> {
-	try {
+	return withCleanups(async () => {
 		const exit = await runChild({
 			command: options.command,
 			environment: options.environment,
@@ -171,9 +194,12 @@ export async function superviseBuild(
 		await options.onExit?.(exit);
 
 		return exit;
-	} finally {
-		await removeInvocationRuntimeDirectory(options.runtimeDirectory);
-	}
+	}, [
+		() =>
+			(options.removeRuntimeDirectory ?? removeInvocationRuntimeDirectory)(
+				options.runtimeDirectory
+			)
+	]);
 }
 
 export interface SupervisedAttempt {
@@ -195,6 +221,10 @@ export interface AttemptedBuildOptions {
 	readonly terminationScheduler?: ChildTerminationScheduler;
 	readonly nextAttemptId?: () => string;
 	readonly startDelay?: StartDelay;
+	/**
+	Removes the invocation runtime directory after every attempt finishes.
+	*/
+	readonly removeRuntimeDirectory?: (directory: string) => Promise<void>;
 }
 
 export interface AttemptedBuildResult {
@@ -278,7 +308,7 @@ export async function superviseAttemptedBuild(
 	signalSource.on('SIGINT', interruptInt);
 	signalSource.on('SIGTERM', interruptTerm);
 
-	try {
+	return withCleanups(async () => {
 		for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
 			const attemptId = nextAttemptId();
 			const logFile = path.join(
@@ -322,12 +352,21 @@ export async function superviseAttemptedBuild(
 					delayInterruption.resolve(undefined);
 				};
 
-				try {
-					await Promise.race([delay.completed, delayInterruption.promise]);
-				} finally {
-					delay.cancel();
-					wakeDelay = undefined;
-				}
+				await withCleanups(
+					() => Promise.race([delay.completed, delayInterruption.promise]),
+					[
+						() => {
+							delay.cancel();
+
+							return Promise.resolve();
+						},
+						() => {
+							wakeDelay = undefined;
+
+							return Promise.resolve();
+						}
+					]
+				);
 
 				const signal = interruptedSignal();
 
@@ -339,9 +378,20 @@ export async function superviseAttemptedBuild(
 		}
 
 		return { exit, attempts };
-	} finally {
-		signalSource.off('SIGINT', interruptInt);
-		signalSource.off('SIGTERM', interruptTerm);
-		await removeInvocationRuntimeDirectory(options.runtimeDirectory);
-	}
+	}, [
+		() => {
+			signalSource.off('SIGINT', interruptInt);
+
+			return Promise.resolve();
+		},
+		() => {
+			signalSource.off('SIGTERM', interruptTerm);
+
+			return Promise.resolve();
+		},
+		() =>
+			(options.removeRuntimeDirectory ?? removeInvocationRuntimeDirectory)(
+				options.runtimeDirectory
+			)
+	]);
 }
