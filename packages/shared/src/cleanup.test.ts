@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { bestEffort, discardResponseBody, withCleanup } from './cleanup.ts';
+import {
+	bestEffort,
+	discardResponseBody,
+	withCleanup,
+	withCleanups
+} from './cleanup.ts';
 
 describe('withCleanup', () => {
 	it('preserves an operation failure when cleanup also fails', async () => {
@@ -22,6 +27,30 @@ describe('withCleanup', () => {
 				() => Promise.reject(cleanupFailure)
 			)
 		).rejects.toBe(cleanupFailure);
+	});
+});
+
+describe('withCleanups', () => {
+	it('preserves the primary failure while every cleanup still runs', async () => {
+		const primary = new Error('operation failed');
+		const calls: string[] = [];
+
+		await expect(
+			withCleanups(
+				() => Promise.reject(primary),
+				[
+					() => {
+						calls.push('first');
+						return Promise.reject(new Error('first cleanup failed'));
+					},
+					() => {
+						calls.push('second');
+						return Promise.resolve();
+					}
+				]
+			)
+		).rejects.toBe(primary);
+		expect(calls).toStrictEqual(['first', 'second']);
 	});
 });
 

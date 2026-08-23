@@ -10,6 +10,7 @@ import pathModule from 'node:path';
 
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { toNixSha256 } from '@cupboard/nix-store/hash';
+import { withIterableCleanup } from '@cupboard/shared/cleanup';
 
 import { byteStream } from '../io/byte-stream.ts';
 
@@ -153,15 +154,14 @@ async function* narFile(path: string, mode: number): AsyncIterable<Uint8Array> {
 	// always describe the content that follows even if the file changes on disk
 	// between framing and reading.
 	const file = await open(path, 'r');
-
-	try {
+	const contents = async function* (): AsyncIterable<Uint8Array> {
 		const { size } = await file.stat();
 		yield createLengthPrefix(size);
 		yield* readFileContents(file, path, size);
 		yield* narPadding(size);
-	} finally {
-		await file.close();
-	}
+	};
+
+	yield* withIterableCleanup(contents(), () => file.close());
 }
 
 async function* readFileContents(

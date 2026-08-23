@@ -28,13 +28,57 @@ export async function withCleanup<T>(
 	operation: () => Promise<T>,
 	cleanup: () => Promise<unknown>
 ): Promise<T> {
+	return withCleanups(operation, [cleanup]);
+}
+
+/**
+ * Runs an operation and every cleanup in order. The first failure is reported,
+ * while later cleanup failures cannot replace it or prevent remaining cleanup.
+ */
+export async function withCleanups<T>(
+	operation: () => Promise<T>,
+	cleanups: readonly (() => Promise<unknown>)[]
+): Promise<T> {
+	let outcome:
+		| { readonly succeeded: true; readonly value: T }
+		| { readonly succeeded: false; readonly error: unknown };
+
+	try {
+		outcome = { succeeded: true, value: await operation() };
+	} catch (error) {
+		outcome = { succeeded: false, error };
+	}
+
+	for (const cleanup of cleanups) {
+		try {
+			await cleanup();
+		} catch (error) {
+			if (outcome.succeeded) {
+				outcome = { succeeded: false, error };
+			}
+		}
+	}
+
+	if (!outcome.succeeded) {
+		throw outcome.error;
+	}
+
+	return outcome.value;
+}
+
+/**
+ * Runs cleanup after iteration. A cleanup failure is reported only when the
+ * source itself completed successfully.
+ */
+export async function* withIterableCleanup<T>(
+	source: AsyncIterable<T>,
+	cleanup: () => Promise<unknown>
+): AsyncIterable<T> {
 	let isSucceeded = false;
 
 	try {
-		const result = await operation();
+		yield* source;
 		isSucceeded = true;
-
-		return result;
 	} finally {
 		if (isSucceeded) {
 			await cleanup();
