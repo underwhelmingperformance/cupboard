@@ -14,20 +14,88 @@ export const criticalSectionBudgetMs = 25_000;
 // when they run inside one.
 const perCallCapMs = 15_000;
 
-const deadlineScope = new AsyncLocalStorage<number>();
+interface DeadlineScope {
+	readonly deadline: number;
+	readonly signal: AbortSignal;
+}
+
+const deadlineScope = new AsyncLocalStorage<DeadlineScope>();
+const deadlineExpired = Symbol('deadline-expired');
 
 /**
-A nested budget can shorten, but never extend, the current deadline.
-*/
-export function withDeadlineBudget<T>(
+ * Runs `body` within a deadline that cannot extend an enclosing deadline.
+ */
+export async function withDeadlineBudget<T>(
 	budgetMs: number,
-	body: () => Promise<T>
+	body: () => Promise<T>,
+	subrequest = 'deadline.scope'
 ): Promise<T> {
 	const proposed = Date.now() + budgetMs;
 	const outer = deadlineScope.getStore();
-	const deadline = outer === undefined ? proposed : Math.min(outer, proposed);
 
-	return deadlineScope.run(deadline, body);
+	if (outer !== undefined && outer.deadline <= proposed) {
+		return deadlineScope.run(outer, body);
+	}
+
+	const controller = new AbortController();
+	const deadline =
+		outer === undefined ? proposed : Math.min(outer.deadline, proposed);
+	const onOuterAbort = (): void => {
+		if (outer !== undefined) {
+			controller.abort(outer.signal.reason);
+		}
+	};
+
+	if (outer?.signal.aborted === true) {
+		onOuterAbort();
+	} else {
+		outer?.signal.addEventListener('abort', onOuterAbort, { once: true });
+	}
+
+	const expire = (): void => {
+		controller.abort(deadlineExpired);
+	};
+	const remaining = deadline - Date.now();
+	const timer = remaining <= 0 ? undefined : setTimeout(expire, remaining);
+
+	if (remaining <= 0) {
+		expire();
+	}
+
+	let result: T;
+
+	try {
+		result = await deadlineScope.run(
+			{ deadline, signal: controller.signal },
+			body
+		);
+	} catch (error) {
+		if (
+			controller.signal.aborted &&
+			!(error instanceof SubrequestTimeoutError)
+		) {
+			throw new SubrequestTimeoutError(subrequest);
+		}
+
+		throw error;
+	} finally {
+		clearTimeout(timer);
+		outer?.signal.removeEventListener('abort', onOuterAbort);
+	}
+
+	if (controller.signal.aborted) {
+		throw new SubrequestTimeoutError(subrequest);
+	}
+
+	return result;
+}
+
+/**
+ * Returns the signal for the current deadline scope. Callers use this signal
+ * as a control-flow boundary before state changes that follow awaited work.
+ */
+export function currentDeadlineSignal(): AbortSignal | undefined {
+	return deadlineScope.getStore()?.signal;
 }
 
 /**
@@ -42,7 +110,8 @@ export function boundedSubrequest<T>(
 	capMs: number = perCallCapMs
 ): Promise<T> {
 	const deadline = deadlineScope.getStore();
-	const remaining = deadline === undefined ? Infinity : deadline - Date.now();
+	const remaining =
+		deadline === undefined ? Infinity : deadline.deadline - Date.now();
 	const ms = Math.min(remaining, capMs);
 
 	if (!Number.isFinite(ms)) {

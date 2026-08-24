@@ -46,6 +46,7 @@ import {
 	r2ObjectKeySchema,
 	requestOriginSchema
 } from '../http/http.ts';
+import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -53,7 +54,9 @@ import {
 	cacheWriteGrants,
 	clearBlobStorage,
 	commitUpload,
+	currentNarObjectKey,
 	currentServer,
+	currentServerTenant,
 	deletePath,
 	expectSingleUploadDecision,
 	flakyD1,
@@ -76,7 +79,8 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
@@ -1142,7 +1146,7 @@ describe('retention grace at publication', () => {
 		const beforeVerification = await graceDeadlineRows(DEFAULT_CACHE);
 
 		await removeGracePolicy(policyId);
-		await currentServer().runVerification();
+		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
 			pendingDecision,
@@ -1188,7 +1192,7 @@ describe('retention grace at publication', () => {
 				upload.uploadId
 			);
 		});
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect({
 			materialised:
@@ -1226,7 +1230,7 @@ describe('retention grace at publication', () => {
 		// The compressed hash matches, but the bytes decode to a different NAR.
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
@@ -1483,18 +1487,22 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Commit the winning generation before exercising the losing reservation.
+		// Commit the winning generation before exercising a losing reservation for
+		// the same store path. This branch does not read the loser's pending row, so
+		// the test can use a synthetic upload ID.
 		await pushPath(token, metadata, DEFAULT_CACHE, nar);
 
-		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			pipelineFor(instance.context).concedeToWinner(
-				rootLogger(),
-				DEFAULT_CACHE,
-				uploadIdSchema.parse('loser-upload'),
-				uploadPathNegotiation(metadata),
-				narObjectKey(metadata.narHash),
-				{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
-			)
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) =>
+				pipelineFor(instance.context).concedeToWinner(
+					rootLogger(),
+					DEFAULT_CACHE,
+					uploadIdSchema.parse('loser-upload'),
+					uploadPathNegotiation(metadata),
+					await currentNarObjectKey(metadata.narHash),
+					{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
+				)
 		);
 
 		expect({
@@ -1539,7 +1547,24 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const loserRow = await pendingRowSnapshot(upload.uploadId);
+
+		await putNarBytes(upload.r2Key, nar);
+		await commitUpload(token, upload.uploadId);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values({
+					...loserRow,
+					id: uploadIdSchema.parse('loser-upload'),
+					r2Key: r2ObjectKeySchema.parse('staging/loser-upload')
+				})
+				.run();
+		});
 
 		const outcome = await runInDurableObject(
 			currentServer(),
@@ -1549,7 +1574,6 @@ describe('retention grace at publication', () => {
 					BLOBS: failingDeleteBucket(instance.context.env.BLOBS)
 				};
 
-				// Use a private staging key so cleanup reaches the failing delete.
 				try {
 					await pipelineFor(instance.context).concedeToWinner(
 						rootLogger(),
@@ -1608,7 +1632,7 @@ describe('retention grace at publication', () => {
 		await markUploadPendingVerification(upload.uploadId);
 
 		const row = await pendingRowSnapshot(upload.uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		// Restore the pending row but remove the applied grace state to reproduce
 		// that crash boundary.
@@ -1624,11 +1648,16 @@ describe('retention grace at publication', () => {
 				.run();
 			instance.context.db
 				.insert(schema.pendingUploads)
-				.values({ ...row, verdict: 'pending', claimedAt: undefined })
+				.values({
+					...row,
+					r2Key: narObjectKey(metadata.narHash),
+					verdict: 'pending',
+					claimedAt: undefined
+				})
 				.run();
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
@@ -1852,7 +1881,7 @@ describe('retention grace at publication', () => {
 		await markUploadPendingVerification(upload.uploadId);
 
 		const row = await pendingRowSnapshot(upload.uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		// Restore the pending row so the next pass takes the recovery path.
 		const hash = storePathHashSchema.parse(metadata.storePathHash);
@@ -1897,11 +1926,15 @@ describe('retention grace at publication', () => {
 					)
 				});
 
-				await verificationFor(context).verifyPendingUploads(rootLogger(), 10);
+				await verificationFor(context).processPendingWithoutDecode(
+					rootLogger(),
+					10
+				);
 
 				return hasMoved;
 			}
 		);
+		await verifyCurrentTenant();
 
 		// The superseded upload must fail without granting grace to the replacement
 		// generation.
@@ -2226,7 +2259,7 @@ describe('retention grace facts on the wire', () => {
 
 		conversation.send({ op: 'commit', uploadId: upload.uploadId });
 		const deferred = await conversation.nextFrame();
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const verdict = await conversation.nextFrame();
 		conversation.socket.close();
 
@@ -3075,7 +3108,7 @@ describe('confirming an unretained publication', () => {
 		});
 
 		await pushPath(token, path);
-		await env.BLOBS.delete(narObjectKey(path.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(path.narHash));
 		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
 
 		const confirmed = await confirmPaths(token, [path.storePathHash]);
@@ -3113,6 +3146,7 @@ describe('confirming an unretained publication', () => {
 
 		const confirmed = await confirmPaths(token, [path.storePathHash]);
 		const restored = await env.BLOBS.head(key);
+		const narUrl = await currentNarObjectKey(path.narHash);
 
 		expect({ confirmed, metadata: restored?.customMetadata }).toStrictEqual({
 			confirmed: {
@@ -3130,6 +3164,7 @@ describe('confirming an unretained publication', () => {
 			metadata: {
 				generation: '0',
 				narHash: path.narHash,
+				narUrl,
 				signatureGeneration: '1'
 			}
 		});

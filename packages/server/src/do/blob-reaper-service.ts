@@ -11,6 +11,7 @@ import {
 	and,
 	asc,
 	eq,
+	exists,
 	gt,
 	inArray,
 	isNotNull,
@@ -22,6 +23,14 @@ import {
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import {
+	registerLegacyObjectIncarnations,
+	type SharedObjectKind
+} from '../blob/object-incarnation.ts';
+import {
+	drainObjectDeletions,
+	recoverAbandonedIncarnations
+} from '../blob/object-incarnation-recovery.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	blobReaperGraceMs,
@@ -33,7 +42,6 @@ import {
 import {
 	batchNonEmpty,
 	chunk,
-	deleteObjects,
 	maxInClauseValues,
 	maxOutgoingConnections,
 	presentNarObjects
@@ -55,9 +63,11 @@ export interface NarInfoDemoter {
 	demote(tenant: string, demotions: readonly NarInfoDemotion[]): Promise<void>;
 }
 
+// Identifies a missing CAS object and the incarnation that fences its reference
+// deletion.
 export interface CasReferenceDemotion {
 	readonly digest: Sha256HexDigest;
-	readonly fenceStoredAt: IsoTimestamp;
+	readonly fenceIncarnation: number;
 }
 
 export interface CasReferenceDemoter {
@@ -122,7 +132,8 @@ export class BlobReaperService {
 		const queries = chunks.map((hashes) => {
 			const fence = and(
 				inArray(d1Schema.blobState.narHash, hashes),
-				isNull(d1Schema.blobState.deleteAfter)
+				isNull(d1Schema.blobState.deleteAfter),
+				notInArray(d1Schema.blobState.narHash, referencedHashes)
 			);
 
 			return this.d1
@@ -134,13 +145,16 @@ export class BlobReaperService {
 		await batchNonEmpty(this.d1, queries);
 	}
 
-	// Recheck the grace deadline and global reachability in the delete statement.
-	// Delete D1 first so a crash before the R2 delete leaves only an orphaned
-	// content-addressed object that a later promotion can adopt.
+	// Recheck the grace deadline and references while deleting the `blob_state`
+	// row. The same transaction records the corresponding R2 key so maintenance
+	// can retry an interrupted deletion.
 	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
 		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
-			.select({ narHash: d1Schema.blobState.narHash })
+			.select({
+				narHash: d1Schema.blobState.narHash,
+				incarnation: d1Schema.blobState.incarnation
+			})
 			.from(d1Schema.blobState)
 			.where(
 				and(
@@ -163,25 +177,90 @@ export class BlobReaperService {
 		);
 
 		for (const hashes of hashChunks) {
+			await registerLegacyObjectIncarnations(
+				this.d1,
+				{ kind: 'nar', objectIds: hashes },
+				nowIso
+			);
 			const fence = and(
 				inArray(d1Schema.blobState.narHash, hashes),
 				isNotNull(d1Schema.blobState.deleteAfter),
 				lte(d1Schema.blobState.deleteAfter, nowIso),
 				notInArray(d1Schema.blobState.narHash, referencedHashes)
 			);
-			const removed = await this.d1
-				.delete(d1Schema.blobState)
-				.where(fence)
-				.returning({ narHash: d1Schema.blobState.narHash })
-				.all();
+			const sameObjectId = eq(
+				d1Schema.blobState.narHash,
+				d1Schema.objectIncarnation.objectId
+			);
+			const sameIncarnation = eq(
+				d1Schema.blobState.incarnation,
+				d1Schema.objectIncarnation.incarnation
+			);
+			const collectableState = and(fence, sameObjectId, sameIncarnation);
+			const collectable = exists(
+				this.d1
+					.select({ one: sql`1` })
+					.from(d1Schema.blobState)
+					.where(collectableState)
+			);
+			const registryFilter = and(
+				eq(d1Schema.objectIncarnation.kind, 'nar'),
+				inArray(d1Schema.objectIncarnation.objectId, hashes),
+				eq(d1Schema.objectIncarnation.state, 'live'),
+				collectable
+			);
+			const narRegistry = eq(d1Schema.objectIncarnation.kind, 'nar');
+			const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
+			const retiredFilter = and(
+				narRegistry,
+				sameObjectId,
+				sameIncarnation,
+				retiredState
+			);
+			const retired = exists(
+				this.d1
+					.select({ one: sql`1` })
+					.from(d1Schema.objectIncarnation)
+					.where(retiredFilter)
+			);
+			const queueDeletion = this.d1
+				.insert(d1Schema.objectDeletion)
+				.select(
+					this.d1
+						.select({
+							kind: sql<SharedObjectKind>`'nar'`.as('kind'),
+							objectId: d1Schema.blobState.narHash,
+							incarnation: d1Schema.blobState.incarnation,
+							removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
+						})
+						.from(d1Schema.blobState)
+						.where(and(fence, retired))
+				)
+				.onConflictDoNothing();
+			const collection = await this.d1.batch([
+				this.d1
+					.update(d1Schema.objectIncarnation)
+					.set({ state: 'absent', reservationOwner: sql`null` })
+					.where(registryFilter),
+				queueDeletion,
+				this.d1
+					.delete(d1Schema.blobState)
+					.where(and(fence, retired))
+					.returning({
+						narHash: d1Schema.blobState.narHash,
+						incarnation: d1Schema.blobState.incarnation
+					})
+			]);
+			const removed = collection[2];
 
 			for (const row of removed) {
-				removedKeys.push(narObjectKey(row.narHash));
+				removedKeys.push(narObjectKey(row.narHash, row.incarnation));
 			}
 		}
 
-		// Preserve D1-first, R2-last ordering across every chunk.
-		await deleteObjects(this.blobs, removedKeys);
+		// Process R2 deletion markers only after their `blob_state` rows have been
+		// deleted.
+		await drainObjectDeletions(this.d1, this.blobs, 'nar', limit);
 
 		return removedKeys.length;
 	}
@@ -220,7 +299,8 @@ export class BlobReaperService {
 		const queries = chunks.map((digests) => {
 			const fence = and(
 				inArray(d1Schema.casObject.digest, digests),
-				isNull(d1Schema.casObject.deleteAfter)
+				isNull(d1Schema.casObject.deleteAfter),
+				notInArray(d1Schema.casObject.digest, referencedDigests)
 			);
 
 			return this.d1
@@ -238,7 +318,10 @@ export class BlobReaperService {
 	): Promise<number> {
 		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
-			.select({ digest: d1Schema.casObject.digest })
+			.select({
+				digest: d1Schema.casObject.digest,
+				incarnation: d1Schema.casObject.incarnation
+			})
 			.from(d1Schema.casObject)
 			.where(
 				and(
@@ -261,24 +344,88 @@ export class BlobReaperService {
 		);
 
 		for (const digests of digestChunks) {
+			await registerLegacyObjectIncarnations(
+				this.d1,
+				{ kind: 'cas', objectIds: digests },
+				nowIso
+			);
 			const fence = and(
 				inArray(d1Schema.casObject.digest, digests),
 				isNotNull(d1Schema.casObject.deleteAfter),
 				lte(d1Schema.casObject.deleteAfter, nowIso),
 				notInArray(d1Schema.casObject.digest, referencedDigests)
 			);
-			const removed = await this.d1
-				.delete(d1Schema.casObject)
-				.where(fence)
-				.returning({ digest: d1Schema.casObject.digest })
-				.all();
+			const sameObjectId = eq(
+				d1Schema.casObject.digest,
+				d1Schema.objectIncarnation.objectId
+			);
+			const sameIncarnation = eq(
+				d1Schema.casObject.incarnation,
+				d1Schema.objectIncarnation.incarnation
+			);
+			const collectableState = and(fence, sameObjectId, sameIncarnation);
+			const collectable = exists(
+				this.d1
+					.select({ one: sql`1` })
+					.from(d1Schema.casObject)
+					.where(collectableState)
+			);
+			const registryFilter = and(
+				eq(d1Schema.objectIncarnation.kind, 'cas'),
+				inArray(d1Schema.objectIncarnation.objectId, digests),
+				eq(d1Schema.objectIncarnation.state, 'live'),
+				collectable
+			);
+			const casRegistry = eq(d1Schema.objectIncarnation.kind, 'cas');
+			const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
+			const retiredFilter = and(
+				casRegistry,
+				sameObjectId,
+				sameIncarnation,
+				retiredState
+			);
+			const retired = exists(
+				this.d1
+					.select({ one: sql`1` })
+					.from(d1Schema.objectIncarnation)
+					.where(retiredFilter)
+			);
+			const queueDeletion = this.d1
+				.insert(d1Schema.objectDeletion)
+				.select(
+					this.d1
+						.select({
+							kind: sql<SharedObjectKind>`'cas'`.as('kind'),
+							objectId: d1Schema.casObject.digest,
+							incarnation: d1Schema.casObject.incarnation,
+							removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
+						})
+						.from(d1Schema.casObject)
+						.where(and(fence, retired))
+				)
+				.onConflictDoNothing();
+			const collection = await this.d1.batch([
+				this.d1
+					.update(d1Schema.objectIncarnation)
+					.set({ state: 'absent', reservationOwner: sql`null` })
+					.where(registryFilter),
+				queueDeletion,
+				this.d1
+					.delete(d1Schema.casObject)
+					.where(and(fence, retired))
+					.returning({
+						digest: d1Schema.casObject.digest,
+						incarnation: d1Schema.casObject.incarnation
+					})
+			]);
+			const removed = collection[2];
 
 			for (const row of removed) {
-				removedKeys.push(casObjectKey(row.digest));
+				removedKeys.push(casObjectKey(row.digest, row.incarnation));
 			}
 		}
 
-		await deleteObjects(this.blobs, removedKeys);
+		await drainObjectDeletions(this.d1, this.blobs, 'cas', limit);
 
 		return removedKeys.length;
 	}
@@ -323,15 +470,20 @@ export class BlobReaperService {
 	}
 
 	private async presentCasObjects(
-		digests: readonly Sha256HexDigest[]
+		objects: readonly {
+			readonly digest: Sha256HexDigest;
+			readonly incarnation: number;
+		}[]
 	): Promise<ReadonlySet<Sha256HexDigest>> {
 		const present = await mapWithConcurrency(
-			digests,
+			objects,
 			maxOutgoingConnections,
-			async (digest) =>
-				(await this.blobs.head(casObjectKey(digest))) === null
+			async (object) =>
+				(await this.blobs.head(
+					casObjectKey(object.digest, object.incarnation)
+				)) === null
 					? undefined
-					: digest
+					: object.digest
 		);
 
 		return new Set(
@@ -371,41 +523,69 @@ export class BlobReaperService {
 		return failed;
 	}
 
-	// Fence each deletion on the `verified_at` value captured by the scan so a
-	// re-promoted row survives. Chunk the predicate for D1's parameter limit.
+	// Delete only the object versions captured by the scan. A later promotion
+	// uses a different version and therefore survives.
 	private async deleteFencedBlobStates(
-		rows: readonly { narHash: NixSha256HashString; verifiedAt: IsoTimestamp }[]
+		rows: readonly { narHash: NixSha256HashString; incarnation: number }[]
 	): Promise<number> {
 		const chunks = chunk(rows, maxFencedDeleteRows);
 		const queries = chunks.map((batch) => {
-			const match = or(
+			const stateMatch = or(
 				...batch.map((row) =>
 					and(
 						eq(d1Schema.blobState.narHash, row.narHash),
-						eq(d1Schema.blobState.verifiedAt, row.verifiedAt)
+						eq(d1Schema.blobState.incarnation, row.incarnation)
+					)
+				)
+			);
+			const registryMatch = or(
+				...batch.map((row) =>
+					and(
+						eq(d1Schema.objectIncarnation.objectId, row.narHash),
+						eq(d1Schema.objectIncarnation.incarnation, row.incarnation)
 					)
 				)
 			);
 
-			return this.d1
-				.delete(d1Schema.blobState)
-				.where(match)
-				.returning({ narHash: d1Schema.blobState.narHash });
+			return [
+				this.d1
+					.update(d1Schema.objectIncarnation)
+					.set({ state: 'absent', reservationOwner: sql`null` })
+					.where(
+						and(
+							eq(d1Schema.objectIncarnation.kind, 'nar'),
+							eq(d1Schema.objectIncarnation.state, 'live'),
+							registryMatch
+						)
+					),
+				this.d1
+					.delete(d1Schema.blobState)
+					.where(stateMatch)
+					.returning({ narHash: d1Schema.blobState.narHash })
+			] as const;
 		});
 
-		const results = await batchNonEmpty(this.d1, queries);
+		const results = await batchNonEmpty(this.d1, queries.flat());
 
-		return results.reduce((demoted, removed) => demoted + removed.length, 0);
+		let demoted = 0;
+
+		for (const [index, result] of results.entries()) {
+			if (index % 2 === 1 && Array.isArray(result)) {
+				demoted += result.length;
+			}
+		}
+
+		return demoted;
 	}
 
 	private demoteBatch(
 		after: string,
 		limit: number
-	): Promise<{ narHash: NixSha256HashString; verifiedAt: IsoTimestamp }[]> {
+	): Promise<{ narHash: NixSha256HashString; incarnation: number }[]> {
 		return this.d1
 			.select({
 				narHash: d1Schema.blobState.narHash,
-				verifiedAt: d1Schema.blobState.verifiedAt
+				incarnation: d1Schema.blobState.incarnation
 			})
 			.from(d1Schema.blobState)
 			.where(gt(d1Schema.blobState.narHash, sql`${after}`))
@@ -414,41 +594,68 @@ export class BlobReaperService {
 			.all();
 	}
 
-	// Fence each deletion on the `stored_at` value captured by the scan so a
-	// re-stored object survives.
+	// Delete only the CAS object versions captured by the scan.
 	private async deleteFencedCasObjects(
-		rows: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
+		rows: readonly { digest: Sha256HexDigest; incarnation: number }[]
 	): Promise<number> {
 		const chunks = chunk(rows, maxFencedDeleteRows);
 		const queries = chunks.map((batch) => {
-			const match = or(
+			const stateMatch = or(
 				...batch.map((row) =>
 					and(
 						eq(d1Schema.casObject.digest, row.digest),
-						eq(d1Schema.casObject.storedAt, row.storedAt)
+						eq(d1Schema.casObject.incarnation, row.incarnation)
+					)
+				)
+			);
+			const registryMatch = or(
+				...batch.map((row) =>
+					and(
+						eq(d1Schema.objectIncarnation.objectId, row.digest),
+						eq(d1Schema.objectIncarnation.incarnation, row.incarnation)
 					)
 				)
 			);
 
-			return this.d1
-				.delete(d1Schema.casObject)
-				.where(match)
-				.returning({ digest: d1Schema.casObject.digest });
+			return [
+				this.d1
+					.update(d1Schema.objectIncarnation)
+					.set({ state: 'absent', reservationOwner: sql`null` })
+					.where(
+						and(
+							eq(d1Schema.objectIncarnation.kind, 'cas'),
+							eq(d1Schema.objectIncarnation.state, 'live'),
+							registryMatch
+						)
+					),
+				this.d1
+					.delete(d1Schema.casObject)
+					.where(stateMatch)
+					.returning({ digest: d1Schema.casObject.digest })
+			] as const;
 		});
 
-		const results = await batchNonEmpty(this.d1, queries);
+		const results = await batchNonEmpty(this.d1, queries.flat());
 
-		return results.reduce((demoted, removed) => demoted + removed.length, 0);
+		let demoted = 0;
+
+		for (const [index, result] of results.entries()) {
+			if (index % 2 === 1 && Array.isArray(result)) {
+				demoted += result.length;
+			}
+		}
+
+		return demoted;
 	}
 
 	private demoteCasBatch(
 		after: string,
 		limit: number
-	): Promise<{ digest: Sha256HexDigest; storedAt: IsoTimestamp }[]> {
+	): Promise<{ digest: Sha256HexDigest; incarnation: number }[]> {
 		return this.d1
 			.select({
 				digest: d1Schema.casObject.digest,
-				storedAt: d1Schema.casObject.storedAt
+				incarnation: d1Schema.casObject.incarnation
 			})
 			.from(d1Schema.casObject)
 			.where(gt(d1Schema.casObject.digest, sql`${after}`))
@@ -457,11 +664,13 @@ export class BlobReaperService {
 			.all();
 	}
 
+	// Group each digest's referencing tenants in bounded reads. Each tenant then
+	// receives one demotion call. Each entry includes the object version read here.
 	private async casReferencingDemotions(
-		objects: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
+		objects: readonly { digest: Sha256HexDigest; incarnation: number }[]
 	): Promise<Map<string, CasReferenceDemotion[]>> {
-		const storedAtByDigest = new Map(
-			objects.map((object) => [object.digest, object.storedAt])
+		const incarnationByDigest = new Map(
+			objects.map((object) => [object.digest, object.incarnation])
 		);
 		const pages = await mapWithConcurrency(
 			chunk(
@@ -487,11 +696,11 @@ export class BlobReaperService {
 			demotionsByTenant.set(
 				tenant,
 				rows.flatMap((row) => {
-					const fenceStoredAt = storedAtByDigest.get(row.digest);
+					const fenceIncarnation = incarnationByDigest.get(row.digest);
 
-					return fenceStoredAt === undefined
+					return fenceIncarnation === undefined
 						? []
-						: [{ digest: row.digest, fenceStoredAt }];
+						: [{ digest: row.digest, fenceIncarnation }];
 				})
 			);
 		}
@@ -499,13 +708,35 @@ export class BlobReaperService {
 		return demotionsByTenant;
 	}
 
-	async reapBlobs(now: Date, limit: number): Promise<number> {
+	async reapBlobs(logger: Logger, now: Date, limit: number): Promise<number> {
+		await drainObjectDeletions(this.d1, this.blobs, 'nar', limit);
+		await recoverAbandonedIncarnations(
+			this.d1,
+			this.blobs,
+			'nar',
+			now,
+			limit,
+			logger
+		);
 		await this.armUnreferencedBlobs(now, limit);
 
 		return this.collectExpiredBlobs(now, limit);
 	}
 
-	async reapCasObjects(now: Date, limit: number): Promise<number> {
+	async reapCasObjects(
+		logger: Logger,
+		now: Date,
+		limit: number
+	): Promise<number> {
+		await drainObjectDeletions(this.d1, this.blobs, 'cas', limit);
+		await recoverAbandonedIncarnations(
+			this.d1,
+			this.blobs,
+			'cas',
+			now,
+			limit,
+			logger
+		);
 		await this.armUnreferencedCasObjects(now, limit);
 
 		return this.collectExpiredCasObjects(now, limit);
@@ -532,10 +763,7 @@ export class BlobReaperService {
 			return 0;
 		}
 
-		const present = await presentNarObjects(
-			this.blobs,
-			batch.map((blob) => blob.narHash)
-		);
+		const present = await presentNarObjects(this.blobs, batch);
 		const missing = batch.filter((blob) => !present.has(blob.narHash));
 
 		if (missing.length === 0) {
@@ -584,9 +812,7 @@ export class BlobReaperService {
 			return 0;
 		}
 
-		const present = await this.presentCasObjects(
-			batch.map((object) => object.digest)
-		);
+		const present = await this.presentCasObjects(batch);
 		const missing = batch.filter((object) => !present.has(object.digest));
 
 		if (missing.length === 0) {

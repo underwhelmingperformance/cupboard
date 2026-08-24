@@ -4,6 +4,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -26,11 +27,24 @@ async function seedOwnedNar(): Promise<void> {
 }
 
 async function seedOwnedNarReference(): Promise<void> {
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const insertBlob = database
+		.insert(d1Schema.blobState)
+		.values({
+			narHash,
+			fileHash: narHash,
+			fileSize: narBytes.length,
+			compression: 'zstd',
+			narSize: narBytes.length,
+			verifiedAt: isoTimestamp(new Date())
+		})
+		.onConflictDoNothing();
+	const insertOwnership = database
 		.insert(d1Schema.tenantBlob)
 		.values({ tenant, narHash, fileSize: narBytes.length })
-		.onConflictDoNothing()
-		.run();
+		.onConflictDoNothing();
+
+	await database.batch([insertBlob, insertOwnership]);
 }
 
 async function serveWithFaults(failures: number): Promise<Response> {

@@ -12,9 +12,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narObjectKey } from '../http/http.ts';
 import {
 	commitPath,
+	currentNarObjectKey,
 	currentServer,
 	expectSingleCommitDecision,
 	flakyD1,
@@ -203,8 +203,10 @@ describe('when a commit retry finds an abandoned reservation', () => {
 			await negotiateUploads(token, [retried]),
 			retried
 		);
-		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			pipelineFor(instance.context).commit(rootLogger(), '', fresh.uploadId)
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) =>
+				pipelineFor(instance.context).commit(rootLogger(), '', fresh.uploadId)
 		);
 
 		expect(outcome).toStrictEqual({
@@ -251,8 +253,10 @@ describe('when a commit resumes its existing reservation', () => {
 
 		await seedReservedNarInfo(second);
 
-		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			pipelineFor(instance.context).commit(rootLogger(), '', reuse.uploadId)
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) =>
+				pipelineFor(instance.context).commit(rootLogger(), '', reuse.uploadId)
 		);
 
 		expect(outcome).toStrictEqual({
@@ -297,14 +301,20 @@ describe('when another commit holds the reservation', () => {
 			second
 		);
 
-		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			pipelineFor(instance.context).concedeToWinner(
-				rootLogger(),
-				'',
-				reuse.uploadId,
-				second,
-				narObjectKey(second.narHash)
-			)
+		// Call `concedeToWinner` directly with the reuse upload's metadata and the
+		// current physical object key. No D1 `blobReference` edge exists for the
+		// second path yet, so `committedNarInfoRow` returns undefined and the call
+		// must return `deferred`, not `already-present`.
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) =>
+				pipelineFor(instance.context).concedeToWinner(
+					rootLogger(),
+					'',
+					reuse.uploadId,
+					second,
+					await currentNarObjectKey(second.narHash)
+				)
 		);
 
 		expect(outcome).toStrictEqual({

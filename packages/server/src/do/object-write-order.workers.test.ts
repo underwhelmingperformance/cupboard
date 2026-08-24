@@ -168,6 +168,7 @@ describe('path-keyed object write ordering', () => {
 					{
 						generation: row.generation,
 						narHash: row.narHash,
+						narUrl: narInfo.url,
 						signatureGeneration:
 							row.pendingSignatureGeneration ?? row.signatureGeneration
 					},

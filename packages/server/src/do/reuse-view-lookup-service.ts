@@ -74,11 +74,25 @@ interface BlobFields {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
 	readonly compression: 'zstd';
+	readonly incarnation: number;
 }
 
 interface VerifiedCandidates {
 	readonly candidates: readonly CandidateRow[];
 	readonly blobs: ReadonlyMap<string, BlobFields>;
+}
+
+function recordedObjectVersions(
+	candidates: readonly CandidateRow[],
+	blobs: ReadonlyMap<string, BlobFields>
+): { readonly narHash: NixSha256HashString; readonly incarnation: number }[] {
+	return candidates.flatMap((candidate) => {
+		const blob = blobs.get(candidate.narHash);
+
+		return blob === undefined
+			? []
+			: [{ narHash: candidate.narHash, incarnation: blob.incarnation }];
+	});
 }
 
 const maxEdgeCandidatesPerQuery = Math.floor((maxInClauseValues - 1) / 3);
@@ -391,7 +405,8 @@ export class ReuseViewLookupService {
 							narHash: d1Schema.blobState.narHash,
 							fileHash: d1Schema.blobState.fileHash,
 							fileSize: d1Schema.blobState.fileSize,
-							compression: d1Schema.blobState.compression
+							compression: d1Schema.blobState.compression,
+							incarnation: d1Schema.blobState.incarnation
 						})
 						.from(d1Schema.blobState)
 						.where(inArray(d1Schema.blobState.narHash, uniqueHashes))
@@ -426,7 +441,8 @@ export class ReuseViewLookupService {
 				{
 					fileHash: state.fileHash,
 					fileSize: state.fileSize,
-					compression: state.compression
+					compression: state.compression,
+					incarnation: state.incarnation
 				}
 			])
 		);
@@ -440,7 +456,7 @@ export class ReuseViewLookupService {
 		const presentHashes = await this.sharedFacts(() =>
 			presentNarObjects(
 				this.context.env.BLOBS,
-				backed.map((candidate) => candidate.narHash)
+				recordedObjectVersions(backed, blobs)
 			)
 		);
 
@@ -495,7 +511,8 @@ export class ReuseViewLookupService {
 						narHash: d1Schema.blobState.narHash,
 						fileHash: d1Schema.blobState.fileHash,
 						fileSize: d1Schema.blobState.fileSize,
-						compression: d1Schema.blobState.compression
+						compression: d1Schema.blobState.compression,
+						incarnation: d1Schema.blobState.incarnation
 					})
 					.from(d1Schema.blobState)
 					.where(inArray(d1Schema.blobState.narHash, narHashes))
@@ -529,7 +546,8 @@ export class ReuseViewLookupService {
 				{
 					fileHash: state.fileHash,
 					fileSize: state.fileSize,
-					compression: state.compression
+					compression: state.compression,
+					incarnation: state.incarnation
 				}
 			])
 		);
@@ -543,11 +561,10 @@ export class ReuseViewLookupService {
 				blobs.has(candidate.narHash) &&
 				ownedHashes.has(candidate.narHash)
 		);
-
 		const presentHashes = await this.sharedFacts(() =>
 			presentNarObjects(
 				this.context.env.BLOBS,
-				backed.map((candidate) => candidate.narHash)
+				recordedObjectVersions(backed, blobs)
 			)
 		);
 
@@ -763,7 +780,7 @@ export class ReuseViewLookupService {
 		// This narinfo is two path segments below the tenant's canonical NAR route.
 		return new NarInfo(
 			new StorePath(row.storePath),
-			`../../${narObjectKey(row.narHash)}`,
+			`../../${narObjectKey(row.narHash, blob.incarnation)}`,
 			blob.compression,
 			NixSha256Hash.parse(blob.fileHash),
 			blob.fileSize,

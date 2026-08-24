@@ -27,7 +27,8 @@ import {
 	testBase,
 	testPushId,
 	uploadMetadata,
-	uploadPathNegotiation
+	uploadPathNegotiation,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 type PendingRow = typeof schema.pendingUploads.$inferSelect;
@@ -259,7 +260,7 @@ describe('root attach at commit', () => {
 		// The settle applied but the clear-marker step never ran: the verify
 		// pass re-drives the same commit and must attach nothing new.
 		await replantStuckPending(planted);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const expected = [
 			{

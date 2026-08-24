@@ -38,7 +38,8 @@ import {
 	openCommitSession,
 	putNarBytes,
 	resetTestServer,
-	verifiablePath
+	verifiablePath,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 import { maxOutgoingConnections } from './bulk.ts';
@@ -1524,7 +1525,7 @@ describe('commit session credit', () => {
 
 		await runIdleClose(() => true);
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect({
 			opening: session.capabilities,

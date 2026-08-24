@@ -42,7 +42,7 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 		workersDev: true,
 		previewUrls: true,
 		crons: [],
-		migrations: [],
+		exports: {},
 		...overrides
 	};
 }
@@ -81,7 +81,13 @@ const artifact: DeploymentArtifact = {
 			cacheEnabled: true,
 			workersDev: false,
 			previewUrls: false,
-			migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
+			exports: {
+				CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+				VersionedR2ObjectRollbackGuard: {
+					type: 'durable-object',
+					storage: 'sqlite'
+				}
+			}
 		})
 	},
 	controlBundle: { mainModule: 'worker.js', code: 'control' },
@@ -190,7 +196,6 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`d1qr:${sql.slice(0, 12)}`);
 				return Promise.resolve([]);
 			},
-			getScriptMigrationTag: () => Promise.resolve('v0'),
 			getScriptConfiguration: () => {
 				recordFallbackApiCall(calls, 'getScriptConfiguration');
 				return Promise.resolve(undefined);
@@ -572,7 +577,6 @@ describe('runDeploy', () => {
 		// comparison must ignore.
 		const convergedApi: CloudflareApi = {
 			...api,
-			getScriptMigrationTag: () => Promise.resolve('v1'),
 			getScriptConfiguration: (script) =>
 				Promise.resolve(deployedConfiguration(script))
 		};
@@ -668,7 +672,6 @@ describe('runDeploy', () => {
 		});
 
 		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
-			'upload:cupboard-tenant',
 			'upload:cupboard'
 		]);
 	});

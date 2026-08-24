@@ -94,30 +94,36 @@ export async function guardRead(
 	return unauthorisedResponse();
 }
 
-// NAR objects are shared by hash across tenants. On an origin read, require this
-// tenant's `tenant_blob` reference before reading R2. Return the same 404 for an
-// absent reference and an absent object, and keep the tenant in the public cache
-// URL so cached bytes cannot cross tenants.
-export function serveNar(
+// NAR objects are shared by hash in R2. Serve one only when `tenant_blob` links
+// it to the requesting tenant, and include the tenant in the edge-cache key.
+// Missing ownership and missing objects both return 404, so a tenant cannot use
+// this route to discover another tenant's stored bytes.
+export async function serveNar(
 	request: Request,
 	env: ReadEnv,
 	tenant: TenantId,
 	narHash: NixSha256HashString,
-	isPrivate: boolean
+	isPrivate: boolean,
+	incarnation = 1
 ): Promise<Response> {
+	const isOwned = await isNarOwnedByTenant(env, tenant, narHash);
+
+	if (!isOwned) {
+		return isPrivate ? uncachedNotFoundResponse() : notFoundResponse();
+	}
+
 	return serveR2(
 		request,
 		env,
-		narObjectKey(narHash),
+		narObjectKey(narHash, incarnation),
 		narHeaders,
-		!isPrivate,
-		() => hasTenantNarReference(env, tenant, narHash)
+		!isPrivate
 	);
 }
 
-// A persistent D1 fault is a retryable 503. Returning 404 would turn a storage
-// failure into an apparent absence.
-async function hasTenantNarReference(
+// Retry the D1 ownership query once. A persistent failure becomes a retryable
+// refusal instead of a 404, which would report the NAR as absent.
+async function isNarOwnedByTenant(
 	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
 	tenant: TenantId,
 	narHash: NixSha256HashString
@@ -127,8 +133,12 @@ async function hasTenantNarReference(
 	try {
 		const owned = await readWithOneRetry(() =>
 			database
-				.select({ narHash: d1Schema.tenantBlob.narHash })
+				.select({ narHash: d1Schema.blobState.narHash })
 				.from(d1Schema.tenantBlob)
+				.innerJoin(
+					d1Schema.blobState,
+					eq(d1Schema.blobState.narHash, d1Schema.tenantBlob.narHash)
+				)
 				.where(
 					and(
 						eq(d1Schema.tenantBlob.tenant, tenant),

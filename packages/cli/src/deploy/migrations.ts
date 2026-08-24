@@ -1,6 +1,3 @@
-import type { SingleStepMigrationParam } from 'cloudflare/resources/workers/workers';
-
-import type { DurableObjectMigration } from './config.ts';
 import type { DatabaseId } from './identifiers.ts';
 
 /**
@@ -85,40 +82,4 @@ export async function applyD1Migrations(
 	}
 
 	return newlyApplied;
-}
-
-/**
- * Decide which Durable Object migration step to send, given the migration tag
- * the deployed script already reports. On a first deploy (no tag) the full set
- * of new-SQLite-class steps is sent; once the tag matches the latest config
- * migration, no migration payload is sent. Mirrors wrangler's
- * `getMigrationsToUpload`, reduced to the steps this Worker uses.
- */
-export function computeDurableObjectMigration(
-	deployedTag: string | undefined,
-	migrations: readonly DurableObjectMigration[]
-): SingleStepMigrationParam | undefined {
-	if (migrations.length === 0) {
-		return undefined;
-	}
-
-	const latest = migrations.at(-1);
-
-	if (latest === undefined || deployedTag === latest.tag) {
-		return undefined;
-	}
-
-	const foundIndex =
-		deployedTag === undefined
-			? -1
-			: migrations.findIndex((migration) => migration.tag === deployedTag);
-
-	const steps = migrations.slice(foundIndex + 1);
-	const newSqliteClasses = steps.flatMap((step) => [...step.newSqliteClasses]);
-
-	return {
-		new_tag: latest.tag,
-		...(deployedTag !== undefined && { old_tag: deployedTag }),
-		...(newSqliteClasses.length > 0 && { new_sqlite_classes: newSqliteClasses })
-	};
 }

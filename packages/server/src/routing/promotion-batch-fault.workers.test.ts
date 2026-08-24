@@ -117,10 +117,13 @@ describe('promotion after a transient D1 batch failure', () => {
 	});
 });
 
-describe('promotion after persistent D1 batch failures', () => {
+// A persistent D1 read fault can occur after R2 promotion has completed. The
+// claim must remain pending and lose its lease so the next pass can finish it
+// from the durable `blob_state` row.
+describe('promotion followed by a persistent D1 fault', () => {
 	beforeEach(resetTestServer);
 
-	it('settles a fresh claim when all batch attempts reject', async () => {
+	it('leaves the claim immediately retryable when all batch attempts reject', async () => {
 		const token = await initialise();
 
 		const fresh = await deferFreshUpload(
@@ -129,8 +132,8 @@ describe('promotion after persistent D1 batch failures', () => {
 			'1'.repeat(32)
 		);
 
-		// Allow the claim pin, then fail all three promotion batches. The fallback
-		// uses individual statements and does not call D1 batch.
+		// The pin batch is call 1. Calls 2-4 read the stored blob metadata after
+		// promotion, including the per-row fallback after prefetch fails.
 		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		let batchCallCount = 0;
 		const batchSpy = vi
@@ -155,9 +158,13 @@ describe('promotion after persistent D1 batch failures', () => {
 			freshVerdict: await pendingUploadVerdict(fresh.uploadId),
 			blobState: await blobStateNarHashes()
 		}).toStrictEqual({
-			freshVerdict: undefined,
+			freshVerdict: 'pending',
 			blobState: [{ narHash: fresh.metadata.narHash }]
 		});
+
+		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+
+		expect(await pendingUploadVerdict(fresh.uploadId)).toBeUndefined();
 	});
 });
 

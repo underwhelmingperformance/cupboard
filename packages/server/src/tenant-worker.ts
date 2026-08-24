@@ -1,4 +1,4 @@
-import { WorkerEntrypoint } from 'cloudflare:workers';
+import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
 import {
@@ -8,6 +8,14 @@ import {
 import { tenantReadFetch } from './routing/tenant-read-handler.ts';
 
 export { CupboardServer } from './do/server.ts';
+
+/**
+ * Cloudflare refuses to deploy an earlier Worker version across a Durable
+ * Object class lifecycle change. This unbound class creates that boundary for
+ * the change to versioned R2 object keys; because it has no binding, the Worker
+ * cannot create instances.
+ */
+export class VersionedR2ObjectRollbackGuard extends DurableObject<TenantEnv> {}
 
 export default class TenantWorker extends WorkerEntrypoint<TenantEnv> {
 	/**

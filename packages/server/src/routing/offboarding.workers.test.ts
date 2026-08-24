@@ -25,7 +25,6 @@ import {
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { narObjectKey } from '../http/http.ts';
 import {
 	afterGrace,
 	attemptPushToTenant,
@@ -33,6 +32,7 @@ import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
+	currentNarObjectKey,
 	issueTokenForTenant,
 	isTenantUsagePresent,
 	offboardTenant,
@@ -178,7 +178,8 @@ describe('offboarding drain', () => {
 		expect({
 			drained,
 			blobState: await blobStateNarHashes(),
-			narObject: (await env.BLOBS.head(narObjectKey(narHash))) !== null
+			narObject:
+				(await env.BLOBS.head(await currentNarObjectKey(narHash))) !== null
 		}).toStrictEqual({
 			drained: {
 				edges: [],
@@ -416,7 +417,8 @@ describe('offboarding drain', () => {
 			edges: await tenantEdges(id),
 			objects: await tenantObjectKeys(id),
 			blobState: await blobStateNarHashes(),
-			narObject: (await env.BLOBS.head(narObjectKey(narHash))) !== null
+			narObject:
+				(await env.BLOBS.head(await currentNarObjectKey(narHash))) !== null
 		}).toStrictEqual({
 			status: 'offboarded',
 			edges: [],

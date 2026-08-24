@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import type { DurableObjectMigration } from './config.ts';
 import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
-	computeDurableObjectMigration,
 	type D1Migration,
 	type D1MigrationApi,
 	parseD1Migrations
@@ -140,32 +138,5 @@ describe('applyD1Migrations', () => {
 				"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
 			]
 		]);
-	});
-});
-
-describe('computeDurableObjectMigration', () => {
-	const migrations: DurableObjectMigration[] = [
-		{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }
-	];
-
-	it.each([
-		{
-			name: 'first deploy sends the new-sqlite-class step',
-			deployedTag: undefined,
-			expected: { new_tag: 'v1', new_sqlite_classes: ['CupboardServer'] }
-		},
-		{
-			name: 'redeploy at the latest tag omits the migration payload',
-			deployedTag: 'v1',
-			expected: undefined
-		}
-	])('$name', ({ deployedTag, expected }) => {
-		expect(
-			computeDurableObjectMigration(deployedTag, migrations)
-		).toStrictEqual(expected);
-	});
-
-	it('returns undefined when there are no migrations', () => {
-		expect(computeDurableObjectMigration(undefined, [])).toBeUndefined();
 	});
 });

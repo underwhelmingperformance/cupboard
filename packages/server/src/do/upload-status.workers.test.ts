@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	clearBlobStorage,
-	currentServer,
 	expectSingleUploadDecision,
 	initialise,
 	markUploadPendingVerification,
@@ -20,7 +19,8 @@ import {
 	testBase,
 	uploadMetadata,
 	uploadStatus,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 async function stageDeferred(nar: {
@@ -62,7 +62,7 @@ describe('deferred upload status', () => {
 		const uploadId = await stageDeferred(nar);
 
 		const whilePending = await uploadStatus(uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const afterVerify = await uploadStatus(uploadId);
 		const stored = await readStoredNarInfo(
 			storePathHashSchema.parse('a'.repeat(32))
@@ -91,7 +91,7 @@ describe('deferred upload status', () => {
 			narBytes: wrong.narBytes
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await uploadStatus(uploadId)).toBe('mismatch');
 	});
@@ -101,7 +101,7 @@ describe('deferred upload status', () => {
 		const uploadId = await stageDeferred(nar);
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await uploadStatus(uploadId)).toBe('over-quota');
 	});

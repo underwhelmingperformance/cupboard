@@ -5,16 +5,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import {
-	narInfoObjectKey,
-	narObjectKey,
-	r2ObjectKeySchema
-} from '../http/http.ts';
+import { narInfoObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobStateNarHashes,
 	commitPath,
+	currentNarObjectKey,
 	currentServer,
 	currentServerTenant,
 	deferFreshUpload,
@@ -32,9 +29,10 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-// A `promoted` verdict guarantees that the canonical object and its `blob_state`
-// row are durable. The Durable Object must not promote those bytes again.
-describe('recording a promoted verdict', () => {
+// An older consumer can report `promoted` after it has written the canonical
+// object and `blob_state` row. The current Durable Object must still record that
+// verdict without repeating the promotion during a rolling deployment.
+describe('recording an older promoted verdict', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
@@ -54,6 +52,7 @@ describe('recording a promoted verdict', () => {
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
 
+		// Reproduce the shared writes an older queue consumer performed.
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		await promoteVerifiedBlob(
 			d1,
@@ -66,8 +65,12 @@ describe('recording a promoted verdict', () => {
 
 		// A settle that promoted again would advance `verified_at` past this.
 		vi.setSystemTime(new Date(testBase.getTime() + 60_000));
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
 
-		const applied = await currentServer().recordVerifications([
+		const applied = await currentServer().recordVerifications(claim.owner, [
 			{ uploadId: upload.uploadId, verdict: { kind: 'promoted' } }
 		]);
 
@@ -98,6 +101,8 @@ describe('recording a promoted verdict', () => {
 	});
 });
 
+// The queue consumer's pass end to end: it decodes and reports off the Durable
+// Object thread. The Durable Object promotes only while it owns the claim.
 describe('consumer verify pass', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -105,7 +110,7 @@ describe('consumer verify pass', () => {
 		await resetTestServer();
 	});
 
-	it('settles a fresh deferred upload, promoting in the consumer', async () => {
+	it('records a fresh deferred upload through an owner-checked promotion', async () => {
 		const token = await initialise();
 		const { metadata, nar } = await verifiablePath('consumer-promotes', {
 			storePathHash: 'a'.repeat(32),
@@ -136,13 +141,13 @@ describe('consumer verify pass', () => {
 		});
 	});
 
-	it('keeps the first upload settled when decoding the second upload fails', async () => {
+	it('keeps the first upload complete when decoding the second upload fails', async () => {
 		const token = await initialise();
 		const first = await deferFreshUpload(token, 'progress-a', 'a'.repeat(32));
 		const second = await deferFreshUpload(token, 'progress-b', 'b'.repeat(32));
 
 		// The second upload's staging read fails before it produces a verdict. The
-		// first upload's verdict is recorded incrementally and remains settled.
+		// first upload's verdict was already recorded and remains complete.
 		const originalGet = env.BLOBS.get.bind(env.BLOBS);
 		const get = vi
 			.spyOn(env.BLOBS, 'get')
@@ -217,7 +222,7 @@ describe('consumer verify pass', () => {
 					narInfoObjectKey(fixtureTenant, second.storePathHash)
 				)) !== null,
 			canonicalPresent:
-				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
 			reads: 0,
 			verdict: undefined,
@@ -255,8 +260,9 @@ describe('consumer verify pass', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// Delete after negotiation to reproduce collection before verification.
-		await env.BLOBS.delete(narObjectKey(nar.narHash));
+		// The object was collected between negotiation and this pass. The server must
+		// record a terminal result and tell the waiter to upload it again.
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
 
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
@@ -301,9 +307,10 @@ describe('consumer verify pass', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// The next pass can settle only if a transient canonical-head failure
-		// releases the claim immediately.
-		const canonicalKey = narObjectKey(nar.narHash);
+		// The promote's canonical head fails transiently; the pass abandons the
+		// claim, and abandoning must free the lease so the next pass retries at
+		// at once.
+		const canonicalKey = await currentNarObjectKey(nar.narHash);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let shouldFail = true;
 		const head = vi

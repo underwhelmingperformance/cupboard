@@ -56,9 +56,16 @@ export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
 export const verifyClaimBatchSize = 32;
 export const verifyClaimMaxNarBytes = verifiableMaxBytes;
 
-// A claim prevents overlapping verification passes from processing the same
-// rows. Another pass may reclaim the rows after the lease expires.
-export const verifyClaimLeaseMs = 4 * 60 * 1000;
+// Cross-deployment verification RPCs accept at most one ordinary maintenance
+// batch. This bounds both the SQLite result materialised by a claim and the
+// verdict array retained while the Durable Object applies it.
+export const maxVerificationRpcRows = verificationBatchSize;
+
+// A claim lease lasts longer than the Worker's five-minute CPU allowance.
+// Active passes renew it halfway through, so network waits cannot let another
+// pass claim the same row. A crashed pass releases its rows when the lease
+// expires.
+export const verifyClaimLeaseMs = 6 * 60 * 1000;
 
 export const maxAttestationBundleBytes = 1024 * 1024;
 
@@ -77,14 +84,24 @@ export const blobReaperBatchSize = 500;
 export const narObjectKeyPrefix = 'nar/';
 export const narObjectKeySuffix = '.nar.zst';
 
-export function narObjectKey(narHash: NixSha256HashString): R2ObjectKey {
+export function narObjectKey(
+	narHash: NixSha256HashString,
+	incarnation = 1
+): R2ObjectKey {
+	const version = incarnation === 1 ? '' : `.${String(incarnation)}`;
+
 	return r2ObjectKeySchema.parse(
-		`${narObjectKeyPrefix}${narHash}${narObjectKeySuffix}`
+		`${narObjectKeyPrefix}${narHash}${version}${narObjectKeySuffix}`
 	);
 }
 
-export function casObjectKey(digest: Sha256HexDigest): R2ObjectKey {
-	return r2ObjectKeySchema.parse(`cas/${digest}`);
+export function casObjectKey(
+	digest: Sha256HexDigest,
+	incarnation = 1
+): R2ObjectKey {
+	const version = incarnation === 1 ? '' : `.${String(incarnation)}`;
+
+	return r2ObjectKeySchema.parse(`cas/${digest}${version}`);
 }
 
 export function attestationListCachePath(
@@ -157,16 +174,31 @@ export function narInfoObjectKey(
 	return r2ObjectKeySchema.parse(`${narInfoObjectPrefix(tenant)}${suffix}`);
 }
 
-export function parseNarName(name: string): NixSha256HashString | undefined {
-	const suffix = '.nar.zst';
+export interface ParsedNarName {
+	readonly narHash: NixSha256HashString;
+	readonly incarnation: number;
+}
+
+export function parseNarName(name: string): ParsedNarName | undefined {
+	const suffix = narObjectKeySuffix;
 
 	if (!name.endsWith(suffix)) {
 		return undefined;
 	}
 
-	const parsed = nixSha256HashSchema.safeParse(name.slice(0, -suffix.length));
+	const stem = name.slice(0, -suffix.length);
+	const separator = stem.lastIndexOf('.');
+	const hash = separator === -1 ? stem : stem.slice(0, separator);
+	const incarnationText = separator === -1 ? '1' : stem.slice(separator + 1);
+	const parsed = nixSha256HashSchema.safeParse(hash);
+	const incarnation = Number(incarnationText);
 
-	return parsed.success ? parsed.data : undefined;
+	return parsed.success &&
+		Number.isSafeInteger(incarnation) &&
+		incarnation > 0 &&
+		String(incarnation) === incarnationText
+		? { narHash: parsed.data, incarnation }
+		: undefined;
 }
 
 export function parseNarInfoName(name: string): StorePathHash | undefined {

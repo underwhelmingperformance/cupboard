@@ -3,7 +3,6 @@ import { isDeepStrictEqual } from 'node:util';
 import Cloudflare from 'cloudflare';
 import { NotFoundError } from 'cloudflare';
 import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
-import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -23,6 +22,7 @@ import {
 	type ZoneId,
 	zoneIdSchema
 } from './identifiers.ts';
+import type { ScriptMetadata } from './upload.ts';
 
 export interface AccountSummary {
 	readonly id: CloudflareAccountId;
@@ -131,7 +131,6 @@ export interface CloudflareApi {
 	): Promise<void>;
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
-	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
 	/**
 	 * The live bindings and cache settings needed for deployment convergence.
 	 * Returns `undefined` when the script is not deployed.
@@ -141,7 +140,7 @@ export interface CloudflareApi {
 	): Promise<ScriptConfiguration | undefined>;
 	uploadScript(
 		scriptName: ScriptName,
-		metadata: ScriptUpdateParams.Metadata,
+		metadata: ScriptMetadata,
 		bundle: WorkerBundle
 	): Promise<void>;
 
@@ -462,15 +461,6 @@ export function createCloudflareApi(
 			}
 
 			return rows;
-		},
-
-		async getScriptMigrationTag(scriptName) {
-			const script = await firstMatch(
-				client.workers.scripts.list(account),
-				(item) => item.id === scriptName
-			);
-
-			return script?.migration_tag ?? undefined;
 		},
 
 		async getScriptConfiguration(scriptName) {

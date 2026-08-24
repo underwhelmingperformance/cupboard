@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -513,7 +514,13 @@ describe('signing key rotation', () => {
 							service.runBackfillOnce()
 						);
 						await publicationStarted.promise;
-						await pending;
+						let didTimeout = false;
+
+						try {
+							await pending;
+						} catch (error) {
+							didTimeout = error instanceof SubrequestTimeoutError;
+						}
 
 						const continuations = instance.context.db
 							.select()
@@ -526,6 +533,7 @@ describe('signing key rotation', () => {
 							rotation,
 							continuations,
 							keys,
+							didTimeout,
 							publicationStarted: put.mock.calls.length > 0,
 							alarmRearmed: retryAlarmCalls === 1
 						};
@@ -554,6 +562,7 @@ describe('signing key rotation', () => {
 				lastError: continuation.lastError
 			})),
 			backfill: incoming.backfill,
+			didTimeout: result.didTimeout,
 			publicationStarted: result.publicationStarted,
 			alarmRearmed: result.alarmRearmed
 		}).toStrictEqual({
@@ -572,6 +581,7 @@ describe('signing key rotation', () => {
 					message: 'A storage subrequest timed out'
 				}
 			},
+			didTimeout: true,
 			publicationStarted: true,
 			alarmRearmed: true
 		});

@@ -1,9 +1,11 @@
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { inArray } from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 export { chunk } from '@cupboard/shared/collections';
@@ -63,14 +65,31 @@ export async function batchNonEmpty<
  */
 export async function presentNarObjects(
 	blobs: R2Bucket,
-	narHashes: readonly NixSha256HashString[]
+	objects: readonly (
+		| NixSha256HashString
+		| { readonly narHash: NixSha256HashString; readonly incarnation: number }
+	)[]
 ): Promise<ReadonlySet<NixSha256HashString>> {
-	const unique = [...new Set(narHashes)];
+	const unique = new Map(
+		objects.map((object) => {
+			const row =
+				typeof object === 'string'
+					? { narHash: object, incarnation: 1 }
+					: object;
+
+			return [row.narHash, row] as const;
+		})
+	)
+		.values()
+		.toArray();
 	const present = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
-		async (narHash) =>
-			(await blobs.head(narObjectKey(narHash))) === null ? undefined : narHash
+		async (object) =>
+			(await blobs.head(narObjectKey(object.narHash, object.incarnation))) ===
+			null
+				? undefined
+				: object.narHash
 	);
 
 	return new Set(
@@ -78,4 +97,29 @@ export async function presentNarObjects(
 			(narHash): narHash is NixSha256HashString => narHash !== undefined
 		)
 	);
+}
+
+export async function recordedNarObjects(
+	database: DrizzleD1Database<typeof d1Schema>,
+	narHashes: readonly NixSha256HashString[]
+): Promise<
+	readonly {
+		readonly narHash: NixSha256HashString;
+		readonly incarnation: number;
+	}[]
+> {
+	const queries = chunk([...new Set(narHashes)], maxInClauseValues).map(
+		(batch) =>
+			database
+				.select({
+					narHash: d1Schema.blobState.narHash,
+					incarnation: d1Schema.blobState.incarnation
+				})
+				.from(d1Schema.blobState)
+				.where(inArray(d1Schema.blobState.narHash, batch))
+	);
+
+	const pages = await batchNonEmpty(database, queries);
+
+	return pages.flat();
 }

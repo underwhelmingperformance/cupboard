@@ -10,11 +10,11 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { narObjectKey } from '../http/http.ts';
 import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
+	currentNarObjectKey,
 	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
@@ -108,7 +108,7 @@ describe('reaper demote routing failure', () => {
 			'solo',
 			'a'.repeat(32)
 		);
-		await env.BLOBS.delete(narObjectKey(nar.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
 
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(
@@ -129,8 +129,8 @@ describe('reaper demote routing failure', () => {
 	it('removes one blob-state row while retaining the row whose tenant demotion fails', async () => {
 		const failing = await pushNar('reaper-fail-a', 'fail', 'a'.repeat(32));
 		const succeeding = await pushNar('reaper-ok-b', 'succeed', 'b'.repeat(32));
-		await env.BLOBS.delete(narObjectKey(failing.nar.narHash));
-		await env.BLOBS.delete(narObjectKey(succeeding.nar.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(failing.nar.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(succeeding.nar.narHash));
 
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(
@@ -158,7 +158,7 @@ describe('reaper demote routing failure', () => {
 
 		const sharedHash: NixSha256HashString = failing.nar.narHash;
 		expect(sharing.nar.narHash).toBe(sharedHash);
-		await env.BLOBS.delete(narObjectKey(sharedHash));
+		await env.BLOBS.delete(await currentNarObjectKey(sharedHash));
 
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(

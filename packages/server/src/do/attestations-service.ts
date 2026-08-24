@@ -19,7 +19,7 @@ import {
 	type AttestationNegotiateResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -274,18 +274,24 @@ export class AttestationsService {
 		return reference !== undefined;
 	}
 
-	private async hasAvailableBundle(digest: Sha256HexDigest): Promise<boolean> {
+	private async availableBundleIncarnation(
+		digest: Sha256HexDigest
+	): Promise<number | undefined> {
 		const row = await this.context.d1
-			.select({ digest: d1Schema.casObject.digest })
+			.select({ incarnation: d1Schema.casObject.incarnation })
 			.from(d1Schema.casObject)
 			.where(eq(d1Schema.casObject.digest, digest))
 			.get();
 
 		if (row === undefined) {
-			return false;
+			return undefined;
 		}
 
-		return (await this.context.env.BLOBS.head(casObjectKey(digest))) !== null;
+		return (await this.context.env.BLOBS.head(
+			casObjectKey(digest, row.incarnation)
+		)) === null
+			? undefined
+			: row.incarnation;
 	}
 
 	private async descriptorsFor(
@@ -414,20 +420,25 @@ export class AttestationsService {
 		const queries = chunk([...new Set(digests)], maxInClauseValues).map(
 			(digestBatch) =>
 				this.context.d1
-					.select({ digest: d1Schema.casObject.digest })
+					.select({
+						digest: d1Schema.casObject.digest,
+						incarnation: d1Schema.casObject.incarnation
+					})
 					.from(d1Schema.casObject)
 					.where(inArray(d1Schema.casObject.digest, digestBatch))
 		);
 
 		const recordedPages = await batchNonEmpty(this.context.d1, queries);
-		const recorded = recordedPages.flat().map((row) => row.digest);
+		const recorded = recordedPages.flat();
 		const present = await mapWithConcurrency(
 			recorded,
 			maxOutgoingConnections,
-			async (digest) =>
-				(await this.context.env.BLOBS.head(casObjectKey(digest))) === null
+			async (object) =>
+				(await this.context.env.BLOBS.head(
+					casObjectKey(object.digest, object.incarnation)
+				)) === null
 					? undefined
-					: digest
+					: object.digest
 		);
 
 		return new Set(
@@ -615,13 +626,15 @@ export class AttestationsService {
 			return uncachedNotFoundResponse();
 		}
 
-		if (!(await this.hasAvailableBundle(digest))) {
+		const incarnation = await this.availableBundleIncarnation(digest);
+
+		if (incarnation === undefined) {
 			return uncachedNotFoundResponse();
 		}
 
 		return this.serveTenantObject(
 			request,
-			casObjectKey(digest),
+			casObjectKey(digest, incarnation),
 			'application/vnd.dev.sigstore.bundle+json',
 			'public, max-age=31536000, immutable'
 		);
@@ -678,14 +691,18 @@ export class AttestationsService {
 
 	async removeReferencesForDigest(
 		digest: Sha256HexDigest,
-		fenceStoredAt: IsoTimestamp
+		fenceIncarnation: number
 	): Promise<void> {
 		// The reaper routes here on a single head()===null observation. Re-check inside
 		// this Durable Object, the single writer of the tenant's rows: a concurrent
 		// re-promote may have restored the shared object, in which case its references
 		// are valid and must not be stripped. Unlike the re-materialisable narinfo
 		// demote, stripping a reference and crediting quota cannot be undone.
-		if ((await this.context.env.BLOBS.head(casObjectKey(digest))) !== null) {
+		if (
+			(await this.context.env.BLOBS.head(
+				casObjectKey(digest, fenceIncarnation)
+			)) !== null
+		) {
 			return;
 		}
 
@@ -711,7 +728,7 @@ export class AttestationsService {
 		for (const reference of references) {
 			await this.attestationCas.removeCapturedReference(
 				reference,
-				fenceStoredAt
+				fenceIncarnation
 			);
 			touchedPaths.add(`${reference.cache}\0${reference.storePathHash}`);
 		}

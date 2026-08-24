@@ -41,7 +41,10 @@ const tenantSource = `{
 	"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "cupboard" }],
 	"vars": {},
 	"observability": { "enabled": true },
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["CupboardServer"] }]
+	"exports": {
+		"CupboardServer": { "type": "durable-object", "storage": "sqlite" },
+		"VersionedR2ObjectRollbackGuard": { "type": "durable-object", "storage": "sqlite" }
+	}
 }`;
 
 describe('parseDeploymentConfig', () => {
@@ -92,7 +95,7 @@ describe('parseDeploymentConfig', () => {
 				workersDev: true,
 				previewUrls: true,
 				crons: ['0 * * * *'],
-				migrations: []
+				exports: {}
 			},
 			tenant: {
 				name: 'cupboard-tenant',
@@ -120,7 +123,13 @@ describe('parseDeploymentConfig', () => {
 				workersDev: false,
 				previewUrls: false,
 				crons: [],
-				migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
+				exports: {
+					CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+					VersionedR2ObjectRollbackGuard: {
+						type: 'durable-object',
+						storage: 'sqlite'
+					}
+				}
 			}
 		});
 	});
@@ -143,6 +152,102 @@ function thrownBy(function_: () => void): unknown {
 }
 
 describe('wrangler config validation', () => {
+	it('rejects the legacy Durable Object migration flow', () => {
+		const legacyTenant = tenantSource.replace(
+			/"exports": \{[\s\S]*?\n\t\}/,
+			'"migrations": [{ "tag": "v1", "new_sqlite_classes": ["CupboardServer"] }]'
+		);
+		const error = thrownBy(() =>
+			parseDeploymentConfig(controlSource, legacyTenant)
+		);
+
+		expect(error).toBeInstanceOf(WranglerConfigError);
+
+		if (error instanceof WranglerConfigError) {
+			expect(error.issues).toStrictEqual([
+				{
+					code: 'custom',
+					path: ['migrations'],
+					message: 'use declarative exports for Durable Object class lifecycle'
+				}
+			]);
+		}
+	});
+
+	it.each([
+		[
+			'created',
+			'{ "type": "durable-object", "state": "created", "storage": "sqlite" }',
+			{ type: 'durable-object', state: 'created', storage: 'sqlite' }
+		],
+		[
+			'deleted',
+			'{ "type": "durable-object", "state": "deleted" }',
+			{ type: 'durable-object', state: 'deleted' }
+		],
+		[
+			'renamed',
+			'{ "type": "durable-object", "state": "renamed", "renamed_to": "Successor" }',
+			{ type: 'durable-object', state: 'renamed', renamed_to: 'Successor' }
+		],
+		[
+			'transferred',
+			'{ "type": "durable-object", "state": "transferred", "transferred_to": "cupboard-successor" }',
+			{
+				type: 'durable-object',
+				state: 'transferred',
+				transferred_to: 'cupboard-successor'
+			}
+		],
+		[
+			'expecting-transfer',
+			'{ "type": "durable-object", "state": "expecting-transfer", "storage": "sqlite", "transfer_from": "cupboard-predecessor" }',
+			{
+				type: 'durable-object',
+				state: 'expecting-transfer',
+				storage: 'sqlite',
+				transfer_from: 'cupboard-predecessor'
+			}
+		]
+	] as const)(
+		'preserves a %s Durable Object lifecycle entry',
+		(_state, entry, expected) => {
+			const source = tenantSource.replace(
+				'{ "type": "durable-object", "storage": "sqlite" }\n\t}',
+				() => `${entry}\n\t}`
+			);
+
+			expect(
+				parseDeploymentConfig(controlSource, source).tenant.exports
+			).toStrictEqual({
+				CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+				VersionedR2ObjectRollbackGuard: expected
+			});
+		}
+	);
+
+	it('rejects the legacy Durable Object migration flow', () => {
+		const legacyTenant = tenantSource.replace(
+			/"exports": \{[\s\S]*?\n\t\}/,
+			'"migrations": [{ "tag": "v1", "new_sqlite_classes": ["CupboardServer"] }]'
+		);
+		const error = thrownBy(() =>
+			parseDeploymentConfig(controlSource, legacyTenant)
+		);
+
+		expect(error).toBeInstanceOf(WranglerConfigError);
+
+		if (error instanceof WranglerConfigError) {
+			expect(error.issues).toStrictEqual([
+				{
+					code: 'custom',
+					path: ['migrations'],
+					message: 'use declarative exports for Durable Object class lifecycle'
+				}
+			]);
+		}
+	});
+
 	it.each([
 		['an uppercase worker name', '"name": "cupboard"', '"name": "Cupboard"'],
 		[

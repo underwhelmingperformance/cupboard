@@ -2,12 +2,12 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narObjectKey } from '../http/http.ts';
 import {
 	blobReferenceRows,
 	commitPath,
 	CommitSocketError,
 	commitUploadRejection,
+	currentNarObjectKey,
 	deletePath,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
@@ -74,7 +74,7 @@ describe('reuse commit ownership', () => {
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			canonicalPresent:
-				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
 			error: { name: 'CommitSocketError', status: StatusCodes.NOT_FOUND },
 			edges: [],

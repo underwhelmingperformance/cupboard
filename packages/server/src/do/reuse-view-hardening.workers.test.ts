@@ -23,10 +23,10 @@ import { z } from 'zod';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	currentNarObjectKey,
 	fixtureWorkerServer,
 	flakyD1,
 	type FlakyD1Plan,
@@ -232,7 +232,9 @@ describe('reuse-view lookup hardening', () => {
 			url: served?.url
 		}).toStrictEqual({
 			narHash: path.narHash,
-			url: `../../${narObjectKey(nixSha256HashSchema.parse(path.narHash))}`
+			url: `../../${await currentNarObjectKey(
+				nixSha256HashSchema.parse(path.narHash)
+			)}`
 		});
 	});
 

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	bootstrap,
+	currentNarObjectKey,
 	narBytes,
 	provisionFixtureTenant,
 	pushPath,
@@ -50,7 +51,7 @@ describe('private-read mode', () => {
 		await pushPath(init.token, metadata);
 		await makePrivate();
 		const narinfoPath = `/${metadata.storePathHash}.narinfo`;
-		const narPath = `/nar/${metadata.narHash}.nar.zst`;
+		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
 
 		const unauthorised = await readFetch(narinfoPath, {});
 		const narinfo = await readFetch(narinfoPath, authorised());

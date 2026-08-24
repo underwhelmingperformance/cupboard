@@ -58,7 +58,7 @@ const controlConfig: WorkerConfig = {
 	workersDev: true,
 	previewUrls: true,
 	crons: ['0 * * * *'],
-	migrations: []
+	exports: {}
 };
 
 const resources: ResolvedResources = {
@@ -67,11 +67,42 @@ const resources: ResolvedResources = {
 };
 
 describe('buildScriptMetadata', () => {
-	it('maps config, resolved ids, and the migration into upload metadata', () => {
-		const metadata = buildScriptMetadata(controlConfig, resources, {
-			new_tag: 'v1',
-			new_sqlite_classes: ['CupboardServer']
+	it('forwards a Durable Object tombstone without adding live-class fields', () => {
+		const metadata = buildScriptMetadata(
+			{
+				...controlConfig,
+				exports: {
+					VersionedR2ObjectRollbackGuard: {
+						type: 'durable-object',
+						state: 'deleted'
+					}
+				}
+			},
+			resources
+		);
+
+		expect(metadata.exports).toStrictEqual({
+			VersionedR2ObjectRollbackGuard: {
+				type: 'durable-object',
+				state: 'deleted'
+			}
 		});
+	});
+
+	it('maps config, resolved ids, and declarative exports into upload metadata', () => {
+		const metadata = buildScriptMetadata(
+			{
+				...controlConfig,
+				exports: {
+					CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+					VersionedR2ObjectRollbackGuard: {
+						type: 'durable-object',
+						storage: 'sqlite'
+					}
+				}
+			},
+			resources
+		);
 
 		expect(metadata).toStrictEqual({
 			main_module: 'worker.js',
@@ -81,7 +112,13 @@ describe('buildScriptMetadata', () => {
 			keep_bindings: ['secret_text', 'plain_text'],
 			cache_options: { enabled: true, cross_version_cache: true },
 			limits: { cpu_ms: 300_000 },
-			migrations: { new_tag: 'v1', new_sqlite_classes: ['CupboardServer'] },
+			exports: {
+				CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+				VersionedR2ObjectRollbackGuard: {
+					type: 'durable-object',
+					storage: 'sqlite'
+				}
+			},
 			bindings: [
 				{
 					type: 'durable_object_namespace',
@@ -117,14 +154,14 @@ describe('buildScriptMetadata', () => {
 		expect(metadata.observability).toStrictEqual({ enabled: true });
 	});
 
-	it('omits limits and migrations when absent', () => {
+	it('omits limits and exports when absent', () => {
 		const metadata = buildScriptMetadata(
 			{ ...controlConfig, cpuMs: undefined },
 			resources
 		);
 
 		expect(metadata.limits).toBeUndefined();
-		expect(metadata.migrations).toBeUndefined();
+		expect(metadata.exports).toBeUndefined();
 	});
 
 	it('throws when a resolved id is missing', () => {

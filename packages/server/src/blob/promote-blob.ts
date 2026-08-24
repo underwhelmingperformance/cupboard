@@ -1,7 +1,7 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -10,6 +10,18 @@ import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
+import {
+	activateObjectIncarnation,
+	isObjectIncarnationLive,
+	promotableStateIncarnation,
+	queueObjectDeletion,
+	registeredLiveObjectIncarnation,
+	reserveObjectIncarnation
+} from './object-incarnation.ts';
+
+/**
+ * The verified NAR metadata used to promote staged bytes.
+ */
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -19,22 +31,35 @@ async function ensureCanonicalObject(
 	blobs: R2Bucket,
 	stagingKey: R2ObjectKey,
 	narHash: NixSha256HashString,
-	// Fresh verification passes metadata derived from the staging bytes. Reuse
-	// omits it and reads authoritative metadata from the canonical object.
-	blob: CanonicalBlob | undefined
-): Promise<CanonicalBlob> {
-	const canonicalKey = narObjectKey(narHash);
+	narSize: number,
+	incarnation: number,
+	canCreate: boolean,
+	// Fresh verification supplies metadata derived from staged bytes. Reuse
+	// derives authoritative metadata from an existing canonical object.
+	blob: CanonicalBlob | undefined,
+	isStillOwned?: () => boolean,
+	queueObjectDeletionAfterWrite?: () => Promise<void>
+): Promise<CanonicalBlob | undefined> {
+	const canonicalKey = narObjectKey(narHash, incarnation);
 	const existing = await blobs.head(canonicalKey);
+
+	if (isStillOwned?.() === false) {
+		return undefined;
+	}
 
 	if (existing !== null) {
 		return canonicalBlobOf(canonicalKey, existing);
 	}
 
-	if (blob === undefined) {
+	if (!canCreate || blob === undefined) {
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
 
 	const staged = await blobs.get(stagingKey);
+
+	if (isStillOwned?.() === false) {
+		return undefined;
+	}
 
 	if (staged === null) {
 		throw new UploadedObjectNotFoundError(stagingKey);
@@ -44,8 +69,14 @@ async function ensureCanonicalObject(
 		// Verification computed this hash from the staging bytes. Ask R2 to check
 		// the bytes again while it writes the canonical object.
 		sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
+		customMetadata: { narSize: String(narSize) },
 		onlyIf: { etagDoesNotMatch: '*' }
 	});
+
+	if (isStillOwned?.() === false) {
+		await queueObjectDeletionAfterWrite?.();
+		return undefined;
+	}
 
 	if (written !== null) {
 		return blob;
@@ -55,6 +86,10 @@ async function ensureCanonicalObject(
 	// the stored encoding so this narinfo matches the object that is served.
 	const winner = await blobs.head(canonicalKey);
 
+	if (isStillOwned?.() === false) {
+		return undefined;
+	}
+
 	if (winner === null) {
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
@@ -63,10 +98,10 @@ async function ensureCanonicalObject(
 }
 
 /**
- * The first conditional write fixes the compressed encoding for the lifetime
- * of a canonical object. Concurrent and later promotions adopt its metadata so
- * every narinfo for the NAR refers to the object that R2 serves. After the
- * reaper removes that object, a fresh promotion can establish another encoding.
+ * Promotes verified staging bytes to a versioned shared R2 object and returns
+ * its compressed metadata. A conditional put makes each physical incarnation
+ * write-once, so concurrent uploads adopt one encoding. The staging object
+ * remains until the commit is durable so a retry can recover after a crash.
  *
  * R2 completes before the `blob_state` write. A crash between them can leave an
  * unrecorded canonical object; retrying adopts that object and writes the row.
@@ -80,22 +115,31 @@ export async function promoteVerifiedBlob(
 	target: PromotionTarget,
 	blob: CanonicalBlob | undefined
 ): Promise<CanonicalBlob> {
-	const { canonical, upsert } = await stagePromotedBlob(
-		d1,
-		blobs,
-		stagingKey,
-		target,
-		blob
-	);
+	const staged = await stagePromotedBlob(d1, blobs, stagingKey, target, blob);
 
-	await upsert.run();
+	const committed = await commitStagedBlobPromotion(d1, staged);
 
-	return canonical;
+	if (committed === 'retired') {
+		throw new UploadedObjectNotFoundError(
+			narObjectKey(staged.narHash, staged.incarnation)
+		);
+	}
+
+	return staged.canonical;
 }
 
-interface StagedBlobPromotion {
+/**
+ * A promotion whose R2 work is complete but whose `blob_state` row is not yet
+ * written. A caller can apply the upsert directly or include it in one D1 batch
+ * with other promotions.
+ */
+export interface StagedBlobPromotion {
 	readonly canonical: CanonicalBlob;
 	readonly upsert: BlobStateUpsert;
+	readonly narHash: NixSha256HashString;
+	readonly incarnation: number;
+	readonly reservationOwner?: string;
+	readonly requiresActivation: boolean;
 }
 
 export type BlobStateUpsert = BatchItem<'sqlite'> & {
@@ -106,30 +150,147 @@ export type BlobStateUpsert = BatchItem<'sqlite'> & {
  * Performs the R2 promotion and returns the `blob_state` upsert. The caller must
  * execute the upsert directly or include it in a D1 batch.
  */
-export async function stagePromotedBlob(
+export function stagePromotedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
 	stagingKey: R2ObjectKey,
 	target: PromotionTarget,
 	blob: CanonicalBlob | undefined
-): Promise<StagedBlobPromotion> {
+): Promise<StagedBlobPromotion>;
+export function stagePromotedBlob(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	blobs: R2Bucket,
+	stagingKey: R2ObjectKey,
+	target: PromotionTarget,
+	blob: CanonicalBlob | undefined,
+	reservationOwner: string,
+	isStillOwned: () => boolean
+): Promise<StagedBlobPromotion | undefined>;
+export async function stagePromotedBlob(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	blobs: R2Bucket,
+	stagingKey: R2ObjectKey,
+	target: PromotionTarget,
+	blob: CanonicalBlob | undefined,
+	reservationOwner?: string,
+	isStillOwned?: () => boolean
+): Promise<StagedBlobPromotion | undefined> {
+	const [claimed] = await d1
+		.select({ incarnation: d1Schema.blobState.incarnation })
+		.from(d1Schema.blobState)
+		.where(
+			and(
+				eq(d1Schema.blobState.narHash, target.narHash),
+				registeredLiveObjectIncarnation(
+					d1,
+					'nar',
+					target.narHash,
+					d1Schema.blobState.incarnation
+				)
+			)
+		)
+		.limit(1);
+	const reserved =
+		claimed ??
+		(await reserveObjectIncarnation(
+			d1,
+			'nar',
+			target.narHash,
+			reservationOwner
+		));
+
+	if (isStillOwned?.() === false) {
+		return undefined;
+	}
+
 	const canonical = await ensureCanonicalObject(
 		blobs,
 		stagingKey,
 		target.narHash,
-		blob
+		target.narSize,
+		reserved.incarnation,
+		claimed === undefined,
+		blob,
+		isStillOwned,
+		() => queueObjectDeletion(d1, 'nar', target.narHash, reserved.incarnation)
 	);
 
-	return { canonical, upsert: blobStateUpsert(d1, target, canonical) };
+	if (canonical === undefined) {
+		return undefined;
+	}
+
+	return {
+		canonical,
+		upsert: blobStateUpsert(d1, target, canonical, reserved.incarnation),
+		narHash: target.narHash,
+		incarnation: reserved.incarnation,
+		reservationOwner,
+		requiresActivation: claimed === undefined
+	};
 }
 
-// An existing row retains the canonical compressed metadata. Promotion clears
-// its reaper deadline because a committed reference can follow. Verified NARs
-// use zstd, the only encoding stored here.
+/**
+ * Activates a prepared R2 object and writes its `blob_state` row. This function
+ * performs no R2 request, so a caller can keep its local ownership check active
+ * for the complete operation.
+ */
+export async function commitStagedBlobPromotion(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	staged: StagedBlobPromotion,
+	isStillOwned: () => boolean = () => true
+): Promise<'live' | 'retired'> {
+	if (!isStillOwned()) {
+		return 'retired';
+	}
+
+	if (staged.requiresActivation) {
+		const activation = await activateObjectIncarnation(
+			d1,
+			'nar',
+			staged.narHash,
+			staged.incarnation,
+			staged.reservationOwner
+		);
+
+		if (activation === 'retired') {
+			return 'retired';
+		}
+	}
+
+	if (!isStillOwned()) {
+		return 'retired';
+	}
+
+	await staged.upsert.run();
+
+	if (!isStillOwned()) {
+		return 'retired';
+	}
+
+	const isLive = await isObjectIncarnationLive(
+		d1,
+		'nar',
+		staged.narHash,
+		staged.incarnation
+	);
+
+	if (!isLive) {
+		await queueObjectDeletion(d1, 'nar', staged.narHash, staged.incarnation);
+
+		return 'retired';
+	}
+
+	return 'live';
+}
+
+// The first writer for an incarnation fixes its compressed metadata. A later
+// promotion of that incarnation retains the metadata and clears its reaper
+// deadline. Verified frames use zstd, the only encoding stored here.
 function blobStateUpsert(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	target: PromotionTarget,
-	canonical: CanonicalBlob
+	canonical: CanonicalBlob,
+	incarnation: number
 ): BlobStateUpsert {
 	const verifiedAt = isoTimestamp(new Date());
 
@@ -141,13 +302,23 @@ function blobStateUpsert(
 			fileSize: canonical.fileSize,
 			compression: 'zstd',
 			narSize: target.narSize,
+			incarnation,
 			verifiedAt
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.blobState.narHash,
-			// The demotion pass compares `verified_at` with its earlier snapshot before
-			// deleting. Refresh it on promotion so a later timestamp invalidates an
-			// older snapshot.
-			set: { deleteAfter: sql`null`, verifiedAt }
+			set: {
+				fileHash: canonical.fileHash,
+				fileSize: canonical.fileSize,
+				compression: 'zstd',
+				narSize: target.narSize,
+				incarnation,
+				deleteAfter: sql`null`,
+				verifiedAt
+			},
+			setWhere: and(
+				promotableStateIncarnation(d1Schema.blobState.incarnation, incarnation),
+				eq(d1Schema.blobState.narHash, target.narHash)
+			)
 		});
 }

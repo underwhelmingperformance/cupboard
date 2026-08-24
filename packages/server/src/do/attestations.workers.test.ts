@@ -40,6 +40,7 @@ import {
 	casObjectRows,
 	clearBlobStorage,
 	commitUploadViaWorker,
+	currentCasObjectKey,
 	fixtureWorkerServer,
 	handlerFetch,
 	hexBytes,
@@ -361,7 +362,7 @@ describe('attestation attach and reads', () => {
 	it('404s a referenced bundle whose shared CAS object is absent', async () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
-		await env.BLOBS.delete(casObjectKey(digest));
+		await env.BLOBS.delete(await currentCasObjectKey(digest));
 
 		const response = await readFetch(`/attestation-bundles/${digest}`);
 
@@ -388,7 +389,8 @@ describe('attestation attach and reads', () => {
 			refs: await attestationReferenceRows(),
 			presence: await tenantCasBlobRows(),
 			objects: await casObjectRows(),
-			casObjectPresent: (await env.BLOBS.head(casObjectKey(digest))) !== null,
+			casObjectPresent:
+				(await env.BLOBS.head(casObjectKey(digest, 2))) !== null,
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
 			status: StatusCodes.INSUFFICIENT_STORAGE,

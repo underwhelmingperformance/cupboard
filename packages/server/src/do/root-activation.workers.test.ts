@@ -27,12 +27,14 @@ import {
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
+	recordClaimedVerification,
 	resetTestServer,
 	setRoot,
 	suspendTenant,
 	testBase,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 type PendingRow = typeof pendingUploads.$inferSelect;
@@ -121,7 +123,7 @@ describe('root activation gating', () => {
 			targets: [metadata.storePath]
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const activated = await listRootTargets(token, 'main');
 
 		const target = {
@@ -151,7 +153,7 @@ describe('root activation gating', () => {
 		// The root protects the reserved row while verification is still using its
 		// staged upload.
 		await currentServer().runGarbageCollection();
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const served = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
@@ -184,7 +186,7 @@ describe('root activation gating', () => {
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const { targets } = await listRootTargets(token, 'main');
 		expect(targets).toStrictEqual([]);
@@ -195,7 +197,7 @@ describe('root activation gating', () => {
 		const upload = await deferFreshUpload(token, 'straggler', 'c'.repeat(32));
 		const staged = await snapshotPendingRow(upload.uploadId);
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		await setRoot(token, {
 			name: 'main',
 			targets: [upload.metadata.storePath]
@@ -209,7 +211,7 @@ describe('root activation gating', () => {
 		);
 		await replantStuckPending(staged);
 
-		await currentServer().recordVerification(upload.uploadId, {
+		await recordClaimedVerification(upload.uploadId, {
 			ok: false,
 			reason: 'nar-hash-mismatch',
 			actualNarHash: upload.nar.narHash
@@ -240,7 +242,7 @@ describe('root activation gating', () => {
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
 		await suspendTenant(fixtureTenant);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const targets = await runInDurableObject(
 			currentServer(),

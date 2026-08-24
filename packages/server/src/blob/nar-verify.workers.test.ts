@@ -1,9 +1,14 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
-import { describe, expect, it } from 'vitest';
+import { env } from 'cloudflare:workers';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { verifyDecompressedNar } from './nar-verify.ts';
+import { SubrequestTimeoutError } from '../errors.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
+import { resetTestServer } from '../test-support.ts';
+
+import { verifyDecompressedNar, verifyStoredNar } from './nar-verify.ts';
 
 async function nixNarHash(bytes: Uint8Array): Promise<string> {
 	const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
@@ -20,6 +25,99 @@ function compressedStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 	});
 
 	return source.pipeThrough(zstdCompressionStream());
+}
+
+function neverProducingBody(): {
+	readonly stream: ReadableStream<Uint8Array>;
+	readonly wasCancelled: () => boolean;
+} {
+	let wasCancelled = false;
+
+	const stream = new ReadableStream<Uint8Array>({
+		pull() {
+			return new Promise(() => {
+				// Keep this promise pending until the verification deadline cancels it.
+			});
+		},
+		cancel() {
+			wasCancelled = true;
+		}
+	});
+
+	return { stream, wasCancelled: () => wasCancelled };
+}
+
+function withStalledBody(
+	object: R2ObjectBody,
+	body: ReadableStream<Uint8Array>
+): R2ObjectBody {
+	return new Proxy(object, {
+		get(target, property) {
+			if (property === 'body') {
+				return body;
+			}
+
+			const value: unknown = Reflect.get(target, property, target);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const bound: unknown = value.bind(target);
+
+			return bound;
+		}
+	});
+}
+
+function stubbedGetBucket(
+	bucket: R2Bucket,
+	stalledKey: string,
+	stalledObject: R2ObjectBody
+): R2Bucket {
+	return new Proxy(bucket, {
+		get(target, property) {
+			if (property === 'get') {
+				return async (key: string, options?: R2GetOptions) =>
+					key === stalledKey ? stalledObject : target.get(key, options);
+			}
+
+			const value: unknown = Reflect.get(target, property, target);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const bound: unknown = value.bind(target);
+
+			return bound;
+		}
+	});
+}
+
+function deferredGetBucket(
+	bucket: R2Bucket,
+	stalledKey: string,
+	pending: Promise<R2ObjectBody | null>
+): R2Bucket {
+	return new Proxy(bucket, {
+		get(target, property) {
+			if (property === 'get') {
+				return (key: string, options?: R2GetOptions) =>
+					key === stalledKey ? pending : target.get(key, options);
+			}
+
+			const value: unknown = Reflect.get(target, property, target);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const bound: unknown = value.bind(target);
+
+			return bound;
+		}
+	});
 }
 
 async function compressedBytes(bytes: Uint8Array): Promise<Uint8Array> {
@@ -118,5 +216,82 @@ describe('verifyDecompressedNar', () => {
 				underFullPayload: true
 			}
 		});
+	});
+});
+
+describe('verifyStoredNar', () => {
+	beforeEach(resetTestServer);
+
+	it('times out and cancels a stalled R2 stream', async () => {
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-timeout-test');
+		await env.BLOBS.put(r2Key, new Uint8Array([1, 2, 3]));
+		const real = await env.BLOBS.get(r2Key);
+
+		if (real === null) {
+			throw new Error('expected the staged object to exist');
+		}
+
+		const { stream, wasCancelled } = neverProducingBody();
+		const bucket = stubbedGetBucket(
+			env.BLOBS,
+			r2Key,
+			withStalledBody(real, stream)
+		);
+		let error: unknown;
+
+		try {
+			await verifyStoredNar(
+				bucket,
+				r2Key,
+				{ narHash: 'sha256:invalid', narSize: 1000 },
+				20
+			);
+		} catch (error_) {
+			error = error_;
+		}
+
+		if (!(error instanceof SubrequestTimeoutError)) {
+			throw new Error(
+				`expected a SubrequestTimeoutError, received ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`
+			);
+		}
+
+		expect({
+			name: error.name,
+			subrequest: error.subrequest,
+			wasCancelled: wasCancelled()
+		}).toStrictEqual({
+			name: 'SubrequestTimeoutError',
+			subrequest: 'nar.verify',
+			wasCancelled: true
+		});
+	});
+
+	it('cancels a body returned after its R2 get deadline', async () => {
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-get-timeout-test');
+		await env.BLOBS.put(r2Key, new Uint8Array([1, 2, 3]));
+		const real = await env.BLOBS.get(r2Key);
+
+		if (real === null) {
+			throw new Error('expected the staged object to exist');
+		}
+
+		const { stream, wasCancelled } = neverProducingBody();
+		const { promise, resolve } = Promise.withResolvers<R2ObjectBody | null>();
+		const bucket = deferredGetBucket(env.BLOBS, r2Key, promise);
+
+		await expect(
+			verifyStoredNar(
+				bucket,
+				r2Key,
+				{ narHash: 'sha256:invalid', narSize: 1000 },
+				20
+			)
+		).rejects.toBeInstanceOf(SubrequestTimeoutError);
+
+		resolve(withStalledBody(real, stream));
+		await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+
+		expect(wasCancelled()).toBe(true);
 	});
 });

@@ -65,12 +65,13 @@
 		// small value so that it can saturate the budget by arrangement.
 		"CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET": ""
 	},
-	"migrations": [
-		{
-			"tag": "v1",
-			"new_sqlite_classes": ["CupboardServer"]
+	"exports": {
+		"CupboardServer": { "type": "durable-object", "storage": "sqlite" },
+		"VersionedR2ObjectRollbackGuard": {
+			"type": "durable-object",
+			"storage": "sqlite"
 		}
-	],
+	},
 	"limits": {
 		"cpu_ms": 300000
 	},

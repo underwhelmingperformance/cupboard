@@ -21,11 +21,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
-import {
-	internalOrigin,
-	narInfoObjectKey,
-	narObjectKey
-} from '../http/http.ts';
+import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	adminGrants,
@@ -36,6 +32,7 @@ import {
 	CommitSocketError,
 	commitUpload,
 	commitUploadRejection,
+	currentNarObjectKey,
 	currentServer,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
@@ -245,7 +242,7 @@ describe('named caches', () => {
 		const collectedBuilds = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, collected.storePathHash, buildsCache)
 		);
-		const sharedNar = await env.BLOBS.head(narObjectKey(narHash));
+		const sharedNar = await env.BLOBS.head(await currentNarObjectKey(narHash));
 
 		expect({
 			collectedFromDefault: collectedDefault === null,

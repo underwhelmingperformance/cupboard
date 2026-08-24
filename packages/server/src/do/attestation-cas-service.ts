@@ -7,9 +7,17 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
+import {
+	activateObjectIncarnation,
+	isObjectIncarnationLive,
+	promotableStateIncarnation,
+	queueObjectDeletion,
+	registeredLiveObjectIncarnation,
+	reserveObjectIncarnation
+} from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -45,13 +53,19 @@ export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
 
 	private async ensureCasObject(
-		bundle: MeasuredAttestationBundle
+		bundle: MeasuredAttestationBundle,
+		incarnation: number,
+		canCreate: boolean
 	): Promise<void> {
-		const key = casObjectKey(bundle.digest);
+		const key = casObjectKey(bundle.digest, incarnation);
 		const existing = await this.context.env.BLOBS.head(key);
 
 		if (existing !== null) {
 			return;
+		}
+
+		if (!canCreate) {
+			throw new UploadedObjectNotFoundError(key);
 		}
 
 		const written = await this.context.env.BLOBS.put(key, bundle.bytes, {
@@ -167,7 +181,43 @@ export class AttestationCasService {
 		_stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle
 	): Promise<void> {
-		await this.ensureCasObject(bundle);
+		const [claimed] = await this.context.d1
+			.update(d1Schema.casObject)
+			.set({ deleteAfter: sql`null` })
+			.where(
+				and(
+					eq(d1Schema.casObject.digest, bundle.digest),
+					registeredLiveObjectIncarnation(
+						this.context.d1,
+						'cas',
+						bundle.digest,
+						d1Schema.casObject.incarnation
+					)
+				)
+			)
+			.returning({ incarnation: d1Schema.casObject.incarnation });
+		const reserved =
+			claimed ??
+			(await reserveObjectIncarnation(this.context.d1, 'cas', bundle.digest));
+
+		await this.ensureCasObject(
+			bundle,
+			reserved.incarnation,
+			claimed === undefined
+		);
+
+		const activation = await activateObjectIncarnation(
+			this.context.d1,
+			'cas',
+			bundle.digest,
+			reserved.incarnation
+		);
+
+		if (activation === 'retired' && claimed === undefined) {
+			throw new UploadedObjectNotFoundError(
+				casObjectKey(bundle.digest, reserved.incarnation)
+			);
+		}
 
 		const now = isoTimestamp(new Date());
 		await this.context.d1
@@ -175,13 +225,42 @@ export class AttestationCasService {
 			.values({
 				digest: bundle.digest,
 				size: bundle.size,
+				incarnation: reserved.incarnation,
 				storedAt: now
 			})
 			.onConflictDoUpdate({
 				target: d1Schema.casObject.digest,
-				set: { deleteAfter: sql`null`, storedAt: now }
+				set: {
+					size: bundle.size,
+					incarnation: reserved.incarnation,
+					deleteAfter: sql`null`,
+					storedAt: now
+				},
+				setWhere: promotableStateIncarnation(
+					d1Schema.casObject.incarnation,
+					reserved.incarnation
+				)
 			})
 			.run();
+
+		if (
+			!(await isObjectIncarnationLive(
+				this.context.d1,
+				'cas',
+				bundle.digest,
+				reserved.incarnation
+			))
+		) {
+			await queueObjectDeletion(
+				this.context.d1,
+				'cas',
+				bundle.digest,
+				reserved.incarnation
+			);
+			throw new UploadedObjectNotFoundError(
+				casObjectKey(bundle.digest, reserved.incarnation)
+			);
+		}
 	}
 
 	async reserveReferenceAndCharge(
@@ -270,7 +349,7 @@ export class AttestationCasService {
 
 	async removeCapturedReference(
 		reference: AttestationReference,
-		fenceStoredAt?: IsoTimestamp
+		fenceIncarnation?: number
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
@@ -280,11 +359,11 @@ export class AttestationCasService {
 		// and quota credit below must fail its storedAt fence so the new generation
 		// keeps its reference and charge. Direct removal does not use this fence.
 		const repromotedFilter =
-			fenceStoredAt === undefined
+			fenceIncarnation === undefined
 				? undefined
 				: and(
 						eq(d1Schema.casObject.digest, reference.digest),
-						ne(d1Schema.casObject.storedAt, fenceStoredAt)
+						ne(d1Schema.casObject.incarnation, fenceIncarnation)
 					);
 		const notRepromoted =
 			repromotedFilter === undefined

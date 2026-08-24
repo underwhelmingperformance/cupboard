@@ -1,13 +1,14 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
+	currentNarObjectKey,
 	deleteBlobReferenceEdge,
 	deleteNarInfoRow,
 	deletePath,
@@ -181,7 +182,8 @@ describe('delete marker replay', () => {
 				(await env.BLOBS.head(
 					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 				)) !== null,
-			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+			blobPresent:
+				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
 			markers: [],
 			edges: [

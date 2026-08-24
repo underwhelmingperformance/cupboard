@@ -5,7 +5,7 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -13,6 +13,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { reserveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
@@ -23,6 +24,7 @@ import {
 	casObjectRows,
 	clearBlobStorage,
 	commitPath,
+	currentCasObjectKey,
 	currentServer,
 	deletePath,
 	expectStats,
@@ -66,7 +68,9 @@ describe('attestation CAS lifecycle', () => {
 
 		expect({
 			objects: await casObjectRows(),
-			stored: (await env.BLOBS.head(casObjectKey(measured.digest))) !== null
+			stored:
+				(await env.BLOBS.head(await currentCasObjectKey(measured.digest))) !==
+				null
 		}).toStrictEqual({
 			objects: [
 				{
@@ -79,13 +83,46 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
-	it('does not record a CAS fact when conditional promotion loses without a winner', async () => {
+	it('replaces a legacy CAS row written after the versioned reservation', async () => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const stagingKey = await stageAttestationBundle(
+			'bundle-deployment-overlap',
+			textEncoder.encode('bundle')
+		);
+		const measured = await currentServer().measureAttestationBundle(stagingKey);
+		const reserved = await reserveObjectIncarnation(
+			database,
+			'cas',
+			measured.digest
+		);
+
+		await env.BLOBS.put(casObjectKey(measured.digest), measured.bytes);
+		await database.insert(d1Schema.casObject).values({
+			digest: measured.digest,
+			size: measured.size,
+			storedAt: isoTimestamp(new Date())
+		});
+		await currentServer().promoteAttestationBundle(stagingKey, measured);
+
+		const state = await database
+			.select({ incarnation: d1Schema.casObject.incarnation })
+			.from(d1Schema.casObject)
+			.where(eq(d1Schema.casObject.digest, measured.digest))
+			.get();
+
+		expect({ reserved, state }).toStrictEqual({
+			reserved: { incarnation: 2, state: 'pending' },
+			state: { incarnation: 2 }
+		});
+	});
+
+	it('does not record a CAS object when conditional promotion loses without a winner', async () => {
 		const stagingKey = await stageAttestationBundle(
 			'bundle-no-winner',
 			textEncoder.encode('bundle')
 		);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
-		const key = casObjectKey(measured.digest);
+		const key = casObjectKey(measured.digest, 2);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		const originalPut = env.BLOBS.put.bind(env.BLOBS);
 		const missingObject = await originalHead(key);
@@ -402,6 +439,7 @@ describe('attestation CAS lifecycle', () => {
 		);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
+		const objectKey = await currentCasObjectKey(measured.digest);
 
 		const armed = await runCasReaper(rootLogger(), env, 10);
 		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
@@ -411,8 +449,81 @@ describe('attestation CAS lifecycle', () => {
 			armed,
 			collected,
 			rows: await casObjectRows(),
-			stored: (await env.BLOBS.head(casObjectKey(measured.digest))) !== null
+			stored: (await env.BLOBS.head(objectKey)) !== null
 		}).toStrictEqual({ armed: 0, collected: 1, rows: [], stored: false });
+	});
+
+	it('does not delete a CAS incarnation promoted after collection commits', async () => {
+		const bytes = textEncoder.encode('reaper-promotion-race');
+		const first = await fileAttestationReference({
+			uploadId: 'reaper-race-first',
+			bytes,
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const firstKey = await currentCasObjectKey(first.digest);
+		await currentServer().removeAttestationReference({
+			cache: '',
+			storePathHash,
+			generation: narInfoGenerationSchema.parse(0),
+			predicateType,
+			digest: first.digest
+		});
+		await runCasReaper(rootLogger(), env, 10);
+		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
+
+		let isInterleaved = false;
+		const bucket: R2Bucket = {
+			head: env.BLOBS.head.bind(env.BLOBS),
+			get: env.BLOBS.get.bind(env.BLOBS),
+			put: env.BLOBS.put.bind(env.BLOBS),
+			async delete(keys) {
+				if (
+					!isInterleaved &&
+					(Array.isArray(keys) ? keys : [keys]).includes(firstKey)
+				) {
+					isInterleaved = true;
+					await fileAttestationReference({
+						uploadId: 'reaper-race-second',
+						bytes,
+						storePathHash: storePathHashSchema.parse('b'.repeat(32)),
+						generation: 0,
+						predicateType
+					});
+				}
+
+				return env.BLOBS.delete(keys);
+			},
+			list: env.BLOBS.list.bind(env.BLOBS),
+			createMultipartUpload: env.BLOBS.createMultipartUpload.bind(env.BLOBS),
+			resumeMultipartUpload: env.BLOBS.resumeMultipartUpload.bind(env.BLOBS)
+		};
+
+		await runCasReaper(rootLogger(), { ...env, BLOBS: bucket }, 10);
+
+		const current = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({
+				digest: d1Schema.casObject.digest,
+				incarnation: d1Schema.casObject.incarnation
+			})
+			.from(d1Schema.casObject)
+			.where(eq(d1Schema.casObject.digest, first.digest))
+			.get();
+
+		expect({
+			isInterleaved,
+			current,
+			present:
+				current !== undefined &&
+				(await env.BLOBS.head(
+					casObjectKey(current.digest, current.incarnation)
+				)) !== null
+		}).toStrictEqual({
+			isInterleaved: true,
+			current: { digest: first.digest, incarnation: 3 },
+			present: true
+		});
 	});
 
 	it('keeps an armed CAS object when a tenant references it again', async () => {
@@ -444,7 +555,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 	});
 
-	it('demotes a CAS object fact when the shared R2 object is missing', async () => {
+	it('demotes a CAS object row when the shared R2 object is missing', async () => {
 		const bundle = await fileAttestationReference({
 			uploadId: 'missing-object',
 			bytes: textEncoder.encode('missing'),
@@ -452,7 +563,7 @@ describe('attestation CAS lifecycle', () => {
 			generation: 0,
 			predicateType
 		});
-		await env.BLOBS.delete(casObjectKey(bundle.digest));
+		await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
 
 		expect(await runCasReaperDemote(rootLogger(), env, 10)).toBe(1);
 		expect({
@@ -497,7 +608,7 @@ describe('attestation CAS lifecycle', () => {
 		await currentServer().demoteAttestationReferences([
 			{
 				digest: bundle.digest,
-				fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
+				fenceIncarnation: 0
 			}
 		]);
 
@@ -525,20 +636,26 @@ describe('attestation CAS lifecycle', () => {
 			usage: await tenantUsageRow()
 		};
 
-		// Re-promotion changes storedAt after the reaper observes the object missing.
-		// Delete the object again so only the storedAt fence can protect the new
-		// reference and its quota charge from the stale demotion.
-		await env.BLOBS.delete(casObjectKey(bundle.digest));
-		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-			.update(d1Schema.casObject)
-			.set({ storedAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z') })
-			.where(eq(d1Schema.casObject.digest, bundle.digest))
-			.run();
+		// The reaper observed one incarnation missing, but a concurrent promotion
+		// advanced the shared object before the Durable Object acted. The stale
+		// incarnation must not remove the newer reference or credit its charge.
+		await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await database.batch([
+			database
+				.update(d1Schema.casObject)
+				.set({ incarnation: 3 })
+				.where(eq(d1Schema.casObject.digest, bundle.digest)),
+			database
+				.update(d1Schema.objectIncarnation)
+				.set({ incarnation: 3 })
+				.where(eq(d1Schema.objectIncarnation.objectId, bundle.digest))
+		]);
 
 		await currentServer().demoteAttestationReferences([
 			{
 				digest: bundle.digest,
-				fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
+				fenceIncarnation: 2
 			}
 		]);
 

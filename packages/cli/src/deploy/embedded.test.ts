@@ -29,7 +29,9 @@ const tenantSource = `{
 	"name": "cupboard-tenant",
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["CupboardServer"] }]
+	"exports": {
+		"CupboardServer": { "type": "durable-object", "storage": "sqlite" }
+	}
 }`;
 
 const payloadJson = JSON.stringify({
@@ -67,7 +69,7 @@ describe('parseEmbeddedPayload', () => {
 					workersDev: true,
 					previewUrls: true,
 					crons: [],
-					migrations: []
+					exports: {}
 				},
 				tenant: {
 					name: 'cupboard-tenant',
@@ -89,7 +91,9 @@ describe('parseEmbeddedPayload', () => {
 					workersDev: true,
 					previewUrls: true,
 					crons: [],
-					migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
+					exports: {
+						CupboardServer: { type: 'durable-object', storage: 'sqlite' }
+					}
 				}
 			},
 			controlBundle: { mainModule: 'worker.js', code: 'control-bytes' },

@@ -200,7 +200,11 @@ describe('uploadScript', () => {
 				scriptName('cupboard'),
 				{
 					main_module: 'worker.js',
-					compatibility_date: '2026-07-27'
+					compatibility_date: '2026-07-27',
+					cache_options: { enabled: true, cross_version_cache: true },
+					exports: {
+						CupboardServer: { type: 'durable-object', storage: 'sqlite' }
+					}
 				},
 				{
 					mainModule: 'worker.js',
@@ -218,7 +222,14 @@ describe('uploadScript', () => {
 					type: 'application/json',
 					value: JSON.stringify({
 						main_module: 'worker.js',
-						compatibility_date: '2026-07-27'
+						compatibility_date: '2026-07-27',
+						cache_options: { enabled: true, cross_version_cache: true },
+						exports: {
+							CupboardServer: {
+								type: 'durable-object',
+								storage: 'sqlite'
+							}
+						}
 					})
 				},
 				{
