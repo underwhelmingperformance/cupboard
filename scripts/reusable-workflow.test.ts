@@ -290,6 +290,31 @@ describe('cupboard flake publish release coordinates', () => {
 		});
 	});
 
+	it('passes the pinned cache key to every setup invocation', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const setupSteps = actionSteps(
+			contents.split('\n'),
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/setup$/u
+		);
+
+		expect({
+			workflowInput: contents.includes(
+				'      trusted-public-key:\n        description:'
+			),
+			setupInputs: setupSteps.map((step) =>
+				step
+					.map((line) => line.trim())
+					.find((line) => line.startsWith('trusted-public-key:'))
+			)
+		}).toStrictEqual({
+			workflowInput: true,
+			setupInputs: Array.from(
+				{ length: 2 },
+				() => 'trusted-public-key: ${{ inputs.trusted-public-key }}'
+			)
+		});
+	});
+
 	it('configures classic builders only when no direct store is selected', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');

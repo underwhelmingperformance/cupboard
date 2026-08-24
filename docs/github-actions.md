@@ -815,6 +815,10 @@ tenant reuse view when the destination is missing them; see
 [docs/reuse-views.md](./reuse-views.md). When `reuse-view` is empty (the
 default), planning and substitution query only the destination.
 
+`trusted-public-key` pins the Nix signing key for reads from the Cupboard
+tenant. When the input is omitted, setup fetches the current key from the
+tenant's `/pubkey` endpoint.
+
 `cupboard-version` optionally overrides the CLI derived from the workflow pin.
 `maximise-space` (default `false`) reclaims runner disk space before building by
 deleting preinstalled software from the runner image; opt in only on ephemeral

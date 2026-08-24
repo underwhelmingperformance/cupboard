@@ -67,6 +67,13 @@ on:
         required: false
         default: ''
         type: string
+      trusted-public-key:
+        description:
+          Nix signing key to trust for reads from the Cupboard tenant. When
+          omitted, setup fetches the tenant's current key from /pubkey.
+        required: false
+        default: ''
+        type: string
       cupboard-version:
         description: >-
           Exact published cupboard release tag to install, or 'latest'. When
@@ -479,6 +486,7 @@ jobs:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
@@ -600,6 +608,7 @@ jobs:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
