@@ -1338,6 +1338,18 @@ export class LocalBuildExpectedPathMissingError extends CodedError {
 	}
 }
 
+export class LocalDependencyBuildFailedError extends CodedError {
+	constructor(
+		public readonly path: string,
+		public readonly installables: readonly string[]
+	) {
+		super(
+			`The local store could not realise the required path ${path} from any known producer: ${installables.join(', ')}.`
+		);
+		this.name = 'LocalDependencyBuildFailedError';
+	}
+}
+
 export class LocalBuildOutputsMissingError extends CodedError {
 	constructor(public readonly installable: string) {
 		super(

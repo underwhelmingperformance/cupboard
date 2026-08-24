@@ -75,6 +75,7 @@ import {
 	LocalBuildOutputsMissingError,
 	LocalBuildOutputsOutsideCohortError,
 	LocalBuildOwnerMissingError,
+	LocalDependencyBuildFailedError,
 	MissingInputError,
 	PlannedTargetNotDerivationError,
 	PlannedTargetSourceMissingError,
@@ -684,8 +685,10 @@ export async function buildCohortAction(
 				};
 
 	const planAndBuild = async (execution: CohortExecution): Promise<void> => {
-		const remotePreparation =
-			execution.kind === 'remote' ? execution.preparation : undefined;
+		const plannedGraph =
+			execution.kind === 'remote'
+				? execution.preparation.graph
+				: execution.graph;
 		const result =
 			queryable.length === 0
 				? undefined
@@ -695,7 +698,7 @@ export async function buildCohortAction(
 						environment,
 						runCupboard,
 						cupboardRunDependencies,
-						remotePreparation?.graph
+						plannedGraph
 					);
 
 		// Recheck build-set outputs immediately before realisation. Remove any target
@@ -745,6 +748,19 @@ export async function buildCohortAction(
 		// keyed build results through receipt and root publication.
 		const isStreamed =
 			inputs.push && inputs.store === '' && buildInstallables.length > 0;
+		const localDependencyBuilds =
+			execution.kind === 'local'
+				? retainedDependencyBuilds(partition, buildInstallables)
+				: [];
+
+		if (localDependencyBuilds.length > 0) {
+			await realiseLocalDependencies(
+				localDependencyBuilds,
+				inputs,
+				runNix,
+				dependencies.signal
+			);
+		}
 
 		let streamedFailure:
 			| {
@@ -1112,7 +1128,14 @@ export async function buildCohortAction(
 					materialiseGraph,
 					dependencies.signal
 				);
-				await planAndBuild({ kind: 'local' });
+				const graph = inputs.push
+					? await resolveLocalGraph(
+							targets.map((target) => derivationPathOf(target)),
+							dependencies.signal
+						)
+					: undefined;
+
+				await planAndBuild({ kind: 'local', graph });
 			},
 			dependencies.signal
 		);
@@ -2268,6 +2291,8 @@ async function planCohort(
 		runnerTemporary,
 		`cupboard-plan-cohort-${inputs.cohort.key}.json`
 	);
+	const shouldRecordPlannedDerivations =
+		inputs.store !== '' || plannedLocalGraph !== undefined;
 
 	await writeFile(
 		targetsFile,
@@ -2276,7 +2301,7 @@ async function planCohort(
 				targets: queryable.map((member) => ({
 					attr: member.attr,
 					installable: member.queryInstallable,
-					...(inputs.store !== '' && {
+					...(shouldRecordPlannedDerivations && {
 						plannedLocalDerivation: derivationPathOf(
 							nixDerivedPathSchema.parse(member.queryInstallable)
 						)
@@ -2486,8 +2511,89 @@ interface RemoteCohortPreparation {
 }
 
 type CohortExecution =
-	| { readonly kind: 'local' }
+	| { readonly kind: 'local'; readonly graph?: LocalDerivationGraph }
 	| { readonly kind: 'remote'; readonly preparation: RemoteCohortPreparation };
+
+function retainedDependencyBuilds(
+	partition: PartitionData | undefined,
+	buildInstallables: readonly string[]
+): readonly RemoteDependencyBuild[] {
+	if (partition === undefined || buildInstallables.length === 0) {
+		return [];
+	}
+
+	const retainedTargets = new Set(
+		buildInstallables.flatMap((target) => {
+			const parsed = nixDerivedPathSchema.safeParse(target);
+
+			return parsed.success ? [canonicalNixDerivedPath(parsed.data)] : [];
+		})
+	);
+
+	return partition.dependencyBuilds.flatMap((dependency) => {
+		const requiredBy = dependency.requiredBy.filter((target) =>
+			retainedTargets.has(canonicalNixDerivedPath(target))
+		);
+
+		return requiredBy.length === 0 ? [] : [{ ...dependency, requiredBy }];
+	});
+}
+
+async function realiseLocalDependencies(
+	dependencies: readonly RemoteDependencyBuild[],
+	inputs: Pick<BuildCohortInputs, 'maxJobs' | 'store' | 'outLinkDirectory'>,
+	runNix: typeof runNixBuild,
+	signal?: AbortSignal
+): Promise<void> {
+	for (const [dependencyIndex, dependency] of dependencies.entries()) {
+		const outcome = await realiseLocalDependency(
+			dependency,
+			dependencyIndex,
+			inputs,
+			runNix,
+			signal
+		);
+
+		if (outcome === 'unavailable') {
+			throw new LocalDependencyBuildFailedError(
+				dependency.path,
+				dependency.installables
+			);
+		}
+	}
+}
+
+async function realiseLocalDependency(
+	dependency: RemoteDependencyBuild,
+	dependencyIndex: number,
+	inputs: Pick<BuildCohortInputs, 'maxJobs' | 'store' | 'outLinkDirectory'>,
+	runNix: typeof runNixBuild,
+	signal?: AbortSignal
+): Promise<'realised' | 'unavailable'> {
+	for (const [
+		candidateIndex,
+		installable
+	] of dependency.installables.entries()) {
+		const result = await runNix(
+			[installable],
+			inputs.maxJobs,
+			inputs.store,
+			path.join(
+				inputs.outLinkDirectory,
+				'dependencies',
+				String(dependencyIndex),
+				String(candidateIndex)
+			),
+			signal
+		);
+
+		if (result.paths.includes(dependency.path)) {
+			return 'realised';
+		}
+	}
+
+	return 'unavailable';
+}
 
 function plannedTargetBindings(
 	members: readonly CohortMember[],
