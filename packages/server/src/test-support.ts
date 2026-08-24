@@ -225,6 +225,8 @@ const emptyOwner = {
 	ownerAudience: oidcAudienceSchema.parse('')
 } as const;
 
+const testRunId = crypto.randomUUID();
+
 const harness = {
 	origin: 'https://cupboard.test',
 	server: testServerFor('initial'),
@@ -251,8 +253,9 @@ export interface GcResult {
  * DO name share the same counter so the URL and the stub agree.
  */
 export async function resetTestServer(): Promise<void> {
-	harness.origin = `https://cupboard-${String(harness.nextTestServerId)}.test`;
-	harness.serverName = `test-${String(harness.nextTestServerId)}`;
+	const serverName = `test-${testRunId}-${String(harness.nextTestServerId)}`;
+	harness.origin = `https://cupboard-${serverName}.test`;
+	harness.serverName = serverName;
 	harness.server = testServerFor(harness.serverName);
 	harness.nextTestServerId += 1;
 
