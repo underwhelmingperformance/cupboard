@@ -24,6 +24,42 @@ function expectCommanderError(value: unknown): asserts value is CommanderError {
 }
 
 describe('buildProgram', () => {
+	it('passes injected services to the attestation signer', async () => {
+		const outputs: (readonly [string, string])[] = [];
+		const subject = `${'11'.repeat(32)}  example`;
+
+		await buildProgram(noRunnerEnvironment, undefined, {
+			attestSign: {
+				io: {
+					readText(filePath) {
+						return Promise.resolve(filePath === 'subjects' ? subject : '');
+					},
+					writeBundle() {
+						return Promise.reject(new Error('no bundle should be written'));
+					}
+				},
+				setOutput(name, value) {
+					outputs.push([name, value]);
+				}
+			}
+		}).parseAsync([
+			'node',
+			'cupboard-action',
+			'attest-sign',
+			'--checksums-file',
+			'subjects',
+			'--built-checksums-file',
+			'built-subjects',
+			'--github-token',
+			'token'
+		]);
+
+		expect(outputs).toStrictEqual([
+			['bundle-path', ''],
+			['origin-bundle-path', '']
+		]);
+	});
+
 	it.each([
 		['an unknown command', ['node', 'cupboard-action', 'frobnicate']],
 		['an unknown option', ['node', 'cupboard-action', 'setup', '--frobnicate']],

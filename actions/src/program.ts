@@ -13,7 +13,10 @@ import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
 import { registerAttestAttachCommand } from './commands/attest-attach.ts';
-import { registerAttestSignCommand } from './commands/attest-sign.ts';
+import {
+	type AttestSignDependencies,
+	registerAttestSignCommand
+} from './commands/attest-sign.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
@@ -31,6 +34,13 @@ interface ActionSignalSource {
 }
 
 /**
+ * Services that command registrations use instead of process-owned defaults.
+ */
+export interface ActionProgramDependencies {
+	readonly attestSign?: AttestSignDependencies;
+}
+
+/**
 Maps runner cancellation signals to their conventional shell exit statuses.
 */
 export class ActionSignalError extends CodedError {
@@ -45,13 +55,14 @@ export class ActionSignalError extends CodedError {
 }
 
 /**
- * Creates the command tree for the composite GitHub Action. The supplied
- * environment is passed to each subcommand so it can resolve runner-derived
- * defaults.
+ * Creates the command tree for the composite GitHub Action. Commands receive
+ * the supplied environment when they resolve runner-derived defaults. Other
+ * process-owned services can be replaced through `dependencies`.
  */
 export function buildProgram(
 	environment: Environment = env,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	dependencies: ActionProgramDependencies = {}
 ): Command {
 	const program = new Command()
 		.name('cupboard-action')
@@ -71,7 +82,7 @@ export function buildProgram(
 	registerPushCommand(program, environment, signal);
 	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
-	registerAttestSignCommand(program, environment);
+	registerAttestSignCommand(program, dependencies.attestSign ?? {});
 	registerAttestAttachCommand(program, environment, signal);
 	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
@@ -87,7 +98,8 @@ export function buildProgram(
 export async function runAction(
 	argument: readonly string[],
 	environment: Environment = env,
-	signalSource: ActionSignalSource = process
+	signalSource: ActionSignalSource = process,
+	dependencies: ActionProgramDependencies = {}
 ): Promise<number> {
 	const githubActions = workflowCommands();
 	const isSignalAwareCommand = [
@@ -114,9 +126,11 @@ export async function runAction(
 	}
 
 	try {
-		await buildProgram(environment, controller?.signal).parseAsync([
-			...argument
-		]);
+		await buildProgram(
+			environment,
+			controller?.signal,
+			dependencies
+		).parseAsync([...argument]);
 		return 0;
 	} catch (error: unknown) {
 		return reportActionFailure(githubActions, error);

@@ -178,9 +178,8 @@ jobs:
           cache: ${{ inputs.cache }}
           receipt-file: ${{ steps.build.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          # Both bundles cover the same subjects. The attach input takes one
-          # path per line and ignores an empty one, so a run that signed only
-          # the build provenance attaches only that bundle.
+          # Each output contains one bundle path per line. The attach input
+          # ignores empty lines.
           bundle: |
             ${{ steps.attest.outputs.bundle-path }}
             ${{ steps.attest.outputs.origin-bundle-path }}

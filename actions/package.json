@@ -6,6 +6,7 @@
 	},
 	"dependencies": {
 		"@actions/attest": "^3.2.0",
+		"@actions/core": "^3.0.1",
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",
