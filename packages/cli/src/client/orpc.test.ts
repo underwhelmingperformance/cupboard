@@ -348,6 +348,46 @@ describe('tenantRpc', () => {
 		expect(captured).toHaveLength(1);
 	});
 
+	it('retries attestation attachment after a gateway failure', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const response = {
+				storePathHash: 'a'.repeat(32),
+				digest: 'b'.repeat(64),
+				predicateType: 'https://slsa.dev/provenance/v1',
+				status: 'already-present'
+			};
+			const { fetcher, captured } = capturingFetcher([
+				badGateway,
+				() => Response.json(response)
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const pending = (async () => {
+				try {
+					return {
+						value: await rpc.attestations.attach({
+							cacheName: cacheSelectorSchema.parse('_default'),
+							id: '1f0d5a2a-35d4-4c7f-9ff0-dfb432eca408'
+						})
+					};
+				} catch (error: unknown) {
+					return { error };
+				}
+			})();
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect(await pending).toStrictEqual({ value: response });
+			expect(captured).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it.each(nonIdempotentNegotiations)(
 		'does not replay $name after a gateway failure',
 		async ({ request }) => {

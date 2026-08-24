@@ -202,7 +202,11 @@ export class AttestationsService {
 			pending.storePathHash,
 			narInfoRow.generation
 		);
-		await this.clearPendingUploadAndStaging(pending);
+		this.context.db
+			.update(schema.pendingAttestations)
+			.set({ predicateType: parsed.predicateType })
+			.where(eq(schema.pendingAttestations.id, pending.id))
+			.run();
 
 		return {
 			storePathHash: pending.storePathHash,
@@ -550,6 +554,15 @@ export class AttestationsService {
 		uploadId: UploadId
 	): Promise<AttestationAttachResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
+
+		if (pending.predicateType !== null) {
+			return {
+				storePathHash: pending.storePathHash,
+				digest: pending.digest,
+				predicateType: pending.predicateType,
+				status: 'already-present'
+			};
+		}
 
 		let measured: MeasuredAttestationBundle;
 

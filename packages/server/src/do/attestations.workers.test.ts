@@ -206,6 +206,51 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
+	it('returns the completed attachment when the client repeats its upload ID', async () => {
+		const { token, metadata, bundle } = await committedPathBundle();
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
+		const decision = attestationUploadDecisionSchema.parse(
+			await negotiate(token, metadata.storePathHash, digest)
+		);
+
+		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
+		const path = `/cache/_default/attestations/${decision.uploadId}/attach`;
+		const first = await authorisedWorkerFetch(path, token, { method: 'POST' });
+		const repeated = await authorisedWorkerFetch(path, token, {
+			method: 'POST'
+		});
+
+		expect({
+			first: {
+				status: first.status,
+				body: await first.json()
+			},
+			repeated: {
+				status: repeated.status,
+				body: await repeated.json()
+			}
+		}).toStrictEqual({
+			first: {
+				status: StatusCodes.OK,
+				body: {
+					storePathHash: metadata.storePathHash,
+					digest,
+					predicateType: 'https://slsa.dev/provenance/v1',
+					status: 'attached'
+				}
+			},
+			repeated: {
+				status: StatusCodes.OK,
+				body: {
+					storePathHash: metadata.storePathHash,
+					digest,
+					predicateType: 'https://slsa.dev/provenance/v1',
+					status: 'already-present'
+				}
+			}
+		});
+	});
+
 	it('rejects non-DSSE Sigstore content without filing a CAS object', async () => {
 		const { token, metadata } = await committedPathBundle();
 		const encoder = new TextEncoder();

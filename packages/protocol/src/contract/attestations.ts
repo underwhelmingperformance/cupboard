@@ -37,7 +37,8 @@ export const attestationsContract = {
 		.meta({
 			requires: 'attestation:attach',
 			resource: { cache: { pending: true } },
-			maintenance: true
+			maintenance: true,
+			replaySafety: 'replay-safe'
 		})
 		.route({
 			method: 'POST',
