@@ -6,6 +6,7 @@ import {
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
+	type PredicateType,
 	type RootName,
 	type Sha256HexDigest,
 	type SigningKeyGeneration,
@@ -152,12 +153,14 @@ export const pendingAttestations = sqliteTable(
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		predicateType: text('predicate_type').$type<PredicateType>(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
-	// Maintenance finds the soonest-expiring attestation and checks listed staging
-	// keys for pending owners. The indexes spare scans of every staged bundle.
+	// Maintenance finds the soonest-expiring upload or completed response and
+	// checks listed staging keys for their owners. The indexes spare scans of
+	// every staged bundle.
 	(table) => [
 		index('pending_attestation_expires_at_idx').on(table.expiresAt),
 		index('pending_attestation_r2_key_idx').on(table.r2Key)
