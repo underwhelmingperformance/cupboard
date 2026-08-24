@@ -1016,6 +1016,48 @@ describe('cupboard flake publish cohort job', () => {
 });
 
 describe('prepare SSH transport', () => {
+	it('installs upstream Nix without enabling the FlakeHub cache', async () => {
+		const workflows = await Promise.all(
+			[ciWorkflow, publishWorkflow, releaseCacheWorkflow].map((file) =>
+				readFile(file, 'utf8')
+			)
+		);
+
+		expect(
+			workflows.map((contents) => {
+				const installSteps = actionSteps(
+					contents.split('\n'),
+					/^ {6}- uses: nixbuild\/nix-quick-install-action@/u
+				);
+
+				return {
+					determinateInstaller: contents.includes(
+						'DeterminateSystems/nix-installer-action@'
+					),
+					installs: installSteps.map((step) =>
+						step.find((line) => line.trimStart().startsWith('nix_version:'))
+					)
+				};
+			})
+		).toStrictEqual([
+			{
+				determinateInstaller: false,
+				installs: Array.from(
+					{ length: 5 },
+					() => '          nix_version: 2.34.7'
+				)
+			},
+			{
+				determinateInstaller: false,
+				installs: ['          nix_version: 2.34.7']
+			},
+			{
+				determinateInstaller: false,
+				installs: ['          nix_version: 2.34.7']
+			}
+		]);
+	});
+
 	it('exercises the shipped Nix client against the pinned remote daemon', async () => {
 		const [contents, dockerfile] = await Promise.all([
 			readFile(ciWorkflow, 'utf8'),
