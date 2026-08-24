@@ -138,6 +138,13 @@ function buildCohortAction(
 		runNixDerivationShow: (installables) =>
 			Promise.resolve(evaluatedDerivations(installables)),
 		materialiseDerivationGraph: () => Promise.resolve(),
+		resolveLocalDerivationGraph: (derivations) =>
+			Promise.resolve({
+				closure: derivations,
+				floatingOutputs: [],
+				substitutableDerivations: [],
+				outputs: []
+			}),
 		withLocalDerivationRoots: withoutLocalDerivationRoots,
 		...dependencies
 	});
@@ -5730,6 +5737,135 @@ describe('buildCohortAction publication', () => {
 				]
 			],
 			receiptLine: `receipt-file=${receiptFile}`
+		});
+	});
+
+	it('builds a known producer before a streamed target that needs its output', async () => {
+		const dependencyPath = storePathSchema.parse(referencePath);
+		const dependencyInstallable = derivedPath(appQueryInstallable);
+		const targetInstallable = derivedPath(libraryQueryInstallable);
+		let targetsFileContents: unknown;
+		const stub = cupboardStub({
+			plan: [
+				{
+					kind: 'plan-cohort',
+					data: {
+						partition: {
+							attachOnly: [],
+							publishByReference: [],
+							leftUpstream: [],
+							alreadyValid: [],
+							buildSet: [targetInstallable],
+							dependencyBuilds: [
+								{
+									path: dependencyPath,
+									installables: [dependencyInstallable],
+									requiredBy: [targetInstallable]
+								}
+							],
+							dependencyCopies: [],
+							counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
+							downloadSize: 0,
+							narSize: 0,
+							unknownCount: 1,
+							ceiling: { value: 5, source: 'configured' }
+						},
+						capacity: measuredCapacity
+					}
+				}
+			],
+			reprobe: planReprobeSuccess([], [targetInstallable])
+		});
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			async (binaryPath, arguments_, passedEnvironment, dependencies) => {
+				if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
+					const targetsFile =
+						arguments_[arguments_.indexOf('--targets-file') + 1];
+
+					if (targetsFile === undefined) {
+						throw new Error('plan cohort targets file is missing');
+					}
+
+					targetsFileContents = JSON.parse(await readFile(targetsFile, 'utf8'));
+				}
+
+				return stub(binaryPath, arguments_, passedEnvironment, dependencies);
+			}
+		);
+		const runNixBuild = vi.fn((installables: readonly string[]) =>
+			Promise.resolve({
+				paths:
+					installables[0] === dependencyInstallable
+						? [dependencyPath]
+						: [libraryBuiltPath],
+				status: 0,
+				copiedFrom: new Map()
+			})
+		);
+
+		await buildCohortAction(
+			{
+				...baseOptions(),
+				cohortJson: cohortJson({
+					attrs: ['.#packages.x86_64-linux.lib'],
+					installables: ['.#packages.x86_64-linux.lib^out'],
+					queryInstallables: [libraryQueryInstallable],
+					expectedPaths: [libraryBuiltPath],
+					roots: ['github:owner/repo/main/lib']
+				}),
+				push: 'true'
+			},
+			environment,
+			{
+				runCupboard: runCupboardMock,
+				runNixBuild,
+				resolveLocalDerivationGraph: (derivations) =>
+					Promise.resolve({
+						closure: [
+							...derivations,
+							storePathSchema.parse(
+								'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+							)
+						],
+						floatingOutputs: [],
+						substitutableDerivations: [],
+						outputs: [
+							{
+								path: dependencyPath,
+								installable: dependencyInstallable
+							}
+						]
+					})
+			}
+		);
+
+		expect({
+			targetsFileContents,
+			builds: runNixBuild.mock.calls.map(([installables]) => installables)
+		}).toStrictEqual({
+			targetsFileContents: {
+				targets: [
+					{
+						attr: '.#packages.x86_64-linux.lib',
+						installable: libraryQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						expectedPath: libraryBuiltPath,
+						root: 'github:owner/repo/main/lib'
+					}
+				],
+				plannedLocalClosure: [
+					'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+				],
+				plannedLocalOutputs: [
+					{
+						path: dependencyPath,
+						installable: dependencyInstallable
+					}
+				]
+			},
+			builds: [[dependencyInstallable], [targetInstallable]]
 		});
 	});
 
