@@ -101,7 +101,7 @@ import {
 
 export const hookScriptFileName = 'post-build-hook.sh';
 
-export const defaultBuildAttempts = 3;
+export const defaultBuildAttempts = 5;
 
 /**
  * A bounded attempt loop retries transient build failures. Per-attempt activity

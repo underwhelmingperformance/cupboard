@@ -171,6 +171,45 @@ describe('buildAction', () => {
 		).rejects.toBeInstanceOf(BuildAttemptsInvalidError);
 	});
 
+	it('makes five build attempts by default', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		let buildAttempts = 0;
+		const retryDelays: number[] = [];
+
+		await buildAction(
+			{ installables: ['.#app'], allowFailure: 'true' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				sleep: (delayMs) => {
+					retryDelays.push(delayMs);
+
+					return Promise.resolve();
+				},
+				nix: { queryPathInfo: () => Promise.reject(new Error('not present')) },
+				runNix: (invocation) => {
+					if (invocation.arguments.includes('--dry-run')) {
+						return Promise.resolve({ status: 0, stdout: '[]' });
+					}
+
+					buildAttempts += 1;
+
+					return Promise.resolve({ status: 1, stdout: '' });
+				}
+			}
+		);
+
+		expect({ buildAttempts, retryDelays }).toStrictEqual({
+			buildAttempts: 5,
+			retryDelays: [15_000, 30_000, 45_000, 60_000]
+		});
+	});
+
 	it('starts Nix with a publication-sized installables file', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
