@@ -86,6 +86,8 @@ async function deferUpload(
 	uploadId: UploadId;
 	narHash: NixSha256HashString;
 	r2Key: string;
+	fileHash: NixSha256HashString;
+	fileSize: number;
 }> {
 	const { metadata, nar } = await verifiablePath(seed, {
 		storePathHash,
@@ -101,7 +103,9 @@ async function deferUpload(
 	return {
 		uploadId: upload.uploadId,
 		narHash: metadata.narHash,
-		r2Key: upload.r2Key
+		r2Key: upload.r2Key,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength
 	};
 }
 
@@ -792,64 +796,85 @@ describe('batched verify fault isolation', () => {
 		}
 	});
 
-	it('passes the remaining consumer budget into a stalled promotion RPC', async () => {
+	it('bounds a stalled promotion by the verdict RPC budget', async () => {
 		const token = await initialise();
 		const upload = await deferUpload(
 			token,
 			'promotion-deadline',
 			'a'.repeat(32)
 		);
-		const canonicalKey = narObjectKey(upload.narHash, 2);
-		const originalPut = env.BLOBS.put.bind(env.BLOBS);
-		const pendingPromotions: Promise<R2Object>[] = [];
-		let didPromotionStart = false;
-		const put = vi
-			.spyOn(env.BLOBS, 'put')
-			.mockImplementation((key, value, options) => {
-				if (key === canonicalKey) {
-					didPromotionStart = true;
-					const promotion = (async (): Promise<R2Object> => {
-						await new Promise((resolve) => setTimeout(resolve, 200));
+		const claim = await currentServer().claimVerificationBatch(
+			1,
+			Number.MAX_SAFE_INTEGER
+		);
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				vi.useFakeTimers();
+
+				const canonicalKey = narObjectKey(upload.narHash, 2);
+				const originalPut = env.BLOBS.put.bind(env.BLOBS);
+				const promotionStarted = Promise.withResolvers<undefined>();
+				const releasePromotion = Promise.withResolvers<undefined>();
+				const pendingPromotions: Promise<R2Object>[] = [];
+				const put = vi
+					.spyOn(env.BLOBS, 'put')
+					.mockImplementation((key, value, options) => {
+						if (key === canonicalKey) {
+							const promotion = (async (): Promise<R2Object> => {
+								promotionStarted.resolve(undefined);
+								await releasePromotion.promise;
+
+								return originalPut(key, value, options);
+							})();
+							pendingPromotions.push(promotion);
+
+							return promotion;
+						}
 
 						return originalPut(key, value, options);
-					})();
-					pendingPromotions.push(promotion);
+					});
 
-					return promotion;
+				try {
+					const rpc = instance.recordVerificationsWithinBudget(
+						claim.owner,
+						[
+							{
+								uploadId: upload.uploadId,
+								verdict: {
+									kind: 'verified',
+									verification: {
+										ok: true,
+										fileHash: upload.fileHash,
+										fileSize: upload.fileSize
+									}
+								}
+							}
+						],
+						40
+					);
+					await promotionStarted.promise;
+					await vi.advanceTimersByTimeAsync(40);
+					const rpcResult = await rpc;
+					const row = instance.context.db
+						.select({ verdict: schema.pendingUploads.verdict })
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, upload.uploadId))
+						.get();
+
+					return {
+						kind: rpcResult.kind,
+						verdict: row?.verdict
+					};
+				} finally {
+					releasePromotion.resolve(undefined);
+					await Promise.allSettled(pendingPromotions);
+					put.mockRestore();
+					vi.useRealTimers();
 				}
-
-				return originalPut(key, value, options);
-			});
-		const pass = verifyTenant(
-			rootLogger(),
-			env,
-			currentServerTenant(),
-			1,
-			Number.MAX_SAFE_INTEGER,
-			40
+			}
 		);
 
-		try {
-			let error: unknown;
-
-			try {
-				await pass;
-			} catch (error_) {
-				error = error_;
-			}
-
-			expect({
-				didPromotionStart,
-				isTimeout: error instanceof SubrequestTimeoutError,
-				verdict: await pendingUploadVerdict(upload.uploadId)
-			}).toStrictEqual({
-				didPromotionStart: true,
-				isTimeout: true,
-				verdict: 'pending'
-			});
-		} finally {
-			await Promise.allSettled(pendingPromotions);
-			put.mockRestore();
-		}
+		expect(result).toStrictEqual({ kind: 'timed-out', verdict: 'pending' });
 	});
 });
