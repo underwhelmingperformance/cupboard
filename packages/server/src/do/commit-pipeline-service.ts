@@ -22,7 +22,6 @@ import {
 	type SessionId,
 	type UploadId
 } from '@cupboard/protocol/upload';
-import { withDeadline } from '@cupboard/shared/timeout';
 import {
 	and,
 	eq,
@@ -37,15 +36,12 @@ import {
 } from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
 
-import { type NarVerification } from '../blob/nar-verify.ts';
-import { verifyDecompressedNar } from '../blob/nar-verify.ts';
 import { signNixFingerprint } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
 	QuotaExceededError,
-	SubrequestTimeoutError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
@@ -53,7 +49,6 @@ import {
 	UploadNotFoundError
 } from '../errors.ts';
 import {
-	narInfoObjectKey,
 	narObjectKey,
 	type R2ObjectKey,
 	verifiableMaxBytes
@@ -93,10 +88,6 @@ export const verifyRequestStaleMs = 45_000;
 export const verifyBackstopKey = 'maintenance:verify-pending';
 export const verifyBackstopDelayMs = 60_000;
 
-// `verifyPendingNar` runs outside the input gate and has no enclosing deadline.
-// This budget stops a stalled R2 body from holding a verification pass forever.
-export const narVerifyBudgetMs = 5 * 60 * 1000;
-
 /**
  * Reports a final commit response immediately, or tells the caller to wait for
  * the verification pass.
@@ -127,6 +118,7 @@ interface CanonicalBlobFacts {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
 	readonly compression: (typeof d1Schema.blobState.$inferSelect)['compression'];
+	readonly incarnation: number;
 }
 
 export interface MaterialiseRequest {
@@ -219,32 +211,6 @@ function isOverQuota(
 		(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
 		account.quotaBytes
 	);
-}
-
-// The verifier locks its input stream. Keep the R2 reader outside that stream
-// so timeout cancellation can still reach the underlying R2 body.
-function cancellableNarBody(body: ReadableStream<Uint8Array>): {
-	readonly stream: ReadableStream<Uint8Array>;
-	readonly cancel: (reason?: unknown) => Promise<void>;
-} {
-	const reader = body.getReader();
-	const stream = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			const { done, value } = await reader.read();
-
-			if (done) {
-				controller.close();
-				return;
-			}
-
-			controller.enqueue(value);
-		},
-		cancel(reason) {
-			return reader.cancel(reason);
-		}
-	});
-
-	return { stream, cancel: (reason) => reader.cancel(reason) };
 }
 
 export class CommitPipelineService {
@@ -1262,9 +1228,12 @@ export class CommitPipelineService {
 
 		try {
 			await this.context.env.MAINTENANCE_QUEUE.send(message);
-		} catch (error) {
+		} catch {
 			this.verifyRequestedAt = undefined;
-			logger.warn('verification request not enqueued', { tenant, error });
+			logger.warn('verification request not enqueued', {
+				kind: 'tenant-verify',
+				reason: 'queue-send-failed'
+			});
 		}
 	}
 
@@ -1543,7 +1512,17 @@ export class CommitPipelineService {
 	async reserveNarInfoRow(
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation
-	): Promise<ReserveOutcome> {
+	): Promise<ReserveOutcome>;
+	async reserveNarInfoRow(
+		cache: StoredCache,
+		metadata: ParsedUploadPathNegotiation,
+		isStillOwned: () => boolean
+	): Promise<ReserveOutcome | undefined>;
+	async reserveNarInfoRow(
+		cache: StoredCache,
+		metadata: ParsedUploadPathNegotiation,
+		isStillOwned?: () => boolean
+	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
@@ -1560,6 +1539,10 @@ export class CommitPipelineService {
 				signNixFingerprint(key.privateJwk, fingerprint, key.publicKey.name)
 			)
 		);
+		if (isStillOwned?.() === false) {
+			return;
+		}
+
 		const sigs = signatures.map((signature) => signature.value);
 		const signatureGeneration = signingKeyGenerationSchema.parse(
 			Math.max(0, ...signingKeys.map((key) => key.generation))
@@ -1569,6 +1552,10 @@ export class CommitPipelineService {
 		// Read, stamp, and advance the generation atomically. The sequence survives
 		// deletion, so a recommit cannot reuse an old edge identity.
 		return this.context.db.transaction((tx) => {
+			if (isStillOwned?.() === false) {
+				return;
+			}
+
 			const seq = tx
 				.select({ next: schema.generationSeq.nextGeneration })
 				.from(schema.generationSeq)
@@ -1661,13 +1648,15 @@ export class CommitPipelineService {
 		// charge batch still fences status and quota, and a stale ownership result is
 		// re-probed once if it would reject the commit.
 		if (prefetched !== undefined) {
-			const canonical = await this.context.env.BLOBS.head(
-				narObjectKey(metadata.narHash)
-			);
+			const isCanonicalPresent =
+				prefetched.blob !== undefined &&
+				(await this.context.env.BLOBS.head(
+					narObjectKey(metadata.narHash, prefetched.blob.incarnation)
+				)) !== null;
 
 			return {
 				blob: prefetched.blob,
-				isCanonicalPresent: canonical !== null,
+				isCanonicalPresent,
 				isOwned: prefetched.isOwned
 			};
 		}
@@ -1679,29 +1668,35 @@ export class CommitPipelineService {
 			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
 		);
 
-		const [d1Rows, canonical] = await Promise.all([
-			this.context.d1.batch([
-				this.context.d1
-					.select({
-						fileHash: d1Schema.blobState.fileHash,
-						fileSize: d1Schema.blobState.fileSize,
-						compression: d1Schema.blobState.compression
-					})
-					.from(d1Schema.blobState)
-					.where(canonicalFilter),
-				this.context.d1
-					.select({ narHash: d1Schema.tenantBlob.narHash })
-					.from(d1Schema.tenantBlob)
-					.where(ownedFilter)
-			]),
-			this.context.env.BLOBS.head(narObjectKey(metadata.narHash))
+		// Read the shared blob row and tenant ownership edge in one D1 batch. Use the
+		// row's `incarnation` field to construct the physical R2 key.
+		const d1Rows = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					fileHash: d1Schema.blobState.fileHash,
+					fileSize: d1Schema.blobState.fileSize,
+					compression: d1Schema.blobState.compression,
+					incarnation: d1Schema.blobState.incarnation
+				})
+				.from(d1Schema.blobState)
+				.where(canonicalFilter),
+			this.context.d1
+				.select({ narHash: d1Schema.tenantBlob.narHash })
+				.from(d1Schema.tenantBlob)
+				.where(ownedFilter)
 		]);
 
 		const [blobRows, ownedRows] = d1Rows;
+		const blob = blobRows[0];
+		const isCanonicalPresent =
+			blob !== undefined &&
+			(await this.context.env.BLOBS.head(
+				narObjectKey(metadata.narHash, blob.incarnation)
+			)) !== null;
 
 		return {
-			blob: blobRows[0],
-			isCanonicalPresent: canonical !== null,
+			blob,
+			isCanonicalPresent,
 			isOwned: ownedRows.length > 0
 		};
 	}
@@ -1724,7 +1719,8 @@ export class CommitPipelineService {
 					narHash: d1Schema.blobState.narHash,
 					fileHash: d1Schema.blobState.fileHash,
 					fileSize: d1Schema.blobState.fileSize,
-					compression: d1Schema.blobState.compression
+					compression: d1Schema.blobState.compression,
+					incarnation: d1Schema.blobState.incarnation
 				})
 				.from(d1Schema.blobState)
 				.where(inArray(d1Schema.blobState.narHash, batch))
@@ -1752,7 +1748,8 @@ export class CommitPipelineService {
 				blobByHash.set(row.narHash, {
 					fileHash: row.fileHash,
 					fileSize: row.fileSize,
-					compression: row.compression
+					compression: row.compression,
+					incarnation: row.incarnation
 				});
 			}
 		}
@@ -1791,18 +1788,21 @@ export class CommitPipelineService {
 			eq(d1Schema.blobReference.generation, generation),
 			eq(d1Schema.blobReference.narHash, metadata.narHash)
 		);
-		const [edge, object] = await Promise.all([
+		const [edge, isCurrentObject] = await Promise.all([
 			this.context.d1
 				.select({ narHash: d1Schema.blobReference.narHash })
 				.from(d1Schema.blobReference)
 				.where(edgeFilter)
 				.get(),
-			this.context.env.BLOBS.head(
-				narInfoObjectKey(tenant, metadata.storePathHash, cache)
+			this.narInfoObjects.isCurrentPublishedVersion(
+				cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash
 			)
 		]);
 
-		return edge !== undefined && object !== null;
+		return edge !== undefined && isCurrentObject;
 	}
 
 	// Share one input gate and charge batch across concurrent socket and
@@ -1825,7 +1825,8 @@ export class CommitPipelineService {
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
-		narHash: NixSha256HashString
+		narHash: NixSha256HashString,
+		isStillSettleable?: () => boolean
 	): Promise<'reclaimed' | 'committed-current' | 'superseded'> {
 		const current = this.context.db
 			.select({
@@ -1864,14 +1865,22 @@ export class CommitPipelineService {
 			)
 			.get();
 
+		if (isStillSettleable !== undefined && !isStillSettleable()) {
+			return 'superseded';
+		}
+
 		if (materialised !== undefined) {
 			return 'committed-current';
 		}
 
 		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 
-		// Delete the grace deadline with the reserved row. A dangling deadline
-		// could otherwise retain a later generation of the same path.
+		if (isStillSettleable !== undefined && !isStillSettleable()) {
+			return 'superseded';
+		}
+
+		// Delete the grace deadline with the reserved row. A dangling deadline could
+		// otherwise retain a later generation of the same path.
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.narInfos)
 				.where(
@@ -1895,51 +1904,5 @@ export class CommitPipelineService {
 		});
 
 		return 'reclaimed';
-	}
-
-	// Fetch and decode outside the input gate. Bound both operations so a stalled
-	// R2 body cannot hold the verification pass indefinitely.
-	async verifyPendingNar(
-		r2Key: R2ObjectKey,
-		metadata: ParsedUploadPathNegotiation,
-		budgetMs: number = narVerifyBudgetMs
-	): Promise<NarVerification> {
-		let cancelBody: ((reason?: unknown) => Promise<void>) | undefined;
-
-		try {
-			return await withDeadline(
-				async () => {
-					const object = await this.context.env.BLOBS.get(r2Key);
-
-					if (object === null) {
-						throw new UploadedObjectNotFoundError(r2Key);
-					}
-
-					const body = object.body as ReadableStream<Uint8Array>;
-					const cancellable = cancellableNarBody(body);
-					cancelBody = cancellable.cancel;
-
-					return verifyDecompressedNar(cancellable.stream, {
-						narHash: metadata.narHash,
-						narSize: metadata.narSize
-					});
-				},
-				budgetMs,
-				(abandoned) => new SubrequestTimeoutError('nar.verify', abandoned)
-			);
-		} catch (error) {
-			// Cancel the R2 reader after a timeout so the abandoned decode does not
-			// leave the body open for the rest of the isolate's lifetime.
-			if (cancelBody !== undefined && error instanceof SubrequestTimeoutError) {
-				try {
-					await cancelBody();
-				} catch {
-					// Best-effort: the timeout still surfaces below regardless of how
-					// the cancel itself settles.
-				}
-			}
-
-			throw error;
-		}
 	}
 }

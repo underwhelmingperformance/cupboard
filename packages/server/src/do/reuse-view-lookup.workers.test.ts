@@ -19,9 +19,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	currentNarObjectKey,
 	fixtureWorkerServer,
 	provisionFixtureTenant,
 	readFetch,
@@ -115,7 +115,9 @@ describe('reuse-view narinfo lookup', () => {
 				contentType: 'text/x-nix-narinfo; charset=utf-8',
 				cacheControl: 'no-store',
 				storePath: path.storePath,
-				url: `../../${narObjectKey(nixSha256HashSchema.parse(path.narHash))}`,
+				url: `../../${await currentNarObjectKey(
+					nixSha256HashSchema.parse(path.narHash)
+				)}`,
 				narHash: path.narHash,
 				hasSignature: true
 			});
@@ -326,7 +328,7 @@ describe('reuse-view narinfo lookup', () => {
 			storePathHash: '8'.repeat(32),
 			remove: async (narHash: string) => {
 				await env.BLOBS.delete(
-					narObjectKey(nixSha256HashSchema.parse(narHash))
+					await currentNarObjectKey(nixSha256HashSchema.parse(narHash))
 				);
 			}
 		}

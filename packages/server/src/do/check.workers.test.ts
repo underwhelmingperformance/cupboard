@@ -1,16 +1,24 @@
 import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import {
+	activateObjectIncarnation,
+	reserveObjectIncarnation
+} from '../blob/object-incarnation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
+	currentNarObjectKey,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -100,7 +108,7 @@ describe('storage check', () => {
 
 		await pushPath(token, alpha);
 		await pushPath(token, beta);
-		await env.BLOBS.delete(narObjectKey(narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(narHash));
 
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 2,
@@ -130,7 +138,7 @@ describe('storage check', () => {
 		await pushPath(token, metadata);
 
 		const tampered = new Uint8Array([9, 9, 9, 9]);
-		await env.BLOBS.put(narObjectKey(metadata.narHash), tampered, {
+		await env.BLOBS.put(await currentNarObjectKey(metadata.narHash), tampered, {
 			sha256: await crypto.subtle.digest('SHA-256', tampered)
 		});
 
@@ -170,12 +178,50 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata, DEFAULT_CACHE, nar);
 
-		// Do not create blob_state for the claimed hash. Otherwise the deep check
-		// rejects the canonical compressed-file facts before it verifies the
-		// decompressed NAR.
-		await env.BLOBS.put(narObjectKey(claimed.narHash), nar.narBytes, {
-			sha256: await crypto.subtle.digest('SHA-256', nar.narBytes)
-		});
+		// Store `nar` under the hash for `claimed`, then make the compressed-file
+		// metadata consistent with that substitution. Only decompression exposes
+		// the incorrect NAR hash.
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const incarnation = await reserveObjectIncarnation(
+			database,
+			'nar',
+			claimed.narHash
+		);
+		await env.BLOBS.put(
+			narObjectKey(claimed.narHash, incarnation.incarnation),
+			nar.narBytes,
+			{
+				sha256: await crypto.subtle.digest('SHA-256', nar.narBytes)
+			}
+		);
+		await activateObjectIncarnation(
+			database,
+			'nar',
+			claimed.narHash,
+			incarnation.incarnation
+		);
+		await database
+			.insert(d1Schema.blobState)
+			.values({
+				narHash: claimed.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				compression: 'zstd',
+				narSize: nar.narSize,
+				incarnation: incarnation.incarnation,
+				verifiedAt: isoTimestamp(new Date())
+			})
+			.onConflictDoUpdate({
+				target: d1Schema.blobState.narHash,
+				set: {
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength,
+					narSize: nar.narSize,
+					incarnation: incarnation.incarnation,
+					verifiedAt: isoTimestamp(new Date())
+				}
+			})
+			.run();
 		await corruptCommittedNarInfo(metadata.storePathHash, {
 			narHash: claimed.narHash
 		});

@@ -100,6 +100,7 @@ import { z } from 'zod';
 import migrations from '../drizzle/migrations.js';
 
 import { issueAccessJwt } from './auth/auth.ts';
+import { type NarVerification } from './blob/nar-verify.ts';
 import {
 	issuePushId,
 	pushIdNonceSchema,
@@ -137,7 +138,9 @@ import type { CupboardServer } from './do/server.ts';
 import {
 	attestationStagingObjectKey,
 	blobReaperGraceMs,
+	casObjectKey,
 	internalOrigin,
+	maxVerificationRpcRows,
 	narInfoObjectKey,
 	narObjectKey,
 	type R2ObjectKey,
@@ -150,7 +153,7 @@ import {
 	type ReadPasswordSalt
 } from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
-import { runBlobReaper } from './routing/scheduled.ts';
+import { runBlobReaper, verifyTenant } from './routing/scheduled.ts';
 import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
 import worker from './worker.ts';
 
@@ -524,6 +527,7 @@ async function configureFixtureTenant(
  */
 export async function useTestServer(name: string): Promise<void> {
 	harness.origin = `https://cupboard-${name}.test`;
+	harness.serverName = name;
 	harness.server = testServerFor(name);
 
 	await configureFixtureTenant(harness.server);
@@ -539,6 +543,39 @@ The Durable Object stub the harness is currently targeting.
 */
 export function currentServer(): DurableObjectStub<CupboardServer> {
 	return harness.server;
+}
+
+/**
+ * Claims an upload and records one owner-fenced verification verdict.
+ */
+export async function recordClaimedVerification(
+	uploadId: UploadId,
+	verification: NarVerification
+): Promise<number> {
+	const claim = await currentServer().claimVerificationBatch(
+		maxVerificationRpcRows,
+		Number.MAX_SAFE_INTEGER
+	);
+
+	return currentServer().recordVerifications(claim.owner, [
+		{ uploadId, verdict: { kind: 'verified', verification } }
+	]);
+}
+
+/**
+ * Claims an upload and records that its staged object is missing.
+ */
+export async function recordClaimedMissingObject(
+	uploadId: UploadId
+): Promise<number> {
+	const claim = await currentServer().claimVerificationBatch(
+		maxVerificationRpcRows,
+		Number.MAX_SAFE_INTEGER
+	);
+
+	return currentServer().recordVerifications(claim.owner, [
+		{ uploadId, verdict: { kind: 'missing' } }
+	]);
 }
 
 /**
@@ -593,6 +630,13 @@ export async function driveToCompletion(
  */
 export function currentServerTenant(): TenantId {
 	return tenantIdSchema.parse(harness.serverName);
+}
+
+/**
+Runs the production queue-consumer verification path for the current tenant.
+*/
+export function verifyCurrentTenant(): Promise<void> {
+	return verifyTenant(rootLogger(), env, currentServerTenant());
 }
 
 export interface InitialisedServer {
@@ -1022,6 +1066,54 @@ export async function clearBlobStorage(): Promise<void> {
 }
 
 /**
+The R2 key for the incarnation D1 currently records for a NAR.
+*/
+export async function currentNarObjectKey(
+	narHash: NixSha256HashString
+): Promise<R2ObjectKey> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ incarnation: d1Schema.objectIncarnation.incarnation })
+		.from(d1Schema.objectIncarnation)
+		.where(
+			and(
+				eq(d1Schema.objectIncarnation.kind, 'nar'),
+				eq(d1Schema.objectIncarnation.objectId, narHash)
+			)
+		)
+		.get();
+
+	if (row === undefined) {
+		throw new TypeError(`No NAR incarnation is registered for ${narHash}`);
+	}
+
+	return narObjectKey(narHash, row.incarnation);
+}
+
+/**
+The R2 key for the incarnation D1 currently records for a CAS object.
+*/
+export async function currentCasObjectKey(
+	digest: Sha256HexDigest
+): Promise<R2ObjectKey> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ incarnation: d1Schema.objectIncarnation.incarnation })
+		.from(d1Schema.objectIncarnation)
+		.where(
+			and(
+				eq(d1Schema.objectIncarnation.kind, 'cas'),
+				eq(d1Schema.objectIncarnation.objectId, digest)
+			)
+		)
+		.get();
+
+	if (row === undefined) {
+		throw new TypeError(`No CAS incarnation is registered for ${digest}`);
+	}
+
+	return casObjectKey(digest, row.incarnation);
+}
+
+/**
 The shared `blob_state` rows in D1, sorted by NAR hash for deterministic assertions.
 */
 export async function blobStateNarHashes(): Promise<
@@ -1098,14 +1190,13 @@ export async function seedBlobStates(
 	narHashes: readonly NixSha256HashString[]
 ): Promise<void> {
 	const verifiedAt = isoTimestamp(new Date());
-	const database = drizzleD1(env.CUPBOARD_DB, { schema: { blobState } });
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	// Each row binds six parameters, so the insert is chunked under D1's
 	// bound-parameter limit.
 	for (const batch of chunk(narHashes, 12)) {
-		await database
-			.insert(blobState)
-			.values(
+		await database.batch([
+			database.insert(blobState).values(
 				batch.map((narHash) => ({
 					narHash,
 					fileHash: narHash,
@@ -1114,8 +1205,16 @@ export async function seedBlobStates(
 					narSize: 1,
 					verifiedAt
 				}))
+			),
+			database.insert(d1Schema.objectIncarnation).values(
+				batch.map((narHash) => ({
+					kind: 'nar' as const,
+					objectId: narHash,
+					incarnation: 1,
+					state: 'live' as const
+				}))
 			)
-			.run();
+		]);
 	}
 }
 
@@ -1129,10 +1228,19 @@ export async function seedCasObjects(
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	for (const batch of chunk(digests, 20)) {
-		await database
-			.insert(d1Schema.casObject)
-			.values(batch.map((digest) => ({ digest, size: 1, storedAt })))
-			.run();
+		await database.batch([
+			database
+				.insert(d1Schema.casObject)
+				.values(batch.map((digest) => ({ digest, size: 1, storedAt }))),
+			database.insert(d1Schema.objectIncarnation).values(
+				batch.map((digest) => ({
+					kind: 'cas' as const,
+					objectId: digest,
+					incarnation: 1,
+					state: 'live' as const
+				}))
+			)
+		]);
 	}
 }
 
@@ -1583,10 +1691,19 @@ export async function deleteNarInfoRow(
 export async function deleteBlobState(
 	narHash: NixSha256HashString
 ): Promise<void> {
-	await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
-		.delete(blobState)
-		.where(eq(blobState.narHash, narHash))
-		.run();
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const registryFilter = and(
+		eq(d1Schema.objectIncarnation.kind, 'nar'),
+		eq(d1Schema.objectIncarnation.objectId, narHash)
+	);
+
+	await database.batch([
+		database
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent' })
+			.where(registryFilter),
+		database.delete(blobState).where(eq(blobState.narHash, narHash))
+	]);
 }
 
 export async function deleteBlobReferenceEdge(
@@ -1857,7 +1974,7 @@ export async function attemptPushToTenant(
 		await completeCommitSession(
 			commitSessionFromResponse(upgraded),
 			decision.uploadId,
-			() => tenantServer(env, tenant).runVerification(),
+			() => verifyTenant(rootLogger(), env, tenant),
 			{}
 		);
 	} catch (error) {
@@ -2153,7 +2270,7 @@ export async function commitUpload(
 	return completeCommitSession(
 		conversation,
 		uploadId,
-		() => currentServer().runVerification(),
+		() => verifyTenant(rootLogger(), env, currentServerTenant()),
 		options
 	);
 }
@@ -2216,7 +2333,7 @@ export async function commitUploadViaWorker(
 	return completeCommitSession(
 		commitSessionFromResponse(response),
 		uploadId,
-		() => tenantServer(env, tenant).runVerification(),
+		() => verifyTenant(rootLogger(), env, tenant),
 		options
 	);
 }
@@ -2398,7 +2515,10 @@ export async function expectNarResponse(
 	hash: string,
 	method: 'GET' | 'HEAD'
 ): Promise<void> {
-	const response = await readFetch(`/nar/${hash}.nar.zst`, { method });
+	const narHash = nixSha256HashSchema.parse(decodeURIComponent(hash));
+	const response = await readFetch(`/${await currentNarObjectKey(narHash)}`, {
+		method
+	});
 	const etag = response.headers.get('etag');
 
 	expect({
@@ -2625,18 +2745,30 @@ export async function putNarBytes(
  */
 export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
 	await putNarBytes(narObjectKey(nar.narHash), nar);
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.blobState)
-		.values({
-			narHash: nar.narHash,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength,
-			compression: 'zstd',
-			narSize: nar.narSize,
-			verifiedAt: isoTimestamp(testBase)
-		})
-		.onConflictDoNothing()
-		.run();
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	await database.batch([
+		database
+			.insert(d1Schema.blobState)
+			.values({
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				compression: 'zstd',
+				narSize: nar.narSize,
+				verifiedAt: isoTimestamp(testBase)
+			})
+			.onConflictDoNothing(),
+		database
+			.insert(d1Schema.objectIncarnation)
+			.values({
+				kind: 'nar',
+				objectId: nar.narHash,
+				incarnation: 1,
+				state: 'live'
+			})
+			.onConflictDoNothing()
+	]);
 }
 
 function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {

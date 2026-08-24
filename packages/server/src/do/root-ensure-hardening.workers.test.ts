@@ -20,10 +20,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
+	currentNarObjectKey,
 	currentServer,
 	flakyR2,
 	initialise,
@@ -183,7 +184,7 @@ describe('root ensure hardening', () => {
 		await commitPath(token, committed);
 
 		await env.BLOBS.delete(
-			narObjectKey(nixSha256HashSchema.parse(committed.narHash))
+			await currentNarObjectKey(nixSha256HashSchema.parse(committed.narHash))
 		);
 
 		const response = await runInDurableObject(
@@ -279,6 +280,7 @@ describe('root ensure hardening', () => {
 			}
 		);
 		const repaired = await env.BLOBS.get(key);
+		const narUrl = await currentNarObjectKey(committed.narHash);
 
 		expect({
 			status: response.status,
@@ -290,6 +292,7 @@ describe('root ensure hardening', () => {
 			customMetadata: {
 				generation: '0',
 				narHash: committed.narHash,
+				narUrl,
 				signatureGeneration: '1'
 			}
 		});

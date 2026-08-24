@@ -105,4 +105,29 @@ describe('VerdictRecorder', () => {
 
 		expect(await recorder.finishRecording()).toBe(0);
 	});
+
+	it('stops a retry delay when the consumer is aborted', async () => {
+		vi.useFakeTimers();
+		const controller = new AbortController();
+		const failure = new Error('consumer deadline');
+		const record = vi.fn(() => Promise.reject(new Error('record outage')));
+		const recorder = new VerdictRecorder(
+			rootLogger(),
+			record,
+			3,
+			60_000,
+			controller.signal
+		);
+
+		recorder.add(verdict('a'));
+		await vi.waitFor(() => {
+			expect(record).toHaveBeenCalledTimes(1);
+		});
+		controller.abort(failure);
+
+		await expect(recorder.finishRecording()).rejects.toBe(failure);
+		expect(record).toHaveBeenCalledTimes(1);
+		expect(vi.getTimerCount()).toBe(0);
+		vi.useRealTimers();
+	});
 });

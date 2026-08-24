@@ -107,19 +107,20 @@ export const pendingUploads = sqliteTable(
 		metadataJson: text('metadata_json').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
-		// This marker survives an interrupted commit and gives `push --wait` an
-		// observable result. Invalid content remains local to the upload rather than
-		// becoming a shared fact for its NAR hash.
+		// This marker survives an interrupted commit so `push --wait` can report the
+		// result. Invalid content never creates a shared blob row.
 		verdict: text('verdict', {
 			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
 		}),
 		// Verification re-reads the subscribed session before sending a terminal
 		// verdict, so a reconnect can replace this value while verification is running.
 		sessionId: text('session_id').$type<SessionId>(),
-		// Overlapping queue, alarm, and cron passes must not claim the same upload.
-		// A crashed pass leaves this lease to expire, while a client re-drive clears
-		// it so the requested pass can start immediately.
+		// `claimed_at` records the lease time, and `claim_owner` identifies the
+		// verification pass. Owner checks prevent an expired pass from changing a row
+		// after another pass claims it. Both columns are null while unclaimed; a client
+		// re-drive clears them to request an immediate retry.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
+		claimOwner: text('claim_owner'),
 		// Capture the retention decision during negotiation so a later policy change
 		// cannot alter this upload. Null also supports rows created before decisions
 		// were stored and is treated as no matching policy.

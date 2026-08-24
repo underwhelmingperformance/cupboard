@@ -269,6 +269,7 @@ describe('multi-tenant writes', () => {
 		await suspendTenant(fixtureTenant);
 
 		await runMaintenanceBatch(rootLogger(), env, 2);
+		await verifyTenants(['acme', 'beta']);
 		const afterFirst = {
 			acme: await servedAt('acme'),
 			beta: await servedAt('beta'),
@@ -280,6 +281,7 @@ describe('multi-tenant writes', () => {
 		// Gamma still has a null timestamp, so the second bounded tick must process
 		// it before acme and beta.
 		await runMaintenanceBatch(rootLogger(), env, 2);
+		await verifyTenants(['gamma']);
 		const gammaAfterSecond = await servedAt('gamma');
 
 		expect({
@@ -311,6 +313,21 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 
 	for (const message of messages) {
 		await executeMaintenanceQueueMessage(rootLogger(), env, message);
+	}
+
+	await verifyTenants(
+		messages.flatMap((message) =>
+			message.kind === 'tenant-maintenance' ? [message.tenant] : []
+		)
+	);
+}
+
+async function verifyTenants(ids: readonly string[]): Promise<void> {
+	for (const id of ids) {
+		await executeMaintenanceQueueMessage(rootLogger(), env, {
+			kind: 'tenant-verify',
+			tenant: tenantIdSchema.parse(id)
+		});
 	}
 }
 

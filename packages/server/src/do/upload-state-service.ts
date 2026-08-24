@@ -9,9 +9,13 @@ import {
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
-import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
+import {
+	commitStagedBlobPromotion,
+	type StagedBlobPromotion,
+	stagePromotedBlob
+} from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
@@ -121,27 +125,42 @@ export class UploadStateService {
 		return new Set(states.keys());
 	}
 
-	clearPendingUpload(uploadId: UploadId): void {
-		this.context.db
+	clearPendingUpload(uploadId: UploadId, owner?: string): boolean {
+		const deleted = this.context.db
 			.delete(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
+			.where(
+				and(
+					eq(schema.pendingUploads.id, uploadId),
+					owner === undefined
+						? isNull(schema.pendingUploads.claimOwner)
+						: eq(schema.pendingUploads.claimOwner, owner)
+				)
+			)
+			.returning({ id: schema.pendingUploads.id })
+			.all();
+
+		return deleted.length === 1;
 	}
 
-	// A pending row is the durable handle for private staging bytes. Delete those
-	// bytes before clearing the handle so a failed R2 operation remains retriable.
-	// A canonical key belongs to the shared reaper and must never be deleted here.
-	// Callers await the R2 operation outside critical sections.
+	// Remove an abandoned upload row only while the caller owns its claim, then
+	// delete its private staging object. The orphan collector retries a failed R2
+	// deletion. Reuse uploads refer to a shared canonical object, which this method
+	// must not delete.
 	async clearPendingUploadAndStaging(
 		uploadId: UploadId,
 		r2Key: R2ObjectKey,
-		narHash: NixSha256HashString
-	): Promise<void> {
+		narHash: NixSha256HashString,
+		owner?: string
+	): Promise<boolean> {
+		if (!this.clearPendingUpload(uploadId, owner)) {
+			return false;
+		}
+
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
 		}
 
-		this.clearPendingUpload(uploadId);
+		return true;
 	}
 
 	// A new verification drive supersedes any existing claim lease. Clearing
@@ -149,7 +168,11 @@ export class UploadStateService {
 	markUploadPending(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict: 'pending', claimedAt: sql`null` })
+			.set({
+				verdict: 'pending',
+				claimedAt: sql`null`,
+				claimOwner: sql`null`
+			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 	}
@@ -192,34 +215,45 @@ export class UploadStateService {
 	markUploadCommitting(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict: 'committing', claimedAt: sql`null` })
+			.set({
+				verdict: 'committing',
+				claimedAt: sql`null`,
+				claimOwner: sql`null`
+			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 	}
 
-	// Delete private staging bytes before recording a terminal verdict. If R2
-	// fails, the pending row remains available for another drive. Canonical reuse
-	// bytes remain under the shared reaper.
-	async markUploadTerminal(
+	// Keep a deferred upload's terminal verdict so `push --wait` and the status
+	// endpoint can report it. The distinct mismatch and over-quota values prevent
+	// a quota refusal from being reported as invalid content.
+	markUploadTerminal(
 		uploadId: UploadId,
-		r2Key: R2ObjectKey,
-		narHash: NixSha256HashString,
-		verdict: 'servable' | 'mismatch' | 'over-quota'
-	): Promise<void> {
-		if (r2Key !== narObjectKey(narHash)) {
-			await this.context.env.BLOBS.delete(r2Key);
-		}
-
-		// Start a fresh observation window at the terminal transition. Verification
-		// can finish after the negotiation TTL, and polling still needs time to read
-		// the outcome before GC removes the row.
+		verdict: 'servable' | 'mismatch' | 'over-quota',
+		owner?: string
+	): boolean {
+		// Start a new observation window because verification can finish after the
+		// upload's original expiry. GC removes the row after this window.
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		const ownerFilter =
+			owner === undefined
+				? isNull(schema.pendingUploads.claimOwner)
+				: eq(schema.pendingUploads.claimOwner, owner);
 
-		this.context.db
+		const updated = this.context.db
 			.update(schema.pendingUploads)
 			.set({ verdict, expiresAt: isoTimestamp(expiresAt) })
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
+			.where(
+				and(eq(schema.pendingUploads.id, uploadId), awaitingFilter, ownerFilter)
+			)
+			.returning({ id: schema.pendingUploads.id })
+			.all();
+
+		return updated.length === 1;
 	}
 
 	// Preview must not change a reaper timer merely by reporting possible reuse, so
@@ -262,17 +296,30 @@ export class UploadStateService {
 		return blobStates;
 	}
 
-	promoteStagingBlob(
+	// Write verified bytes to a physical R2 object. The caller commits the returned
+	// promotion only while it still owns the upload claim.
+	stageStagingBlob(
 		stagingKey: R2ObjectKey,
 		metadata: ParsedUploadPathNegotiation,
-		blob: CanonicalBlob | undefined
-	): Promise<CanonicalBlob> {
-		return promoteVerifiedBlob(
+		blob: CanonicalBlob | undefined,
+		reservationOwner: string,
+		isStillOwned: () => boolean
+	): Promise<StagedBlobPromotion | undefined> {
+		return stagePromotedBlob(
 			this.context.d1,
 			this.context.env.BLOBS,
 			stagingKey,
 			{ narHash: metadata.narHash, narSize: metadata.narSize },
-			blob
+			blob,
+			reservationOwner,
+			isStillOwned
 		);
+	}
+
+	commitStagingBlob(
+		staged: StagedBlobPromotion,
+		isStillOwned: () => boolean = () => true
+	): Promise<'live' | 'retired'> {
+		return commitStagedBlobPromotion(this.context.d1, staged, isStillOwned);
 	}
 }

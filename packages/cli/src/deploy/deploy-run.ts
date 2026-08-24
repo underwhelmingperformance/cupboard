@@ -1,6 +1,5 @@
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
-import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 import { z } from 'zod';
 
 import type { DeploymentArtifact } from './artifact.ts';
@@ -9,10 +8,7 @@ import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
-import {
-	applyD1Migrations,
-	computeDurableObjectMigration
-} from './migrations.ts';
+import { applyD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
 import type { DeploySecrets } from './secrets.ts';
 import {
@@ -40,7 +36,7 @@ async function uploadScriptForPlan(
 	dependencies: DeployDependencies,
 	context: PhaseContext,
 	scriptName: ScriptName,
-	metadata: ScriptUpdateParams.Metadata,
+	metadata: ScriptMetadata,
 	bundle: WorkerBundle
 ): Promise<void> {
 	try {
@@ -375,11 +371,6 @@ export async function runDeploy(
 		}
 	}
 
-	const tag = await api.getScriptMigrationTag(artifact.config.tenant.name);
-	const migration = computeDurableObjectMigration(
-		tag,
-		artifact.config.tenant.migrations
-	);
 	const withBuildVersion = (metadata: ScriptMetadata): ScriptMetadata => ({
 		...metadata,
 		annotations: {
@@ -388,7 +379,7 @@ export async function runDeploy(
 		}
 	});
 	const tenantMetadata = withBuildVersion(
-		buildScriptMetadata(artifact.config.tenant, resources, migration)
+		buildScriptMetadata(artifact.config.tenant, resources)
 	);
 	const controlMetadata = withBuildVersion(
 		buildScriptMetadata(artifact.config.control, resources)
@@ -412,7 +403,6 @@ export async function runDeploy(
 			return {
 				tenant:
 					tenantLive?.buildVersion === artifact.buildVersion &&
-					migration === undefined &&
 					hasMatchingBindings(tenantMetadata.bindings, tenantLive.bindings) &&
 					tenantLive.cacheEnabled === artifact.config.tenant.cacheEnabled &&
 					tenantLive.crossVersionCache === artifact.config.tenant.cacheEnabled,

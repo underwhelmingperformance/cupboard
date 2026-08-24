@@ -8,13 +8,14 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
+	currentNarObjectKey,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -166,7 +167,7 @@ describe('background verification', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(token, metadata);
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
 		const narInfoObject = await env.BLOBS.head(
@@ -270,7 +271,7 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata);
 		await pushPath(token, metadata, 'builds');
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
 		const narInfoCount = await runInDurableObject(

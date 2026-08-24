@@ -33,11 +33,67 @@ export const instanceConfig = sqliteTable('instance_config', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
-// These rows store the canonical compressed metadata shared by every tenant.
-// Promotion writes R2 before this row, so a crash can leave an object without
-// metadata. Object loss can also leave a stale row. Callers that need proof of
-// availability must check R2. Upload mismatches remain on the private upload row
-// and cannot poison the shared metadata for a hash.
+// Tracks the current version of each shared R2 object. The row remains after
+// collection so the next promotion receives a greater `incarnation` number.
+// `pending` has reserved the versioned R2 key, `live` has completed the R2
+// write, and `absent` has no current object. Maintenance can recover or retire
+// an abandoned promotion when its `blob_state` or `cas_object` row is missing.
+export const objectIncarnation = sqliteTable(
+	'object_incarnation',
+	{
+		kind: text('kind', { enum: ['nar', 'cas'] }).notNull(),
+		objectId: text('object_id').notNull(),
+		incarnation: integer('incarnation').notNull(),
+		state: text('state', {
+			enum: ['pending', 'live', 'absent']
+		}).notNull(),
+		reservationOwner: text('reservation_owner'),
+		updatedAt: text('updated_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(sql`'1970-01-01T00:00:00.000Z'`)
+	},
+	(table) => [
+		primaryKey({ columns: [table.kind, table.objectId] }),
+		index('object_incarnation_recovery_idx').on(
+			table.kind,
+			table.state,
+			table.updatedAt,
+			table.objectId
+		)
+	]
+);
+
+// Each row schedules deletion of one versioned R2 object after its `blob_state`
+// or `cas_object` row has been deleted. Maintenance deletes that R2 key
+// immediately. A replacement keeps the row until `remove_after` so a Worker
+// with the old reservation cannot recreate an untracked object.
+export const objectDeletion = sqliteTable(
+	'object_deletion',
+	{
+		kind: text('kind', { enum: ['nar', 'cas'] }).notNull(),
+		objectId: text('object_id').notNull(),
+		incarnation: integer('incarnation').notNull(),
+		removeAfter: text('remove_after').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.kind, table.objectId, table.incarnation]
+		}),
+		index('object_deletion_due_idx').on(
+			table.kind,
+			table.removeAfter,
+			table.objectId,
+			table.incarnation
+		)
+	]
+);
+
+// Each row records a verified shared NAR at one physical incarnation key. The
+// row supplies both availability and the compressed metadata advertised by
+// narinfo responses. Upload mismatches remain private to their upload rows and
+// cannot change this row. Collection deletes the row and schedules deletion of
+// the corresponding R2 key in one transaction.
 export const blobState = sqliteTable(
 	'blob_state',
 	{
@@ -46,6 +102,7 @@ export const blobState = sqliteTable(
 		fileSize: integer('file_size').notNull(),
 		compression: text('compression', { enum: ['zstd'] }).notNull(),
 		narSize: integer('nar_size').notNull(),
+		incarnation: integer('incarnation').notNull().default(1),
 		verifiedAt: text('verified_at').$type<IsoTimestamp>().notNull(),
 		// The reaper arms an unreferenced blob by setting this deadline. A new
 		// reference clears it. Collection must recheck that the deadline has elapsed
@@ -227,14 +284,15 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// A row records the size of attestation bytes stored at `cas/<digest>` in shared
-// R2. It does not mean that the bundle passed Sigstore, DSSE, or trust-root
-// verification.
+// A row records measured attestation bytes stored at the physical incarnation
+// key for `cas/<digest>`. It does not mean that the bundle passed Sigstore,
+// DSSE, or trust-root verification.
 export const casObject = sqliteTable(
 	'cas_object',
 	{
 		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
 		size: integer('size').notNull(),
+		incarnation: integer('incarnation').notNull().default(1),
 		storedAt: text('stored_at').$type<IsoTimestamp>().notNull(),
 		deleteAfter: text('delete_after').$type<IsoTimestamp>()
 	},

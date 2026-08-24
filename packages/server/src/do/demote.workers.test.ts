@@ -8,13 +8,14 @@ import {
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { runReaperDemote } from '../routing/scheduled.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
+	currentNarObjectKey,
 	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
@@ -76,7 +77,7 @@ async function isNarInfoPresent(
 }
 
 async function isNarPresent(narHash: NixSha256HashString): Promise<boolean> {
-	const object = await env.BLOBS.head(narObjectKey(narHash));
+	const object = await env.BLOBS.head(await currentNarObjectKey(narHash));
 
 	return object !== null;
 }
@@ -100,7 +101,9 @@ describe('missing blob demotion', () => {
 		const { tenant, metadata, narHash } =
 			await committedTenantPath('demote-basic');
 
-		await env.BLOBS.delete(narObjectKey(narHash));
+		// Delete the shared NAR while leaving its `blob_state` row, tenant
+		// reference and materialised narinfo in place.
+		await env.BLOBS.delete(await currentNarObjectKey(narHash));
 
 		expect({
 			isNarPresent: await isNarPresent(narHash),
@@ -133,7 +136,7 @@ describe('missing blob demotion', () => {
 		const first = await committedTenantPath('demote-shared');
 		const second = await committedTenantPath('demote-shared');
 
-		await env.BLOBS.delete(narObjectKey(first.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(first.narHash));
 
 		expect({
 			sharedHash: first.narHash === second.narHash,
@@ -191,7 +194,7 @@ describe('missing blob demotion', () => {
 		const { tenant, token, metadata, nar, narHash } =
 			await committedTenantPath('demote-heal');
 
-		await env.BLOBS.delete(narObjectKey(narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(narHash));
 		await runReaperDemote(rootLogger(), env);
 
 		await pushPathToTenant(tenant, token, metadata, nar);

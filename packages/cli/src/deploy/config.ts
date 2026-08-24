@@ -59,10 +59,31 @@ export interface QueueConsumerConfig {
 	readonly deadLetterQueue: string | undefined;
 }
 
-export interface DurableObjectMigration {
-	readonly tag: string;
-	readonly newSqliteClasses: readonly string[];
-}
+type DurableObjectStorage = 'sqlite' | 'legacy-kv';
+
+export type DurableObjectExport =
+	| {
+			readonly type: 'durable-object';
+			readonly state?: 'created';
+			readonly storage: DurableObjectStorage;
+	  }
+	| { readonly type: 'durable-object'; readonly state: 'deleted' }
+	| {
+			readonly type: 'durable-object';
+			readonly state: 'renamed';
+			readonly renamed_to: string;
+	  }
+	| {
+			readonly type: 'durable-object';
+			readonly state: 'transferred';
+			readonly transferred_to: string;
+	  }
+	| {
+			readonly type: 'durable-object';
+			readonly state: 'expecting-transfer';
+			readonly storage: DurableObjectStorage;
+			readonly transfer_from: string;
+	  };
 
 export interface WorkerConfig {
 	readonly name: ScriptName;
@@ -84,7 +105,7 @@ export interface WorkerConfig {
 	readonly workersDev: boolean;
 	readonly previewUrls: boolean;
 	readonly crons: readonly string[];
-	readonly migrations: readonly DurableObjectMigration[];
+	readonly exports: Readonly<Record<string, DurableObjectExport>>;
 }
 
 export interface DeploymentConfig {
@@ -196,44 +217,93 @@ const queueConsumer = z.object({
 	dead_letter_queue: queueName.optional()
 });
 
-const migration = z.object({
-	tag: z.string(),
-	new_sqlite_classes: z.array(z.string()).default([])
-});
+const durableObjectStorage = z.enum(['sqlite', 'legacy-kv']);
+const durableObjectExport = z.union([
+	z
+		.object({
+			type: z.literal('durable-object'),
+			state: z.literal('created').optional(),
+			storage: durableObjectStorage
+		})
+		.strict(),
+	z
+		.object({
+			type: z.literal('durable-object'),
+			state: z.literal('deleted')
+		})
+		.strict(),
+	z
+		.object({
+			type: z.literal('durable-object'),
+			state: z.literal('renamed'),
+			renamed_to: z.string()
+		})
+		.strict(),
+	z
+		.object({
+			type: z.literal('durable-object'),
+			state: z.literal('transferred'),
+			transferred_to: z.string()
+		})
+		.strict(),
+	z
+		.object({
+			type: z.literal('durable-object'),
+			state: z.literal('expecting-transfer'),
+			storage: durableObjectStorage,
+			transfer_from: z.string()
+		})
+		.strict()
+]);
 
 const observability = z.object({
 	enabled: z.boolean(),
 	traces: z.object({ enabled: z.boolean() }).partial().optional()
 });
 
-const rawWranglerSchema = z.object({
-	name: workerName,
-	compatibility_date: z
-		.string()
-		.regex(/^\d{4}-\d{2}-\d{2}$/, 'compatibility_date must be YYYY-MM-DD'),
-	compatibility_flags: z.array(z.string()).default([]),
-	vars: z.record(z.string(), z.string()).default({}),
-	limits: z.object({ cpu_ms: z.number() }).partial().optional(),
-	observability: observability.optional(),
-	durable_objects: z
-		.object({ bindings: z.array(durableObjectBinding) })
-		.optional(),
-	r2_buckets: z.array(r2BucketBinding).default([]),
-	kv_namespaces: z.array(kvNamespaceBinding).default([]),
-	d1_databases: z.array(d1DatabaseBinding).default([]),
-	queues: z
-		.object({
-			producers: z.array(queueProducer).default([]),
-			consumers: z.array(queueConsumer).default([])
-		})
-		.optional(),
-	services: z.array(serviceBinding).default([]),
-	cache: z.object({ enabled: z.boolean() }).optional(),
-	workers_dev: z.boolean().default(true),
-	preview_urls: z.boolean().default(true),
-	triggers: z.object({ crons: z.array(cronExpression).default([]) }).optional(),
-	migrations: z.array(migration).default([])
-});
+const rawWranglerSchema = z
+	.object({
+		name: workerName,
+		compatibility_date: z
+			.string()
+			.regex(/^\d{4}-\d{2}-\d{2}$/, 'compatibility_date must be YYYY-MM-DD'),
+		compatibility_flags: z.array(z.string()).default([]),
+		vars: z.record(z.string(), z.string()).default({}),
+		limits: z.object({ cpu_ms: z.number() }).partial().optional(),
+		observability: observability.optional(),
+		durable_objects: z
+			.object({ bindings: z.array(durableObjectBinding) })
+			.optional(),
+		r2_buckets: z.array(r2BucketBinding).default([]),
+		kv_namespaces: z.array(kvNamespaceBinding).default([]),
+		d1_databases: z.array(d1DatabaseBinding).default([]),
+		queues: z
+			.object({
+				producers: z.array(queueProducer).default([]),
+				consumers: z.array(queueConsumer).default([])
+			})
+			.optional(),
+		services: z.array(serviceBinding).default([]),
+		cache: z.object({ enabled: z.boolean() }).optional(),
+		workers_dev: z.boolean().default(true),
+		preview_urls: z.boolean().default(true),
+		triggers: z
+			.object({ crons: z.array(cronExpression).default([]) })
+			.optional(),
+		exports: z.record(z.string(), durableObjectExport).default({}),
+		migrations: z.unknown().optional()
+	})
+	.superRefine((config, context) => {
+		if (config.migrations === undefined) {
+			return;
+		}
+
+		context.addIssue({
+			code: 'custom',
+			path: ['migrations'],
+			message: 'use declarative exports for Durable Object class lifecycle'
+		});
+	});
 
 type RawWrangler = z.infer<typeof rawWranglerSchema>;
 
@@ -310,10 +380,7 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		workersDev: raw.workers_dev,
 		previewUrls: raw.preview_urls,
 		crons: raw.triggers?.crons ?? [],
-		migrations: raw.migrations.map((migration) => ({
-			tag: migration.tag,
-			newSqliteClasses: migration.new_sqlite_classes
-		}))
+		exports: raw.exports
 	};
 }
 

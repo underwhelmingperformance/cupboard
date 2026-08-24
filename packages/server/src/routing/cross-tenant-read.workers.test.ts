@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	cacheWriteGrants,
 	clearBlobStorage,
+	currentNarObjectKey,
 	handlerFetch,
 	issueTokenForTenant,
 	provisionNamedTenant,
@@ -57,7 +58,7 @@ describe('cross-tenant NAR read isolation', () => {
 			nar
 		);
 
-		const narPath = `/nar/${nar.narHash}.nar.zst`;
+		const narPath = `/${await currentNarObjectKey(nar.narHash)}`;
 		const ownerGet = await handlerFetch(`/t/acme${narPath}`);
 		const intruderGet = await handlerFetch(`/t/mallory${narPath}`);
 		const ownerHead = await handlerFetch(`/t/acme${narPath}`, {

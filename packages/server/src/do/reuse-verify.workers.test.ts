@@ -6,10 +6,10 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { pendingUploads } from '../db/schema.ts';
-import { narObjectKey } from '../http/http.ts';
 import {
 	commitPath,
 	commitUpload,
+	currentNarObjectKey,
 	currentServer,
 	expectSingleCommitDecision,
 	fetchNarInfo,
@@ -18,11 +18,13 @@ import {
 	markUploadPendingVerification,
 	narInfoGeneration,
 	negotiateUploads,
+	recordClaimedMissingObject,
 	resetTestServer,
 	seedReservedNarInfo,
 	setRoot,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 type PendingRow = typeof pendingUploads.$inferSelect;
@@ -85,14 +87,14 @@ describe('deferred reuse verification', () => {
 		);
 
 		await markUploadPendingVerification(reuse.uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const servedFirst = await fetchNarInfo(first.storePathHash);
 		const servedSecond = await fetchNarInfo(second.storePathHash);
 
 		expect({
 			canonicalPresent:
-				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null,
+				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null,
 			firstNarHash: servedFirst.narHash.toString(),
 			secondNarHash: servedSecond.narHash.toString()
 		}).toStrictEqual({
@@ -132,9 +134,9 @@ describe('deferred reuse verification', () => {
 		// Reserve the narinfo row before deleting the canonical object. The crash
 		// state exists only while the reservation remains and the object is missing.
 		await seedReservedNarInfo(second, 0);
-		await env.BLOBS.delete(narObjectKey(nar.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
 
-		await currentServer().recordMissingObject(reuse.uploadId);
+		await recordClaimedMissingObject(reuse.uploadId);
 
 		expect(await narInfoGeneration(second.storePathHash)).toBeUndefined();
 	});
@@ -171,7 +173,7 @@ describe('deferred reuse verification', () => {
 		await setRoot(token, { name: 'main', targets: [second.storePath] });
 
 		await replantStuckPending(staged);
-		await currentServer().recordMissingObject(reuse.uploadId);
+		await recordClaimedMissingObject(reuse.uploadId);
 
 		const { targets } = await listRootTargets(token, 'main');
 		expect(targets.map((target) => target.storePathHash)).toStrictEqual([

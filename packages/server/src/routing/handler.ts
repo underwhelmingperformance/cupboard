@@ -291,9 +291,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		'GET',
 		['/t/:tenant/nar/:name', '/t/:tenant/cache/:cacheName/nar/:name'],
 		async (context) => {
-			const narHash = parseNarName(context.req.param('name'));
+			const nar = parseNarName(context.req.param('name'));
 
-			if (narHash === undefined) {
+			if (nar === undefined) {
 				return notFoundResponse();
 			}
 
@@ -309,8 +309,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 						context.req.raw,
 						context.env,
 						context.get('tenant'),
-						narHash,
-						true
+						nar.narHash,
+						true,
+						nar.incarnation
 					)
 				: cachedTenantRead(context);
 		}

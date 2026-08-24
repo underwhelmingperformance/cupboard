@@ -53,6 +53,7 @@ import {
 	DatabaseOverloadedError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
+	SubrequestTimeoutError,
 	TenantNotConfiguredError,
 	UploadNotFoundError,
 	ZstdUnavailableError
@@ -60,6 +61,7 @@ import {
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
+	maxVerificationRpcRows,
 	parseNarInfoName,
 	type R2ObjectKey,
 	type RequestOrigin,
@@ -120,6 +122,7 @@ import {
 	ServerContext
 } from './context.ts';
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
+import { currentDeadlineSignal, withDeadlineBudget } from './deadline.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	GarbageCollectionService,
@@ -167,6 +170,43 @@ import {
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
+
+const verificationClaimBoundSchema = z
+	.number()
+	.int()
+	.positive()
+	.max(maxVerificationRpcRows);
+
+const verificationByteBoundSchema = z
+	.number()
+	.int()
+	.positive()
+	.max(Number.MAX_SAFE_INTEGER);
+
+const verificationBudgetSchema = z
+	.number()
+	.int()
+	.positive()
+	.max(Number.MAX_SAFE_INTEGER);
+
+const verificationRpcControlMarginMs = 10;
+
+/**
+ * The internal result of a budgeted verification claim RPC.
+ */
+export type VerificationClaimRpcResult =
+	| {
+			readonly kind: 'claimed';
+			readonly batch: PendingVerificationBatch;
+	  }
+	| { readonly kind: 'timed-out' };
+
+/**
+ * The internal result of a budgeted verification record RPC.
+ */
+export type VerificationRecordRpcResult =
+	| { readonly kind: 'recorded'; readonly applied: number }
+	| { readonly kind: 'timed-out' };
 
 // Reuse misses must be `no-store`. A view update or commit can make the same
 // lookup succeed, and no purge key covers the cached 404.
@@ -1413,10 +1453,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport> {
-		return this.runExclusiveMaintenance('verify', () => {
+		return this.runExclusiveMaintenance('verify', async () => {
 			this.commitPipeline.onVerificationPassStarted();
+			await this.verification.processPendingWithoutDecode(logger, limit);
 
-			return this.verification.verify(logger, purgeOrigin, limit);
+			if (this.verification.hasPendingUploads()) {
+				await this.commitPipeline.requestVerification(
+					logger,
+					this.context.requireTenant()
+				);
+			}
+
+			return this.verification.verifyBatch(logger, purgeOrigin, limit);
 		});
 	}
 
@@ -1558,7 +1606,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		await this.metered('verify-backstop', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.processPendingReuse(
+				this.verification.processPendingWithoutDecode(
 					logger,
 					verifyBackstopReuseSettleLimit
 				)
@@ -1568,6 +1616,61 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			backstopLogger,
 			this.context.requireTenant()
 		);
+	}
+
+	private async claimVerificationBatchOperation(
+		limit: number,
+		maxNarBytes: number,
+		onClaimed?: (batch: PendingVerificationBatch) => void
+	): Promise<PendingVerificationBatch> {
+		await this.initialise();
+		// Claiming is the start of a pass: re-arm the prompt-verify guard before
+		// taking the snapshot so a deferral after it triggers a fresh request.
+		this.commitPipeline.onVerificationPassStarted();
+
+		return this.metered('claim-verifications', async (logger) => {
+			const signal = currentDeadlineSignal();
+			signal?.throwIfAborted();
+			await this.withMaintenanceEligibility(() =>
+				this.verification.processPendingWithoutDecode(logger, limit, signal)
+			);
+			signal?.throwIfAborted();
+
+			const batch = this.verification.listPendingForVerify(
+				limit,
+				maxNarBytes,
+				signal
+			);
+			onClaimed?.(batch);
+
+			return batch;
+		});
+	}
+
+	private validateVerificationResults(
+		results: readonly VerificationResult[]
+	): void {
+		if (results.length > maxVerificationRpcRows) {
+			throw new RangeError(
+				`A verification result batch may contain at most ${String(maxVerificationRpcRows)} entries.`
+			);
+		}
+	}
+
+	private recordVerificationsOperation(
+		owner: string,
+		results: readonly VerificationResult[]
+	): Promise<number> {
+		return this.metered('record-verifications', async (logger) => {
+			const signal = currentDeadlineSignal();
+			signal?.throwIfAborted();
+			const applied = await this.withMaintenanceEligibility(() =>
+				this.verification.recordVerifications(logger, owner, results, signal)
+			);
+			signal?.throwIfAborted();
+
+			return applied;
+		});
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -1672,10 +1775,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.commitPipeline.onVerificationPassStarted();
 			await this.metered('verification', (logger) =>
 				this.withMaintenanceEligibility(async () => {
-					await this.verification.verifyPendingUploads(
+					await this.verification.processPendingWithoutDecode(
 						logger,
 						verificationBatchSize
 					);
+
+					if (this.verification.hasPendingUploads()) {
+						await this.commitPipeline.requestVerification(
+							logger,
+							this.context.requireTenant()
+						);
+					}
 					await this.verification.verifyBatch(
 						logger,
 						undefined,
@@ -1692,28 +1802,96 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// writer. A truncated result tells the consumer that more rows remain.
 	async claimVerificationBatch(
 		limit: number,
-		maxNarBytes: number
+		maxNarBytes: number,
+		budgetMs?: number
 	): Promise<PendingVerificationBatch> {
-		await this.initialise();
-		// Claiming is the start of a pass: re-arm the prompt-verify guard before
-		// taking the snapshot so a deferral after it triggers a fresh request.
-		this.commitPipeline.onVerificationPassStarted();
-		return this.metered('claim-verifications', () =>
-			Promise.resolve(
-				this.verification.listPendingForVerify(limit, maxNarBytes)
-			)
-		);
+		if (budgetMs !== undefined) {
+			const result = await this.claimVerificationBatchWithinBudget(
+				limit,
+				maxNarBytes,
+				budgetMs
+			);
+
+			if (result.kind === 'timed-out') {
+				throw new SubrequestTimeoutError('verification.claim');
+			}
+
+			return result.batch;
+		}
+
+		const parsedLimit = verificationClaimBoundSchema.parse(limit);
+		const parsedMaxNarBytes = verificationByteBoundSchema.parse(maxNarBytes);
+
+		return this.claimVerificationBatchOperation(parsedLimit, parsedMaxNarBytes);
 	}
 
-	// An older consumer calls this uncapped RPC. The Durable Object and consumer
-	// deploy separately, so keep it until both run a release that uses
-	// `claimVerificationBatch`.
+	/**
+	 * Claims a verification batch within the supplied consumer budget.
+	 */
+	async claimVerificationBatchWithinBudget(
+		limit: number,
+		maxNarBytes: number,
+		budgetMs: number
+	): Promise<VerificationClaimRpcResult> {
+		const parsedLimit = verificationClaimBoundSchema.parse(limit);
+		const parsedMaxNarBytes = verificationByteBoundSchema.parse(maxNarBytes);
+		const parsedBudget = verificationBudgetSchema.parse(budgetMs);
+		let claimed: PendingVerificationBatch | undefined;
+
+		try {
+			const batch = await withDeadlineBudget(
+				Math.max(0, parsedBudget - verificationRpcControlMarginMs),
+				() =>
+					this.claimVerificationBatchOperation(
+						parsedLimit,
+						parsedMaxNarBytes,
+						(batch) => {
+							claimed = batch;
+						}
+					),
+				'verification.claim'
+			);
+
+			return { kind: 'claimed', batch };
+		} catch (error) {
+			if (!(error instanceof SubrequestTimeoutError)) {
+				throw error;
+			}
+
+			if (claimed !== undefined) {
+				this.verification.releaseClaimLeases(
+					claimed.owner,
+					claimed.claims.map((claim) => claim.uploadId)
+				);
+			}
+
+			return { kind: 'timed-out' };
+		}
+	}
+
+	// A preceding consumer cannot send a claim owner. Leave its methods callable,
+	// but schedule a current pass without returning or changing any rows.
 	async claimPendingVerifications(
 		limit: number
 	): Promise<PendingVerification[]> {
-		const batch = await this.claimVerificationBatch(limit, Infinity);
+		verificationClaimBoundSchema.parse(limit);
+		await this.requestVerificationPass();
 
-		return [...batch.claims];
+		return [];
+	}
+
+	async renewVerificationClaims(
+		owner: string,
+		uploadIds: readonly UploadId[]
+	): Promise<boolean> {
+		if (uploadIds.length > maxVerificationRpcRows) {
+			throw new RangeError(
+				`A verification renewal may contain at most ${String(maxVerificationRpcRows)} upload IDs.`
+			);
+		}
+
+		await this.initialise();
+		return this.verification.renewClaimLeases(owner, uploadIds);
 	}
 
 	// Only RPC callers can stage negotiate hints. The Worker puts the returned
@@ -1744,35 +1922,82 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Return the number of results that changed a row. The queue consumer requests
 	// another pass only when at least one result was applied.
 	async recordVerifications(
-		results: readonly VerificationResult[]
+		ownerOrResults: string | readonly VerificationResult[],
+		results?: readonly VerificationResult[],
+		budgetMs?: number
 	): Promise<number> {
+		if (typeof ownerOrResults !== 'string') {
+			this.validateVerificationResults(ownerOrResults);
+			await this.requestVerificationPass();
+
+			return 0;
+		}
+
+		if (results === undefined) {
+			throw new TypeError('Verification results are required.');
+		}
+
+		if (budgetMs !== undefined) {
+			const result = await this.recordVerificationsWithinBudget(
+				ownerOrResults,
+				results,
+				budgetMs
+			);
+
+			if (result.kind === 'timed-out') {
+				throw new SubrequestTimeoutError('verification.record');
+			}
+
+			return result.applied;
+		}
+
+		this.validateVerificationResults(results);
 		await this.initialise();
-		return this.metered('record-verifications', (logger) =>
-			this.afterHotMutation(() =>
-				this.verification.recordVerifications(logger, results)
-			)
-		);
+
+		return this.recordVerificationsOperation(ownerOrResults, results);
+	}
+
+	/**
+	 * Records verification results within the supplied consumer budget.
+	 */
+	async recordVerificationsWithinBudget(
+		owner: string,
+		results: readonly VerificationResult[],
+		budgetMs: number
+	): Promise<VerificationRecordRpcResult> {
+		this.validateVerificationResults(results);
+		const parsedBudget = verificationBudgetSchema.parse(budgetMs);
+
+		try {
+			const applied = await withDeadlineBudget(
+				Math.max(0, parsedBudget - verificationRpcControlMarginMs),
+				async () => {
+					await this.initialise();
+
+					return this.recordVerificationsOperation(owner, results);
+				},
+				'verification.record'
+			);
+
+			return { kind: 'recorded', applied };
+		} catch (error) {
+			if (error instanceof SubrequestTimeoutError) {
+				return { kind: 'timed-out' };
+			}
+
+			throw error;
+		}
 	}
 
 	async recordVerification(
-		uploadId: UploadId,
-		verification: NarVerification
+		_uploadId: UploadId,
+		_verification: NarVerification
 	): Promise<void> {
-		await this.initialise();
-		await this.metered('record-verification', (logger) =>
-			this.afterHotMutation(() =>
-				this.verification.recordVerification(logger, uploadId, verification)
-			)
-		);
+		await this.requestVerificationPass();
 	}
 
-	async recordMissingObject(uploadId: UploadId): Promise<void> {
-		await this.initialise();
-		await this.metered('record-missing-object', () =>
-			this.afterHotMutation(() =>
-				this.verification.recordMissingObject(uploadId)
-			)
-		);
+	async recordMissingObject(_uploadId: UploadId): Promise<void> {
+		await this.requestVerificationPass();
 	}
 
 	async runAuthKeyRetirement(): Promise<void> {
@@ -1840,10 +2065,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		await this.initialise();
 		await this.metered('demote-attestation-references', async () => {
-			for (const { digest, fenceStoredAt } of demotions) {
+			for (const { digest, fenceIncarnation } of demotions) {
 				await this.attestations.removeReferencesForDigest(
 					digest,
-					fenceStoredAt
+					fenceIncarnation
 				);
 			}
 		});

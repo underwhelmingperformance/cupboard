@@ -12,6 +12,8 @@ import {
 	controlTrust,
 	globalAdmin,
 	manifestState,
+	objectDeletion,
+	objectIncarnation,
 	tenant,
 	tenantBlob,
 	tenantCasBlob,
@@ -45,6 +47,8 @@ beforeEach(async () => {
 	await database.delete(tenantMaintenanceEligibility).run();
 	await database.delete(tenantMaintenanceFailure).run();
 	await database.delete(tenantUsage).run();
+	await database.delete(objectDeletion).run();
+	await database.delete(objectIncarnation).run();
 	await database.delete(casObject).run();
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();

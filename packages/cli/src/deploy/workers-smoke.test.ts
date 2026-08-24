@@ -4,13 +4,18 @@ import { z } from 'zod';
 
 import { buildArtifactFromTree } from './artifact.ts';
 import { createEsbuildBundler } from './bundle.ts';
+import { type DurableObjectExport } from './config.ts';
 import { findCheckoutRoot } from './source.ts';
 
 // Bundling both real Workers and booting them in workerd is the integration
 // proof that the esbuild config produces deployable bytes: the heavy server
 // dependencies (the AWS SDK under `nodejs_compat`, the Durable Object's inlined
 // `.sql` migrations) must survive bundling and run.
-const state: { miniflare?: Miniflare } = {};
+const state: {
+	miniflare?: Miniflare;
+	tenantExports?: Readonly<Record<string, DurableObjectExport>>;
+	hasVersionedR2ObjectRollbackGuardExport?: boolean;
+} = {};
 
 function activeMiniflare(): Miniflare {
 	if (state.miniflare === undefined) {
@@ -27,6 +32,11 @@ beforeAll(async () => {
 		checkoutRoot,
 		createEsbuildBundler()
 	);
+	state.tenantExports = artifact.config.tenant.exports;
+	state.hasVersionedR2ObjectRollbackGuardExport =
+		/export \{[\s\S]*\bVersionedR2ObjectRollbackGuard\b[\s\S]*\};/.test(
+			artifact.tenantBundle.code
+		);
 
 	state.miniflare = new Miniflare({
 		workers: [
@@ -80,3 +90,19 @@ it('bundles both Workers into bytes workerd can serve', async () => {
 		body: 'ok\n'
 	});
 }, 30_000);
+
+it('couples versioned R2 object keys to declarative class lifecycle', () => {
+	expect({
+		exports: state.tenantExports,
+		hasRollbackGuardExport: state.hasVersionedR2ObjectRollbackGuardExport
+	}).toStrictEqual({
+		exports: {
+			CupboardServer: { type: 'durable-object', storage: 'sqlite' },
+			VersionedR2ObjectRollbackGuard: {
+				type: 'durable-object',
+				storage: 'sqlite'
+			}
+		},
+		hasRollbackGuardExport: true
+	});
+});

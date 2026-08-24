@@ -175,7 +175,7 @@ describe('maintenance pass cost', () => {
 				currentServer().demoteAttestationReferences([
 					{
 						digest: sha256HexDigestSchema.parse('b'.repeat(64)),
-						fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
+						fenceIncarnation: 1
 					}
 				])
 		}

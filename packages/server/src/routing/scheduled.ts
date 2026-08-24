@@ -1,23 +1,12 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
-import {
-	type NixSha256HashString,
-	type TenantId,
-	tenantIdSchema
-} from '@cupboard/nix-store/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
-import {
-	type NarVerification,
-	verifyDecompressedNar
-} from '../blob/nar-verify.ts';
-import {
-	type BlobStateUpsert,
-	stagePromotedBlob
-} from '../blob/promote-blob.ts';
+import { narVerifyBudgetMs, verifyStoredNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	deleteTenantMember,
@@ -33,17 +22,21 @@ import {
 	type NarInfoDemoter,
 	type NarInfoDemotion
 } from '../do/blob-reaper-service.ts';
+import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
+import type { VerificationRecordRpcResult } from '../do/server.ts';
 import {
-	batchNonEmpty,
-	chunk,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from '../do/bulk.ts';
+	ActiveVerificationClaims,
+	raceVerificationOperation,
+	withRenewedVerificationClaim
+} from '../do/verification-claim-lease.ts';
 import {
-	type PendingVerification,
+	type PendingVerificationBatch,
 	type VerificationResult
 } from '../do/verification-service.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	SubrequestTimeoutError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import {
 	blobReaperBatchSize,
 	verifyClaimBatchSize,
@@ -57,6 +50,7 @@ import { tenantServer } from './durable-object.ts';
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
+export const verificationConsumerBudgetMs = 14 * 60 * 1000;
 
 // Bound offboarding by tenants, rounds, and objects per round. The object chunk
 // matches R2's 1,000-key delete limit.
@@ -366,7 +360,7 @@ export function runBlobReaper(
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
-	return blobReaper(env).reapBlobs(new Date(), batchSize);
+	return blobReaper(env).reapBlobs(logger, new Date(), batchSize);
 }
 
 export function runCasReaper(
@@ -374,7 +368,7 @@ export function runCasReaper(
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
-	return blobReaper(env).reapCasObjects(new Date(), batchSize);
+	return blobReaper(env).reapCasObjects(logger, new Date(), batchSize);
 }
 
 /**
@@ -644,9 +638,59 @@ const verifyDecodeConcurrency = 4;
 // so it can be redelivered.
 const recordAttempts = 3;
 const recordRetryDelayMs = 500;
+const verificationCleanupMarginMs = 1000;
 
-const promotionBatchAttempts = 3;
-const promotionBatchRetryDelayMs = 500;
+class VerificationPassDeadline {
+	private readonly controller = new AbortController();
+	private readonly workDeadline: number;
+	private readonly timer: ReturnType<typeof setTimeout>;
+
+	constructor(budgetMs: number) {
+		const cleanupMargin = Math.min(
+			verificationCleanupMarginMs,
+			Math.floor(budgetMs / 10)
+		);
+		this.workDeadline = Date.now() + budgetMs - cleanupMargin;
+		this.timer = setTimeout(
+			() => {
+				this.controller.abort(new SubrequestTimeoutError('nar.verify.batch'));
+			},
+			Math.max(0, this.workDeadline - Date.now())
+		);
+	}
+
+	get signal(): AbortSignal {
+		return this.controller.signal;
+	}
+
+	remainingWorkMs(): number {
+		this.signal.throwIfAborted();
+
+		return Math.max(1, this.workDeadline - Date.now());
+	}
+
+	dispose(): void {
+		clearTimeout(this.timer);
+	}
+}
+
+async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+	if (ms === 0) {
+		signal?.throwIfAborted();
+		return;
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const delay = new Promise<void>((resolve) => {
+		timer = setTimeout(resolve, ms);
+	});
+
+	try {
+		await raceVerificationOperation(delay, signal);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 /**
  * Records completed verdicts incrementally through one RPC at a time. Verdicts
@@ -666,7 +710,8 @@ export class VerdictRecorder {
 			results: readonly VerificationResult[]
 		) => Promise<number>,
 		private readonly attempts = recordAttempts,
-		private readonly retryDelayMs = recordRetryDelayMs
+		private readonly retryDelayMs = recordRetryDelayMs,
+		private readonly signal?: AbortSignal
 	) {}
 
 	private async flush(): Promise<void> {
@@ -694,8 +739,10 @@ export class VerdictRecorder {
 		let lastError: unknown;
 
 		for (let attempt = 0; attempt < this.attempts; attempt += 1) {
+			this.signal?.throwIfAborted();
+
 			if (attempt > 0) {
-				await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
+				await abortableDelay(this.retryDelayMs, this.signal);
 			}
 
 			try {
@@ -703,9 +750,10 @@ export class VerdictRecorder {
 			} catch (error) {
 				lastError = error;
 				this.logger.warn('verification verdicts not recorded', {
+					kind: 'fresh',
 					count: batch.length,
 					attempt: attempt + 1,
-					error
+					reason: 'record-rpc-failed'
 				});
 			}
 		}
@@ -714,6 +762,7 @@ export class VerdictRecorder {
 	}
 
 	add(result: VerificationResult): void {
+		this.signal?.throwIfAborted();
 		this.buffer.push(result);
 
 		if (this.failure === undefined) {
@@ -736,287 +785,195 @@ export class VerdictRecorder {
 			throw this.failure.error;
 		}
 
+		this.signal?.throwIfAborted();
+
 		return this.applied;
 	}
 }
 
-interface PendingPromotion {
-	readonly upsert: BlobStateUpsert;
-	readonly onSuccess: VerificationResult;
-	readonly onFailure: VerificationResult;
-}
-
-type PromotionOutcome =
-	| { readonly kind: 'verdict'; readonly result: VerificationResult }
-	| { readonly kind: 'promotion'; readonly promotion: PendingPromotion };
-
-// Return a staged D1 upsert after successful R2 promotion. If promotion fails,
-// return the verified result so the Durable Object can retry promotion while it
-// applies the verdict.
-async function stagePromotionForClaim(
-	database: CronDatabase,
-	blobs: R2Bucket,
-	claim: PendingVerification,
-	verification: NarVerification
-): Promise<PromotionOutcome> {
-	const fallback: VerificationResult = {
-		uploadId: claim.uploadId,
-		verdict: { kind: 'verified', verification }
-	};
-
-	if (
-		!verification.ok ||
-		verification.fileHash === undefined ||
-		verification.fileSize === undefined
-	) {
-		return { kind: 'verdict', result: fallback };
-	}
-
-	try {
-		const { upsert } = await stagePromotedBlob(
-			database,
-			blobs,
-			claim.r2Key,
-			{ narHash: claim.narHash, narSize: claim.narSize },
-			{ fileHash: verification.fileHash, fileSize: verification.fileSize }
-		);
-
-		return {
-			kind: 'promotion',
-			promotion: {
-				upsert,
-				onSuccess: { uploadId: claim.uploadId, verdict: { kind: 'promoted' } },
-				onFailure: fallback
-			}
-		};
-	} catch {
-		return { kind: 'verdict', result: fallback };
-	}
-}
-
-// Apply promotion upserts in one D1 batch. After transient retries fail, execute
-// them individually so one invalid statement does not block the others. The
-// upserts are idempotent across both paths.
-async function recordPromotionBatch(
-	logger: Logger,
-	database: CronDatabase,
-	recorder: VerdictRecorder,
-	promotions: readonly PendingPromotion[]
-): Promise<void> {
-	if (promotions.length === 0) {
-		return;
-	}
-
-	const upserts = promotions.map((promotion) => promotion.upsert);
-
-	let wasBatchApplied = false;
-
-	for (let attempt = 0; attempt < promotionBatchAttempts; attempt += 1) {
-		if (attempt > 0) {
-			await new Promise((resolve) =>
-				setTimeout(resolve, promotionBatchRetryDelayMs)
-			);
-		}
-
-		try {
-			await batchNonEmpty(database, upserts);
-			wasBatchApplied = true;
-			break;
-		} catch (error) {
-			logger.warn('promotion batch not applied', {
-				count: upserts.length,
-				attempt: attempt + 1,
-				error
-			});
-		}
-	}
-
-	if (wasBatchApplied) {
-		for (const promotion of promotions) {
-			recorder.add(promotion.onSuccess);
-		}
-
-		return;
-	}
-
-	// Keep individual fallback concurrency bounded after D1 rejected the batch.
-	const applied = await mapWithConcurrency(
-		upserts,
-		maxOutgoingConnections,
-		async (upsert) => {
-			try {
-				await upsert.run();
-				return true;
-			} catch {
-				return false;
-			}
-		}
-	);
-
-	for (const [index, promotion] of promotions.entries()) {
-		recorder.add(
-			applied[index] === true ? promotion.onSuccess : promotion.onFailure
-		);
-	}
-}
-
-// Fetch, decode, and promote claimed uploads in the queue consumer. Only the
-// fenced state transitions run on the tenant's single-writer Durable Object.
-// Transient faults release a claim; a definitively missing object is terminal.
+// Claim a bounded batch, then fetch and decode staging objects in the queue
+// consumer so CPU-bound NAR verification does not occupy the Durable Object.
+// The Durable Object applies each verdict only while this pass owns the claim.
+// Transient failures release the claim; a missing staging object is terminal.
 export async function verifyTenant(
 	logger: Logger,
 	env: Env,
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
-	maxNarBytes: number = verifyClaimMaxNarBytes
+	maxNarBytes: number = verifyClaimMaxNarBytes,
+	budgetMs: number = verificationConsumerBudgetMs
 ): Promise<void> {
-	const server = tenantServer(env, id);
-	const { claims, truncated } = await server.claimVerificationBatch(
-		batchSize,
-		maxNarBytes
-	);
-	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	// Record verdicts as they complete so waiters do not depend on slower siblings
-	// and a failed invocation preserves earlier progress.
-	const recorder = new VerdictRecorder(
-		logger.with({ job: 'verify-verdicts' }),
-		(results) => server.recordVerifications(results)
-	);
+	const deadline = new VerificationPassDeadline(budgetMs);
 
-	// Clear reaper deadlines for all claimed hashes before doing external work.
-	// Missing rows are inserted later; existing rows must not be reaped before
-	// their promotion upsert runs.
-	await pinClaimedNarHashes(
-		database,
-		claims.map((claim) => claim.narHash)
-	);
+	try {
+		const server = tenantServer(env, id);
+		let batch: PendingVerificationBatch | undefined;
 
-	const reuseClaims = claims.filter((claim) => claim.reuse);
-	const freshClaims = claims.filter((claim) => !claim.reuse);
+		try {
+			const budgetedClaim = server.claimVerificationBatchWithinBudget(
+				batchSize,
+				maxNarBytes,
+				deadline.remainingWorkMs()
+			);
+			const claimResult = await raceVerificationOperation(
+				Promise.resolve(budgetedClaim),
+				deadline.signal
+			);
 
-	// Reuse claims need only a canonical-object head. Process them before fresh
-	// decodes and batch their `blob_state` upserts together.
-	const reusePromotions: PendingPromotion[] = [];
-
-	await mapWithConcurrency(
-		reuseClaims,
-		maxOutgoingConnections,
-		async (claim) => {
-			try {
-				const { upsert } = await stagePromotedBlob(
-					database,
-					env.BLOBS,
-					claim.r2Key,
-					{ narHash: claim.narHash, narSize: claim.narSize },
-					undefined
-				);
-				reusePromotions.push({
-					upsert,
-					onSuccess: {
-						uploadId: claim.uploadId,
-						verdict: { kind: 'promoted' }
-					},
-					// If the batched upsert fails, let the Durable Object repeat promotion
-					// while applying the verified verdict.
-					onFailure: {
-						uploadId: claim.uploadId,
-						verdict: { kind: 'verified', verification: { ok: true } }
-					}
-				});
-			} catch (error) {
-				// A missing canonical object is definitive. Other promotion failures
-				// release the claim for retry.
-				recorder.add({
-					uploadId: claim.uploadId,
-					verdict:
-						error instanceof UploadedObjectNotFoundError
-							? { kind: 'missing' }
-							: { kind: 'abandoned' }
-				});
+			if (claimResult.kind === 'timed-out') {
+				throw new SubrequestTimeoutError('verification.claim');
 			}
+
+			batch = claimResult.batch;
+		} catch {
+			deadline.signal.throwIfAborted();
+			const compatibleBatch = (await raceVerificationOperation(
+				server.claimVerificationBatch(
+					batchSize,
+					maxNarBytes,
+					deadline.remainingWorkMs()
+				),
+				deadline.signal
+			)) as PendingVerificationBatch | Omit<PendingVerificationBatch, 'owner'>;
+
+			if (!('owner' in compatibleBatch)) {
+				await raceVerificationOperation(
+					server.requestVerificationPass(),
+					deadline.signal
+				);
+				return;
+			}
+
+			batch = compatibleBatch;
 		}
-	);
 
-	await recordPromotionBatch(logger, database, recorder, reusePromotions);
+		const { claims, owner, truncated } = batch;
+		const activeClaims = new ActiveVerificationClaims(
+			claims.map((claim) => claim.uploadId)
+		);
+		const applied = await withRenewedVerificationClaim(
+			async () => {
+				const wereClaimsRenewed = await raceVerificationOperation(
+					server.renewVerificationClaims(owner, activeClaims.remaining()),
+					deadline.signal
+				);
 
-	const freshPromotions: PendingPromotion[] = [];
+				if (!wereClaimsRenewed) {
+					throw new Error(
+						'The verification claim is no longer owned by this pass.'
+					);
+				}
+			},
+			async (signal) => {
+				// Record verdicts as they complete so waiters do not depend on slower uploads
+				// and an interrupted invocation keeps earlier progress.
+				const recorder = new VerdictRecorder(
+					logger.with({ job: 'verify-verdicts' }),
+					async (results) => {
+						const recordRpc = server.recordVerificationsWithinBudget(
+							owner,
+							results,
+							deadline.remainingWorkMs()
+						);
+						const result = await raceVerificationOperation(
+							Promise.resolve<VerificationRecordRpcResult>(recordRpc),
+							signal
+						);
 
-	await mapWithConcurrency(
-		freshClaims,
-		verifyDecodeConcurrency,
-		async (claim) => {
-			try {
-				const object = await env.BLOBS.get(claim.r2Key);
+						if (result.kind === 'timed-out') {
+							throw new SubrequestTimeoutError('verification.record');
+						}
 
-				if (object === null) {
+						signal.throwIfAborted();
+
+						activeClaims.recorded(results.map((result) => result.uploadId));
+
+						return result.applied;
+					},
+					recordAttempts,
+					recordRetryDelayMs,
+					signal
+				);
+
+				const reuseClaims = claims.filter((claim) => claim.reuse);
+				const freshClaims = claims.filter((claim) => !claim.reuse);
+
+				// Reuse rows need no decode. The Durable Object checks the canonical object
+				// and performs every shared write while it still owns the claim.
+				for (const claim of reuseClaims) {
+					signal.throwIfAborted();
 					recorder.add({
 						uploadId: claim.uploadId,
-						verdict: { kind: 'missing' }
+						verdict: { kind: 'verified', verification: { ok: true } }
 					});
-					return;
 				}
 
-				// The Workers type omits the byte element type used by the verifier.
-				const verification = await verifyDecompressedNar(
-					object.body as ReadableStream<Uint8Array>,
-					{ narHash: claim.narHash, narSize: claim.narSize }
+				await mapWithConcurrency(
+					freshClaims,
+					verifyDecodeConcurrency,
+					async (claim) => {
+						try {
+							signal.throwIfAborted();
+							const verification = await verifyStoredNar(
+								env.BLOBS,
+								claim.r2Key,
+								{
+									narHash: claim.narHash,
+									narSize: claim.narSize
+								},
+								narVerifyBudgetMs,
+								signal
+							);
+							signal.throwIfAborted();
+
+							recorder.add({
+								uploadId: claim.uploadId,
+								verdict: { kind: 'verified', verification }
+							});
+						} catch (error) {
+							if (signal.aborted) {
+								throw error;
+							}
+							if (error instanceof UploadedObjectNotFoundError) {
+								recorder.add({
+									uploadId: claim.uploadId,
+									verdict: { kind: 'missing' }
+								});
+								return;
+							}
+
+							// Release a transient fetch or decode failure for the next pass.
+							logger.warn('pending upload verification failed', {
+								kind: 'fresh',
+								reason: 'verification-failed'
+							});
+							recorder.add({
+								uploadId: claim.uploadId,
+								verdict: { kind: 'abandoned' }
+							});
+						}
+					}
 				);
 
-				const outcome = await stagePromotionForClaim(
-					database,
-					env.BLOBS,
-					claim,
-					verification
-				);
+				return recorder.finishRecording();
+			},
+			undefined,
+			deadline.signal
+		);
 
-				if (outcome.kind === 'promotion') {
-					freshPromotions.push(outcome.promotion);
-					return;
-				}
+		// Continue a truncated claim only after applying a verdict. With no progress,
+		// leave retry to cron instead of reclaiming the same rows immediately.
+		const isProgressed = applied > 0;
 
-				recorder.add(outcome.result);
-			} catch {
-				// Release transient fetch and decode failures for the next pass.
-				recorder.add({
-					uploadId: claim.uploadId,
-					verdict: { kind: 'abandoned' }
-				});
-			}
+		if (truncated && isProgressed) {
+			await raceVerificationOperation(
+				server.requestVerificationPass(),
+				deadline.signal
+			);
 		}
-	);
-
-	await recordPromotionBatch(logger, database, recorder, freshPromotions);
-
-	const applied = await recorder.finishRecording();
-
-	// Continue a truncated claim only after applying progress. With no progress,
-	// leave retry to cron rather than immediately reclaiming the same rows.
-	const isProgressed = applied > 0;
-
-	if (truncated && isProgressed) {
-		await server.requestVerificationPass();
+	} finally {
+		deadline.dispose();
 	}
-}
-
-async function pinClaimedNarHashes(
-	database: CronDatabase,
-	narHashes: readonly NixSha256HashString[]
-): Promise<void> {
-	if (narHashes.length === 0) {
-		return;
-	}
-
-	const chunks = chunk(narHashes, maxInClauseValues);
-
-	await batchNonEmpty(
-		database,
-		chunks.map((batch) =>
-			database
-				.update(d1Schema.blobState)
-				.set({ deleteAfter: sql`null` })
-				.where(inArray(d1Schema.blobState.narHash, batch))
-		)
-	);
 }
 
 async function executeTenantMaintenanceMessage(

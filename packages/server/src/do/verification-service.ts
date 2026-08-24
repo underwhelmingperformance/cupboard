@@ -1,4 +1,4 @@
-import { type Logger } from '@cupboard/logger';
+import { type Logger, rootLogger } from '@cupboard/logger';
 import {
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -13,10 +13,23 @@ import {
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadStatusResponse,
 	type SessionId,
-	type UploadId
+	type UploadId,
+	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	eq,
+	exists,
+	gt,
+	inArray,
+	isNull,
+	lte,
+	ne,
+	or,
+	sql
+} from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -56,8 +69,47 @@ import { type ReconcileTarget } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
+import {
+	raceVerificationOperation,
+	withRenewedVerificationClaim
+} from './verification-claim-lease.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
+type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
+
+const pendingDecodeFreeCursorKey =
+	'maintenance:verification-decode-free-cursor';
+
+type DecodeFreeCandidateKind = 'reuse' | 'recovery';
+
+interface DecodeFreeCursorState {
+	readonly next: DecodeFreeCandidateKind;
+	readonly reuse?: UploadId;
+	readonly recovery?: UploadId;
+}
+
+function parseDecodeFreeCursorState(value: unknown): DecodeFreeCursorState {
+	if (typeof value !== 'object' || value === null) {
+		return { next: 'reuse' };
+	}
+
+	const stored = value as Record<string, unknown>;
+	const reuse = uploadIdSchema.safeParse(stored.reuse);
+	const recovery = uploadIdSchema.safeParse(stored.recovery);
+	const next = stored.next === 'recovery' ? 'recovery' : 'reuse';
+
+	return {
+		next,
+		...(reuse.success && { reuse: reuse.data }),
+		...(recovery.success && { recovery: recovery.data })
+	};
+}
+
+function otherDecodeFreeCandidateKind(
+	kind: DecodeFreeCandidateKind
+): DecodeFreeCandidateKind {
+	return kind === 'reuse' ? 'recovery' : 'reuse';
+}
 
 function edgeKey(
 	cache: StoredCache,
@@ -101,17 +153,19 @@ export interface PendingVerification {
 	readonly reuse: boolean;
 }
 
-// `truncated` means that claimable rows remain. The consumer requests a
-// continuation only after the current pass records progress.
+// The owner must accompany every later renewal and verdict. `truncated` means
+// that the row or byte limit left work for another pass.
 export interface PendingVerificationBatch {
+	readonly owner: string;
 	readonly claims: readonly PendingVerification[];
 	readonly truncated: boolean;
 }
 
-// `missing` is reserved for an object known not to exist. `abandoned` reports a
-// transient fault and releases the lease without recording a terminal result.
-// `promoted` means that the canonical object and its `blob_state` row are
-// already durable, so the Durable Object must not promote the bytes again.
+type PendingVerificationChunk = Omit<PendingVerificationBatch, 'owner'>;
+
+// The queue consumer's verdict for one claimed upload. Older consumers can
+// report `promoted` after writing the canonical object. Current consumers report
+// `verified` and leave shared writes to the Durable Object.
 export type VerificationVerdict =
 	| { readonly kind: 'verified'; readonly verification: NarVerification }
 	| { readonly kind: 'promoted' }
@@ -129,10 +183,27 @@ interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
 	readonly metadata: ParsedUploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
+	readonly owner: string;
 }
 
-// Terminal rows remain authoritative during their observation window. Verify
-// passes can overlap, so a straggling verdict must not reopen a settled row.
+type PreparedVerdict =
+	| { readonly kind: 'ready'; readonly settle: PreparedSettle }
+	| { readonly kind: 'applied' }
+	| { readonly kind: 'ignored' };
+
+type PreparedWithoutDecode =
+	PreparedVerdict | { readonly kind: 'requires-decode' };
+
+type PendingReservation =
+	| { readonly kind: 'reserved'; readonly generation: NarInfoGeneration }
+	| { readonly kind: 'applied' }
+	| { readonly kind: 'ignored' };
+
+type FinaliseCommittedResult = 'continue' | 'applied' | 'ignored';
+type PromotionResult = 'ready' | 'applied' | 'ignored';
+
+// Terminal rows remain authoritative during their observation window.
+// Overlapping verification passes must not reopen them.
 function isAwaitingVerdict(
 	row: typeof schema.pendingUploads.$inferSelect
 ): boolean {
@@ -165,8 +236,8 @@ function claimableFilter(now: Date) {
 function chunkClaims(
 	pendings: readonly (typeof schema.pendingUploads.$inferSelect)[],
 	limit: number,
-	maxNarBytes: number
-): PendingVerificationBatch {
+	maxNarBytes?: number
+): PendingVerificationChunk {
 	const claims: PendingVerification[] = [];
 	let bytes = 0;
 	let hasFresh = false;
@@ -183,7 +254,12 @@ function chunkClaims(
 		const isReuse = pending.r2Key === narObjectKey(metadata.narHash);
 		const cost = isReuse ? 0 : metadata.narSize;
 
-		if (hasFresh && cost > 0 && bytes + cost > maxNarBytes) {
+		if (
+			maxNarBytes !== undefined &&
+			hasFresh &&
+			cost > 0 &&
+			bytes + cost > maxNarBytes
+		) {
 			return { claims, truncated: true };
 		}
 
@@ -280,122 +356,239 @@ export class VerificationService {
 		);
 	}
 
-	private async prepareAndPromote(
-		pending: typeof schema.pendingUploads.$inferSelect
-	): Promise<PreparedSettle | undefined> {
-		const metadata = parseStoredUploadPathMetadata(
-			pending.id,
-			pending.metadataJson
-		);
-
-		const reserved = await this.reservePendingRow(pending, metadata);
-
-		if (reserved === undefined) {
-			return undefined;
-		}
-
-		if (await this.finaliseIfAlreadyCommitted(pending, metadata, reserved)) {
-			return undefined;
-		}
-
-		// A content mismatch and a missing staging object are terminal. Other read
-		// failures leave the row and its staged bytes for another pass. Never use an
-		// existing `blob_state` row to accept fresh bytes that have not been verified.
-		let verification: NarVerification;
-
-		try {
-			verification = await this.commitPipeline.verifyPendingNar(
-				pending.r2Key,
-				metadata
-			);
-		} catch (error) {
-			if (error instanceof UploadedObjectNotFoundError) {
-				await this.failReservedUpload(pending, metadata, reserved);
-				return undefined;
-			}
-
-			throw error;
-		}
-
-		const wasPromoted = await this.promoteForCommit(
-			pending,
-			metadata,
-			reserved,
-			verification,
-			'promote'
-		);
-
-		if (!wasPromoted) {
-			return undefined;
-		}
-
-		return { pending, metadata, generation: reserved };
-	}
-
 	private async prepareRecordedVerdict(
 		uploadId: UploadId,
 		verification: NarVerification,
-		promotion: PromotionState
-	): Promise<PreparedSettle | undefined> {
+		promotion: PromotionState,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<PreparedVerdict> {
+		signal?.throwIfAborted();
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
+			.where(
+				and(
+					eq(schema.pendingUploads.id, uploadId),
+					eq(schema.pendingUploads.claimOwner, owner)
+				)
+			)
 			.get();
 
 		if (pending === undefined || !isAwaitingVerdict(pending)) {
-			return undefined;
+			return { kind: 'ignored' };
 		}
 
 		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
 		);
-		const generation = await this.reservePendingRow(pending, metadata);
+		const effectivePromotion: PromotionState =
+			pending.r2Key === narObjectKey(metadata.narHash)
+				? 'already-promoted'
+				: promotion;
+		const reservation = await this.reservePendingRow(
+			pending,
+			metadata,
+			owner,
+			signal
+		);
 
-		if (generation === undefined) {
-			return undefined;
+		if (reservation.kind !== 'reserved') {
+			return reservation;
+		}
+		const { generation } = reservation;
+
+		const finalised = await this.finaliseIfAlreadyCommitted(
+			pending,
+			metadata,
+			generation,
+			owner,
+			signal
+		);
+
+		if (finalised !== 'continue') {
+			return { kind: finalised };
 		}
 
-		if (await this.finaliseIfAlreadyCommitted(pending, metadata, generation)) {
-			return undefined;
-		}
-
-		const wasPromoted = await this.promoteForCommit(
+		const promotionResult = await this.promoteForCommit(
 			pending,
 			metadata,
 			generation,
 			verification,
-			promotion
+			effectivePromotion,
+			owner,
+			signal
 		);
 
-		if (!wasPromoted) {
-			return undefined;
+		if (promotionResult !== 'ready') {
+			return { kind: promotionResult };
 		}
 
-		return { pending, metadata, generation };
+		return {
+			kind: 'ready',
+			settle: { pending, metadata, generation, owner }
+		};
+	}
+
+	private async prepareWithoutDecode(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<PreparedWithoutDecode> {
+		signal?.throwIfAborted();
+
+		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			return { kind: 'ignored' };
+		}
+
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const isReuse = pending.r2Key === narObjectKey(metadata.narHash);
+
+		if (!isReuse) {
+			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
+
+			if (reserved === undefined) {
+				return { kind: 'requires-decode' };
+			}
+
+			const isCommitted = await this.commitPipeline.isGenerationCommitted(
+				pending.cache,
+				metadata,
+				reserved.generation
+			);
+
+			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				return { kind: 'ignored' };
+			}
+
+			if (!isCommitted) {
+				return { kind: 'requires-decode' };
+			}
+		} else if (!(await this.isCurrentNarPresent(metadata.narHash))) {
+			throw new UploadedObjectNotFoundError(pending.r2Key);
+		}
+
+		const reservation = await this.reservePendingRow(
+			pending,
+			metadata,
+			owner,
+			signal
+		);
+
+		if (reservation.kind !== 'reserved') {
+			return reservation;
+		}
+
+		const finalised = await this.finaliseIfAlreadyCommitted(
+			pending,
+			metadata,
+			reservation.generation,
+			owner,
+			signal
+		);
+
+		if (finalised !== 'continue') {
+			return { kind: finalised };
+		}
+
+		if (!isReuse) {
+			return { kind: 'requires-decode' };
+		}
+
+		const promotion = await this.promoteForCommit(
+			pending,
+			metadata,
+			reservation.generation,
+			{ ok: true },
+			'already-promoted',
+			owner,
+			signal
+		);
+
+		if (promotion !== 'ready') {
+			return { kind: promotion };
+		}
+
+		return {
+			kind: 'ready',
+			settle: {
+				pending,
+				metadata,
+				generation: reservation.generation,
+				owner
+			}
+		};
+	}
+
+	private collectPreparedWithoutDecode(
+		prepared: PreparedWithoutDecode,
+		uploadId: UploadId,
+		owner: string,
+		ready: PreparedSettle[]
+	): number {
+		switch (prepared.kind) {
+			case 'applied': {
+				return 1;
+			}
+			case 'ready': {
+				ready.push(prepared.settle);
+
+				return 0;
+			}
+			case 'requires-decode': {
+				this.releaseLease(uploadId, owner);
+
+				return 0;
+			}
+			case 'ignored': {
+				return 0;
+			}
+		}
 	}
 
 	private async reservePendingRow(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation
-	): Promise<NarInfoGeneration | undefined> {
-		const reserved = await this.commitPipeline.reserveNarInfoRow(
-			pending.cache,
-			metadata
-		);
-
-		if (reserved.kind === 'lost') {
-			this.notifyWaiters(pending, 'absent');
-			await this.uploadState.clearPendingUploadAndStaging(
-				pending.id,
-				pending.r2Key,
-				metadata.narHash
-			);
-			return undefined;
+		metadata: ParsedUploadPathNegotiation,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<PendingReservation> {
+		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			return { kind: 'ignored' };
 		}
 
-		return reserved.generation;
+		const reserved = await this.commitPipeline.reserveNarInfoRow(
+			pending.cache,
+			metadata,
+			() => this.ownsActiveClaim(owner, pending.id, signal)
+		);
+
+		if (
+			reserved === undefined ||
+			!this.ownsActiveClaim(owner, pending.id, signal)
+		) {
+			return { kind: 'ignored' };
+		}
+
+		if (reserved.kind === 'lost') {
+			const didApply = await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash,
+				owner
+			);
+
+			if (didApply) {
+				this.notifyWaiters(pending, 'absent');
+			}
+
+			return { kind: didApply ? 'applied' : 'ignored' };
+		}
+
+		return { kind: 'reserved', generation: reserved.generation };
 	}
 
 	// A crash can leave a committed generation and its pending marker after the
@@ -405,16 +598,40 @@ export class VerificationService {
 	private async finaliseIfAlreadyCommitted(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: NarInfoGeneration
-	): Promise<boolean> {
+		generation: NarInfoGeneration,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<FinaliseCommittedResult> {
+		return this.context.criticalSection(() =>
+			this.finaliseIfAlreadyCommittedLocked(
+				pending,
+				metadata,
+				generation,
+				owner,
+				signal
+			)
+		);
+	}
+
+	private async finaliseIfAlreadyCommittedLocked(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathNegotiation,
+		generation: NarInfoGeneration,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<FinaliseCommittedResult> {
 		const isCommitted = await this.commitPipeline.isGenerationCommitted(
 			pending.cache,
 			metadata,
 			generation
 		);
 
+		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			return 'ignored';
+		}
+
 		if (!isCommitted) {
-			return false;
+			return 'continue';
 		}
 
 		// The flush applies captured grace only after the durable charge, so an
@@ -439,7 +656,7 @@ export class VerificationService {
 		// the ordinary saga verify the current row under its authoritative charge
 		// fence.
 		if (!confirmed.matched) {
-			return false;
+			return 'continue';
 		}
 
 		// Attach the run root while the confirmation's identity proof still applies.
@@ -451,11 +668,14 @@ export class VerificationService {
 			metadata.storePath
 		);
 
+		if (!this.uploadState.clearPendingUpload(pending.id, owner)) {
+			return 'ignored';
+		}
+
 		this.notifyWaiters(pending, 'servable');
-		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
 
-		return true;
+		return 'applied';
 	}
 
 	private async promoteForCommit(
@@ -463,45 +683,102 @@ export class VerificationService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
 		verification: NarVerification,
-		promotion: PromotionState
-	): Promise<boolean> {
+		promotion: PromotionState,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<PromotionResult> {
+		signal?.throwIfAborted();
+
 		if (!verification.ok) {
-			await this.failReservedUpload(pending, metadata, generation);
-			return false;
+			const didApply = await this.failReservedUpload(
+				pending,
+				metadata,
+				generation,
+				'mismatch',
+				owner,
+				signal
+			);
+			return didApply ? 'applied' : 'ignored';
 		}
 
-		// Streaming the staging bytes must remain outside
-		// `blockConcurrencyWhile`. Promotion is content-addressed and idempotent.
-		// Skip it when the queue consumer has already made both the canonical object
-		// and its `blob_state` row durable.
+		// Stream the R2 write outside the input gate. A replacement owner reserves a
+		// greater incarnation and cannot adopt bytes from the revoked owner. Re-enter
+		// the gate to check ownership before activating the object and writing
+		// `blob_state`.
 		if (promotion === 'promote') {
+			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				return 'ignored';
+			}
+
 			const blob =
 				verification.fileHash !== undefined &&
 				verification.fileSize !== undefined
 					? { fileHash: verification.fileHash, fileSize: verification.fileSize }
 					: undefined;
-			await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
+			const staged = await this.uploadState.stageStagingBlob(
+				pending.r2Key,
+				metadata,
+				blob,
+				owner,
+				() => this.ownsActiveClaim(owner, pending.id, signal)
+			);
+
+			if (
+				staged === undefined ||
+				!this.ownsActiveClaim(owner, pending.id, signal)
+			) {
+				return 'ignored';
+			}
+
+			return this.context.criticalSection(async () => {
+				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					return 'ignored';
+				}
+
+				const activation = await this.uploadState.commitStagingBlob(
+					staged,
+					() => this.ownsActiveClaim(owner, pending.id, signal)
+				);
+
+				if (activation === 'retired') {
+					return 'ignored';
+				}
+
+				return this.ownsActiveClaim(owner, pending.id, signal)
+					? 'ready'
+					: 'ignored';
+			});
 		}
 
-		return true;
+		return 'ready';
 	}
 
 	// A failed batch prefetch must fall back to per-path probes. One transient D1
 	// fault must not abort the verification pass.
 	private async prefetchedFactsFor(
 		logger: Logger,
-		ready: readonly PreparedSettle[]
+		ready: readonly PreparedSettle[],
+		signal?: AbortSignal
 	): Promise<
 		Map<NixSha256HashString, PrefetchedMaterialisationFacts> | undefined
 	> {
 		try {
-			return await this.commitPipeline.prefetchMaterialisationFacts(
-				ready.map((item) => item.metadata.narHash)
+			signal?.throwIfAborted();
+			return await raceVerificationOperation(
+				this.commitPipeline.prefetchMaterialisationFacts(
+					ready.map((item) => item.metadata.narHash)
+				),
+				signal
 			);
-		} catch (error) {
+		} catch {
+			signal?.throwIfAborted();
 			logger.warn(
 				'prefetch materialisation facts failed; falling back to per-path probes',
-				{ error }
+				{
+					kind: 'materialisation',
+					count: ready.length,
+					reason: 'prefetch-failed'
+				}
 			);
 			return undefined;
 		}
@@ -512,14 +789,21 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
-		prefetched?: PrefetchedMaterialisationFacts
-	): Promise<void> {
-		// Probe only after promotion has created the canonical object and its
-		// `blob_state` row. An earlier probe would report both as absent.
+		prefetched: PrefetchedMaterialisationFacts | undefined,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<boolean> {
+		signal?.throwIfAborted();
+		// Promotion creates the object and `blob_state` row, so probe afterwards.
 		const probe = await this.commitPipeline.probeMaterialisation(
 			metadata,
 			prefetched
 		);
+		signal?.throwIfAborted();
+
+		if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+			return false;
+		}
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
 		let outcome = await this.commitPipeline.materialiseBatched(logger, {
@@ -534,23 +818,13 @@ export class VerificationService {
 			// tenant ownership here: a tenant does not yet own a hash on its first
 			// commit.
 			mustOwnBlob: false,
-			// Another pass settled a missing or terminal row while this pass awaited
-			// promotion and probing. Do not modify that row. This check runs inside
-			// the flush gate, so a competing settle cannot interleave between the
-			// check and the charge.
-			isStillSettleable: () => {
-				const current = this.context.db
-					.select()
-					.from(schema.pendingUploads)
-					.where(eq(schema.pendingUploads.id, pending.id))
-					.get();
-
-				return current !== undefined && isAwaitingVerdict(current);
-			}
+			// Check the claim again inside the charge gate. A competing pass might have
+			// removed the row or recorded a terminal verdict during the earlier awaits.
+			isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
 		});
 
 		if (outcome.kind === 'gone') {
-			return;
+			return false;
 		}
 
 		// Over quota on the canonical size: if the probe came from a prefetch batch,
@@ -561,6 +835,12 @@ export class VerificationService {
 		if (prefetched !== undefined && outcome.kind === 'over-quota') {
 			const freshProbe =
 				await this.commitPipeline.probeMaterialisation(metadata);
+			signal?.throwIfAborted();
+
+			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				return false;
+			}
+
 			const retried = await this.commitPipeline.materialiseBatched(logger, {
 				cache: pending.cache,
 				metadata,
@@ -569,34 +849,27 @@ export class VerificationService {
 				mustOwnBlob: false,
 				graceDecision,
 				attachRootName: pending.attachRootName ?? undefined,
-				isStillSettleable: () => {
-					const current = this.context.db
-						.select()
-						.from(schema.pendingUploads)
-						.where(eq(schema.pendingUploads.id, pending.id))
-						.get();
-
-					return current !== undefined && isAwaitingVerdict(current);
-				}
+				isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
 			});
 
 			if (retried.kind === 'gone') {
-				return;
+				return false;
 			}
 
 			outcome = retried;
 		}
 
 		if (outcome.kind === 'over-quota') {
-			// Without reclaiming this reserved row, a later scan could restore its
-			// object and make an unreferenced, uncharged path servable.
-			await this.failReservedUpload(
+			// Reclaim the reserved narinfo row. Otherwise reconciliation could restore
+			// an unreferenced path that was never charged to the tenant.
+			return this.failReservedUpload(
 				pending,
 				metadata,
 				generation,
-				'over-quota'
+				'over-quota',
+				owner,
+				signal
 			);
-			return;
 		}
 
 		// Publishing can stop after reservation and before the charge fence. Reclaim
@@ -607,16 +880,24 @@ export class VerificationService {
 			// completes, so a confirmation outside it could race a delete or
 			// recommit queued behind the gate.
 			const reclaim = await this.context.criticalSection(async () => {
+				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					return 'superseded' as const;
+				}
+
 				const result = await this.commitPipeline.reclaimReservedRow(
 					pending.cache,
 					metadata.storePathHash,
 					generation,
-					metadata.narHash
+					metadata.narHash,
+					() => this.ownsActiveClaim(owner, pending.id, signal)
 				);
 
-				// This upload's captured grace decision has not been applied. Apply it
-				// to the winning generation before notifying, and attach the run root
-				// under the same identity proof.
+				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					return 'superseded' as const;
+				}
+
+				// The winning generation must receive this upload's retention decision and
+				// run-root attachment before the waiter is notified.
 				if (result === 'committed-current') {
 					this.commitPipeline.attachRootTarget(
 						pending.cache,
@@ -639,17 +920,29 @@ export class VerificationService {
 			});
 
 			if (reclaim === 'committed-current') {
-				this.notifyWaiters(pending, 'servable');
-				this.uploadState.clearPendingUpload(pending.id);
-				return;
+				signal?.throwIfAborted();
+				const didApply = this.uploadState.clearPendingUpload(pending.id, owner);
+
+				if (didApply) {
+					this.notifyWaiters(pending, 'servable');
+				}
+
+				return didApply;
+			}
+
+			signal?.throwIfAborted();
+			const didApply = await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash,
+				owner
+			);
+
+			if (!didApply) {
+				return false;
 			}
 
 			this.notifyWaiters(pending, 'absent');
-			await this.uploadState.clearPendingUploadAndStaging(
-				pending.id,
-				pending.r2Key,
-				metadata.narHash
-			);
 
 			// A superseded row belongs to a replacement that still holds the
 			// path, so its retention targets must survive; only a genuinely
@@ -658,33 +951,49 @@ export class VerificationService {
 				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 			}
 
-			return;
+			return true;
 		}
 
 		if (outcome.kind === 'materialised') {
-			// Wait for the narinfo object to publish before notifying waiters or
-			// clearing the marker. A failure before publication must leave the upload
-			// available for another pass.
-			await this.narInfoObjects.publishNarInfoObject(
+			// Keep the upload row until the narinfo object is published. An interruption
+			// before publication can then re-drive the commit.
+			const wasPublished = await this.narInfoObjects.publishNarInfoObjectWhile(
 				pending.cache,
 				metadata.storePathHash,
 				generation,
 				metadata.narHash,
-				outcome.narInfo
+				outcome.narInfo,
+				() => this.ownsActiveClaim(owner, pending.id, signal)
 			);
 
-			this.notifyWaiters(pending, 'servable');
-			this.uploadState.clearPendingUpload(pending.id);
-			await this.deleteStagingObject(pending);
-			return;
+			if (!wasPublished) {
+				return false;
+			}
+
+			signal?.throwIfAborted();
+			// Once the narinfo is durable, notify waiters and remove the upload row and
+			// private staging bytes.
+			const wasCleared = this.uploadState.clearPendingUpload(pending.id, owner);
+
+			if (wasCleared) {
+				this.notifyWaiters(pending, 'servable');
+				await this.deleteStagingObject(pending);
+			}
+
+			return wasCleared;
 		}
 
-		// A concurrent recommit took the path or the blob vanished, so clear this
-		// upload's marker. If no edge references a blob that this pass promoted,
-		// leave the blob for the reaper.
+		// A concurrent commit took the path or the blob disappeared. Remove this
+		// upload row; the reaper collects any unreferenced object it promoted.
+		signal?.throwIfAborted();
+		if (!this.uploadState.clearPendingUpload(pending.id, owner)) {
+			return false;
+		}
+
 		this.notifyWaiters(pending, 'absent');
-		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
+
+		return true;
 	}
 
 	// Never delete a reuse row's shared canonical object. Other paths can refer to
@@ -699,34 +1008,68 @@ export class VerificationService {
 		await this.context.env.BLOBS.delete(pending.r2Key);
 	}
 
-	// A straggling failure verdict must not retire a generation that another pass
-	// has already committed. Its edge proves that the path is servable, so leave
-	// the row, root and waiter for the committing pass to update.
+	// Do not replace a terminal verdict with a staging-cleanup failure. The orphan
+	// collector will retry deletion after the upload grace period.
+	private async deleteStagingObjectBestEffort(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		signal?: AbortSignal
+	): Promise<void> {
+		try {
+			signal?.throwIfAborted();
+			await this.deleteStagingObject(pending);
+		} catch {
+			signal?.throwIfAborted();
+			rootLogger().warn(
+				'upload completed but its staging object was not deleted',
+				{ kind: 'fresh', reason: 'staging-delete-failed' }
+			);
+		}
+	}
+
+	// Reclaim the reserved narinfo row before recording mismatch or over-quota. If
+	// another pass already committed the generation, leave the upload row, root,
+	// and waiter to that pass so a late failure cannot retire a servable path.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
-		verdict: 'mismatch' | 'over-quota' = 'mismatch'
-	): Promise<void> {
-		const reclaim = await this.context.criticalSection(() =>
-			this.commitPipeline.reclaimReservedRow(
+		verdict: 'mismatch' | 'over-quota' = 'mismatch',
+		owner: string,
+		signal?: AbortSignal
+	): Promise<boolean> {
+		signal?.throwIfAborted();
+		const reclaim = await this.context.criticalSection(async () => {
+			if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+				return 'superseded' as const;
+			}
+
+			const result = await this.commitPipeline.reclaimReservedRow(
 				pending.cache,
 				metadata.storePathHash,
 				generation,
-				metadata.narHash
-			)
-		);
+				metadata.narHash,
+				() => this.ownsActiveClaim(owner, pending.id, signal)
+			);
+
+			return this.ownsActiveClaim(owner, pending.id, signal)
+				? result
+				: ('superseded' as const);
+		});
 
 		if (reclaim === 'committed-current') {
-			return;
+			return false;
 		}
 
-		await this.uploadState.markUploadTerminal(
+		signal?.throwIfAborted();
+		const isSettled = this.uploadState.markUploadTerminal(
 			pending.id,
-			pending.r2Key,
-			metadata.narHash,
-			verdict
+			verdict,
+			owner
 		);
+
+		if (!isSettled) {
+			return false;
+		}
 
 		// A superseded row belongs to a replacement that still holds the path,
 		// so its retention targets must survive; only a genuinely reclaimed
@@ -736,6 +1079,9 @@ export class VerificationService {
 		}
 
 		this.notifyWaiters(pending, verdict);
+		await this.deleteStagingObjectBestEffort(pending, signal);
+
+		return true;
 	}
 
 	// Re-check the NAR under the caller's critical section before restoring the
@@ -744,8 +1090,7 @@ export class VerificationService {
 	private async restoreNarInfoObject(
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<number> {
-		const isNarPresent =
-			(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
+		const isNarPresent = await this.isCurrentNarPresent(row.narHash);
 
 		if (!isNarPresent) {
 			return 0;
@@ -763,6 +1108,7 @@ export class VerificationService {
 			{
 				generation: row.generation,
 				narHash: row.narHash,
+				narUrl: narInfo.url,
 				signatureGeneration:
 					row.pendingSignatureGeneration ?? row.signatureGeneration
 			},
@@ -772,15 +1118,10 @@ export class VerificationService {
 		return 1;
 	}
 
-	private warnSkippedRow(
-		logger: Logger,
-		row: typeof schema.narInfos.$inferSelect,
-		error: unknown
-	): void {
+	private warnSkippedRow(logger: Logger): void {
 		logger.warn('narinfo row not reconciled', {
-			cache: row.cache,
-			storePathHash: row.storePathHash,
-			error
+			kind: 'narinfo',
+			reason: 'reconcile-failed'
 		});
 	}
 
@@ -806,21 +1147,39 @@ export class VerificationService {
 		isObjectPresent: (row: NarInfoRow) => Promise<boolean>
 	): Promise<RowObservation | undefined> {
 		try {
-			const isNarPresent =
-				(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
+			const isNarPresent = await this.isCurrentNarPresent(row.narHash);
 
 			return {
 				row,
 				isNarPresent: isNarPresent,
 				objectPresent: isNarPresent && (await isObjectPresent(row))
 			};
-		} catch (error) {
-			this.warnSkippedRow(logger, row, error);
+		} catch {
+			this.warnSkippedRow(logger);
 
 			return undefined;
 		}
 	}
 
+	private async isCurrentNarPresent(
+		narHash: NixSha256HashString
+	): Promise<boolean> {
+		const state = await this.context.d1
+			.select({ incarnation: d1Schema.blobState.incarnation })
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
+			.get();
+
+		return (
+			state !== undefined &&
+			(await this.context.env.BLOBS.head(
+				narObjectKey(narHash, state.incarnation)
+			)) !== null
+		);
+	}
+
+	// A targeted reconciliation checks a small set of unrelated paths, so probe
+	// each narinfo object directly instead of listing a prefix.
 	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
@@ -899,11 +1258,12 @@ export class VerificationService {
 				isDone = inRange.length < listed.objects.length || !listed.truncated;
 				cursor = listed.truncated ? listed.cursor : undefined;
 			}
-		} catch (error) {
+		} catch {
 			// A transient list fault must not abort the whole reconcile; fall back to
 			// a per-row head, which keeps each row's own fault isolation.
 			logger.warn('narinfo object listing failed; falling back to heads', {
-				error
+				kind: 'narinfo-list',
+				reason: 'list-failed'
 			});
 
 			return undefined;
@@ -1006,37 +1366,350 @@ export class VerificationService {
 					? 'restored'
 					: 'unchanged';
 			}
-		} catch (error) {
-			this.warnSkippedRow(logger, row, error);
+		} catch {
+			this.warnSkippedRow(logger);
 		}
 
 		return 'unchanged';
 	}
 
-	// Select and lease without yielding so no other claim can interleave. Lease
-	// only the rows returned to the caller; the sentinel and rows excluded by a
-	// cap must remain claimable.
-	private leaseRows(uploadIds: readonly UploadId[], now: Date): void {
+	// Lease only the rows returned to this pass. Selection and leasing are
+	// synchronous on the single writer, so another pass cannot claim them between
+	// those operations.
+	private leaseRows(
+		uploadIds: readonly UploadId[],
+		now: Date,
+		owner: string
+	): void {
 		if (uploadIds.length === 0) {
 			return;
 		}
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ claimedAt: isoTimestamp(now) })
+			.set({ claimedAt: isoTimestamp(now), claimOwner: owner })
 			.where(inArray(schema.pendingUploads.id, uploadIds))
 			.run();
 	}
 
-	// Frees a claimed row the pass working it is abandoning unsettled (a
-	// transient fault), so the next pass need not wait the lease out. A crashed
-	// pass never reaches this; its rows free at lease expiry.
-	private releaseLease(uploadId: UploadId): void {
+	private decodeFreeCandidatePage(
+		now: Date,
+		kind: DecodeFreeCandidateKind,
+		after: UploadId | undefined,
+		limit: number
+	): PendingUploadRow[] {
+		const pendingStorePathHash = sql<StorePathHash>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
+		const matchingNarInfo = and(
+			eq(schema.narInfos.cache, schema.pendingUploads.cache),
+			eq(schema.narInfos.storePathHash, pendingStorePathHash)
+		);
+		const matchingNarInfoQuery = this.context.db
+			.select({ storePathHash: schema.narInfos.storePathHash })
+			.from(schema.narInfos)
+			.where(matchingNarInfo);
+		const canonicalR2Key = sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`;
+		const reuseCandidate = eq(schema.pendingUploads.r2Key, canonicalR2Key);
+		const recoveryCandidate = and(
+			ne(schema.pendingUploads.r2Key, canonicalR2Key),
+			exists(matchingNarInfoQuery)
+		);
+		const decodeFreeCandidate =
+			kind === 'reuse' ? reuseCandidate : recoveryCandidate;
+		const afterCandidate =
+			after === undefined ? undefined : gt(schema.pendingUploads.id, after);
+
+		return this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(and(claimableFilter(now), decodeFreeCandidate, afterCandidate))
+			.orderBy(asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+	}
+
+	private decodeFreeCandidatePageFromCursor(
+		now: Date,
+		kind: DecodeFreeCandidateKind,
+		cursor: UploadId | undefined,
+		limit: number
+	): PendingUploadRow[] {
+		const afterCursor = this.decodeFreeCandidatePage(now, kind, cursor, limit);
+
+		if (cursor === undefined || afterCursor.length > 0) {
+			return afterCursor;
+		}
+
+		return this.decodeFreeCandidatePage(now, kind, undefined, limit);
+	}
+
+	private async persistDecodeFreeCursor(
+		cursor: DecodeFreeCursorState | undefined
+	): Promise<void> {
+		if (cursor === undefined) {
+			await this.context.ctx.storage.delete(pendingDecodeFreeCursorKey);
+			return;
+		}
+
+		await this.context.ctx.storage.put(pendingDecodeFreeCursorKey, cursor);
+	}
+
+	private async commitDecodeFreeClaim(
+		candidates: readonly PendingUploadRow[],
+		now: Date,
+		owner: string,
+		cursor: DecodeFreeCursorState | undefined,
+		signal?: AbortSignal
+	): Promise<void> {
+		signal?.throwIfAborted();
+		await raceVerificationOperation(
+			this.persistDecodeFreeCursor(cursor),
+			signal
+		);
+		signal?.throwIfAborted();
+		this.leaseRows(
+			candidates.map((pending) => pending.id),
+			now,
+			owner
+		);
+	}
+
+	private async claimPendingWithoutDecode(
+		limit: number,
+		signal?: AbortSignal
+	): Promise<{
+		readonly owner: string;
+		readonly reuse: readonly PendingUploadRow[];
+		readonly recoveryCandidates: readonly PendingUploadRow[];
+	}> {
+		return this.context.criticalSection(async () => {
+			signal?.throwIfAborted();
+			const now = new Date();
+			const owner = crypto.randomUUID();
+			const storedCursor = await raceVerificationOperation(
+				this.context.ctx.storage.get(pendingDecodeFreeCursorKey),
+				signal
+			);
+			signal?.throwIfAborted();
+			const cursor = parseDecodeFreeCursorState(storedCursor);
+			let kind = cursor.next;
+			let candidates = this.decodeFreeCandidatePageFromCursor(
+				now,
+				kind,
+				cursor[kind],
+				limit
+			);
+
+			if (candidates.length === 0) {
+				kind = otherDecodeFreeCandidateKind(kind);
+				candidates = this.decodeFreeCandidatePageFromCursor(
+					now,
+					kind,
+					cursor[kind],
+					limit
+				);
+			}
+
+			const reuse = candidates.filter(
+				(pending) => pending.r2Key === narObjectKey(pending.narHash)
+			);
+			const recoveryCandidates = candidates.filter(
+				(pending) => pending.r2Key !== narObjectKey(pending.narHash)
+			);
+
+			const lastCandidate = candidates.at(-1);
+			await this.commitDecodeFreeClaim(
+				candidates,
+				now,
+				owner,
+				lastCandidate === undefined
+					? undefined
+					: ({
+							...cursor,
+							[kind]: lastCandidate.id,
+							next: otherDecodeFreeCandidateKind(kind)
+						} satisfies DecodeFreeCursorState),
+				signal
+			);
+
+			return { owner, reuse, recoveryCandidates };
+		});
+	}
+
+	private async committedRecoveryCandidates(
+		logger: Logger,
+		owner: string,
+		candidates: readonly PendingUploadRow[],
+		signal?: AbortSignal
+	): Promise<PendingUploadRow[]> {
+		const classified = await mapWithConcurrency(
+			candidates,
+			maxOutgoingConnections,
+			async (pending): Promise<PendingUploadRow | undefined> => {
+				try {
+					signal?.throwIfAborted();
+					const metadata = parseStoredUploadPathMetadata(
+						pending.id,
+						pending.metadataJson
+					);
+					const reserved = this.narInfoRow(
+						pending.cache,
+						metadata.storePathHash
+					);
+
+					if (reserved === undefined) {
+						this.releaseLease(pending.id, owner);
+						return undefined;
+					}
+
+					const isCommitted = await raceVerificationOperation(
+						this.commitPipeline.isGenerationCommitted(
+							pending.cache,
+							metadata,
+							reserved.generation
+						),
+						signal
+					);
+
+					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+						return undefined;
+					}
+
+					if (!isCommitted) {
+						this.releaseLease(pending.id, owner);
+						return undefined;
+					}
+
+					return pending;
+				} catch {
+					signal?.throwIfAborted();
+					this.releaseLease(pending.id, owner);
+					logger.warn('pending upload recovery probe failed', {
+						kind: 'committed-recovery',
+						reason: 'commit-state-probe-failed'
+					});
+					return undefined;
+				}
+			}
+		);
+
+		return classified.filter(
+			(candidate): candidate is PendingUploadRow => candidate !== undefined
+		);
+	}
+
+	// Release a claim after a transient fault so the next pass need not wait for
+	// the lease to expire. A crashed pass never reaches this method; its claims
+	// become available when their leases expire.
+	private releaseLease(uploadId: UploadId, owner: string): void {
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ claimedAt: sql`null` })
-			.where(eq(schema.pendingUploads.id, uploadId))
+			.set({ claimedAt: sql`null`, claimOwner: sql`null` })
+			.where(
+				and(
+					eq(schema.pendingUploads.id, uploadId),
+					eq(schema.pendingUploads.claimOwner, owner)
+				)
+			)
 			.run();
+	}
+
+	private async renewClaimsWhile<T>(
+		owner: string,
+		uploadIds: readonly UploadId[],
+		work: (signal: AbortSignal) => Promise<T>,
+		outerSignal?: AbortSignal
+	): Promise<T> {
+		return withRenewedVerificationClaim(
+			() => {
+				if (!this.renewClaimLeases(owner, uploadIds)) {
+					throw new Error(
+						'The verification claim is no longer owned by this pass.'
+					);
+				}
+
+				return Promise.resolve();
+			},
+			work,
+			undefined,
+			outerSignal
+		);
+	}
+
+	private ownsClaim(owner: string, uploadId: UploadId): boolean {
+		return this.ownsClaimFor(owner, uploadId);
+	}
+
+	private ownsActiveClaim(
+		owner: string,
+		uploadId: UploadId,
+		signal?: AbortSignal
+	): boolean {
+		return signal?.aborted !== true && this.ownsClaimFor(owner, uploadId);
+	}
+
+	private ownsClaimFor(owner: string, uploadId: UploadId): boolean {
+		const awaitingFilter = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		return (
+			this.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(
+					and(
+						eq(schema.pendingUploads.id, uploadId),
+						eq(schema.pendingUploads.claimOwner, owner),
+						awaitingFilter
+					)
+				)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	 * Releases the specified leases only while `owner` still owns them.
+	 */
+	releaseClaimLeases(owner: string, uploadIds: readonly UploadId[]): void {
+		const distinctIds = [...new Set(uploadIds)];
+
+		for (const ids of chunk(distinctIds, maxInClauseValues)) {
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({ claimedAt: sql`null`, claimOwner: sql`null` })
+				.where(
+					and(
+						inArray(schema.pendingUploads.id, ids),
+						eq(schema.pendingUploads.claimOwner, owner)
+					)
+				)
+				.run();
+		}
+	}
+
+	renewClaimLeases(owner: string, uploadIds: readonly UploadId[]): boolean {
+		if (uploadIds.length === 0) {
+			return true;
+		}
+
+		const distinctIds = [...new Set(uploadIds)];
+		let renewed = 0;
+
+		for (const ids of chunk(distinctIds, maxInClauseValues)) {
+			renewed += this.context.db
+				.update(schema.pendingUploads)
+				.set({ claimedAt: isoTimestamp(new Date()) })
+				.where(
+					and(
+						inArray(schema.pendingUploads.id, ids),
+						eq(schema.pendingUploads.claimOwner, owner)
+					)
+				)
+				.returning({ id: schema.pendingUploads.id })
+				.all().length;
+		}
+
+		return renewed === distinctIds.length;
 	}
 
 	// Reconciles a targeted set of committed paths, the per-push counterpart of the
@@ -1081,16 +1754,6 @@ export class VerificationService {
 				);
 			}
 		});
-	}
-
-	async verify(
-		logger: Logger,
-		purgeOrigin: RequestOrigin | undefined,
-		limit: number
-	): Promise<VerifyReport> {
-		await this.verifyPendingUploads(logger, limit);
-
-		return this.verifyBatch(logger, purgeOrigin, limit);
 	}
 
 	async verifyBatch(
@@ -1223,102 +1886,16 @@ export class VerificationService {
 		});
 	}
 
-	// The cron fallback claims unleased `pending` and `committing` rows. It verifies
-	// fresh staging bytes outside the input gate, then uses the same fenced settle
-	// path as the queue consumer. Each pass is bounded by `limit`.
-	async verifyPendingUploads(logger: Logger, limit: number): Promise<void> {
-		// Queue leases identify work already in progress. Claim around those rows and
-		// lease this pass's rows synchronously so a consumer cannot take them.
-		const now = new Date();
-		const pendings = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(claimableFilter(now))
-			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit)
-			.all();
-
-		this.leaseRows(
-			pendings.map((pending) => pending.id),
-			now
-		);
-
-		// A failure for one upload releases its lease and leaves its marker for the
-		// next pass. It must not prevent the remaining claims from settling.
-		const ready: PreparedSettle[] = [];
-
-		for (const pending of pendings) {
-			try {
-				const prepared = await this.prepareAndPromote(pending);
-
-				if (prepared !== undefined) {
-					ready.push(prepared);
-				}
-			} catch {
-				this.releaseLease(pending.id);
-			}
-		}
-
-		if (ready.length === 0) {
-			return;
-		}
-
-		// Read each promoted path's canonical facts and ownership once through
-		// chunked queries. These facts can become stale while the batch settles; the
-		// charge batch remains the authoritative status and quota fence, and an
-		// over-quota result triggers a fresh probe.
-		const prefetched = await this.prefetchedFactsFor(logger, ready);
-
-		for (const item of ready) {
-			try {
-				await this.materialiseVerified(
-					logger,
-					item.pending,
-					item.metadata,
-					item.generation,
-					prefetched?.get(item.metadata.narHash)
-				);
-			} catch {
-				this.releaseLease(item.pending.id);
-			}
-		}
-	}
-
-	// The queue consumer fetches and verifies fresh staging objects outside the
-	// Durable Object. A reuse claim identifies canonical bytes that need no
-	// decode. Selection and leasing are one synchronous step on the single writer,
-	// so an overlapping cron or queue pass cannot take the same row.
+	// Claim a bounded batch of fresh rows for the queue consumer to fetch and
+	// decode outside the Durable Object. The single writer selects and leases the
+	// rows without yielding, which prevents an overlapping alarm or cron pass from
+	// claiming the same uploads.
 	listPendingForVerify(
 		limit: number,
-		maxNarBytes: number
+		maxNarBytes: number,
+		signal?: AbortSignal
 	): PendingVerificationBatch {
-		const now = new Date();
-		const pendings = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(claimableFilter(now))
-			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit + 1)
-			.all();
-		const batch = chunkClaims(pendings, limit, maxNarBytes);
-
-		this.leaseRows(
-			batch.claims.map((claim) => claim.uploadId),
-			now
-		);
-
-		return batch;
-	}
-
-	// Processes up to `limit` pending reuse rows on the Durable Object. Their
-	// bytes are already verified in the canonical object, so processing requires
-	// only a head request and a `blob_state` upsert. The alarm backstop processes
-	// these inexpensive rows even when no consumer pass is running; fresh rows
-	// remain for the queue consumer, which decodes them off the Durable Object's
-	// thread. The query applies both the reuse test and the limit, so a large
-	// backlog of fresh rows adds no scan cost. It also leases the selected rows
-	// synchronously, so a concurrent consumer does not claim them.
-	async processPendingReuse(logger: Logger, limit: number): Promise<number> {
+		signal?.throwIfAborted();
 		const now = new Date();
 		const pendings = this.context.db
 			.select()
@@ -1326,123 +1903,169 @@ export class VerificationService {
 			.where(
 				and(
 					claimableFilter(now),
-					eq(
+					ne(
 						schema.pendingUploads.r2Key,
 						sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
 					)
 				)
 			)
 			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = chunkClaims(pendings, limit, maxNarBytes);
+		const owner = crypto.randomUUID();
 
+		signal?.throwIfAborted();
 		this.leaseRows(
-			pendings.map((pending) => pending.id),
-			now
+			batch.claims.map((claim) => claim.uploadId),
+			now,
+			owner
 		);
 
-		let settled = 0;
-		const ready: PreparedSettle[] = [];
-
-		for (const pending of pendings) {
-			try {
-				const prepared = await this.prepareRecordedVerdict(
-					pending.id,
-					{ ok: true },
-					'promote'
-				);
-
-				if (prepared === undefined) {
-					settled += 1;
-				} else {
-					ready.push(prepared);
-				}
-			} catch (error) {
-				if (error instanceof UploadedObjectNotFoundError) {
-					// A missing canonical object cannot reappear. Record `absent`
-					// immediately rather than leave a lease on a stale row.
-					await this.recordMissingObject(pending.id);
-					settled += 1;
-					continue;
-				}
-
-				// A transient fault: free the lease and leave the row for the next
-				// pass without starving the rest.
-				this.releaseLease(pending.id);
-				logger.warn('pending reuse upload not settled', {
-					uploadId: pending.id,
-					error
-				});
-			}
-		}
-
-		if (ready.length === 0) {
-			return settled;
-		}
-
-		// Read every survivor's canonical facts once, then materialise from memory:
-		// a reuse backlog settles with O(chunks) probe reads, not one per row. The
-		// facts can go stale across the batch; the charge batch remains the
-		// authoritative fence and the over-quota retry re-probes.
-		const prefetched = await this.prefetchedFactsFor(logger, ready);
-
-		for (const item of ready) {
-			try {
-				await this.materialiseVerified(
-					logger,
-					item.pending,
-					item.metadata,
-					item.generation,
-					prefetched?.get(item.metadata.narHash)
-				);
-				settled += 1;
-			} catch (error) {
-				this.releaseLease(item.pending.id);
-				logger.warn('pending reuse upload not settled', {
-					uploadId: item.pending.id,
-					error
-				});
-			}
-		}
-
-		return settled;
+		return { ...batch, owner };
 	}
 
-	// This compatibility RPC is idempotent because a queue consumer can report the
-	// same upload again after a retry. A vanished, terminal or superseded row makes
-	// the repeated report a no-op.
-	async recordVerification(
+	hasPendingUploads(): boolean {
+		return (
+			this.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(claimableFilter(new Date()))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	// Resolves up to `limit` rows that need no NAR decode. A committed fresh row
+	// can finish crash recovery from its durable reference, and a reuse row can
+	// adopt its canonical object. Other fresh rows remain for the queue consumer.
+	async processPendingWithoutDecode(
 		logger: Logger,
-		uploadId: UploadId,
-		verification: NarVerification,
-		promotion: PromotionState = 'promote'
-	): Promise<void> {
-		const prepared = await this.prepareRecordedVerdict(
-			uploadId,
-			verification,
-			promotion
-		);
+		limit: number,
+		signal?: AbortSignal
+	): Promise<number> {
+		signal?.throwIfAborted();
+		const { owner, reuse, recoveryCandidates } =
+			await this.claimPendingWithoutDecode(limit, signal);
+		const claimedIds = [...reuse, ...recoveryCandidates].map((row) => row.id);
 
-		if (prepared === undefined) {
-			return;
+		try {
+			const committedRecovery = await this.committedRecoveryCandidates(
+				logger,
+				owner,
+				recoveryCandidates,
+				signal
+			);
+			signal?.throwIfAborted();
+			const pendings = [...reuse, ...committedRecovery];
+
+			let settled = 0;
+			const ready: PreparedSettle[] = [];
+
+			// Reserve each row and finish the cases that do not require a NAR decode.
+			// Collect rows that need shared blob data so the service can read that data
+			// in batches before materialisation.
+			for (const [index, pending] of pendings.entries()) {
+				try {
+					signal?.throwIfAborted();
+					const prepared = await this.renewClaimsWhile(
+						owner,
+						pendings.slice(index).map((row) => row.id),
+						(claimSignal) =>
+							this.prepareWithoutDecode(pending, owner, claimSignal),
+						signal
+					);
+
+					settled += this.collectPreparedWithoutDecode(
+						prepared,
+						pending.id,
+						owner,
+						ready
+					);
+				} catch (error) {
+					signal?.throwIfAborted();
+					if (error instanceof UploadedObjectNotFoundError) {
+						// A missing canonical object is terminal for this reuse attempt.
+						if (await this.recordMissingObject(pending.id, owner, signal)) {
+							settled += 1;
+						}
+						continue;
+					}
+
+					// Release the lease after a transient fault so another pass can retry
+					// this row while the current pass continues with the others.
+					this.releaseLease(pending.id, owner);
+					logger.warn('could not settle pending upload without decoding', {
+						kind:
+							pending.r2Key === narObjectKey(pending.narHash)
+								? 'reuse'
+								: 'committed-recovery',
+						reason: 'prepare-failed'
+					});
+				}
+			}
+
+			if (ready.length === 0) {
+				return settled;
+			}
+
+			// Read the shared blob rows in chunks, then materialise each upload from that
+			// snapshot. The charge transaction remains authoritative, and an over-quota
+			// result triggers a fresh probe.
+			const prefetched = await this.prefetchedFactsFor(logger, ready, signal);
+
+			for (const [index, item] of ready.entries()) {
+				try {
+					signal?.throwIfAborted();
+					const didApply = await this.renewClaimsWhile(
+						owner,
+						ready.slice(index).map((row) => row.pending.id),
+						(signal) =>
+							this.materialiseVerified(
+								logger,
+								item.pending,
+								item.metadata,
+								item.generation,
+								prefetched?.get(item.metadata.narHash),
+								item.owner,
+								signal
+							),
+						signal
+					);
+
+					if (didApply) {
+						settled += 1;
+					}
+				} catch {
+					signal?.throwIfAborted();
+					this.releaseLease(item.pending.id, owner);
+					logger.warn('could not apply reuse verdict', {
+						kind:
+							item.pending.r2Key === narObjectKey(item.pending.narHash)
+								? 'reuse'
+								: 'committed-recovery',
+						reason: 'materialisation-failed'
+					});
+				}
+			}
+
+			return settled;
+		} finally {
+			this.releaseClaimLeases(owner, claimedIds);
 		}
-
-		await this.materialiseVerified(
-			logger,
-			prepared.pending,
-			prepared.metadata,
-			prepared.generation
-		);
 	}
 
-	// Each result is isolated so a transient promote or commit failure leaves only
-	// that row for another pass. Materialisations share the flush, and the return
-	// value counts only results that applied. The consumer requests a continuation
-	// only after real progress; a batch with no progress leaves retry to cron.
+	// Apply one queue batch in a single RPC. Prepare uploads concurrently and flush
+	// their materialisations together. A failure leaves only that upload for a
+	// later pass. Count only the verdicts this owner commits, so the caller requests
+	// another pass only after making progress.
 	async recordVerifications(
 		logger: Logger,
-		results: readonly VerificationResult[]
+		owner: string,
+		results: readonly VerificationResult[],
+		signal?: AbortSignal
 	): Promise<number> {
+		signal?.throwIfAborted();
 		let applied = 0;
 
 		const ready: PreparedSettle[] = [];
@@ -1452,17 +2075,23 @@ export class VerificationService {
 			maxOutgoingConnections,
 			async ({ uploadId, verdict }) => {
 				try {
+					signal?.throwIfAborted();
+					if (!this.ownsClaim(owner, uploadId)) {
+						return;
+					}
+
 					if (verdict.kind === 'abandoned') {
-						// The consumer gave the claim up unsettled (a transient fault);
-						// free the lease so the next pass retries promptly. Not progress,
-						// so it does not count towards the continuation gate.
-						this.releaseLease(uploadId);
+						// The consumer abandoned the claim after a transient fault. Release
+						// the lease so the next pass can retry promptly. This does not count
+						// as progress for the continuation decision.
+						this.releaseLease(uploadId, owner);
 						return;
 					}
 
 					if (verdict.kind === 'missing') {
-						await this.recordMissingObject(uploadId);
-						applied += 1;
+						if (await this.recordMissingObject(uploadId, owner, signal)) {
+							applied += 1;
+						}
 						return;
 					}
 
@@ -1473,67 +2102,101 @@ export class VerificationService {
 					const prepared = await this.prepareRecordedVerdict(
 						uploadId,
 						verification,
-						promotion
+						promotion,
+						owner,
+						signal
 					);
 
-					if (prepared === undefined) {
+					if (prepared.kind === 'applied') {
 						applied += 1;
 						return;
 					}
 
-					ready.push(prepared);
+					if (prepared.kind === 'ignored') {
+						return;
+					}
+
+					ready.push(prepared.settle);
 				} catch (error) {
-					logger.warn('verification verdict not recorded', { uploadId, error });
+					signal?.throwIfAborted();
+					if (error instanceof UploadedObjectNotFoundError) {
+						if (await this.recordMissingObject(uploadId, owner, signal)) {
+							applied += 1;
+						}
+						return;
+					}
+
+					this.releaseLease(uploadId, owner);
+					logger.warn('verification verdict not recorded', {
+						kind: 'fresh',
+						reason: 'prepare-failed'
+					});
 				}
 			}
 		);
+		signal?.throwIfAborted();
 
 		if (ready.length === 0) {
 			return applied;
 		}
 
-		// Read every promoted survivor's canonical facts once, then materialise each
-		// from memory: a large verdict batch costs O(chunks) probe reads, not one per
-		// path. A materialise fault leaves the row for the next pass, so it does not
-		// count towards the continuation gate. The facts can go stale across the
-		// batch; the charge batch remains the authoritative fence and the over-quota
-		// retry re-probes.
-		const prefetched = await this.prefetchedFactsFor(logger, ready);
+		// Read the shared blob rows in chunks, then materialise each surviving upload
+		// from that snapshot. Failed materialisations remain for another pass and do
+		// not count as progress.
+		const prefetched = await this.prefetchedFactsFor(logger, ready, signal);
 
 		await mapWithConcurrency(ready, maxOutgoingConnections, async (item) => {
 			try {
-				await this.materialiseVerified(
+				signal?.throwIfAborted();
+				const didApply = await this.materialiseVerified(
 					logger,
 					item.pending,
 					item.metadata,
 					item.generation,
-					prefetched?.get(item.metadata.narHash)
+					prefetched?.get(item.metadata.narHash),
+					item.owner,
+					signal
 				);
-				applied += 1;
-			} catch (error) {
+
+				if (didApply) {
+					applied += 1;
+				}
+			} catch {
+				signal?.throwIfAborted();
+				this.releaseLease(item.pending.id, owner);
 				logger.warn('verification verdict not recorded', {
-					uploadId: item.pending.id,
-					error
+					kind: 'fresh',
+					reason: 'materialisation-failed'
 				});
 			}
 		});
+		signal?.throwIfAborted();
 
 		return applied;
 	}
 
 	// A missing private staging object is a terminal mismatch because those bytes
-	// cannot reappear. A missing canonical object does not prove that a reuse
-	// client's NAR is invalid, so clear that row and report `absent`; the client can
-	// negotiate and upload again.
-	async recordMissingObject(uploadId: UploadId): Promise<void> {
+	// cannot reappear. A missing shared object does not invalidate the client's NAR,
+	// so remove the reuse row and report `absent` to trigger a new upload.
+	async recordMissingObject(
+		uploadId: UploadId,
+		owner: string,
+		signal?: AbortSignal
+	): Promise<boolean> {
+		signal?.throwIfAborted();
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
+			.where(
+				and(
+					eq(schema.pendingUploads.id, uploadId),
+					eq(schema.pendingUploads.claimOwner, owner)
+				)
+			)
 			.get();
 
 		if (pending === undefined || !isAwaitingVerdict(pending)) {
-			return;
+			return false;
 		}
 
 		const metadata = parseStoredUploadPathMetadata(
@@ -1557,12 +2220,21 @@ export class VerificationService {
 				// callback completes, so a confirmation outside it could race a
 				// delete or recommit queued behind the gate.
 				reclaim = await this.context.criticalSection(async () => {
+					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+						return 'superseded' as const;
+					}
+
 					const result = await this.commitPipeline.reclaimReservedRow(
 						pending.cache,
 						metadata.storePathHash,
 						reserved.generation,
-						metadata.narHash
+						metadata.narHash,
+						() => this.ownsActiveClaim(owner, pending.id, signal)
 					);
+
+					if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+						return 'superseded' as const;
+					}
 
 					// This upload lost the race, so its own captured decision
 					// never ran; apply it against the winning generation before
@@ -1590,22 +2262,41 @@ export class VerificationService {
 					return result;
 				});
 
-				// A concurrent pass has already committed this generation, so the
-				// missing verdict is stale. Clear the stuck row and send `servable`
-				// without pruning its root.
+				if (!this.ownsActiveClaim(owner, pending.id, signal)) {
+					return false;
+				}
+
+				// A concurrent pass has already committed this generation, so this
+				// missing verdict is stale. Clear the pending row and report `servable`
+				// to the waiter without pruning the path's root.
 				if (reclaim === 'committed-current') {
-					this.notifyWaiters(pending, 'servable');
-					this.uploadState.clearPendingUpload(pending.id);
-					return;
+					signal?.throwIfAborted();
+					const didApply = this.uploadState.clearPendingUpload(
+						pending.id,
+						owner
+					);
+
+					if (didApply) {
+						this.notifyWaiters(pending, 'servable');
+					}
+
+					return didApply;
 				}
 			}
 
-			this.notifyWaiters(pending, 'absent');
-			await this.uploadState.clearPendingUploadAndStaging(
+			signal?.throwIfAborted();
+			const didApply = await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
-				metadata.narHash
+				metadata.narHash,
+				owner
 			);
+
+			if (!didApply) {
+				return false;
+			}
+
+			this.notifyWaiters(pending, 'absent');
 
 			// A superseded or recommitted row still holds the path, so its
 			// retention targets must survive; only a genuinely reclaimed path
@@ -1614,16 +2305,23 @@ export class VerificationService {
 				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 			}
 
-			return;
+			return true;
 		}
 
-		await this.uploadState.markUploadTerminal(
+		signal?.throwIfAborted();
+		const isSettled = this.uploadState.markUploadTerminal(
 			pending.id,
-			pending.r2Key,
-			metadata.narHash,
-			'mismatch'
+			'mismatch',
+			owner
 		);
+
+		if (!isSettled) {
+			return false;
+		}
 		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 		this.notifyWaiters(pending, 'mismatch');
+		await this.deleteStagingObjectBestEffort(pending, signal);
+
+		return true;
 	}
 }

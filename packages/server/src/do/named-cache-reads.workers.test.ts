@@ -36,9 +36,7 @@ describe('named cache reads', () => {
 			`/cache/builds/${metadata.storePathHash}.narinfo`
 		);
 		const narinfo = NarInfo.parse(await narinfoResponse.text());
-		const narResponse = await readFetch(
-			`/cache/builds/nar/${metadata.narHash}.nar.zst`
-		);
+		const narResponse = await readFetch(`/cache/builds/${narinfo.url}`);
 		const narBody = new Uint8Array(await narResponse.arrayBuffer());
 
 		expect({

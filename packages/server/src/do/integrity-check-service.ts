@@ -27,6 +27,7 @@ import { type ServerContext } from './context.ts';
 interface BlobFact {
 	fileHash: NixSha256HashString;
 	fileSize: number;
+	incarnation: number;
 }
 
 export class IntegrityCheckService {
@@ -37,11 +38,17 @@ export class IntegrityCheckService {
 		isDeep: boolean,
 		blobFacts: Map<NixSha256HashString, BlobFact>
 	): Promise<CheckDiscrepancy['kind'] | undefined> {
-		const object =
-			(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) ??
-			undefined;
+		const blobFact = blobFacts.get(row.narHash);
 
-		if (object === undefined) {
+		if (blobFact === undefined) {
+			return 'missing-nar';
+		}
+
+		const object = await this.context.env.BLOBS.head(
+			narObjectKey(row.narHash, blobFact.incarnation)
+		);
+
+		if (object === null) {
 			return 'missing-nar';
 		}
 
@@ -49,34 +56,32 @@ export class IntegrityCheckService {
 			return undefined;
 		}
 
-		// `blob_state` is authoritative for the compressed size and hash. A deep
-		// check also derives the uncompressed NAR hash below, even if that row is
-		// absent.
-		const blobFact = blobFacts.get(row.narHash);
-
-		if (blobFact !== undefined) {
-			try {
-				verifyStoredBlob(object, {
-					narHash: row.narHash,
-					fileHash: blobFact.fileHash,
-					fileSize: blobFact.fileSize
-				});
-			} catch (error) {
-				if (
-					error instanceof UploadedObjectSizeMismatchError ||
-					error instanceof UploadedObjectChecksumMissingError ||
-					error instanceof UploadedObjectChecksumMismatchError
-				) {
-					return 'file-hash-mismatch';
-				}
-
-				throw error;
+		// `blob_state` supplies the compressed checksum and size for the current
+		// physical object. Verify them before decompressing and re-deriving the NAR
+		// hash.
+		try {
+			verifyStoredBlob(object, {
+				narHash: row.narHash,
+				fileHash: blobFact.fileHash,
+				fileSize: blobFact.fileSize
+			});
+		} catch (error) {
+			if (
+				error instanceof UploadedObjectSizeMismatchError ||
+				error instanceof UploadedObjectChecksumMissingError ||
+				error instanceof UploadedObjectChecksumMismatchError
+			) {
+				return 'file-hash-mismatch';
 			}
+
+			throw error;
 		}
 
 		// A deep check also re-derives the uncompressed NAR hash, catching a stored
 		// blob whose bytes no longer match the hash its narinfo signed.
-		const blob = await this.context.env.BLOBS.get(narObjectKey(row.narHash));
+		const blob = await this.context.env.BLOBS.get(
+			narObjectKey(row.narHash, blobFact.incarnation)
+		);
 
 		if (blob === null) {
 			return 'missing-nar';
@@ -111,7 +116,8 @@ export class IntegrityCheckService {
 					.select({
 						narHash: d1Schema.blobState.narHash,
 						fileHash: d1Schema.blobState.fileHash,
-						fileSize: d1Schema.blobState.fileSize
+						fileSize: d1Schema.blobState.fileSize,
+						incarnation: d1Schema.blobState.incarnation
 					})
 					.from(d1Schema.blobState)
 					.where(inBatch)
@@ -120,12 +126,14 @@ export class IntegrityCheckService {
 		);
 
 		return new Map(
-			pages
-				.flat()
-				.map((row) => [
-					row.narHash,
-					{ fileHash: row.fileHash, fileSize: row.fileSize }
-				])
+			pages.flat().map((row) => [
+				row.narHash,
+				{
+					fileHash: row.fileHash,
+					fileSize: row.fileSize,
+					incarnation: row.incarnation
+				}
+			])
 		);
 	}
 
@@ -154,9 +162,7 @@ export class IntegrityCheckService {
 		const tenant = this.context.requireTenant();
 
 		const distinctNarHashes = [...new Set(rows.map((row) => row.narHash))];
-		const blobFacts = isDeep
-			? await this.blobFactsFor(distinctNarHashes)
-			: new Map<NixSha256HashString, BlobFact>();
+		const blobFacts = await this.blobFactsFor(distinctNarHashes);
 
 		for (const row of rows) {
 			const narInfoObject = await this.context.env.BLOBS.head(

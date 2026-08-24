@@ -32,7 +32,8 @@ import {
 	deleteObjects,
 	maxInClauseValues,
 	maxOutgoingConnections,
-	presentNarObjects
+	presentNarObjects,
+	recordedNarObjects
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -45,6 +46,7 @@ interface NarInfoReferenceVersion {
 }
 
 interface NarInfoObjectVersion extends NarInfoReferenceVersion {
+	readonly narUrl: string;
 	readonly signatureGeneration: SigningKeyGeneration;
 }
 
@@ -52,6 +54,7 @@ interface NarInfoObjectMetadata {
 	readonly [key: string]: string;
 	readonly generation: string;
 	readonly narHash: string;
+	readonly narUrl: string;
 	readonly signatureGeneration: string;
 }
 
@@ -61,6 +64,7 @@ function narInfoObjectMetadata(
 	return {
 		generation: String(version.generation),
 		narHash: version.narHash,
+		narUrl: version.narUrl,
 		signatureGeneration: String(version.signatureGeneration)
 	};
 }
@@ -70,17 +74,19 @@ function objectMetadata(
 ): NarInfoObjectMetadata | undefined {
 	const generation = object?.customMetadata?.generation;
 	const narHash = object?.customMetadata?.narHash;
+	const narUrl = object?.customMetadata?.narUrl;
 	const signatureGeneration = object?.customMetadata?.signatureGeneration;
 
 	if (
 		generation === undefined ||
 		narHash === undefined ||
+		narUrl === undefined ||
 		signatureGeneration === undefined
 	) {
 		return undefined;
 	}
 
-	return { generation, narHash, signatureGeneration };
+	return { generation, narHash, narUrl, signatureGeneration };
 }
 
 function isObjectVersion(
@@ -92,6 +98,7 @@ function isObjectVersion(
 	return (
 		metadata?.generation === String(version.generation) &&
 		metadata.narHash === version.narHash &&
+		metadata.narUrl === version.narUrl &&
 		metadata.signatureGeneration === String(version.signatureGeneration)
 	);
 }
@@ -108,7 +115,7 @@ interface CommittedReferenceEdge {
 
 type NarInfoBlobFields = Pick<
 	typeof d1Schema.blobState.$inferSelect,
-	'fileHash' | 'fileSize' | 'compression'
+	'fileHash' | 'fileSize' | 'compression' | 'incarnation'
 >;
 
 function referenceKey(
@@ -143,6 +150,25 @@ export class NarInfoObjectsService {
 			}
 		}
 
+		const version = await this.putCurrentNarInfoObject(
+			cache,
+			storePathHash,
+			generation,
+			narHash,
+			narInfo
+		);
+		await this.context.criticalSection(() =>
+			this.confirmPublishedObjectLocked(cache, storePathHash, version)
+		);
+	}
+
+	private async putCurrentNarInfoObject(
+		cache: StoredCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString,
+		narInfo: NarInfo
+	): Promise<NarInfoObjectVersion> {
 		const row = this.context.db
 			.select()
 			.from(schema.narInfos)
@@ -155,13 +181,6 @@ export class NarInfoObjectsService {
 			.get();
 		const isRowMatch =
 			row?.generation === generation && row.narHash === narHash;
-		const version: NarInfoObjectVersion = {
-			generation,
-			narHash,
-			signatureGeneration: isRowMatch
-				? effectiveSignatureGeneration(row)
-				: signingKeyGenerationSchema.parse(0)
-		};
 		const currentSignatures = isRowMatch
 			? storedSignaturesSchema.parse(JSON.parse(row.sigsJson) as unknown)
 			: undefined;
@@ -172,16 +191,24 @@ export class NarInfoObjectsService {
 		const currentNarInfo = shouldRenderCurrent
 			? await this.narInfoFromRow(row)
 			: undefined;
+		const publishedNarInfo = currentNarInfo ?? narInfo;
+		const version: NarInfoObjectVersion = {
+			generation,
+			narHash,
+			narUrl: publishedNarInfo.url,
+			signatureGeneration: isRowMatch
+				? effectiveSignatureGeneration(row)
+				: signingKeyGenerationSchema.parse(0)
+		};
 
 		await this.putNarInfoObject(
 			cache,
 			storePathHash,
 			version,
-			currentNarInfo ?? narInfo
+			publishedNarInfo
 		);
-		await this.context.criticalSection(() =>
-			this.confirmPublishedObjectLocked(cache, storePathHash, version)
-		);
+
+		return version;
 	}
 
 	// The R2 put runs outside the critical section. Re-read the row under the
@@ -204,9 +231,20 @@ export class NarInfoObjectsService {
 			)
 			.get();
 
+		const blob =
+			row === undefined
+				? undefined
+				: await this.context.d1
+						.select({ incarnation: d1Schema.blobState.incarnation })
+						.from(d1Schema.blobState)
+						.where(eq(d1Schema.blobState.narHash, row.narHash))
+						.get();
+
 		if (
+			blob !== undefined &&
 			row?.generation === version.generation &&
 			row.narHash === version.narHash &&
+			version.narUrl === narObjectKey(row.narHash, blob.incarnation) &&
 			effectiveSignatureGeneration(row) === version.signatureGeneration
 		) {
 			return;
@@ -235,6 +273,7 @@ export class NarInfoObjectsService {
 			{
 				generation: row.generation,
 				narHash: row.narHash,
+				narUrl: narInfo.url,
 				signatureGeneration: effectiveSignatureGeneration(row)
 			},
 			narInfo
@@ -273,18 +312,25 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		const existing = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-		);
-
-		if (isObjectVersion(existing, row)) {
-			return;
-		}
-
 		const narInfo = await this.narInfoFromRow(row);
 
 		// Demotion owns the object after the shared blob state disappears.
 		if (narInfo === undefined) {
+			return;
+		}
+
+		const existing = await this.context.env.BLOBS.head(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+
+		if (
+			isObjectVersion(existing, {
+				generation: row.generation,
+				narHash: row.narHash,
+				narUrl: narInfo.url,
+				signatureGeneration: effectiveSignatureGeneration(row)
+			})
+		) {
 			return;
 		}
 
@@ -294,6 +340,7 @@ export class NarInfoObjectsService {
 			{
 				generation: row.generation,
 				narHash: row.narHash,
+				narUrl: narInfo.url,
 				signatureGeneration: effectiveSignatureGeneration(row)
 			},
 			narInfo
@@ -344,9 +391,18 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		const blob = await this.context.env.BLOBS.head(narObjectKey(narHash));
+		const state = await this.context.d1
+			.select({ incarnation: d1Schema.blobState.incarnation })
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
+			.get();
+		const isBlobPresent =
+			state !== undefined &&
+			(await this.context.env.BLOBS.head(
+				narObjectKey(narHash, state.incarnation)
+			)) !== null;
 
-		if (blob !== null) {
+		if (isBlobPresent) {
 			return;
 		}
 
@@ -374,10 +430,75 @@ export class NarInfoObjectsService {
 		});
 	}
 
-	// Publishes for one path run in order. After each R2 put, a short critical
-	// section compares the published generation and NAR hash with the live row.
-	// This prevents a late put from restoring metadata deleted or replaced by a
-	// concurrent commit.
+	// Publishes one claimed verification through the ordinary ordered publication
+	// path. The post-publication fence repairs a late write against the current
+	// narinfo row. The caller completes the upload only while it owns the claim.
+	async publishNarInfoObjectWhile(
+		cache: StoredCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString,
+		narInfo: NarInfo,
+		isStillOwned: () => boolean
+	): Promise<boolean> {
+		if (!isStillOwned()) {
+			return false;
+		}
+
+		await this.publishNarInfoObject(
+			cache,
+			storePathHash,
+			generation,
+			narHash,
+			narInfo
+		);
+
+		return isStillOwned();
+	}
+
+	async isCurrentPublishedVersion(
+		cache: StoredCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		narHash: NixSha256HashString
+	): Promise<boolean> {
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash),
+					eq(schema.narInfos.generation, generation),
+					eq(schema.narInfos.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (row === undefined) {
+			return false;
+		}
+
+		const object = await this.context.env.BLOBS.head(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+
+		const narInfo = await this.narInfoFromRow(row);
+
+		return (
+			narInfo !== undefined &&
+			isObjectVersion(object, {
+				generation: row.generation,
+				narHash: row.narHash,
+				narUrl: narInfo.url,
+				signatureGeneration: effectiveSignatureGeneration(row)
+			})
+		);
+	}
+
+	// Serialise publications for each store path. After an R2 put, a short gate
+	// compares the published generation, NAR hash, and object version with the
+	// current D1 row. Recovery deletes or re-renders an object that lost this race.
 	async publishNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -415,7 +536,8 @@ export class NarInfoObjectsService {
 			.select({
 				fileHash: d1Schema.blobState.fileHash,
 				fileSize: d1Schema.blobState.fileSize,
-				compression: d1Schema.blobState.compression
+				compression: d1Schema.blobState.compression,
+				incarnation: d1Schema.blobState.incarnation
 			})
 			.from(d1Schema.blobState)
 			.where(eq(d1Schema.blobState.narHash, row.narHash))
@@ -434,7 +556,7 @@ export class NarInfoObjectsService {
 	): NarInfo {
 		return new NarInfo(
 			new StorePath(row.storePath),
-			narObjectKey(row.narHash),
+			narObjectKey(row.narHash, blob.incarnation),
 			blob.compression,
 			NixSha256Hash.parse(blob.fileHash),
 			blob.fileSize,
@@ -664,10 +786,11 @@ export class NarInfoObjectsService {
 		const committedRows = rows.filter((row) =>
 			committed.has(row.storePathHash)
 		);
-		const backed = await presentNarObjects(
-			this.context.env.BLOBS,
+		const objects = await recordedNarObjects(
+			this.context.d1,
 			committedRows.map((row) => row.narHash)
 		);
+		const backed = await presentNarObjects(this.context.env.BLOBS, objects);
 		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
 		const hasCurrentObject = (row: NarInfoRow): boolean => {
 			const metadata = present.get(row.storePathHash);

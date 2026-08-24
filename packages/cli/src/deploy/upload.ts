@@ -1,13 +1,17 @@
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
-import type { SingleStepMigrationParam } from 'cloudflare/resources/workers/workers';
 
-import type { WorkerConfig } from './config.ts';
+import type { DurableObjectExport, WorkerConfig } from './config.ts';
 import type { DatabaseId, KvNamespaceId } from './identifiers.ts';
 
 type Metadata = ScriptUpdateParams.Metadata;
 type Binding = NonNullable<Metadata['bindings']>[number];
 
 export interface ScriptMetadata extends Metadata {
+	/**
+	 * Declarative Durable Object class lifecycle. The Cloudflare upload API
+	 * accepts this field, but the pinned SDK's metadata type predates it.
+	 */
+	readonly exports?: Readonly<Record<string, DurableObjectExport>>;
 	readonly cache_options: {
 		readonly enabled: boolean;
 		readonly cross_version_cache: boolean;
@@ -112,17 +116,15 @@ function bindingsFor(
 }
 
 /**
- * Build the multipart upload metadata for a Worker from its config, the resolved
- * resource ids, and the Durable Object migration to apply (if any). `vars`
- * become `plain_text` bindings; `keep_bindings` preserves secrets and
- * variables set out of band across content uploads, which is what
- * `keep_vars: true` in both wrangler configs preserves them. A binding that
- * this metadata lists is still deployed from here.
+ * Build the multipart upload metadata for a Worker from its config and the
+ * resolved resource ids. `vars` become `plain_text` bindings; `keep_bindings`
+ * preserves secrets and variables set out of band across content uploads,
+ * which is what `keep_vars: true` in both wrangler configs preserves them. A
+ * binding that this metadata lists is still deployed from here.
  */
 export function buildScriptMetadata(
 	worker: WorkerConfig,
-	resources: ResolvedResources,
-	migration?: SingleStepMigrationParam
+	resources: ResolvedResources
 ): ScriptMetadata {
 	return {
 		main_module: worker.mainModule,
@@ -138,7 +140,7 @@ export function buildScriptMetadata(
 			enabled: worker.cacheEnabled,
 			cross_version_cache: worker.cacheEnabled
 		},
-		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } }),
-		...(migration !== undefined && { migrations: migration })
+		...(Object.keys(worker.exports).length > 0 && { exports: worker.exports }),
+		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } })
 	};
 }

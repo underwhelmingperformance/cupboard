@@ -2,11 +2,12 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	collectVerificationPasses,
 	commitPath,
+	currentNarObjectKey,
 	currentServer,
 	deferFreshUpload,
 	expectSingleCommitDecision,
@@ -67,6 +68,39 @@ describe('verify alarm backstop', () => {
 			sent: [request],
 			marker: dueAt,
 			alarm: dueAt
+		});
+	});
+
+	it('routes scheduled fresh verification through the queue consumer', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(token, 'cron-queue', 'q'.repeat(32));
+		const sent = await collectVerificationPasses();
+		const originalGet = env.BLOBS.get.bind(env.BLOBS);
+		const stagingReads: string[] = [];
+		const get = vi
+			.spyOn(env.BLOBS, 'get')
+			.mockImplementation((key, options) => {
+				if (key === upload.r2Key) {
+					stagingReads.push(key);
+				}
+
+				return originalGet(key, options);
+			});
+
+		try {
+			await currentServer().runVerification();
+		} finally {
+			get.mockRestore();
+		}
+
+		expect({
+			sent,
+			stagingReads,
+			verdict: await pendingUploadVerdict(upload.uploadId)
+		}).toStrictEqual({
+			sent: [request],
+			stagingReads: [],
+			verdict: 'pending'
 		});
 	});
 
@@ -233,7 +267,9 @@ describe('verify alarm backstop', () => {
 		await collectVerificationPasses();
 		await currentServer().requestVerificationPass();
 
-		await env.BLOBS.delete(narObjectKey(nar.narHash));
+		// The object was collected before the backstop fired. The server must report
+		// a terminal result to the waiter.
+		await env.BLOBS.delete(await currentNarObjectKey(nar.narHash));
 
 		vi.setSystemTime(new Date(base.getTime() + verifyBackstopDelayMs));
 		await fireAlarm();
@@ -250,43 +286,28 @@ describe('verify alarm backstop', () => {
 		});
 	});
 
-	it('does not settle reuse rows leased to a consumer', async () => {
+	it('does not settle a fresh row leased to a consumer', async () => {
 		const token = await initialise();
-		const nar = await verifiableNar('backstop-reuse-claimed');
-		const first = uploadMetadata({
-			name: 'first',
-			storePathHash: 'g'.repeat(32),
-			narHash: nar.narHash,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength,
-			narSize: nar.narSize
-		});
-
-		await commitPath(token, first, nar);
-
-		const second = uploadMetadata({
-			name: 'second',
-			storePathHash: 'h'.repeat(32),
-			narHash: nar.narHash,
-			fileHash: nar.fileHash,
-			fileSize: nar.narBytes.byteLength,
-			narSize: nar.narSize
-		});
-		const reuse = expectSingleCommitDecision(
-			await negotiateUploads(token, [second]),
-			second
+		const upload = await deferFreshUpload(
+			token,
+			'backstop-fresh-claimed',
+			'g'.repeat(32)
 		);
-
-		await markUploadPendingVerification(reuse.uploadId);
 		await collectVerificationPasses();
 
 		// The consumer lease must exclude this row from the backstop pass.
-		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
+		const claimed = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
 		await currentServer().requestVerificationPass();
 
 		vi.setSystemTime(new Date(base.getTime() + verifyBackstopDelayMs));
 		await fireAlarm();
 
-		expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
+		expect({
+			claimed: claimed.claims.map((claim) => claim.uploadId),
+			verdict: await pendingUploadVerdict(upload.uploadId)
+		}).toStrictEqual({ claimed: [upload.uploadId], verdict: 'pending' });
 	});
 });

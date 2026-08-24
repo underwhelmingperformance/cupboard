@@ -46,7 +46,8 @@ import {
 	uploadMetadata,
 	type VerifiableNar,
 	verifiableNar,
-	verifiableNarStored
+	verifiableNarStored,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 // Both encodings decompress to the same NAR and therefore share a narHash. Only
@@ -331,10 +332,10 @@ describe('per-tenant quota', () => {
 		const token = await initialise();
 		const { small, large } = await divergentEncodings('quota-encoding-over');
 
-		// Leave blob_state absent so the advisory check uses the smaller staged
-		// size. Promotion adopts the larger canonical object, and the authoritative
-		// charge must reject that size.
-		await putNarBytes(narObjectKey(large.narHash), large);
+		// Leave `blob_state` absent so the advisory check uses the smaller staged
+		// size. Promotion adopts the larger canonical object, whose size exceeds the
+		// quota.
+		await putNarBytes(narObjectKey(large.narHash, 2), large);
 		await provisionFixtureTenant({ quotaBytes: small.narBytes.byteLength });
 
 		const metadata = uploadMetadata({
@@ -395,10 +396,10 @@ describe('per-tenant quota', () => {
 		await markUploadPendingVerification(upload.uploadId);
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		// Run verification again to prove that the reclaimed reservation cannot
 		// republish the narinfo object.
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const usage = await tenantUsageRow();
 		const object = await env.BLOBS.head(
@@ -445,7 +446,7 @@ describe('per-tenant quota', () => {
 
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const firstServable = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, first.metadata.storePathHash)
@@ -555,8 +556,8 @@ describe('the probe-to-charge window', () => {
 		await putNarBytes(decision.r2Key, nar);
 		await markUploadPendingVerification(decision.uploadId);
 
-		const held = holdProbeHead(narObjectKey(nar.narHash));
-		const pass = currentServer().runVerification();
+		const held = holdProbeHead(narObjectKey(nar.narHash, 2));
+		const pass = verifyCurrentTenant();
 
 		await vi.waitFor(() => {
 			expect(held.heads()).toBe(2);
@@ -572,7 +573,7 @@ describe('the probe-to-charge window', () => {
 
 		try {
 			// The advisory read has already observed the old quota. The charge batch
-			// must detect the lower value and settle the upload terminally.
+			// must detect the lower value and record an over-quota result.
 			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 				.update(d1Schema.tenantUsage)
 				.set({ quotaBytes: nar.narBytes.byteLength - 1 })

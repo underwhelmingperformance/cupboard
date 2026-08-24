@@ -15,7 +15,8 @@ import {
 	putNarBytes,
 	resetTestServer,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 // Verification can await after reading a pending row. A concurrent `subscribe`
@@ -62,7 +63,7 @@ describe('verification sends verdicts only to the current session', () => {
 				.run();
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		async function nextFrameResult() {
 			return { kind: 'frame', frame: await secondSession.nextFrame() } as const;
@@ -127,7 +128,7 @@ describe('verification sends verdicts only to the current session', () => {
 		const secondReplay = await second.nextFrame();
 		expect(secondReplay.ev).toBe('deferred');
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const verdict = await second.nextFrame();
 		second.socket.close();
 		first.socket.close();

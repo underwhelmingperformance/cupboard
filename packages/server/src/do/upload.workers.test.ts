@@ -51,6 +51,7 @@ import {
 	commitUploadViaWorker,
 	CommitVerdictError,
 	commitVerifiablePath,
+	currentNarObjectKey,
 	currentOrigin,
 	currentServer,
 	currentServerTenant,
@@ -87,6 +88,8 @@ import {
 	putNarBytes,
 	readFetch,
 	readStoredNarInfo,
+	recordClaimedMissingObject,
+	recordClaimedVerification,
 	removeRoot,
 	resetTestServer,
 	runGcFromInternalOrigin,
@@ -100,6 +103,7 @@ import {
 	verifiableNar,
 	verifiableNarStored,
 	verifiablePath,
+	verifyCurrentTenant,
 	workerFetch
 } from '../test-support.ts';
 
@@ -413,7 +417,7 @@ describe('upload flow', () => {
 
 		expect(narInfo.toFields()).toStrictEqual({
 			storePath: metadata.storePath,
-			url: `nar/${metadata.narHash}.nar.zst`,
+			url: narObjectKey(metadata.narHash, 2),
 			compression: 'zstd',
 			fileHash: metadata.fileHash,
 			fileSize: metadata.fileSize,
@@ -488,14 +492,9 @@ describe('upload flow', () => {
 			NixSha256Hash.parse(metadata.narHash).toUrlSegment(),
 			'GET'
 		);
-		await expectConditionalNotModified(
-			`/nar/${metadata.narHash}.nar.zst`,
-			readFetch
-		);
-		await expectDateConditionalNotModified(
-			`/nar/${metadata.narHash}.nar.zst`,
-			readFetch
-		);
+		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
+		await expectConditionalNotModified(narPath, readFetch);
+		await expectDateConditionalNotModified(narPath, readFetch);
 	});
 
 	it('logs the row cost of the cold start and a settled commit', async () => {
@@ -596,10 +595,9 @@ describe('upload flow', () => {
 		await commitPath(token, metadata);
 		await provisionNamedTenant('acme');
 
-		const owner = await readFetch(`/nar/${metadata.narHash}.nar.zst`);
-		const intruder = await handlerFetch(
-			`/t/acme/nar/${metadata.narHash}.nar.zst`
-		);
+		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
+		const owner = await readFetch(narPath);
+		const intruder = await handlerFetch(`/t/acme${narPath}`);
 
 		expect({
 			ownerStatus: owner.status,
@@ -732,7 +730,7 @@ describe('upload flow', () => {
 
 		const goodCommit = await commitUpload(token, goodUpload.uploadId);
 		const served = await readFetch(`/${goodMetadata.storePathHash}.narinfo`);
-		const blob = await env.BLOBS.head(narObjectKey(good.narHash));
+		const blob = await env.BLOBS.head(await currentNarObjectKey(good.narHash));
 
 		expect({
 			commitStatus: goodCommit.status,
@@ -790,7 +788,9 @@ describe('upload flow', () => {
 
 		const firstInfo = await fetchNarInfo(first.storePathHash);
 		const secondInfo = await fetchNarInfo(second.storePathHash);
-		const canonical = await env.BLOBS.head(narObjectKey(compressed.narHash));
+		const canonical = await env.BLOBS.head(
+			await currentNarObjectKey(compressed.narHash)
+		);
 		const canonicalChecksum = z
 			.instanceof(ArrayBuffer)
 			.parse(canonical?.checksums.sha256);
@@ -824,7 +824,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		// A terminal verdict remains readable during the observation window after
 		// the staging bytes are deleted.
@@ -898,7 +898,7 @@ describe('upload flow', () => {
 		// Pending verification survives the ordinary upload expiry.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 
@@ -924,7 +924,7 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -949,7 +949,7 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('committing');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -976,7 +976,7 @@ describe('upload flow', () => {
 			verdict: await pendingUploadVerdict(upload.uploadId)
 		}).toStrictEqual({ status: 'pending', verdict: 'committing' });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -993,7 +993,13 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
-		expect(await currentServer().claimPendingVerifications(10)).toStrictEqual([
+		// The queue consumer claims the deferred upload (a read on the DO), decodes
+		// the bytes off the DO thread, then reports the verdict back.
+		const claim = await currentServer().claimVerificationBatch(
+			10,
+			Number.MAX_SAFE_INTEGER
+		);
+		expect(claim.claims).toStrictEqual([
 			{
 				uploadId: upload.uploadId,
 				r2Key: upload.r2Key,
@@ -1003,11 +1009,21 @@ describe('upload flow', () => {
 			}
 		]);
 
-		await currentServer().recordVerification(upload.uploadId, {
-			ok: true,
-			fileHash: fileHash.value,
-			fileSize: narBytes.byteLength
-		});
+		// The off-DO consumer reports the file hash and size it computed while
+		// decoding. Promotion stores that metadata for the served narinfo.
+		await currentServer().recordVerifications(claim.owner, [
+			{
+				uploadId: upload.uploadId,
+				verdict: {
+					kind: 'verified',
+					verification: {
+						ok: true,
+						fileHash: fileHash.value,
+						fileSize: narBytes.byteLength
+					}
+				}
+			}
+		]);
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -1024,7 +1040,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
-		await currentServer().recordVerification(upload.uploadId, {
+		await recordClaimedVerification(upload.uploadId, {
 			ok: false,
 			reason: 'nar-hash-mismatch',
 			actualNarHash: metadata.narHash
@@ -1046,7 +1062,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
-		await currentServer().recordMissingObject(upload.uploadId);
+		await recordClaimedMissingObject(upload.uploadId);
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 	});
@@ -1121,7 +1137,7 @@ describe('upload flow', () => {
 			uploadId: upload.uploadId
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const verdict = await second.nextFrame();
 		second.socket.close();
 
@@ -1325,7 +1341,7 @@ describe('upload flow', () => {
 			await instance.webSocketMessage(serverSocket, batchMessage);
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect({
 			a: await pendingUploadVerdict(a.uploadId),
@@ -1581,7 +1597,7 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId);
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		const session = await openCommitSession(token);
 		session.send({
@@ -1813,7 +1829,7 @@ describe('upload flow', () => {
 			uploadId: upload.uploadId
 		});
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const verdict = await second.nextFrame();
 		second.socket.close();
 
@@ -1849,7 +1865,7 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -1929,7 +1945,8 @@ describe('upload flow', () => {
 			{ kind: 'tenant-verify', tenant: fixtureTenant }
 		]);
 
-		await currentServer().claimPendingVerifications(10);
+		// A pass starts (the queue consumer claims the rows), re-arming the guard.
+		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 
 		// Once a pass has claimed its snapshot, a later deferral needs another
 		// request.
@@ -1978,7 +1995,7 @@ describe('upload flow', () => {
 			staged: (await env.BLOBS.head(loser.r2Key)) !== null
 		}).toStrictEqual({ status: 'pending', verdict: 'pending', staged: true });
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 
@@ -2024,7 +2041,7 @@ describe('upload flow', () => {
 		// An existing canonical blob must not let fresh staged bytes bypass
 		// verification.
 		await markUploadPendingVerification(liarUpload.uploadId);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(liarUpload.uploadId)).toBe('mismatch');
 		await expect(
@@ -2085,7 +2102,7 @@ describe('upload flow', () => {
 			narInfoObjectKey(fixtureTenant, reserved.storePathHash),
 			'accidental'
 		);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(reservedUpload.uploadId)).toBe(
 			'mismatch'
@@ -2112,13 +2129,13 @@ describe('upload flow', () => {
 			.spyOn(env.BLOBS, 'get')
 			.mockRejectedValueOnce(new Error('transient R2 read'));
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		getSpy.mockRestore();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -2198,7 +2215,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		// Verification clears the pending row after publishing the verdict.
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
@@ -2207,7 +2224,7 @@ describe('upload flow', () => {
 		).resolves.not.toBeNull();
 
 		await deletePath(token, metadata.storePathHash);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
@@ -2243,7 +2260,7 @@ describe('upload flow', () => {
 		});
 		await markUploadPendingVerification(upload.uploadId);
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
@@ -2290,19 +2307,18 @@ describe('upload flow', () => {
 
 		// Whichever upload verifies first wins the narinfo row. The losing NAR hash
 		// must have no canonical object left after both verdicts are applied.
-		await currentServer().runVerification();
-		await currentServer().runGarbageCollection();
+		await verifyCurrentTenant();
 
 		const served = await fetchNarInfo(storePathHash);
 		const winner = served.narHash.toString() === narX.narHash ? narX : narY;
 		const loser = winner === narX ? narY : narX;
+		const winnerKey = await currentNarObjectKey(winner.narHash);
+		const loserKey = narObjectKey(loser.narHash, 2);
 
-		await expect(
-			env.BLOBS.head(narObjectKey(loser.narHash))
-		).resolves.toBeNull();
-		await expect(
-			env.BLOBS.head(narObjectKey(winner.narHash))
-		).resolves.not.toBeNull();
+		await currentServer().runGarbageCollection();
+
+		await expect(env.BLOBS.head(loserKey)).resolves.toBeNull();
+		await expect(env.BLOBS.head(winnerKey)).resolves.not.toBeNull();
 	});
 
 	it('terminally fails a deferred upload whose staging object has vanished', async () => {
@@ -2319,7 +2335,7 @@ describe('upload flow', () => {
 		// A definitively missing staging object is terminal; leaving it pending
 		// would retry the same absent object on every pass.
 		await env.BLOBS.delete(upload.r2Key);
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 	});
@@ -2346,7 +2362,7 @@ describe('upload flow', () => {
 
 		// A terminal verdict starts a new observation window after the upload TTL.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 
@@ -2450,7 +2466,7 @@ describe('upload flow', () => {
 		await expect(env.BLOBS.head(first.r2Key)).resolves.toBeNull();
 		await expect(env.BLOBS.head(second.r2Key)).resolves.toBeNull();
 		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
+			env.BLOBS.head(await currentNarObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 	});
 
@@ -2465,7 +2481,7 @@ describe('upload flow', () => {
 		);
 
 		await putNarBytes(upload.r2Key);
-		await putNarBytes(narObjectKey(metadata.narHash));
+		await putNarBytes(narObjectKey(metadata.narHash, 2));
 
 		const commit = await commitUpload(token, upload.uploadId);
 
@@ -2473,7 +2489,7 @@ describe('upload flow', () => {
 
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
+			env.BLOBS.head(await currentNarObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 		await expectNarResponse(metadata.narHash, 'GET');
 	});
@@ -2516,7 +2532,7 @@ describe('upload flow', () => {
 			cacheControl: 'public, max-age=3600, must-revalidate',
 			fields: {
 				storePath: metadata.storePath,
-				url: `nar/${metadata.narHash}.nar.zst`,
+				url: narObjectKey(metadata.narHash, 2),
 				compression: 'zstd',
 				fileHash: metadata.fileHash,
 				fileSize: metadata.fileSize,
@@ -2611,7 +2627,7 @@ describe('upload flow', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		// Leave `blob_state` present so negotiation queues reconciliation. The
 		// missing canonical object then makes reconciliation retire the narinfo.
@@ -2642,7 +2658,7 @@ describe('upload flow', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 		await negotiateUploads(token, [metadata]);
 		await fireReconcile();
 
@@ -2706,8 +2722,8 @@ describe('upload flow', () => {
 		await commitPath(token, first);
 		await commitSharedPath(token, second);
 
-		// Remove the canonical object shared by two committed paths.
-		await env.BLOBS.delete(narObjectKey(first.narHash));
+		// Remove the physical object shared by two committed paths.
+		await env.BLOBS.delete(await currentNarObjectKey(first.narHash));
 
 		// Reconciliation retires both reference edges but credits the shared blob
 		// only once.
@@ -2797,7 +2813,7 @@ describe('upload flow', () => {
 
 		const result = await runGcResult();
 
-		await currentServer().runVerification();
+		await verifyCurrentTenant();
 		const narInfo = await fetchNarInfo(reserved.storePathHash);
 
 		expect({ result, narHash: narInfo.narHash.toString() }).toStrictEqual({
@@ -2934,7 +2950,7 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength
 		});
 		await commitPath(token, metadata);
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		// Leave `blob_state` present so negotiation queues reconciliation before the
 		// missing canonical object retires the narinfo.
@@ -3097,6 +3113,7 @@ describe('upload flow', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
+		const objectKey = await currentNarObjectKey(metadata.narHash);
 
 		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
@@ -3123,15 +3140,11 @@ describe('upload flow', () => {
 		});
 
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.not.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
 	it('retains a NAR still referenced by another store path', async () => {
@@ -3146,6 +3159,7 @@ describe('upload flow', () => {
 		});
 		await commitPath(token, first);
 		await commitSharedPath(token, second);
+		const objectKey = await currentNarObjectKey(second.narHash);
 
 		const deletedFirst = await deletePath(token, first.storePathHash);
 
@@ -3155,7 +3169,7 @@ describe('upload flow', () => {
 
 		expect(secondServed.status).toBe(StatusCodes.OK);
 		await expect(
-			env.BLOBS.head(narObjectKey(first.narHash))
+			env.BLOBS.head(await currentNarObjectKey(first.narHash))
 		).resolves.not.toBeNull();
 
 		const deletedSecond = await deletePath(token, second.storePathHash);
@@ -3165,9 +3179,7 @@ describe('upload flow', () => {
 		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(second.narHash))
-		).resolves.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
 	it('is idempotent when deleting an absent store path', async () => {
@@ -3190,21 +3202,18 @@ describe('upload flow', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
+		const objectKey = await currentNarObjectKey(metadata.narHash);
 		await deletePath(token, metadata.storePathHash);
 
 		await runBlobReaper(rootLogger(), env);
 
 		vi.setSystemTime(new Date(testBase.getTime() + 16 * 60 * 1000));
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.not.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
 	it('rejects an unauthenticated delete', async () => {
@@ -3237,6 +3246,7 @@ describe('upload flow', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
+		const objectKey = await currentNarObjectKey(metadata.narHash);
 
 		const deleteSpy = vi
 			.spyOn(env.BLOBS, 'delete')
@@ -3264,9 +3274,7 @@ describe('upload flow', () => {
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.not.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
 
 		const recovered = await runGcResult();
 
@@ -3276,16 +3284,12 @@ describe('upload flow', () => {
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.not.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.not.toBeNull();
 
 		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
-		await expect(
-			env.BLOBS.head(narObjectKey(metadata.narHash))
-		).resolves.toBeNull();
+		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
 	it('retains a re-pushed path left dangling by an interrupted deletion', async () => {
@@ -3984,7 +3988,7 @@ describe('upload flow', () => {
 				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashC))
 			).resolves.toBeNull();
 			await expect(
-				env.BLOBS.head(narObjectKey(narHash))
+				env.BLOBS.head(await currentNarObjectKey(narHash))
 			).resolves.not.toBeNull();
 			await expect(
 				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashA))
@@ -4008,6 +4012,7 @@ describe('upload flow', () => {
 			});
 			await commitPath(token, a);
 			await commitPath(token, c, cNar);
+			const cObjectKey = await currentNarObjectKey(cNar.narHash);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
 			// Tenant GC retires the unreachable path's edge. The global reaper handles
@@ -4024,7 +4029,7 @@ describe('upload flow', () => {
 
 			expect({
 				deleted: await runBlobReaper(rootLogger(), env),
-				stored: (await env.BLOBS.head(narObjectKey(cNar.narHash))) !== null
+				stored: (await env.BLOBS.head(cObjectKey)) !== null
 			}).toStrictEqual({
 				deleted: 0,
 				stored: true
@@ -4033,9 +4038,7 @@ describe('upload flow', () => {
 			vi.setSystemTime(afterGrace());
 
 			expect(await runBlobReaper(rootLogger(), env)).toBe(1);
-			await expect(
-				env.BLOBS.head(narObjectKey(cNar.narHash))
-			).resolves.toBeNull();
+			await expect(env.BLOBS.head(cObjectKey)).resolves.toBeNull();
 		});
 	});
 

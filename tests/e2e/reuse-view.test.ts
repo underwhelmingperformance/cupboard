@@ -70,7 +70,7 @@ describe('Nix substitution through a reuse view', () => {
 						server.tenantPath(`/reuse/reuse/${storePathHash}.narinfo`)
 					);
 					const narInfo = NarInfo.parse(await narInfoResponse.text());
-					const expectedNarUrl = `../../nar/${narInfo.narHash.toString()}.nar.zst`;
+					const expectedNarUrl = `../../nar/${narInfo.narHash.toString()}.2.nar.zst`;
 
 					// A reuse view has no NAR route of its own: probing the relative
 					// path the narinfo names must 404 beneath the view itself.

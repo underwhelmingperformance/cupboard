@@ -10,10 +10,11 @@ import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
+	currentNarObjectKey,
 	currentServer,
 	initialise,
 	resetTestServer,
@@ -294,5 +295,61 @@ describe('narinfo publication after a concurrent row change', () => {
 			signatures: body?.match(/^Sig:/gmu)?.length,
 			signatureGeneration: object?.customMetadata?.signatureGeneration
 		}).toStrictEqual({ signatures: 2, signatureGeneration: '2' });
+	});
+
+	it('rewrites a narinfo published by a preceding Worker after object replacement', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publish-incarnation-fence');
+		const metadata = uploadMetadata({
+			name: 'incarnation-fenced',
+			storePathHash: 'd'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, metadata, nar);
+		const row = await committedRow(metadata.storePathHash);
+		const key = narInfoObjectKey(
+			fixtureTenant,
+			storePathHashSchema.parse(metadata.storePathHash),
+			cache
+		);
+		const current = await narInfoObjectText(metadata.storePathHash);
+
+		expect(current).toBeDefined();
+
+		if (current === undefined) {
+			return;
+		}
+
+		const currentUrl = await currentNarObjectKey(nar.narHash);
+		const legacyUrl = narObjectKey(nar.narHash);
+		await env.BLOBS.put(
+			key,
+			current.replace(currentUrl, () => legacyUrl),
+			{
+				customMetadata: {
+					generation: String(row.generation),
+					narHash: row.narHash,
+					signatureGeneration: String(row.signatureGeneration)
+				}
+			}
+		);
+
+		await runInDurableObject(currentServer(), (instance) =>
+			new NarInfoObjectsService(instance.context).ensureNarInfoObject(
+				cache,
+				row.storePathHash
+			)
+		);
+
+		const repaired = await env.BLOBS.get(key);
+
+		expect({
+			body: await repaired?.text(),
+			narUrl: repaired?.customMetadata?.narUrl
+		}).toStrictEqual({ body: current, narUrl: currentUrl });
 	});
 });

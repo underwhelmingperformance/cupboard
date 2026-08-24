@@ -15,8 +15,11 @@ import {
 	listRootTargets,
 	narInfoGeneration,
 	pendingUploadVerdict,
+	putNarBytes,
+	recordClaimedVerification,
 	resetTestServer,
-	setRoot
+	setRoot,
+	verifyCurrentTenant
 } from '../test-support.ts';
 
 type PendingRow = typeof pendingUploads.$inferSelect;
@@ -63,7 +66,7 @@ describe('verification with a pending row left after commit', () => {
 			);
 			const staged = await snapshotPendingRow(upload.uploadId);
 
-			await currentServer().runVerification();
+			await verifyCurrentTenant();
 			await setRoot(token, {
 				name: 'main',
 				targets: [upload.metadata.storePath]
@@ -72,9 +75,9 @@ describe('verification with a pending row left after commit', () => {
 			await replantStuckPending(staged);
 
 			if (entry === 'cron') {
-				await currentServer().runVerification();
+				await verifyCurrentTenant();
 			} else {
-				await currentServer().recordVerification(upload.uploadId, {
+				await recordClaimedVerification(upload.uploadId, {
 					ok: true,
 					fileHash: upload.nar.fileHash,
 					fileSize: upload.nar.narBytes.byteLength
@@ -99,4 +102,51 @@ describe('verification with a pending row left after commit', () => {
 			});
 		}
 	);
+
+	it('does not accept a stale narinfo object for the committed generation', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(
+			token,
+			'short-circuit-version',
+			'b'.repeat(32)
+		);
+		const staged = await snapshotPendingRow(upload.uploadId);
+		const objectKey = narInfoObjectKey(
+			fixtureTenant,
+			upload.metadata.storePathHash
+		);
+
+		await verifyCurrentTenant();
+
+		const published = await env.BLOBS.get(objectKey);
+
+		if (published === null) {
+			throw new Error('expected the committed narinfo object');
+		}
+
+		await env.BLOBS.put(objectKey, published.body, {
+			customMetadata: {
+				...published.customMetadata,
+				generation: '99'
+			}
+		});
+		await replantStuckPending(staged);
+		await putNarBytes(upload.r2Key, upload.nar);
+
+		await recordClaimedVerification(upload.uploadId, {
+			ok: true,
+			fileHash: upload.nar.fileHash,
+			fileSize: upload.nar.narBytes.byteLength
+		});
+
+		const restored = await env.BLOBS.head(objectKey);
+
+		expect({
+			verdict: await pendingUploadVerdict(upload.uploadId),
+			metadata: restored?.customMetadata
+		}).toStrictEqual({
+			verdict: undefined,
+			metadata: published.customMetadata
+		});
+	});
 });

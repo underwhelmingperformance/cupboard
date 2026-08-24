@@ -113,9 +113,9 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 		bundleHandler
 	);
 	const narHandler = (context: Context<TenantReadHonoEnv>) => {
-		const narHash = parseNarName(context.req.param('name') ?? '');
+		const nar = parseNarName(context.req.param('name') ?? '');
 
-		if (narHash === undefined) {
+		if (nar === undefined) {
 			return noStore(notFoundResponse());
 		}
 
@@ -123,8 +123,9 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			narHash,
-			false
+			nar.narHash,
+			false,
+			nar.incarnation
 		);
 	};
 	app.get('/t/:tenant/nar/:name', narHandler);

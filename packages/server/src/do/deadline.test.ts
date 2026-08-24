@@ -59,6 +59,43 @@ describe('boundedSubrequest', () => {
 		}
 	});
 
+	it.each([
+		{
+			name: 'a late result',
+			settle: (operation: PromiseWithResolvers<string>) => {
+				operation.resolve('late');
+			}
+		},
+		{
+			name: 'a different late error',
+			settle: (operation: PromiseWithResolvers<string>) => {
+				operation.reject(new Error('late storage failure'));
+			}
+		}
+	])('keeps the deadline authoritative over $name', async ({ settle }) => {
+		vi.useFakeTimers();
+
+		try {
+			const operation = Promise.withResolvers<string>();
+			const pending = withDeadlineBudget(
+				50,
+				() => operation.promise,
+				'verification.record'
+			);
+			const rejects = expect(pending).rejects.toMatchObject({
+				name: 'SubrequestTimeoutError',
+				subrequest: 'verification.record'
+			});
+
+			await vi.advanceTimersByTimeAsync(50);
+			settle(operation);
+
+			await rejects;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('sets no timer for an unbounded byte-transfer call outside a scope', () => {
 		vi.useFakeTimers();
 
