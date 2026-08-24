@@ -103,7 +103,9 @@ jobs:
           path: .cupboard-workflow
           persist-credentials: false
 
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
 
       - uses: ./.cupboard-workflow/actions/resolve-cupboard
         id: resolve-cupboard

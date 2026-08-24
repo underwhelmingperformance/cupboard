@@ -25,7 +25,9 @@ jobs:
 
       # pnpm check includes the end-to-end suite, so the check runner needs
       # the same working Nix installation as CI's dedicated end-to-end job.
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
@@ -114,7 +116,9 @@ jobs:
 
       # Build the CLI through the flake so a stale pnpm dependency hash or a
       # broken derivation fails here rather than in a consumer's checkout.
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
 
       - run: nix flake check
 
