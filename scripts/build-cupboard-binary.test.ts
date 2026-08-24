@@ -1,7 +1,12 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
 	compileHookHelper,
+	generateSeaPreparationBlob,
 	hookHelperBinaryName,
 	hookHelperSourcePath,
 	normaliseBuildVersion,
@@ -77,6 +82,44 @@ describe('releaseAssetNameFor', () => {
 			);
 		}
 	);
+});
+
+describe('generateSeaPreparationBlob', () => {
+	it('produces identical blobs in different work directories', async () => {
+		const root = await mkdtemp(path.join(tmpdir(), 'cupboard-sea-'));
+		const workDirectories = ['first', 'second'].map((name) =>
+			path.join(root, name)
+		);
+
+		try {
+			const blobs = await Promise.all(
+				workDirectories.map(async (workDirectory) => {
+					await mkdir(workDirectory);
+					await Promise.all([
+						writeFile(
+							path.join(workDirectory, 'cupboard.cjs'),
+							"console.log('cupboard');\n"
+						),
+						writeFile(
+							path.join(workDirectory, 'embedded-workers.json'),
+							'{"worker":"same"}\n'
+						)
+					]);
+
+					const blobPath = await generateSeaPreparationBlob(
+						workDirectory,
+						'cjs'
+					);
+
+					return readFile(blobPath);
+				})
+			);
+
+			expect(blobs[1]).toStrictEqual(blobs[0]);
+		} finally {
+			await rm(root, { force: true, recursive: true });
+		}
+	});
 });
 
 describe('releaseArchiveArguments', () => {

@@ -24,6 +24,7 @@ interface Options {
 type SeaFormat = 'esm' | 'cjs';
 
 interface RunOptions {
+	readonly cwd?: string;
 	readonly optional?: boolean;
 }
 
@@ -42,6 +43,46 @@ const sentinelFuse = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
 export const hookHelperSourcePath =
 	'packages/cli/hook-helper/cupboard-hook-relay.c';
 export const hookHelperBinaryName = 'cupboard-hook-relay';
+
+export async function generateSeaPreparationBlob(
+	workDirectory: string,
+	seaFormat: SeaFormat
+): Promise<string> {
+	const bundlePath = path.join(
+		workDirectory,
+		seaFormat === 'esm' ? 'cupboard.mjs' : 'cupboard.cjs'
+	);
+	const blobPath = path.join(workDirectory, 'cupboard.blob');
+	const configurationPath = path.join(workDirectory, 'sea-config.json');
+	const embeddedPayloadPath = path.join(workDirectory, embeddedAssetKey);
+
+	await writeFile(
+		configurationPath,
+		JSON.stringify(
+			{
+				main: path.basename(bundlePath),
+				...(seaFormat === 'esm' && { mainFormat: 'module' }),
+				output: path.basename(blobPath),
+				assets: {
+					[embeddedAssetKey]: path.basename(embeddedPayloadPath)
+				},
+				disableExperimentalSEAWarning: true,
+				useCodeCache: false,
+				useSnapshot: false
+			},
+			undefined,
+			2
+		)
+	);
+
+	run(
+		process.execPath,
+		['--experimental-sea-config', path.basename(configurationPath)],
+		{ cwd: workDirectory }
+	);
+
+	return blobPath;
+}
 
 export type CommandRunner = (
 	command: string,
@@ -122,8 +163,6 @@ async function main(): Promise<void> {
 
 	const outputDirectory = path.resolve(options.outputDirectory);
 	const workDirectory = path.join(outputDirectory, 'work');
-	const blobPath = path.join(workDirectory, 'cupboard.blob');
-	const seaConfigPath = path.join(workDirectory, 'sea-config.json');
 	const embeddedPayloadPath = path.join(workDirectory, embeddedAssetKey);
 	const binaryDirectory = path.join(outputDirectory, 'package');
 	const binaryPath = path.join(binaryDirectory, 'cupboard');
@@ -223,12 +262,7 @@ async function main(): Promise<void> {
 			target: 'node24'
 		});
 
-		await writeFile(
-			seaConfigPath,
-			JSON.stringify(seaConfig(bundlePath, seaFormat), undefined, 2)
-		);
-
-		run(process.execPath, ['--experimental-sea-config', seaConfigPath]);
+		const blobPath = await generateSeaPreparationBlob(workDirectory, seaFormat);
 		await copyFile(process.execPath, binaryPath);
 		await chmod(binaryPath, 0o755);
 
@@ -260,18 +294,6 @@ async function main(): Promise<void> {
 			'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
 		]);
 	}
-
-	function seaConfig(bundlePath: string, seaFormat: SeaFormat): object {
-		return {
-			main: bundlePath,
-			...(seaFormat === 'esm' && { mainFormat: 'module' }),
-			output: blobPath,
-			assets: { [embeddedAssetKey]: embeddedPayloadPath },
-			disableExperimentalSEAWarning: true,
-			useCodeCache: false,
-			useSnapshot: false
-		};
-	}
 }
 
 function errorMessage(error: unknown): string {
@@ -283,7 +305,10 @@ function run(
 	arguments_: readonly string[],
 	options: RunOptions = {}
 ): void {
-	const result = spawnSync(command, [...arguments_], { stdio: 'inherit' });
+	const result = spawnSync(command, [...arguments_], {
+		cwd: options.cwd,
+		stdio: 'inherit'
+	});
 
 	if (result.status === 0) {
 		return;
