@@ -110,6 +110,9 @@ importers:
       '@actions/attest':
         specifier: ^3.2.0
         version: 3.2.0(@octokit/core@7.0.6)(supports-color@10.2.2)
+      '@actions/core':
+        specifier: ^3.0.1
+        version: 3.0.1
       '@cupboard/logger':
         specifier: workspace:*
         version: link:../packages/logger

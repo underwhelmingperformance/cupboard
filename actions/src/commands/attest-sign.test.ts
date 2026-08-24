@@ -1,11 +1,8 @@
-import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { createGithubReporter } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type {
 	AttestationStatement,
@@ -22,9 +19,14 @@ import {
 import {
 	attestSignAction,
 	type AttestSignDependencies,
+	type AttestSignIo,
 	type AttestSignOptions,
 	resolveAttestSignInputs
 } from './attest-sign.ts';
+
+const mocks = vi.hoisted(() => ({ setOutput: vi.fn() }));
+
+vi.mock('@actions/core', () => ({ setOutput: mocks.setOutput }));
 
 const appName = '0123456789abcdfghijklmnpqrsvwxyz-app';
 const appDigest = '11'.repeat(32);
@@ -53,28 +55,47 @@ interface Workspace {
 	readonly checksumsFile: string;
 	readonly builtChecksumsFile: string;
 	readonly predicateFile: string;
-	readonly outputFile: string;
+	readonly textFiles: Map<string, string>;
+	readonly bundles: Map<string, string>;
 }
 
-async function workspace(): Promise<Workspace> {
-	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-sign-'));
+function workspace(): Workspace {
+	const directory = '/runner/temp/cupboard-sign';
 	const checksumsFile = path.join(directory, 'subjects.txt');
 	const builtChecksumsFile = path.join(directory, 'built-subjects.txt');
 	const predicateFile = path.join(directory, 'build-origin.json');
-
-	await writeFile(
-		checksumsFile,
-		`${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`
-	);
-	await writeFile(builtChecksumsFile, `${appDigest}  ${appName}\n`);
-	await writeFile(predicateFile, `${JSON.stringify(originPredicate)}\n`);
 
 	return {
 		directory,
 		checksumsFile,
 		builtChecksumsFile,
 		predicateFile,
-		outputFile: path.join(directory, 'output')
+		textFiles: new Map([
+			[
+				checksumsFile,
+				`${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`
+			],
+			[builtChecksumsFile, `${appDigest}  ${appName}\n`],
+			[predicateFile, `${JSON.stringify(originPredicate)}\n`]
+		]),
+		bundles: new Map()
+	};
+}
+
+function memoryIo(files: Workspace): AttestSignIo {
+	return {
+		readText(filePath) {
+			const contents = files.textFiles.get(filePath);
+
+			return contents === undefined
+				? Promise.reject(new Error(`No test file exists at ${filePath}`))
+				: Promise.resolve(contents);
+		},
+		writeBundle(filePath, signed) {
+			files.bundles.set(filePath, signed.bundle);
+
+			return Promise.resolve();
+		}
 	};
 }
 
@@ -92,11 +113,20 @@ function options(
 	};
 }
 
-function recordingSigner(
+interface RecordedSigning {
+	readonly dependencies: AttestSignDependencies;
+	readonly outputs: Readonly<Record<string, string>>;
+}
+
+function recordedSigning(
+	files: Workspace,
 	records: SigningRecord[],
-	failures: readonly Error[] = []
-): AttestSignDependencies {
-	return {
+	failures: readonly Error[] = [],
+	shouldRecordOutputs = true
+): RecordedSigning {
+	const outputs: Record<string, string> = {};
+	const dependencies: AttestSignDependencies = {
+		io: memoryIo(files),
 		delay: () => Promise.resolve(),
 		provenanceStatement: () =>
 			Promise.resolve({
@@ -114,21 +144,27 @@ function recordingSigner(
 				: Promise.reject(failure);
 		}
 	};
+
+	return {
+		outputs,
+		dependencies: shouldRecordOutputs
+			? {
+					...dependencies,
+					setOutput(name, value) {
+						outputs[name] = value;
+					}
+				}
+			: dependencies
+	};
 }
 
-async function outputsOf(outputFile: string): Promise<Record<string, string>> {
-	const written = await readFile(outputFile, 'utf8');
+function checksumLines(count: number): string {
+	return Array.from({ length: count }, (_, index) => {
+		const digest = index.toString(16).padStart(64, '0');
+		const name = `subject-${String(index).padStart(4, '0')}`;
 
-	return Object.fromEntries(
-		written
-			.split('\n')
-			.filter((line) => line.length > 0)
-			.map((line) => {
-				const separator = line.indexOf('=');
-
-				return [line.slice(0, separator), line.slice(separator + 1)];
-			})
-	);
+		return `${digest}  ${name}`;
+	}).join('\n');
 }
 
 describe('resolveAttestSignInputs', () => {
@@ -190,181 +226,268 @@ describe('resolveAttestSignInputs', () => {
 });
 
 describe('attestSignAction', () => {
-	it('signs build provenance for built paths and build-origin for all accepted subjects', async () => {
-		const files = await workspace();
+	it('writes action outputs through the GitHub Actions toolkit', async () => {
+		const files = workspace();
 		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records, [], false);
+		const checksums = `${checksumLines(1025)}\n`;
+		const firstBundle = path.join(files.directory, 'provenance.sigstore.json');
+		const secondBundle = path.join(
+			files.directory,
+			'provenance.sigstore.2.json'
+		);
 
-		try {
-			await attestSignAction(
-				options(files),
-				{ GITHUB_OUTPUT: files.outputFile },
-				createGithubReporter(),
-				recordingSigner(records)
-			);
+		files.textFiles.set(files.checksumsFile, checksums);
+		files.textFiles.set(files.builtChecksumsFile, checksums);
+		mocks.setOutput.mockClear();
 
-			const bundleFile = path.join(files.directory, 'provenance.sigstore.json');
-			const originBundleFile = path.join(
-				files.directory,
-				'build-origin.sigstore.json'
-			);
+		await attestSignAction(
+			options(files, { predicateFile: '', predicateType: '' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
 
-			expect({
-				records,
-				outputs: await outputsOf(files.outputFile),
-				bundle: await readFile(bundleFile, 'utf8'),
-				originBundle: await readFile(originBundleFile, 'utf8')
-			}).toStrictEqual({
-				records: [
-					{
-						subjects: [{ name: appName, sha256: appDigest }],
-						statement: {
-							predicateType: 'https://slsa.dev/provenance/v1',
-							predicate: { buildDefinition: { buildType: 'workflow' } }
-						}
-					},
-					{
-						subjects: [
-							{ name: appName, sha256: appDigest },
-							{ name: runtimeName, sha256: runtimeDigest }
-						],
-						statement: {
-							predicateType: buildOriginPredicateType,
-							predicate: originPredicate
-						}
+		expect(mocks.setOutput.mock.calls).toStrictEqual([
+			['bundle-path', `${firstBundle}\n${secondBundle}`],
+			['origin-bundle-path', '']
+		]);
+	});
+
+	it('signs build provenance for built paths and build-origin for all accepted subjects', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const bundleFile = path.join(files.directory, 'provenance.sigstore.json');
+		const originBundleFile = path.join(
+			files.directory,
+			'build-origin.sigstore.json'
+		);
+
+		await attestSignAction(
+			options(files),
+			createGithubReporter(),
+			signing.dependencies
+		);
+
+		expect({
+			records,
+			outputs: signing.outputs,
+			bundles: [...files.bundles]
+		}).toStrictEqual({
+			records: [
+				{
+					subjects: [{ name: appName, sha256: appDigest }],
+					statement: {
+						predicateType: 'https://slsa.dev/provenance/v1',
+						predicate: { buildDefinition: { buildType: 'workflow' } }
 					}
-				],
-				outputs: {
-					'bundle-path': bundleFile,
-					'origin-bundle-path': originBundleFile
 				},
-				bundle: '{"predicateType":"https://slsa.dev/provenance/v1"}\n',
-				originBundle: `{"predicateType":"${buildOriginPredicateType}"}\n`
-			});
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+				{
+					subjects: [
+						{ name: appName, sha256: appDigest },
+						{ name: runtimeName, sha256: runtimeDigest }
+					],
+					statement: {
+						predicateType: buildOriginPredicateType,
+						predicate: originPredicate
+					}
+				}
+			],
+			outputs: {
+				'bundle-path': bundleFile,
+				'origin-bundle-path': originBundleFile
+			},
+			bundles: [
+				[bundleFile, '{"predicateType":"https://slsa.dev/provenance/v1"}\n'],
+				[originBundleFile, `{"predicateType":"${buildOriginPredicateType}"}\n`]
+			]
+		});
 	});
 
 	it('signs the provenance alone when the run recorded no origin', async () => {
-		const files = await workspace();
+		const files = workspace();
 		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
 
-		try {
-			await attestSignAction(
-				options(files, { predicateFile: '', predicateType: '' }),
-				{ GITHUB_OUTPUT: files.outputFile },
-				createGithubReporter(),
-				recordingSigner(records)
-			);
+		await attestSignAction(
+			options(files, { predicateFile: '', predicateType: '' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
 
-			expect({
-				predicateTypes: records.map((record) => record.statement.predicateType),
-				outputs: await outputsOf(files.outputFile)
-			}).toStrictEqual({
-				predicateTypes: ['https://slsa.dev/provenance/v1'],
-				outputs: {
-					'bundle-path': path.join(files.directory, 'provenance.sigstore.json'),
-					'origin-bundle-path': ''
-				}
-			});
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+		expect({
+			predicateTypes: records.map((record) => record.statement.predicateType),
+			outputs: signing.outputs
+		}).toStrictEqual({
+			predicateTypes: ['https://slsa.dev/provenance/v1'],
+			outputs: {
+				'bundle-path': path.join(files.directory, 'provenance.sigstore.json'),
+				'origin-bundle-path': ''
+			}
+		});
 	});
 
 	it('signs build-origin alone when this run built none of the published paths', async () => {
-		const files = await workspace();
+		const files = workspace();
 		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		files.textFiles.set(files.builtChecksumsFile, '');
 
-		try {
-			await writeFile(files.builtChecksumsFile, '');
-			await attestSignAction(
-				options(files),
-				{ GITHUB_OUTPUT: files.outputFile },
-				createGithubReporter(),
-				recordingSigner(records)
-			);
+		await attestSignAction(
+			options(files),
+			createGithubReporter(),
+			signing.dependencies
+		);
 
-			expect({
-				predicateTypes: records.map((record) => record.statement.predicateType),
-				outputs: await outputsOf(files.outputFile)
-			}).toStrictEqual({
-				predicateTypes: [buildOriginPredicateType],
-				outputs: {
-					'bundle-path': '',
-					'origin-bundle-path': path.join(
-						files.directory,
-						'build-origin.sigstore.json'
-					)
+		expect({
+			predicateTypes: records.map((record) => record.statement.predicateType),
+			outputs: signing.outputs
+		}).toStrictEqual({
+			predicateTypes: [buildOriginPredicateType],
+			outputs: {
+				'bundle-path': '',
+				'origin-bundle-path': path.join(
+					files.directory,
+					'build-origin.sigstore.json'
+				)
+			}
+		});
+	});
+
+	it('splits both statements at the GitHub subject limit', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const checksums = `${checksumLines(1025)}\n`;
+		const firstProvenanceBundle = path.join(
+			files.directory,
+			'provenance.sigstore.json'
+		);
+		const secondProvenanceBundle = path.join(
+			files.directory,
+			'provenance.sigstore.2.json'
+		);
+		const firstOriginBundle = path.join(
+			files.directory,
+			'build-origin.sigstore.json'
+		);
+		const secondOriginBundle = path.join(
+			files.directory,
+			'build-origin.sigstore.2.json'
+		);
+
+		files.textFiles.set(files.checksumsFile, checksums);
+		files.textFiles.set(files.builtChecksumsFile, checksums);
+		await attestSignAction(
+			options(files),
+			createGithubReporter(),
+			signing.dependencies
+		);
+
+		expect({
+			batches: records.map((record) => ({
+				count: record.subjects.length,
+				first: record.subjects.at(0)?.name,
+				last: record.subjects.at(-1)?.name
+			})),
+			outputs: signing.outputs,
+			bundles: [...files.bundles]
+		}).toStrictEqual({
+			batches: [
+				{
+					count: 1024,
+					first: 'subject-0000',
+					last: 'subject-1023'
+				},
+				{
+					count: 1,
+					first: 'subject-1024',
+					last: 'subject-1024'
+				},
+				{
+					count: 1024,
+					first: 'subject-0000',
+					last: 'subject-1023'
+				},
+				{
+					count: 1,
+					first: 'subject-1024',
+					last: 'subject-1024'
 				}
-			});
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+			],
+			outputs: {
+				'bundle-path': `${firstProvenanceBundle}\n${secondProvenanceBundle}`,
+				'origin-bundle-path': `${firstOriginBundle}\n${secondOriginBundle}`
+			},
+			bundles: [
+				[
+					firstProvenanceBundle,
+					'{"predicateType":"https://slsa.dev/provenance/v1"}\n'
+				],
+				[
+					secondProvenanceBundle,
+					'{"predicateType":"https://slsa.dev/provenance/v1"}\n'
+				],
+				[
+					firstOriginBundle,
+					`{"predicateType":"${buildOriginPredicateType}"}\n`
+				],
+				[
+					secondOriginBundle,
+					`{"predicateType":"${buildOriginPredicateType}"}\n`
+				]
+			]
+		});
 	});
 
 	it('refuses a checksums file that lists no subject', async () => {
-		const files = await workspace();
+		const files = workspace();
+		files.textFiles.set(files.checksumsFile, '');
 
-		try {
-			await writeFile(files.checksumsFile, '');
-			await expect(
-				attestSignAction(
-					options(files),
-					{ GITHUB_OUTPUT: files.outputFile },
-					createGithubReporter(),
-					recordingSigner([])
-				)
-			).rejects.toBeInstanceOf(AttestationSubjectsMissingError);
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+		await expect(
+			attestSignAction(
+				options(files),
+				createGithubReporter(),
+				recordedSigning(files, []).dependencies
+			)
+		).rejects.toBeInstanceOf(AttestationSubjectsMissingError);
 	});
 
 	it('rejects a predicate file that does not contain a JSON object before signing', async () => {
-		const files = await workspace();
+		const files = workspace();
 		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		files.textFiles.set(files.predicateFile, '["not an object"]\n');
 
-		try {
-			await writeFile(files.predicateFile, '["not an object"]\n');
-			await expect(
-				attestSignAction(
-					options(files),
-					{ GITHUB_OUTPUT: files.outputFile },
-					createGithubReporter(),
-					recordingSigner(records)
-				)
-			).rejects.toBeInstanceOf(AttestationPredicateFileError);
+		await expect(
+			attestSignAction(
+				options(files),
+				createGithubReporter(),
+				signing.dependencies
+			)
+		).rejects.toBeInstanceOf(AttestationPredicateFileError);
 
-			expect(records).toStrictEqual([]);
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+		expect(records).toStrictEqual([]);
 	});
 
 	it('fails the step when a statement cannot be signed', async () => {
-		const files = await workspace();
+		const files = workspace();
 		const records: SigningRecord[] = [];
-		const dependencies = recordingSigner(records, [
+		const signing = recordedSigning(files, records, [
 			new Error('the OIDC token is missing')
 		]);
 
-		try {
-			await expect(
-				attestSignAction(
-					options(files),
-					{ GITHUB_OUTPUT: files.outputFile },
-					createGithubReporter(),
-					dependencies
-				)
-			).rejects.toBeInstanceOf(AttestationSigningError);
+		await expect(
+			attestSignAction(
+				options(files),
+				createGithubReporter(),
+				signing.dependencies
+			)
+		).rejects.toBeInstanceOf(AttestationSigningError);
 
-			expect({
-				attempted: records.length,
-				wroteOutputs: existsSync(files.outputFile)
-			}).toStrictEqual({ attempted: 1, wroteOutputs: false });
-		} finally {
-			await rm(files.directory, { recursive: true, force: true });
-		}
+		expect({
+			attempted: records.length,
+			outputs: signing.outputs
+		}).toStrictEqual({ attempted: 1, outputs: {} });
 	});
 });

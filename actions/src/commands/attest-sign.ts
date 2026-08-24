@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { env } from 'node:process';
 
+import { setOutput as setGithubOutput } from '@actions/core';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import { chunk } from '@cupboard/shared/collections';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -22,7 +23,6 @@ import {
 	MissingInputError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
-import { type Environment, setOutput } from '../inputs.ts';
 import { provided } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
 
@@ -46,6 +46,17 @@ export interface AttestSignInputs {
 	readonly githubToken: string;
 }
 
+/**
+ * File operations used while signing and saving attestation bundles.
+ */
+export interface AttestSignIo {
+	readonly readText: (filePath: string) => Promise<string>;
+	readonly writeBundle: (
+		filePath: string,
+		signed: SignedAttestation
+	) => Promise<void>;
+}
+
 export interface AttestSignDependencies extends SigningDependencies {
 	/**
 	 * Defaults to {@link githubStatementSigner}.
@@ -55,6 +66,11 @@ export interface AttestSignDependencies extends SigningDependencies {
 		githubToken: string
 	) => StatementSigner;
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
+	/**
+	 * Defaults to {@link setGithubOutput}.
+	 */
+	readonly setOutput?: (name: string, value: string) => Promise<void> | void;
+	readonly io?: AttestSignIo;
 }
 
 // The `attest` command validates the build-origin predicate against its schema
@@ -62,10 +78,11 @@ export interface AttestSignDependencies extends SigningDependencies {
 // The only check here is that the document is a JSON object, because that is
 // what the predicate field of an in-toto statement takes.
 const predicateDocumentSchema = z.looseObject({});
+const maximumGithubAttestationSubjects = 1024;
 
 export function registerAttestSignCommand(
 	program: Command,
-	environment: Environment = env
+	dependencies: AttestSignDependencies = {}
 ): void {
 	program
 		.command('attest-sign')
@@ -85,11 +102,17 @@ export function registerAttestSignCommand(
 			'--predicate-type <type>',
 			'in-toto predicate type of the build-origin predicate'
 		)
-		.option('--bundle-file <path>', 'path for the SLSA build-provenance bundle')
-		.option('--origin-bundle-file <path>', 'path for the build-origin bundle')
+		.option(
+			'--bundle-file <path>',
+			'base path for the SLSA build-provenance bundles'
+		)
+		.option(
+			'--origin-bundle-file <path>',
+			'base path for the build-origin bundles'
+		)
 		.option('--github-token <token>', 'GitHub token for the attestation store')
 		.action((options: AttestSignOptions) =>
-			attestSignAction(options, environment)
+			attestSignAction(options, createGithubReporter(), dependencies)
 		);
 }
 
@@ -139,15 +162,19 @@ export function resolveAttestSignInputs(
 }
 
 async function readSubjects(
-	checksumsFile: string
+	checksumsFile: string,
+	io: AttestSignIo
 ): Promise<readonly AttestationSubject[]> {
-	const checksums = parseChecksums(await readFile(checksumsFile, 'utf8'));
+	const checksums = parseChecksums(await io.readText(checksumsFile));
 
 	return [...checksums].map(([name, sha256]) => ({ name, sha256 }));
 }
 
-async function readPredicate(predicateFile: string): Promise<object> {
-	const source = await readFile(predicateFile, 'utf8');
+async function readPredicate(
+	predicateFile: string,
+	io: AttestSignIo
+): Promise<object> {
+	const source = await io.readText(predicateFile);
 	let document: unknown;
 
 	try {
@@ -167,35 +194,33 @@ async function readPredicate(predicateFile: string): Promise<object> {
 	return parsed.data;
 }
 
-async function writeBundle(
-	bundleFile: string,
-	signed: SignedAttestation
-): Promise<void> {
-	await mkdir(path.dirname(bundleFile), { recursive: true });
-	await writeFile(bundleFile, signed.bundle);
-}
+const nodeAttestSignIo: AttestSignIo = {
+	readText: (filePath) => readFile(filePath, 'utf8'),
+	async writeBundle(filePath, signed) {
+		await mkdir(path.dirname(filePath), { recursive: true });
+		await writeFile(filePath, signed.bundle);
+	}
+};
 
 /**
- * The two statements cover different subjects. Build provenance claims that
- * this workflow produced its subjects, so it covers only paths built by this
- * run. The action signs no build provenance when this run built none of the
- * published paths. The build-origin statement covers every accepted receipt
- * subject.
+ * Build provenance covers only paths built by this run. The action signs no
+ * build provenance when this run built none of the published paths.
+ * Build-origin attestations cover every accepted receipt subject.
  */
 export async function attestSignAction(
 	options: AttestSignOptions,
-	environment: Environment = env,
 	reporter: Reporter = createGithubReporter(),
 	dependencies: AttestSignDependencies = {}
 ): Promise<void> {
 	const inputs = resolveAttestSignInputs(options);
-	const subjects = await readSubjects(inputs.checksumsFile);
+	const io = dependencies.io ?? nodeAttestSignIo;
+	const subjects = await readSubjects(inputs.checksumsFile, io);
 
 	if (subjects.length === 0) {
 		throw new AttestationSubjectsMissingError(inputs.checksumsFile);
 	}
 
-	const builtSubjects = await readSubjects(inputs.builtChecksumsFile);
+	const builtSubjects = await readSubjects(inputs.builtChecksumsFile, io);
 	const signerFor =
 		dependencies.signerFor ??
 		((forSubjects, githubToken) =>
@@ -204,63 +229,105 @@ export async function attestSignAction(
 		dependencies.provenanceStatement ?? slsaProvenanceStatement;
 	const signing: SigningDependencies =
 		dependencies.delay === undefined ? {} : { delay: dependencies.delay };
+	const setOutput = dependencies.setOutput ?? setGithubOutput;
 	// Read the build-origin predicate before signing anything. Reading it later
 	// would record a provenance attestation on the repository for a run that
 	// then fails on an unreadable file.
 	const originPredicate =
 		inputs.predicateFile === ''
 			? undefined
-			: await readPredicate(inputs.predicateFile);
+			: await readPredicate(inputs.predicateFile, io);
 
-	await setOutput(
-		environment,
-		'bundle-path',
+	const provenanceBundles =
 		builtSubjects.length === 0
-			? ''
-			: await signProvenance(inputs, {
-					sign: signerFor(builtSubjects, inputs.githubToken),
-					statement: provenanceStatement,
+			? []
+			: await signSubjectBatches({
+					subjects: builtSubjects,
+					statement: await provenanceStatement(),
+					bundleFile: inputs.bundleFile,
+					githubToken: inputs.githubToken,
+					signerFor,
 					reporter,
-					signing
-				})
-	);
+					signing,
+					io
+				});
+
+	await setOutput('bundle-path', provenanceBundles.join('\n'));
 
 	if (originPredicate === undefined) {
-		await setOutput(environment, 'origin-bundle-path', '');
+		await setOutput('origin-bundle-path', '');
 
 		return;
 	}
 
-	const origin = await signStatement(
-		{ predicateType: inputs.predicateType, predicate: originPredicate },
-		signerFor(subjects, inputs.githubToken),
+	const originBundles = await signSubjectBatches({
+		subjects,
+		statement: {
+			predicateType: inputs.predicateType,
+			predicate: originPredicate
+		},
+		bundleFile: inputs.originBundleFile,
+		githubToken: inputs.githubToken,
+		signerFor,
 		reporter,
-		signing
-	);
+		signing,
+		io
+	});
 
-	await writeBundle(inputs.originBundleFile, origin);
-	await setOutput(environment, 'origin-bundle-path', inputs.originBundleFile);
+	await setOutput('origin-bundle-path', originBundles.join('\n'));
 }
 
-interface ProvenanceSigning {
-	readonly sign: StatementSigner;
-	readonly statement: () => Promise<AttestationStatement>;
+interface SubjectBatchSigning {
+	readonly subjects: readonly AttestationSubject[];
+	readonly statement: AttestationStatement;
+	readonly bundleFile: string;
+	readonly githubToken: string;
+	readonly signerFor: (
+		subjects: readonly AttestationSubject[],
+		githubToken: string
+	) => StatementSigner;
 	readonly reporter: Reporter;
 	readonly signing: SigningDependencies;
+	readonly io: AttestSignIo;
 }
 
-async function signProvenance(
-	inputs: AttestSignInputs,
-	options: ProvenanceSigning
-): Promise<string> {
-	const provenance = await signStatement(
-		await options.statement(),
-		options.sign,
-		options.reporter,
-		options.signing
+async function signSubjectBatches(
+	options: SubjectBatchSigning
+): Promise<readonly string[]> {
+	const bundleFiles: string[] = [];
+	const subjectBatches = chunk(
+		options.subjects,
+		maximumGithubAttestationSubjects
 	);
 
-	await writeBundle(inputs.bundleFile, provenance);
+	for (const [index, subjects] of subjectBatches.entries()) {
+		const signed = await signStatement(
+			options.statement,
+			options.signerFor(subjects, options.githubToken),
+			options.reporter,
+			options.signing
+		);
+		const bundleFile = bundleFileForBatch(options.bundleFile, index);
 
-	return inputs.bundleFile;
+		await options.io.writeBundle(bundleFile, signed);
+		bundleFiles.push(bundleFile);
+	}
+
+	return bundleFiles;
+}
+
+function bundleFileForBatch(bundleFile: string, index: number): string {
+	if (index === 0) {
+		return bundleFile;
+	}
+
+	const extension = path.extname(bundleFile);
+
+	if (extension === '') {
+		return `${bundleFile}.${String(index + 1)}`;
+	}
+
+	const stem = bundleFile.slice(0, -extension.length);
+
+	return `${stem}.${String(index + 1)}${extension}`;
 }
