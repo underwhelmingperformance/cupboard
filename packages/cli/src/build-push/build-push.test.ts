@@ -1718,6 +1718,23 @@ describe('runBuildPush', () => {
 		});
 	});
 
+	it('makes five build attempts by default', async () => {
+		const run = await runFlow({
+			constructed: { succeedOn: 5 },
+			valid: [pathA]
+		});
+
+		expect({
+			error: run.error,
+			attemptIdsIssued: run.attemptIdsIssued,
+			sleeps: run.sleeps
+		}).toStrictEqual({
+			error: undefined,
+			attemptIdsIssued: 5,
+			sleeps: [15_000, 30_000, 45_000, 60_000]
+		});
+	});
+
 	it.each([
 		{
 			name: 'streamed',

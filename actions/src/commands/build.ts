@@ -78,6 +78,8 @@ export interface BuildDependencies {
 	readonly signal?: AbortSignal;
 }
 
+const defaultBuildAttempts = 5;
+
 function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
 	signal?.throwIfAborted();
 
@@ -319,7 +321,11 @@ export function registerBuildCommand(
 			'--installables-file <path>',
 			'read newline-delimited installables from this file'
 		)
-		.option('--attempts <count>', 'maximum number of build attempts', '3')
+		.option(
+			'--attempts <count>',
+			'maximum number of build attempts',
+			String(defaultBuildAttempts)
+		)
 		.option(
 			'--keep-going <boolean>',
 			'continue building other installables after one fails',
@@ -369,9 +375,10 @@ export async function buildAction(
 		throw new BuildInstallableInvalidError(installables);
 	}
 
-	const attempts = Number(options.attempts ?? '3');
+	const statedAttempts = options.attempts ?? String(defaultBuildAttempts);
+	const attempts = Number(statedAttempts);
 	if (!Number.isSafeInteger(attempts) || attempts < 1) {
-		throw new BuildAttemptsInvalidError(options.attempts ?? '3');
+		throw new BuildAttemptsInvalidError(statedAttempts);
 	}
 
 	const isKeepGoing = isEnabled('keep-going', options.keepGoing, false);

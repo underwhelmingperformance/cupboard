@@ -17,7 +17,7 @@ inputs:
     description: Maximum local build jobs. Empty uses the Nix default.
     required: false
   allow-failure:
-    description: Return successfully if all three build attempts fail.
+    description: Return successfully if all five build attempts fail.
     required: false
     default: 'false'
   require-provenance:
