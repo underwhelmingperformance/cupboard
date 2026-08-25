@@ -26,10 +26,32 @@ describe('prepare and setup Nix configuration', () => {
 			setupReferencesPrepareConfig: setup.includes('cupboard-prepare-nix.conf'),
 			setupWritesOwnConfig: setup.includes("'cupboard-nix.conf'")
 		}).toStrictEqual({
-			prepareConfigReferences: 4,
+			prepareConfigReferences: 6,
 			prepareReferencesSetupConfig: false,
 			setupReferencesPrepareConfig: false,
 			setupWritesOwnConfig: true
+		});
+	});
+
+	it('writes the substitution default before the caller settings', async () => {
+		const contents = await readFile(prepareAction, 'utf8');
+		const steps = contents
+			.matchAll(/^ {4}- name: (?<step>.+)$/gmu)
+			.map((match) => match.groups?.step)
+			.toArray();
+
+		expect({
+			substitutionDefault: contents.includes('always-allow-substitutes = true'),
+			// The last assignment in a nix.conf file wins, so the caller's
+			// `nix-config` can only turn the default off by coming after it.
+			configurationSteps: steps.filter((step) => step?.startsWith('Configure '))
+		}).toStrictEqual({
+			substitutionDefault: true,
+			configurationSteps: [
+				'Configure Nix substitution',
+				'Configure extra Nix settings',
+				'Configure Nix SSH transport'
+			]
 		});
 	});
 });

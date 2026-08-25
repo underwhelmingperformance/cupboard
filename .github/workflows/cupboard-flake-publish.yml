@@ -109,7 +109,9 @@ on:
         type: boolean
       nix-config:
         description:
-          Flake installable that evaluates to extra nix.conf text for builders.
+          Flake installable that evaluates to extra nix.conf text for the plan
+          and cohort jobs. These settings override the workflow's own defaults,
+          such as always-allow-substitutes.
         required: false
         default: ''
         type: string
@@ -628,7 +630,6 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          max-jobs: ${{ matrix.remote && inputs.store == '' && '0' || '' }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}

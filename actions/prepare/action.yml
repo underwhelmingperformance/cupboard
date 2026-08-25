@@ -16,8 +16,9 @@ inputs:
     required: false
   nix-config:
     description:
-      Flake installable that evaluates to nix.conf settings for builders. Leave
-      empty to skip this configuration.
+      Flake installable that evaluates to nix.conf settings for this job. These
+      settings override the defaults this action writes. Leave empty to skip
+      this configuration.
     required: false
   maximise-space:
     description:
@@ -142,6 +143,22 @@ runs:
     - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
       with:
         nix_version: 2.34.7
+
+    # A cupboard cache holds paths whose derivations set
+    # `allowSubstitutes = false`, because this workflow published them. Without
+    # this setting Nix rebuilds those derivations on every run instead of
+    # fetching the paths the cache already holds.
+    #
+    # Keep this step before the caller's `nix-config`. Both write to the same
+    # file, the last assignment in a nix.conf file wins, and a caller must be
+    # able to turn this default off.
+    - name: Configure Nix substitution
+      shell: bash
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+        printf 'always-allow-substitutes = true\n' \
+          >> "${RUNNER_TEMP}/cupboard-prepare-nix.conf"
+        echo "NIX_USER_CONF_FILES=${RUNNER_TEMP}/cupboard-prepare-nix.conf:${HOME}/.config/nix/nix.conf" >> "${GITHUB_ENV}"
 
     # Write the additional settings to a job-scoped file under RUNNER_TEMP and
     # put that file first in NIX_USER_CONF_FILES. The runner's configuration

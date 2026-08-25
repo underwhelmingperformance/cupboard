@@ -122,7 +122,7 @@ export const publishTargetSchema = z.strictObject({
 	os: z.string().min(1).refine(isValidRunnerLabel, {
 		message: 'os must be a printable ASCII runner label without spaces'
 	}),
-	remote: z.boolean(),
+	remote: z.boolean().default(false),
 	bestEffort: z.boolean().default(false),
 	rootSuffix: z
 		.string()

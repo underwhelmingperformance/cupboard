@@ -987,14 +987,13 @@ describe('publishTargetSchema', () => {
 		});
 	});
 
-	it('treats targets as strict unless the manifest opts them out', () => {
+	it('defaults a target to a strict build on the runner', () => {
 		expect(
 			publishTargetSchema.parse({
 				attr: '.#app',
 				rootDrvPath: manifestRootDrvPath,
 				system: 'x86_64-linux',
 				os: 'ubuntu-latest',
-				remote: true,
 				rootSuffix: 'app'
 			})
 		).toStrictEqual({
@@ -1002,7 +1001,7 @@ describe('publishTargetSchema', () => {
 			rootDrvPath: manifestRootDrvPath,
 			system: 'x86_64-linux',
 			os: 'ubuntu-latest',
-			remote: true,
+			remote: false,
 			bestEffort: false,
 			rootSuffix: 'app',
 			outputs: ['out']
