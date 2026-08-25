@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 import { z } from 'zod';
 
 // The composite actions derive their toolchain from the workspace's own pins:
@@ -26,6 +27,43 @@ function actionFiles(): string[] {
 		.filter((entry) => entry.isDirectory())
 		.map((entry) => path.join(actionsDirectory, entry.name, 'action.yml'))
 		.filter((file) => existsSync(file));
+}
+
+const actionOutputSchema = z.looseObject({ value: z.string() });
+const actionOutputsSchema = z.record(z.string(), actionOutputSchema);
+const actionStepSchema = z.looseObject({
+	env: z.record(z.string(), z.string()).optional()
+});
+const actionRunsSchema = z.looseObject({
+	steps: z.array(actionStepSchema).default([])
+});
+const actionSchema = z.looseObject({
+	outputs: actionOutputsSchema.default({}),
+	runs: actionRunsSchema
+});
+
+function actionDocument(action: string) {
+	const document: unknown = parse(
+		readFileSync(path.join(actionsDirectory, action, 'action.yml'), 'utf8')
+	);
+
+	return actionSchema.parse(document);
+}
+
+/**
+ * Each output of a composite action, mapped to the expression it publishes.
+ */
+function actionOutputs(action: string): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(actionDocument(action).outputs).map(([name, output]) => [
+			name,
+			output.value
+		])
+	);
+}
+
+function actionSteps(action: string) {
+	return actionDocument(action).runs.steps;
 }
 
 const manifestPath = path.join(repositoryRoot, 'package.json');
@@ -221,52 +259,39 @@ describe('documentation action pins', () => {
 });
 
 describe('canonical acquisition composition', () => {
-	it('documents reusable acquisition JSON beside the legacy version output', () => {
-		const setupAction = readFileSync(
-			path.join(actionsDirectory, 'setup', 'action.yml'),
-			'utf8'
-		);
-
-		expect({
-			canonical: setupAction.includes(
-				'cupboard:\n    description:\n      Pass this JSON to another setup invocation to acquire the same release or\n      source commit.\n    value: ${{ steps.setup.outputs.cupboard }}'
-			),
-			legacyVersion: setupAction.includes(
-				'cupboard-version:\n    description:\n      Resolved cupboard release tag. This output is empty for a source\n      acquisition.\n    value: ${{ steps.setup.outputs.cupboard-version }}'
-			)
-		}).toStrictEqual({ canonical: true, legacyVersion: true });
+	it('exposes the reusable acquisition JSON beside the resolved version', () => {
+		expect(actionOutputs('setup')).toStrictEqual({
+			'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+			cupboard: '${{ steps.setup.outputs.cupboard }}',
+			'cupboard-version': '${{ steps.setup.outputs.cupboard-version }}',
+			'nix-config-file': '${{ steps.setup.outputs.nix-config-file }}'
+		});
 	});
 
 	it('keeps the standalone push version output beside its path', () => {
-		const pushAction = readFileSync(
-			path.join(actionsDirectory, 'push', 'action.yml'),
-			'utf8'
-		);
-
-		expect(pushAction).toContain(
-			'cupboard-version:\n    description: Version reported by the cupboard executable.\n    value: ${{ steps.push.outputs.cupboard-version }}'
-		);
+		expect(actionOutputs('push')).toStrictEqual({
+			'cupboard-path': '${{ steps.push.outputs.cupboard-path }}',
+			'cupboard-version': '${{ steps.push.outputs.cupboard-version }}',
+			'uploaded-paths': '${{ steps.push.outputs.uploaded-paths }}',
+			'reused-blobs': '${{ steps.push.outputs.reused-blobs }}',
+			'skipped-paths': '${{ steps.push.outputs.skipped-paths }}',
+			'uploaded-bytes': '${{ steps.push.outputs.uploaded-bytes }}'
+		});
 	});
 
 	it.each(['setup', 'push'])(
-		'%s leaves release-repository unset for canonical acquisition',
+		'%s passes the release repository the caller named',
 		(action) => {
-			const body = readFileSync(
-				path.join(actionsDirectory, action, 'action.yml'),
-				'utf8'
+			const steps = actionSteps(action).filter(
+				(step) => step.env?.RELEASE_REPOSITORY !== undefined
 			);
 
-			expect({
-				rawInput: body.includes(
-					'RELEASE_REPOSITORY: ${{ inputs.release-repository }}'
-				),
-				actionRepositoryFallback: body.includes(
-					'inputs.release-repository || github.action_repository'
-				)
-			}).toStrictEqual({
-				rawInput: true,
-				actionRepositoryFallback: false
-			});
+			// A fallback to `github.action_repository` would look for releases in the
+			// repository the caller pinned the action from, which is not always the
+			// repository that publishes them.
+			expect(steps.map((step) => step.env?.RELEASE_REPOSITORY)).toStrictEqual([
+				'${{ inputs.release-repository }}'
+			]);
 		}
 	);
 });
