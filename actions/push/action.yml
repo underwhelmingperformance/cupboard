@@ -11,15 +11,16 @@ inputs:
     required: false
   cupboard-path:
     description:
-      Use this pre-acquired cupboard executable from actions/setup and skip
-      release installation.
+      Path to a cupboard executable that actions/setup already acquired. When it
+      is set, the action installs no release.
     required: false
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact published release tag.
     required: false
   include-prereleases:
-    description: When true, prereleases are eligible when resolving latest.
+    description:
+      When true, a prerelease is eligible when the action resolves latest.
     required: false
   github-token:
     description: GitHub token used for release API calls.
@@ -40,8 +41,8 @@ inputs:
     required: false
   store:
     description: >-
-      Remote ssh-ng store URI to use for reading path metadata and NAR bytes.
-      Empty reads the store Nix itself would use on this runner.
+      Remote ssh-ng store URI to read path metadata and NAR bytes from. Leave
+      empty to read the store Nix itself would use on this runner.
     required: false
   audience:
     description: GitHub OIDC audience. Defaults to the canonical form of url.
@@ -96,8 +97,8 @@ inputs:
     required: false
   run-root:
     description:
-      Add each committed path to this run root. This is independent of root and
-      root-groups.
+      Add each committed path to this run root. The run root is independent of
+      root and root-groups.
     required: false
   run-root-ttl:
     description: Expire the run root after this duration. Requires run-root.

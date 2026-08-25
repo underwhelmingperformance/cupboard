@@ -3,8 +3,8 @@ description:
   Produce Sigstore bundles for the accepted subjects in a current-run build
   receipt. GitHub's SLSA build-provenance attestations cover paths built by this
   run. Cupboard build-origin attestations cover every accepted subject and
-  record its origin. Before signing, committed destination narinfos verify each
-  NAR hash and any recorded deriver.
+  record its origin. Before signing, the action checks each NAR hash and any
+  recorded deriver against the narinfos committed at the destination.
 inputs:
   receipt-file:
     description: Current-run receipt produced by a cupboard build action.
@@ -16,8 +16,8 @@ inputs:
     required: false
   built-checksums-file:
     description:
-      Where to write checksums for accepted subjects built by this run. They are
-      the subjects of the build-provenance attestations. Defaults to a file
+      Where to write checksums for accepted subjects built by this run. The
+      build-provenance attestations cover those subjects. Defaults to a file
       beside the checksums file.
     required: false
   predicate-file:
@@ -27,11 +27,11 @@ inputs:
     required: false
   url:
     description:
-      Destination cupboard tenant URL. Its committed narinfos verify every
-      subject before signing.
+      Destination cupboard tenant URL. The action checks every subject against
+      this tenant's committed narinfos before signing.
     required: true
   cache:
-    description: Named destination cache. Empty selects the default cache.
+    description: Named destination cache. Leave empty to use the default cache.
     required: false
   read-user:
     description: Basic-auth username for a private destination cache.
@@ -55,16 +55,16 @@ outputs:
     value: ${{ steps.attest.outputs.origin-bundle-path }}
   checksums-file:
     description:
-      Path to the checksums for all accepted receipt subjects. They are the
-      subjects of the build-origin attestations.
+      Path to the checksums for all accepted receipt subjects. The build-origin
+      attestations cover those subjects.
     value: ${{ steps.subjects.outputs.checksums-file }}
   subject-count:
     description: Number of accepted attestation subjects.
     value: ${{ steps.subjects.outputs.subject-count }}
   built-checksums-file:
     description:
-      Path to the checksums for accepted subjects built by this run. They are
-      the subjects of the build-provenance attestations.
+      Path to the checksums for accepted subjects built by this run. The
+      build-provenance attestations cover those subjects.
     value: ${{ steps.subjects.outputs.built-checksums-file }}
   built-subject-count:
     description: Number of accepted subjects built by this run.

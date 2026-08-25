@@ -16,9 +16,9 @@ inputs:
     required: false
   nix-config:
     description:
-      Flake installable that evaluates to nix.conf settings for this job. These
-      settings override the defaults this action writes. Leave empty to skip
-      this configuration.
+      Flake installable that evaluates to nix.conf text. The action writes it
+      after its own settings, so these values override them. Leave empty to
+      write no settings of your own.
     required: false
   maximise-space:
     description:
@@ -27,14 +27,19 @@ inputs:
     required: false
     default: 'false'
   remote:
-    description: When true, configure the remote builders below for this job.
+    description:
+      When true, apply the builders, builder-ssh-key, builder-ssh-config and
+      builder-known-hosts inputs to this job. A true value with no builders is
+      refused, so a job that expects remote builders fails instead of building
+      locally, and builder credentials are refused when this input is false.
     required: false
     default: 'false'
   store:
     description:
       Direct ssh-ng store for this job. It is mutually exclusive with remote
-      builder mode. Leave it empty to use no direct store. Supply its private
-      key through store-ssh-key, not through an ssh-key URI parameter.
+      builder mode. Leave it empty to use the runner's own store. Supply the
+      private key through store-ssh-key; the URI must not set the ssh-key
+      parameter.
     required: false
   builders:
     description:
@@ -55,7 +60,9 @@ inputs:
       rejected.
     required: false
   builder-known-hosts:
-    description: Required known_hosts lines for every enabled remote builder.
+    description:
+      known_hosts lines that pin every enabled remote builder. Required when
+      remote is true.
     required: false
   store-ssh-key:
     description: SSH private key authenticating to a direct ssh-ng store.
@@ -144,10 +151,10 @@ runs:
       with:
         nix_version: 2.34.7
 
-    # A cupboard cache holds paths whose derivations set
-    # `allowSubstitutes = false`, because this workflow published them. Without
-    # this setting Nix rebuilds those derivations on every run instead of
-    # fetching the paths the cache already holds.
+    # Nix rebuilds a derivation that sets `allowSubstitutes = false` even when a
+    # substituter already serves its output path. This workflow publishes such
+    # paths to the cupboard cache itself, so `always-allow-substitutes` lets a
+    # run fetch them instead of building them again.
     #
     # Keep this step before the caller's `nix-config`. Both write to the same
     # file, the last assignment in a nix.conf file wins, and a caller must be

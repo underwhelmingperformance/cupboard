@@ -35,7 +35,9 @@ on:
         default: main
         type: string
       cache:
-        description: Named cache to publish to; empty selects the default cache.
+        description:
+          Named cache to publish to. Leave empty to publish to the default
+          cache.
         required: false
         default: ''
         type: string
@@ -47,23 +49,25 @@ on:
         default: ''
         type: string
       ttl:
-        description: Retention TTL such as 14d; empty retains permanently.
+        description:
+          Retention TTL such as 14d. Leave empty to retain permanently.
         required: false
         default: ''
         type: string
       run-root-ttl:
         description:
-          TTL for the per-run root attached by every cohort push, such as 7d or
-          12h. It keeps streamed work available so later cohorts can substitute
-          shared outputs instead of rebuilding them.
+          TTL for the per-run root that every cohort push attaches, such as 7d
+          or 12h. The root keeps streamed work available, so a later cohort can
+          substitute a shared output instead of rebuilding it.
         required: false
         default: '24h'
         type: string
       reuse-view:
         description:
           Named tenant reuse view for shared intermediates missing from the
-          destination. setup rejects a view whose nix-cache-info priority is
-          equal to or lower than the destination's. Empty disables the view.
+          destination. setup rejects a view whose nix-cache-info priority is not
+          numerically greater than the destination's. Leave empty to disable the
+          view.
         required: false
         default: ''
         type: string
@@ -117,8 +121,8 @@ on:
         type: string
       input-known-hosts:
         description:
-          Required known_hosts lines pinning private flake input SSH hosts when
-          input_ssh_key is supplied.
+          known_hosts lines that pin every SSH host serving a private flake
+          input. Required when input_ssh_key is supplied.
         required: false
         default: ''
         type: string
@@ -134,7 +138,8 @@ on:
         type: string
       builder-known-hosts:
         description:
-          Required known_hosts lines pinning every enabled remote builder.
+          known_hosts lines that pin every enabled remote builder. Required when
+          builders is supplied.
         required: false
         default: ''
         type: string
@@ -150,8 +155,8 @@ on:
         description:
           Authenticate the direct store with the runner's SSH agent or default
           identity files instead of store_ssh_key. Intended only for explicitly
-          provisioned self-hosted runners; false fails closed when no managed
-          key is supplied.
+          provisioned self-hosted runners. When it is false and no store_ssh_key
+          is supplied, the job fails rather than offering an ambient identity.
         required: false
         default: false
         type: boolean
@@ -171,8 +176,9 @@ on:
         description: >-
           Runner label for the configure and plan jobs. The plan job evaluates
           the flake with the input SSH key and OIDC permission, so repositories
-          with self-hosted runners should keep this on a GitHub-hosted label or
-          route it through runner groups; see docs/runner-provenance.md.
+          with self-hosted runners should leave this input on a GitHub-hosted
+          label, or route the job through runner groups; see
+          docs/runner-provenance.md.
         required: false
         default: ubuntu-latest
         type: string
@@ -620,8 +626,9 @@ jobs:
         with:
           cohort-json: ${{ toJSON(matrix) }}
           # The planner requires every member of a cohort to use the same value.
-          # The action applies it only to attributable target failures;
-          # infrastructure and unbounded publication failures remain fatal.
+          # The action treats a failure as best-effort only when it can
+          # attribute the failure to a target; infrastructure and unbounded
+          # publication failures remain fatal.
           best-effort: ${{ matrix.bestEffort }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -636,18 +643,19 @@ jobs:
           gc-between-cohorts:
             ${{ inputs.gc-between-cohorts && runner.environment ==
             'github-hosted' && inputs.store == '' }}
-          # Every cohort job in this run shares one root, so a later cohort
-          # can substitute an earlier one's streamed work instead of
-          # rebuilding it.
+          # Every cohort job in this run shares one root, so a later cohort can
+          # substitute work an earlier cohort streamed instead of rebuilding
+          # it.
           run-root:
             ${{ format('{0}/_cupboard-run/{1}',
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
 
       # A streamed cohort derives its receipt from the supervised build. A
-      # remote-store cohort includes only queryable outputs that Nix reports as
-      # results of this invocation. Substituted, already-valid, and floating
-      # paths do not count as build evidence. No publication means no receipt.
+      # remote-store cohort records only the queryable outputs that Nix reports
+      # as results of this invocation. Substituted, already-valid and floating
+      # paths are not build evidence. A cohort that published nothing writes no
+      # receipt.
       - uses: ./.cupboard-workflow/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
@@ -659,7 +667,8 @@ jobs:
           read-password: ${{ secrets.read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
-      # the bundle only after publication and only when signing produced one.
+      # the bundle only after publication and only when signing produced a
+      # bundle.
       - uses: ./.cupboard-workflow/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&

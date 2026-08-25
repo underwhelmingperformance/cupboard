@@ -12,8 +12,8 @@ inputs:
     required: false
   include-prereleases:
     description:
-      When resolving latest, consider prereleases and install the newest release
-      of any kind.
+      When true, a prerelease is eligible when the action resolves latest, so
+      the action installs the newest release of any kind.
     required: false
   github-token:
     description: GitHub token for release, asset and attestation requests.
@@ -68,7 +68,9 @@ outputs:
       source commit.
     value: ${{ steps.setup.outputs.cupboard }}
   cupboard-version:
-    description: Resolved cupboard release tag; empty for source acquisition.
+    description:
+      Resolved cupboard release tag. This output is empty for a source
+      acquisition.
     value: ${{ steps.setup.outputs.cupboard-version }}
   nix-config-file:
     description: Path to the generated runner-local Nix config file.
@@ -104,10 +106,10 @@ runs:
     - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       with:
         version: ${{ steps.toolchain.outputs.pnpm-version }}
-        # Point pnpm/action-setup's manifest lookup at this action's own
-        # manifest, not the caller's checkout, whose pinned pnpm would
-        # otherwise conflict with `version`. Parity between this pin and the
-        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
+        # Read packageManager from this action's manifest. Reading the caller's
+        # checkout could select a different pnpm version and conflict with
+        # `version`. scripts/action-tool-parity.test.ts keeps this pin aligned
+        # with the workspace manifest.
         package_json_file: ${{ github.action_path }}/../../package.json
 
     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
