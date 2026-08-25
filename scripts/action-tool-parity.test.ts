@@ -232,7 +232,7 @@ describe('canonical acquisition composition', () => {
 				'cupboard:\n    description:\n      Pass this JSON to another setup invocation to acquire the same release or\n      source commit.\n    value: ${{ steps.setup.outputs.cupboard }}'
 			),
 			legacyVersion: setupAction.includes(
-				'cupboard-version:\n    description: Resolved cupboard release tag; empty for source acquisition.\n    value: ${{ steps.setup.outputs.cupboard-version }}'
+				'cupboard-version:\n    description:\n      Resolved cupboard release tag. This output is empty for a source\n      acquisition.\n    value: ${{ steps.setup.outputs.cupboard-version }}'
 			)
 		}).toStrictEqual({ canonical: true, legacyVersion: true });
 	});

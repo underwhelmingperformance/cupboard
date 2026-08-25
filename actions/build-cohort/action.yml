@@ -34,8 +34,8 @@ inputs:
     required: false
   max-jobs:
     description:
-      Maximum build jobs for the selected store. Empty uses that store's Nix
-      default.
+      Maximum build jobs for the selected store. Leave empty to use that store's
+      Nix configuration.
     required: false
   store:
     description: >-
@@ -59,20 +59,20 @@ inputs:
     default: 'false'
   best-effort:
     description: >-
-      Tolerate target build failures only after publishing every surviving path,
-      updating its retention roots and writing the output files. Planning,
-      authentication, copying, publication, retention and receipt failures
-      remain fatal.
+      Tolerate a target build failure, but only once the action has published
+      every surviving path, updated their retention roots and written the output
+      files. Planning, authentication, copying, publication, retention and
+      receipt failures remain fatal.
     required: false
   gc-between-cohorts:
     description: >-
-      Collect the local Nix store between build-push cohorts, so a later cohort
-      substitutes the earlier shared work from the cache. Disabled by default.
-      When disabled, the action does not delete user store paths.
+      Collect the local Nix store between build-push cohorts. A later cohort
+      then substitutes the shared paths from the cache instead of keeping them
+      on the runner's disk. Disabled by default, and when it is disabled the
+      action deletes no store paths.
     required: false
   run-root:
-    description:
-      Run root to which each published path is attached when committed.
+    description: Run root that every published path joins as it commits.
     required: false
   run-root-ttl:
     description: Expire the run root after this duration, such as 2d.
@@ -124,9 +124,10 @@ outputs:
   receipt-file:
     description: >-
       Build receipt for actions/attest. A streamed cohort writes it from its
-      supervised build. A remote-store cohort records published paths from the
-      selected store and includes only provenance that Nix reported. Empty when
-      publication is disabled or the cohort has no result paths to publish.
+      supervised build. A remote-store cohort records the paths published from
+      the selected store, and records provenance only for the outputs Nix
+      reported as results. This output is empty when publication is disabled or
+      the cohort has no result paths to publish.
     value: ${{ steps.build-cohort.outputs.receipt-file }}
   out-link-directory:
     description: >-

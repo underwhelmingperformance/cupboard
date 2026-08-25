@@ -17,24 +17,28 @@ on:
         type: string
         default: '.'
       cache:
-        description: Named cache to push to. Empty pushes to the default cache.
+        description:
+          Named cache to push to. Leave empty to push to the default cache.
         required: false
         type: string
         default: ''
       root:
         description:
           Prefix for the retention root. The workflow appends the builder's Nix
-          system, creating a separate root for each platform.
+          system, so each platform retains under its own root.
         required: false
         type: string
         default: ''
       ttl:
-        description: Retention TTL such as 7d. Empty retains permanently.
+        description:
+          Retention TTL such as 7d. Leave empty to retain permanently.
         required: false
         type: string
         default: ''
       attest:
-        description: Sign and attach SLSA build provenance for the paths.
+        description:
+          When true, sign and attach SLSA build provenance for the published
+          paths.
         required: false
         type: boolean
         default: true
@@ -45,8 +49,8 @@ on:
         default: ubuntu-24.04
       trusted-public-key:
         description:
-          Nix trusted public key for the cache. Empty trusts the key the
-          deployment serves, on first use.
+          Nix public key to trust for reads from the cache. Leave empty to fetch
+          the key the deployment serves and trust that.
         required: false
         type: string
         default: ''
@@ -118,8 +122,8 @@ jobs:
           github-api-url: ${{ github.api_url }}
           github-graphql-url: ${{ github.graphql_url }}
 
-      # Substitute from the cache being published to, so builds reuse the
-      # store paths it already holds.
+      # Substitute from the destination cache, so a build reuses the store
+      # paths that cache already holds.
       - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
@@ -137,9 +141,9 @@ jobs:
           # an attachment failure produces a new receipt.
           require-provenance: ${{ inputs.attest }}
 
-      # A retention root holds one closure and a push replaces it wholesale, so
-      # builds for different systems must retain under sibling roots. Append
-      # this builder's system to the caller's prefix.
+      # A retention root holds one set of paths, and each push replaces that
+      # set completely, so builds for different systems must retain under
+      # sibling roots. Append this builder's system to the caller's prefix.
       - name: Resolve the retention root
         id: root
         if: ${{ inputs.root != '' }}
