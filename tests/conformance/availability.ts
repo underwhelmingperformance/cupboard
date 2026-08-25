@@ -159,7 +159,12 @@ async function prepareFixture(
 			[
 				'--expr',
 				fixtureExpression,
-				'--no-out-link',
+				// The out-link is a garbage-collection root, so a collection cannot
+				// remove the fixture between this build and the cases that read
+				// it. `cleanupFixture` deletes the link with the rest of the
+				// fixture.
+				'--out-link',
+				path.join(root, 'fixture'),
 				'--option',
 				'sandbox',
 				'false',
