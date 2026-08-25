@@ -146,7 +146,6 @@ in [
     rootDrvPath = package.drvPath;
     system = "x86_64-linux";
     os = "ubuntu-latest";
-    remote = false;
     rootSuffix = "x86_64-linux/default";
   }
 ];
@@ -678,7 +677,6 @@ in [
     derivation = darwinConfigurations.laptop.system;
     system = "aarch64-darwin";
     os = "macos-latest";
-    remote = false;
     bestEffort = true;
     rootSuffix = "aarch64-darwin/darwin-laptop";
     outputs = ["out"];
@@ -693,16 +691,28 @@ the planner then schedules a direct build and the target job reports the error.
 When `push` is false, the workflow removes every `rootDrvPath` without
 evaluating it. Build-only mode therefore does not inspect derivations.
 
-`outputs` defaults to `["out"]` and `bestEffort` to `false`. A best-effort
-target does not fail the whole matrix when its build fails. Targets grouped by
-one explicit `cohort` label must agree on `bestEffort`; planning refuses a mixed
-group and names both conflicting targets. `os` selects the runner label the
-target's jobs run on; the manifest is the operator's flake, so runner choice is
-operator configuration ([docs/runner-provenance.md](./runner-provenance.md)
-covers self-hosted estates). `remote` marks a group that realises its
-derivations on the configured remote builders: those jobs build with
-`--max-jobs 0` and apply the `builders` specification, the `builder_ssh_key` and
-`builder_ssh_config` secrets, and the `builder-known-hosts` input.
+`outputs` defaults to `["out"]`, and `remote` and `bestEffort` to `false`. A
+best-effort target does not fail the whole matrix when its build fails. Targets
+grouped by one explicit `cohort` label must agree on `bestEffort`; planning
+refuses a mixed group and names both conflicting targets. `os` selects the
+runner label the target's jobs run on; the manifest is the operator's flake, so
+runner choice is operator configuration
+([docs/runner-provenance.md](./runner-provenance.md) covers self-hosted
+estates). `remote` gives a group's jobs the `builders` specification, the
+`builder_ssh_key` and `builder_ssh_config` secrets, and the
+`builder-known-hosts` input. Nix then offers each derivation to those builders
+before it considers building on the runner.
+
+The workflow does not set `max-jobs`. Nix builds a derivation on the runner when
+every builder declines it, and when the derivation sets [`preferLocalBuild`][],
+so a derivation that reads a secret from the runner's environment is never sent
+to a builder. To send every derivation to the builders instead, set
+`max-jobs = 0` in the `nix-config` input. Nix ignores `preferLocalBuild` under
+that setting, because a store with no local build slots has nowhere to run the
+derivation.
+
+[`preferlocalbuild`]:
+  https://nix.dev/manual/nix/latest/language/advanced-attributes#adv-attr-preferLocalBuild
 
 Call the workflow with the cache and root prefix for the current event:
 
@@ -874,9 +884,9 @@ remote filesystem capacity, and direct-store mode is intended for builds that
 exceed the runner's disk capacity.
 
 Direct-store mode and classic `builders` delegation are separate choices and
-cannot be enabled together. A selected store keeps its daemon's default build
-concurrency; `remote = true` in a manifest only selects `--max-jobs 0` for
-classic builders when no `store` input is present.
+cannot be enabled together. A selected store keeps its daemon's own build
+concurrency, and `remote = true` in a manifest selects the classic builders only
+when no `store` input is present.
 
 The workflow exposes store transport credentials independently of builder
 scheduling. Pin the host in `store-known-hosts`, put connection options under a

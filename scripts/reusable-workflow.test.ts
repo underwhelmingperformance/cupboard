@@ -979,7 +979,7 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('leaves direct-store concurrency to the selected daemon', async () => {
+	it('leaves build concurrency to the Nix configuration', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
@@ -1001,8 +1001,10 @@ describe('cupboard flake publish cohort job', () => {
 		}).toStrictEqual({
 			classicBuilderPreparation:
 				"remote: ${{ matrix.remote && inputs.store == '' }}",
-			maxJobs:
-				"max-jobs: ${{ matrix.remote && inputs.store == '' && '0' || '' }}"
+			// `max-jobs 0` sends every derivation to the builders, including one
+			// that sets `preferLocalBuild`. The workflow passes no value, so a
+			// caller that wants that policy sets `max-jobs` in `nix-config`.
+			maxJobs: undefined
 		});
 	});
 
