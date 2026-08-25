@@ -665,16 +665,45 @@ export function runNix(
 }
 
 /**
+ * Where the builds in this file keep their out-links. Nix registers an out-link
+ * as an indirect garbage-collection root, and every caller reads the store path
+ * after the build returns, so without a link a collection can remove the result
+ * first.
+ */
+export const conformanceOutLinkDirectory = path.join(
+	tmpdir(),
+	'cupboard-conformance-out-links'
+);
+
+/**
+ * The out-link for the oracle's Nix. Every case in the suite runs that binary,
+ * so this link keeps a fixed path and outlives each build. A later build
+ * replaces the link, so at most one root exists.
+ */
+export const conformanceNixOutLink = path.join(
+	conformanceOutLinkDirectory,
+	'conformance-nix'
+);
+
+/**
  * Builds the pinned flake output with the ambient environment so Nix can use
  * the substituters configured on this machine.
  *
  * A missing `nix` binary and a failed build both make the oracle unavailable.
  */
 async function buildConformanceNix(root: string): Promise<NixResult> {
+	mkdirSync(conformanceOutLinkDirectory, { recursive: true });
+
 	try {
 		return await runNix(
 			'nix',
-			['build', conformanceNixOutput, '--no-link', '--print-out-paths'],
+			[
+				'build',
+				conformanceNixOutput,
+				'--out-link',
+				conformanceNixOutLink,
+				'--print-out-paths'
+			],
 			{ cwd: root }
 		);
 	} catch (error) {
@@ -691,12 +720,37 @@ async function readFlakeOracleProbe(
 	system: OracleSystem
 ): Promise<ProbedOracle> {
 	const output = `.#packages.${system}.conformanceOracleProbe`;
+	// The link must outlive the read below, so it goes in a directory this
+	// function deletes only after reading the probe.
+	const linkDirectory = mkdtempSync(
+		path.join(tmpdir(), 'cupboard-oracle-probe-')
+	);
+
+	try {
+		return await readBuiltOracleProbe(root, system, output, linkDirectory);
+	} finally {
+		rmSync(linkDirectory, { force: true, recursive: true });
+	}
+}
+
+async function readBuiltOracleProbe(
+	root: string,
+	system: OracleSystem,
+	output: string,
+	linkDirectory: string
+): Promise<ProbedOracle> {
 	let build: NixResult;
 
 	try {
 		build = await runNix(
 			'nix',
-			['build', output, '--no-link', '--print-out-paths'],
+			[
+				'build',
+				output,
+				'--out-link',
+				path.join(linkDirectory, 'probe'),
+				'--print-out-paths'
+			],
 			{ cwd: root }
 		);
 	} catch (error) {
