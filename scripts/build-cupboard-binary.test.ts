@@ -106,10 +106,7 @@ describe('generateSeaPreparationBlob', () => {
 						)
 					]);
 
-					const blobPath = await generateSeaPreparationBlob(
-						workDirectory,
-						'cjs'
-					);
+					const blobPath = await generateSeaPreparationBlob(workDirectory);
 
 					return readFile(blobPath);
 				})
