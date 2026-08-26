@@ -38,6 +38,7 @@ const pathB = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
+const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
 const runRoot = uploadAttachRootSchema.parse({ name: 'github:acme/repo/run' });
 
 function pathInfo(storePath: StorePathString): NixValidPathInfo {
@@ -336,6 +337,36 @@ describe('BuildOutputBatcher', () => {
 				{ outcome: 'destination-served', storePath: pathB },
 				{ outcome: 'published', storePath: pathA }
 			]
+		});
+	});
+
+	it('returns a divergent destination skip to the candidate set', async () => {
+		const { batcher, failures, outcomes } = harness({
+			decisions: (paths) =>
+				paths.map((path) =>
+					uploadDecisionSchema.parse({
+						action: 'skip',
+						storePathHash: path.storePathHash,
+						narHash: divergentNarHash.toString()
+					})
+				)
+		});
+
+		batcher.enqueue(pathA);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+
+		expect({
+			candidates: batcher.candidates,
+			outcomes,
+			failures: failures.map((failure) => ({
+				storePath: failure.storePath,
+				name: failure.reason instanceof Error ? failure.reason.name : undefined
+			}))
+		}).toStrictEqual({
+			candidates: [pathA],
+			outcomes: [],
+			failures: [{ storePath: pathA, name: 'BuildOutputDivergedError' }]
 		});
 	});
 

@@ -48,6 +48,7 @@ import {
 } from '../push/push.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
+import { requireMatchingBuildOutput } from './divergence.ts';
 
 export interface ReconcileTarget {
 	readonly installable: NixDerivedPathString;
@@ -417,6 +418,13 @@ async function publishInfoBatch(
 		}
 
 		if (decision.action === 'skip') {
+			try {
+				requireMatchingBuildOutput(info, decision);
+			} catch (error) {
+				recordFailure(ledger, info.storePath, 'verification', error);
+				continue;
+			}
+
 			ledger.servable.add(info.storePath);
 			continue;
 		}
