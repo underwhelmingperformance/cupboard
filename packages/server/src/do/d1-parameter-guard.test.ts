@@ -13,6 +13,7 @@ import {
 	type NixSha256HashString,
 	predicateTypeSchema,
 	rootNameSchema,
+	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -27,6 +28,11 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
+import {
+	buildBlobCollection,
+	buildCasCollection,
+	maxCollectionChunk
+} from './blob-reaper-service.ts';
 import { maxInClauseValues } from './bulk.ts';
 import {
 	maxTeardownPresenceChunk,
@@ -75,6 +81,12 @@ const testRootName = rootNameSchema.parse('main');
 
 function narHashes(count: number): NixSha256HashString[] {
 	return Array.from({ length: count }, () => testNarHash);
+}
+
+function digests(count: number): Sha256HexDigest[] {
+	return Array.from({ length: count }, () =>
+		sha256HexDigestSchema.parse('0'.repeat(64))
+	);
 }
 
 function fencedEdgeFilter(count: number) {
@@ -338,6 +350,50 @@ describe('selected D1 statements', () => {
 			const del = buildTenantCasBlobDeleteStatement(database, tenant, digests);
 
 			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+	});
+	// The registry update binds the object-id list twice, so it reaches the cap
+	// at half the width the other two statements manage. Each case builds the
+	// widest chunk the reaper produces.
+	describe('expired object collection (blob-reaper-service)', () => {
+		it('registry UPDATE stays within 100 params at maxCollectionChunk', () => {
+			const { retire } = buildBlobCollection(
+				database,
+				narHashes(maxCollectionChunk),
+				now
+			);
+
+			expect(retire.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+
+		it('deletion-queue INSERT stays within 100 params at maxCollectionChunk', () => {
+			const { queueDeletion } = buildBlobCollection(
+				database,
+				narHashes(maxCollectionChunk),
+				now
+			);
+
+			expect(queueDeletion.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+
+		it('fenced DELETE stays within 100 params at maxCollectionChunk', () => {
+			const { remove } = buildBlobCollection(
+				database,
+				narHashes(maxCollectionChunk),
+				now
+			);
+
+			expect(remove.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+
+		it('CAS registry UPDATE stays within 100 params at maxCollectionChunk', () => {
+			const { retire } = buildCasCollection(
+				database,
+				digests(maxCollectionChunk),
+				now
+			);
+
+			expect(retire.toSQL().params.length).toBeLessThanOrEqual(100);
 		});
 	});
 });

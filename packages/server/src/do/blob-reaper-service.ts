@@ -102,12 +102,179 @@ interface ReapObjectsOptions {
 
 const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
+// The registry update binds each object ID twice: once in the fence inside the
+// `collectable` subquery and once in the outer filter that selects registry rows
+// for retirement. Limit collection chunks to half of `maxInClauseValues` so the
+// update stays within the parameter limit.
+export const maxCollectionChunk = Math.floor(maxInClauseValues / 2);
+
 // Persist the last key scanned. An empty position wraps to the start. Eventual
 // consistency can repeat an idempotent page but cannot skip beyond the stored
 // cursor.
 export interface DemoteCursor {
 	read(): Promise<string>;
 	advance(position: string): Promise<void>;
+}
+
+/**
+ * Builds the registry update, deletion-queue insert, and object-state delete
+ * for one chunk of expired NAR objects. The delete returns the rows that still
+ * satisfied the fence when it ran.
+ */
+export function buildBlobCollection(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	narHashes: readonly NixSha256HashString[],
+	nowIso: IsoTimestamp
+) {
+	const referencedHashes = d1
+		.select({ narHash: d1Schema.blobReference.narHash })
+		.from(d1Schema.blobReference);
+	const fence = and(
+		inArray(d1Schema.blobState.narHash, narHashes),
+		isNotNull(d1Schema.blobState.deleteAfter),
+		lte(d1Schema.blobState.deleteAfter, nowIso),
+		notInArray(d1Schema.blobState.narHash, referencedHashes)
+	);
+	const sameObjectId = eq(
+		d1Schema.blobState.narHash,
+		d1Schema.objectIncarnation.objectId
+	);
+	const sameIncarnation = eq(
+		d1Schema.blobState.incarnation,
+		d1Schema.objectIncarnation.incarnation
+	);
+	const collectableState = and(fence, sameObjectId, sameIncarnation);
+	const collectable = exists(
+		d1
+			.select({ one: sql`1` })
+			.from(d1Schema.blobState)
+			.where(collectableState)
+	);
+	const registryFilter = and(
+		eq(d1Schema.objectIncarnation.kind, 'nar'),
+		inArray(d1Schema.objectIncarnation.objectId, narHashes),
+		eq(d1Schema.objectIncarnation.state, 'live'),
+		collectable
+	);
+	const narRegistry = eq(d1Schema.objectIncarnation.kind, 'nar');
+	const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
+	const retiredFilter = and(
+		narRegistry,
+		sameObjectId,
+		sameIncarnation,
+		retiredState
+	);
+	const retired = exists(
+		d1
+			.select({ one: sql`1` })
+			.from(d1Schema.objectIncarnation)
+			.where(retiredFilter)
+	);
+
+	return {
+		retire: d1
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent', reservationOwner: sql`null` })
+			.where(registryFilter),
+		queueDeletion: d1
+			.insert(d1Schema.objectDeletion)
+			.select(
+				d1
+					.select({
+						kind: sql<SharedObjectKind>`'nar'`.as('kind'),
+						objectId: d1Schema.blobState.narHash,
+						incarnation: d1Schema.blobState.incarnation,
+						removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
+					})
+					.from(d1Schema.blobState)
+					.where(and(fence, retired))
+			)
+			.onConflictDoNothing(),
+		remove: d1.delete(d1Schema.blobState).where(and(fence, retired)).returning({
+			narHash: d1Schema.blobState.narHash,
+			incarnation: d1Schema.blobState.incarnation
+		})
+	};
+}
+
+/**
+ * Builds the registry update, deletion-queue insert, and object-state delete
+ * for one chunk of expired content-addressed objects.
+ */
+export function buildCasCollection(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	digests: readonly Sha256HexDigest[],
+	nowIso: IsoTimestamp
+) {
+	const referencedDigests = d1
+		.select({ digest: d1Schema.attestationReference.digest })
+		.from(d1Schema.attestationReference);
+	const fence = and(
+		inArray(d1Schema.casObject.digest, digests),
+		isNotNull(d1Schema.casObject.deleteAfter),
+		lte(d1Schema.casObject.deleteAfter, nowIso),
+		notInArray(d1Schema.casObject.digest, referencedDigests)
+	);
+	const sameObjectId = eq(
+		d1Schema.casObject.digest,
+		d1Schema.objectIncarnation.objectId
+	);
+	const sameIncarnation = eq(
+		d1Schema.casObject.incarnation,
+		d1Schema.objectIncarnation.incarnation
+	);
+	const collectableState = and(fence, sameObjectId, sameIncarnation);
+	const collectable = exists(
+		d1
+			.select({ one: sql`1` })
+			.from(d1Schema.casObject)
+			.where(collectableState)
+	);
+	const registryFilter = and(
+		eq(d1Schema.objectIncarnation.kind, 'cas'),
+		inArray(d1Schema.objectIncarnation.objectId, digests),
+		eq(d1Schema.objectIncarnation.state, 'live'),
+		collectable
+	);
+	const casRegistry = eq(d1Schema.objectIncarnation.kind, 'cas');
+	const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
+	const retiredFilter = and(
+		casRegistry,
+		sameObjectId,
+		sameIncarnation,
+		retiredState
+	);
+	const retired = exists(
+		d1
+			.select({ one: sql`1` })
+			.from(d1Schema.objectIncarnation)
+			.where(retiredFilter)
+	);
+
+	return {
+		retire: d1
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent', reservationOwner: sql`null` })
+			.where(registryFilter),
+		queueDeletion: d1
+			.insert(d1Schema.objectDeletion)
+			.select(
+				d1
+					.select({
+						kind: sql<SharedObjectKind>`'cas'`.as('kind'),
+						objectId: d1Schema.casObject.digest,
+						incarnation: d1Schema.casObject.incarnation,
+						removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
+					})
+					.from(d1Schema.casObject)
+					.where(and(fence, retired))
+			)
+			.onConflictDoNothing(),
+		remove: d1.delete(d1Schema.casObject).where(and(fence, retired)).returning({
+			digest: d1Schema.casObject.digest,
+			incarnation: d1Schema.casObject.incarnation
+		})
+	};
 }
 
 // The Worker runs this reaper because only it can see reference edges for every
@@ -198,15 +365,12 @@ export class BlobReaperService {
 			.all();
 		const batch = expired.slice(0, limit);
 		const removedKeys: R2ObjectKey[] = [];
-		const referencedHashes = this.d1
-			.select({ narHash: d1Schema.blobReference.narHash })
-			.from(d1Schema.blobReference);
 
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
 		const hashChunks = chunk(
 			batch.map((blob) => blob.narHash),
-			maxInClauseValues
+			maxCollectionChunk
 		);
 
 		for (const hashes of hashChunks) {
@@ -215,75 +379,12 @@ export class BlobReaperService {
 				{ kind: 'nar', objectIds: hashes },
 				nowIso
 			);
-			const fence = and(
-				inArray(d1Schema.blobState.narHash, hashes),
-				isNotNull(d1Schema.blobState.deleteAfter),
-				lte(d1Schema.blobState.deleteAfter, nowIso),
-				notInArray(d1Schema.blobState.narHash, referencedHashes)
+			const { retire, queueDeletion, remove } = buildBlobCollection(
+				this.d1,
+				hashes,
+				nowIso
 			);
-			const sameObjectId = eq(
-				d1Schema.blobState.narHash,
-				d1Schema.objectIncarnation.objectId
-			);
-			const sameIncarnation = eq(
-				d1Schema.blobState.incarnation,
-				d1Schema.objectIncarnation.incarnation
-			);
-			const collectableState = and(fence, sameObjectId, sameIncarnation);
-			const collectable = exists(
-				this.d1
-					.select({ one: sql`1` })
-					.from(d1Schema.blobState)
-					.where(collectableState)
-			);
-			const registryFilter = and(
-				eq(d1Schema.objectIncarnation.kind, 'nar'),
-				inArray(d1Schema.objectIncarnation.objectId, hashes),
-				eq(d1Schema.objectIncarnation.state, 'live'),
-				collectable
-			);
-			const narRegistry = eq(d1Schema.objectIncarnation.kind, 'nar');
-			const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
-			const retiredFilter = and(
-				narRegistry,
-				sameObjectId,
-				sameIncarnation,
-				retiredState
-			);
-			const retired = exists(
-				this.d1
-					.select({ one: sql`1` })
-					.from(d1Schema.objectIncarnation)
-					.where(retiredFilter)
-			);
-			const queueDeletion = this.d1
-				.insert(d1Schema.objectDeletion)
-				.select(
-					this.d1
-						.select({
-							kind: sql<SharedObjectKind>`'nar'`.as('kind'),
-							objectId: d1Schema.blobState.narHash,
-							incarnation: d1Schema.blobState.incarnation,
-							removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
-						})
-						.from(d1Schema.blobState)
-						.where(and(fence, retired))
-				)
-				.onConflictDoNothing();
-			const collection = await this.d1.batch([
-				this.d1
-					.update(d1Schema.objectIncarnation)
-					.set({ state: 'absent', reservationOwner: sql`null` })
-					.where(registryFilter),
-				queueDeletion,
-				this.d1
-					.delete(d1Schema.blobState)
-					.where(and(fence, retired))
-					.returning({
-						narHash: d1Schema.blobState.narHash,
-						incarnation: d1Schema.blobState.incarnation
-					})
-			]);
+			const collection = await this.d1.batch([retire, queueDeletion, remove]);
 			const removed = collection[2];
 
 			for (const row of removed) {
@@ -368,15 +469,12 @@ export class BlobReaperService {
 			.all();
 		const batch = expired.slice(0, limit);
 		const removedKeys: R2ObjectKey[] = [];
-		const referencedDigests = this.d1
-			.select({ digest: d1Schema.attestationReference.digest })
-			.from(d1Schema.attestationReference);
 
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
 		const digestChunks = chunk(
 			batch.map((object) => object.digest),
-			maxInClauseValues
+			maxCollectionChunk
 		);
 
 		for (const digests of digestChunks) {
@@ -385,75 +483,12 @@ export class BlobReaperService {
 				{ kind: 'cas', objectIds: digests },
 				nowIso
 			);
-			const fence = and(
-				inArray(d1Schema.casObject.digest, digests),
-				isNotNull(d1Schema.casObject.deleteAfter),
-				lte(d1Schema.casObject.deleteAfter, nowIso),
-				notInArray(d1Schema.casObject.digest, referencedDigests)
+			const { retire, queueDeletion, remove } = buildCasCollection(
+				this.d1,
+				digests,
+				nowIso
 			);
-			const sameObjectId = eq(
-				d1Schema.casObject.digest,
-				d1Schema.objectIncarnation.objectId
-			);
-			const sameIncarnation = eq(
-				d1Schema.casObject.incarnation,
-				d1Schema.objectIncarnation.incarnation
-			);
-			const collectableState = and(fence, sameObjectId, sameIncarnation);
-			const collectable = exists(
-				this.d1
-					.select({ one: sql`1` })
-					.from(d1Schema.casObject)
-					.where(collectableState)
-			);
-			const registryFilter = and(
-				eq(d1Schema.objectIncarnation.kind, 'cas'),
-				inArray(d1Schema.objectIncarnation.objectId, digests),
-				eq(d1Schema.objectIncarnation.state, 'live'),
-				collectable
-			);
-			const casRegistry = eq(d1Schema.objectIncarnation.kind, 'cas');
-			const retiredState = eq(d1Schema.objectIncarnation.state, 'absent');
-			const retiredFilter = and(
-				casRegistry,
-				sameObjectId,
-				sameIncarnation,
-				retiredState
-			);
-			const retired = exists(
-				this.d1
-					.select({ one: sql`1` })
-					.from(d1Schema.objectIncarnation)
-					.where(retiredFilter)
-			);
-			const queueDeletion = this.d1
-				.insert(d1Schema.objectDeletion)
-				.select(
-					this.d1
-						.select({
-							kind: sql<SharedObjectKind>`'cas'`.as('kind'),
-							objectId: d1Schema.casObject.digest,
-							incarnation: d1Schema.casObject.incarnation,
-							removeAfter: sql<IsoTimestamp>`${nowIso}`.as('remove_after')
-						})
-						.from(d1Schema.casObject)
-						.where(and(fence, retired))
-				)
-				.onConflictDoNothing();
-			const collection = await this.d1.batch([
-				this.d1
-					.update(d1Schema.objectIncarnation)
-					.set({ state: 'absent', reservationOwner: sql`null` })
-					.where(registryFilter),
-				queueDeletion,
-				this.d1
-					.delete(d1Schema.casObject)
-					.where(and(fence, retired))
-					.returning({
-						digest: d1Schema.casObject.digest,
-						incarnation: d1Schema.casObject.incarnation
-					})
-			]);
+			const collection = await this.d1.batch([retire, queueDeletion, remove]);
 			const removed = collection[2];
 
 			for (const row of removed) {
