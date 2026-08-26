@@ -27,6 +27,7 @@ import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
+import { maxBoundParameters } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -38,9 +39,14 @@ interface StoredRoot {
 	readonly updatedAt: IsoTimestamp;
 }
 
-// Each target contributes four values to its INSERT. Cloudflare SQLite admits
-// at most 100 bound parameters per query.
-export const maxRootTargetInsertRows = 25;
+// Each target row supplies all four columns of `retention_root_target`, so the
+// INSERT binds four parameters per row and nothing else. A full chunk uses all
+// 100 parameters. Update this calculation if the statement gains another column
+// or a fixed parameter.
+const rootTargetInsertColumns = 4;
+export const maxRootTargetInsertRows = Math.floor(
+	maxBoundParameters / rootTargetInsertColumns
+);
 
 // A narinfo row's exact version, snapshotted off-gate so a gated re-check can
 // tell an unchanged row from one a delete-and-recommit replaced.

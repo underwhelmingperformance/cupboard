@@ -1,11 +1,11 @@
-// Guards Cloudflare SQLite's 100-bound-parameter cap for selected statements
-// that use production chunk limits. Local SQLite in workerd and
-// vitest-pool-workers allows 32,766 variables, so worker tests do not expose an
-// overrun. This Node test inspects `.toSQL().params` before execution.
+// Cloudflare's D1 and Durable Object SQLite runtimes accept at most 100 bound
+// parameters in one query. Local workerd and test-pool runs accept 32,766, so
+// executing these statements locally does not reproduce an overrun. These Node
+// tests inspect `.toSQL().params` instead.
 //
-// Each case builds one selected statement at its maximum production chunk
-// width. Widening that chunk or adding a bound parameter must keep the statement
-// at or below the Cloudflare limit.
+// Each case builds a production statement at its maximum batch size. Increasing
+// that size or adding a bound parameter must keep the statement at or below the
+// Cloudflare limit.
 import {
 	cacheNameSchema,
 	narInfoGenerationSchema,
@@ -20,8 +20,10 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { and, eq, inArray, or } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
+import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -33,11 +35,17 @@ import {
 	buildCasCollection,
 	maxCollectionChunk
 } from './blob-reaper-service.ts';
-import { maxInClauseValues } from './bulk.ts';
+import { maxBoundParameters, maxInClauseValues } from './bulk.ts';
 import {
+	fencedEdgeRetirement,
+	maxFencedRetireRows,
 	maxTeardownPresenceChunk,
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
+import {
+	expiredRootTargetSelect,
+	maxRootsExpiredPerRun
+} from './garbage-collection-service.ts';
 import {
 	attestationReferenceDeleteChunk,
 	type AttestationReferenceKey,
@@ -49,6 +57,7 @@ import {
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
+import { buildLeaseUpdate } from './verification-service.ts';
 
 const throwStub = (): never => {
 	throw new Error('D1 stub: not executed');
@@ -63,6 +72,9 @@ const stubD1 = {
 } satisfies D1Database;
 
 const database = drizzle(stubD1, { schema: d1Schema });
+// The verification and garbage-collection statements run on Durable Object
+// SQLite. Use its Drizzle driver so the generated SQL matches production.
+const doDatabase = drizzleDurable({ exec: throwStub } as never, { schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
 const cache = cacheNameSchema.parse('builds');
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
@@ -89,27 +101,9 @@ function digests(count: number): Sha256HexDigest[] {
 	);
 }
 
-function fencedEdgeFilter(count: number) {
-	return and(
-		eq(d1Schema.blobReference.tenant, tenant),
-		eq(d1Schema.blobReference.cache, cache),
-		or(
-			...Array.from({ length: count }, () =>
-				and(
-					eq(d1Schema.blobReference.storePathHash, testStorePathHash),
-					eq(
-						d1Schema.blobReference.generation,
-						narInfoGenerationSchema.parse(0)
-					)
-				)
-			)
-		)
-	);
-}
-
 describe('selected D1 statements', () => {
 	describe('retention-root target writes (roots-service)', () => {
-		it('target INSERT stays within 100 params at maxRootTargetInsertRows', () => {
+		it('target INSERT stays within the parameter budget at maxRootTargetInsertRows', () => {
 			const query = database.insert(schema.retentionRootTargets).values(
 				Array.from({ length: maxRootTargetInsertRows }, () => ({
 					cache,
@@ -119,12 +113,14 @@ describe('selected D1 statements', () => {
 				}))
 			);
 
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 
 	describe('teardown presence delete (deletion-queue-service)', () => {
-		it('credit UPDATE stays within 100 params at maxTeardownPresenceChunk', () => {
+		it('credit UPDATE stays within the parameter budget at maxTeardownPresenceChunk', () => {
 			const { update } = teardownPresenceBatch(
 				database,
 				tenant,
@@ -132,10 +128,12 @@ describe('selected D1 statements', () => {
 				now
 			);
 
-			expect(update.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(update.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('presence DELETE stays within 100 params at maxTeardownPresenceChunk', () => {
+		it('presence DELETE stays within the parameter budget at maxTeardownPresenceChunk', () => {
 			const { presenceDelete } = teardownPresenceBatch(
 				database,
 				tenant,
@@ -143,46 +141,50 @@ describe('selected D1 statements', () => {
 				now
 			);
 
-			expect(presenceDelete.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(presenceDelete.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 
 	describe('fenced edge retirement (deletion-queue-service)', () => {
-		// The fenced edge retirement batches entries with maxFencedRetireRows =
-		// Math.floor(maxInClauseValues / 2) = 45 entries per chunk. Each entry
-		// contributes two parameters (storePathHash, generation) to the OR list, plus
-		// tenant(1) and cache(1) on the outer filter, and the subquery repeats those
-		// 2N+2 params. The UPDATE total is 2N+4, the DELETE total is 2N+2.
-		const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+		const batch = Array.from({ length: maxFencedRetireRows }, () => ({
+			storePathHash: testStorePathHash,
+			narHash: testNarHash,
+			generation: narInfoGenerationSchema.parse(0)
+		}));
 
-		it('narinfos credit UPDATE stays within 100 params at maxFencedRetireRows', () => {
-			const edgeFilter = fencedEdgeFilter(maxFencedRetireRows);
-			const edgeCount = database
-				.select({ count: sql<number>`count(*)` })
-				.from(d1Schema.blobReference)
-				.where(edgeFilter);
+		it('credit UPDATE stays within the parameter budget at maxFencedRetireRows', () => {
+			const { creditUpdate } = fencedEdgeRetirement(
+				database,
+				tenant,
+				cache,
+				batch,
+				now
+			);
 
-			const update = database
-				.update(d1Schema.tenantUsage)
-				.set({
-					narinfos: sql`${d1Schema.tenantUsage.narinfos} - (${edgeCount})`,
-					updatedAt: now
-				})
-				.where(eq(d1Schema.tenantUsage.tenant, tenant));
-
-			expect(update.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(creditUpdate.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('edge DELETE stays within 100 params at maxFencedRetireRows', () => {
-			const edgeFilter = fencedEdgeFilter(maxFencedRetireRows);
-			const del = database.delete(d1Schema.blobReference).where(edgeFilter);
+		it('edge DELETE stays within the parameter budget at maxFencedRetireRows', () => {
+			const { edgeDelete } = fencedEdgeRetirement(
+				database,
+				tenant,
+				cache,
+				batch,
+				now
+			);
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(edgeDelete.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 
 	describe('offboarding reference deletes (offboarding-service)', () => {
-		it('blob-reference DELETE stays within 100 params at blobReferenceDeleteChunk', () => {
+		it('blob-reference DELETE stays within the parameter budget at blobReferenceDeleteChunk', () => {
 			const rows: BlobReferenceKey[] = Array.from(
 				{ length: blobReferenceDeleteChunk },
 				() => ({
@@ -196,10 +198,10 @@ describe('selected D1 statements', () => {
 				.delete(d1Schema.blobReference)
 				.where(and(eq(d1Schema.blobReference.tenant, tenant), inBatch));
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 
-		it('attestation-reference DELETE stays within 100 params at attestationReferenceDeleteChunk', () => {
+		it('attestation-reference DELETE stays within the parameter budget at attestationReferenceDeleteChunk', () => {
 			const rows: AttestationReferenceKey[] = Array.from(
 				{ length: attestationReferenceDeleteChunk },
 				() => ({
@@ -217,7 +219,7 @@ describe('selected D1 statements', () => {
 				.delete(d1Schema.attestationReference)
 				.where(and(eq(d1Schema.attestationReference.tenant, tenant), inBatch));
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 	});
 
@@ -227,7 +229,7 @@ describe('selected D1 statements', () => {
 		// with no outer tenant/cache filter, so the DELETE binds 2 * 45 = 90 params.
 		const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
-		it('blob_state DELETE stays within 100 params at maxFencedDeleteRows', () => {
+		it('blob_state DELETE stays within the parameter budget at maxFencedDeleteRows', () => {
 			const blobStatePair = and(
 				eq(d1Schema.blobState.narHash, testNarHash),
 				eq(d1Schema.blobState.verifiedAt, now)
@@ -240,10 +242,10 @@ describe('selected D1 statements', () => {
 				.where(match)
 				.returning({ narHash: d1Schema.blobState.narHash });
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 
-		it('cas_object DELETE stays within 100 params at maxFencedDeleteRows', () => {
+		it('cas_object DELETE stays within the parameter budget at maxFencedDeleteRows', () => {
 			const testDigest = sha256HexDigestSchema.parse('0'.repeat(64));
 			const casObjectPair = and(
 				eq(d1Schema.casObject.digest, testDigest),
@@ -257,7 +259,7 @@ describe('selected D1 statements', () => {
 				.where(match)
 				.returning({ digest: d1Schema.casObject.digest });
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 	});
 
@@ -267,7 +269,7 @@ describe('selected D1 statements', () => {
 		// The blobState query binds N params, the owned query binds N+1 (tenant), and
 		// the edge query binds N+2 (tenant + cache).
 
-		it('blob_state SELECT stays within 100 params at maxInClauseValues', () => {
+		it('blob_state SELECT stays within the parameter budget at maxInClauseValues', () => {
 			const query = database
 				.select({
 					narHash: d1Schema.blobState.narHash,
@@ -282,10 +284,12 @@ describe('selected D1 statements', () => {
 					inArray(d1Schema.blobState.narHash, narHashes(maxInClauseValues))
 				);
 
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('owned-blobs SELECT stays within 100 params at maxInClauseValues', () => {
+		it('owned-blobs SELECT stays within the parameter budget at maxInClauseValues', () => {
 			const ownedHashes = narHashes(maxInClauseValues);
 			const query = database
 				.select({ narHash: d1Schema.tenantBlob.narHash })
@@ -297,10 +301,12 @@ describe('selected D1 statements', () => {
 					)
 				);
 
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('committed-edge SELECT stays within 100 params at maxInClauseValues', () => {
+		it('committed-edge SELECT stays within the parameter budget at maxInClauseValues', () => {
 			const storePaths = Array.from(
 				{ length: maxInClauseValues },
 				() => testStorePathHash
@@ -320,80 +326,124 @@ describe('selected D1 statements', () => {
 					)
 				);
 
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 
 	describe('maintenance stamp UPDATE (routing/scheduled)', () => {
-		it('stampMaintained UPDATE stays within 100 params at maxInClauseValues', () => {
+		it('stampMaintained UPDATE stays within the parameter budget at maxInClauseValues', () => {
 			const tenantIds = Array.from({ length: maxInClauseValues }, (_, index) =>
 				tenantIdSchema.parse(`tenant-${String(index)}`)
 			);
 			const update = buildStampMaintainedStatement(database, tenantIds, now);
 
-			expect(update.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(update.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 
 	describe('offboarding presence deletes (offboarding-service)', () => {
-		it('tenant_blob DELETE stays within 100 params at maxInClauseValues', () => {
+		it('tenant_blob DELETE stays within the parameter budget at maxInClauseValues', () => {
 			const narHashList = narHashes(maxInClauseValues);
 			const del = buildTenantBlobDeleteStatement(database, tenant, narHashList);
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 
-		it('tenant_cas_blob DELETE stays within 100 params at maxInClauseValues', () => {
+		it('tenant_cas_blob DELETE stays within the parameter budget at maxInClauseValues', () => {
 			const digests = Array.from({ length: maxInClauseValues }, () =>
 				sha256HexDigestSchema.parse('0'.repeat(64))
 			);
 			const del = buildTenantCasBlobDeleteStatement(database, tenant, digests);
 
-			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 	});
-	// The registry update binds the object-id list twice, so it reaches the cap
-	// at half the width the other two statements manage. Each case builds the
-	// widest chunk the reaper produces.
+	// The registry update binds the object ID list twice and therefore determines
+	// the collection chunk width. Each case builds the widest chunk the reaper
+	// produces.
 	describe('expired object collection (blob-reaper-service)', () => {
-		it('registry UPDATE stays within 100 params at maxCollectionChunk', () => {
+		it('registry UPDATE stays within the parameter budget at maxCollectionChunk', () => {
 			const { retire } = buildBlobCollection(
 				database,
 				narHashes(maxCollectionChunk),
 				now
 			);
 
-			expect(retire.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(retire.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('deletion-queue INSERT stays within 100 params at maxCollectionChunk', () => {
+		it('deletion-queue INSERT stays within the parameter budget at maxCollectionChunk', () => {
 			const { queueDeletion } = buildBlobCollection(
 				database,
 				narHashes(maxCollectionChunk),
 				now
 			);
 
-			expect(queueDeletion.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(queueDeletion.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('fenced DELETE stays within 100 params at maxCollectionChunk', () => {
+		it('fenced DELETE stays within the parameter budget at maxCollectionChunk', () => {
 			const { remove } = buildBlobCollection(
 				database,
 				narHashes(maxCollectionChunk),
 				now
 			);
 
-			expect(remove.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(remove.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 
-		it('CAS registry UPDATE stays within 100 params at maxCollectionChunk', () => {
+		it('CAS registry UPDATE stays within the parameter budget at maxCollectionChunk', () => {
 			const { retire } = buildCasCollection(
 				database,
 				digests(maxCollectionChunk),
 				now
 			);
 
-			expect(retire.toSQL().params.length).toBeLessThanOrEqual(100);
+			expect(retire.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
+		});
+	});
+
+	describe('verification claim lease (verification-service)', () => {
+		it('lease UPDATE stays within the parameter budget at maxInClauseValues', () => {
+			const update = buildLeaseUpdate(
+				doDatabase,
+				Array.from({ length: maxInClauseValues }, () =>
+					uploadIdSchema.parse('01J0000000000000000000000A')
+				),
+				now,
+				'owner'
+			);
+
+			expect(update.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
+		});
+	});
+
+	// This list of root names is not chunked; maxRootsExpiredPerRun bounds it.
+	describe('expired root targets (garbage-collection-service)', () => {
+		it('target SELECT stays within the parameter budget at maxRootsExpiredPerRun', () => {
+			const select = expiredRootTargetSelect(
+				doDatabase,
+				cache,
+				Array.from({ length: maxRootsExpiredPerRun }, () => testRootName)
+			);
+
+			expect(select.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
 		});
 	});
 });

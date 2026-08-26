@@ -27,8 +27,10 @@ export interface TornDownNarInfo {
 	readonly narHash: NixSha256HashString;
 }
 
-// Each fenced edge binds a path and generation. Reserve parameters for the
-// tenant and cache when calculating the largest safe D1 batch.
+// Both statements use the same edge filter, which binds 2N + 2 parameters: a
+// path and generation for each edge, plus the tenant and cache. The credit
+// update embeds that filter in its `count(*)` subquery and also binds `updatedAt`
+// and its own tenant predicate. Its 2N + 4 parameters determine the chunk width.
 export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
 
 // Limit each flush to a few retirement batches. An alarm continues any backlog
@@ -36,8 +38,54 @@ export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
 export const maxNarInfoDeletionsFlushedPerRun = 4 * maxFencedRetireRows;
 
 // The credit update embeds the tenant and hash filter twice. Together with the
-// fixed bindings, a chunk uses 2N+6 parameters; 45 stays below D1's limit of 100.
+// fixed bindings, a chunk uses 2N + 6 parameters; 45 stays below D1's limit of
+// 100.
 export const maxTeardownPresenceChunk = 45;
+
+/**
+ * Builds the usage-credit update and edge delete that retire one chunk of
+ * narinfo edges. Both statements use the same edge filter. The credit update
+ * embeds that filter in its `count(*)` subquery and adds two fixed parameters,
+ * so it binds 94 parameters at `maxFencedRetireRows`.
+ *
+ * The parameter guard imports this builder so it inspects the production
+ * statements instead of maintaining a separate filter.
+ */
+export function fencedEdgeRetirement(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	cache: StoredCache,
+	batch: readonly TornDownNarInfo[],
+	now: IsoTimestamp
+) {
+	const edgeFilter = and(
+		eq(d1Schema.blobReference.tenant, tenant),
+		eq(d1Schema.blobReference.cache, cache),
+		or(
+			...batch.map((entry) =>
+				and(
+					eq(d1Schema.blobReference.storePathHash, entry.storePathHash),
+					eq(d1Schema.blobReference.generation, entry.generation)
+				)
+			)
+		)
+	);
+	const edgeCount = database
+		.select({ count: sql<number>`count(*)` })
+		.from(d1Schema.blobReference)
+		.where(edgeFilter);
+
+	return {
+		creditUpdate: database
+			.update(d1Schema.tenantUsage)
+			.set({
+				narinfos: sql`${d1Schema.tenantUsage.narinfos} - (${edgeCount})`,
+				updatedAt: now
+			})
+			.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+		edgeDelete: database.delete(d1Schema.blobReference).where(edgeFilter)
+	};
+}
 
 // The credit update and presence delete use the same filter in one transaction.
 // Keep the update first so its subqueries measure the rows that the delete will
@@ -459,33 +507,15 @@ export class DeletionQueueService {
 
 			// Compute the credit from edges that still exist, then delete those exact
 			// generations in the same transaction. Replays cannot double-credit.
-			const edgeFilter = and(
-				eq(d1Schema.blobReference.tenant, tenant),
-				eq(d1Schema.blobReference.cache, cache),
-				or(
-					...batch.map((entry) =>
-						and(
-							eq(d1Schema.blobReference.storePathHash, entry.storePathHash),
-							eq(d1Schema.blobReference.generation, entry.generation)
-						)
-					)
-				)
+			const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
+				this.context.d1,
+				tenant,
+				cache,
+				batch,
+				now
 			);
-			const edgeCount = this.context.d1
-				.select({ count: sql<number>`count(*)` })
-				.from(d1Schema.blobReference)
-				.where(edgeFilter);
 
-			await this.context.d1.batch([
-				this.context.d1
-					.update(d1Schema.tenantUsage)
-					.set({
-						narinfos: sql`${d1Schema.tenantUsage.narinfos} - (${edgeCount})`,
-						updatedAt: now
-					})
-					.where(eq(d1Schema.tenantUsage.tenant, tenant)),
-				this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
-			]);
+			await this.context.d1.batch([creditUpdate, edgeDelete]);
 
 			// A shared hash retains its presence row until its final edge is retired.
 			// The caller's critical section makes this Durable Object the sole writer
