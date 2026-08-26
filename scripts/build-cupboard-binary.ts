@@ -21,8 +21,6 @@ interface Options {
 	readonly version: string;
 }
 
-type SeaFormat = 'esm' | 'cjs';
-
 interface RunOptions {
 	readonly cwd?: string;
 	readonly optional?: boolean;
@@ -45,13 +43,9 @@ export const hookHelperSourcePath =
 export const hookHelperBinaryName = 'cupboard-hook-relay';
 
 export async function generateSeaPreparationBlob(
-	workDirectory: string,
-	seaFormat: SeaFormat
+	workDirectory: string
 ): Promise<string> {
-	const bundlePath = path.join(
-		workDirectory,
-		seaFormat === 'esm' ? 'cupboard.mjs' : 'cupboard.cjs'
-	);
+	const bundlePath = path.join(workDirectory, 'cupboard.cjs');
 	const blobPath = path.join(workDirectory, 'cupboard.blob');
 	const configurationPath = path.join(workDirectory, 'sea-config.json');
 	const embeddedPayloadPath = path.join(workDirectory, embeddedAssetKey);
@@ -61,7 +55,6 @@ export async function generateSeaPreparationBlob(
 		JSON.stringify(
 			{
 				main: path.basename(bundlePath),
-				...(seaFormat === 'esm' && { mainFormat: 'module' }),
 				output: path.basename(blobPath),
 				assets: {
 					[embeddedAssetKey]: path.basename(embeddedPayloadPath)
@@ -177,7 +170,7 @@ async function main(): Promise<void> {
 	);
 	await writeFile(embeddedPayloadPath, JSON.stringify(payload));
 
-	await buildAndSmokeSea();
+	await buildSea();
 	compileHookHelper({ binaryDirectory, runCommand: run });
 	run('tar', releaseArchiveArguments(assetPath, binaryDirectory));
 
@@ -196,24 +189,8 @@ async function main(): Promise<void> {
 		);
 	}
 
-	async function buildAndSmokeSea(): Promise<void> {
-		try {
-			await buildSea('esm');
-			return;
-		} catch (error) {
-			console.warn(
-				`ESM SEA smoke failed; rebuilding as CommonJS: ${errorMessage(error)}`
-			);
-		}
-
-		await buildSea('cjs');
-	}
-
-	async function buildSea(seaFormat: SeaFormat): Promise<void> {
-		const bundlePath = path.join(
-			workDirectory,
-			seaFormat === 'esm' ? 'cupboard.mjs' : 'cupboard.cjs'
-		);
+	async function buildSea(): Promise<void> {
+		const bundlePath = path.join(workDirectory, 'cupboard.cjs');
 
 		await build({
 			// The single-executable runs the bundle through the bare `node` binary, so
@@ -240,29 +217,25 @@ async function main(): Promise<void> {
 			define: {
 				CUPBOARD_VERSION: JSON.stringify(options.version)
 			},
-			...(seaFormat === 'esm'
-				? { entryPoints: ['packages/cli/src/main.ts'] }
-				: {
-						stdin: {
-							contents: [
-								"import { runCli } from './packages/cli/src/run.ts';",
-								'void (async () => {',
-								'\tprocess.exitCode = await runCli();',
-								'})();'
-							].join('\n'),
-							loader: 'ts',
-							resolveDir: process.cwd(),
-							sourcefile: 'cupboard-cjs-entry.ts'
-						}
-					}),
-			format: seaFormat,
+			stdin: {
+				contents: [
+					"import { runCli } from './packages/cli/src/run.ts';",
+					'void (async () => {',
+					'\tprocess.exitCode = await runCli();',
+					'})();'
+				].join('\n'),
+				loader: 'ts',
+				resolveDir: process.cwd(),
+				sourcefile: 'cupboard-cjs-entry.ts'
+			},
+			format: 'cjs',
 			outfile: bundlePath,
 			platform: 'node',
 			sourcemap: true,
 			target: 'node24'
 		});
 
-		const blobPath = await generateSeaPreparationBlob(workDirectory, seaFormat);
+		const blobPath = await generateSeaPreparationBlob(workDirectory);
 		await copyFile(process.execPath, binaryPath);
 		await chmod(binaryPath, 0o755);
 
@@ -294,10 +267,6 @@ async function main(): Promise<void> {
 			'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
 		]);
 	}
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 function run(
