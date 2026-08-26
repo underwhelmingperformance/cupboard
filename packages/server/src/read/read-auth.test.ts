@@ -32,26 +32,34 @@ async function verifierFor(password: string): Promise<ReadVerifier> {
 }
 
 describe('isReadAuthorised', () => {
-	it('creates a versioned PBKDF2 verifier and accepts legacy SHA-256 rows', async () => {
+	it('stores the salted SHA-256 digest of the password', async () => {
 		const salt = readPasswordSaltSchema.parse('test-salt');
-		const current = await hashReadPassword('password', salt);
-		const legacy = await crypto.subtle.digest(
+		const digest = await crypto.subtle.digest(
 			'SHA-256',
 			new TextEncoder().encode('cupboard-read-password-v1\0test-salt\0password')
 		);
-		const legacyHex = Array.from(new Uint8Array(legacy), (byte) =>
+		const digestHex = Array.from(new Uint8Array(digest), (byte) =>
 			byte.toString(16).padStart(2, '0')
 		).join('');
 
 		expect({
-			versioned: current.startsWith('pbkdf2-sha256$600000$'),
-			legacy: await isReadPasswordMatching(
+			hash: await hashReadPassword('password', salt),
+			matches: await isReadPasswordMatching(
 				'password',
-				readPasswordHashSchema.parse(legacyHex),
+				readPasswordHashSchema.parse(digestHex),
 				salt
 			)
-		}).toStrictEqual({ versioned: true, legacy: true });
+		}).toStrictEqual({ hash: digestHex, matches: true });
 	});
+
+	// An upper-case digest is the same 32 bytes and looks correct, but the stored
+	// and computed verifiers are compared as strings, so it would never match.
+	it('refuses an upper-case digest as a stored verifier', () => {
+		expect(readPasswordHashSchema.safeParse('A'.repeat(64)).success).toBe(
+			false
+		);
+	});
+
 	it.each([
 		{
 			name: 'matching credentials, password split on the first colon',

@@ -29,26 +29,38 @@ describe('tenantCreateBodySchema', () => {
 	});
 });
 
+// 32 random bytes in base64url, the only shape a read password may take.
+const generatedPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
+
 describe('tenantReadCredentialSchema', () => {
-	it('accepts a netrc-safe opaque password', () => {
-		const credential = {
-			user: 'alice',
-			password: 'correct-horse-battery-staple'
-		};
+	it('accepts a generated password', () => {
+		const credential = { user: 'alice', password: generatedPassword };
 
 		expect(tenantReadCredentialSchema.parse(credential)).toStrictEqual(
 			credential
 		);
 	});
 
+	// The stored verifier is a salted digest, so a password carrying less than
+	// the full 256 bits must never reach the control plane.
 	it.each([
-		{ name: 'a too-short password', password: 'short' },
+		{ name: 'a short password', password: 'short' },
+		{
+			name: 'a memorable password of a plausible length',
+			password: 'correct-horse-battery-staple-and-more'
+		},
+		{
+			name: 'a password one character short',
+			password: generatedPassword.slice(1)
+		},
 		{
 			name: 'a password with a space',
-			password: 'correct horse battery staple'
+			password: `${generatedPassword.slice(1)} `
 		},
-		{ name: 'a password with a newline', password: 'correct\nhorse' },
-		{ name: 'a password with a DEL character', password: 'bad' }
+		{
+			name: 'a password with base64 padding',
+			password: `${generatedPassword.slice(1)}=`
+		}
 	])('rejects $name', ({ password }) => {
 		expect(
 			tenantReadCredentialSchema.safeParse({ user: 'alice', password }).success
@@ -63,7 +75,7 @@ describe('tenantReadCredentialSchema', () => {
 		expect(
 			tenantReadCredentialSchema.safeParse({
 				user,
-				password: 'correct-horse-battery-staple'
+				password: generatedPassword
 			}).success
 		).toBe(false);
 	});

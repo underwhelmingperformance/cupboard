@@ -8,6 +8,7 @@ import {
 	type ParsedTenantMutateResponse,
 	type ParsedTenantReadModeResponse,
 	type ParsedTenantSummary,
+	readPasswordByteLength,
 	type TenantCreateBody,
 	tenantCreateBodySchema,
 	tenantReadModeSchema,
@@ -45,7 +46,6 @@ export interface TenantClient {
 
 interface RotateCredentialOptions {
 	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
 }
 
 interface ConfirmableOptions {
@@ -58,17 +58,14 @@ interface CreateOptions {
 	readonly ownerAudience: string;
 	readonly public?: boolean;
 	readonly readUser?: ReadUser;
-	readonly readPassword?: string | false;
+	readonly readPassword?: boolean;
 	readonly quotaBytes?: number;
 }
 
-export class ReadCredentialIncompleteError extends Error {
-	constructor(
-		public readonly readUser: string | undefined,
-		public readonly readPassword: string | false | undefined
-	) {
-		super('--read-user requires --read-password');
-		this.name = 'ReadCredentialIncompleteError';
+export class ReadUserWithoutCredentialError extends Error {
+	constructor(public readonly readUser: string) {
+		super('--read-user cannot be combined with --no-read-password');
+		this.name = 'ReadUserWithoutCredentialError';
 	}
 }
 
@@ -99,8 +96,13 @@ interface ReadCredentialSelection {
 	readonly generatedPassword: string | undefined;
 }
 
+/**
+ * Creates a read password. The control plane stores a salted digest of it, so
+ * the strength of the credential is these 32 random bytes and no command
+ * accepts a password from the caller.
+ */
 export function generateReadPassword(): string {
-	return randomBytes(32).toString('base64url');
+	return randomBytes(readPasswordByteLength).toString('base64url');
 }
 
 function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
@@ -109,53 +111,30 @@ function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
 
 /**
  * Returns no credential for a public tenant or when `--no-read-password` is
- * set. Otherwise it uses the supplied password or generates one.
+ * set. Otherwise it generates one.
  */
 export function readCredentialFromOptions(options: {
 	readonly public?: boolean;
 	readonly readUser?: ReadUser;
-	readonly readPassword?: string | false;
+	readonly readPassword?: boolean;
 }): ReadCredentialSelection {
 	if (options.readPassword === false) {
 		if (options.readUser !== undefined) {
-			throw new ReadCredentialIncompleteError(
-				options.readUser,
-				options.readPassword
-			);
+			throw new ReadUserWithoutCredentialError(options.readUser);
 		}
 
 		return { read: undefined, generatedPassword: undefined };
 	}
 
-	if (options.public === true && options.readPassword === undefined) {
+	if (options.public === true) {
 		return { read: undefined, generatedPassword: undefined };
 	}
 
-	const user = readUserOrDefault(options.readUser);
-	const generated =
-		options.readPassword === undefined || options.readPassword === 'auto'
-			? generateReadPassword()
-			: undefined;
-
-	if (generated !== undefined) {
-		return {
-			read: { user, password: generated },
-			generatedPassword: generated
-		};
-	}
-
-	const explicitPassword = options.readPassword;
-
-	if (explicitPassword === undefined) {
-		throw new ReadCredentialIncompleteError(
-			options.readUser,
-			options.readPassword
-		);
-	}
+	const password = generateReadPassword();
 
 	return {
-		read: { user, password: explicitPassword },
-		generatedPassword: undefined
+		read: { user: readUserOrDefault(options.readUser), password },
+		generatedPassword: password
 	};
 }
 
@@ -183,10 +162,6 @@ export function registerTenantCommands(
 			'--read-user <user>',
 			'the Basic-auth user a private cache requires from readers',
 			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'the Basic-auth password a private cache requires from readers (default: auto)'
 		)
 		.option(
 			'--no-read-password',
@@ -307,7 +282,7 @@ export function registerTenantCommands(
 	tenant
 		.command('rotate-credential')
 		.description(
-			"Set a private cache's read credential, generating a password by default."
+			"Set a private cache's read credential to a newly generated password."
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
@@ -315,10 +290,6 @@ export function registerTenantCommands(
 			'--read-user <user>',
 			'the Basic-auth user a private cache requires from readers',
 			parseReadUser
-		)
-		.option(
-			'--read-password <password>',
-			'the Basic-auth password a private cache requires from readers (default: auto)'
 		)
 		.action(async (url: URL, id: string, options: RotateCredentialOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -497,8 +468,7 @@ export async function runTenantRotateCredential(
 	client: Pick<TenantClient, 'rotateReadCredential'>
 ): Promise<void> {
 	const user = readUserOrDefault(options.readUser);
-	const password = options.readPassword ?? generateReadPassword();
-	const generated = options.readPassword === undefined ? password : undefined;
+	const password = generateReadPassword();
 
 	const result = await reporter.phase('Rotating read credential', () =>
 		client.rotateReadCredential({ id, read: { user, password } })
@@ -507,12 +477,9 @@ export async function runTenantRotateCredential(
 	const rows: ResultRow[] = [
 		{ label: 'Tenant', value: result.id },
 		{ label: 'Read mode', value: result.readMode },
-		{ label: 'Read user', value: user }
+		{ label: 'Read user', value: user },
+		{ label: 'Read password', value: password }
 	];
-
-	if (generated !== undefined) {
-		rows.push({ label: 'Read password', value: generated });
-	}
 
 	if (result.readMode === 'public') {
 		rows.push({
@@ -524,7 +491,7 @@ export async function runTenantRotateCredential(
 
 	reporter.result({
 		kind: 'tenant',
-		data: { ...result, readUser: user, generatedReadPassword: generated },
+		data: { ...result, readUser: user, generatedReadPassword: password },
 		rows
 	});
 }

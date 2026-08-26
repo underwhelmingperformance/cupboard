@@ -7,23 +7,14 @@ import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
 
 const textEncoder = new TextEncoder();
 const readPasswordHashDomain = 'cupboard-read-password-v1';
-const readPasswordKdfDomain = 'cupboard-read-password-v2';
-const readPasswordKdfIterations = 600_000;
-const readPasswordKdfPrefix = `pbkdf2-sha256$${String(
-	readPasswordKdfIterations
-)}$`;
+// A SHA-256 digest rendered as lower-case hexadecimal is 64 ASCII bytes.
+const readPasswordHashByteLength = 64;
 
 // Separate brands prevent callers from passing a password hash where a salt or
 // read user is required.
 export const readPasswordHashSchema = z
 	.string()
-	.refine(
-		(value) =>
-			/^[0-9a-f]{64}$/u.test(value) ||
-			(value.startsWith(readPasswordKdfPrefix) &&
-				/^[A-Za-z0-9_-]{43}$/u.test(value.slice(readPasswordKdfPrefix.length))),
-		'unsupported read-password verifier format'
-	)
+	.regex(/^[0-9a-f]{64}$/u, 'unsupported read-password verifier format')
 	.brand('ReadPasswordHash');
 export type ReadPasswordHash = z.infer<typeof readPasswordHashSchema>;
 
@@ -39,43 +30,23 @@ export interface ReadVerifier {
 }
 
 /**
- * Creates the versioned PBKDF2 verifier stored for private-read credentials.
- * Changing this format invalidates existing credentials.
+ * Creates the verifier stored for a private-read credential. Changing this
+ * encoding invalidates existing credentials.
+ *
+ * The verifier is a salted digest, so the credential is protected by the
+ * password's own entropy. `readPasswordSchema` requires 32 random bytes, which
+ * leaves an attacker holding a stolen verifier the whole 256-bit space to
+ * search.
  */
 export async function hashReadPassword(
 	password: string,
 	salt: ReadPasswordSalt
 ): Promise<ReadPasswordHash> {
-	const key = await crypto.subtle.importKey(
-		'raw',
-		textEncoder.encode(password),
-		'PBKDF2',
-		false,
-		['deriveBits']
-	);
-	const derived = await crypto.subtle.deriveBits(
-		{
-			name: 'PBKDF2',
-			hash: 'SHA-256',
-			iterations: readPasswordKdfIterations,
-			salt: textEncoder.encode(`${readPasswordKdfDomain}\0${salt}`)
-		},
-		key,
-		256
-	);
-
-	return readPasswordHashSchema.parse(
-		`${readPasswordKdfPrefix}${bytesToBase64Url(new Uint8Array(derived))}`
-	);
-}
-
-async function legacyReadPasswordHash(
-	password: string,
-	salt: ReadPasswordSalt
-): Promise<string> {
-	return sha256HexBytes(
+	const digest = await sha256HexBytes(
 		textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
 	);
+
+	return readPasswordHashSchema.parse(digest);
 }
 
 export async function isReadPasswordMatching(
@@ -83,14 +54,12 @@ export async function isReadPasswordMatching(
 	passwordHash: ReadPasswordHash,
 	salt: ReadPasswordSalt
 ): Promise<boolean> {
-	const candidate = passwordHash.startsWith(readPasswordKdfPrefix)
-		? await hashReadPassword(password, salt)
-		: await legacyReadPasswordHash(password, salt);
+	const candidate = await hashReadPassword(password, salt);
 
 	return isConstantTimeEqual(
 		candidate,
 		passwordHash,
-		textEncoder.encode(passwordHash).byteLength
+		readPasswordHashByteLength
 	);
 }
 

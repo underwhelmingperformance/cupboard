@@ -21,20 +21,23 @@ export const tenantStatusSchema = z.enum([
 ]);
 export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
-export const readPasswordMinLength = 20;
+// A read password is 32 random bytes, rendered as 43 base64url characters.
+export const readPasswordByteLength = 32;
+const readPasswordLength = 43;
 
 export const defaultReadUser = readUserInputSchema.parse('cupboard');
 
+// A read password is generated, never chosen. The control plane stores a
+// salted digest of it, so the credential is protected by the password's own
+// entropy, and this schema is exact so that all 256 bits stay random.
 export const readPasswordSchema = z
 	.string()
-	.min(readPasswordMinLength)
-	.regex(/^[!-~]+$/);
+	.length(readPasswordLength)
+	.regex(/^[A-Za-z0-9_-]+$/);
 
-// Basic authentication uses the first colon to separate the user from the
-// password, so `readUserInputSchema` excludes colons. The CLI generates the
-// password by default; explicit values must be visible ASCII that netrc can
-// store without escaping. The control plane hashes the password before
-// persistence.
+// base64url is visible ASCII and contains no colon, so Basic authentication can
+// split the user from the password and netrc can store both unquoted.
+// `readUserInputSchema` excludes colons for the same reason.
 export const tenantReadCredentialSchema = z.strictObject({
 	user: readUserInputSchema,
 	password: readPasswordSchema
