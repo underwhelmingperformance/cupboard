@@ -7,7 +7,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type ParsedUploadGraceFact,
 	type ParsedUploadPathNegotiation,
@@ -57,7 +57,7 @@ import {
 	type PrefetchedMaterialisationFacts
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
-import { type ServerContext } from './context.ts';
+import { type SchemaDatabase, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	confirmGrace,
@@ -237,6 +237,25 @@ function claimableFilter(now: Date) {
 			lte(schema.pendingUploads.claimedAt, leasedBefore)
 		)
 	);
+}
+
+/**
+ * Builds the update that leases one chunk of pending uploads to a verification
+ * pass.
+ *
+ * The parameter guard imports this builder and inspects the generated SQL
+ * without executing it.
+ */
+export function buildLeaseUpdate(
+	database: SchemaDatabase,
+	uploadIds: readonly UploadId[],
+	claimedAt: IsoTimestamp,
+	owner: string
+) {
+	return database
+		.update(schema.pendingUploads)
+		.set({ claimedAt, claimOwner: owner })
+		.where(inArray(schema.pendingUploads.id, uploadIds));
 }
 
 // Claims form a contiguous prefix in id order, subject to the row limit and the
@@ -1396,20 +1415,17 @@ export class VerificationService {
 	// Lease only the rows returned to this pass. Selection and leasing are
 	// synchronous on the single writer, so another pass cannot claim them between
 	// those operations.
+	//
+	// The largest verification page contains `maxVerificationRpcRows` uploads.
+	// Split that page so each update stays within the parameter limit.
 	private leaseRows(
 		uploadIds: readonly UploadId[],
 		now: Date,
 		owner: string
 	): void {
-		if (uploadIds.length === 0) {
-			return;
+		for (const ids of chunk(uploadIds, maxInClauseValues)) {
+			buildLeaseUpdate(this.context.db, ids, isoTimestamp(now), owner).run();
 		}
-
-		this.context.db
-			.update(schema.pendingUploads)
-			.set({ claimedAt: isoTimestamp(now), claimOwner: owner })
-			.where(inArray(schema.pendingUploads.id, uploadIds))
-			.run();
 	}
 
 	private decodeFreeCandidatePage(

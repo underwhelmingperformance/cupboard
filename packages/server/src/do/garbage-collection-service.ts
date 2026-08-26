@@ -42,6 +42,7 @@ import {
 } from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
+	type SchemaDatabase,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
@@ -56,7 +57,43 @@ export const maxPathsCollectedPerRun = 1000;
 // then resume without a cursor and without leaving a target unprotected.
 export const maxExpiredRootTargetsPerRun = 1000;
 
+// `expiredRootTargetSelect` binds every root selected by this pass in one query,
+// so this value also limits that query's parameter count.
 export const maxRootsExpiredPerRun = 32;
+
+/**
+ * Builds one ordered page of targets for roots that have just expired. The
+ * query must include every root from the expiry pass so its ordering and limit
+ * apply to the complete target set. Splitting the roots across queries would
+ * give each subset its own page and could omit targets from the first global
+ * page.
+ *
+ * The parameter guard imports this builder and inspects it with
+ * `maxRootsExpiredPerRun` root names.
+ */
+export function expiredRootTargetSelect(
+	database: SchemaDatabase,
+	cache: StoredCache,
+	rootNames: readonly RootName[]
+) {
+	return database
+		.select({
+			rootName: schema.retentionRootTargets.rootName,
+			storePathHash: schema.retentionRootTargets.storePathHash
+		})
+		.from(schema.retentionRootTargets)
+		.where(
+			and(
+				eq(schema.retentionRootTargets.cache, cache),
+				inArray(schema.retentionRootTargets.rootName, rootNames)
+			)
+		)
+		.orderBy(
+			asc(schema.retentionRootTargets.rootName),
+			asc(schema.retentionRootTargets.storePathHash)
+		)
+		.limit(maxExpiredRootTargetsPerRun + 1);
+}
 
 // Delete at most one R2 batch from each pending table. Deleted rows disappear
 // from the next indexed expiry query, so the existing alarm continuation drains
@@ -257,24 +294,11 @@ export class GarbageCollectionService {
 		const expiredRootTargetCandidates =
 			expiredRootNames.length === 0
 				? []
-				: this.context.db
-						.select({
-							rootName: schema.retentionRootTargets.rootName,
-							storePathHash: schema.retentionRootTargets.storePathHash
-						})
-						.from(schema.retentionRootTargets)
-						.where(
-							and(
-								eq(schema.retentionRootTargets.cache, cache),
-								inArray(schema.retentionRootTargets.rootName, expiredRootNames)
-							)
-						)
-						.orderBy(
-							asc(schema.retentionRootTargets.rootName),
-							asc(schema.retentionRootTargets.storePathHash)
-						)
-						.limit(maxExpiredRootTargetsPerRun + 1)
-						.all();
+				: expiredRootTargetSelect(
+						this.context.db,
+						cache,
+						expiredRootNames
+					).all();
 		const expiredRootTargets = expiredRootTargetCandidates.slice(
 			0,
 			maxExpiredRootTargetsPerRun

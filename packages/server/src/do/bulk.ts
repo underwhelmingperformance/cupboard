@@ -10,9 +10,17 @@ import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
-// Cloudflare's D1 and Durable Object SQLite runtimes admit at most 100 bound
-// parameters per query, so an `IN (...)` list is chunked below that with
-// headroom for the fixed parameters a query also binds (a tenant, a cache).
+// Cloudflare's D1 and Durable Object SQLite runtimes accept at most 100 bound
+// parameters in one query.
+//
+// Local workerd and test-pool runs use a SQLite build that accepts 32,766
+// parameters, so executing a statement there does not reproduce an overrun.
+// `d1-parameter-guard.test.ts` inspects the generated parameter lists instead.
+export const maxBoundParameters = 100;
+
+// An `IN (...)` list is chunked below the budget, leaving headroom for the fixed
+// parameters a query also binds (a tenant, a cache). A statement that binds its
+// list more than once needs a narrower chunk of its own.
 export const maxInClauseValues = 90;
 
 // Cloudflare allows a Durable Object six simultaneous outgoing connections per
