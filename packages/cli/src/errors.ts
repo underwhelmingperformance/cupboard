@@ -344,6 +344,21 @@ export class PushNarMetadataMismatchError extends CliError {
 	}
 }
 
+export class BuildOutputDivergedError extends CliError {
+	constructor(
+		public readonly storePath: string,
+		public readonly localNarHash: string,
+		public readonly cacheNarHash: string
+	) {
+		super(
+			`The build store holds ${storePath} with NAR hash ${localNarHash}, but ` +
+				`the destination cache serves ${cacheNarHash}. The same store path was ` +
+				'realised with different bytes.'
+		);
+		this.name = 'BuildOutputDivergedError';
+	}
+}
+
 export abstract class CupboardResponseError extends CliError {
 	protected constructor(
 		public readonly path: string,

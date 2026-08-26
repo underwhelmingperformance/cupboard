@@ -20,6 +20,8 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { exactUploadDecisions } from '../push/negotiation.ts';
 import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 
+import { requireMatchingBuildOutput } from './divergence.ts';
+
 export const flushMaxWaitMs = 500;
 
 export interface BatchSession {
@@ -237,6 +239,13 @@ export class BuildOutputBatcher {
 						}
 
 						if (decision.action === 'skip') {
+							try {
+								requireMatchingBuildOutput(info, decision);
+							} catch (error) {
+								this.settlePath(info.storePath, error, remaining);
+								continue;
+							}
+
 							remaining.delete(info.storePath);
 							this.recordOutcome({
 								outcome: 'destination-served',

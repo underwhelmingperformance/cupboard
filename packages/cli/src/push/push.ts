@@ -90,6 +90,7 @@ import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { capacityWaitReporter } from './capacity-wait.ts';
+import { narDivergence } from './divergence.ts';
 import { exactUploadDecisions } from './negotiation.ts';
 import { publishedSubjects, republishedSubject } from './origin.ts';
 import {
@@ -1947,15 +1948,19 @@ function divergentSkips(
 
 		const local = byStorePathHash.get(decision.storePathHash);
 
-		if (local === undefined || resolvedNarHash(local) === decision.narHash) {
+		if (local === undefined) {
 			continue;
 		}
 
-		divergent.set(decision.storePathHash, {
-			storePath: resolvedStorePath(local),
-			localNarHash: resolvedNarHash(local),
-			cacheNarHash: decision.narHash
-		});
+		const difference = narDivergence(
+			resolvedStorePath(local),
+			resolvedNarHash(local),
+			decision.narHash
+		);
+
+		if (difference !== undefined) {
+			divergent.set(decision.storePathHash, difference);
+		}
 	}
 
 	return divergent;

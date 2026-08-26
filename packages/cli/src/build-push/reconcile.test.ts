@@ -71,6 +71,7 @@ const drvA = derivationPathSchema.parse(
 const rootOne = rootNameSchema.parse('github:acme/repo/one');
 const rootTwo = rootNameSchema.parse('github:acme/repo/two');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
+const divergentNarHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xbb));
 const substituterSignature = 'cache.example.org-1:c2ln';
 
 function target(storePath: StorePathString, root?: RootName): ReconcileTarget {
@@ -327,6 +328,57 @@ function reconcileWith(
 }
 
 describe('reconcileBuild', () => {
+	it('refuses a destination copy whose NAR differs from the build output', async () => {
+		const fixture = harness({
+			valid: [pathA],
+			decisions: (paths) =>
+				paths.map((path) =>
+					uploadDecisionSchema.parse({
+						action: 'skip',
+						storePathHash: StorePath.hash(
+							storePathSchema.parse(path.storePath)
+						),
+						narHash: divergentNarHash.toString()
+					})
+				)
+		});
+		const result = await reconcileWith(fixture, {
+			targets: [target(pathA, rootOne)]
+		});
+
+		expect({
+			receipt: result.receipt,
+			roots: result.roots,
+			rootReplacements: fixture.rootReplacements,
+			failures: result.failures.map((failure) => ({
+				storePath: failure.storePath,
+				reason: failure.reason,
+				name: failure.cause instanceof Error ? failure.cause.name : undefined
+			}))
+		}).toStrictEqual({
+			receipt: {
+				version: 3,
+				paths: [],
+				subjects: [],
+				outcomes: [
+					{ outcome: 'failed', storePath: pathA, reason: 'verification' }
+				],
+				uploaded: [],
+				failed: [pathA],
+				collected: []
+			},
+			roots: [{ root: rootOne, applied: false, targets: [pathA] }],
+			rootReplacements: [],
+			failures: [
+				{
+					storePath: pathA,
+					reason: 'verification',
+					name: 'BuildOutputDivergedError'
+				}
+			]
+		});
+	});
+
 	it.each([
 		{
 			name: 'empty',
