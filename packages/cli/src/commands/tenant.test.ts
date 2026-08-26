@@ -21,7 +21,7 @@ import {
 	InvalidQuotaBytesError,
 	parseQuotaBytes,
 	readCredentialFromOptions,
-	ReadCredentialIncompleteError,
+	ReadUserWithoutCredentialError,
 	runTenantClearCredential,
 	runTenantCreate,
 	runTenantList,
@@ -35,6 +35,16 @@ import {
 
 const acmeTenant = tenantIdSchema.parse('acme');
 const alice = readUserInputSchema.parse('alice');
+
+// A generated read password: 32 random bytes in base64url. The value is
+// random, so the tests read what the command sent and check the report repeats
+// it.
+const generatedPasswordSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const rotateCallSchema = z.object({
+	id: z.string(),
+	read: z.object({ user: z.string(), password: generatedPasswordSchema })
+});
+const rotateCallsSchema = z.tuple([rotateCallSchema]);
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -138,7 +148,10 @@ describe('runTenantCreate', () => {
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud',
-			read: { user: 'alice', password: 'correct-horse-battery-staple' }
+			read: {
+				user: 'alice',
+				password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+			}
 		});
 
 		await runTenantCreate(body, reporter(results), {
@@ -170,7 +183,7 @@ describe('runTenantCreate', () => {
 			ownerAudience: 'aud',
 			read: {
 				user: 'cupboard',
-				password: 'correct-horse-battery-staple'
+				password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 			}
 		});
 
@@ -180,7 +193,7 @@ describe('runTenantCreate', () => {
 			{
 				create: () => Promise.resolve(summary({}))
 			},
-			'correct-horse-battery-staple'
+			'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 		);
 
 		expect(results).toStrictEqual([
@@ -189,31 +202,21 @@ describe('runTenantCreate', () => {
 				{ label: 'Status', value: 'active' },
 				{ label: 'Read mode', value: 'private' },
 				{ label: 'Read user', value: 'cupboard' },
-				{ label: 'Read password', value: 'correct-horse-battery-staple' }
+				{
+					label: 'Read password',
+					value: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+				}
 			]
 		]);
 	});
 });
 
 describe('readCredentialFromOptions', () => {
-	it('uses an explicit read password with the given user', () => {
-		expect(
-			readCredentialFromOptions({
-				readUser: alice,
-				readPassword: 'correct-horse-battery-staple'
-			})
-		).toStrictEqual({
-			read: { user: 'alice', password: 'correct-horse-battery-staple' },
-			generatedPassword: undefined
-		});
-	});
-
 	it('generates a private read password by default', () => {
 		const selection = readCredentialFromOptions({});
-		const generatedPassword = z
-			.string()
-			.regex(/^[A-Za-z0-9_-]{43}$/)
-			.parse(selection.generatedPassword);
+		const generatedPassword = generatedPasswordSchema.parse(
+			selection.generatedPassword
+		);
 
 		expect(selection).toStrictEqual({
 			read: { user: 'cupboard', password: generatedPassword },
@@ -221,15 +224,11 @@ describe('readCredentialFromOptions', () => {
 		});
 	});
 
-	it('treats auto as explicit generation', () => {
-		const selection = readCredentialFromOptions({
-			readUser: alice,
-			readPassword: 'auto'
-		});
-		const generatedPassword = z
-			.string()
-			.regex(/^[A-Za-z0-9_-]{43}$/)
-			.parse(selection.generatedPassword);
+	it('generates for a supplied read user', () => {
+		const selection = readCredentialFromOptions({ readUser: alice });
+		const generatedPassword = generatedPasswordSchema.parse(
+			selection.generatedPassword
+		);
 
 		expect(selection).toStrictEqual({
 			read: { user: 'alice', password: generatedPassword },
@@ -256,17 +255,12 @@ describe('readCredentialFromOptions', () => {
 			readCredentialFromOptions({ readUser: alice, readPassword: false })
 		);
 
-		expect(error).toBeInstanceOf(ReadCredentialIncompleteError);
+		expect(error).toBeInstanceOf(ReadUserWithoutCredentialError);
 
-		if (error instanceof ReadCredentialIncompleteError) {
-			expect({
-				name: error.name,
-				readUser: error.readUser,
-				readPassword: error.readPassword
-			}).toStrictEqual({
-				name: 'ReadCredentialIncompleteError',
-				readUser: 'alice',
-				readPassword: false
+		if (error instanceof ReadUserWithoutCredentialError) {
+			expect({ name: error.name, readUser: error.readUser }).toStrictEqual({
+				name: 'ReadUserWithoutCredentialError',
+				readUser: 'alice'
 			});
 		}
 	});
@@ -475,48 +469,7 @@ describe('runTenantReadMode', () => {
 });
 
 describe('runTenantRotateCredential', () => {
-	it('sends an explicit credential and shows the user without echoing the password', async () => {
-		const results: ResultRow[][] = [];
-		const calls: {
-			id: string;
-			read: { user: string; password: string };
-		}[] = [];
-
-		await runTenantRotateCredential(
-			acmeTenant,
-			{ readUser: alice, readPassword: 'correct-horse-battery-staple' },
-			reporter(results),
-			{
-				rotateReadCredential(input) {
-					calls.push(input);
-					return Promise.resolve(
-						tenantReadModeResponseSchema.parse({
-							id: 'acme',
-							readMode: 'private'
-						})
-					);
-				}
-			}
-		);
-
-		expect({ calls, results }).toStrictEqual({
-			calls: [
-				{
-					id: 'acme',
-					read: { user: 'alice', password: 'correct-horse-battery-staple' }
-				}
-			],
-			results: [
-				[
-					{ label: 'Tenant', value: 'acme' },
-					{ label: 'Read mode', value: 'private' },
-					{ label: 'Read user', value: 'alice' }
-				]
-			]
-		});
-	});
-
-	it('generates a password by default and reports the same value it sends', async () => {
+	it('generates a password and reports the same value it sends', async () => {
 		const results: ResultRow[][] = [];
 		const calls: {
 			id: string;
@@ -534,12 +487,7 @@ describe('runTenantRotateCredential', () => {
 				);
 			}
 		});
-		const readSchema = z.object({
-			user: z.string(),
-			password: z.string().regex(/^[A-Za-z0-9_-]{43}$/)
-		});
-		const grantSchema = z.object({ id: z.string(), read: readSchema });
-		const [call] = z.tuple([grantSchema]).parse(calls);
+		const [call] = rotateCallsSchema.parse(calls);
 
 		// The operator must see the exact generated password sent to the server;
 		// another value could not authenticate.
@@ -565,27 +513,36 @@ describe('runTenantRotateCredential', () => {
 
 	it('warns when the tenant is public', async () => {
 		const results: ResultRow[][] = [];
+		const calls: {
+			id: string;
+			read: { user: string; password: string };
+		}[] = [];
 
 		await runTenantRotateCredential(
 			acmeTenant,
-			{ readUser: alice, readPassword: 'correct-horse-battery-staple' },
+			{ readUser: alice },
 			reporter(results),
 			{
-				rotateReadCredential: () =>
-					Promise.resolve(
+				rotateReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve(
 						tenantReadModeResponseSchema.parse({
 							id: 'acme',
 							readMode: 'public'
 						})
-					)
+					);
+				}
 			}
 		);
+		const [call] = rotateCallsSchema.parse(calls);
+		const sentPassword = call.read.password;
 
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Tenant', value: 'acme' },
 				{ label: 'Read mode', value: 'public' },
 				{ label: 'Read user', value: 'alice' },
+				{ label: 'Read password', value: sentPassword },
 				{
 					label: 'Warning',
 					value:

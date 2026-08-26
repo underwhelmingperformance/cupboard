@@ -77,7 +77,7 @@ function privateBodyWithRead(id: string): ParsedTenantCreateBody {
 		readMode: 'private',
 		read: {
 			user: 'cupboard',
-			password: 'correct-horse-battery-staple'
+			password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 		},
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
@@ -88,7 +88,7 @@ function privateBodyWithRead(id: string): ParsedTenantCreateBody {
 function readCredential(user: string): ParsedTenantReadCredential {
 	return tenantReadCredentialSchema.parse({
 		user,
-		password: 'correct-horse-battery-staple'
+		password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 	});
 }
 
@@ -275,11 +275,12 @@ describe('tenant registry', () => {
 		expect({
 			user: row.readUser,
 			passwordHash: row.readPasswordHash,
-			hashIsPlaintext: row.readPasswordHash === 'correct-horse-battery-staple'
+			hashIsPlaintext:
+				row.readPasswordHash === 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 		}).toStrictEqual({
 			user: 'cupboard',
 			passwordHash: await hashReadPassword(
-				'correct-horse-battery-staple',
+				'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23',
 				row.readPasswordSalt
 			),
 			hashIsPlaintext: false
@@ -646,11 +647,12 @@ describe('tenant lifecycle operations', () => {
 		expect({
 			user: row.readUser,
 			hash: row.readPasswordHash,
-			hashIsPlaintext: row.readPasswordHash === 'correct-horse-battery-staple'
+			hashIsPlaintext:
+				row.readPasswordHash === 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 		}).toStrictEqual({
 			user: 'reader',
 			hash: await hashReadPassword(
-				'correct-horse-battery-staple',
+				'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23',
 				row.readPasswordSalt
 			),
 			hashIsPlaintext: false

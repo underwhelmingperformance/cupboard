@@ -303,7 +303,10 @@ describe('control contract round trip', () => {
 		});
 		const rotated = await client.tenants.rotateReadCredential({
 			id: 'acme',
-			read: { user: 'reader', password: 'correct-horse-battery-staple' }
+			read: {
+				user: 'reader',
+				password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+			}
 		});
 		const cleared = await client.tenants.clearReadCredential({ id: 'acme' });
 
