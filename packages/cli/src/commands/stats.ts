@@ -3,15 +3,17 @@ import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface StatsOptions {
-	readonly cache?: string;
-}
+type StatsOptions = CacheSelectionOptions;
 
 export function registerStatsCommand(
 	program: Command,
@@ -22,6 +24,7 @@ export function registerStatsCommand(
 		.description('Show objects referenced by a cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--cache <name>', 'report on a named cache rather than the default')
+		.addOption(privateCacheOption('report on'))
 		.action(async (url: URL, options: StatsOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
@@ -31,7 +34,7 @@ export function registerStatsCommand(
 
 			const stats = await reporter.phase('Querying cupboard', () =>
 				rpc.stats.cache({
-					cacheName: selectorForCache(storedCacheFor(options.cache))
+					cacheName: selectorForCache(resolveCacheSelection(options))
 				})
 			);
 

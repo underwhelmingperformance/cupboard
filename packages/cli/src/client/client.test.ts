@@ -1,5 +1,9 @@
 import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
 	nixSha256HashSchema,
+	privateStoredCache,
+	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
@@ -21,7 +25,12 @@ import {
 	ResponseSchemaMismatchError
 } from '../errors.ts';
 
-import { CupboardClient, type TokenProvider } from './client.ts';
+import {
+	cachePrefixFor,
+	CupboardClient,
+	resolveCacheSelection,
+	type TokenProvider
+} from './client.ts';
 import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
@@ -643,6 +652,75 @@ describe('CupboardClient cache prefix', () => {
 				cache: 'Bad!'
 			});
 		}
+	});
+});
+
+describe('resolveCacheSelection', () => {
+	it.each([
+		{
+			name: 'neither option selects the default cache',
+			options: {},
+			expected: DEFAULT_CACHE
+		},
+		{
+			name: 'the default alias selects the default cache',
+			options: { cache: DEFAULT_CACHE },
+			expected: DEFAULT_CACHE
+		},
+		{
+			name: 'a public name selects that cache',
+			options: { cache: 'builds' },
+			expected: cacheNameSchema.parse('builds')
+		},
+		{
+			name: 'a private name selects the private stored cache',
+			options: { privateCache: 'release' },
+			expected: privateStoredCache(cacheNameSchema.parse('release'))
+		}
+	])('$name', ({ expected, options }) => {
+		expect(resolveCacheSelection(options)).toBe(expected);
+	});
+
+	it.each([
+		{ name: 'a public cache', options: { cache: 'Bad!' } },
+		{ name: 'a private cache', options: { privateCache: 'Bad!' } }
+	])('rejects an invalid name for $name', ({ options }) => {
+		const error = thrownBy(() => resolveCacheSelection(options));
+
+		expect(error).toBeInstanceOf(InvalidCacheNameError);
+
+		if (error instanceof InvalidCacheNameError) {
+			expect({ name: error.name, cache: error.cache }).toStrictEqual({
+				name: 'InvalidCacheNameError',
+				cache: 'Bad!'
+			});
+		}
+	});
+});
+
+describe('cachePrefixFor', () => {
+	it.each<{
+		readonly name: string;
+		readonly cache: StoredCache;
+		readonly prefix: string;
+	}>([
+		{
+			name: 'the default cache has no prefix',
+			cache: DEFAULT_CACHE,
+			prefix: ''
+		},
+		{
+			name: 'a named public cache',
+			cache: cacheNameSchema.parse('builds'),
+			prefix: '/cache/builds'
+		},
+		{
+			name: 'a private cache uses the private namespace',
+			cache: privateStoredCache(cacheNameSchema.parse('release')),
+			prefix: '/private-cache/release'
+		}
+	])('$name', ({ cache, prefix }) => {
+		expect(cachePrefixFor(cache)).toBe(prefix);
 	});
 });
 

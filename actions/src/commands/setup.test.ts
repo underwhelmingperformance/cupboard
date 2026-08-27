@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
-import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	privateStoredCache,
+	storedCacheSchema
+} from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
@@ -15,6 +20,7 @@ import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
+	PrivateCacheCredentialMissingError,
 	ProbeTimeoutError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -34,6 +40,8 @@ import {
 } from './setup.ts';
 
 const alice = readUserInputSchema.parse('alice');
+const cacheName = (value: string) => cacheNameSchema.parse(value);
+const readPassword = 'A'.repeat(43);
 
 async function isPathPresent(candidate: string): Promise<boolean> {
 	try {
@@ -234,7 +242,7 @@ describe('resolveSetupInputs', () => {
 		installDirectory: '/runner/temp/cupboard-bin',
 		addToPath: true,
 		cacheUrl: undefined,
-		cache: '',
+		caches: [{ cache: DEFAULT_CACHE }],
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -260,6 +268,53 @@ describe('resolveSetupInputs', () => {
 
 		expect(resolveSetupInputs(blanked, environment)).toStrictEqual(defaults);
 	});
+
+	it('resolves the public caches, then the private ones, in the order named', () => {
+		const inputs = resolveSetupInputs(
+			{
+				...baseOptions,
+				cache: 'builds, docs',
+				privateCache: 'release\nstaging',
+				readUser: 'alice',
+				readPassword: 'secret',
+				privateCacheCredentials: JSON.stringify({
+					staging: { user: 'ci', password: readPassword }
+				})
+			},
+			environment
+		);
+
+		expect(inputs.caches).toStrictEqual([
+			{ cache: cacheName('builds') },
+			{ cache: cacheName('docs') },
+			{
+				cache: privateStoredCache(cacheName('release')),
+				credential: { user: alice, password: 'secret' }
+			},
+			{
+				cache: privateStoredCache(cacheName('staging')),
+				credential: {
+					user: readUserInputSchema.parse('ci'),
+					password: readPassword
+				}
+			}
+		]);
+	});
+
+	it.each([
+		{ name: 'an ordinary name', cache: 'release' },
+		{
+			name: 'a name that is a property of Object.prototype',
+			cache: 'constructor'
+		}
+	])(
+		'refuses a private cache with no read credential and $name',
+		({ cache }) => {
+			expect(() =>
+				resolveSetupInputs({ ...baseOptions, privateCache: cache }, environment)
+			).toThrow(PrivateCacheCredentialMissingError);
+		}
+	);
 
 	it('does not require RUNNER_TEMP when install-dir is explicit', () => {
 		const inputs = resolveSetupInputs(
@@ -403,7 +458,7 @@ function stubFetch(
 describe('resolveSubstituters', () => {
 	const baseOptions: Omit<ResolveSubstitutersOptions, 'reuseView'> = {
 		cacheUrl: new URL('https://cache.example.test'),
-		cache: storedCacheSchema.parse(DEFAULT_CACHE),
+		caches: [{ cache: storedCacheSchema.parse(DEFAULT_CACHE) }],
 		readUser: '',
 		readPassword: ''
 	};
@@ -578,6 +633,85 @@ describe('resolveSubstituters', () => {
 			}
 		}
 	);
+
+	it('returns every configured cache before the view', async () => {
+		const fetcher = stubFetch((url) =>
+			cacheInfoBody(url.includes('/reuse/') ? 50 : 40)
+		);
+		const substituters = await resolveSubstituters(
+			{
+				...baseOptions,
+				caches: [
+					{ cache: cacheName('builds') },
+					{
+						cache: privateStoredCache(cacheName('release')),
+						credential: { user: alice, password: 'secret' }
+					}
+				],
+				reuseView: 'reuse'
+			},
+			{ fetch: fetcher }
+		);
+
+		expect(substituters.map((url) => canonicalHref(url))).toStrictEqual([
+			'https://cache.example.test/cache/builds',
+			'https://alice:secret@cache.example.test/private-cache/release',
+			'https://cache.example.test/reuse/reuse'
+		]);
+	});
+
+	it('probes each cache with its own credential', async () => {
+		const requests: { url: string; authorization: string | undefined }[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const url = input instanceof Request ? input.url : String(input);
+			const headers = new Headers(init?.headers);
+			const body = cacheInfoBody(url.includes('/reuse/') ? 50 : 40);
+
+			requests.push({
+				url,
+				authorization: headers.get('authorization') ?? undefined
+			});
+
+			return Promise.resolve(new Response(body));
+		};
+
+		await resolveSubstituters(
+			{
+				...baseOptions,
+				caches: [
+					{ cache: cacheName('builds') },
+					{
+						cache: privateStoredCache(cacheName('release')),
+						credential: {
+							user: readUserInputSchema.parse('ci'),
+							password: readPassword
+						}
+					}
+				],
+				reuseView: 'reuse',
+				readUser: alice,
+				readPassword: 'secret'
+			},
+			{ fetch: fetcher }
+		);
+
+		expect(
+			requests.toSorted((left, right) => left.url.localeCompare(right.url))
+		).toStrictEqual([
+			{
+				url: 'https://cache.example.test/cache/builds/nix-cache-info',
+				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
+			},
+			{
+				url: 'https://cache.example.test/private-cache/release/nix-cache-info',
+				authorization: `Basic ${Buffer.from(`ci:${readPassword}`).toString('base64')}`
+			},
+			{
+				url: 'https://cache.example.test/reuse/reuse/nix-cache-info',
+				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
+			}
+		]);
+	});
 
 	it.each([
 		[

@@ -11,7 +11,12 @@ inputs:
     description: Path to the cupboard binary installed by actions/setup.
     required: true
   cache:
-    description: Named cache that received the paths.
+    description: Named public cache that received the paths.
+    required: false
+  private-cache:
+    description:
+      Private cache that received the paths. Set either cache or private-cache,
+      not both.
     required: false
   audience:
     description: GitHub OIDC audience. Defaults to url.
@@ -87,6 +92,7 @@ runs:
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         CACHE: ${{ inputs.cache }}
+        PRIVATE_CACHE: ${{ inputs.private-cache }}
         AUDIENCE: ${{ inputs.audience }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
@@ -98,6 +104,7 @@ runs:
           --url "$URL"
           --cupboard-path "$CUPBOARD_PATH"
           --cache "$CACHE"
+          --private-cache "$PRIVATE_CACHE"
           --audience "$AUDIENCE"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"

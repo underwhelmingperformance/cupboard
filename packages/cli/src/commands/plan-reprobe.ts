@@ -2,8 +2,12 @@ import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import type { DestinationProbes } from '../plan/availability-partition.ts';
 import {
@@ -17,9 +21,8 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { readCohortTargets, readCredentials } from './plan-cohort.ts';
 
-export interface PlanReprobeOptions {
+export interface PlanReprobeOptions extends CacheSelectionOptions {
 	readonly targetsFile: string;
-	readonly cache?: string;
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
@@ -51,6 +54,7 @@ export function registerPlanReprobeCommand(
 			"JSON file describing the build set's targets"
 		)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to probe for substitutable paths'
@@ -69,7 +73,7 @@ export function registerPlanReprobeCommand(
 			await runPlanReprobe({ targets }, reporter, {
 				destinationProbes: tenantProbesFor({
 					baseUrl: url,
-					cache: storedCacheFor(options.cache),
+					cache: resolveCacheSelection(options),
 					...(options.reuseView !== undefined && { view: options.reuseView }),
 					...(credentials !== undefined && { credentials })
 				})

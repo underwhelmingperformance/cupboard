@@ -8,14 +8,17 @@ import type {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface DeleteOptions {
-	readonly cache?: string;
+interface DeleteOptions extends CacheSelectionOptions {
 	readonly yes?: boolean;
 }
 
@@ -42,6 +45,7 @@ export function registerDeleteCommand(
 			'--cache <name>',
 			'delete from a named cache rather than the default'
 		)
+		.addOption(privateCacheOption('delete from'))
 		.option('-y, --yes', 'delete without the confirmation prompt')
 		.action(async (url: URL, storePath: string, options: DeleteOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -51,7 +55,7 @@ export function registerDeleteCommand(
 			});
 
 			await runDelete(
-				selectorForCache(storedCacheFor(options.cache)),
+				selectorForCache(resolveCacheSelection(options)),
 				storePath,
 				ui,
 				rpc.paths

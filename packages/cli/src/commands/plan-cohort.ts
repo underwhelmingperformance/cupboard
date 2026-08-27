@@ -29,8 +29,13 @@ import { type Command, InvalidArgumentError } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
@@ -162,9 +167,8 @@ export async function resolvePlannedSubstitutionPolicy(
 	};
 }
 
-export interface PlanCohortOptions {
+export interface PlanCohortOptions extends CacheSelectionOptions {
 	readonly targetsFile: string;
-	readonly cache?: string;
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
@@ -296,6 +300,7 @@ export function registerPlanCommands(
 			"JSON file describing the cohort's targets"
 		)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to probe for substitutable paths'
@@ -373,11 +378,12 @@ export function registerPlanCommands(
 			const reporter = commandUi(program, programOptions).reporter();
 			const input = await readCohortPlanInput(options.targetsFile);
 			const { targets } = input;
-			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const cache = resolveCacheSelection(options);
+			const cacheName = selectorForCache(cache);
 			const uniqueRoots = [...new Set(targets.map((target) => target.root))];
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, {
-					cache: options.cache,
+					cache,
 					signal: programOptions.signal
 				}),
 				{
@@ -406,7 +412,7 @@ export function registerPlanCommands(
 			reportUnknownSettings(reporter, nix.unknownSettings);
 			const probes = tenantProbesFor({
 				baseUrl: url,
-				cache: storedCacheFor(options.cache),
+				cache,
 				...(options.reuseView !== undefined && { view: options.reuseView }),
 				...(credentials !== undefined && { credentials })
 			});

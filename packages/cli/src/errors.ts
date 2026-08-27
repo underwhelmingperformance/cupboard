@@ -1078,6 +1078,45 @@ export class ReadCredentialPairError extends CliUsageError {
 	}
 }
 
+/**
+ * Every private-cache read requires authentication. The CLI therefore needs a
+ * read credential before it can print the substituter URL.
+ */
+export class PrivateCacheCredentialRequiredError extends CliUsageError {
+	constructor(public readonly cache: string) {
+		super(
+			`No read credential for private cache '${cache}'. Set --private-cache-credentials or CUPBOARD_PRIVATE_CACHE_CREDENTIALS, or --read-user and --read-password.`
+		);
+		this.name = 'PrivateCacheCredentialRequiredError';
+	}
+}
+
+/**
+ * Private-cache credentials are a JSON object that maps each private cache's
+ * local name to its read credential.
+ */
+export class InvalidPrivateCacheCredentialsError extends CliUsageError {
+	constructor(options?: { readonly cause: unknown }) {
+		super(
+			'Invalid private cache credentials (expected a JSON object mapping a cache name to { user, password })',
+			options
+		);
+		this.name = 'InvalidPrivateCacheCredentialsError';
+	}
+}
+
+/**
+ * Each entry in the credential document must match a selected private cache.
+ */
+export class UnknownPrivateCacheCredentialError extends CliUsageError {
+	constructor(public readonly cache: string) {
+		super(
+			`Select private cache '${cache}' with --private-cache or remove its credential.`
+		);
+		this.name = 'UnknownPrivateCacheCredentialError';
+	}
+}
+
 export class GithubCheckFailedError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Configuration checks failed: ${checks.join(', ')}`);

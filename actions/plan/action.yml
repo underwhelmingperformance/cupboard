@@ -16,7 +16,12 @@ inputs:
     description: Prefix used to form each target's retention root.
     required: true
   cache:
-    description: Named cache to inspect and publish to.
+    description: Named public cache to inspect and publish to.
+    required: false
+  private-cache:
+    description:
+      Private cache to inspect and publish to. Set either cache or
+      private-cache, not both.
     required: false
   ttl:
     description: TTL applied when retaining an already cached target.
@@ -140,6 +145,7 @@ runs:
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         ROOT_PREFIX: ${{ inputs.root-prefix }}
         CACHE: ${{ inputs.cache }}
+        PRIVATE_CACHE: ${{ inputs.private-cache }}
         TTL: ${{ inputs.ttl }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
@@ -157,6 +163,7 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --root-prefix "$ROOT_PREFIX"
           --cache "$CACHE"
+          --private-cache "$PRIVATE_CACHE"
           --ttl "$TTL"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"

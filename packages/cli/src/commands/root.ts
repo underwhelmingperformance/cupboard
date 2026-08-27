@@ -27,17 +27,21 @@ import {
 	rootListAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface RootSetOptions {
+interface RootSetOptions extends CacheSelectionOptions {
 	readonly ttl?: TtlSeconds;
-	readonly cache?: string;
 }
 
 interface RootEnsureOptions extends RootSetOptions {
@@ -45,8 +49,7 @@ interface RootEnsureOptions extends RootSetOptions {
 	readonly audience?: Audience;
 }
 
-interface RootOptions {
-	readonly cache?: string;
+interface RootOptions extends CacheSelectionOptions {
 	readonly yes?: boolean;
 }
 
@@ -126,6 +129,7 @@ export function registerRootCommands(
 			parseTtl
 		)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -143,7 +147,7 @@ export function registerRootCommands(
 				options: RootEnsureOptions
 			) => {
 				const reporter = commandUi(program, programOptions).reporter();
-				const cacheName = selectorForCache(storedCacheFor(options.cache));
+				const cacheName = selectorForCache(resolveCacheSelection(options));
 				const credential = await authenticateForPush(
 					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 					{
@@ -183,6 +187,7 @@ export function registerRootCommands(
 			parseTtl
 		)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.addHelpText(
 			'after',
 			[
@@ -209,7 +214,7 @@ export function registerRootCommands(
 				});
 
 				await runRootSet(
-					selectorForCache(storedCacheFor(options.cache)),
+					selectorForCache(resolveCacheSelection(options)),
 					name,
 					targets,
 					options.ttl,
@@ -224,6 +229,7 @@ export function registerRootCommands(
 		.description('List retention roots.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -235,7 +241,7 @@ export function registerRootCommands(
 		)
 		.action(async (url: URL, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const cacheName = selectorForCache(resolveCacheSelection(options));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
@@ -258,6 +264,7 @@ export function registerRootCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -269,7 +276,7 @@ export function registerRootCommands(
 		)
 		.action(async (url: URL, name: RootName, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const cacheName = selectorForCache(resolveCacheSelection(options));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
@@ -292,6 +299,7 @@ export function registerRootCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name to remove', parseRootName)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addOption(privateCacheOption('target'))
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, name: RootName, options: RootOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -301,7 +309,7 @@ export function registerRootCommands(
 			});
 
 			await runRootRemove(
-				selectorForCache(storedCacheFor(options.cache)),
+				selectorForCache(resolveCacheSelection(options)),
 				name,
 				ui,
 				rpc.roots

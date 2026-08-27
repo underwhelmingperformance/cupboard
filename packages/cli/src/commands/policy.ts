@@ -25,8 +25,13 @@ import type { Command } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
@@ -42,8 +47,7 @@ interface PolicyAddGraceOptions {
 	readonly grace: GraceSeconds;
 }
 
-interface GraceCoverageOptions {
-	readonly cache?: string;
+interface GraceCoverageOptions extends CacheSelectionOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -210,6 +214,7 @@ export function registerPolicyCommands(
 			'--cache <name>',
 			'report coverage of a named cache rather than the default'
 		)
+		.addOption(privateCacheOption('report coverage of'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -221,7 +226,7 @@ export function registerPolicyCommands(
 		)
 		.action(async (url: URL, options: GraceCoverageOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const cacheName = selectorForCache(resolveCacheSelection(options));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{

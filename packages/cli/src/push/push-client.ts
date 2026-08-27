@@ -1,4 +1,8 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	selectorForCache,
+	type StoredCache
+} from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
@@ -7,11 +11,7 @@ import {
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
-import {
-	cachePrefixFor,
-	CupboardClient,
-	storedCacheFor
-} from '../client/client.ts';
+import { cachePrefixFor, CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 
@@ -22,7 +22,7 @@ import { type BlobUploader, r2BlobUploader } from './r2-upload.ts';
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface PushClientOptions {
-	readonly cache?: string;
+	readonly cache?: StoredCache;
 	readonly signal?: AbortSignal;
 	readonly fetcher?: typeof fetch;
 }
@@ -37,7 +37,7 @@ export function pushClientFor(
 	credential: AccessCredential,
 	options: PushClientOptions = {}
 ): PushClient {
-	const cache = storedCacheFor(options.cache);
+	const cache = options.cache ?? DEFAULT_CACHE;
 	const cacheName = selectorForCache(cache);
 	const baseFetcher = options.fetcher ?? fetch;
 	let hasUploadGraceFacts = false;

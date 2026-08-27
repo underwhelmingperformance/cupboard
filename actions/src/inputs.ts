@@ -11,6 +11,17 @@ export function parseLines(value: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
+/**
+ * The entries of a list input. A workflow may write one entry per line or
+ * separate them with commas; blank entries are dropped.
+ */
+export function parseListInput(value: string): string[] {
+	return value
+		.split(/[\n,]/u)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+}
+
 export function requireEnvironment(
 	environment: Environment,
 	name: string

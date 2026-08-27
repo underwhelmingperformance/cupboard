@@ -112,15 +112,43 @@
         lib.types.submodule {
           options = {
             url = lib.mkOption {
-              type = lib.types.str;
+              type = lib.types.nullOr lib.types.str;
+              default = null;
               example = "https://cupboard.example.workers.dev/t/acme";
-              description = "Substituter URL, as printed by `cupboard config`.";
+              description = ''
+                Substituter URL of a public cache, as printed by
+                `cupboard config`.
+              '';
+            };
+
+            substitutersFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.externalPath;
+              default = null;
+              example = "/etc/nix/cupboard-release.conf";
+              description = ''
+                Set this to a file containing the `extra-substituters` line
+                printed by `cupboard config --private-cache`. Create the file
+                outside the Nix store with mode 0400 or 0600, and make it
+                readable only by the account that runs Nix.
+
+                The module adds an `include` directive to `nix.conf`. The
+                credential-bearing URL remains in the permission-controlled
+                file. Nix appends settings from the included file, so the
+                private cache joins the substituters from public cache entries
+                in this list.
+
+                A missing or unreadable included file makes the Nix
+                configuration fail.
+              '';
             };
 
             publicKeys = lib.mkOption {
               type = lib.types.listOf lib.types.str;
               example = [ "cupboard-1:abc123..." ];
-              description = "Trusted public key(s), as printed by `cupboard pubkey`.";
+              description = ''
+                Trusted public key(s), as printed by `cupboard pubkey`. A key
+                is public data, so it is set here for a private cache too.
+              '';
             };
           };
         };
@@ -132,19 +160,37 @@
         { config, lib, ... }:
         let
           cfg = config.nix.cupboard;
+          publicCaches = builtins.filter (cache: cache.url != null) cfg.caches;
+          privateCaches = builtins.filter (cache: cache.substitutersFile != null) cfg.caches;
         in
         {
           options.nix.cupboard.caches = lib.mkOption {
             type = lib.types.listOf (cacheType lib);
             default = [ ];
-            description = "Cupboard caches to add as Nix substituters.";
+            description = ''
+              Cupboard caches to add as Nix substituters. Public cache entries
+              specify `url`. Private cache entries specify `substitutersFile`
+              so the credential remains in a permission-controlled file.
+            '';
           };
 
           config = lib.mkIf (cfg.caches != [ ]) {
+            assertions = map (cache: {
+              assertion = (cache.url == null) != (cache.substitutersFile == null);
+              message = ''
+                nix.cupboard.caches: each cache sets either url (public) or
+                substitutersFile (private), and not both.
+              '';
+            }) cfg.caches;
+
             nix.settings = {
-              substituters = map (cache: cache.url) cfg.caches;
+              substituters = map (cache: cache.url) publicCaches;
               trusted-public-keys = lib.concatMap (cache: cache.publicKeys) cfg.caches;
             };
+
+            nix.extraOptions = lib.concatMapStrings (
+              cache: "include ${toString cache.substitutersFile}\n"
+            ) privateCaches;
           };
         };
     in

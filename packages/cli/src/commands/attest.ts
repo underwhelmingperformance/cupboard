@@ -23,8 +23,13 @@ import {
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { attestAttachAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { AttestAttachBundleRequiredError, CliUsageError } from '../errors.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -33,11 +38,10 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { resolvePushPath } from './push.ts';
 
-interface VerifyOptions {
+interface VerifyOptions extends CacheSelectionOptions {
 	readonly narHash?: string;
 	readonly url?: URL;
 	readonly storePathHash?: string;
-	readonly cache?: string;
 	readonly bundleDigest?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
@@ -90,10 +94,9 @@ export function parseVerifierThreshold(option: string) {
 	};
 }
 
-interface AttachOptions {
+interface AttachOptions extends CacheSelectionOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
-	readonly cache?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly attestation: readonly string[];
@@ -133,6 +136,7 @@ export function registerAttestCommands(
 			parseAudience
 		)
 		.option('--cache <name>', 'attach on a named cache rather than the default')
+		.addOption(privateCacheOption('attach on'))
 		.option('--read-user <user>', 'private-read username', parseReadUser)
 		.option('--read-password <password>', 'private-read password')
 		.option(
@@ -157,11 +161,12 @@ export function registerAttestCommands(
 			}
 
 			const reporter = commandUi(program, programOptions).reporter();
+			const cache = resolveCacheSelection(options);
 			const raw = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+				cache,
 				signal: programOptions.signal
 			});
-			const cacheSelector = selectorForCache(storedCacheFor(options.cache));
+			const cacheSelector = selectorForCache(cache);
 			const resolvedPaths = paths.map((path) =>
 				storePathSchema.parse(resolvePushPath(path))
 			);
@@ -172,7 +177,7 @@ export function registerAttestCommands(
 				resolvedPaths,
 				{
 					url,
-					cache: storedCacheFor(options.cache),
+					cache,
 					...(readUser !== undefined && { readUser }),
 					...(readPassword !== undefined && { readPassword })
 				},
@@ -193,7 +198,7 @@ export function registerAttestCommands(
 			await runAttestAttach(resolvedPaths, reporter, {
 				client: requireAttestationAttachClient(
 					pushClientFor(url, token, {
-						cache: options.cache,
+						cache,
 						signal: programOptions.signal
 					})
 				),
@@ -215,7 +220,11 @@ export function registerAttestCommands(
 			parseWorkerUrl
 		)
 		.option('--store-path-hash <hash>', 'remote store-path hash to inspect')
-		.option('--cache <name>', 'remote named cache')
+		.option(
+			'--cache <name>',
+			'verify against a named cache rather than the default'
+		)
+		.addOption(privateCacheOption('verify against'))
 		.option('--bundle-digest <digest>', 'remote bundle digest to verify')
 		.option('--read-user <user>', 'private-read username', parseReadUser)
 		.option('--read-password <password>', 'private-read password')
@@ -313,7 +322,7 @@ export function registerAttestCommands(
 						...common,
 						url: options.url,
 						storePathHash: options.storePathHash,
-						cache: storedCacheFor(options.cache),
+						cache: resolveCacheSelection(options),
 						bundleDigest: options.bundleDigest,
 						readUser,
 						readPassword,

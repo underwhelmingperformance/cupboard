@@ -47,8 +47,13 @@ import {
 	runChild,
 	type RunChildOptions
 } from '../build-push/supervisor.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	parseTtl,
@@ -69,7 +74,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { parsePathFile, validateRetentionChoice } from './push.ts';
 
-interface BuildPushOptions {
+interface BuildPushOptions extends CacheSelectionOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -79,7 +84,6 @@ interface BuildPushOptions {
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
-	readonly cache?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
@@ -460,6 +464,7 @@ export function registerBuildPushCommand(
 			parseTtl
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
+		.addOption(privateCacheOption('push to'))
 		.option(
 			'--no-wait',
 			'reconcile without waiting for deferred blobs to become servable; an unconfirmed root is left untouched'
@@ -541,11 +546,12 @@ export function registerBuildPushCommand(
 								await readFile(options.intermediatePathsFile, 'utf8')
 							);
 				const reporter = commandUi(program, programOptions).reporter();
+				const cache = resolveCacheSelection(options);
 				const raw = CupboardClient.fromUrl(url, {
-					cache: options.cache,
+					cache,
 					signal: programOptions.signal
 				});
-				const cacheSelector = selectorForCache(storedCacheFor(options.cache));
+				const cacheSelector = selectorForCache(cache);
 				const targetRoot = options.retain === false ? undefined : options.root;
 				const authorizationDetails = pushAuthorizationDetails({
 					cacheSelector,
@@ -559,7 +565,7 @@ export function registerBuildPushCommand(
 					authorizationDetails
 				});
 				const pushClient = pushClientFor(url, token, {
-					cache: options.cache,
+					cache,
 					signal: programOptions.signal
 				});
 

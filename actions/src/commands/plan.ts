@@ -60,9 +60,10 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
+	cacheArguments,
 	isEnabled,
 	provided,
-	providedCache,
+	providedCacheSelection,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -218,6 +219,7 @@ export interface PlanOptions {
 	readonly targets?: string;
 	readonly url?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
 	readonly rootPrefix?: string;
 	readonly ttl?: string;
 	readonly readUser?: string;
@@ -298,7 +300,8 @@ export function registerPlanCommand(
 			'--root-prefix <prefix>',
 			"prefix used to form each target's retention root"
 		)
-		.option('--cache <name>', 'named cache to inspect and publish to')
+		.option('--cache <name>', 'Inspect and publish to a named public cache.')
+		.option('--private-cache <name>', 'Inspect and publish to a private cache.')
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
@@ -386,7 +389,7 @@ export function resolvePlanInputs(
 	return {
 		targets,
 		url,
-		cache: providedCache(options.cache),
+		cache: providedCacheSelection(options.cache, options.privateCache),
 		rootPrefix,
 		ttl: provided(options.ttl) ?? '',
 		readUser,
@@ -784,9 +787,7 @@ async function ensureRoot(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.ttl !== '') {
 		arguments_.push('--ttl', inputs.ttl);
@@ -888,9 +889,7 @@ async function readRootTargets(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	try {
 		await runner(inputs.cupboardPath, arguments_, signal);

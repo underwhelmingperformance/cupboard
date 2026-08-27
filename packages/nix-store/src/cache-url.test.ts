@@ -5,7 +5,8 @@ import {
 	privateReuseViewUrl,
 	publicKeyUrl,
 	reuseViewUrl,
-	tenantUrl
+	tenantUrl,
+	urlWithCredential
 } from './cache-url.ts';
 import { InvalidCacheUrlSegmentError } from './errors.ts';
 import { DEFAULT_CACHE, storedCacheSchema } from './scalars.ts';
@@ -180,5 +181,47 @@ describe('publicKeyUrl', () => {
 		}
 	])('$name', ({ value, expected }) => {
 		expect(publicKeyUrl(base(value)).href).toBe(expected);
+	});
+});
+
+describe('urlWithCredential', () => {
+	const url = base('https://cupboard.example.workers.dev/t/acme');
+
+	it.each([
+		{
+			name: 'a credential of unreserved characters',
+			credential: { user: 'alice', password: 'correct-horse' },
+			expected:
+				'https://alice:correct-horse@cupboard.example.workers.dev/t/acme'
+		},
+		{
+			name: 'a credential carrying userinfo delimiters',
+			credential: { user: 'al:ice@x', password: 'p@ss word/' },
+			expected:
+				'https://al%3Aice%40x:p%40ss%20word%2F@cupboard.example.workers.dev/t/acme'
+		},
+		{
+			name: 'a credential containing a percent sign',
+			credential: { user: 'alice', password: '100%pure' },
+			expected: 'https://alice:100%25pure@cupboard.example.workers.dev/t/acme'
+		}
+	])('escapes $name', ({ credential, expected }) => {
+		const authenticated = urlWithCredential(url, credential);
+
+		expect({
+			href: authenticated.href,
+			user: decodeURIComponent(authenticated.username),
+			password: decodeURIComponent(authenticated.password)
+		}).toStrictEqual({
+			href: expected,
+			user: credential.user,
+			password: credential.password
+		});
+	});
+
+	it('leaves the given URL unchanged', () => {
+		urlWithCredential(url, { user: 'alice', password: 'secret' });
+
+		expect(url.href).toBe('https://cupboard.example.workers.dev/t/acme');
 	});
 });

@@ -33,6 +33,10 @@ inputs:
   cache:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
+  private-cache:
+    description:
+      Private destination cache. Set either cache or private-cache, not both.
+    required: false
   read-user:
     description: Basic-auth username for a private destination cache.
     required: false
@@ -125,6 +129,7 @@ runs:
         PREDICATE_FILE: ${{ inputs.predicate-file }}
         URL: ${{ inputs.url }}
         CACHE: ${{ inputs.cache }}
+        PRIVATE_CACHE: ${{ inputs.private-cache }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
       run: |
@@ -137,6 +142,7 @@ runs:
           --predicate-file "$PREDICATE_FILE" \
           --url "$URL" \
           --cache "$CACHE" \
+          --private-cache "$PRIVATE_CACHE" \
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 
