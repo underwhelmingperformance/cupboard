@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { canonicalCacheRequest } from './cache-request.ts';
 
+function headerSet(request: Request): Record<string, string> {
+	return Object.fromEntries(request.headers);
+}
+
 describe('canonicalCacheRequest', () => {
 	it('removes query parameters and fragments without changing the request', () => {
 		const request = new Request(
@@ -22,6 +26,37 @@ describe('canonicalCacheRequest', () => {
 			url: 'https://cache.example/t/acme/abc.narinfo',
 			method: 'HEAD',
 			ifNoneMatch: '"abc"'
+		});
+	});
+
+	it('strips the reader credentials and keeps every other header', () => {
+		const request = new Request(
+			'https://cache.example/t/acme/abc.narinfo?token=one#part',
+			{
+				headers: {
+					accept: 'text/x-nix-narinfo',
+					authorization: `Basic ${btoa('alice:secret')}`,
+					cookie: 'session=abc',
+					'if-none-match': '"abc"',
+					'user-agent': 'Nix/2.24.9'
+				}
+			}
+		);
+
+		const canonical = canonicalCacheRequest(request);
+
+		expect({
+			url: canonical.url,
+			method: canonical.method,
+			headers: headerSet(canonical)
+		}).toStrictEqual({
+			url: 'https://cache.example/t/acme/abc.narinfo',
+			method: 'GET',
+			headers: {
+				accept: 'text/x-nix-narinfo',
+				'if-none-match': '"abc"',
+				'user-agent': 'Nix/2.24.9'
+			}
 		});
 	});
 });

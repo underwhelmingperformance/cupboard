@@ -1,9 +1,7 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	cacheFromSelector,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
-	publicCacheSelectorSchema,
 	type StoredCache,
 	type StorePathHash,
 	type TenantId
@@ -46,40 +44,6 @@ interface ReadEnv {
 	readonly CUPBOARD_DO: DurableObjectNamespace;
 }
 
-// Bare paths and `/cache/_default/` select the default cache. Any other public
-// selector after `/cache/` selects the named public cache with that local name.
-// The parser rejects private selectors because these read routes do not
-// authenticate the reader. It also rejects malformed selectors.
-export function cacheScope(
-	pathname: string
-): undefined | { cache: StoredCache; rest: string } {
-	const prefix = '/cache/';
-
-	if (!pathname.startsWith(prefix)) {
-		return { cache: DEFAULT_CACHE, rest: pathname };
-	}
-
-	const remainder = pathname.slice(prefix.length);
-	const separator = remainder.indexOf('/');
-
-	if (separator <= 0) {
-		return undefined;
-	}
-
-	const selector = publicCacheSelectorSchema.safeParse(
-		remainder.slice(0, separator)
-	);
-
-	if (!selector.success) {
-		return undefined;
-	}
-
-	return {
-		cache: cacheFromSelector(selector.data),
-		rest: remainder.slice(separator)
-	};
-}
-
 /**
  * What a read request addresses: a cache in the public namespace, where the
  * tenant's read mode decides whether readers authenticate, or a cache in the
@@ -94,13 +58,13 @@ export interface ReadScope {
  * Authenticates a read, or returns the refusal to send instead.
  *
  * Admission reads every verifier from the authoritative D1 rows on each
- * request, so credential rotation or revocation takes effect immediately.
+ * request, so a rotated or deleted verifier takes effect immediately.
  *
  * A request in the private namespace must authenticate. `cacheVerifier` is the
- * addressed cache's own credential when it has one, and it is then the only
- * credential that opens the cache; a cache without one takes the tenant
- * credential. Neither being present is a refusal, so a missing row cannot open
- * a private cache to anyone.
+ * addressed cache's own verifier. If the cache has one, only a credential that
+ * matches it opens the cache; otherwise the guard uses the tenant verifier. If
+ * neither verifier exists the guard refuses the request, so a missing row
+ * cannot open a private cache to anyone.
  *
  * A request in the public namespace authenticates only when the whole tenant is
  * private. Successful authenticated reads stay on the control Worker and never

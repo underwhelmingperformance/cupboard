@@ -2,18 +2,14 @@ import {
 	cacheFromSelector,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
+	publicCacheSelectorSchema,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import {
-	cacheAvailabilityRequestSchema,
-	type CacheAvailabilityResponse
-} from '@cupboard/protocol/cache-availability';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
-import { StatusCodes } from 'http-status-codes';
 
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
@@ -25,33 +21,17 @@ import {
 	TenantWritesStoppedError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import {
-	notFoundResponse,
-	parseAttestationDigestName,
-	parseNarInfoName,
-	parseNarName,
-	TextBody,
-	textResponse
-} from '../http/http.ts';
-import { parseRequestBody } from '../http/parse.ts';
+import { notFoundResponse, TextBody, textResponse } from '../http/http.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
-import {
-	cacheInfoResponse,
-	cacheScope,
-	guardScopedRead,
-	missingStorePathHashes,
-	type ReadScope,
-	serveNar,
-	serveNarInfo
-} from '../read/read.ts';
+import { guardScopedRead } from '../read/read.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
-import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
+import { readApp } from './read-app.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
-import { tenantReadFetch } from './tenant-read-handler.ts';
+import { innerRequest, tenantUncachedRead } from './tenant-forward.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
 const healthBody = new TextBody('ok\n');
@@ -149,13 +129,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 		const { entry, fresh } = admission;
 
-		const isRead =
-			context.req.method === 'GET' ||
-			context.req.method === 'HEAD' ||
-			isUploadPreviewRequest(context.req.method, route.rest) ||
-			isCacheAvailabilityRequest(context.req.method, route.rest);
-
-		if (isRead && entry.status !== 'active') {
+		if (
+			isTenantRead(context.req.method, route.rest) &&
+			entry.status !== 'active'
+		) {
 			return notFoundResponse();
 		}
 
@@ -163,21 +140,36 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantEntry', entry);
 		context.set('tenantEntryFresh', fresh);
 		context.set('tenantRest', route.rest);
+		context.set('readScope', { visibility: 'public', cache: DEFAULT_CACHE });
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
 
-		// A valid `/cache/<name>/` prefix selects a named cache. Bare read paths use
-		// the default cache; malformed selectors return 404.
-		if (isRead) {
-			const scope = cacheScope(route.rest);
+		await next();
+	});
 
-			if (scope === undefined) {
-				return notFoundResponse();
-			}
-
-			context.set('cache', scope.cache);
+	// A `/cache/<name>/` prefix selects a named cache in the public namespace.
+	// The private namespace is not read-addressable here, so a `_private-`
+	// selector is refused with the same 404 as a malformed one. A write parses
+	// its own selector, which does admit the private namespace, so only reads
+	// pass through this rule.
+	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
+		if (!isTenantRead(context.req.method, context.get('tenantRest'))) {
+			return next();
 		}
 
-		await next();
+		const selector = publicCacheSelectorSchema.safeParse(
+			context.req.param('cacheName')
+		);
+
+		if (!selector.success) {
+			return notFoundResponse();
+		}
+
+		context.set('readScope', {
+			visibility: 'public',
+			cache: cacheFromSelector(selector.data)
+		});
+
+		return next();
 	});
 
 	// Fetch discovery and signing keys from the tenant Durable Object without
@@ -192,99 +184,16 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
-	// Path and cache deletion can change attestation lists and bundle references,
-	// so neither response is cached. Malformed names fall through to the tenant
-	// Durable Object's normal routing.
-	app.on(
-		'GET',
-		[
-			'/t/:tenant/attestations/:hash',
-			'/t/:tenant/cache/:cacheName/attestations/:hash'
-		],
-		async (context, next) => {
-			if (
-				parseNarInfoName(`${context.req.param('hash')}.narinfo`) === undefined
-			) {
-				return next();
-			}
-
-			const denied = await guardScopedRead(
-				context.req.raw,
-				context.get('tenantEntry'),
-				publicScope(context)
-			);
-
-			return denied ?? tenantUncachedRead(context);
-		}
-	);
-	app.on(
-		'GET',
-		[
-			'/t/:tenant/attestation-bundles/:digest',
-			'/t/:tenant/cache/:cacheName/attestation-bundles/:digest'
-		],
-		async (context, next) => {
-			if (
-				parseAttestationDigestName(context.req.param('digest')) === undefined
-			) {
-				return next();
-			}
-
-			const denied = await guardScopedRead(
-				context.req.raw,
-				context.get('tenantEntry'),
-				publicScope(context)
-			);
-
-			if (denied !== undefined) {
-				return denied;
-			}
-
-			return tenantUncachedRead(context, true);
-		}
-	);
-
-	app.on(
-		'POST',
-		[
-			'/t/:tenant/api/v1/missing-paths',
-			'/t/:tenant/cache/:cacheName/api/v1/missing-paths'
-		],
-		async (context) => {
-			const denied = await guardScopedRead(
-				context.req.raw,
-				context.get('tenantEntry'),
-				publicScope(context)
-			);
-
-			if (denied !== undefined) {
-				return denied;
-			}
-
-			const request = await parseRequestBody(
-				cacheAvailabilityRequestSchema,
-				context.req.raw
-			);
-			const response: CacheAvailabilityResponse = {
-				missingStorePathHashes: await missingStorePathHashes(
-					context.env,
-					context.get('tenant'),
-					context.get('cache'),
-					request.storePathHashes
-				)
-			};
-
-			return context.json(response, StatusCodes.OK, {
-				'cache-control': 'no-store'
-			});
-		}
-	);
+	// The binary-cache protocol, served for the default cache at the bare tenant
+	// prefix and for a named cache under `/cache/<name>/`.
+	app.route('/t/:tenant', readApp);
+	app.route('/t/:tenant/cache/:cacheName', readApp);
 
 	app.post('/t/:tenant/reuse/:view/api/v1/missing-paths', async (context) => {
 		const denied = await guardScopedRead(
 			context.req.raw,
 			context.get('tenantEntry'),
-			publicScope(context)
+			context.get('readScope')
 		);
 
 		return (
@@ -295,112 +204,13 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		);
 	});
 
-	app.on(
-		'GET',
-		['/t/:tenant/nar/:name', '/t/:tenant/cache/:cacheName/nar/:name'],
-		async (context) => {
-			const nar = parseNarName(context.req.param('name'));
-
-			if (nar === undefined) {
-				return notFoundResponse();
-			}
-
-			const entry = context.get('tenantEntry');
-			const denied = await guardScopedRead(
-				context.req.raw,
-				entry,
-				publicScope(context)
-			);
-
-			if (denied !== undefined) {
-				return denied;
-			}
-
-			return entry.readMode === 'private'
-				? serveNar(
-						context.req.raw,
-						context.env,
-						context.get('tenant'),
-						nar.narHash,
-						true,
-						nar.incarnation
-					)
-				: cachedTenantRead(context);
-		}
-	);
-
-	app.on(
-		'GET',
-		[
-			String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`,
-			String.raw`/t/:tenant/cache/:cacheName/:name{[0-9a-z]+\.narinfo}`
-		],
-		async (context) => {
-			const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
-
-			if (storePathHash === undefined) {
-				return notFoundResponse();
-			}
-
-			const entry = context.get('tenantEntry');
-			const denied = await guardScopedRead(
-				context.req.raw,
-				entry,
-				publicScope(context)
-			);
-
-			if (denied !== undefined) {
-				return denied;
-			}
-
-			return entry.readMode === 'private'
-				? serveNarInfo(
-						context.req.raw,
-						context.env,
-						context.get('tenant'),
-						context.get('cache'),
-						storePathHash,
-						true
-					)
-				: cachedTenantRead(context);
-		}
-	);
-
-	app.on(
-		'GET',
-		['/t/:tenant/nix-cache-info', '/t/:tenant/cache/:cacheName/nix-cache-info'],
-		async (context) => {
-			const entry = context.get('tenantEntry');
-			const denied = await guardScopedRead(
-				context.req.raw,
-				entry,
-				publicScope(context)
-			);
-
-			if (denied !== undefined) {
-				return denied;
-			}
-
-			return entry.readMode === 'private' ||
-				context.get('cache') !== DEFAULT_CACHE
-				? cacheInfoResponse(
-						innerRequest(context),
-						context.env,
-						context.get('tenant'),
-						context.get('cache'),
-						true
-					)
-				: cachedTenantRead(context);
-		}
-	);
-
 	// Reuse-view metadata has its own priority and is never cached. Bypass the
 	// default-cache renderer.
 	app.get('/t/:tenant/reuse/:view/nix-cache-info', async (context) => {
 		const denied = await guardScopedRead(
 			context.req.raw,
 			context.get('tenantEntry'),
-			publicScope(context)
+			context.get('readScope')
 		);
 
 		return (
@@ -419,7 +229,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			const denied = await guardScopedRead(
 				context.req.raw,
 				context.get('tenantEntry'),
-				publicScope(context)
+				context.get('readScope')
 			);
 
 			return (
@@ -437,7 +247,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const denied = await guardScopedRead(
 			context.req.raw,
 			context.get('tenantEntry'),
-			publicScope(context)
+			context.get('readScope')
 		);
 
 		if (denied !== undefined) {
@@ -449,20 +259,6 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 		return response;
 	});
-
-	// Serve signing keys uncached so rotation is visible immediately.
-	app.on(
-		'GET',
-		['/t/:tenant/pubkey', '/t/:tenant/cache/:cacheName/pubkey'],
-		(context) => {
-			const pubkeyUrl = new URL(context.req.url);
-			pubkeyUrl.pathname = '/pubkey';
-
-			return tenantServer(context.env, context.get('tenant')).fetch(
-				new Request(pubkeyUrl, context.req.raw)
-			);
-		}
-	);
 
 	// Compute shared D1 hints on the Worker before entering the tenant Durable
 	// Object. If hint preparation or the deployment-skew RPC fails, dispatch
@@ -542,63 +338,6 @@ export default {
 	}
 } satisfies ExportedHandler<Env>;
 
-// Every route registered here reads a cache in the public namespace, so the
-// tenant's read mode decides whether the reader must authenticate.
-function publicScope(context: Context<WorkerHonoEnv>): ReadScope {
-	return { visibility: 'public', cache: context.get('cache') };
-}
-
-// Strip the public tenant prefix and any client-supplied hint token. Upload
-// negotiation adds a server-issued token only after this sanitisation.
-function innerRequest(context: Context<WorkerHonoEnv>): Request {
-	const inner = new URL(context.req.url);
-	inner.pathname = context.get('tenantRest');
-	const request = new Request(inner, context.req.raw);
-	request.headers.delete(negotiateHintsHeader);
-
-	return request;
-}
-
-async function cachedTenantRead(
-	context: Context<WorkerHonoEnv>
-): Promise<Response> {
-	const { CUPBOARD_TENANT: service } = context.env as Partial<
-		Pick<Env, 'CUPBOARD_TENANT'>
-	>;
-
-	if (service !== undefined) {
-		return service.fetch(canonicalCacheRequest(context.req.raw));
-	}
-
-	return tenantReadFetch(
-		context.req.raw,
-		context.env as unknown as TenantEnv,
-		context.executionCtx
-	);
-}
-
-async function tenantUncachedRead(
-	context: Context<WorkerHonoEnv>,
-	shouldForceNoStore = false
-): Promise<Response> {
-	const response = await tenantServer(context.env, context.get('tenant')).fetch(
-		innerRequest(context)
-	);
-
-	if (!shouldForceNoStore) {
-		return response;
-	}
-
-	const headers = new Headers(response.headers);
-	headers.set('cache-control', 'no-store');
-
-	return new Response(response.body, {
-		status: response.status,
-		statusText: response.statusText,
-		headers
-	});
-}
-
 // Confirm mutable requests against authoritative D1 status before Durable
 // Object dispatch. The tenant Durable Object then applies its own authorisation.
 async function dispatchTenant(
@@ -650,6 +389,18 @@ function isTenantWrite(inner: Request): boolean {
 	return !(
 		isUploadPreviewRequest(inner.method, innerUrl.pathname) ||
 		isCacheAvailabilityRequest(inner.method, innerUrl.pathname)
+	);
+}
+
+// A read addresses cache content: the binary-cache protocol plus the two
+// read-only POST endpoints. Admission requires an active tenant for these, and
+// only these carry a cache prefix the edge parses.
+function isTenantRead(method: string, pathname: string): boolean {
+	return (
+		method === 'GET' ||
+		method === 'HEAD' ||
+		isUploadPreviewRequest(method, pathname) ||
+		isCacheAvailabilityRequest(method, pathname)
 	);
 }
 
