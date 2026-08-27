@@ -7,6 +7,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
+	reuseViewNameSchema,
 	reuseViewPrioritySchema,
 	reuseViewRevisionSchema
 } from '@cupboard/protocol/reuse-views';
@@ -573,16 +574,21 @@ describe('migrations', () => {
 			generation: 0,
 			created_at: '2026-01-01T00:00:00.000Z'
 		};
+		const viewName = reuseViewNameSchema.parse('reuse');
 		const view = {
-			name: 'reuse',
+			name: viewName,
 			revision: reuseViewRevisionSchema.parse(1),
 			priority: reuseViewPrioritySchema.parse(50),
 			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
-		const selector = { view: 'reuse', kind: 'exact' as const, pattern: 'pr-1' };
+		const selector = {
+			view: viewName,
+			kind: 'exact' as const,
+			pattern: 'pr-1'
+		};
 		const revisionSeq = {
-			name: 'reuse',
+			name: viewName,
 			nextRevision: reuseViewRevisionSchema.parse(2)
 		};
 

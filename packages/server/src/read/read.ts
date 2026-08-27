@@ -65,9 +65,9 @@ interface ReadEnv {
 }
 
 /**
- * What a read request addresses: a cache in the public namespace, where the
- * tenant's read mode decides whether readers authenticate, or a cache in the
- * private namespace, where they always do.
+ * The namespace and cache selected by a read request. The tenant's read mode
+ * determines whether a public-cache read requires authentication. Every
+ * private-cache read requires it.
  */
 export interface ReadScope {
 	readonly visibility: 'public' | 'private';
@@ -81,10 +81,9 @@ export interface ReadScope {
  * request, so a rotated or deleted verifier takes effect immediately.
  *
  * A request in the private namespace must authenticate. `cacheVerifier` is the
- * addressed cache's own verifier. If the cache has one, only a credential that
- * matches it opens the cache; otherwise the guard uses the tenant verifier. If
- * neither verifier exists the guard refuses the request, so a missing row
- * cannot open a private cache to anyone.
+ * cache-specific verifier, when present. Only a matching credential opens that
+ * cache. Otherwise the guard uses the tenant verifier. If neither verifier
+ * exists, the guard refuses the request.
  *
  * A request in the public namespace authenticates only when the whole tenant is
  * private. Successful authenticated reads stay on the control Worker and never
@@ -107,6 +106,22 @@ export async function guardScopedRead(
 	return authenticateRead(request, entry.readVerifier);
 }
 
+/**
+ * Authenticates a read of a private reuse view, or returns the refusal to send
+ * instead.
+ *
+ * A view can select several caches, so only the tenant verifier authorises the
+ * read. A cache-specific verifier grants access only to that cache, not to a
+ * view over it. A tenant without a verifier therefore has no readable private
+ * view.
+ */
+export function guardPrivateViewRead(
+	request: Request,
+	entry: TenantEntry
+): Promise<Response | undefined> {
+	return authenticateRead(request, entry.readVerifier);
+}
+
 async function authenticateRead(
 	request: Request,
 	verifier: ReadVerifier | undefined
@@ -121,19 +136,24 @@ async function authenticateRead(
 /**
  * Which reference rows may authorise a NAR read.
  *
- * One R2 object holds the NAR for a hash, and every cache that has committed a
- * narinfo pointing at that hash has a `blob_ref` row for it. The addressed
- * surface decides which of those rows count.
+ * R2 stores one NAR object for each hash. Every cache that has committed a
+ * narinfo for that hash has a corresponding `blob_ref` row. The read surface
+ * determines which reference rows can authorise the request.
  *
- * A read in the public namespace counts the rows of the tenant's public caches.
- * These caches share one read rule: a public tenant answers every reader, a
- * private tenant asks every reader for the tenant credential, and no public
- * cache has a credential of its own. A reader admitted to one of them can
- * address any of the others, so the namespace is the boundary the reference
- * check enforces.
+ * A read in the public namespace counts rows from the tenant's public caches.
+ * These caches share one read rule. A public tenant requires no credential; a
+ * private tenant requires the tenant credential. Public caches have no
+ * cache-specific credentials. A reader authorised for one public cache can
+ * address any other public cache, so the reference check uses the complete
+ * public namespace.
  *
- * A read in the private namespace addresses one cache, which can hold its own
- * credential, so only that cache's own rows count.
+ * A read in the private namespace selects one cache, which can have its own
+ * credential. Only reference rows for that cache authorise the NAR.
+ *
+ * A read through a private reuse view counts rows from all of the tenant's
+ * private caches. Only the tenant credential opens a private view, and every
+ * private view selects from this range, so the private cache range is the
+ * reference boundary.
  */
 export type NarAuthority =
 	| { readonly kind: 'cache'; readonly cache: StoredCache }
@@ -187,14 +207,14 @@ export async function serveNar(
 }
 
 /**
- * The lookup that authorises one NAR read: one seek into `blob_ref` over
+ * Builds the lookup that authorises one NAR read: one seek into `blob_ref` over
  * `(tenant, nar_hash, cache, cache_generation)`, joined to the blob's verified
  * state and to the lifecycle row of the referencing cache.
  *
  * Advancing the cache generation makes every edge from an earlier generation
  * stop authorising reads, so cache deletion does not need to retire those edges
  * synchronously to revoke read authority. The join is a left join because a
- * cache that no deletion has reached has no lifecycle row.
+ * cache that has never been deleted has no lifecycle row.
  *
  * The index test builds this statement so that it inspects the query the read
  * path runs.
@@ -264,11 +284,11 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
  * lookups in one batch.
  *
  * A deleted cache keeps its path-keyed narinfo objects until the teardown drain
- * removes them, and registering the stored name again ends the deleted state
- * before the drain finishes. The object alone therefore cannot say whether the
- * live cache holds the path, and only an edge the current generation authorises
- * can. The narinfo generation and NAR hash come back with the edge so that the
- * read can also refuse an object the current commit did not write.
+ * removes them. The same stored name can be registered again before that drain
+ * finishes. Object presence therefore does not establish that the current
+ * cache contains the path. The query requires an edge authorised by the current
+ * cache generation. It also returns the narinfo generation and NAR hash so the
+ * read can reject an object from another commit.
  *
  * The index test builds this statement so that it inspects the query the read
  * path runs.
@@ -302,10 +322,10 @@ export function narInfoReferenceQuery(
  * taken from the reference edges the cache generation authorises.
  *
  * A recommit can leave an earlier edge in place until the teardown drain
- * removes it, so one path can hold several authorised edges. Narinfo
- * generations increase and are never reused for a stored name and path, so the
- * greatest of them belongs to the current commit. A path with no authorised
- * edge is absent from the result.
+ * removes it, so D1 can contain several authorised edges for one path. Narinfo
+ * generations increase and are never reused for a stored cache name and path.
+ * The greatest generation therefore belongs to the current commit. A path with
+ * no authorised edge is absent from the result.
  *
  * Retry the D1 query once, as the NAR read does: a persistent failure becomes a
  * retryable refusal instead of a 404 reporting the path as absent.
@@ -350,10 +370,10 @@ async function authorisedNarInfoVersions(
 // the same tenant, cache, and path identity in its cache tag so deletion and
 // re-signing purge only this narinfo.
 //
-// A private read serves the object only when an authorised reference edge names
-// the path and the object's recorded generation and NAR hash match that edge.
-// Without the second check a reader admitted to a recreated cache could receive
-// the object the previous cache of that name published. Public caches accept
+// A private read serves the object only when an authorised reference edge
+// matches the path and the object's recorded generation and NAR hash match that
+// edge. Without the second check, a reader of a recreated cache could receive
+// the object published by the previous cache with that name. Public caches accept
 // the eventual removal of a deleted cache's objects instead, which keeps the
 // cacheable read path free of D1.
 export async function serveNarInfo(
@@ -396,10 +416,10 @@ export async function missingStorePathHashes(
 	storePathHashes: readonly StorePathHash[]
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
-	// For a private cache, resolve the commit each path currently has before
-	// checking R2, and report a path whose object belongs to another commit as
-	// missing. A narinfo GET refuses such an object, so reporting the path
-	// present here would make the push skip a path the cache cannot then serve.
+	// For a private cache, resolve the current commit for each path before
+	// checking R2. Report the path as missing if the object belongs to another
+	// commit. A narinfo GET would refuse that object, so the push must not skip
+	// the path.
 	const versions = isPrivateCache(cache)
 		? await authorisedNarInfoVersions(env, tenant, cache, unique)
 		: undefined;

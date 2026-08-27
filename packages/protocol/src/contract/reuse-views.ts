@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 import {
+	reuseViewContractNameSchema,
 	reuseViewListResponseSchema,
-	reuseViewNameSchema,
 	reuseViewRemoveResponseSchema,
 	reuseViewSetBodySchema,
 	reuseViewSummarySchema
@@ -25,15 +25,24 @@ export const reuseViewsContract = {
 		.route({ method: 'PUT', path: '/reuse-views/{name}' })
 		.input(
 			z.strictObject({
-				name: reuseViewNameSchema,
+				name: reuseViewContractNameSchema,
 				...reuseViewSetBodySchema.shape
 			})
 		)
+		.errors({
+			// A private view's selectors resolve inside the private namespace, which
+			// has no default cache. The server refuses an exact `_default` selector
+			// in a private view and reports the view it refused.
+			PRIVATE_VIEW_DEFAULT_SELECTOR: {
+				status: 400,
+				data: z.strictObject({ view: z.string() })
+			}
+		})
 		.output(reuseViewSummarySchema),
 
 	remove: baseProcedure
 		.meta({ requires: 'reuse-view:remove' })
 		.route({ method: 'DELETE', path: '/reuse-views/{name}' })
-		.input(z.strictObject({ name: reuseViewNameSchema }))
+		.input(z.strictObject({ name: reuseViewContractNameSchema }))
 		.output(reuseViewRemoveResponseSchema)
 };

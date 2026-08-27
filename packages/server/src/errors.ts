@@ -15,6 +15,7 @@ import {
 	subjectTokenProblems
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
+import { type ReuseViewContractName } from '@cupboard/protocol/reuse-views';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
@@ -119,6 +120,15 @@ export class CommitSessionLimitError extends ServerHttpError {
 	constructor(public readonly limit: number) {
 		super('Too many concurrent commit sessions');
 		this.name = 'CommitSessionLimitError';
+	}
+}
+
+export class PrivateViewDefaultSelectorError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public readonly view: ReuseViewContractName) {
+		super('A private reuse view cannot select the default cache');
+		this.name = 'PrivateViewDefaultSelectorError';
 	}
 }
 

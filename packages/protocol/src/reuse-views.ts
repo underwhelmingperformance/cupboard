@@ -2,6 +2,8 @@ import {
 	cacheNamePattern,
 	cacheNamePrefixPattern,
 	type CachePriority,
+	PRIVATE_SELECTOR_PREFIX,
+	PRIVATE_STORED_PREFIX,
 	publicCacheSelectorSchema
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
@@ -17,6 +19,108 @@ export const reuseViewNameSchema = z
 	.brand('ReuseViewName');
 export type ParsedReuseViewName = z.output<typeof reuseViewNameSchema>;
 
+// Derive both private forms from the local name so they share its validation.
+// The cache-name grammar excludes slashes and an initial underscore, which
+// makes the `private/` and `_private-` prefixes unambiguous.
+function hasPrefixedLocalName(value: string, prefix: string): boolean {
+	return (
+		value.startsWith(prefix) &&
+		reuseViewNameSchema.safeParse(value.slice(prefix.length)).success
+	);
+}
+
+/**
+ * A private reuse view's stored name: `private/` followed by its local name.
+ * The prefix makes the namespace part of the view identity. Moving a view
+ * between namespaces therefore creates a different identity.
+ */
+export const privateStoredReuseViewSchema = z
+	.string()
+	.refine((value) => hasPrefixedLocalName(value, PRIVATE_STORED_PREFIX))
+	.brand('PrivateStoredReuseView');
+export type PrivateStoredReuseView = z.output<
+	typeof privateStoredReuseViewSchema
+>;
+
+/**
+ * A private reuse view's contract name: `_private-` followed by its local
+ * name. Contract paths and grants spell a view this way; the read routes under
+ * `/private-reuse/` carry the local name instead.
+ */
+export const privateReuseViewNameSchema = z
+	.string()
+	.refine((value) => hasPrefixedLocalName(value, PRIVATE_SELECTOR_PREFIX))
+	.brand('PrivateReuseViewName');
+export type PrivateReuseViewName = z.output<typeof privateReuseViewNameSchema>;
+
+/**
+ * A reuse-view name in the contract: the local name for a public view or the
+ * `_private-` name for a private view.
+ */
+export const reuseViewContractNameSchema = z.union([
+	reuseViewNameSchema,
+	privateReuseViewNameSchema
+]);
+export type ReuseViewContractName = z.output<
+	typeof reuseViewContractNameSchema
+>;
+
+/**
+ * A stored reuse-view name: the local name for a public view or the `private/`
+ * name for a private view. Convert a contract name with
+ * `reuseViewFromContractName`.
+ */
+export const storedReuseViewSchema = z.union([
+	reuseViewNameSchema,
+	privateStoredReuseViewSchema
+]);
+export type StoredReuseView = z.output<typeof storedReuseViewSchema>;
+
+export function isPrivateReuseView(
+	view: StoredReuseView
+): view is PrivateStoredReuseView {
+	return privateStoredReuseViewSchema.safeParse(view).success;
+}
+
+/**
+ * Returns the stored name for a private view with the given local name.
+ */
+export function privateStoredReuseView(
+	name: ParsedReuseViewName
+): PrivateStoredReuseView {
+	return privateStoredReuseViewSchema.parse(`${PRIVATE_STORED_PREFIX}${name}`);
+}
+
+function isPrivateReuseViewName(
+	name: ReuseViewContractName
+): name is PrivateReuseViewName {
+	return privateReuseViewNameSchema.safeParse(name).success;
+}
+
+export function reuseViewFromContractName(
+	name: ReuseViewContractName
+): StoredReuseView {
+	if (isPrivateReuseViewName(name)) {
+		return privateStoredReuseViewSchema.parse(
+			`${PRIVATE_STORED_PREFIX}${name.slice(PRIVATE_SELECTOR_PREFIX.length)}`
+		);
+	}
+
+	return name;
+}
+
+export function contractNameForReuseView(
+	view: StoredReuseView
+): ReuseViewContractName {
+	if (isPrivateReuseView(view)) {
+		return privateReuseViewNameSchema.parse(
+			`${PRIVATE_SELECTOR_PREFIX}${view.slice(PRIVATE_STORED_PREFIX.length)}`
+		);
+	}
+
+	return view;
+}
+
 // A prefix selector's pattern has the same maximum length as a public cache's
 // local name because a longer prefix could not match one. The pattern can be
 // empty; the empty prefix matches every public cache.
@@ -24,10 +128,13 @@ const reuseViewSelectorPatternMaxLength = 63;
 
 export const reuseViewSelectorKindSchema = z.enum(['exact', 'prefix']);
 
-// The pattern of an `exact` selector is a public selector, including
-// `_default`. A `prefix` selector matches named public caches whose stored
-// names start with its pattern. The empty prefix also matches the default
-// cache. Reuse-view selectors never match private caches.
+// The view's namespace determines the selector namespace. A public view selects
+// public caches, and a private view selects private caches.
+//
+// An `exact` selector matches one cache, or the default cache as `_default`. A
+// `prefix` selector matches named caches with local names that start with its
+// pattern. The empty prefix matches every named cache and, in a public view,
+// the default cache. The server accepts `_default` only for a public view.
 export const reuseViewSelectorSchema = z
 	.strictObject({
 		kind: reuseViewSelectorKindSchema,
@@ -107,8 +214,10 @@ export const reuseViewRevisionSchema = z
 	.brand('ReuseViewRevision');
 export type ReuseViewRevision = z.output<typeof reuseViewRevisionSchema>;
 
+// A summary reports the contract name. Private view names therefore use the
+// `_private-` prefix.
 export const reuseViewSummarySchema = z.strictObject({
-	name: reuseViewNameSchema,
+	name: reuseViewContractNameSchema,
 	revision: reuseViewRevisionSchema,
 	priority: reuseViewPrioritySchema,
 	selectors: z.array(reuseViewSelectorSchema),
@@ -125,7 +234,7 @@ export type ParsedReuseViewListResponse = z.output<
 >;
 
 export const reuseViewRemoveResponseSchema = z.strictObject({
-	name: reuseViewNameSchema,
+	name: reuseViewContractNameSchema,
 	removed: z.boolean()
 });
 export type ParsedReuseViewRemoveResponse = z.output<

@@ -32,6 +32,10 @@ export function reuseViewUrl(baseUrl: URL, view: string): URL {
 	return appendPathSegments(baseUrl, 'reuse', view);
 }
 
+export function privateReuseViewUrl(baseUrl: URL, view: string): URL {
+	return appendPathSegments(baseUrl, 'private-reuse', view);
+}
+
 export function publicKeyUrl(baseUrl: URL): URL {
 	return appendPathSegments(baseUrl, 'pubkey');
 }

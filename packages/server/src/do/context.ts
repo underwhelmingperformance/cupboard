@@ -29,6 +29,7 @@ import {
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
 import {
+	contractNameForReuseView,
 	type ParsedReuseViewSelector,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
@@ -323,7 +324,7 @@ export function reuseViewSummaryFromRow(
 	selectors: readonly ParsedReuseViewSelector[]
 ): ReuseViewSummary {
 	return {
-		name: row.name,
+		name: contractNameForReuseView(row.name),
 		revision: row.revision,
 		priority: row.priority,
 		selectors: [...selectors],

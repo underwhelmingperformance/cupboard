@@ -25,12 +25,18 @@ import {
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	notFoundResponse,
+	parseNarName,
 	TextBody,
 	textResponse,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
-import { guardScopedRead } from '../read/read.ts';
+import {
+	guardPrivateViewRead,
+	guardScopedRead,
+	privateNamespaceNarAuthority,
+	serveNar
+} from '../read/read.ts';
 import { unauthorisedResponse } from '../read/read-auth.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
@@ -54,7 +60,7 @@ const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
 const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
-	/^(?:(?:\/cache\/[^/]+)|(?:\/private-cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
+	/^(?:(?:\/cache\/[^/]+)|(?:\/private-cache\/[^/]+)|(?:\/reuse\/[^/]+)|(?:\/private-reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -90,8 +96,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		async (context) => {
 			const slug = context.req.param('tenant');
 			const tenant = tenantIdSchema.safeParse(slug);
-			// This document publishes the tenant's issuer, which clients compare as
-			// a string. Serve it under the one spelling of the slug.
+			// This document publishes the tenant issuer as a string. Serve it only
+			// when the raw path segment is the canonical spelling of the slug.
 			const rawSlug = new URL(context.req.url).pathname.split('/').at(-1);
 
 			if (rawSlug !== slug || !tenant.success) {
@@ -137,9 +143,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		// A read inside the private namespace needs the addressed cache's own read
-		// verifier as well as the tenant row. Naming the cache here loads both in
-		// one D1 batch, before any route runs.
+		// A read inside the private namespace needs the addressed cache's read
+		// verifier as well as the tenant row. Pass the parsed cache so admission
+		// loads both in one D1 batch before any route runs.
 		const privateCache = parsePrivateCachePath(route.rest);
 		const admission = await admitTenant(
 			context.env,
@@ -176,14 +182,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		await next();
 	});
 
-	// A `/cache/<name>/` prefix selects a named cache in the public namespace.
-	// The private namespace is not read-addressable here, so a `_private-`
-	// selector is refused with the same 404 as a malformed one. A write parses
-	// its own selector, which does admit the private namespace, so only reads
-	// pass through the scoping rule below. Refuse a request that did not spell
-	// the namespace and the name literally, whatever the method, because other
-	// routing stages read the raw segments and may reject them or derive a
-	// different identity.
+	// A `/cache/<name>/` prefix selects a cache in the public namespace. Content
+	// reads reject a `_private-` selector, while write routes parse their selector
+	// separately and can accept the private namespace. Require the literal
+	// spelling for every method because other routing stages inspect the raw path
+	// while Hono uses decoded segments.
 	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
 		if (
 			!isLiteralNamespacePath(
@@ -215,15 +218,12 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		return next();
 	});
 
-	// A `/private-cache/<name>/` prefix carries a private cache's local name, not
-	// a selector, so this namespace addresses every private cache and nothing
-	// else. Every request under the prefix authenticates, whatever its method and
-	// whether or not the cache exists, so the namespace answers no reader without
-	// a credential. A path that names no cache has no verifier to check a
-	// credential against and is refused outright, and so is a request that did
-	// not spell the namespace and the name literally: admission parses the raw
-	// path, so it loaded no verifier for such a request, and the tenant verifier
-	// must not stand in for a cache credential.
+	// A `/private-cache/<name>/` prefix contains a private cache's local name.
+	// Every request under this prefix authenticates before route resolution,
+	// regardless of its method or whether the cache exists. Admission parses the
+	// raw path to load the cache verifier. If the raw namespace or name differs
+	// from Hono's decoded route, reject the request instead of falling back to the
+	// tenant verifier. Reject a malformed path for the same reason.
 	app.use('/t/:tenant/private-cache/:cacheName/*', async (context, next) => {
 		const cacheName = context.req.param('cacheName');
 		const name = cacheNameSchema.safeParse(cacheName);
@@ -270,9 +270,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	app.route('/t/:tenant/cache/:cacheName', readApp);
 	app.route('/t/:tenant/private-cache/:cacheName', readApp);
 
-	// A `/reuse/<view>/` prefix names a reuse view in the public namespace. A
-	// request that did not spell the namespace and the name literally is refused
-	// here, with the same 404 the namespace gives a malformed view name.
+	// A `/reuse/<view>/` prefix selects a view in the public namespace. Require
+	// the literal spelling of the namespace and view name, as for cache routes.
 	app.use('/t/:tenant/reuse/:view/*', async (context, next) => {
 		if (
 			!isLiteralNamespacePath(
@@ -339,8 +338,83 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
-	// Reuse views expose no NAR route. Authenticate private tenants before the 404
-	// and prevent caches from retaining a miss for a route added later.
+	// A `/private-reuse/<view>/` prefix selects a view in the private namespace.
+	// A view can select several caches, so only the tenant credential authorises
+	// it; a cache-specific credential does not. Every request under the prefix
+	// authenticates, regardless of its method or whether the view exists.
+	app.use('/t/:tenant/private-reuse/*', async (context, next) => {
+		const denied = await guardPrivateViewRead(
+			context.req.raw,
+			context.get('tenantEntry')
+		);
+
+		return denied ?? next();
+	});
+
+	// The reader has already presented the tenant credential. Return the
+	// namespace's 404 when the raw path does not use the literal namespace and
+	// view name.
+	app.use('/t/:tenant/private-reuse/:view/*', async (context, next) => {
+		if (
+			!isLiteralNamespacePath(
+				context.get('tenantRest'),
+				'private-reuse',
+				context.req.param('view')
+			)
+		) {
+			return uncachedNotFoundResponse();
+		}
+
+		await next();
+	});
+
+	// The Durable Object resolves the view and serves both hits and misses. Apply
+	// `no-store` here so no authenticated response can enter a cache, regardless
+	// of which Durable Object route produced it.
+	const servePrivateReuse = async (
+		context: Context<WorkerHonoEnv>
+	): Promise<Response> =>
+		withoutStoring(
+			await tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+
+	app.get('/t/:tenant/private-reuse/:view/nix-cache-info', servePrivateReuse);
+	app.get(
+		String.raw`/t/:tenant/private-reuse/:view/:name{[0-9a-z]+\.narinfo}`,
+		servePrivateReuse
+	);
+
+	// A private-view narinfo refers to this route, which keeps the NAR inside the
+	// authenticated namespace. The NAR URL does not identify a source cache, and
+	// the view's selectors may change before the reader follows it. Authorise the
+	// read against the tenant's complete private-cache range.
+	app.get('/t/:tenant/private-reuse/:view/nar/:name', (context) => {
+		const nar = parseNarName(context.req.param('name'));
+
+		if (nar === undefined) {
+			return uncachedNotFoundResponse();
+		}
+
+		return serveNar(
+			context.req.raw,
+			context.env,
+			context.get('tenant'),
+			nar,
+			privateNamespaceNarAuthority,
+			true
+		);
+	});
+
+	app.post(
+		'/t/:tenant/private-reuse/:view/api/v1/missing-paths',
+		servePrivateReuse
+	);
+
+	// Public reuse views expose no NAR route under `/reuse/`. Authenticate private
+	// tenants before returning 404 and prevent caches from retaining a miss for a
+	// route added later.
 	app.get('/t/:tenant/reuse/*', async (context) => {
 		const denied = await guardScopedRead(
 			context.req.raw,
@@ -412,6 +486,13 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// after the mount above so the read app's routes still match.
 	app.all('/t/:tenant/private-cache', refusePrivateNamespace);
 	app.all('/t/:tenant/private-cache/*', refusePrivateNamespace);
+
+	// The same rule for the private reuse-view namespace. Every path that names
+	// a view has already passed the credential check above, so an unserved one
+	// ends as a 404. The namespace root names no view, and a request for it is
+	// refused without consulting any tenant or view state.
+	app.all('/t/:tenant/private-reuse', () => unauthorisedResponse());
+	app.all('/t/:tenant/private-reuse/*', () => uncachedNotFoundResponse());
 
 	// Keep the fallback last so specialised read routes can apply their cache
 	// policy before Durable Object dispatch.
@@ -510,10 +591,10 @@ function isTenantRead(method: string, pathname: string): boolean {
 	);
 }
 
-// A read of the cache content the request's prefix addresses. A commit upgrade
-// is sent as a GET, and an upload preview is one of the read-only POSTs, but
-// both negotiate a write. A write may name a private cache, so neither is
-// scoped as a read of the cache the prefix names.
+// Whether the request reads content from the cache selected by its URL prefix.
+// A commit upgrade uses GET, and an upload preview uses a read-only POST, but
+// both use the write surface. The write surface accepts private cache
+// selectors, so neither request is a scoped content read.
 function isScopedContentRead(request: Request, pathname: string): boolean {
 	if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return false;

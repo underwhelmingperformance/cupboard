@@ -30,17 +30,24 @@ export interface ReuseSelector {
 }
 
 /**
-Defines or replaces the fixture tenant's `reuse` view through the admin API.
-*/
+ * Defines or replaces one of the fixture tenant's views through the admin API.
+ * `name` is the name a request gives the view, so a private view is defined
+ * under its `_private-` name.
+ */
 export async function setView(
-	selectors: readonly ReuseSelector[]
+	selectors: readonly ReuseSelector[],
+	name = 'reuse'
 ): Promise<void> {
 	const token = await initialiseViaWorker();
-	const response = await authorisedWorkerFetch('/reuse-views/reuse', token, {
-		body: JSON.stringify({ selectors }),
-		headers: { 'content-type': 'application/json' },
-		method: 'PUT'
-	});
+	const response = await authorisedWorkerFetch(
+		`/reuse-views/${encodeURIComponent(name)}`,
+		token,
+		{
+			body: JSON.stringify({ selectors }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 }

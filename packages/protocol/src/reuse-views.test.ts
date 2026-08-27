@@ -2,8 +2,14 @@ import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
+	contractNameForReuseView,
 	isDestinationPreferred,
+	isPrivateReuseView,
+	privateReuseViewNameSchema,
+	privateStoredReuseView,
+	privateStoredReuseViewSchema,
 	reuseViewDefaultPriority,
+	reuseViewFromContractName,
 	reuseViewListResponseSchema,
 	reuseViewMaxSelectors,
 	reuseViewNameSchema,
@@ -230,5 +236,104 @@ describe('isDestinationPreferred', () => {
 				viewPriority(40 + viewPriorityMargin)
 			)
 		).toBe(true);
+	});
+});
+
+describe('private reuse-view names', () => {
+	it('keeps the stored and contract forms apart', () => {
+		expect({
+			storedSchema: {
+				stored: privateStoredReuseViewSchema.safeParse('private/reuse').success,
+				contractName:
+					privateStoredReuseViewSchema.safeParse('_private-reuse').success
+			},
+			contractNameSchema: {
+				stored: privateReuseViewNameSchema.safeParse('private/reuse').success,
+				contractName:
+					privateReuseViewNameSchema.safeParse('_private-reuse').success
+			}
+		}).toStrictEqual({
+			storedSchema: { stored: true, contractName: false },
+			contractNameSchema: { stored: false, contractName: true }
+		});
+	});
+
+	it.each([
+		['a local name alone', 'reuse'],
+		['the stored prefix alone', 'private/'],
+		['the contract prefix alone', '_private-'],
+		['an uppercase local name', 'private/Reuse'],
+		['a local name over the length bound', `private/${'a'.repeat(64)}`],
+		['a nested name', 'private/private/reuse'],
+		['a local name starting with a separator', 'private/-reuse']
+	])('rejects %s as a stored name', (_name, value) => {
+		expect(privateStoredReuseViewSchema.safeParse(value).success).toBe(false);
+	});
+
+	it.each([
+		{ localName: 'reuse' },
+		{ localName: 'pr-1' },
+		{ localName: 'a'.repeat(63) }
+	])(
+		'maps $localName between its stored and contract names',
+		({ localName }) => {
+			const stored = privateStoredReuseView(
+				reuseViewNameSchema.parse(localName)
+			);
+			const contractName = contractNameForReuseView(stored);
+
+			expect({
+				stored,
+				contractName,
+				backToStored: reuseViewFromContractName(contractName),
+				isPrivate: isPrivateReuseView(stored)
+			}).toStrictEqual({
+				stored: `private/${localName}`,
+				contractName: `_private-${localName}`,
+				backToStored: `private/${localName}`,
+				isPrivate: true
+			});
+		}
+	);
+
+	it('leaves a public view name unchanged in both directions', () => {
+		const name = reuseViewNameSchema.parse('reuse');
+
+		expect({
+			stored: reuseViewFromContractName(name),
+			contractName: contractNameForReuseView(name),
+			isPrivate: isPrivateReuseView(name)
+		}).toStrictEqual({
+			stored: 'reuse',
+			contractName: 'reuse',
+			isPrivate: false
+		});
+	});
+
+	it('uses contract names in view summaries and removal responses', () => {
+		const view = {
+			name: '_private-reuse',
+			revision: 1,
+			priority: reuseViewDefaultPriority,
+			selectors: [{ kind: 'exact', pattern: 'builds' }],
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		};
+
+		expect({
+			summary: reuseViewSummarySchema.parse(view),
+			stored: reuseViewSummarySchema.safeParse({
+				...view,
+				name: 'private/reuse'
+			}).success,
+			remove: reuseViewRemoveResponseSchema.parse({
+				name: '_private-reuse',
+				removed: true
+			})
+		}).toStrictEqual({
+			summary: view,
+			stored: false,
+			remove: { name: '_private-reuse', removed: true }
+		});
 	});
 });

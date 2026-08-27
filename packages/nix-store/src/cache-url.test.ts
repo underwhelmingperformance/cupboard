@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	cacheUrl,
+	privateReuseViewUrl,
 	publicKeyUrl,
 	reuseViewUrl,
 	tenantUrl
@@ -130,6 +131,32 @@ describe('reuseViewUrl', () => {
 	it.each([[''], ['.'], ['..']])('refuses the view name %j', (view) => {
 		expect(() =>
 			reuseViewUrl(base('https://cupboard.example.workers.dev'), view)
+		).toThrow(InvalidCacheUrlSegmentError);
+	});
+});
+
+describe('privateReuseViewUrl', () => {
+	it.each([
+		{
+			name: 'appends the private reuse view path to a bare host',
+			value: 'https://cupboard.example.workers.dev',
+			view: 'nightly',
+			expected: 'https://cupboard.example.workers.dev/private-reuse/nightly'
+		},
+		{
+			name: 'preserves a tenant path prefix',
+			value: 'https://cupboard.example.workers.dev/t/acme',
+			view: 'nightly',
+			expected:
+				'https://cupboard.example.workers.dev/t/acme/private-reuse/nightly'
+		}
+	])('$name', ({ value, view, expected }) => {
+		expect(privateReuseViewUrl(base(value), view).href).toBe(expected);
+	});
+
+	it.each([[''], ['.'], ['..']])('refuses the view name %j', (view) => {
+		expect(() =>
+			privateReuseViewUrl(base('https://cupboard.example.workers.dev'), view)
 		).toThrow(InvalidCacheUrlSegmentError);
 	});
 });

@@ -19,6 +19,7 @@ import {
 } from '../errors.ts';
 
 import {
+	contractViewName,
 	parsePriority,
 	runReuseViewList,
 	runReuseViewRemove,
@@ -270,6 +271,62 @@ describe('runReuseViewRemove', () => {
 		}).toStrictEqual({
 			results: [],
 			cancellations: ['The reuse view was left in place.']
+		});
+	});
+});
+
+describe('contractViewName', () => {
+	it.each([
+		{ name: 'a public view keeps its name', localName: 'reuse' },
+		{ name: 'a public view with a separator', localName: 'nightly-reuse' }
+	])('$name', ({ localName }) => {
+		expect(contractViewName(localName)).toBe(localName);
+	});
+
+	it.each([
+		{ localName: 'reuse', expected: '_private-reuse' },
+		{ localName: 'nightly-reuse', expected: '_private-nightly-reuse' }
+	])(
+		'returns the private contract name $expected for local name $localName',
+		({ localName, expected }) => {
+			expect(contractViewName(localName, true)).toBe(expected);
+		}
+	);
+});
+
+describe('a private view summary', () => {
+	it('reports a private view under its contract name', async () => {
+		const results: ResultRow[][] = [];
+		const calls: { name: string }[] = [];
+		const privateSummary = reuseViewSummarySchema.parse({
+			...summary,
+			name: '_private-reuse',
+			selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+		});
+
+		await runReuseViewSet(
+			contractViewName('reuse', true),
+			[{ kind: 'prefix', pattern: 'pr-' }],
+			undefined,
+			reporter(results),
+			{
+				set(input) {
+					calls.push({ name: input.name });
+					return Promise.resolve(privateSummary);
+				}
+			}
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ name: '_private-reuse' }],
+			results: [
+				[
+					{ label: 'View', value: '_private-reuse' },
+					{ label: 'Revision', value: '1' },
+					{ label: 'Priority', value: '50' },
+					{ label: 'Selectors', value: 'prefix:pr-' }
+				]
+			]
 		});
 	});
 });
