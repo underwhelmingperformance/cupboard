@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -432,6 +432,37 @@ describe('push command', () => {
 
 		// The run reached its first remote call, so a root replacement with no
 		// paths is not an empty publication.
+		expect(result).toBeInstanceOf(CliAbortError);
+	});
+
+	it('refuses --cache together with --private-cache', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--cache',
+			'builds',
+			'--private-cache',
+			'release'
+		]);
+
+		expect(result).toBeInstanceOf(CommanderError);
+
+		if (result instanceof CommanderError) {
+			expect(result.code).toBe('commander.conflictingOption');
+		}
+	});
+
+	it('accepts --private-cache before authentication starts', async () => {
+		const result = await parsePush(
+			[
+				'https://cache.example.workers.dev/t/acme',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				'--private-cache',
+				'release'
+			],
+			interrupted
+		);
+
 		expect(result).toBeInstanceOf(CliAbortError);
 	});
 

@@ -54,10 +54,11 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
+	cacheArguments,
 	collectLines,
 	isEnabled,
 	provided,
-	providedCache,
+	providedCacheSelection,
 	providedUrl
 } from '../options.ts';
 import {
@@ -90,6 +91,7 @@ export interface PushOptions {
 	readonly expectedSourceCommit?: string;
 	readonly installDir?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
 	readonly store?: string;
 	readonly audience?: string;
 	readonly root?: string;
@@ -217,7 +219,8 @@ export function registerPushCommand(
 			'--install-dir <directory>',
 			'directory for the downloaded cupboard binary'
 		)
-		.option('--cache <name>', 'cache to receive the paths')
+		.option('--cache <name>', 'Push to a named public cache.')
+		.option('--private-cache <name>', 'Push to a private cache.')
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store'
@@ -377,7 +380,7 @@ export function resolvePushInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		url,
 		paths: options.paths,
-		cache: providedCache(options.cache),
+		cache: providedCacheSelection(options.cache, options.privateCache),
 		store: provided(options.store) ?? '',
 		audience: provided(options.audience) ?? '',
 		root: isRetained
@@ -772,9 +775,7 @@ export function buildPushArguments(
 		arguments_.push('--root', options.root);
 	}
 
-	if (options.cache !== '') {
-		arguments_.push('--cache', options.cache);
-	}
+	arguments_.push(...cacheArguments(options.cache));
 
 	if (options.store !== '') {
 		arguments_.push('--store', options.store);

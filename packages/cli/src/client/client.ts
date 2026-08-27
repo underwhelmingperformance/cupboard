@@ -1,9 +1,13 @@
 import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
+	type CacheName,
 	cacheNameSchema,
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
+	isPrivateCache,
 	type NixSha256HashString,
+	privateCacheLocalName,
+	privateStoredCache,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -62,7 +66,10 @@ export class CupboardClient {
 		value: URL,
 		options: string | CupboardClientOptions = DEFAULT_CACHE
 	): CupboardClient {
-		const resolved = typeof options === 'string' ? { cache: options } : options;
+		const resolved =
+			typeof options === 'string'
+				? { cache: storedCacheFor(options) }
+				: options;
 
 		return new CupboardClient(
 			new URL(value),
@@ -414,7 +421,7 @@ export class CupboardClient {
 }
 
 export interface CupboardClientOptions {
-	readonly cache?: string;
+	readonly cache?: StoredCache;
 	readonly signal?: AbortSignal;
 }
 
@@ -465,17 +472,63 @@ export function storedCacheFor(cache: string | undefined): StoredCache {
 		return DEFAULT_CACHE;
 	}
 
-	const parsed = cacheNameSchema.safeParse(cache);
+	return cacheNameFor(cache);
+}
+
+/**
+ * Parses a local cache name before the CLI constructs a request.
+ */
+export function cacheNameFor(name: string): CacheName {
+	const parsed = cacheNameSchema.safeParse(name);
 
 	if (!parsed.success) {
-		throw new InvalidCacheNameError(cache);
+		throw new InvalidCacheNameError(name);
 	}
 
 	return parsed.data;
 }
 
-export function cachePrefixFor(cache: string): string {
-	const stored = storedCacheFor(cache);
+/**
+ * Converts a local private-cache name to its stored form. This applies the same
+ * validation as `storedCacheFor`.
+ */
+export function privateStoredCacheFor(name: string): StoredCache {
+	return privateStoredCache(cacheNameFor(name));
+}
 
-	return stored === DEFAULT_CACHE ? '' : `/cache/${stored}`;
+/**
+ * The cache-selection options for a command that targets one cache. Commander
+ * rejects a command line that sets both options.
+ */
+export interface CacheSelectionOptions {
+	readonly cache?: string;
+	readonly privateCache?: string;
+}
+
+/**
+ * Resolves the cache targeted by a single-target command. If both options are
+ * empty, the command targets the tenant's default cache.
+ */
+export function resolveCacheSelection(
+	options: CacheSelectionOptions
+): StoredCache {
+	if (options.privateCache !== undefined) {
+		return privateStoredCacheFor(options.privateCache);
+	}
+
+	return storedCacheFor(options.cache);
+}
+
+export function cachePrefixFor(cache: StoredCache): string {
+	if (cache === DEFAULT_CACHE) {
+		return '';
+	}
+
+	// Private-cache routes use the local name as one path segment. The stored name
+	// contains a slash, so it cannot be used in that segment.
+	if (isPrivateCache(cache)) {
+		return `/private-cache/${privateCacheLocalName(cache)}`;
+	}
+
+	return `/cache/${cache}`;
 }

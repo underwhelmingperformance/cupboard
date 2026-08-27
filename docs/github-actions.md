@@ -342,6 +342,26 @@ For private reads, provide `read-user` and `read-password`. The action writes a
 private netrc file under `$RUNNER_TEMP`, sets mode `0600`, appends
 `netrc-file = ...` to the generated Nix config, and never echoes the password.
 
+`cache` and `private-cache` each take a list, written one entry per line or
+separated by commas, and may be used together: setup writes one substituter set
+covering every cache the two inputs name. Naming neither uses the tenant's
+default cache. Every read of a private cache authenticates, and a netrc entry is
+keyed by host alone, so the substituter URL of a private cache carries its own
+credential. That URL reaches `NIX_CONFIG` and the generated config file, so
+treat both as secret. A private cache takes its credential from
+`private-cache-credentials`, a JSON object mapping the cache's local name to its
+user and password, and otherwise from `read-user` and `read-password`; a private
+cache left without a credential fails the run.
+
+```yaml
+- uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+  with:
+    cache-url: https://cupboard.example.workers.dev/t/<slug>
+    cache: builds
+    private-cache: release
+    private-cache-credentials: ${{ secrets.CUPBOARD_PRIVATE_CACHE_CREDENTIALS }}
+```
+
 `reuse-view` adds a named tenant reuse view as a second substituter, after the
 destination cache. Setup verifies the two priorities keep the destination first;
 see [docs/reuse-views.md](./reuse-views.md) for the ordering rules.
@@ -380,6 +400,10 @@ as `readlink -f`, so macOS is first-class.
 The default OIDC audience is the `url` input. The default retention root is
 `github:${{ github.repository }}/${{ github.ref_name }}`. `wait` defaults to
 `true` and `wait-timeout` defaults to `10m`.
+
+A push addresses one cache. `cache` names a public one and `private-cache` a
+private one; setting both fails the run. `actions/plan`, `actions/attest` and
+`actions/attest-attach` take the same pair.
 
 Attestation bundle paths are also newline-delimited. They attach a bundle that
 already exists; `actions/attest` below produces one with the right subjects:

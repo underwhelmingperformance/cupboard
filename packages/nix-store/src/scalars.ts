@@ -186,11 +186,9 @@ export const cacheNameSchema = z
 	.brand('CacheName');
 export type CacheName = z.infer<typeof cacheNameSchema>;
 
-// The characters and first-character restriction cacheNamePattern imposes on
-// a full cache name, without its length bound: a prefix may be shorter than
-// any real name, down to empty (which matches every cache), but every
-// character it does supply must belong to the same alphabet in the same
-// position, or no legal cache name could ever start with it.
+// The character rules for a cache-name prefix, without the length bound from
+// `cacheNamePattern`. The empty prefix matches every cache. A non-empty prefix
+// uses the same first-character rule and alphabet as a complete cache name.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
 // The default cache's selector. Its stored name is the empty string, which
@@ -214,9 +212,9 @@ export const privateCacheSelectorPattern =
 	/^_private-[a-z0-9][a-z0-9._-]{0,62}$/;
 
 /**
- * A private cache's stored name: `private/` followed by its local name. The
- * stored name records privacy as part of the cache identity, so changing
- * privacy requires a different identity.
+ * A private cache's stored name: `private/` followed by its local name. This
+ * prefix makes the namespace part of the cache identity. Moving a cache between
+ * the public and private namespaces therefore creates a different identity.
  */
 export const privateStoredCacheSchema = z
 	.string()
@@ -225,8 +223,8 @@ export const privateStoredCacheSchema = z
 export type PrivateStoredCache = z.output<typeof privateStoredCacheSchema>;
 
 /**
-A private cache's selector: `_private-` followed by its local name.
-*/
+ * A private cache selector: `_private-` followed by its local name.
+ */
 export const privateCacheSelectorSchema = z
 	.string()
 	.regex(privateCacheSelectorPattern)
@@ -262,14 +260,24 @@ export const namedCacheSelectorSchema = z.union([
 export type NamedCacheSelector = z.output<typeof namedCacheSelectorSchema>;
 
 /**
+ * The stored name of a public cache: `DEFAULT_CACHE` for the default cache or
+ * `CacheName` for a named one. Use this where an input must never address a
+ * private cache, such as a public-cache option.
+ */
+export const publicStoredCacheSchema = z.union([
+	z.literal(DEFAULT_CACHE),
+	cacheNameSchema
+]);
+export type PublicStoredCache = z.output<typeof publicStoredCacheSchema>;
+
+/**
  * The stored name of a cache: `CacheName` for a named public cache,
  * `DEFAULT_CACHE` for the default cache, or `PrivateStoredCache` for a private
  * cache. Convert a selector with `cacheFromSelector`. Parse a raw database
  * value before using it as `StoredCache`.
  */
 export const storedCacheSchema = z.union([
-	z.literal(DEFAULT_CACHE),
-	cacheNameSchema,
+	publicStoredCacheSchema,
 	privateStoredCacheSchema
 ]);
 export type StoredCache = z.output<typeof storedCacheSchema>;
@@ -287,15 +295,15 @@ function isPrivateCacheSelector(
 }
 
 /**
-The stored name of the private cache whose local name is `name`.
-*/
+ * Returns the stored name for a private cache with the given local name.
+ */
 export function privateStoredCache(name: CacheName): PrivateStoredCache {
 	return privateStoredCacheSchema.parse(`${PRIVATE_STORED_PREFIX}${name}`);
 }
 
 /**
-The local name of a private cache, without the `private/` prefix.
-*/
+ * Returns a private cache's local name without the `private/` prefix.
+ */
 export function privateCacheLocalName(cache: PrivateStoredCache): CacheName {
 	return cacheNameSchema.parse(cache.slice(PRIVATE_STORED_PREFIX.length));
 }
@@ -329,10 +337,9 @@ export function selectorForCache(cache: StoredCache): CacheSelector {
 }
 
 // Raw bounds for the private stored-name range. Queries use these bounds to
-// exclude private caches. `'0'` is the code unit after `'/'`, so the half-open
-// range `[PRIVATE_STORED_RANGE_START, PRIVATE_STORED_RANGE_END)` contains every
-// private stored name and no public stored name. A public cache whose local
-// name is `private` sorts below the start bound.
+// exclude private caches. `'0'` is the code unit after `'/'`, so every name
+// beginning with `private/` falls within this half-open range. The public cache
+// named `private` sorts below the start bound.
 export const PRIVATE_STORED_RANGE_START = PRIVATE_STORED_PREFIX;
 export const PRIVATE_STORED_RANGE_END = 'private0';
 

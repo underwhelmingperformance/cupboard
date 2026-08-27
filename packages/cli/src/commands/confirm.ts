@@ -21,15 +21,19 @@ import { isAbortError } from '../abort.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { ConfirmIncompleteError, PathsNotConfirmedError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface ConfirmOptions {
-	readonly cache?: string;
+interface ConfirmOptions extends CacheSelectionOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -54,6 +58,7 @@ export function registerConfirmCommand(
 			'--cache <name>',
 			'confirm against a named cache rather than the default'
 		)
+		.addOption(privateCacheOption('confirm against'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -75,7 +80,7 @@ export function registerConfirmCommand(
 		)
 		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const cacheName = selectorForCache(resolveCacheSelection(options));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{

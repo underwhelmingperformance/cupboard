@@ -9,7 +9,8 @@ import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	type CachePriority,
-	type StoredCache
+	DEFAULT_CACHE,
+	privateStoredCache
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
@@ -17,7 +18,11 @@ import {
 	reuseViewPrioritySchema
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import {
+	basicAuthHeader,
+	type BasicCredential,
+	type ReadUser
+} from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
@@ -35,6 +40,7 @@ import {
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	PrivateCacheCredentialMissingError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -48,7 +54,9 @@ import {
 import {
 	isEnabled,
 	provided,
-	providedCache,
+	providedCaches,
+	providedPrivateCacheCredentials,
+	providedPrivateCacheNames,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -59,8 +67,10 @@ import {
 } from '../release-install.ts';
 import {
 	cachePublicKeyRequestHeaders,
+	type CacheSelection,
 	cacheUrlFor,
-	reuseViewUrlFor
+	reuseViewUrlFor,
+	substituterUrlFor
 } from '../substituters.ts';
 
 export interface SetupOptions {
@@ -74,6 +84,8 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
+	readonly privateCacheCredentials?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
@@ -92,7 +104,7 @@ export interface SetupInputs {
 	readonly installDirectory: string;
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
-	readonly cache: StoredCache;
+	readonly caches: readonly CacheSelection[];
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -163,7 +175,22 @@ export function registerSetupCommand(
 			'--cache-url <url>',
 			'cupboard tenant URL to add to Nix substituters'
 		)
-		.option('--cache <name>', 'cache to use at the tenant URL')
+		.option(
+			'--cache <name>',
+			'Add public caches at the tenant URL, one per line or comma-separated. ' +
+				'Can be combined with --private-cache.'
+		)
+		.option(
+			'--private-cache <name>',
+			'Add private caches at the tenant URL, one per line or comma-separated. ' +
+				'Supply each credential through --private-cache-credentials or ' +
+				'through --read-user and --read-password.'
+		)
+		.option(
+			'--private-cache-credentials <json>',
+			'Supply private cache credentials as a JSON object mapping each ' +
+				"cache's local name to its user and password."
+		)
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to add as a second substituter'
@@ -247,7 +274,7 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		cache: providedCache(options.cache),
+		caches: resolveCaches(options, readUser, readPassword),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -262,6 +289,48 @@ export function resolveSetupInputs(
 					)
 				: '')
 	};
+}
+
+/**
+ * The caches the run configures: the public caches the `cache` input names,
+ * then the private caches the `private-cache` input names. Naming neither
+ * configures the tenant's default cache.
+ *
+ * Every read of a private cache authenticates. A cache with its own entry in
+ * `private-cache-credentials` uses it; the rest use the shared `read-user` and
+ * `read-password`, and a private cache left with no credential fails the run.
+ */
+function resolveCaches(
+	options: SetupOptions,
+	readUser: ReadUser | '',
+	readPassword: string
+): readonly CacheSelection[] {
+	const publicCaches = providedCaches(options.cache);
+	const privateNames = providedPrivateCacheNames(options.privateCache);
+
+	if (publicCaches.length === 0 && privateNames.length === 0) {
+		return [{ cache: DEFAULT_CACHE }];
+	}
+
+	const credentials = providedPrivateCacheCredentials(
+		options.privateCacheCredentials,
+		privateNames
+	);
+	const shared: BasicCredential | undefined =
+		readUser === '' ? undefined : { user: readUser, password: readPassword };
+
+	return [
+		...publicCaches.map((cache) => ({ cache })),
+		...privateNames.map((name) => {
+			const credential = credentials.get(name) ?? shared;
+
+			if (credential === undefined) {
+				throw new PrivateCacheCredentialMissingError(name);
+			}
+
+			return { cache: privateStoredCache(name), credential };
+		})
+	];
 }
 
 export async function setupAction(
@@ -426,63 +495,73 @@ async function fetchCacheInfoPriority(
 
 export interface ResolveSubstitutersOptions {
 	readonly cacheUrl: URL;
-	readonly cache: StoredCache;
+	readonly caches: readonly CacheSelection[];
 	readonly reuseView: string;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 }
 
 /**
- * When a reuse view is configured, fetches both `nix-cache-info` documents and
- * requires the destination's priority to be numerically lower. The destination
- * remains first in the returned list. The check and ordering prevent a
- * divergent input-addressed path in the view from replacing the destination's
- * choice.
+ * When a reuse view is configured, fetches the `nix-cache-info` document of
+ * every configured cache and of the view, and requires each cache's priority to
+ * be numerically lower than the view's. The caches remain ahead of the view in
+ * the returned list. The check and ordering prevent a divergent
+ * input-addressed path in the view from replacing a destination's choice.
  * The probes use Basic authentication because the runner's netrc applies only
- * to later Nix reads.
+ * to later Nix reads, and fetch ignores a credential in the URL.
  */
 export async function resolveSubstituters(
 	options: ResolveSubstitutersOptions,
 	dependencies: CacheInfoFetchDependencies = {}
 ): Promise<readonly URL[]> {
-	const destinationUrl = cacheUrlFor(options.cacheUrl, options.cache);
+	const substituters = options.caches.map((selection) =>
+		substituterUrlFor(options.cacheUrl, selection)
+	);
 
 	if (options.reuseView === '') {
-		return [destinationUrl];
+		return substituters;
 	}
 
 	const viewUrl = reuseViewUrlFor(options.cacheUrl, options.reuseView);
 	const fetcher = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
-	const headers =
+	const tenantHeaders =
 		options.readUser === ''
 			? undefined
 			: basicAuthHeader({
 					user: options.readUser,
 					password: options.readPassword
 				});
-	const [destinationPriority, rawViewPriority] = await Promise.all([
-		fetchCacheInfoPriority(
-			fetcher,
-			destinationUrl,
-			'destination',
-			headers,
-			dependencies.signal
-		),
+	const [rawViewPriority, destinationPriorities] = await Promise.all([
 		fetchCacheInfoPriority(
 			fetcher,
 			viewUrl,
 			'view',
-			headers,
+			tenantHeaders,
 			dependencies.signal
+		),
+		Promise.all(
+			options.caches.map((selection) =>
+				fetchCacheInfoPriority(
+					fetcher,
+					cacheUrlFor(options.cacheUrl, selection.cache),
+					'destination',
+					selection.credential === undefined
+						? tenantHeaders
+						: basicAuthHeader(selection.credential),
+					dependencies.signal
+				)
+			)
 		)
 	]);
 	const viewPriority = reuseViewPrioritySchema.parse(rawViewPriority);
 
-	if (!isDestinationPreferred(destinationPriority, viewPriority)) {
-		throw new ReuseViewPriorityError(destinationPriority, viewPriority);
+	for (const destinationPriority of destinationPriorities) {
+		if (!isDestinationPreferred(destinationPriority, viewPriority)) {
+			throw new ReuseViewPriorityError(destinationPriority, viewPriority);
+		}
 	}
 
-	return [destinationUrl, viewUrl];
+	return [...substituters, viewUrl];
 }
 
 async function configureNix(
@@ -501,7 +580,7 @@ async function configureNix(
 	const substituters = await resolveSubstituters(
 		{
 			cacheUrl: inputs.cacheUrl,
-			cache: inputs.cache,
+			caches: inputs.caches,
 			reuseView: inputs.reuseView,
 			readUser: inputs.readUser,
 			readPassword: inputs.readPassword

@@ -20,6 +20,7 @@ import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 
+import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
 import type { AccessCredential } from '../../packages/cli/src/client/credentials.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
@@ -377,7 +378,7 @@ export class CupboardTestServer {
 		options: { readonly cache?: string } = {}
 	): PushClient {
 		const base = pushClientFor(this.tenantUrl, credential, {
-			cache: options.cache
+			cache: storedCacheFor(options.cache)
 		});
 
 		return {

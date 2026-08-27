@@ -49,7 +49,7 @@ import {
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
 	provided,
-	providedCache,
+	providedCacheSelection,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -67,6 +67,7 @@ export interface AttestOptions {
 	readonly predicateFile?: string;
 	readonly url?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 }
@@ -279,6 +280,7 @@ export function registerAttestCommand(
 		)
 		.requiredOption('--url <url>', 'destination cupboard tenant URL')
 		.option('--cache <name>', 'destination named cache')
+		.option('--private-cache <name>', 'destination private cache')
 		.option(
 			'--read-user <user>',
 			'username for private destination-cache reads'
@@ -326,7 +328,7 @@ export function resolveAttestInputs(
 	return {
 		receiptFile,
 		url,
-		cache: providedCache(options.cache),
+		cache: providedCacheSelection(options.cache, options.privateCache),
 		readUser,
 		readPassword,
 		checksumsFile,

@@ -21,6 +21,17 @@ export class CacheNameInvalidError extends UsageError {
 	}
 }
 
+/**
+ * A push or an administrative call addresses exactly one cache, and the two
+ * inputs address different namespaces.
+ */
+export class CacheSelectionConflictError extends UsageError {
+	constructor() {
+		super('set either cache or private-cache, not both');
+		this.name = 'CacheSelectionConflictError';
+	}
+}
+
 export type UrlInputName = 'cache-url' | 'url';
 
 export class UrlInputInvalidError extends UsageError {
@@ -299,6 +310,47 @@ export class ReadPasswordRequiredError extends UsageError {
 	constructor() {
 		super('read-password is required when read-user is supplied');
 		this.name = 'ReadPasswordRequiredError';
+	}
+}
+
+/**
+ * The `private-cache-credentials` input is a JSON object mapping a private
+ * cache's local name to its read credential.
+ */
+export class PrivateCacheCredentialsInvalidError extends UsageError {
+	constructor(options?: { readonly cause: unknown }) {
+		super(
+			'private-cache-credentials must be a JSON object mapping a cache name to { user, password }',
+			options
+		);
+		this.name = 'PrivateCacheCredentialsInvalidError';
+	}
+}
+
+/**
+ * A credential names a cache the run does not configure. The workflow expects
+ * a cache it did not list, so the run fails instead of reading that cache
+ * without the credential.
+ */
+export class UnknownPrivateCacheCredentialError extends UsageError {
+	constructor(public readonly cache: string) {
+		super(
+			`private-cache-credentials names '${cache}', which private-cache does not list`
+		);
+		this.name = 'UnknownPrivateCacheCredentialError';
+	}
+}
+
+/**
+ * Every read of a private cache authenticates, so a listed private cache needs
+ * either its own credential or the shared read-user and read-password pair.
+ */
+export class PrivateCacheCredentialMissingError extends UsageError {
+	constructor(public readonly cache: string) {
+		super(
+			`no read credential for private cache '${cache}': supply private-cache-credentials or read-user and read-password`
+		);
+		this.name = 'PrivateCacheCredentialMissingError';
 	}
 }
 

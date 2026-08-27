@@ -38,7 +38,21 @@ inputs:
     description: cupboard tenant URL to add to Nix substituters.
     required: false
   cache:
-    description: Cache to use at the tenant URL.
+    description:
+      Public caches to use at the tenant URL, one per line or comma-separated.
+      Naming neither cache nor private-cache uses the tenant's default cache.
+    required: false
+  private-cache:
+    description:
+      Private caches to use at the tenant URL, one per line or comma-separated.
+      Every read of one authenticates, so each needs a credential from
+      private-cache-credentials or from read-user and read-password.
+    required: false
+  private-cache-credentials:
+    description:
+      JSON object mapping each private cache's local name to an object holding
+      its user and password. Populate it from workflow secrets. A cache with no
+      entry of its own uses read-user and read-password.
     required: false
   trusted-public-key:
     description: Nix signing key to trust for cache reads.
@@ -135,6 +149,8 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        PRIVATE_CACHE: ${{ inputs.private-cache }}
+        PRIVATE_CACHE_CREDENTIALS: ${{ inputs.private-cache-credentials }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
         READ_USER: ${{ inputs.read-user }}
@@ -153,6 +169,8 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --private-cache "$PRIVATE_CACHE"
+          --private-cache-credentials "$PRIVATE_CACHE_CREDENTIALS"
           --reuse-view "$REUSE_VIEW"
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"

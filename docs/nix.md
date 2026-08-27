@@ -85,10 +85,15 @@ cache to their own configuration.
 
 ### As a NixOS or Home Manager module
 
-Both modules expose `nix.cupboard.caches`, a list of `{ url; publicKeys; }`, and
-fold each entry into `nix.settings.substituters` and
-`nix.settings.trusted-public-keys`. The default cache and its key are kept; the
-caches you list are added.
+Both modules expose `nix.cupboard.caches`, a list of caches, and fold each entry
+into `nix.settings.substituters` and `nix.settings.trusted-public-keys`. The
+default cache and its key are kept; the caches you list are added.
+
+A public cache sets `url`. A private cache sets `substitutersFile` instead: its
+substituter URL carries a read credential, and `nix.conf` is world-readable, so
+the module never writes that URL into it. See [Private caches][private-caches].
+
+[private-caches]: #private-caches
 
 NixOS:
 
@@ -214,3 +219,57 @@ copy from elsewhere. The in-toto subject digest of a cupboard attestation is the
 NAR hash. A public transparency log exposes that digest to everyone, and a
 repository's attestation store exposes it to every reader of that repository.
 Both are append-only, so a published NAR hash cannot be withdrawn.
+
+### Configuring a client
+
+A private cache lives at `/t/<tenant>/private-cache/<name>`. Configure public
+and private caches together by repeating and combining `--cache` and
+`--private-cache`:
+
+```sh
+credentials=$(printf '{"release":{"user":"%s","password":"%s"}}' "$user" "$password")
+
+CUPBOARD_PRIVATE_CACHE_CREDENTIALS=$credentials \
+  cupboard config "$url" "$(cupboard pubkey "$url")" \
+    --cache builds --private-cache release
+```
+
+The command prints one snippet containing every cache in argument order. Write
+the complete snippet to the destination file. The credentials are a JSON object
+mapping each private cache's local name to its `user` and `password`, supplied
+in `CUPBOARD_PRIVATE_CACHE_CREDENTIALS` or in `--private-cache-credentials`,
+which wins when both are set. A private cache with no entry uses `--read-user`
+and `--read-password`. A private cache left with no credential at all fails the
+command, and so does a credential for a cache that no `--private-cache` option
+names.
+
+Every read of a private cache authenticates, and a netrc entry is keyed by host
+alone, so netrc cannot hold a credential for one cache among several on the same
+host. The substituter URL of a private cache therefore carries its own
+credential, which makes the printed snippet as secret as the credential itself.
+Give the snippet to the modules through `substitutersFile`:
+
+```nix
+{
+  nix.cupboard.caches = [
+    {
+      url = "https://cupboard.example.workers.dev/t/acme/cache/builds";
+      publicKeys = [ "cupboard-1:abc123..." ];
+    }
+    {
+      substitutersFile = "/etc/nix/cupboard-release.conf";
+      publicKeys = [ "cupboard-1:abc123..." ];
+    }
+  ];
+}
+```
+
+Set `substitutersFile` to a file containing the `extra-substituters` line
+printed by `cupboard config --private-cache`. Create the file outside the Nix
+store with mode 0400 or 0600, and make it readable only by the account that runs
+Nix. The module adds an `include` directive to `nix.conf`; it does not copy the
+credential-bearing URL into that world-readable file. Nix appends the settings
+of an included file to the ones it has already read, so the private cache joins
+the substituters the rest of the list contributes. Nix rejects the configuration
+when an `include` names a missing or unreadable file, so the private cache
+cannot silently drop out of the substituter list.

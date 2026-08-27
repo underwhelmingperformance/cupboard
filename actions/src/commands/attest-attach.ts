@@ -25,9 +25,10 @@ import {
 } from '../errors.ts';
 import { type Environment } from '../inputs.ts';
 import {
+	cacheArguments,
 	collectLines,
 	provided,
-	providedCache,
+	providedCacheSelection,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -37,6 +38,7 @@ export interface AttestAttachOptions {
 	readonly url?: string;
 	readonly cupboardPath?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
 	readonly audience?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -78,6 +80,7 @@ export function registerAttestAttachCommand(
 			'path to the cupboard binary installed by actions/setup'
 		)
 		.option('--cache <name>', 'named cache that received the paths')
+		.option('--private-cache <name>', 'private cache that received the paths')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option(
 			'--read-user <user>',
@@ -152,7 +155,7 @@ export function resolveAttestAttachInputs(
 	return {
 		url,
 		cupboardPath,
-		cache: providedCache(options.cache),
+		cache: providedCacheSelection(options.cache, options.privateCache),
 		audience: provided(options.audience) ?? '',
 		readUser,
 		readPassword,
@@ -183,9 +186,7 @@ export function attestAttachArguments(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.readUser !== '') {
 		arguments_.push(

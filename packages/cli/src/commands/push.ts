@@ -24,8 +24,13 @@ import {
 	pushAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
+import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient, storedCacheFor } from '../client/client.ts';
+import {
+	type CacheSelectionOptions,
+	CupboardClient,
+	resolveCacheSelection
+} from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	parseTtl,
@@ -53,7 +58,7 @@ import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface PushOptions {
+interface PushOptions extends CacheSelectionOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -66,7 +71,6 @@ interface PushOptions {
 	readonly readPassword?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
-	readonly cache?: string;
 	readonly store?: string;
 	readonly receiptFile?: string;
 	readonly alreadyHeld?: readonly string[] | false;
@@ -350,6 +354,7 @@ export function registerPushCommand(
 			parseTtl
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
+		.addOption(privateCacheOption('push to'))
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store (default: the store Nix itself would use)',
@@ -491,12 +496,13 @@ export function registerPushCommand(
 				throw new EmptyPublicationError();
 			}
 			const reporter = commandUi(program, programOptions).reporter();
+			const cache = resolveCacheSelection(options);
 			const raw = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+				cache,
 				signal: programOptions.signal
 			});
 
-			const cacheSelector = selectorForCache(storedCacheFor(options.cache));
+			const cacheSelector = selectorForCache(cache);
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(url),
@@ -509,7 +515,7 @@ export function registerPushCommand(
 			const copiedFrom = await observedCopiesFrom(options.copiedFromFile);
 			const receipt = await runPush(publication, reporter, {
 				client: pushClientFor(url, token, {
-					cache: options.cache,
+					cache,
 					signal: programOptions.signal
 				}),
 				...(options.store !== undefined && {
