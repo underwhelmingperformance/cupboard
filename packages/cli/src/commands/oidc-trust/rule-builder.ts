@@ -1,4 +1,4 @@
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
@@ -256,9 +256,9 @@ function cacheBinding(
 		return { exact: options.cache, validate: 'cacheName' };
 	}
 
-	// An omitted cache means the tenant's default cache. `_default` is the wire
-	// value for that selection, not a cache name the user must supply.
-	return { exact: WIRE_DEFAULT_CACHE, validate: 'cacheName' };
+	// An omitted cache means the tenant's default cache. `_default` is the
+	// selector for that cache, not a cache name the user must supply.
+	return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
 }
 
 function rootBinding(

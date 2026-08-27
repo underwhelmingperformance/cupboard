@@ -1134,7 +1134,8 @@ export class BuildEventMalformedError extends BuildEventRejectedError {
 }
 
 /**
-A hook connection exceeded the fixed build-event wire-size bound.
+The invocation listener received a build event that exceeded the fixed byte
+limit.
 */
 export class BuildEventTooLargeError extends BuildEventRejectedError {
 	constructor(

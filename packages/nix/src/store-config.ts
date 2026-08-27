@@ -896,10 +896,10 @@ function includePath(target: string, source: ConfigSource): string {
 }
 
 // Parsing and forwarding are separate. Every source contributes to the
-// effective client settings. Dedicated SetOptions fields use their wire slots;
-// other user and inline assignments become daemon override entries keyed by
-// canonical setting name. System assignments are not forwarded because the
-// daemon reads them itself.
+// effective client settings. A setting with a dedicated SetOptions field is
+// sent in that field; other user and inline assignments become daemon override
+// entries keyed by canonical setting name. System assignments are not forwarded
+// because the daemon reads them itself.
 class EffectiveSettings {
 	private readonly overridden = new EffectiveDaemonOverrides();
 

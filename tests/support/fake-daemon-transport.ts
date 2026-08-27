@@ -191,7 +191,7 @@ export interface FakeBuilds {
 
 export interface FakeBuildResult {
 	/**
-	The derived path in its wire spelling, with `!` before outputs.
+	The derived path in the daemon's legacy spelling, with `!` before outputs.
 	*/
 	readonly target: string;
 	readonly status: number;

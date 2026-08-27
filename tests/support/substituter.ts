@@ -28,8 +28,8 @@ export const servedNarSize = 4096;
  * A loopback binary cache for tests that exercise a real Nix daemon. It serves
  * `nix-cache-info` and a narinfo for each path registered with
  * {@link FakeSubstituter.serve}, records every narinfo request, and returns 404
- * for all other paths. Tests can therefore distinguish a request that crossed
- * the wire from a response Nix had already cached.
+ * for all other paths. Tests can therefore distinguish a request that reached
+ * this cache from a response Nix had already cached.
  *
  * The store paths exist only as metadata. Tests never request their NAR
  * contents.

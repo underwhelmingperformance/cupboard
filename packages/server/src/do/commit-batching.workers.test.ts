@@ -1,5 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import {
 	uploadCommitDecisionSchema,
 	uploadNegotiateResponseSchema
@@ -380,7 +380,7 @@ describe('commit batching', () => {
 		await commitPath(token, seed, nar);
 
 		const negotiated = await authorisedFetch(
-			`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 			token,
 			{
 				method: 'POST',

@@ -55,9 +55,9 @@ This is a pnpm workspace.
   tenant Durable Object's app in `do/server.ts`. Never hand-roll a dispatcher
   over pathnames. Authentication, maintenance eligibility and cache scoping are
   middleware; services take parsed values and return typed protocol objects,
-  with the route layer doing the parsing and rendering. Only wire-format
-  endpoints (OAuth, the Nix binary-cache protocol, the commit WebSocket,
-  streamed object serves) handle raw Request/Response.
+  with the route layer doing the parsing and rendering. Only the following
+  endpoints handle raw Request/Response: OAuth, the Nix binary-cache protocol,
+  the commit WebSocket, and streamed object serves.
 - Hono answers HEAD by re-dispatching the request to the GET handler with the
   body stripped, so register reads with `.get()`; an explicit HEAD registration
   never matches.
@@ -68,5 +68,5 @@ This is a pnpm workspace.
   (`tenantRpc`/`controlRpc` in `packages/cli/src/client/orpc.ts`), with
   responses validated at runtime on both sides. A new admin endpoint starts as a
   contract procedure; never add a hand-written route and client pair for JSON.
-  Only wire-format endpoints listed above stay outside the contract, on the slim
-  hand-written `CupboardClient`.
+  Only the raw Request/Response endpoints listed above stay outside the
+  contract, on the slim hand-written `CupboardClient`.

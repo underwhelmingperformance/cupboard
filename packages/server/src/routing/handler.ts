@@ -599,8 +599,8 @@ function admittedWriteStatus(
 }
 
 // The two read-only POST endpoints bypass the write gate. A WebSocket upgrade
-// uses GET on the wire, but the only socket route commits uploads and must be
-// gated as a write.
+// is sent as a GET request, but the only socket route commits uploads and must
+// be gated as a write.
 function isTenantWrite(inner: Request): boolean {
 	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return true;

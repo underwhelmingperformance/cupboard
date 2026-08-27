@@ -1,10 +1,10 @@
 import {
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	graceSecondsSchema,
 	rootNameSchema,
 	storePathHashSchema,
-	storePathSchema,
-	WIRE_DEFAULT_CACHE
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
@@ -46,7 +46,7 @@ async function negotiateWithRoot(
 	attachRoot?: UploadAttachRoot
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 		token,
 		{
 			method: 'POST',

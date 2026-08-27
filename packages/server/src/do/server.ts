@@ -490,8 +490,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// Contract routes must run before wire-format routes because the oRPC
-		// handler signals an unmatched request by falling through.
+		// Contract routes must run before the routes that handle raw
+		// Request/Response, because the oRPC handler signals an unmatched request
+		// by falling through.
 		this.app.use(async (context, next) => {
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				context.req.raw,
@@ -532,7 +533,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// Treat an absent cache prefix and the `_default` wire alias as the stored
+		// Treat an absent cache prefix and the `_default` selector as the stored
 		// default-cache name. Validate named prefixes before route dispatch.
 		this.app.use(async (context, next) => {
 			context.set('cache', DEFAULT_CACHE);

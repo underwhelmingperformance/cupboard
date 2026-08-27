@@ -1,4 +1,7 @@
-import { DEFAULT_CACHE, WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR
+} from '@cupboard/nix-store/scalars';
 import { commitAcceptCapabilitiesHeader } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -87,7 +90,7 @@ function closeAll(sessions: readonly CommitConversation[]): void {
 }
 
 function attemptUpgrade(token: string, accepted?: string): Promise<Response> {
-	return authorisedFetch(`/cache/${WIRE_DEFAULT_CACHE}/commit`, token, {
+	return authorisedFetch(`/cache/${DEFAULT_CACHE_SELECTOR}/commit`, token, {
 		headers: {
 			upgrade: 'websocket',
 			...(accepted !== undefined && {

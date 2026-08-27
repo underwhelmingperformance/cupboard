@@ -1,7 +1,7 @@
 import {
 	DEFAULT_CACHE,
-	storePathHashSchema,
-	WIRE_DEFAULT_CACHE
+	DEFAULT_CACHE_SELECTOR,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	commitAcceptCapabilitiesHeader,
@@ -381,13 +381,16 @@ describe('commit session credit', () => {
 
 		await misconfigureBudget();
 
-		const response = await fetchPath(`/cache/${WIRE_DEFAULT_CACHE}/commit`, {
-			headers: {
-				authorization: `Bearer ${token}`,
-				upgrade: 'websocket',
-				[commitAcceptCapabilitiesHeader]: commitCreditAccept
+		const response = await fetchPath(
+			`/cache/${DEFAULT_CACHE_SELECTOR}/commit`,
+			{
+				headers: {
+					authorization: `Bearer ${token}`,
+					upgrade: 'websocket',
+					[commitAcceptCapabilitiesHeader]: commitCreditAccept
+				}
 			}
-		});
+		);
 		const sockets = await runInDurableObject(
 			currentServer(),
 			(_instance, state) => state.getWebSockets().length

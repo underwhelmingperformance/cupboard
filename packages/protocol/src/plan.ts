@@ -7,8 +7,9 @@ import { z } from 'zod';
 // When `cupboard plan cohort` finds more paths with unknown availability
 // than the ceiling permits, it reports a structured refusal. The GitHub
 // action parses that refusal and renders the same explanation in its own
-// error. This module declares the refusal's wire shapes and its message
-// rendering once, so both sides use the same definitions. The action may
+// error. This module defines the refusal schemas and the functions that
+// render its message in one place, so both sides use the same
+// definitions. The action may
 // run an older or newer cupboard binary than the one it was released with,
 // so the schemas give the newer fields defaults and a payload from an older
 // binary still parses.

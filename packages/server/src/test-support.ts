@@ -6,6 +6,7 @@ import {
 	type AuthKeyId,
 	authKeyIdSchema,
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	narInfoGenerationSchema,
 	nixKeyNameSchema,
 	nixSha256HashSchema,
@@ -20,8 +21,7 @@ import {
 	storePathHashSchema,
 	type TenantId,
 	tenantIdSchema,
-	ttlSecondsSchema,
-	WIRE_DEFAULT_CACHE
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -708,7 +708,7 @@ export function adminGrants(): AuthorizationDetails {
  */
 export function cacheWriteGrants(
 	roots: readonly string[] = [],
-	cacheSelector: string = WIRE_DEFAULT_CACHE
+	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
@@ -1856,7 +1856,7 @@ export async function negotiateViaWorker(
 	paths: readonly ParsedUploadPathMetadata[]
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedWorkerFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 		token,
 		{
 			body: JSON.stringify({
@@ -1904,7 +1904,7 @@ export async function pushPathToTenant(
 	token: string,
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar,
-	cache: string = WIRE_DEFAULT_CACHE
+	cache: string = DEFAULT_CACHE_SELECTOR
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
@@ -1957,7 +1957,7 @@ export async function attemptPushToTenant(
 	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
 		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 		token,
 		{
 			method: 'POST',
@@ -2017,7 +2017,7 @@ export async function stageDeferredForTenant(
 	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
 		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 		token,
 		{
 			method: 'POST',
@@ -2385,7 +2385,7 @@ export async function deletePath(
 	storePathHash: StorePathHash
 ): Promise<DeletePathResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/paths/${storePathHash}`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/paths/${storePathHash}`,
 		token,
 		{
 			method: 'DELETE'
@@ -2403,7 +2403,7 @@ export async function setRoot(
 ): Promise<RootSetResponse> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify(body),
@@ -2422,7 +2422,7 @@ export async function listRoots(
 	options: { readonly cursor?: string; readonly limit?: number } = {}
 ): Promise<RootListResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/roots${listPageQuery(options)}`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/roots${listPageQuery(options)}`,
 		token
 	);
 
@@ -2440,7 +2440,7 @@ export async function listRootTargets(
 	options: { readonly cursor?: string; readonly limit?: number } = {}
 ): Promise<z.output<typeof rootTargetsPageSchema>> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}/targets${listPageQuery(options)}`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}/targets${listPageQuery(options)}`,
 		token
 	);
 
@@ -2466,7 +2466,7 @@ export async function removeRoot(
 	name: string
 ): Promise<RootRemoveResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			method: 'DELETE'
@@ -2717,7 +2717,7 @@ export async function expectTextResponse(
 
 // The contract addresses the default cache as `_default`; there is no bare
 // `/stats` route.
-export const defaultCacheStatsPath = `/cache/${WIRE_DEFAULT_CACHE}/stats`;
+export const defaultCacheStatsPath = `/cache/${DEFAULT_CACHE_SELECTOR}/stats`;
 
 export async function expectStats(
 	token: string,

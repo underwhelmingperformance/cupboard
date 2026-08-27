@@ -245,10 +245,10 @@ async function filterCloudflareItems<T>(
 
 /**
  * A queue consumer as the live API returns it. The published schema (and the
- * SDK's types) say the Worker is named by `script_name`, but the live
- * endpoint returns `script` (and `service` for service bindings), which is
- * also what wrangler matches on. All spellings are read, and the parse is
- * deliberately independent of the SDK's view of the wire.
+ * SDK's types) say the Worker is identified by `script_name`. The live
+ * endpoint returns `script`, or `service` for service bindings. Wrangler also
+ * matches these live fields. The schema accepts all three field names and does
+ * not depend on the SDK's response types.
  */
 const liveConsumerSchema = z.object({
 	type: z.string().optional(),

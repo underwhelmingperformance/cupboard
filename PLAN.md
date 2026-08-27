@@ -69,10 +69,10 @@ now implemented. The early "single-tenant for now" framing has been overtaken by
 that work. Routing is Hono throughout, and the JSON admin APIs are
 contract-first oRPC: every admin procedure is declared once in
 `@cupboard/protocol/contract`, the server implements it with oRPC, and the CLI
-derives its typed clients from it. Only wire-format surfaces stay outside the
-contract: OAuth token and discovery/JWKS endpoints, the Nix binary-cache
-protocol and public key, the commit WebSocket, streamed object serves, and their
-HTTP authentication mechanisms.
+derives its typed clients from it. Only endpoints that handle raw
+Request/Response stay outside the contract: OAuth token and discovery/JWKS
+endpoints, the Nix binary-cache protocol and public key, the commit WebSocket,
+streamed object serves, and their HTTP authentication mechanisms.
 
 ### Signing-key rotation and Workers Cache
 
@@ -348,7 +348,7 @@ that deployed is the identity that administers.
       HTTP server for Nix, scoped `nix` invocation builder, and localhost URL
       validation. Enforces the Isolation invariants documented in the Testing
       section.
-- [x] `pnpm test:e2e` script wired at the root.
+- [x] `pnpm test:e2e` script added at the root.
 
 ## Infrastructure
 
@@ -1111,8 +1111,9 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 
 This pass tightens the protocol and boundary model before extending auth
 further. The goal is one validation model on every boundary: JSON parsing is
-only the lexical step, Zod schemas own the wire shape and semantics, and a tiny
-pure lexer handles text formats such as narinfo before a schema validates them.
+only the lexical step, Zod schemas own the message shape and semantics, and a
+tiny pure lexer handles text formats such as narinfo before a schema validates
+them.
 
 - [x] Add Zod v4 to `@cupboard/shared`.
 - [x] Split the monolithic shared protocol module into focused modules, with
@@ -1130,12 +1131,12 @@ pure lexer handles text formats such as narinfo before a schema validates them.
   - [x] `cache-info.ts` and `nix-config.ts` for the remaining text renderers.
   - [x] `errors.ts` for the small set of typed protocol errors still thrown by
         free functions.
-- [x] Retire the hand-written wire interfaces, validator classes, and duplicate
-      `fromFields` model layer once the schemas own those contracts.
+- [x] Retire the hand-written message interfaces, validator classes, and
+      duplicate `fromFields` model layer once the schemas own those contracts.
 - [x] After schema parsing has replaced the DTO layer, revisit message output
       types. Prefer branded parsed or domain types at trusted boundaries, while
-      keeping buildable wire input types unbranded unless construction can be
-      made brand-safe without casts.
+      keeping buildable input types unbranded unless construction can be made
+      brand-safe without casts.
 - [x] Validate every JSON boundary:
   - [x] server request bodies return typed 400s on malformed or structurally
         invalid JSON;
@@ -1649,8 +1650,8 @@ edge cache, routed through each owning tenant DO's repair queue; removing
 Negotiate gates skip/upload only on the asking tenant's own edges, never on
 global blob existence. A tenant that does not already reference a blob is told
 to upload even when the bytes already exist globally. The server dedupes at rest
-after upload and verification. Deduplication is storage-only, never a wire-level
-existence oracle.
+after upload and verification. Deduplication is storage-only, never an existence
+oracle in a response.
 
 There remains a weaker servability-latency signal: after a tenant has uploaded
 the bytes, a blob already present in the shared CAS may become available faster
@@ -2792,8 +2793,8 @@ The change is cheapest before a release and while tokens are stateless:
 - Access tokens are short-lived and carry no server-side record (V4). Changing
   their claim shape costs nothing to deploy; outstanding tokens expire within
   minutes.
-- V5 is a fresh deploy with no field compatibility to keep, so the wire shape of
-  a token and the stored shape of a trust rule are both free to change.
+- V5 is a fresh deploy with no field compatibility to keep, so a token's own
+  shape and the stored shape of a trust rule are both free to change.
 - The contract already declares each procedure's required authority once, in
   `meta({ scope })`. V7 enriches that declaration rather than inventing a new
   one.
@@ -2807,14 +2808,15 @@ claims into a released, compatibility-bound token.
 A grant is an operation paired with the resources it may act on:
 
 - **Operations** are the verbs the server gates, one per contract procedure or
-  wire route so that no path is left unguarded. On the tenant Durable Object the
-  push lifecycle is `upload:negotiate`, `upload:prepare`, `upload:status`, and
-  `upload:commit`; the attestation lifecycle is `attestation:negotiate`,
-  `attestation:prepare`, and `attestation:attach`; retention is `root:set`; and
-  the admin verbs cover `cache:create`, `cache:delete`, `narinfo:delete`,
-  signing keys, trust rules, and policy. On the control plane: `tenant:create`,
-  `tenant:suspend`, `tenant:resume`, `tenant:remove`, `tenant:read`,
-  `control-key:rotate`, and `control-key:retire`.
+  hand-written route so that no path is left unguarded. On the tenant Durable
+  Object the push lifecycle is `upload:negotiate`, `upload:prepare`,
+  `upload:status`, and `upload:commit`; the attestation lifecycle is
+  `attestation:negotiate`, `attestation:prepare`, and `attestation:attach`;
+  retention is `root:set`; and the admin verbs cover `cache:create`,
+  `cache:delete`, `narinfo:delete`, signing keys, trust rules, and policy. On
+  the control plane: `tenant:create`, `tenant:suspend`, `tenant:resume`,
+  `tenant:remove`, `tenant:read`, `control-key:rotate`, and
+  `control-key:retire`.
 - **Resources** name what an operation acts on, in three shapes. Tenant-DO cache
   operations carry a cache (an exact name) and, where the operation sets
   retention, a root (an exact name or a trailing-slash prefix) nested within
@@ -2876,10 +2878,10 @@ which input fields name its resources, replacing `meta({ scope })`:
 A single authoriser answers one question: does any grant on the token cover this
 operation on these resources? Covering means the operation matches and each
 resource selector contains the request, an exact name, or a trailing-slash
-prefix that admits it. The wire-format write paths outside the contract (the
-commit WebSocket, the presigned upload negotiation) call the same authoriser
-with their operation and resources, so there is one decision point rather than a
-role check in middleware plus a bespoke claim check in a handler.
+prefix that admits it. The write paths outside the contract (the commit
+WebSocket, the presigned upload negotiation) call the same authoriser with their
+operation and resources, so there is one decision point rather than a role check
+in middleware plus a bespoke claim check in a handler.
 
 Some write routes carry only an upload id rather than the cache and store path:
 commit, upload status, and attestation attach address a stored pending row. For
@@ -3231,9 +3233,9 @@ untrusted one, and the owner's CLI can drop to a single cache before running a
 script.
 
 Refresh is the stored-session path for interactive owner/admin logins. The
-presence of a `refresh_token` member in the token response is the wire signal
-that a session can refresh; claim-bound CI exchanges omit it. A refresh-token
-grant consumes the presented refresh token, re-reads the current trust rule, and
+presence of a `refresh_token` member in the token response is the signal that a
+session can refresh; claim-bound CI exchanges omit it. A refresh-token grant
+consumes the presented refresh token, re-reads the current trust rule, and
 issues a new access token only for grants the rule still permits. If the refresh
 request also carries narrower `authorization_details`, the same subset test used
 for attenuation applies before the new token is issued.
@@ -3256,10 +3258,11 @@ for attenuation applies before the new token is issued.
 - `meta({ scope })` on every contract procedure, control procedures included,
   becomes `meta({ requires, resource })`. The oRPC middleware reads that
   metadata, verifies the token, resolves the declared resources from parsed
-  input or stored rows, and calls the shared authoriser. Hono wire-format routes
-  use the same authoriser after they have resolved their concrete resources.
-  Hono remains the routing layer; the capability decision is shared rather than
-  path-specific. An owner rule seeds a single wildcard grant for its domain.
+  input or stored rows, and calls the shared authoriser. Hono routes outside the
+  contract use the same authoriser after they have resolved their concrete
+  resources. Hono remains the routing layer; the capability decision is shared
+  rather than path-specific. An owner rule seeds a single wildcard grant for its
+  domain.
 
 ### Implementation sequence
 
@@ -3268,7 +3271,7 @@ Each step keeps a working deployment.
 - [x] **Grant model and authoriser.** Define the operation and resource types,
       the grant set, and the covering test. Add the authoriser and route every
       contract procedure, on the tenant DO and the control plane, plus every
-      wire-format write path, through it. Replace the `scope` claim with
+      hand-written write path, through it. Replace the `scope` claim with
       `authorization_details`; an owner rule seeds a wildcard grant per domain.
       Unit tests for covering, including the missing-field-denies rule, the
       per-domain wildcard, and a token from one domain refused on the other
@@ -3367,7 +3370,7 @@ The push amplifies request count because it fans a closure of thousands of paths
 into per-path D1 work. Negotiate is already one request for the whole set; the
 per-path fan-out is in the commit and the verify pass. This section plans the
 reduction from per-path requests towards a near-constant per-push read budget,
-which server-side batching achieves without any wire change.
+which server-side batching achieves without any protocol change.
 
 ### What is and is not per path
 
@@ -3404,7 +3407,7 @@ expiry deletes into chunked `IN ... RETURNING`, the offboarding residue probes,
 the edge-retirement reads, and the stats reads. This cuts the cost _per call_
 and is safe in isolation; it does not change how many times a call is made.
 
-Phase 2: read the batch's facts once, no wire change. This is the fix. The
+Phase 2: read the batch's facts once, no protocol change. This is the fix. The
 verify pass already claims a _batch_ of pending uploads before it settles them
 one by one; have it read every claimed path's `blob_state` and ownership in two
 chunked `IN` queries and the account once, build lookup maps, and settle each
@@ -3513,7 +3516,7 @@ constraints address three failure modes:
    chunked commit op carrying per-id identity, per-id reserve decomposition and
    intra-chunk concurrency, and the client's chunk boundary. Follows Phase 2,
    which clears the overload, and lands the three questions above before the
-   wire changes.
+   protocol changes.
 
 ### Verification
 
@@ -3531,7 +3534,7 @@ constraints address three failure modes:
 - Reusing the negotiate reads at commit time is explicitly rejected (see Phase
   2); the content facts must be read fresh.
 - The batched-commit protocol is out of the D1-budget scope: it is a DO-side and
-  wire evolution that follows the read reduction, not a D1 fix.
+  protocol evolution that follows the read reduction, not a D1 fix.
 
 ## Publish planning, retention grace, and tenant-wide reuse
 
@@ -4647,9 +4650,9 @@ published, never named in that list, and kept by the run root while it lives;
 and an unretained path, which only a plain `--no-retain` push can produce, joins
 no root at all. Two parallel path lists of the same shape could express only two
 of those kinds and would leave a transposition between them representable; the
-tag travelling with the path removes both faults, and the run root's behaviour
-stops being invisible at the client even though its wire decision stays where it
-is, bound at negotiate and applied server-side.
+tag travelling with the path removes both faults. The client now represents the
+run root's behaviour explicitly. The run-root retention decision remains bound
+during negotiation, and the server applies it.
 
 The split prevents every opportunistically uploaded intermediate from becoming a
 durable root. It also lets the final target root express the user's actual
@@ -5280,7 +5283,7 @@ status path and is not itself a publication failure.
 The root a commit attaches to is bound where the push is established, at
 negotiate, alongside the push id and the prefix-scoped upload credential, and
 the commit socket inherits it. A commit frame therefore carries no root of its
-own, so attaching to a different root is not expressible on the wire, and the
+own, so attaching to a different root is not expressible in a frame, and the
 authorisation stays one decision taken before any frame is handled. This follows
 what the push protocol already does twice: `upload:negotiate` is authorised once
 and its R2 credential is confined to `staging/<pushId>/` by construction, and
@@ -5809,8 +5812,8 @@ remaining work.
         `build-push` with remote builders must not silently attest unverified
         results, and a remote-store cohort must record which store produced each
         path. Attestation refuses an unverified remotely produced subject.
-19. [ ] Wire cross-run pruning end to end. Supply `--previous-receipt-file` from
-        the composite action and the workflow; upload per-cohort receipt
+19. [ ] Connect cross-run pruning end to end. Supply `--previous-receipt-file`
+        from the composite action and the workflow; upload per-cohort receipt
         fragments and a plan-stage fragment naming the expected keys; add an
         aggregation job that runs on failure and publishes state only for a
         complete, identity-valid set; define the manifest digest over the

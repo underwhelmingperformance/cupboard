@@ -738,8 +738,8 @@ function configuredAudiences(
 	return new Set(rules.map((rule) => rule.audience));
 }
 
-// The wire form is `<id>.<secret>`. The ID selects the row, and the secret
-// proves possession against the stored hash.
+// A refresh token is spelled `<id>.<secret>`. The ID selects the row, and the
+// secret proves possession against the stored hash.
 function parseRefreshToken(token: string): ParsedRefreshToken | undefined {
 	const separator = token.indexOf('.');
 

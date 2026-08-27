@@ -846,8 +846,8 @@ describe('reconcileBuild', () => {
 		});
 	});
 
-	// `uploadNegotiateMaxPaths` is a wire constant, so reaching a second batch
-	// requires a large fixture. Allow extra time on loaded runners.
+	// `uploadNegotiateMaxPaths` is fixed by the protocol, so reaching a second
+	// batch requires a large fixture. Allow extra time on loaded runners.
 	it(
 		'continues with later batches after one negotiation fails',
 		{ timeout: 30_000 },
