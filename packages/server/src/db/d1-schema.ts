@@ -3,6 +3,7 @@ import {
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
+	type PrivateStoredCache,
 	type Sha256HexDigest,
 	type StoredCache,
 	type StorePathHash,
@@ -198,10 +199,10 @@ export const tenant = sqliteTable(
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// Private caches store the Basic-auth user, salt, and password verifier.
-		// Public caches keep all three columns null. A private cache with an
-		// incomplete verifier rejects every read; the plaintext password is never
-		// stored.
+		// For private tenants, these columns store the Basic-auth user, salt, and
+		// password verifier. Public tenants keep all three null. A private tenant
+		// with an incomplete verifier rejects every read; the plaintext password
+		// is never stored.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
@@ -212,6 +213,28 @@ export const tenant = sqliteTable(
 	(table) => [
 		index('tenant_maintenance_idx').on(table.status, table.lastMaintainedAt)
 	]
+);
+
+// One private cache's own read verifier, keyed by the cache's stored name.
+// While this row exists, only credentials that match its verifier can open the
+// cache. Deleting a cache leaves the row in place, so re-creating the cache with
+// the same stored name preserves the verifier. Finalising an offboarded tenant
+// deletes all of its cache-verifier rows.
+export const tenantCacheReadCredential = sqliteTable(
+	'tenant_cache_read_credential',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cache: text('cache').$type<PrivateStoredCache>().notNull(),
+		readUser: text('read_user').$type<ReadUser>().notNull(),
+		readPasswordHash: text('read_password_hash')
+			.$type<ReadPasswordHash>()
+			.notNull(),
+		readPasswordSalt: text('read_password_salt')
+			.$type<ReadPasswordSalt>()
+			.notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.tenant, table.cache] })]
 );
 
 // Keep the latest maintenance success and failure for each tenant and pass. A

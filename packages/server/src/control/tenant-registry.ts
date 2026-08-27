@@ -1,4 +1,9 @@
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type CacheName,
+	type PrivateStoredCache,
+	privateStoredCache,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -12,7 +17,7 @@ import type {
 	ParsedTenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
-import { and, eq, ne, notInArray, sql } from 'drizzle-orm';
+import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
@@ -398,6 +403,151 @@ export async function setTenantReadCredential(
 	});
 }
 
+/**
+ * Replaces one private cache's own read credential, only while the tenant is
+ * active or suspended. The credential is exclusive: while the row exists, the
+ * tenant credential no longer opens that cache.
+ */
+export async function setCacheReadCredential(
+	database: Database,
+	id: TenantId,
+	cacheName: CacheName,
+	read: ParsedTenantReadCredential,
+	now: IsoTimestamp
+): Promise<void> {
+	await requireLiveTenant(database, id);
+
+	const readPasswordSalt = generateReadPasswordSalt();
+	const readPasswordHash = await hashReadPassword(
+		read.password,
+		readPasswordSalt
+	);
+	const cache = privateStoredCache(cacheName);
+	// Select from a live tenant in the same statement as the upsert. If
+	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
+	// recreate the credential that cleanup deleted.
+	const written = await database
+		.insert(d1Schema.tenantCacheReadCredential)
+		.select(
+			database
+				.select({
+					tenant: d1Schema.tenant.id,
+					cache: sql<PrivateStoredCache>`${cache}`.as('cache'),
+					readUser: sql<ReadUser>`${read.user}`.as('read_user'),
+					readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
+						'read_password_hash'
+					),
+					readPasswordSalt: sql<ReadPasswordSalt>`${readPasswordSalt}`.as(
+						'read_password_salt'
+					),
+					createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
+				})
+				.from(d1Schema.tenant)
+				.where(liveTenantFilter(id))
+		)
+		.onConflictDoUpdate({
+			target: [
+				d1Schema.tenantCacheReadCredential.tenant,
+				d1Schema.tenantCacheReadCredential.cache
+			],
+			set: {
+				readUser: read.user,
+				readPasswordHash,
+				readPasswordSalt,
+				createdAt: now
+			}
+		})
+		.run();
+
+	if (written.meta.changes === 0) {
+		await refuseRetiredTenant(database, id);
+	}
+}
+
+/**
+ * Removes one private cache's own read credential, only while the tenant is
+ * active or suspended. Readers of that cache then authenticate with the tenant
+ * credential. Removing a credential the cache does not have succeeds.
+ */
+export async function clearCacheReadCredential(
+	database: Database,
+	id: TenantId,
+	cacheName: CacheName
+): Promise<void> {
+	await requireLiveTenant(database, id);
+
+	const cache = privateStoredCache(cacheName);
+	const liveTenantRow = database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(liveTenantFilter(id));
+	// Require a live tenant in the DELETE itself. If offboarding wins the race
+	// after the precheck, the DELETE changes no rows and the caller checks the
+	// tenant state instead of returning success.
+	const deleted = await database
+		.delete(d1Schema.tenantCacheReadCredential)
+		.where(
+			and(
+				eq(d1Schema.tenantCacheReadCredential.tenant, id),
+				eq(d1Schema.tenantCacheReadCredential.cache, cache),
+				exists(liveTenantRow)
+			)
+		)
+		.run();
+
+	if (deleted.meta.changes > 0) {
+		return;
+	}
+
+	// A live tenant may have no credential for this cache, and clearing an
+	// absent credential succeeds. Re-read the tenant to distinguish that result
+	// from a missing or retired tenant.
+	await requireLiveTenant(database, id);
+}
+
+// Matches the tenant row only while its status still admits writes. Offboarding
+// and offboarded are terminal, so a tenant this condition rejects never becomes
+// writable again.
+function liveTenantFilter(id: TenantId): SQL | undefined {
+	return and(
+		eq(d1Schema.tenant.id, id),
+		notInArray(d1Schema.tenant.status, ['offboarding', 'offboarded'])
+	);
+}
+
+// Why a write guarded on a live tenant matched no row: either the tenant row is
+// gone, or offboarding has retired it.
+async function refuseRetiredTenant(
+	database: Database,
+	id: TenantId
+): Promise<never> {
+	const existing = await loadTenant(database, id);
+
+	if (existing === undefined) {
+		throw new TenantNotFoundError(id);
+	}
+
+	throw new TenantRetiredError(id);
+}
+
+// Rejects a missing or retired tenant before a credential mutation starts. The
+// mutation repeats the status check in its guarded write because offboarding
+// can begin after this function returns.
+async function requireLiveTenant(
+	database: Database,
+	id: TenantId
+): Promise<void> {
+	const existing = await loadTenant(database, id);
+
+	if (existing === undefined) {
+		throw new TenantNotFoundError(id);
+	}
+
+	if (existing.status === 'offboarding' || existing.status === 'offboarded') {
+		throw new TenantRetiredError(id);
+	}
+}
+
 // A private tenant without a complete read credential fails closed. Do not clear
 // credentials after offboarding has begun.
 export async function clearTenantReadCredential(
@@ -419,12 +569,7 @@ async function updateLiveTenant(
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set(set)
-		.where(
-			and(
-				eq(d1Schema.tenant.id, id),
-				notInArray(d1Schema.tenant.status, ['offboarding', 'offboarded'])
-			)
-		)
+		.where(liveTenantFilter(id))
 		.returning();
 	const row = updated[0];
 
@@ -432,16 +577,10 @@ async function updateLiveTenant(
 		return toSummary(row);
 	}
 
-	const existing = await loadTenant(database, id);
-
-	if (existing === undefined) {
-		throw new TenantNotFoundError(id);
-	}
-
-	throw new TenantRetiredError(id);
+	return refuseRetiredTenant(database, id);
 }
 
-// Keep a tombstone so the slug cannot be reused, but clear the read credential,
+// Keep a tombstone so the slug cannot be reused, but clear the read credentials,
 // owner identity, and usage in one batch. The caller separately purges the
 // tenant's Durable Object. The owner columns are not nullable, so finalisation
 // stores empty strings rather than deleting them.
@@ -467,6 +606,9 @@ export async function finaliseOffboardedTenant(
 			.where(eq(d1Schema.tenantUsage.tenant, id)),
 		database
 			.delete(d1Schema.tenantMaintenanceEligibility)
-			.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id))
+			.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
+		database
+			.delete(d1Schema.tenantCacheReadCredential)
+			.where(eq(d1Schema.tenantCacheReadCredential.tenant, id))
 	]);
 }

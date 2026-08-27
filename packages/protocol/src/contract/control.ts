@@ -1,4 +1,8 @@
-import { authKeyIdSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	authKeyIdSchema,
+	cacheNameSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
 
@@ -21,6 +25,7 @@ import {
 } from '../oidc.ts';
 import { controlCheckReportSchema } from '../reports.ts';
 import {
+	cacheReadCredentialResponseSchema,
 	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
@@ -145,6 +150,39 @@ export const controlContract = {
 			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
 			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantReadModeResponseSchema),
+
+		// A private cache may carry a read credential of its own. While that
+		// credential exists it is the only one that opens the cache; clearing it
+		// returns the cache to the tenant credential. `cacheName` is the local name.
+		rotateCacheReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:rotate-cache-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
+			.route({
+				method: 'POST',
+				path: '/tenants/{id}/private-caches/{cacheName}/read-credential'
+			})
+			.input(
+				z.strictObject({
+					id: tenantIdSchema,
+					cacheName: cacheNameSchema,
+					read: tenantReadCredentialSchema
+				})
+			)
+			.output(cacheReadCredentialResponseSchema),
+
+		clearCacheReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:clear-cache-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
+			.route({
+				method: 'DELETE',
+				path: '/tenants/{id}/private-caches/{cacheName}/read-credential'
+			})
+			.input(z.strictObject({ id: tenantIdSchema, cacheName: cacheNameSchema }))
+			.output(cacheReadCredentialResponseSchema),
 
 		remove: controlProcedure
 			.meta({

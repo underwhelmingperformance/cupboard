@@ -69,7 +69,9 @@ export const tenantOperations = [
 	'tenant:remove',
 	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
-	'tenant:clear-read-credential'
+	'tenant:clear-read-credential',
+	'tenant:rotate-cache-read-credential',
+	'tenant:clear-cache-read-credential'
 ] as const;
 
 // These control operations do not select a resource.
@@ -140,6 +142,8 @@ export const operationSchema = z.enum([
 	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
+	'tenant:rotate-cache-read-credential',
+	'tenant:clear-cache-read-credential',
 	'membership:rebuild',
 	'control-oidc-trust:list',
 	'control-oidc-trust:read',

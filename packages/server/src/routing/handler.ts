@@ -38,8 +38,9 @@ import { loggerMiddleware } from '../observability/logging.ts';
 import {
 	cacheInfoResponse,
 	cacheScope,
-	guardRead,
+	guardScopedRead,
 	missingStorePathHashes,
+	type ReadScope,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
@@ -207,9 +208,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				return next();
 			}
 
-			const denied = await guardRead(
+			const denied = await guardScopedRead(
 				context.req.raw,
-				context.get('tenantEntry')
+				context.get('tenantEntry'),
+				publicScope(context)
 			);
 
 			return denied ?? tenantUncachedRead(context);
@@ -228,9 +230,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				return next();
 			}
 
-			const denied = await guardRead(
+			const denied = await guardScopedRead(
 				context.req.raw,
-				context.get('tenantEntry')
+				context.get('tenantEntry'),
+				publicScope(context)
 			);
 
 			if (denied !== undefined) {
@@ -248,9 +251,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			'/t/:tenant/cache/:cacheName/api/v1/missing-paths'
 		],
 		async (context) => {
-			const denied = await guardRead(
+			const denied = await guardScopedRead(
 				context.req.raw,
-				context.get('tenantEntry')
+				context.get('tenantEntry'),
+				publicScope(context)
 			);
 
 			if (denied !== undefined) {
@@ -277,7 +281,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	);
 
 	app.post('/t/:tenant/reuse/:view/api/v1/missing-paths', async (context) => {
-		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+		const denied = await guardScopedRead(
+			context.req.raw,
+			context.get('tenantEntry'),
+			publicScope(context)
+		);
 
 		return (
 			denied ??
@@ -298,7 +306,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			}
 
 			const entry = context.get('tenantEntry');
-			const denied = await guardRead(context.req.raw, entry);
+			const denied = await guardScopedRead(
+				context.req.raw,
+				entry,
+				publicScope(context)
+			);
 
 			if (denied !== undefined) {
 				return denied;
@@ -331,7 +343,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			}
 
 			const entry = context.get('tenantEntry');
-			const denied = await guardRead(context.req.raw, entry);
+			const denied = await guardScopedRead(
+				context.req.raw,
+				entry,
+				publicScope(context)
+			);
 
 			if (denied !== undefined) {
 				return denied;
@@ -355,7 +371,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		['/t/:tenant/nix-cache-info', '/t/:tenant/cache/:cacheName/nix-cache-info'],
 		async (context) => {
 			const entry = context.get('tenantEntry');
-			const denied = await guardRead(context.req.raw, entry);
+			const denied = await guardScopedRead(
+				context.req.raw,
+				entry,
+				publicScope(context)
+			);
 
 			if (denied !== undefined) {
 				return denied;
@@ -377,7 +397,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Reuse-view metadata has its own priority and is never cached. Bypass the
 	// default-cache renderer.
 	app.get('/t/:tenant/reuse/:view/nix-cache-info', async (context) => {
-		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+		const denied = await guardScopedRead(
+			context.req.raw,
+			context.get('tenantEntry'),
+			publicScope(context)
+		);
 
 		return (
 			denied ??
@@ -392,9 +416,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	app.get(
 		String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 		async (context) => {
-			const denied = await guardRead(
+			const denied = await guardScopedRead(
 				context.req.raw,
-				context.get('tenantEntry')
+				context.get('tenantEntry'),
+				publicScope(context)
 			);
 
 			return (
@@ -409,7 +434,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Reuse views expose no NAR route. Authenticate private tenants before the 404
 	// and prevent caches from retaining a miss for a route added later.
 	app.get('/t/:tenant/reuse/*', async (context) => {
-		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+		const denied = await guardScopedRead(
+			context.req.raw,
+			context.get('tenantEntry'),
+			publicScope(context)
+		);
 
 		if (denied !== undefined) {
 			return denied;
@@ -512,6 +541,12 @@ export default {
 		await handleMaintenanceQueue(batch, env);
 	}
 } satisfies ExportedHandler<Env>;
+
+// Every route registered here reads a cache in the public namespace, so the
+// tenant's read mode decides whether the reader must authenticate.
+function publicScope(context: Context<WorkerHonoEnv>): ReadScope {
+	return { visibility: 'public', cache: context.get('cache') };
+}
 
 // Strip the public tenant prefix and any client-supplied hint token. Upload
 // negotiation adds a server-issued token only after this sanitisation.

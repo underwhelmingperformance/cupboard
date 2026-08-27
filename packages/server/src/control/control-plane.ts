@@ -1,4 +1,8 @@
-import { type AuthKeyId, type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type AuthKeyId,
+	type CacheName,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import {
 	type ConfiguredInstanceSummary,
 	type InstanceName,
@@ -34,6 +38,7 @@ import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
+	type CacheReadCredentialResponse,
 	type MembershipRebuildResponse,
 	type ParsedTenantCreateBody,
 	type ParsedTenantReadCredential,
@@ -115,10 +120,12 @@ import {
 	writeTenantMember
 } from './tenant-membership.ts';
 import {
+	clearCacheReadCredential,
 	clearTenantReadCredential,
 	ensureTenant,
 	listTenants,
 	resumeTenant,
+	setCacheReadCredential,
 	setTenantReadCredential,
 	setTenantReadMode,
 	setTenantStatus
@@ -659,6 +666,33 @@ export async function controlTenantClearReadCredential(
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, readMode: summary.readMode };
+}
+
+export async function controlTenantRotateCacheReadCredential(
+	env: Env,
+	id: TenantId,
+	cacheName: CacheName,
+	read: ParsedTenantReadCredential
+): Promise<CacheReadCredentialResponse> {
+	await setCacheReadCredential(
+		controlDatabase(env),
+		id,
+		cacheName,
+		read,
+		isoTimestamp(new Date())
+	);
+
+	return { id, cacheName, hasCredential: true };
+}
+
+export async function controlTenantClearCacheReadCredential(
+	env: Env,
+	id: TenantId,
+	cacheName: CacheName
+): Promise<CacheReadCredentialResponse> {
+	await clearCacheReadCredential(controlDatabase(env), id, cacheName);
+
+	return { id, cacheName, hasCredential: false };
 }
 
 export async function controlTenantOffboard(
