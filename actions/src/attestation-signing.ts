@@ -6,7 +6,10 @@ import type { InternalError } from '@sigstore/sign';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
-import { AttestationSigningError } from './errors.ts';
+import {
+	AttestationSelfCheckError,
+	AttestationSigningError
+} from './errors.ts';
 
 export interface AttestationSubject {
 	readonly name: string;
@@ -19,10 +22,9 @@ export interface AttestationStatement {
 }
 
 /**
- * The evidence of signing time a produced bundle carries. A Rekor entry is a
- * permanent public record of the signature. An RFC 3161 timestamp supplies
- * signed time evidence but does not by itself publish the signature to a
- * public log.
+ * Evidence that records when a bundle was signed. A Rekor entry is a permanent
+ * public record of the signature. An RFC 3161 timestamp supplies signed time
+ * evidence but does not by itself publish the signature to a public log.
  */
 export interface BundleEvidence {
 	readonly tlogEntryCount: number;
@@ -112,9 +114,9 @@ export interface SigningDependencies {
 /**
  * Signs one statement, attempting again after a transient Fulcio or witness
  * failure and backing off between attempts. Each attempt signs from the
- * beginning and gets its own key, certificate and log entry, so a later attempt
- * never depends on the log entry a failed one created. When the failure is
- * final, or the attempts run out, the caller gets an
+ * beginning and gets its own key, certificate and log entry. A later attempt
+ * therefore does not depend on any log entry created during a failed attempt.
+ * When the failure is final, or the attempts run out, the caller gets an
  * {@link AttestationSigningError} and the step fails.
  */
 export async function signStatement(
@@ -129,6 +131,12 @@ export async function signStatement(
 		try {
 			return await sign(statement);
 		} catch (error) {
+			// Propagate a self-check failure unchanged. It describes the bundle
+			// produced by this attempt, and another signing attempt cannot repair it.
+			if (error instanceof AttestationSelfCheckError) {
+				throw error;
+			}
+
 			if (attempt >= maxSigningAttempts || !isTransientSigningFailure(error)) {
 				throw new AttestationSigningError(statement.predicateType, attempt, {
 					cause: error
@@ -165,10 +173,10 @@ export interface SigningPolicy {
 }
 
 /**
- * How many subjects one statement covers. `individual` signs one statement per
- * subject so that a reader of one bundle learns no other subject; it makes no
- * claim about the complete run. `run` signs one statement for a batch of
- * subjects, up to the limit the attestation store accepts.
+ * How many subjects each statement covers. `individual` signs one statement
+ * per subject. Each bundle reveals only that subject and does not attest to the
+ * complete run. `run` signs one statement for a batch of subjects, up to the
+ * limit accepted by the attestation store.
  */
 export function subjectsPerStatement(
 	grouping: SubjectGrouping,
@@ -182,14 +190,14 @@ export function cacheVisibility(cache: StoredCache): DestinationVisibility {
 }
 
 /**
- * The policy a destination's visibility implies when the workflow selects
- * none. The in-toto subject digest of every statement is the NAR hash, and
+ * The default signing policy for each destination visibility. The in-toto
+ * subject digest of every statement is the NAR hash, and
  * Rekor and the repository's attestation store are append-only, so a
  * published bundle permanently reveals that each subject path exists and
- * identifies its contents to anyone holding a matching copy. A private
- * destination therefore defaults to evidence that reaches neither, and to
- * one statement per subject so that a reader of one bundle cannot enumerate
- * the others.
+ * identifies its contents to anyone holding a matching copy. The private
+ * defaults omit Rekor and the GitHub attestation upload. They also sign one
+ * statement per subject, which prevents a reader of one bundle from
+ * enumerating the other subjects in the run.
  */
 export function defaultSigningPolicy(
 	visibility: DestinationVisibility
@@ -210,25 +218,16 @@ export function defaultSigningPolicy(
 }
 
 /**
- * The Sigstore instance a profile selects. `tsa-only` selects the GitHub
- * instance because GitHub's private Fulcio and RFC 3161 timestamp authority
- * are the only delegated signing path that creates no Rekor entry; the bundle
- * it produces is in the GitHub trust domain rather than the public-good one.
- * `sigstore-default` selects nothing and leaves the choice to
- * `@actions/attest`, which reads the repository's visibility.
+ * The Sigstore instance selected by a profile. `tsa-only` and
+ * `rekor-and-tsa` both sign in the public-good trust domain. The action
+ * constructs their Sigstore clients and uses the public-good timestamp
+ * authority. `sigstore-default` returns `undefined` because `@actions/attest`
+ * selects an instance from the repository's visibility.
  */
 export function sigstoreInstanceFor(
 	profile: SigningProfile
 ): SigstoreInstance | undefined {
-	if (profile === 'tsa-only') {
-		return 'github';
-	}
-
-	if (profile === 'rekor-and-tsa') {
-		return 'public-good';
-	}
-
-	return undefined;
+	return profile === 'sigstore-default' ? undefined : 'public-good';
 }
 
 export const disclosedServices = [
@@ -248,9 +247,9 @@ export type PublicationDestination = (typeof publicationDestinations)[number];
 
 export interface SigningDisclosure {
 	/**
-	 * The instances the run may use. It holds both when the profile leaves the
-	 * choice to the repository's visibility, and the services and publications
-	 * then cover both.
+	 * The instances the run may use. This list contains both instances when
+	 * `@actions/attest` selects one from the repository's visibility. In that
+	 * case, `services` and `publications` cover both possible instances.
 	 */
 	readonly instances: readonly SigstoreInstance[];
 	readonly services: readonly DisclosedService[];
@@ -259,15 +258,31 @@ export interface SigningDisclosure {
 	readonly subjectCount: number;
 }
 
-const instanceServices = {
-	'public-good': ['oidc-and-fulcio', 'certificate-transparency', 'rekor'],
-	github: ['oidc-and-fulcio', 'rfc-3161-tsa']
-} as const satisfies Record<SigstoreInstance, readonly DisclosedService[]>;
+/**
+ * The services each profile can contact. For `sigstore-default`, the set
+ * includes every service used by either the public-good instance or the GitHub
+ * instance because `@actions/attest` selects between them at runtime.
+ */
+const profileServices = {
+	'sigstore-default': [
+		'oidc-and-fulcio',
+		'certificate-transparency',
+		'rfc-3161-tsa',
+		'rekor'
+	],
+	'tsa-only': ['oidc-and-fulcio', 'certificate-transparency', 'rfc-3161-tsa'],
+	'rekor-and-tsa': [
+		'oidc-and-fulcio',
+		'certificate-transparency',
+		'rfc-3161-tsa',
+		'rekor'
+	]
+} as const satisfies Record<SigningProfile, readonly DisclosedService[]>;
 
 /**
- * What a selected policy will contact and where the complete bundle will end
- * up, so a workflow author reads the disclosure before signing rather than
- * after.
+ * The external services a policy may contact and the destinations to which it
+ * may publish a complete bundle. The action displays this information before
+ * signing begins.
  */
 export function signingDisclosure(
 	policy: SigningPolicy,
@@ -276,9 +291,7 @@ export function signingDisclosure(
 	const instance = sigstoreInstanceFor(policy.profile);
 	const instances: readonly SigstoreInstance[] =
 		instance === undefined ? ['public-good', 'github'] : [instance];
-	const contacted = new Set(
-		instances.flatMap((selected) => instanceServices[selected])
-	);
+	const contacted = new Set<DisclosedService>(profileServices[policy.profile]);
 	const willPublishToRekor = contacted.has('rekor');
 
 	return {
@@ -297,10 +310,8 @@ export function signingDisclosure(
 }
 
 const instanceDescription = {
-	'public-good':
-		'the public-good Sigstore instance (the public Fulcio and Rekor)',
-	github:
-		"the GitHub Sigstore instance (GitHub's private Fulcio and its RFC 3161 timestamp authority)"
+	'public-good': 'the public-good Sigstore instance',
+	github: 'the GitHub Sigstore instance'
 } as const satisfies Record<SigstoreInstance, string>;
 
 const serviceDisclosure = {
@@ -309,7 +320,7 @@ const serviceDisclosure = {
 	'certificate-transparency':
 		'Certificate transparency receives the signing certificate and the identity it certifies.',
 	'rfc-3161-tsa':
-		'An RFC 3161 timestamp authority receives the signature imprint and the time of the request.',
+		'An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
 	rekor: 'Rekor receives the signature metadata and the certified identity.'
 } as const satisfies Record<DisclosedService, string>;
 
@@ -330,10 +341,10 @@ const publicationDisclosure = {
 export function disclosureLines(
 	disclosure: SigningDisclosure
 ): readonly string[] {
-	const [only] = disclosure.instances;
+	const [soleInstance] = disclosure.instances;
 	const heading =
-		only !== undefined && disclosure.instances.length === 1
-			? `Signing with ${instanceDescription[only]}.`
+		soleInstance !== undefined && disclosure.instances.length === 1
+			? `Signing with ${instanceDescription[soleInstance]}.`
 			: "The repository's visibility selects the Sigstore instance: the public-good instance for a public repository, the GitHub instance otherwise. The lines below cover both.";
 
 	return [
@@ -349,11 +360,23 @@ export function disclosureLines(
 }
 
 function groupingLine(disclosure: SigningDisclosure): string {
-	const count = String(disclosure.subjectCount);
+	const subjects = counted(
+		disclosure.subjectCount,
+		'accepted subject',
+		'accepted subjects'
+	);
 
 	return disclosure.grouping === 'individual'
-		? `Signing one statement for each of the ${count} accepted subjects, so no bundle names another subject.`
-		: `Signing one statement for all ${count} accepted subjects, so a reader of one bundle learns the name and digest of every one of them.`;
+		? `Signing one statement for each of the ${subjects}. Each bundle will contain one subject.`
+		: `Signing one statement for all ${subjects}. Each bundle will contain the name and digest of every subject.`;
+}
+
+function counted(count: number, singular: string, plural: string): string {
+	return `${String(count)} ${agreeing(count, singular, plural)}`;
+}
+
+function agreeing(count: number, singular: string, plural: string): string {
+	return count === 1 ? singular : plural;
 }
 
 export interface ProducedEvidence extends BundleEvidence {
@@ -362,40 +385,49 @@ export interface ProducedEvidence extends BundleEvidence {
 }
 
 /**
- * The instance that produced a set of bundles. The public-good instance
- * records every signature in Rekor and the GitHub instance timestamps it with
- * an RFC 3161 authority, so the evidence the bundles carry identifies the
- * trust domain even when the profile left the instance to `@actions/attest`.
+ * The instance that produced a set of bundles. A directly signed profile
+ * selects its trust domain, so the report does not infer the instance from the
+ * bundle evidence. Under `sigstore-default`, the repository's visibility
+ * selects the instance. The evidence then distinguishes the two instances:
+ * the public-good instance records every signature in Rekor, while the GitHub
+ * instance adds an RFC 3161 timestamp.
  */
 export function producedInstance(
+	profile: SigningProfile,
 	evidence: BundleEvidence
 ): SigstoreInstance | undefined {
+	const selected = sigstoreInstanceFor(profile);
+
+	if (selected !== undefined) {
+		return selected;
+	}
+
 	if (evidence.tlogEntryCount > 0) {
 		return 'public-good';
 	}
 
-	if (evidence.timestampCount > 0) {
-		return 'github';
-	}
-
-	return undefined;
+	return evidence.timestampCount > 0 ? 'github' : undefined;
 }
 
-export function producedLines(produced: ProducedEvidence): readonly string[] {
+export function producedLines(
+	profile: SigningProfile,
+	produced: ProducedEvidence
+): readonly string[] {
 	if (produced.bundleCount === 0) {
 		return ['This run signed no statement.'];
 	}
 
-	const instance = producedInstance(produced);
+	const instance = producedInstance(profile, produced);
+	const bundles = counted(produced.bundleCount, 'bundle', 'bundles');
 
 	return [
 		instance === undefined
-			? 'The bundles carry no Rekor entry and no RFC 3161 timestamp.'
-			: `The bundles are in the trust domain of ${instanceDescription[instance]}.`,
-		`The action signed ${String(produced.bundleCount)} bundles that carry ${String(produced.tlogEntryCount)} Rekor entries and ${String(produced.timestampCount)} RFC 3161 timestamps.`,
+			? `${agreeing(produced.bundleCount, 'The bundle carries', 'The bundles carry')} no Rekor entry and no RFC 3161 timestamp.`
+			: `${agreeing(produced.bundleCount, 'The bundle is', 'The bundles are')} in the trust domain of ${instanceDescription[instance]}.`,
+		`The action signed ${bundles} that ${agreeing(produced.bundleCount, 'carries', 'carry')} ${counted(produced.tlogEntryCount, 'Rekor entry', 'Rekor entries')} and ${counted(produced.timestampCount, 'RFC 3161 timestamp', 'RFC 3161 timestamps')}.`,
 		produced.uploadedCount === 0
 			? "The action recorded no bundle in the repository's attestation store."
-			: `The action recorded ${String(produced.uploadedCount)} of ${String(produced.bundleCount)} bundles in the repository's attestation store.`
+			: `The action recorded ${String(produced.uploadedCount)} of ${bundles} in the repository's attestation store.`
 	];
 }
 
@@ -406,10 +438,12 @@ export interface GithubSignerOptions {
 }
 
 /**
- * Signs statements through `@actions/attest` under the given policy. The
- * profile selects the Sigstore instance, and `upload-to-github` decides
- * whether the signed bundle is written to the repository's attestation store,
- * where `gh attestation verify` finds it.
+ * Signs statements through `@actions/attest`, which selects the Sigstore
+ * instance from the repository's visibility. This is the signer for the
+ * `sigstore-default` profile. The `tsa-only` and `rekor-and-tsa` profiles use a
+ * directly constructed Sigstore client instead. `upload-to-github` decides whether
+ * `@actions/attest` writes the signed bundle to the repository's attestation
+ * store, where `gh attestation verify` finds it.
  */
 export function githubStatementSigner(
 	options: GithubSignerOptions
@@ -418,7 +452,6 @@ export function githubStatementSigner(
 		name: subject.name,
 		digest: { sha256: subject.sha256 }
 	}));
-	const instance = sigstoreInstanceFor(options.policy.profile);
 
 	return async (statement) => {
 		const attestation = await attest({
@@ -426,8 +459,7 @@ export function githubStatementSigner(
 			predicateType: statement.predicateType,
 			predicate: statement.predicate,
 			token: options.githubToken,
-			skipWrite: !options.policy.uploadToGithub,
-			...(instance !== undefined && { sigstore: instance })
+			skipWrite: !options.policy.uploadToGithub
 		});
 		const material = attestation.bundle.verificationMaterial;
 

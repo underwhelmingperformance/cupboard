@@ -34,8 +34,7 @@ inputs:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
   private-cache:
-    description:
-      Private destination cache. Set either cache or private-cache, not both.
+    description: Private destination cache.
     required: false
   read-user:
     description: Basic-auth username for a private destination cache.
@@ -48,29 +47,29 @@ inputs:
     required: false
   signing-profile:
     description:
-      Select the Sigstore instance that signs the statements. sigstore-default
-      leaves the choice to the repository's visibility, tsa-only signs with
-      GitHub's instance and creates no Rekor entry, and rekor-and-tsa signs with
-      the public-good instance and records the signature in Rekor. Defaults to
-      tsa-only for a private destination cache and to sigstore-default
-      otherwise.
+      Select the evidence in each signed bundle. sigstore-default selects the
+      Sigstore instance according to the repository's visibility. tsa-only and
+      rekor-and-tsa use a Sigstore client in the public-good trust domain.
+      tsa-only adds an RFC 3161 timestamp and no Rekor entry; rekor-and-tsa adds
+      both. Defaults to tsa-only for a private destination cache and to
+      sigstore-default otherwise.
     required: false
   upload-to-github:
     description:
-      Record each bundle in the repository's attestation store when true, where
-      every reader of the repository can read it. Each in-toto subject digest is
-      a NAR hash; because the attestation store is append-only, publishing a
-      bundle permanently reveals that each subject path exists and identifies
-      its contents to a reader who already holds a matching copy. Defaults to
-      false for a private destination cache and to true otherwise.
+      When true, record each bundle in the repository's attestation store.
+      Anyone who can read the repository can then read the bundle. Each in-toto
+      subject digest is a NAR hash. Because the attestation store is
+      append-only, publishing a bundle permanently reveals that each subject
+      path exists. A reader with a matching copy can also identify its contents.
+      Defaults to false for a private destination cache and to true otherwise.
     required: false
   subject-grouping:
     description:
-      Select how many subjects one statement covers. run signs one statement for
-      the whole run, so a reader of one bundle learns every subject; individual
-      signs one statement per subject, so no bundle names another subject.
-      Individual grouping makes no claim about the complete run. Defaults to
-      individual for a private destination cache and to run otherwise.
+      Select how many subjects each statement covers. run signs one statement
+      for the whole run, so each bundle contains every subject. individual signs
+      a separate statement for each subject, so each bundle contains one
+      subject. Individual statements do not attest to the complete run. Defaults
+      to individual for a private destination cache and to run otherwise.
     required: false
 outputs:
   bundle-path:
@@ -172,9 +171,6 @@ runs:
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 
-    # Sign directly because workflows cannot retry a `uses:` step and the
-    # upstream attestation actions accept no retry input. Restart signing after
-    # a transient Fulcio or witness failure.
     - name: Sign the attestation statements
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}
