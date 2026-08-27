@@ -110,8 +110,9 @@ async function recordWorkerUpload(
 /**
  * A Cloudflare client whose HTTP layer is a fake: responses are looked up by
  * `METHOD path` (paths relative to the v4 API root), and every request is
- * recorded. This exercises the real interface code against wire shapes the live
- * API actually produces, which the SDK's published types do not always match.
+ * recorded. This exercises the real interface code against the response shapes
+ * the live API actually produces, which the SDK's published types do not always
+ * match.
  */
 function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 	client: Cloudflare;

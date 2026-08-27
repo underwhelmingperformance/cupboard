@@ -67,7 +67,7 @@ export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
 
 // The stable Cupboard problem subtypes which distinguish subject-token
-// refusals inside OAuth's `invalid_request` error. The server emits these wire
+// refusals inside OAuth's `invalid_request` error. The server emits these
 // values and the CLI uses the same schema to decide whether a fresh login can
 // resolve the refusal.
 export const subjectTokenProblems = {
@@ -153,7 +153,7 @@ export type ParsedTokenExchangeRequest = z.output<
 // access token is the Cupboard JWT; `issued_token_type` is present for the
 // token-exchange grant. A tenant's interactive session receives a refresh token,
 // which rotates on every refresh. `authorization_details` (RFC 9396) reports the
-// grants the token carries. Field names use the OAuth wire spelling.
+// grants the token carries. Field names use the OAuth spelling.
 export const tokenResponseSchema = z.strictObject({
 	access_token: z.string(),
 	token_type: z.literal('Bearer'),

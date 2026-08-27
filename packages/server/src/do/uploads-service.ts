@@ -333,7 +333,8 @@ export class UploadsService {
 
 		// Capture grace once and store it with every pending upload. A later policy
 		// change cannot alter the decision before commit finishes. Attach grace facts
-		// only when the client requested them, preserving the legacy wire shape.
+		// only when the client requested them, so a client that did not ask still
+		// receives the legacy response shape.
 		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 		const graceDecision: GraceDecision = {
 			reportsGrace: shouldReportGrace,

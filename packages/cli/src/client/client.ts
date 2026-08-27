@@ -2,10 +2,10 @@ import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	type NixSha256HashString,
 	type StoredCache,
-	type StorePathHash,
-	WIRE_DEFAULT_CACHE
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
@@ -119,11 +119,11 @@ export class CupboardClient {
 		return body.trimEnd();
 	}
 
-	// Contract routes require an explicit cache selector, including the wire
-	// alias for the default cache.
+	// Contract routes require an explicit cache selector, including `_default`
+	// for the tenant's default cache.
 	private selectorScoped(path: string): string {
 		return this.cachePrefix === ''
-			? `/cache/${WIRE_DEFAULT_CACHE}${path}`
+			? `/cache/${DEFAULT_CACHE_SELECTOR}${path}`
 			: `${this.cachePrefix}${path}`;
 	}
 

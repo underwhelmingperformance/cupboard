@@ -56,7 +56,7 @@ const opBuildPathsWithResults = 46;
 const buildModeNormal = 0;
 const buildModeCheck = 2;
 
-function buildModeWireValue(mode: NixBuildMode): number {
+function encodeBuildMode(mode: NixBuildMode): number {
 	return mode === 'check' ? buildModeCheck : buildModeNormal;
 }
 
@@ -71,7 +71,7 @@ const minimumBuildResultsMinor = 34;
 // request encoding's own requirement.
 const minimumSubstitutablePathInfosMinor = 22;
 
-// BuildResult::Status wire values in declaration order; `cached-failure` is
+// BuildResult::Status protocol values in declaration order; `cached-failure` is
 // reserved by the protocol.
 const buildStatusKinds = [
 	'built',
@@ -779,8 +779,9 @@ interface NixDaemonConnectionLease {
 }
 
 // A session batches operations on one connection and deduplicates and sorts the
-// wire inputs and reply values. The worker protocol is a serial request/response
-// stream, so public operations queue for exclusive ownership of the connection.
+// request inputs and reply values. The worker protocol is a serial
+// request/response stream, so public operations queue for exclusive ownership
+// of the connection.
 class NixDaemonConnectionSession implements NixDaemonSession {
 	private operationTail = Promise.resolve();
 
@@ -1386,7 +1387,7 @@ class NixDaemonConnection {
 	private async handshake(): Promise<void> {
 		const request = new NixDaemonWriter();
 		request.writeInteger(workerMagic1);
-		request.writeInteger(versionToWire(this.version));
+		request.writeInteger(encodeVersion(this.version));
 
 		await this.transport.write(request.bytes());
 
@@ -1396,7 +1397,7 @@ class NixDaemonConnection {
 			throw new NixDaemonProtocolMismatchError(magic);
 		}
 
-		const daemonVersion = versionFromWire(await this.readInteger());
+		const daemonVersion = decodeVersion(await this.readInteger());
 
 		if (
 			daemonVersion.major !== protocolMajor ||
@@ -1446,7 +1447,7 @@ class NixDaemonConnection {
 		}
 
 		if (this.version.minor >= 35) {
-			this.trustLevel = trustFromWire(await this.readInteger());
+			this.trustLevel = decodeTrust(await this.readInteger());
 		}
 	}
 
@@ -1784,17 +1785,17 @@ class NixDaemonConnection {
 	}
 
 	private async readInteger(): Promise<number> {
-		return integerFromWire(await this.transport.read(8));
+		return decodeInteger(await this.transport.read(8));
 	}
 
-	// A structural NAR token, decoded for the grammar walk, with the raw wire
-	// frames so the copy re-emits exactly what was read.
+	// A structural NAR token, decoded for the grammar walk, with the raw frames
+	// so the copy preserves the original bytes exactly.
 	private async readNarWord(): Promise<{
 		readonly word: string;
 		readonly frames: readonly Uint8Array[];
 	}> {
 		const header = await this.transport.read(8);
-		const length = integerFromWire(header);
+		const length = decodeInteger(header);
 
 		if (length > maxNarWordLength) {
 			throw new InvalidNixDaemonNarError(
@@ -1828,7 +1829,7 @@ class NixDaemonConnection {
 	// bounded chunks without decoding it.
 	private async *copyNarBlob(): AsyncIterable<Uint8Array> {
 		const header = await this.transport.read(8);
-		const length = integerFromWire(header);
+		const length = decodeInteger(header);
 		yield header;
 
 		let remaining = length + paddingLength(length);
@@ -1976,8 +1977,8 @@ class NixDaemonConnection {
 		const request = new NixDaemonWriter();
 		request.writeInteger(opQueryValidPaths);
 		request.writeStringSet(storePaths);
-		// QueryValidPaths has an allowSubstitutes wire flag. This operation tests
-		// only local validity, so the flag stays off.
+		// QueryValidPaths has an allowSubstitutes flag. This operation tests only
+		// local validity, so the flag stays off.
 		request.writeBoolean(false);
 
 		await this.transport.write(request.bytes());
@@ -2163,7 +2164,7 @@ class NixDaemonConnection {
 		const request = new NixDaemonWriter();
 		request.writeInteger(opBuildPathsWithResults);
 		request.writeStringSet(targets.map((target) => legacyDerivedPath(target)));
-		request.writeInteger(buildModeWireValue(mode));
+		request.writeInteger(encodeBuildMode(mode));
 
 		await this.transport.write(request.bytes());
 		await this.processStderr();
@@ -2491,7 +2492,7 @@ function sortedUnique<T extends string>(values: readonly T[]): readonly T[] {
 	return [...new Set(values)].toSorted(byCodeUnit);
 }
 
-// The wire spells a derived path in the legacy form, with `!` between the
+// The daemon spells a derived path in the legacy form, with `!` between the
 // derivation and its outputs; the modern installable spelling uses `^`.
 function legacyDerivedPath(target: NixDerivedPathString): string {
 	const separator = target.indexOf('^');
@@ -2503,16 +2504,16 @@ function legacyDerivedPath(target: NixDerivedPathString): string {
 	return `${target.slice(0, separator)}!${target.slice(separator + 1)}`;
 }
 
-function modernDerivedPath(wire: string): NixDerivedPathString {
-	const separator = wire.indexOf('!');
+function modernDerivedPath(legacy: string): NixDerivedPathString {
+	const separator = legacy.indexOf('!');
 
 	if (separator === -1) {
-		return requireStorePath(wire);
+		return requireStorePath(legacy);
 	}
 
-	const drvPath = requireStorePath(wire.slice(0, separator));
+	const drvPath = requireStorePath(legacy.slice(0, separator));
 
-	return `${drvPath}^${wire.slice(separator + 1)}`;
+	return `${drvPath}^${legacy.slice(separator + 1)}`;
 }
 
 function outputNameFromDrvOutputId(id: string): string {
@@ -2594,26 +2595,26 @@ function buildOutcome(
 }
 
 // Worker-protocol trust values: 1 trusted, 2 not trusted, 0 unset.
-function trustFromWire(wire: number): NixDaemonTrust {
-	if (wire === 1) {
+function decodeTrust(flag: number): NixDaemonTrust {
+	if (flag === 1) {
 		return 'trusted';
 	}
 
-	if (wire === 2) {
+	if (flag === 2) {
 		return 'not-trusted';
 	}
 
 	return 'unknown';
 }
 
-function versionToWire(version: NixDaemonProtocolVersion): number {
+function encodeVersion(version: NixDaemonProtocolVersion): number {
 	return (version.major << 8) | version.minor;
 }
 
-function versionFromWire(wire: number): NixDaemonProtocolVersion {
+function decodeVersion(encoded: number): NixDaemonProtocolVersion {
 	return {
-		major: (wire & 0xff_00) >> 8,
-		minor: wire & 0x00_ff
+		major: (encoded & 0xff_00) >> 8,
+		minor: encoded & 0x00_ff
 	};
 }
 
@@ -2621,7 +2622,7 @@ function paddingLength(length: number): number {
 	return (8 - (length % 8)) % 8;
 }
 
-function integerFromWire(bytes: Uint8Array): number {
+function decodeInteger(bytes: Uint8Array): number {
 	const value = Buffer.from(bytes).readBigUInt64LE();
 
 	if (value > BigInt(Number.MAX_SAFE_INTEGER)) {

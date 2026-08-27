@@ -193,12 +193,12 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 // position, or no legal cache name could ever start with it.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
-// The default cache's name on the wire. Its stored name is the empty string,
-// which cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell
-// it `_default`. The leading underscore fails `cacheNamePattern`, so the alias
+// The default cache's selector. Its stored name is the empty string, which
+// cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell it
+// `_default`. The leading underscore fails `cacheNamePattern`, so the selector
 // can never collide with a creatable cache, matching the `/_health` and
 // `/_version` convention for non-content names.
-export const WIRE_DEFAULT_CACHE = '_default';
+export const DEFAULT_CACHE_SELECTOR = '_default';
 
 // Private stored names begin with this prefix. The local name of a public
 // cache cannot contain a slash, so no public stored name begins with this
@@ -239,7 +239,7 @@ export type PrivateCacheSelector = z.output<typeof privateCacheSelectorSchema>;
  * cache, such as the public read paths.
  */
 export const publicCacheSelectorSchema = z.union([
-	z.literal(WIRE_DEFAULT_CACHE),
+	z.literal(DEFAULT_CACHE_SELECTOR),
 	cacheNameSchema
 ]);
 export type PublicCacheSelector = z.output<typeof publicCacheSelectorSchema>;
@@ -290,7 +290,7 @@ export function privateCacheLocalName(cache: PrivateStoredCache): CacheName {
 }
 
 export function cacheFromSelector(selector: CacheSelector): StoredCache {
-	if (selector === WIRE_DEFAULT_CACHE) {
+	if (selector === DEFAULT_CACHE_SELECTOR) {
 		return DEFAULT_CACHE;
 	}
 
@@ -305,7 +305,7 @@ export function cacheFromSelector(selector: CacheSelector): StoredCache {
 
 export function selectorForCache(cache: StoredCache): CacheSelector {
 	if (cache === DEFAULT_CACHE) {
-		return WIRE_DEFAULT_CACHE;
+		return DEFAULT_CACHE_SELECTOR;
 	}
 
 	if (isPrivateCache(cache)) {

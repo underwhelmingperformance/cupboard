@@ -216,7 +216,7 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 					installables: [installable],
 					queryInstallables: [`${derivation}^out`],
 					// JSON.stringify writes this undefined entry as null, which is
-					// the wire value the cohort schema expects for an unknown path.
+					// the value the cohort schema expects for an unknown path.
 					expectedPaths: [undefined],
 					roots: ['github:owner/repo/main/cohort-job-boundary'],
 					system: system(),

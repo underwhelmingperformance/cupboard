@@ -1,8 +1,8 @@
 import {
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	selectorForCache,
-	storedCacheSchema,
-	WIRE_DEFAULT_CACHE
+	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -51,7 +51,7 @@ async function fireReconcile(): Promise<void> {
 }
 
 function previewOnlyGrants(
-	cacheSelector: string = WIRE_DEFAULT_CACHE
+	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
@@ -63,7 +63,7 @@ function previewOnlyGrants(
 }
 
 function negotiateOnlyGrants(
-	cacheSelector: string = WIRE_DEFAULT_CACHE
+	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{

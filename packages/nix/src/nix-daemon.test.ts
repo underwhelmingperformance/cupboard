@@ -997,8 +997,8 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(1);
 	});
 
-	// max-silent-time uses a signed wire field, so negative configured values are
-	// encoded unchanged.
+	// max-silent-time is a signed protocol field, so negative configured values
+	// are encoded unchanged.
 	it('encodes a negative max-silent-time value', async () => {
 		const client = new NixDaemonStoreClient({
 			setOptions: { maxSilentTime: -1 },
@@ -2605,16 +2605,16 @@ describe('NixDaemonStoreClient', () => {
 	});
 
 	it.each([
-		{ name: 'a trusted client', wire: 1, expected: 'trusted' },
-		{ name: 'an untrusted client', wire: 2, expected: 'not-trusted' },
-		{ name: 'an unset trust flag', wire: 0, expected: 'unknown' }
+		{ name: 'a trusted client', flag: 1, expected: 'trusted' },
+		{ name: 'an untrusted client', flag: 2, expected: 'not-trusted' },
+		{ name: 'an unset trust flag', flag: 0, expected: 'unknown' }
 	])(
 		'reports the handshake trust flag for $name',
-		async ({ wire, expected }) => {
+		async ({ flag, expected }) => {
 			let transport: FakeDaemonTransport | undefined;
 			const client = new NixDaemonStoreClient({
 				connect: () => {
-					transport = new FakeDaemonTransport({}, { trust: wire });
+					transport = new FakeDaemonTransport({}, { trust: flag });
 
 					return Promise.resolve(transport);
 				}

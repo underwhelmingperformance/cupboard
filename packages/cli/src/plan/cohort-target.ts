@@ -16,7 +16,7 @@ const attributeSchema = z
 		'attr must not contain control characters'
 	);
 
-// The daemon wire protocol names a realisation target as a store path
+// The daemon protocol names a realisation target as a store path
 // optionally followed by `^` and the outputs to realise, and a cohort's
 // installable is written in the targets file in that same form. The output
 // selection is rendered into diagnostics like the attr, so the same

@@ -2,6 +2,7 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
 	privateStoredCache,
@@ -9,8 +10,7 @@ import {
 	type StoredCache,
 	storedCacheSchema,
 	storePathHashSchema,
-	storePathSchema,
-	WIRE_DEFAULT_CACHE
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
@@ -2103,7 +2103,7 @@ function plannedUploadDecision(
 	return decision;
 }
 
-describe('retention grace facts on the wire', () => {
+describe('retention grace facts reported to clients', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await clearBlobStorage();
@@ -2121,7 +2121,7 @@ describe('retention grace facts on the wire', () => {
 		async ({ reportsGrace: shouldAcceptGraceFacts, capabilities }) => {
 			const { token } = await bootstrap();
 			const response = await authorisedFetch(
-				`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+				`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 				token,
 				{
 					method: 'POST',
@@ -2149,7 +2149,7 @@ describe('retention grace facts on the wire', () => {
 	);
 
 	it('keeps legacy decision shapes without the capability, attaching facts with it', async () => {
-		await useTestServer('wire-decisions');
+		await useTestServer('reported-decisions');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2194,11 +2194,11 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	it('includes the deadline on a settled frame only for a capable upload', async () => {
-		await useTestServer('wire-settled');
+		await useTestServer('reported-settled');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
-		const nar = await verifiableNar('wire-settled');
+		const nar = await verifiableNar('reported-settled');
 		const seed = uploadMetadata({
 			storePathHash: repeated('a'),
 			name: 'seed',
@@ -2262,11 +2262,11 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	it('reports the captured grace when deferred and the deadline on the verdict', async () => {
-		await useTestServer('wire-deferred');
+		await useTestServer('reported-deferred');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
-		const nar = await verifiableNar('wire-deferred');
+		const nar = await verifiableNar('reported-deferred');
 		const metadata = uploadMetadata({
 			storePathHash: repeated('d'),
 			name: 'deferred',
@@ -2314,7 +2314,7 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	it('cannot shorten an already-present deadline on a retried negotiation', async () => {
-		await useTestServer('wire-retry');
+		await useTestServer('reported-retry');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2355,7 +2355,7 @@ describe('retention grace facts on the wire', () => {
 	// Apply grace for all already-present paths in one transaction so the
 	// negotiation does not open one transaction per path.
 	it('applies grace to several already-present paths in one transaction', async () => {
-		await useTestServer('wire-skip-batch');
+		await useTestServer('reported-skip-batch');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2410,7 +2410,7 @@ describe('retention grace facts on the wire', () => {
 	// before returning skip, or a legacy client could omit bytes for a generation
 	// that is no longer committed.
 	it('plans a path whose row moves during negotiation instead of skipping it', async () => {
-		await useTestServer('wire-skip-moved');
+		await useTestServer('reported-skip-moved');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2482,7 +2482,7 @@ describe('retention grace facts on the wire', () => {
 	// shared-object work. The eventual verdict must include the stored deadline
 	// for the replacement session.
 	it('sends the stored deadline on a reattached session verdict frame', async () => {
-		await useTestServer('wire-reattach-verdict');
+		await useTestServer('reported-reattach-verdict');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -2643,7 +2643,7 @@ describe('retention grace facts on the wire', () => {
 	// entry. For an entry marked `retention`, read the deadline stored by the
 	// original commit because the captured grace decision is no longer present.
 	it('attaches the durable deadline when a retention-marked commit-batch entry resolves a cleared row', async () => {
-		await useTestServer('wire-reconnect-grace');
+		await useTestServer('reported-reconnect-grace');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2693,7 +2693,7 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	it('reports an empty fact when a retention-marked reconnect resolves a cleared row with no stored deadline', async () => {
-		await useTestServer('wire-reconnect-no-grace');
+		await useTestServer('reported-reconnect-no-grace');
 		const { token } = await bootstrap();
 
 		const metadata = uploadMetadata({
@@ -2745,7 +2745,7 @@ describe('retention grace facts on the wire', () => {
 	// upload. Report the stored deadline without extending it, or a commit-only
 	// token could refresh any committed path by inventing an upload ID.
 	it('reports the stored fact without extending when a retention-marked entry resolves a row another push committed', async () => {
-		await useTestServer('wire-reconnect-reports');
+		await useTestServer('reported-reconnect-reports');
 		const { token } = await bootstrap();
 
 		const metadata = uploadMetadata({
@@ -2795,7 +2795,7 @@ describe('retention grace facts on the wire', () => {
 	// Only the `retention` marker opts into the grace field. Preserve the legacy
 	// frame shape when an older client resends an unmarked entry.
 	it('keeps the legacy shape for a capable reconnect entry with no retention marker', async () => {
-		await useTestServer('wire-reconnect-unmarked');
+		await useTestServer('reported-reconnect-unmarked');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2843,7 +2843,7 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	it('attaches the durable deadline when a retention-marked subscribe-identity entry resolves a cleared row', async () => {
-		await useTestServer('wire-reconnect-identity-grace');
+		await useTestServer('reported-reconnect-identity-grace');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
 
@@ -2894,7 +2894,7 @@ describe('retention grace facts on the wire', () => {
 });
 
 function confirmOnlyGrants(
-	cacheSelector: string = WIRE_DEFAULT_CACHE
+	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
@@ -2910,7 +2910,7 @@ async function confirmPaths(
 	storePathHashes: readonly string[]
 ): Promise<{ readonly status: number; readonly body: UploadConfirmResponse }> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/confirm`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
 		token,
 		{
 			body: JSON.stringify({ storePathHashes }),
@@ -3532,7 +3532,7 @@ describe('confirming an unretained publication', () => {
 		const commitToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const negotiateResponse = await authorisedFetch(
-			`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 			confirmOnlyToken,
 			{
 				body: JSON.stringify({
@@ -3544,7 +3544,7 @@ describe('confirming an unretained publication', () => {
 			}
 		);
 		const commitResponse = await authorisedFetch(
-			`/cache/${WIRE_DEFAULT_CACHE}/commit`,
+			`/cache/${DEFAULT_CACHE_SELECTOR}/commit`,
 			confirmOnlyToken,
 			{ headers: { upgrade: 'websocket' } }
 		);
@@ -3553,7 +3553,7 @@ describe('confirming an unretained publication', () => {
 		// path in the cache) is issuance-only, so a presented commit-only token
 		// must not reach confirm.
 		const confirmByCommitTokenResponse = await authorisedFetch(
-			`/cache/${WIRE_DEFAULT_CACHE}/uploads/confirm`,
+			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
 			commitToken,
 			{
 				body: JSON.stringify({ storePathHashes: [path.storePathHash] }),

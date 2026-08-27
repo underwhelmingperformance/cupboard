@@ -1,7 +1,7 @@
 import {
 	DEFAULT_CACHE,
-	rootNameSchema,
-	WIRE_DEFAULT_CACHE
+	DEFAULT_CACHE_SELECTOR,
+	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	type UploadAttachRoot,
@@ -41,7 +41,7 @@ async function negotiateWithRoot(
 	attachRoot?: UploadAttachRoot
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
 		token,
 		{
 			method: 'POST',

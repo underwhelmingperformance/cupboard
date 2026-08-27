@@ -197,7 +197,7 @@ describe('refreshTokenGrantRequestSchema', () => {
 });
 
 describe('subjectTokenProblemSchema', () => {
-	it('owns every stable subject-token problem wire value', () => {
+	it('parses every stable subject-token problem value', () => {
 		expect(
 			Object.values(subjectTokenProblems).map((problem) =>
 				subjectTokenProblemSchema.parse(problem)

@@ -1,9 +1,9 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
+	DEFAULT_CACHE_SELECTOR,
 	nixSha256HashSchema,
-	storePathHashSchema,
-	WIRE_DEFAULT_CACHE
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -83,7 +83,7 @@ describe('reuse-view narinfo lookup', () => {
 		{
 			label: 'the default-cache exact selector',
 			selectors: [{ kind: 'exact', pattern: '_default' }],
-			cache: WIRE_DEFAULT_CACHE
+			cache: DEFAULT_CACHE_SELECTOR
 		},
 		{
 			label: 'a prefix selector',

@@ -1,6 +1,6 @@
 import {
-	storePathSchema,
-	WIRE_DEFAULT_CACHE
+	DEFAULT_CACHE_SELECTOR,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
@@ -45,7 +45,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:commit'],
-			cache: WIRE_DEFAULT_CACHE
+			cache: DEFAULT_CACHE_SELECTOR
 		},
 		...(attachRootSelector === undefined
 			? []
@@ -53,7 +53,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 					{
 						type: 'cupboard_cache',
 						actions: ['root:attach'],
-						cache: WIRE_DEFAULT_CACHE,
+						cache: DEFAULT_CACHE_SELECTOR,
 						root: attachRootSelector
 					}
 				])
@@ -65,7 +65,7 @@ function negotiate(
 	paths: readonly ReturnType<typeof uploadMetadata>[],
 	attachRoot?: UploadAttachRoot
 ): Promise<Response> {
-	return authorisedFetch(`/cache/${WIRE_DEFAULT_CACHE}/uploads`, token, {
+	return authorisedFetch(`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`, token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
@@ -255,12 +255,12 @@ describe('negotiate binds the run root', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate', 'upload:commit'],
-					cache: WIRE_DEFAULT_CACHE
+					cache: DEFAULT_CACHE_SELECTOR
 				},
 				{
 					type: 'cupboard_cache',
 					actions: ['root:set'],
-					cache: WIRE_DEFAULT_CACHE,
+					cache: DEFAULT_CACHE_SELECTOR,
 					root: runRootName
 				}
 			])

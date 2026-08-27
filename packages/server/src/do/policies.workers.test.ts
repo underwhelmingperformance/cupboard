@@ -1,4 +1,4 @@
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import type {
 	GracePolicyListResponse,
@@ -424,7 +424,7 @@ describe('grace coverage', () => {
 		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });
 
 		const pullRequestCache = await graceCoverage(token, 'pr-7');
-		const defaultCache = await graceCoverage(token, WIRE_DEFAULT_CACHE);
+		const defaultCache = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
 
 		expect({ pullRequestCache, defaultCache }).toStrictEqual({
 			pullRequestCache: {
@@ -447,7 +447,7 @@ describe('grace coverage', () => {
 	it('returns covered: false when no grace policy matches', async () => {
 		const token = await initialise();
 
-		const coverage = await graceCoverage(token, WIRE_DEFAULT_CACHE);
+		const coverage = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
 
 		expect(coverage).toStrictEqual({
 			status: StatusCodes.OK,
@@ -463,14 +463,17 @@ describe('grace coverage', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					cache: WIRE_DEFAULT_CACHE
+					cache: DEFAULT_CACHE_SELECTOR
 				}
 			])
 		);
 		const commitOnlyToken = await issueServerSignedToken(cacheWriteGrants());
 
-		const coverage = await graceCoverage(confirmToken, WIRE_DEFAULT_CACHE);
-		const commitOnly = await graceCoverage(commitOnlyToken, WIRE_DEFAULT_CACHE);
+		const coverage = await graceCoverage(confirmToken, DEFAULT_CACHE_SELECTOR);
+		const commitOnly = await graceCoverage(
+			commitOnlyToken,
+			DEFAULT_CACHE_SELECTOR
+		);
 		const refusedList = await authorisedFetch('/policies/grace', confirmToken);
 
 		expect({

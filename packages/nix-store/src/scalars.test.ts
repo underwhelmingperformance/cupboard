@@ -8,6 +8,7 @@ import {
 	cacheSelectorSchema,
 	compressionSchema,
 	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR,
 	isPrivateCache,
 	nixSha256HashSchema,
 	positiveIntSchema,
@@ -32,8 +33,7 @@ import {
 	storePathBasenameSchema,
 	storePathHashSchema,
 	storePathSchema,
-	ttlSecondsSchema,
-	WIRE_DEFAULT_CACHE
+	ttlSecondsSchema
 } from './scalars.ts';
 
 const nixHash = `sha256:${'1'.repeat(52)}`;
@@ -168,7 +168,7 @@ const acceptedCases: readonly {
 	{
 		name: 'the default cache selector',
 		schema: publicCacheSelectorSchema,
-		value: WIRE_DEFAULT_CACHE
+		value: DEFAULT_CACHE_SELECTOR
 	},
 	{
 		name: 'a private stored name',
@@ -511,7 +511,7 @@ const rejectedCases: readonly {
 		value: '_private-'
 	},
 	{
-		name: 'a private selector whose local name starts with an underscore',
+		name: 'a private selector with an underscore at the start of its local name',
 		schema: privateCacheSelectorSchema,
 		value: '_private-_x'
 	},
@@ -582,7 +582,7 @@ describe('private cache identity', () => {
 	it.each([
 		{
 			name: 'the default cache',
-			selector: WIRE_DEFAULT_CACHE,
+			selector: DEFAULT_CACHE_SELECTOR,
 			cache: DEFAULT_CACHE
 		},
 		{ name: 'a public named cache', selector: 'builds', cache: 'builds' },

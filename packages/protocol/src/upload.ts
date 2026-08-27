@@ -68,7 +68,7 @@ export type ParsedUploadPathMetadata = z.output<
 
 // An identifier signed by the server when it issues upload credentials. The
 // identifier scopes staging objects to `staging/<pushId>/`, so one credential
-// can cover every upload in the push. The restricted wire format prevents the
+// can cover every upload in the push. The restricted format prevents the
 // identifier from escaping that prefix. The schema validates only the format;
 // the server separately verifies the signature.
 export const pushIdSchema = z
@@ -317,7 +317,7 @@ export const uploadCapabilitiesValue = uploadGraceFactsCapability;
 // The server advertises the parameterised form below.
 export const commitBatchCapability = 'commit-batch';
 
-// Wire-freeze: this constant is encoded in the capability token the server
+// This constant is encoded in the capability token the server
 // advertises on every 101. Any change to this value, or to the shape of a
 // known op's schema, needs a new capability token so older servers (which close
 // on schema violations) and newer clients can coexist safely.
@@ -325,9 +325,9 @@ export const commitBatchMaxEntries = 100;
 
 // The attribute both tokens below carry once the server accepts the optional
 // `retention` marker on a `commitBatchEntrySchema` entry (see that schema's
-// wire-freeze note). A client checks for this attribute before ever setting
-// the marker, so a server that predates it never receives the unknown field
-// that its strict schema would reject.
+// compatibility note). A client checks for this attribute before ever setting the
+// marker, so a server that predates it never receives the unknown field that
+// its strict schema would reject.
 export const retentionMarkerAttribute = 'retention';
 export const retentionMarkerAttributeValue = '1';
 
@@ -343,9 +343,9 @@ export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String
 // acked ids through the identity-carrying op, which resolves a gone row by the
 // path's committed narinfo.
 //
-// Wire-freeze: the op's entry schema reuses `commitBatchEntrySchema` and is
-// bounded by `commitBatchMaxEntries`. Any change to that shape or bound needs a
-// new capability token.
+// The op's entry schema reuses `commitBatchEntrySchema` and is bounded
+// by `commitBatchMaxEntries`. Any change to that shape or bound needs a new
+// capability token.
 export const subscribeIdentityCapability = 'subscribe-identity';
 
 // The capability token the server includes in the 101 header alongside the
@@ -362,7 +362,7 @@ export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};
 // may send `request-credit`, and every entry it sends must be covered by credit
 // it holds.
 //
-// Wire-freeze: this token covers the `request-credit` op and the `credit` and
+// This token covers the `request-credit` op and the `credit` and
 // `queued` frames. Any change to their shapes needs a new capability token.
 export const commitCreditCapability = 'commit-credit';
 
@@ -391,7 +391,7 @@ export function commitCapabilitiesValueWithCredit(
 // `retention` also records that this upload accepted grace facts. The
 // `already-present` response can then include the path's durable grace fact.
 //
-// Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
+// Any change to this schema's shape or the `commitBatchMaxEntries`
 // bound is a breaking change that requires a new capability token for each op
 // that uses it.
 export const commitBatchEntrySchema = z.strictObject({
@@ -412,7 +412,7 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 		op: z.literal('subscribe'),
 		uploadIds: uploadIdsSchema
 	}),
-	// Wire-freeze: entries reuse `commitBatchEntrySchema` and are bounded by
+	// Entries reuse `commitBatchEntrySchema` and are bounded by
 	// `commitBatchMaxEntries`; the server advertises `subscribe-identity` only
 	// when it handles this op, so an older server never receives it.
 	z.strictObject({

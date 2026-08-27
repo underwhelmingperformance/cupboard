@@ -108,7 +108,7 @@ function renderCache(
 		return undefined;
 	}
 
-	// Use the wire-selector grammar so `_default` can bind the default cache.
+	// Use the cache-selector grammar so `_default` can bind the default cache.
 	return cacheSelectorSchema.safeParse(raw).data;
 }
 

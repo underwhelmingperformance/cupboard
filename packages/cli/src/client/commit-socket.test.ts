@@ -2928,7 +2928,7 @@ describe('credit-paced commits', () => {
 
 	// A grant ends the current wait and resets the deadline. Once the retried
 	// entry is in flight, no capacity time accrues until its next response.
-	it('stops the capacity wait when the retried entry goes back on the wire', async () => {
+	it('stops the capacity wait when the retried entry is sent again', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket, {
 			timeoutSeconds: 100,
