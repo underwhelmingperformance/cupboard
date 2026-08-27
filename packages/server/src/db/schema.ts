@@ -19,7 +19,8 @@ import {
 import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
 	ReuseViewPriority,
-	ReuseViewRevision
+	ReuseViewRevision,
+	StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
@@ -531,7 +532,7 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 });
 
 export const reuseViews = sqliteTable('reuse_view', {
-	name: text('name').primaryKey(),
+	name: text('name').$type<StoredReuseView>().primaryKey(),
 	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
 	priority: integer('priority').$type<ReuseViewPriority>().notNull(),
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
@@ -541,7 +542,7 @@ export const reuseViews = sqliteTable('reuse_view', {
 export const reuseViewSelectors = sqliteTable(
 	'reuse_view_selector',
 	{
-		view: text('view').notNull(),
+		view: text('view').$type<StoredReuseView>().notNull(),
 		kind: text('kind', { enum: ['exact', 'prefix'] }).notNull(),
 		pattern: text('pattern').notNull()
 	},
@@ -552,6 +553,6 @@ export const reuseViewSelectors = sqliteTable(
 // name therefore receives a new revision, which lets the read path distinguish
 // that replacement from an unchanged view.
 export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
-	name: text('name').primaryKey(),
+	name: text('name').$type<StoredReuseView>().primaryKey(),
 	nextRevision: integer('next_revision').$type<ReuseViewRevision>().notNull()
 });

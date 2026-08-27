@@ -20,7 +20,12 @@ import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
 } from '@cupboard/protocol/reports';
-import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import {
+	type ParsedReuseViewName,
+	privateStoredReuseView,
+	reuseViewNameSchema,
+	type StoredReuseView
+} from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	commitCapabilitiesHeader,
@@ -648,9 +653,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			context: Context<TenantHonoEnv>
 		) => Response | Promise<Response> = serverErrorHandler;
 
-		this.app.use(
-			'/reuse/*',
-			createMiddleware<TenantHonoEnv>(async (context, next) => {
+		const uncachedReuseErrors = createMiddleware<TenantHonoEnv>(
+			async (context, next) => {
 				try {
 					await next();
 				} catch (error) {
@@ -661,80 +665,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 
 				context.res.headers.set('cache-control', 'no-store');
-			})
-		);
-
-		// Reuse-view cache information must be `no-store`. No purge key can
-		// invalidate a cached miss after the view is created.
-		this.app.get('/reuse/:view/nix-cache-info', (context) => {
-			const view = reuseViewNameSchema.safeParse(context.req.param('view'));
-
-			if (!view.success) {
-				return reuseNotFound();
-			}
-
-			const body = this.reuseViews.cacheInfoBody(view.data);
-
-			if (body === undefined) {
-				return reuseNotFound();
-			}
-
-			return textResponse(context.req.raw, body, {
-				'content-type': 'text/x-nix-cache-info; charset=utf-8',
-				'cache-control': 'no-store'
-			});
-		});
-
-		// Reuse-view narinfo responses must be `no-store`. A view update, a source
-		// commit, or collection can change either a hit or a miss, and no purge key
-		// covers those changes.
-		this.app.get(
-			String.raw`/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
-			async (context) => {
-				const view = reuseViewNameSchema.safeParse(context.req.param('view'));
-				const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
-
-				if (storePathHash === undefined || !view.success) {
-					return reuseNotFound();
-				}
-
-				const narInfo = await this.reuseLookup.lookup(
-					context.get('logger'),
-					view.data,
-					storePathHash
-				);
-
-				if (narInfo === undefined) {
-					return reuseNotFound();
-				}
-
-				return textResponse(context.req.raw, narInfo.render(), {
-					'content-type': 'text/x-nix-narinfo; charset=utf-8',
-					'cache-control': 'no-store'
-				});
 			}
 		);
 
-		this.app.post('/reuse/:view/api/v1/missing-paths', async (context) => {
-			const request = await parseRequestBody(
-				reuseViewAvailabilityRequestSchema,
-				context.req.raw
-			);
-			const view = reuseViewNameSchema.safeParse(context.req.param('view'));
-			const response: CacheAvailabilityResponse = {
-				missingStorePathHashes: view.success
-					? await this.reuseLookup.missingStorePathHashes(
-							context.get('logger'),
-							view.data,
-							request.storePathHashes
-						)
-					: request.storePathHashes
-			};
+		this.app.use('/reuse/*', uncachedReuseErrors);
+		this.app.use('/private-reuse/*', uncachedReuseErrors);
 
-			return context.json(response, StatusCodes.OK, {
-				'cache-control': 'no-store'
-			});
-		});
+		// Both namespaces carry the view's local name in the path. A public view
+		// is stored under that name and a private view under its private stored
+		// name, so each namespace reads its own views and neither can read the
+		// other's. Only an edge forward that has already authenticated the reader
+		// reaches the private routes.
+		this.registerReuseViewRoutes('/reuse', (name) => name);
+		this.registerReuseViewRoutes('/private-reuse', privateStoredReuseView);
 
 		// `/token` uses the subject token as its credential. The Worker proxies the
 		// JWKS route to this Durable Object.
@@ -816,6 +759,87 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.req.param('digest')
 				)
 		);
+	}
+
+	// The read routes of one reuse-view namespace. `storedView` maps the local
+	// name in the path to the name the view is stored under. Every response is
+	// `no-store`: a view update, a source commit, or collection can change both
+	// a hit and a miss, and no purge key covers those changes.
+	private registerReuseViewRoutes(
+		prefix: string,
+		storedView: (name: ParsedReuseViewName) => StoredReuseView
+	): void {
+		const requestedView = (
+			context: Context<TenantHonoEnv>
+		): StoredReuseView | undefined => {
+			const name = reuseViewNameSchema.safeParse(context.req.param('view'));
+
+			return name.success ? storedView(name.data) : undefined;
+		};
+
+		this.app.get(`${prefix}/:view/nix-cache-info`, (context) => {
+			const view = requestedView(context);
+			const body =
+				view === undefined ? undefined : this.reuseViews.cacheInfoBody(view);
+
+			if (body === undefined) {
+				return reuseNotFound();
+			}
+
+			return textResponse(context.req.raw, body, {
+				'content-type': 'text/x-nix-cache-info; charset=utf-8',
+				'cache-control': 'no-store'
+			});
+		});
+
+		this.app.get(
+			String.raw`${prefix}/:view/:name{[0-9a-z]+\.narinfo}`,
+			async (context) => {
+				const view = requestedView(context);
+				const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
+
+				if (view === undefined || storePathHash === undefined) {
+					return reuseNotFound();
+				}
+
+				const narInfo = await this.reuseLookup.lookup(
+					context.get('logger'),
+					view,
+					storePathHash
+				);
+
+				if (narInfo === undefined) {
+					return reuseNotFound();
+				}
+
+				return textResponse(context.req.raw, narInfo.render(), {
+					'content-type': 'text/x-nix-narinfo; charset=utf-8',
+					'cache-control': 'no-store'
+				});
+			}
+		);
+
+		this.app.post(`${prefix}/:view/api/v1/missing-paths`, async (context) => {
+			const request = await parseRequestBody(
+				reuseViewAvailabilityRequestSchema,
+				context.req.raw
+			);
+			const view = requestedView(context);
+			const response: CacheAvailabilityResponse = {
+				missingStorePathHashes:
+					view === undefined
+						? request.storePathHashes
+						: await this.reuseLookup.missingStorePathHashes(
+								context.get('logger'),
+								view,
+								request.storePathHashes
+							)
+			};
+
+			return context.json(response, StatusCodes.OK, {
+				'cache-control': 'no-store'
+			});
+		});
 	}
 
 	// Authenticate the HTTP upgrade before creating a socket. Store the session

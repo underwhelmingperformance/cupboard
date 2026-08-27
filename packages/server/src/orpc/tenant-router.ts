@@ -6,6 +6,7 @@ import {
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';
+import { reuseViewFromContractName } from '@cupboard/protocol/reuse-views';
 import { uploadGraceFactsCapability } from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
@@ -129,13 +130,18 @@ export const tenantRouter = os.router({
 			context.services.reuseViews.listViews()
 		),
 		set: os.reuseViews.set.handler(({ input, context }) =>
-			context.services.reuseViews.setView(input.name, {
-				selectors: input.selectors,
-				...(input.priority !== undefined && { priority: input.priority })
-			})
+			context.services.reuseViews.setView(
+				reuseViewFromContractName(input.name),
+				{
+					selectors: input.selectors,
+					...(input.priority !== undefined && { priority: input.priority })
+				}
+			)
 		),
 		remove: os.reuseViews.remove.handler(({ input, context }) =>
-			context.services.reuseViews.removeView(input.name)
+			context.services.reuseViews.removeView(
+				reuseViewFromContractName(input.name)
+			)
 		)
 	},
 	oidcTrust: {

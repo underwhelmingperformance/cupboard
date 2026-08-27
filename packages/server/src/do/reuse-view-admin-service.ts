@@ -1,20 +1,26 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	cachePrioritySchema,
+	DEFAULT_CACHE_SELECTOR
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedReuseViewName,
+	contractNameForReuseView,
+	isPrivateReuseView,
 	type ParsedReuseViewSelector,
 	type ParsedReuseViewSetBody,
 	reuseViewDefaultPriority,
 	type ReuseViewListResponse,
 	type ReuseViewRemoveResponse,
 	reuseViewRevisionSchema,
-	type ReuseViewSummary
+	type ReuseViewSummary,
+	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
+import { PrivateViewDefaultSelectorError } from '../errors.ts';
 
 import { reuseViewSummaryFromRow, type ServerContext } from './context.ts';
 
@@ -27,6 +33,18 @@ function selectorSort(
 		: byCodeUnit(left.kind, right.kind);
 }
 
+// Only an exact selector names the default cache. The empty prefix covers the
+// default cache too, but it means "every cache of this namespace", which a
+// private view may use.
+function hasDefaultCacheSelector(
+	selectors: readonly ParsedReuseViewSelector[]
+): boolean {
+	return selectors.some(
+		(selector) =>
+			selector.kind === 'exact' && selector.pattern === DEFAULT_CACHE_SELECTOR
+	);
+}
+
 export class ReuseViewAdminService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -34,7 +52,7 @@ export class ReuseViewAdminService {
 	// writer cannot change it between this read and the subsequent update.
 	private unchangedView(
 		tx: Parameters<Parameters<ServerContext['db']['transaction']>[0]>[0],
-		name: ParsedReuseViewName,
+		name: StoredReuseView,
 		body: ParsedReuseViewSetBody
 	): ReuseViewSummary | undefined {
 		const current = tx
@@ -74,7 +92,7 @@ export class ReuseViewAdminService {
 		}
 
 		return {
-			name,
+			name: contractNameForReuseView(name),
 			revision: current.revision,
 			priority,
 			selectors: requested,
@@ -114,9 +132,13 @@ export class ReuseViewAdminService {
 	// new revision with the old selectors, and concurrent writers must receive
 	// revisions in commit order.
 	setView(
-		name: ParsedReuseViewName,
+		name: StoredReuseView,
 		body: ParsedReuseViewSetBody
 	): ReuseViewSummary {
+		if (isPrivateReuseView(name) && hasDefaultCacheSelector(body.selectors)) {
+			throw new PrivateViewDefaultSelectorError(contractNameForReuseView(name));
+		}
+
 		const now = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
@@ -174,7 +196,7 @@ export class ReuseViewAdminService {
 				.run();
 
 			return {
-				name,
+				name: contractNameForReuseView(name),
 				revision,
 				priority,
 				selectors: body.selectors.toSorted(selectorSort),
@@ -186,7 +208,7 @@ export class ReuseViewAdminService {
 
 	// Preserve the revision sequence when deleting a view. A recreated view must
 	// not reuse a revision because lookups use it as an ABA fence.
-	removeView(name: ParsedReuseViewName): ReuseViewRemoveResponse {
+	removeView(name: StoredReuseView): ReuseViewRemoveResponse {
 		const existing = this.context.db
 			.select({ name: schema.reuseViews.name })
 			.from(schema.reuseViews)
@@ -202,10 +224,13 @@ export class ReuseViewAdminService {
 				.run();
 		});
 
-		return { name, removed: existing !== undefined };
+		return {
+			name: contractNameForReuseView(name),
+			removed: existing !== undefined
+		};
 	}
 
-	cacheInfoBody(name: ParsedReuseViewName): string | undefined {
+	cacheInfoBody(name: StoredReuseView): string | undefined {
 		const row = this.context.db
 			.select({ priority: schema.reuseViews.priority })
 			.from(schema.reuseViews)

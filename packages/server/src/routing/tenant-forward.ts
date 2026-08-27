@@ -29,7 +29,8 @@ export async function cachedTenantRead(
 	context: Context<WorkerHonoEnv>
 ): Promise<Response> {
 	// The in-process app takes the same canonical request as the service binding,
-	// so development and tests see what the deployed tenant Worker receives.
+	// so development and tests receive the same environment as the deployed
+	// tenant Worker.
 	const request = canonicalCacheRequest(context.req.raw);
 	const { CUPBOARD_TENANT: service } = context.env as Partial<
 		Pick<Env, 'CUPBOARD_TENANT'>
@@ -61,9 +62,10 @@ export async function tenantUncachedRead(
 }
 
 /**
- * Copies a response with `no-store`, so a body served under a credential
- * reaches no cache. A response a fetch returned carries immutable headers, so
- * the policy can only be applied to a copy.
+ * Copies a response and sets `Cache-Control: no-store`.
+ *
+ * Responses returned by `fetch` have immutable headers, so Hono can apply
+ * the policy only to a copy.
  */
 export function withoutStoring(response: Response): Response {
 	const headers = new Headers(response.headers);

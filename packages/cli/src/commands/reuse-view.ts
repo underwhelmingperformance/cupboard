@@ -1,4 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { PRIVATE_SELECTOR_PREFIX } from '@cupboard/nix-store/scalars';
 import {
 	type ParsedReuseViewListResponse,
 	type ParsedReuseViewRemoveResponse,
@@ -25,10 +26,20 @@ export interface ReuseViewSetOptions {
 	readonly exact: readonly string[];
 	readonly prefix: readonly string[];
 	readonly priority?: ReuseViewPriority;
+	readonly private?: boolean;
 }
 
 interface ConfirmableOptions {
 	readonly yes?: boolean;
+	readonly private?: boolean;
+}
+
+/**
+ * Returns the view's contract name. Public views keep their local name;
+ * private views use `_private-<name>`. The server validates the local name.
+ */
+export function contractViewName(name: string, isPrivate = false): string {
+	return isPrivate ? `${PRIVATE_SELECTOR_PREFIX}${name}` : name;
 }
 
 export interface ReuseViewClient {
@@ -125,14 +136,22 @@ export function registerReuseViewCommands(
 			'Nix substituter priority (lower is preferred); default 50',
 			parsePriority
 		)
+		.option(
+			'--private',
+			'define the view in the private namespace; its selectors match private caches and every read requires authentication'
+		)
 		.addHelpText(
 			'after',
 			[
 				'',
-				'Example:',
+				'Examples:',
 				'  # A view covering every PR cache plus one named release cache',
 				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
-				'    --prefix pr- --exact release'
+				'    --prefix pr- --exact release',
+				'',
+				'  # A private view over private caches with names that start with pr-',
+				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
+				'    --private --prefix pr-'
 			].join('\n')
 		)
 		.action(async (url: URL, name: string, options: ReuseViewSetOptions) => {
@@ -145,7 +164,7 @@ export function registerReuseViewCommands(
 			});
 
 			await runReuseViewSet(
-				name,
+				contractViewName(name, options.private),
 				selectorsFromOptions(options),
 				options.priority,
 				reporter,
@@ -159,6 +178,7 @@ export function registerReuseViewCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'reuse-view name')
 		.option('-y, --yes', 'remove without the confirmation prompt')
+		.option('--private', 'remove a view from the private namespace')
 		.action(async (url: URL, name: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
@@ -166,7 +186,11 @@ export function registerReuseViewCommands(
 				signal: programOptions.signal
 			});
 
-			await runReuseViewRemove(name, ui, rpc.reuseViews);
+			await runReuseViewRemove(
+				contractViewName(name, options.private),
+				ui,
+				rpc.reuseViews
+			);
 		});
 }
 

@@ -3,18 +3,21 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheFromSelector,
+	cacheNameSchema,
 	type NixSha256HashString,
-	PRIVATE_STORED_RANGE_END,
-	PRIVATE_STORED_RANGE_START,
+	PRIVATE_STORED_PREFIX,
+	privateStoredCache,
 	publicCacheSelectorSchema,
 	referencesSchema,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedReuseViewName,
-	type ReuseViewRevision
+	isPrivateReuseView,
+	type ReuseViewRevision,
+	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import {
 	and,
@@ -29,6 +32,7 @@ import {
 	sql
 } from 'drizzle-orm';
 
+import { outsidePrivateCaches } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
@@ -132,45 +136,80 @@ function prefixUpperBound(prefix: string): string {
 	return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
 }
 
-// Prefix selectors match public caches only. Exclude the private stored-name
-// range from every prefix query. A public cache called `private` sorts below
-// that range and remains matchable.
+// A public view's prefix selectors match public caches only, so every prefix
+// query excludes the private stored-name range.
 function outsidePrivateRange(): SQL | undefined {
-	return or(
-		lt(schema.narInfos.cache, sql`${PRIVATE_STORED_RANGE_START}`),
-		gte(schema.narInfos.cache, sql`${PRIVATE_STORED_RANGE_END}`)
+	return outsidePrivateCaches(schema.narInfos.cache);
+}
+
+// Every private stored name begins with the private prefix, so append the
+// selector pattern to that prefix to form the range bounds. An empty pattern
+// selects the complete private range.
+function insidePrivatePrefix(pattern: string): SQL | undefined {
+	const start = `${PRIVATE_STORED_PREFIX}${pattern}`;
+
+	return and(
+		gte(schema.narInfos.cache, sql`${start}`),
+		lt(schema.narInfos.cache, sql`${prefixUpperBound(start)}`)
 	);
 }
 
-const privateRangeParameters = 2;
+// A half-open range over the `cache` column binds two values, one per bound.
+const cacheRangeParameters = 2;
 
-function selectorParameters(selector: {
-	kind: 'exact' | 'prefix';
-	pattern: string;
-}): number {
+// The condition for every cache in the view's namespace.
+function allCachesCondition(view: StoredReuseView): SQL | undefined {
+	return isPrivateReuseView(view)
+		? insidePrivatePrefix('')
+		: outsidePrivateRange();
+}
+
+// The cache an exact selector names, resolved inside the view's namespace.
+function exactSelectorCache(
+	view: StoredReuseView,
+	pattern: string
+): StoredCache {
+	if (isPrivateReuseView(view)) {
+		return privateStoredCache(cacheNameSchema.parse(pattern));
+	}
+
+	return cacheFromSelector(publicCacheSelectorSchema.parse(pattern));
+}
+
+function selectorParameters(
+	view: StoredReuseView,
+	selector: { kind: 'exact' | 'prefix'; pattern: string }
+): number {
 	if (selector.kind === 'exact') {
 		return 1;
 	}
 
-	return selector.pattern === ''
-		? privateRangeParameters
-		: 2 + privateRangeParameters;
+	if (isPrivateReuseView(view) || selector.pattern === '') {
+		return cacheRangeParameters;
+	}
+
+	// A public non-empty prefix binds its own bounds and the private-range
+	// exclusion.
+	return cacheRangeParameters * 2;
 }
 
-function selectorCondition(selector: {
-	kind: 'exact' | 'prefix';
-	pattern: string;
-}): SQL | undefined {
+function selectorCondition(
+	view: StoredReuseView,
+	selector: { kind: 'exact' | 'prefix'; pattern: string }
+): SQL | undefined {
 	if (selector.kind === 'exact') {
-		const cache = cacheFromSelector(
-			publicCacheSelectorSchema.parse(selector.pattern)
+		return eq(
+			schema.narInfos.cache,
+			exactSelectorCache(view, selector.pattern)
 		);
-
-		return eq(schema.narInfos.cache, cache);
 	}
 
 	if (selector.pattern === '') {
-		return outsidePrivateRange();
+		return allCachesCondition(view);
+	}
+
+	if (isPrivateReuseView(view)) {
+		return insidePrivatePrefix(selector.pattern);
 	}
 
 	// Prefix patterns are not complete selectors, so compare them directly with
@@ -180,6 +219,29 @@ function selectorCondition(selector: {
 		lt(schema.narInfos.cache, sql`${prefixUpperBound(selector.pattern)}`),
 		outsidePrivateRange()
 	);
+}
+
+/**
+ * The NAR URL a view's narinfo advertises, relative to the base URL the reader
+ * addressed the view with.
+ *
+ * A private view serves its NARs under its own mount so the read remains behind
+ * the tenant-credential guard and is authorised over the private cache range. A
+ * route outside the view would enter the public namespace, which does not serve
+ * a NAR referenced only by private caches.
+ *
+ * A public view uses the tenant's public NAR route, two segments above the
+ * view. A public view can select only the tenant's public caches, and that route
+ * serves any NAR those caches reference.
+ */
+function narUrlForView(
+	view: StoredReuseView,
+	narHash: NixSha256HashString,
+	incarnation: number
+): string {
+	const key = narObjectKey(narHash, incarnation);
+
+	return isPrivateReuseView(view) ? key : `../../${key}`;
 }
 
 /**
@@ -200,7 +262,7 @@ export class ReuseViewLookupService {
 	// number of rows.
 	private snapshotCandidates(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHash: StorePathHash
 	): GateSnapshot | undefined {
 		const viewRow = this.context.db
@@ -225,7 +287,7 @@ export class ReuseViewLookupService {
 		const byCache = new Map<string, CandidateRow>();
 
 		for (const selector of selectors) {
-			for (const row of this.selectorRows(selector, storePathHash)) {
+			for (const row of this.selectorRows(view, selector, storePathHash)) {
 				byCache.set(row.cache, row);
 			}
 
@@ -251,15 +313,14 @@ export class ReuseViewLookupService {
 	}
 
 	private selectorRows(
+		view: StoredReuseView,
 		selector: { kind: 'exact' | 'prefix'; pattern: string },
 		storePathHash: StorePathHash
 	): CandidateRow[] {
 		const hashMatch = eq(schema.narInfos.storePathHash, storePathHash);
 
 		if (selector.kind === 'exact') {
-			const cache = cacheFromSelector(
-				publicCacheSelectorSchema.parse(selector.pattern)
-			);
+			const cache = exactSelectorCache(view, selector.pattern);
 
 			return this.context.db
 				.select()
@@ -268,7 +329,7 @@ export class ReuseViewLookupService {
 				.all();
 		}
 
-		const cacheRange = selectorCondition(selector);
+		const cacheRange = selectorCondition(view, selector);
 
 		return this.context.db
 			.select()
@@ -280,7 +341,7 @@ export class ReuseViewLookupService {
 
 	private snapshotCandidateBatch(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHashes: readonly StorePathHash[]
 	): GateBatchSnapshot | undefined {
 		const viewRow = this.context.db
@@ -305,18 +366,18 @@ export class ReuseViewLookupService {
 			(selector) => selector.kind === 'prefix' && selector.pattern === ''
 		);
 		const selectorConditions = selectors.flatMap((selector) => {
-			const condition = selectorCondition(selector);
+			const condition = selectorCondition(view, selector);
 			return condition === undefined ? [] : [condition];
 		});
-		// An empty prefix matches every public cache, so its condition alone covers
-		// the other selectors.
+		// An empty prefix matches every cache of the view's namespace, so its
+		// condition alone covers the other selectors.
 		const cacheFilter = hasAllCacheSelector
-			? outsidePrivateRange()
+			? allCachesCondition(view)
 			: or(...selectorConditions);
 		const selectorParameterCount = hasAllCacheSelector
-			? privateRangeParameters
+			? cacheRangeParameters
 			: selectors.reduce(
-					(count, selector) => count + selectorParameters(selector),
+					(count, selector) => count + selectorParameters(view, selector),
 					0
 				);
 		const maxHashesPerQuery = Math.max(
@@ -603,7 +664,7 @@ export class ReuseViewLookupService {
 	// cannot match a revision captured before deletion.
 	private revalidateSnapshot(
 		snapshot: GateSnapshot,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		verified: VerifiedCandidates
 	): VerifiedCandidates | undefined {
 		const viewRow = this.context.db
@@ -644,7 +705,7 @@ export class ReuseViewLookupService {
 
 	private revalidateCandidates(
 		revision: number,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		verified: VerifiedCandidates
 	): VerifiedCandidates | undefined {
 		const viewRow = this.context.db
@@ -704,7 +765,7 @@ export class ReuseViewLookupService {
 	// sorted because the fingerprint treats them as a set.
 	private hasSingleSemanticCandidate(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHash: StorePathHash,
 		candidates: readonly CandidateRow[]
 	): boolean {
@@ -750,7 +811,7 @@ export class ReuseViewLookupService {
 
 	private renderSingleCandidate(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHash: StorePathHash,
 		settled: VerifiedCandidates
 	): NarInfo | undefined {
@@ -796,10 +857,9 @@ export class ReuseViewLookupService {
 			)
 		].toSorted(byCodeUnit);
 
-		// This narinfo is two path segments below the tenant's canonical NAR route.
 		return new NarInfo(
 			new StorePath(row.storePath),
-			`../../${narObjectKey(row.narHash, blob.incarnation)}`,
+			narUrlForView(view, row.narHash, blob.incarnation),
 			blob.compression,
 			NixSha256Hash.parse(blob.fileHash),
 			blob.fileSize,
@@ -830,7 +890,7 @@ export class ReuseViewLookupService {
 	 */
 	async lookup(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHash: StorePathHash
 	): Promise<NarInfo | undefined> {
 		const snapshot = await this.context.criticalSection(() =>
@@ -860,7 +920,7 @@ export class ReuseViewLookupService {
 	 */
 	async missingStorePathHashes(
 		logger: Logger,
-		view: ParsedReuseViewName,
+		view: StoredReuseView,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<StorePathHash[]> {
 		const uniqueHashes = [...new Set(storePathHashes)];

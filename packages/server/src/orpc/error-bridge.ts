@@ -4,6 +4,7 @@ import { StatusCodes } from 'http-status-codes';
 
 import {
 	CacheNotEmptyError,
+	PrivateViewDefaultSelectorError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -50,6 +51,14 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache }
+		});
+	}
+
+	if (error instanceof PrivateViewDefaultSelectorError) {
+		return new ORPCError('PRIVATE_VIEW_DEFAULT_SELECTOR', {
+			status: error.status,
+			message: error.message,
+			data: { view: error.view }
 		});
 	}
 

@@ -435,15 +435,16 @@ describe('command help', () => {
 		expect(help).toContain('remove');
 	});
 
-	it('shows the selector and priority options and an example for reuse-view set', () => {
+	it('shows the selector, priority and namespace options and examples for reuse-view set', () => {
 		const help = helpFor(['reuse-view', 'set']);
 
 		expect(help).toContain('--exact');
 		expect(help).toContain('--prefix');
 		expect(help).toContain('--priority');
+		expect(help).toContain('--private');
 		expect(help).toContain('matches');
 		expect(help).toContain('every cache');
-		expect(help).toContain('Example:');
+		expect(help).toContain('Examples:');
 	});
 
 	it('shows the confirmation option for reuse-view remove', () => {
