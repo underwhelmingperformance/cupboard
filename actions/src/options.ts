@@ -20,6 +20,7 @@ import {
 	BooleanInputInvalidError,
 	CacheNameInvalidError,
 	CacheSelectionConflictError,
+	ChoiceInputInvalidError,
 	PrivateCacheCredentialsInvalidError,
 	ReadUserInvalidError,
 	UnknownPrivateCacheCredentialError,
@@ -62,11 +63,9 @@ export function provided(value: string | undefined): string | undefined {
 }
 
 /**
- * The public cache an input names, or the default cache when the input is
- * absent or blank. Reject an invalid cache name with
- * {@link CacheNameInvalidError} before constructing an endpoint. A private
- * cache is named by the `private-cache` input instead, so the private stored
- * form `private/<name>` is not a legal value here.
+ * Parses a public cache input. An absent or blank input selects the default
+ * cache. This input rejects the private stored form `private/<name>` because
+ * callers select private caches through `private-cache`.
  */
 export function providedCache(value: string | undefined): PublicStoredCache {
 	const parsed = publicStoredCacheSchema.safeParse(
@@ -81,9 +80,10 @@ export function providedCache(value: string | undefined): PublicStoredCache {
 }
 
 /**
- * The single cache an action targets. The `cache` and `private-cache` inputs
- * name the same slot in different namespaces, so naming both fails the run.
- * Naming neither targets the tenant's default cache.
+ * Resolves the single cache targeted by an action. `cache` selects the public
+ * namespace, while `private-cache` selects the private namespace. The run fails
+ * if both inputs are set. If both are empty, it selects the tenant's default
+ * cache.
  */
 export function providedCacheSelection(
 	cache: string | undefined,
@@ -109,8 +109,8 @@ export function providedCacheSelection(
 }
 
 /**
- * The cupboard arguments that address one cache. The default cache is
- * addressed by naming no cache at all.
+ * Returns the cupboard arguments for one cache. The default cache requires no
+ * cache-selection argument.
  */
 export function cacheArguments(cache: StoredCache): readonly string[] {
 	if (cache === DEFAULT_CACHE) {
@@ -123,8 +123,8 @@ export function cacheArguments(cache: StoredCache): readonly string[] {
 }
 
 /**
- * The public caches an input names, in the order it names them. A blank input
- * names none, which leaves the caller to decide what an empty selection means.
+ * Parses public cache names in input order. A blank input returns an empty list,
+ * and the caller decides whether that means the default cache or no cache.
  */
 export function providedCaches(
 	value: string | undefined
@@ -133,9 +133,8 @@ export function providedCaches(
 }
 
 /**
- * The local names of the private caches an input names, in the order it names
- * them. A private cache is addressed by local name in its credential input and
- * in its URL, and `privateStoredCache` turns one into a stored name.
+ * Parses the local names of private caches in input order. Credential documents
+ * and URLs use local names; `privateStoredCache` converts them to stored names.
  */
 export function providedPrivateCacheNames(
 	value: string | undefined
@@ -152,14 +151,13 @@ export function providedPrivateCacheNames(
 }
 
 /**
- * Parse the `private-cache-credentials` input, a JSON object mapping each
- * private cache's local name to the credential used for reads from that cache.
- * An absent or blank input names no credential, and reads from a cache with no
- * entry use the shared `read-user` and `read-password`.
+ * Parses `private-cache-credentials`, a JSON object that maps each private
+ * cache's local name to its read credential. An absent or blank input returns
+ * an empty map. A caller can use the shared `read-user` and `read-password` for
+ * a cache with no entry.
  *
- * A credential for a cache the `private-cache` input does not name is refused,
- * because the credential document and the private caches the run configures
- * disagree.
+ * Rejects an entry unless `private-cache` lists the same cache. Otherwise the
+ * credential document and the configured cache list disagree.
  */
 export function providedPrivateCacheCredentials(
 	value: string | undefined,
@@ -264,6 +262,32 @@ export function isEnabled(
 	}
 
 	throw new BooleanInputInvalidError(name, trimmed);
+}
+
+/**
+ * Accept one of `choices` after trimming. A blank or absent value uses the
+ * fallback; any other value fails the run with a
+ * {@link ChoiceInputInvalidError} that lists the accepted values.
+ */
+export function providedChoice<Choice extends string>(
+	name: string,
+	value: string | undefined,
+	choices: readonly Choice[],
+	fallback: Choice
+): Choice {
+	const trimmed = provided(value);
+
+	if (trimmed === undefined) {
+		return fallback;
+	}
+
+	const chosen = choices.find((choice) => choice === trimmed);
+
+	if (chosen === undefined) {
+		throw new ChoiceInputInvalidError(name, trimmed, choices);
+	}
+
+	return chosen;
 }
 
 export function collectLines(

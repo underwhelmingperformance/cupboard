@@ -1,13 +1,27 @@
 import type { AttestOptions, Predicate } from '@actions/attest';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	privateStoredCache,
+	type StoredCache,
+	storedCacheSchema
+} from '@cupboard/nix-store/scalars';
 import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
 	type AttestationStatement,
+	cacheVisibility,
+	defaultSigningPolicy,
+	type DestinationVisibility,
+	disclosureLines,
 	githubStatementSigner,
 	isTransientSigningFailure,
 	maxSigningAttempts,
+	producedInstance,
+	producedLines,
 	type SignedAttestation,
+	signingDisclosure,
 	type SigningStageCode,
 	signStatement,
 	slsaProvenanceStatement,
@@ -142,7 +156,10 @@ const statement: AttestationStatement = {
 	predicate: { buildDefinition: {} }
 };
 
-const signed: SignedAttestation = { bundle: '{"mediaType":"test"}\n' };
+const signed: SignedAttestation = {
+	bundle: '{"mediaType":"test"}\n',
+	evidence: { tlogEntryCount: 1, timestampCount: 0 }
+};
 
 interface SigningRun {
 	readonly signer: StatementSigner;
@@ -281,45 +298,291 @@ describe('signStatement', () => {
 	});
 });
 
-describe('githubStatementSigner', () => {
-	it('sends each subject as a sha256 digest and returns the bundle as text', async () => {
-		const bundle = {
-			mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json'
-		};
+const visibilityCases: readonly {
+	readonly cache: StoredCache;
+	readonly expected: DestinationVisibility;
+}[] = [
+	{ cache: DEFAULT_CACHE, expected: 'public' },
+	{ cache: storedCacheSchema.parse('releases'), expected: 'public' },
+	{
+		cache: privateStoredCache(cacheNameSchema.parse('ci')),
+		expected: 'private'
+	}
+];
 
+describe('cacheVisibility', () => {
+	it.each(visibilityCases)(
+		'reads $cache as a $expected destination',
+		({ cache, expected }) => {
+			expect(cacheVisibility(cache)).toBe(expected);
+		}
+	);
+});
+
+describe('defaultSigningPolicy', () => {
+	it.each([
+		{
+			visibility: 'private',
+			expected: {
+				profile: 'tsa-only',
+				uploadToGithub: false,
+				grouping: 'individual'
+			}
+		},
+		{
+			visibility: 'public',
+			expected: {
+				profile: 'sigstore-default',
+				uploadToGithub: true,
+				grouping: 'run'
+			}
+		}
+	] as const)(
+		'returns the default signing policy for a $visibility destination',
+		({ visibility, expected }) => {
+			expect(defaultSigningPolicy(visibility)).toStrictEqual(expected);
+		}
+	);
+});
+
+describe('signingDisclosure', () => {
+	it.each([
+		{
+			profile: 'tsa-only',
+			uploadToGithub: false,
+			expected: {
+				instances: ['github'],
+				services: ['oidc-and-fulcio', 'rfc-3161-tsa'],
+				publications: ['bundle-files']
+			}
+		},
+		{
+			profile: 'tsa-only',
+			uploadToGithub: true,
+			expected: {
+				instances: ['github'],
+				services: ['oidc-and-fulcio', 'rfc-3161-tsa'],
+				publications: ['github-attestation-store', 'bundle-files']
+			}
+		},
+		{
+			profile: 'rekor-and-tsa',
+			uploadToGithub: false,
+			expected: {
+				instances: ['public-good'],
+				services: ['oidc-and-fulcio', 'certificate-transparency', 'rekor'],
+				publications: ['rekor', 'bundle-files']
+			}
+		},
+		{
+			profile: 'rekor-and-tsa',
+			uploadToGithub: true,
+			expected: {
+				instances: ['public-good'],
+				services: ['oidc-and-fulcio', 'certificate-transparency', 'rekor'],
+				publications: ['rekor', 'github-attestation-store', 'bundle-files']
+			}
+		},
+		{
+			profile: 'sigstore-default',
+			uploadToGithub: false,
+			expected: {
+				instances: ['public-good', 'github'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa',
+					'rekor'
+				],
+				publications: ['rekor', 'bundle-files']
+			}
+		},
+		{
+			profile: 'sigstore-default',
+			uploadToGithub: true,
+			expected: {
+				instances: ['public-good', 'github'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa',
+					'rekor'
+				],
+				publications: ['rekor', 'github-attestation-store', 'bundle-files']
+			}
+		}
+	] as const)(
+		'discloses $profile with upload-to-github $uploadToGithub',
+		({ profile, uploadToGithub, expected }) => {
+			expect(
+				signingDisclosure({ profile, uploadToGithub, grouping: 'run' }, 3)
+			).toStrictEqual({ ...expected, grouping: 'run', subjectCount: 3 });
+		}
+	);
+
+	it('renders one line for each contact and each publication', () => {
+		const disclosure = signingDisclosure(
+			{ profile: 'sigstore-default', uploadToGithub: true, grouping: 'run' },
+			3
+		);
+		const lines = disclosureLines(disclosure);
+		const listed = disclosure.services.length + disclosure.publications.length;
+
+		expect({
+			heading: lines[0],
+			total: lines.length,
+			listed: lines.filter((line) => line.startsWith('  ')).length
+		}).toStrictEqual({
+			heading:
+				"The repository's visibility selects the Sigstore instance: the public-good instance for a public repository, the GitHub instance otherwise. The lines below cover both.",
+			total: listed + 4,
+			listed
+		});
+	});
+});
+
+describe('producedLines', () => {
+	it.each([
+		{
+			evidence: {
+				bundleCount: 2,
+				tlogEntryCount: 0,
+				timestampCount: 2,
+				uploadedCount: 0
+			},
+			instance: 'github'
+		},
+		{
+			evidence: {
+				bundleCount: 1,
+				tlogEntryCount: 1,
+				timestampCount: 0,
+				uploadedCount: 1
+			},
+			instance: 'public-good'
+		},
+		{
+			evidence: {
+				bundleCount: 1,
+				tlogEntryCount: 0,
+				timestampCount: 0,
+				uploadedCount: 0
+			},
+			instance: undefined
+		}
+	])(
+		'reports the $instance trust domain from the evidence',
+		({ evidence, instance }) => {
+			expect({
+				instance: producedInstance(evidence),
+				lines: producedLines(evidence).length
+			}).toStrictEqual({ instance, lines: 3 });
+		}
+	);
+
+	it('reports a run that signed nothing as one line', () => {
+		expect(
+			producedLines({
+				bundleCount: 0,
+				tlogEntryCount: 0,
+				timestampCount: 0,
+				uploadedCount: 0
+			})
+		).toStrictEqual(['This run signed no statement.']);
+	});
+});
+
+describe('githubStatementSigner', () => {
+	const bundle = {
+		mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+		verificationMaterial: {
+			tlogEntries: [{ logIndex: '1' }],
+			timestampVerificationData: {
+				rfc3161Timestamps: [{ signedTimestamp: 'a' }]
+			}
+		}
+	};
+
+	it.each([
+		{ profile: 'tsa-only', uploadToGithub: false, sigstore: 'github' },
+		{ profile: 'tsa-only', uploadToGithub: true, sigstore: 'github' },
+		{
+			profile: 'rekor-and-tsa',
+			uploadToGithub: false,
+			sigstore: 'public-good'
+		},
+		{
+			profile: 'sigstore-default',
+			uploadToGithub: true,
+			sigstore: undefined
+		}
+	] as const)(
+		'signs $profile with upload-to-github $uploadToGithub',
+		async ({ profile, uploadToGithub, sigstore }) => {
+			mocks.attest.mockReset();
+			mocks.attest.mockResolvedValue({
+				bundle,
+				certificate: 'certificate',
+				attestationID: '42'
+			});
+
+			const result = await githubStatementSigner({
+				subjects: [
+					{
+						name: 'abcdefghijklmnopqrstuvwxyz012345-app',
+						sha256: '11'.repeat(32)
+					}
+				],
+				githubToken: 'token',
+				policy: { profile, uploadToGithub, grouping: 'run' }
+			})(statement);
+
+			expect({ result, calls: mocks.attest.mock.calls }).toStrictEqual({
+				result: {
+					bundle: `${JSON.stringify(bundle)}\n`,
+					evidence: { tlogEntryCount: 1, timestampCount: 1 },
+					attestationId: '42'
+				},
+				calls: [
+					[
+						{
+							subjects: [
+								{
+									name: 'abcdefghijklmnopqrstuvwxyz012345-app',
+									digest: { sha256: '11'.repeat(32) }
+								}
+							],
+							predicateType: statement.predicateType,
+							predicate: statement.predicate,
+							token: 'token',
+							skipWrite: !uploadToGithub,
+							...(sigstore !== undefined && { sigstore })
+						}
+					]
+				]
+			});
+		}
+	);
+
+	it('counts no timestamp when the bundle carries none', async () => {
+		mocks.attest.mockReset();
 		mocks.attest.mockResolvedValue({
-			bundle,
-			certificate: 'certificate',
-			attestationID: '42'
+			bundle: {
+				mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+				verificationMaterial: { tlogEntries: [] }
+			},
+			certificate: 'certificate'
 		});
 
-		const signed = await githubStatementSigner({
-			subjects: [
-				{
-					name: 'abcdefghijklmnopqrstuvwxyz012345-app',
-					sha256: '11'.repeat(32)
-				}
-			],
-			githubToken: 'token'
+		const result = await githubStatementSigner({
+			subjects: [],
+			githubToken: 'token',
+			policy: { profile: 'tsa-only', uploadToGithub: false, grouping: 'run' }
 		})(statement);
 
-		expect({ signed, calls: mocks.attest.mock.calls }).toStrictEqual({
-			signed: { bundle: `${JSON.stringify(bundle)}\n`, attestationId: '42' },
-			calls: [
-				[
-					{
-						subjects: [
-							{
-								name: 'abcdefghijklmnopqrstuvwxyz012345-app',
-								digest: { sha256: '11'.repeat(32) }
-							}
-						],
-						predicateType: statement.predicateType,
-						predicate: statement.predicate,
-						token: 'token'
-					}
-				]
-			]
+		expect(result.evidence).toStrictEqual({
+			tlogEntryCount: 0,
+			timestampCount: 0
 		});
 	});
 });

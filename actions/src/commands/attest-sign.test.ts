@@ -1,18 +1,24 @@
 import path from 'node:path';
 
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
-import { createGithubReporter } from '@cupboard/reporter';
+import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
 	AttestationStatement,
-	AttestationSubject
+	AttestationSubject,
+	BundleEvidence,
+	SigningPolicy
 } from '../attestation-signing.ts';
 import {
 	AttestationPredicateFileError,
 	AttestationSigningError,
 	AttestationSubjectsMissingError,
+	BooleanInputInvalidError,
+	BuildOriginSubjectMissingError,
+	ChoiceInputInvalidError,
 	MissingInputError,
+	PredicateGroupingUnsupportedError,
 	PredicateTypeRequiredError
 } from '../errors.ts';
 
@@ -45,9 +51,46 @@ const originPredicate = {
 	]
 };
 
+function builtOrigin(name: string, narHash: string) {
+	return {
+		origin: 'built',
+		storePath: `/nix/store/${name}`,
+		narHash,
+		derivation: `/nix/store/${name}.drv`,
+		buildStore: 'auto',
+		verification: 'build-store'
+	};
+}
+
+const runOriginPredicate = {
+	subjects: [
+		builtOrigin(appName, appDigest),
+		builtOrigin(runtimeName, runtimeDigest)
+	]
+};
+
 interface SigningRecord {
 	readonly subjects: readonly AttestationSubject[];
 	readonly statement: AttestationStatement;
+	readonly policy: SigningPolicy;
+}
+
+const publicPolicy: SigningPolicy = {
+	profile: 'sigstore-default',
+	uploadToGithub: true,
+	grouping: 'run'
+};
+
+const privatePolicy: SigningPolicy = {
+	profile: 'tsa-only',
+	uploadToGithub: false,
+	grouping: 'individual'
+};
+
+function signedEvidence(policy: SigningPolicy): BundleEvidence {
+	return policy.profile === 'tsa-only'
+		? { tlogEntryCount: 0, timestampCount: 1 }
+		: { tlogEntryCount: 1, timestampCount: 0 };
 }
 
 interface Workspace {
@@ -109,6 +152,7 @@ function options(
 		predicateFile: files.predicateFile,
 		predicateType: buildOriginPredicateType,
 		githubToken: 'token',
+		destinationVisibility: 'public',
 		...overrides
 	};
 }
@@ -133,16 +177,22 @@ function recordedSigning(
 				predicateType: 'https://slsa.dev/provenance/v1',
 				predicate: { buildDefinition: { buildType: 'workflow' } }
 			}),
-		signerFor: (subjects) => (statement) => {
-			const failure = failures[records.length];
-			records.push({ subjects, statement });
+		signerFor:
+			({ subjects, policy }) =>
+			(statement) => {
+				const failure = failures[records.length];
+				records.push({ subjects, statement, policy });
 
-			return failure === undefined
-				? Promise.resolve({
-						bundle: `{"predicateType":"${statement.predicateType}"}\n`
-					})
-				: Promise.reject(failure);
-		}
+				return failure === undefined
+					? Promise.resolve({
+							bundle: `{"predicateType":"${statement.predicateType}"}\n`,
+							evidence: signedEvidence(policy),
+							...(policy.uploadToGithub && {
+								attestationId: String(records.length)
+							})
+						})
+					: Promise.reject(failure);
+			}
 	};
 
 	return {
@@ -155,6 +205,40 @@ function recordedSigning(
 					}
 				}
 			: dependencies
+	};
+}
+
+function ignore(): void {
+	return;
+}
+
+function recordingReporter(reported: string[]): Reporter {
+	return {
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: ignore, warn: ignore })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: ignore, fact: ignore, warn: ignore })),
+		steps: (_label, body) =>
+			Promise.resolve(
+				body({
+					message: ignore,
+					group: () => ({
+						message: ignore,
+						success: ignore,
+						error: ignore
+					}),
+					warn: ignore
+				})
+			),
+		result: ignore,
+		data: ignore,
+		error: ignore,
+		warn: ignore,
+		success: ignore,
+		step: ignore,
+		info(message) {
+			reported.push(message);
+		}
 	};
 }
 
@@ -175,7 +259,8 @@ describe('resolveAttestSignInputs', () => {
 				builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 				predicateFile: '/runner/temp/attestations/build-origin.json',
 				predicateType: buildOriginPredicateType,
-				githubToken: 'token'
+				githubToken: 'token',
+				destinationVisibility: 'public'
 			})
 		).toStrictEqual({
 			checksumsFile: '/runner/temp/attestations/subjects.txt',
@@ -183,9 +268,109 @@ describe('resolveAttestSignInputs', () => {
 			predicateFile: '/runner/temp/attestations/build-origin.json',
 			predicateType: buildOriginPredicateType,
 			githubToken: 'token',
+			policy: publicPolicy,
 			bundleFile: '/runner/temp/attestations/provenance.sigstore.json',
 			originBundleFile: '/runner/temp/attestations/build-origin.sigstore.json'
 		});
+	});
+
+	const signingInputs = {
+		checksumsFile: '/runner/temp/attestations/subjects.txt',
+		builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
+		githubToken: 'token'
+	};
+
+	it.each([
+		{
+			given: { destinationVisibility: 'public' },
+			expected: publicPolicy
+		},
+		{
+			given: { destinationVisibility: 'private' },
+			expected: privatePolicy
+		},
+		{
+			given: {},
+			expected: privatePolicy
+		},
+		{
+			given: {
+				destinationVisibility: 'private',
+				signingProfile: 'rekor-and-tsa'
+			},
+			expected: {
+				profile: 'rekor-and-tsa',
+				uploadToGithub: false,
+				grouping: 'individual'
+			}
+		},
+		{
+			given: { destinationVisibility: 'private', uploadToGithub: 'true' },
+			expected: {
+				profile: 'tsa-only',
+				uploadToGithub: true,
+				grouping: 'individual'
+			}
+		},
+		{
+			given: { destinationVisibility: 'public', signingProfile: 'tsa-only' },
+			expected: { profile: 'tsa-only', uploadToGithub: true, grouping: 'run' }
+		},
+		{
+			given: { destinationVisibility: 'public', uploadToGithub: 'false' },
+			expected: {
+				profile: 'sigstore-default',
+				uploadToGithub: false,
+				grouping: 'run'
+			}
+		},
+		{
+			given: { destinationVisibility: 'public', subjectGrouping: 'individual' },
+			expected: {
+				profile: 'sigstore-default',
+				uploadToGithub: true,
+				grouping: 'individual'
+			}
+		},
+		{
+			given: {
+				destinationVisibility: '',
+				signingProfile: '',
+				uploadToGithub: ''
+			},
+			expected: privatePolicy
+		}
+	])('resolves the policy for $given', ({ given, expected }) => {
+		expect(
+			resolveAttestSignInputs({ ...signingInputs, ...given }).policy
+		).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			input: 'signing-profile',
+			given: { signingProfile: 'tsa' },
+			expected: ChoiceInputInvalidError
+		},
+		{
+			input: 'destination-visibility',
+			given: { destinationVisibility: 'internal' },
+			expected: ChoiceInputInvalidError
+		},
+		{
+			input: 'upload-to-github',
+			given: { uploadToGithub: 'yes' },
+			expected: BooleanInputInvalidError
+		},
+		{
+			input: 'subject-grouping',
+			given: { subjectGrouping: 'per-subject' },
+			expected: ChoiceInputInvalidError
+		}
+	])('refuses an unknown $input value', ({ given, expected }) => {
+		expect(() =>
+			resolveAttestSignInputs({ ...signingInputs, ...given })
+		).toThrow(expected);
 	});
 
 	it.each([
@@ -280,7 +465,8 @@ describe('attestSignAction', () => {
 					statement: {
 						predicateType: 'https://slsa.dev/provenance/v1',
 						predicate: { buildDefinition: { buildType: 'workflow' } }
-					}
+					},
+					policy: publicPolicy
 				},
 				{
 					subjects: [
@@ -290,7 +476,8 @@ describe('attestSignAction', () => {
 					statement: {
 						predicateType: buildOriginPredicateType,
 						predicate: originPredicate
-					}
+					},
+					policy: publicPolicy
 				}
 			],
 			outputs: {
@@ -438,6 +625,211 @@ describe('attestSignAction', () => {
 				]
 			]
 		});
+	});
+
+	it.each([
+		{
+			destination: 'private',
+			given: {},
+			disclosed: [
+				"Signing with the GitHub Sigstore instance (GitHub's private Fulcio and its RFC 3161 timestamp authority).",
+				'Signing one statement for each of the 2 accepted subjects, so no bundle names another subject.',
+				'Signing can contact the following external services.',
+				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
+				'  An RFC 3161 timestamp authority receives the signature imprint and the time of the request.',
+				'Signing publishes evidence or complete bundles to the following destinations.',
+				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
+			],
+			produced: [
+				"The bundles are in the trust domain of the GitHub Sigstore instance (GitHub's private Fulcio and its RFC 3161 timestamp authority).",
+				'The action signed 3 bundles that carry 0 Rekor entries and 3 RFC 3161 timestamps.',
+				"The action recorded no bundle in the repository's attestation store."
+			]
+		},
+		{
+			destination: 'private with an explicit public-good profile',
+			given: {
+				signingProfile: 'rekor-and-tsa',
+				uploadToGithub: 'true'
+			},
+			disclosed: [
+				'Signing with the public-good Sigstore instance (the public Fulcio and Rekor).',
+				'Signing one statement for each of the 2 accepted subjects, so no bundle names another subject.',
+				'Signing can contact the following external services.',
+				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
+				'  Certificate transparency receives the signing certificate and the identity it certifies.',
+				'  Rekor receives the signature metadata and the certified identity.',
+				'Signing publishes evidence or complete bundles to the following destinations.',
+				'  Rekor stores a permanent public record of the signature, and that record remains after the cache drops the path.',
+				"  The action writes the complete bundle to the repository's attestation store, where every reader of the repository can read it.",
+				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
+			],
+			produced: [
+				'The bundles are in the trust domain of the public-good Sigstore instance (the public Fulcio and Rekor).',
+				'The action signed 3 bundles that carry 3 Rekor entries and 0 RFC 3161 timestamps.',
+				"The action recorded 3 of 3 bundles in the repository's attestation store."
+			]
+		}
+	])(
+		'discloses the services a $destination destination contacts before signing',
+		async ({ given, disclosed, produced }) => {
+			const files = workspace();
+			const reported: string[] = [];
+
+			files.textFiles.set(
+				files.predicateFile,
+				`${JSON.stringify(runOriginPredicate)}\n`
+			);
+			await attestSignAction(
+				options(files, { destinationVisibility: 'private', ...given }),
+				recordingReporter(reported),
+				recordedSigning(files, []).dependencies
+			);
+
+			expect(reported).toStrictEqual([...disclosed, ...produced]);
+		}
+	);
+
+	it('signs one statement per subject under individual grouping', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const bothSubjects = `${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`;
+
+		files.textFiles.set(files.builtChecksumsFile, bothSubjects);
+		files.textFiles.set(
+			files.predicateFile,
+			`${JSON.stringify(runOriginPredicate)}\n`
+		);
+
+		await attestSignAction(
+			options(files, { destinationVisibility: 'private' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
+
+		expect({
+			signed: records.map((record) => ({
+				subjects: record.subjects,
+				predicateType: record.statement.predicateType,
+				predicate: record.statement.predicate
+			})),
+			outputs: signing.outputs
+		}).toStrictEqual({
+			signed: [
+				{
+					subjects: [{ name: appName, sha256: appDigest }],
+					predicateType: 'https://slsa.dev/provenance/v1',
+					predicate: { buildDefinition: { buildType: 'workflow' } }
+				},
+				{
+					subjects: [{ name: runtimeName, sha256: runtimeDigest }],
+					predicateType: 'https://slsa.dev/provenance/v1',
+					predicate: { buildDefinition: { buildType: 'workflow' } }
+				},
+				{
+					subjects: [{ name: appName, sha256: appDigest }],
+					predicateType: buildOriginPredicateType,
+					predicate: { subjects: [builtOrigin(appName, appDigest)] }
+				},
+				{
+					subjects: [{ name: runtimeName, sha256: runtimeDigest }],
+					predicateType: buildOriginPredicateType,
+					predicate: { subjects: [builtOrigin(runtimeName, runtimeDigest)] }
+				}
+			],
+			outputs: {
+				'bundle-path': [
+					path.join(files.directory, 'provenance.sigstore.json'),
+					path.join(files.directory, 'provenance.sigstore.2.json')
+				].join('\n'),
+				'origin-bundle-path': [
+					path.join(files.directory, 'build-origin.sigstore.json'),
+					path.join(files.directory, 'build-origin.sigstore.2.json')
+				].join('\n')
+			}
+		});
+	});
+
+	it('keeps same-digest subjects separate under individual grouping', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+		const bothSubjects = `${appDigest}  ${appName}\n${appDigest}  ${runtimeName}\n`;
+
+		files.textFiles.set(files.checksumsFile, bothSubjects);
+		files.textFiles.set(files.builtChecksumsFile, '');
+		files.textFiles.set(
+			files.predicateFile,
+			`${JSON.stringify({
+				subjects: [
+					builtOrigin(appName, appDigest),
+					builtOrigin(runtimeName, appDigest)
+				]
+			})}\n`
+		);
+
+		await attestSignAction(
+			options(files, { destinationVisibility: 'private' }),
+			createGithubReporter(),
+			signing.dependencies
+		);
+
+		expect(
+			records.map((record) => ({
+				subjects: record.subjects,
+				predicate: record.statement.predicate
+			}))
+		).toStrictEqual([
+			{
+				subjects: [{ name: appName, sha256: appDigest }],
+				predicate: { subjects: [builtOrigin(appName, appDigest)] }
+			},
+			{
+				subjects: [{ name: runtimeName, sha256: appDigest }],
+				predicate: { subjects: [builtOrigin(runtimeName, appDigest)] }
+			}
+		]);
+	});
+
+	it('refuses individual grouping for a predicate it cannot project', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+
+		await expect(
+			attestSignAction(
+				options(files, {
+					destinationVisibility: 'private',
+					predicateType: 'https://spdx.dev/Document'
+				}),
+				createGithubReporter(),
+				signing.dependencies
+			)
+		).rejects.toBeInstanceOf(PredicateGroupingUnsupportedError);
+
+		expect(records).toStrictEqual([]);
+	});
+
+	it('refuses a subject the build-origin predicate does not record', async () => {
+		const files = workspace();
+		const records: SigningRecord[] = [];
+		const signing = recordedSigning(files, records);
+
+		files.textFiles.set(
+			files.predicateFile,
+			`${JSON.stringify({ subjects: [builtOrigin(appName, appDigest)] })}\n`
+		);
+
+		await expect(
+			attestSignAction(
+				options(files, { destinationVisibility: 'private' }),
+				createGithubReporter(),
+				signing.dependencies
+			)
+		).rejects.toBeInstanceOf(BuildOriginSubjectMissingError);
+
+		expect(records).toStrictEqual([]);
 	});
 
 	it('refuses a checksums file that lists no subject', async () => {

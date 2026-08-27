@@ -1143,7 +1143,8 @@ async function runAlreadyValidPublication(
 							`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
 							'built-subject-count=1\n' +
 							`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
-							`predicate-type=${buildOriginPredicateType}\n`
+							`predicate-type=${buildOriginPredicateType}\n` +
+							'destination-visibility=public\n'
 					}
 				});
 
@@ -1613,7 +1614,8 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
 						`built-subject-count=${String(paths.length)}\n` +
 						`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
-						`predicate-type=${buildOriginPredicateType}\n`
+						`predicate-type=${buildOriginPredicateType}\n` +
+						'destination-visibility=public\n'
 				});
 
 				const rejectedChecksumsFile = path.join(

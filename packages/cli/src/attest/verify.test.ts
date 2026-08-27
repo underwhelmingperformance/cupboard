@@ -2,7 +2,11 @@ import { createPublicKey } from 'node:crypto';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import { storedCacheSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	privateStoredCache,
+	storedCacheSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { readUserInputSchema } from '@cupboard/shared/http';
@@ -657,6 +661,92 @@ describe('remote attestation verification', () => {
 				authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
 			}
 		]);
+	});
+
+	// The credential authenticates the reader; the URL names the cache. Keeping
+	// the two apart means no request carries userinfo, which a proxy or a log
+	// would record along with the path.
+	it('reads a private cache with a credential the URL does not carry', async () => {
+		const narInfo = await signedNarInfo();
+		const base = 'https://cupboard.test/t/acme/private-cache/ci';
+		const recordedCalls: {
+			readonly url: string;
+			readonly authorisation?: string;
+		}[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const url = fetchInputUrl(input);
+			const authorisation = new Headers(init?.headers).get('authorization');
+			recordedCalls.push({
+				url,
+				authorisation: authorisation ?? undefined
+			});
+
+			if (url === `${base}/${storePathHash}.narinfo`) {
+				return Promise.resolve(new Response(narInfo.source));
+			}
+
+			if (url === `${base}/attestations/${storePathHash}`) {
+				return Promise.resolve(
+					Response.json({
+						attestations: [{ digest: bundleDigest, predicateType, size: 1 }]
+					})
+				);
+			}
+
+			if (url === `${base}/attestation-bundles/${bundleDigest}`) {
+				return Promise.resolve(new Response(new Uint8Array([1])));
+			}
+
+			return Promise.resolve(new Response('not found', { status: 404 }));
+		};
+
+		await verifyRemoteAttestations(
+			{
+				url: new URL('https://cupboard.test/t/acme'),
+				cache: privateStoredCache(cacheNameSchema.parse('ci')),
+				storePathHash,
+				readUser: readUserInputSchema.parse('reader'),
+				readPassword: 'secret',
+				trustedPublicKey: narInfo.publicKey,
+				predicateType,
+				trustedRoot,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				fetch: fetcher,
+				verify: () =>
+					Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType,
+							subjectDigests: [narDigest]
+						})
+					)
+			}
+		);
+
+		expect({
+			calls: recordedCalls,
+			withUserinfo: recordedCalls.filter(
+				(call) => new URL(call.url).username !== ''
+			)
+		}).toStrictEqual({
+			calls: [
+				{
+					url: `${base}/${storePathHash}.narinfo`,
+					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				},
+				{
+					url: `${base}/attestations/${storePathHash}`,
+					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				},
+				{
+					url: `${base}/attestation-bundles/${bundleDigest}`,
+					authorisation: 'Basic cmVhZGVyOnNlY3JldA=='
+				}
+			],
+			withUserinfo: []
+		});
 	});
 
 	// A narinfo can include signatures for untrusted keys and malformed lines.

@@ -36,9 +36,10 @@ export type ParsedBuildOriginSubject = z.output<
 	typeof buildOriginSubjectSchema
 >;
 
-// One statement contains the receipt subjects that the attestation step
-// accepted. After verifying the statement for one subject, a reader can inspect
-// the evidence for the other accepted subjects from the same receipt.
+// With run grouping, one statement contains every receipt subject accepted by
+// the attestation step. A reader who verifies the statement for one subject can
+// also inspect the evidence for the other accepted subjects. With individual
+// grouping, each predicate contains only its own subject.
 export const buildOriginPredicateSchema = z.strictObject({
 	subjects: z.array(buildOriginSubjectSchema).min(1)
 });
