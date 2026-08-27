@@ -29,6 +29,13 @@ export interface WorkflowCommands {
 	error(message: string): void;
 	group(title: string): void;
 	endGroup(): void;
+	/**
+	 * Registers `value` as a run secret. GitHub Actions replaces every later
+	 * occurrence of it in the log with `***`, so call this before the value can
+	 * reach any output. Outside Actions nothing reads the command and printing
+	 * the value would disclose it, so this writes nothing.
+	 */
+	addMask(value: string): void;
 }
 
 // GitHub Actions turns a workflow command written on its own line into an
@@ -95,6 +102,11 @@ export function workflowCommands(
 		endGroup: () => {
 			if (isWorkflowSyntax) {
 				out.write('::endgroup::\n');
+			}
+		},
+		addMask: (value) => {
+			if (isWorkflowSyntax) {
+				out.write(`::add-mask::${escapeData(value)}\n`);
 			}
 		}
 	};

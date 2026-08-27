@@ -40,19 +40,20 @@ inputs:
   cache:
     description:
       Public caches to use at the tenant URL, one per line or comma-separated.
-      Naming neither cache nor private-cache uses the tenant's default cache.
+      If both cache and private-cache are empty, setup uses the tenant's default
+      cache.
     required: false
   private-cache:
     description:
       Private caches to use at the tenant URL, one per line or comma-separated.
-      Every read of one authenticates, so each needs a credential from
-      private-cache-credentials or from read-user and read-password.
+      Every private-cache read requires a credential. Supply one through
+      private-cache-credentials or through read-user and read-password.
     required: false
   private-cache-credentials:
     description:
-      JSON object mapping each private cache's local name to an object holding
-      its user and password. Populate it from workflow secrets. A cache with no
-      entry of its own uses read-user and read-password.
+      JSON object that maps each private cache's local name to its user and
+      password. Populate it from workflow secrets. A cache without its own entry
+      uses read-user and read-password.
     required: false
   trusted-public-key:
     description: Nix signing key to trust for cache reads.
@@ -70,7 +71,9 @@ inputs:
       numerically greater than the destination's.
     required: false
   nix-config-file:
-    description: Existing Nix config file to append generated settings to.
+    description:
+      Existing Nix config file. Setup appends an optional include of the
+      protected runner-local config file.
     required: false
 outputs:
   cupboard-path:

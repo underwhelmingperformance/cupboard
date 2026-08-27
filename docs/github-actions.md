@@ -327,10 +327,12 @@ Reusable workflows pass a canonical release-or-source JSON coordinate through
 the `cupboard` input. Direct action callers normally leave that internal
 coordinate unset and select a released binary with `cupboard-version` instead.
 
-Generated Nix config is written under `$RUNNER_TEMP` and exported through
-`NIX_CONFIG`. The action does not mutate `/etc/nix/nix.conf`. If
-`nix-config-file` is supplied, the generated config is also appended to that
-file.
+The action writes generated Nix config under `$RUNNER_TEMP` with mode `0600`.
+`NIX_CONFIG` contains a required absolute include of that file, and the action
+does not mutate `/etc/nix/nix.conf`. If `nix-config-file` is supplied, the
+action appends an optional include to the caller's file. The caller's file may
+remain after the runner removes `$RUNNER_TEMP`, so Nix must ignore the missing
+included file on later runs.
 
 If `trusted-public-key` is omitted, setup fetches `/pubkey` from the cache URL
 and trusts that cache signing key for this run. This is trust-on-first-use only
@@ -347,11 +349,19 @@ separated by commas, and may be used together: setup writes one substituter set
 covering every cache the two inputs name. Naming neither uses the tenant's
 default cache. Every read of a private cache authenticates, and a netrc entry is
 keyed by host alone, so the substituter URL of a private cache carries its own
-credential. That URL reaches `NIX_CONFIG` and the generated config file, so
-treat both as secret. A private cache takes its credential from
-`private-cache-credentials`, a JSON object mapping the cache's local name to its
-user and password, and otherwise from `read-user` and `read-password`; a private
-cache left without a credential fails the run.
+credential. That URL is written only to the protected generated config file. A
+private cache takes its credential from `private-cache-credentials`, a JSON
+object mapping the cache's local name to its user and password, and otherwise
+from `read-user` and `read-password`; a private cache left without a credential
+fails the run.
+
+Before it fetches or writes anything, setup registers each private cache's
+password and each credential-bearing substituter URL as a run secret, so the
+runner replaces both with `***` in the log. Both forms are registered because
+percent-encoding the password into the URL's userinfo can change it. Masking
+covers only the log, so a credential that a later step writes into a job
+artefact or a summary is still readable. Supply the credentials from repository
+or environment secrets rather than from the workflow file.
 
 ```yaml
 - uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
@@ -402,8 +412,10 @@ The default OIDC audience is the `url` input. The default retention root is
 `true` and `wait-timeout` defaults to `10m`.
 
 A push addresses one cache. `cache` names a public one and `private-cache` a
-private one; setting both fails the run. `actions/plan`, `actions/attest` and
-`actions/attest-attach` take the same pair.
+private one; setting both fails the run. `actions/plan`, `actions/attest`,
+`actions/attest-attach` and `actions/build-cohort` take the same pair. The
+reusable flake publish workflow described below takes the pair too and passes
+the selection to every one of those actions.
 
 Attestation bundle paths are also newline-delimited. They attach a bundle that
 already exists; `actions/attest` below produces one with the right subjects:
@@ -806,6 +818,15 @@ reads. The plan job also probes the cache directly, outside Nix, so pass the
 same credentials separately: `actions/plan` accepts them as
 `read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
 header on every narinfo probe.
+
+To publish to a private cache, set `private-cache` instead of `cache`; setting
+both fails the run, as does combining either with `preset`. The workflow passes
+the selection to `actions/setup`, `actions/plan`, `actions/build-cohort`,
+`actions/attest` and `actions/attest-attach`, so every job reads and writes the
+same destination. The workflow supplies one `read_user` and `read_password` pair
+for all authenticated reads, so supply the credential that the selected private
+cache accepts. If the cache has its own verifier, the tenant credential is
+rejected by setup's initial cache-info probe, before publication starts.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter

@@ -24,7 +24,9 @@ describe('prepare and setup Nix configuration', () => {
 				?.length,
 			prepareReferencesSetupConfig: prepare.includes('cupboard-nix.conf'),
 			setupReferencesPrepareConfig: setup.includes('cupboard-prepare-nix.conf'),
-			setupWritesOwnConfig: setup.includes("'cupboard-nix.conf'")
+			setupWritesOwnConfig: setup.includes(
+				'`cupboard-nix-${randomUUID()}.conf`'
+			)
 		}).toStrictEqual({
 			prepareConfigReferences: 6,
 			prepareReferencesSetupConfig: false,
