@@ -1,5 +1,6 @@
 import {
 	type GraceSeconds,
+	isPrivateCache,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -228,9 +229,14 @@ export class RetentionService {
 			: { covered: true, graceSeconds };
 	}
 
-	// The longest matching cache prefix wins. An empty prefix is the tenant-wide
-	// default.
+	// The longest matching cache-name prefix wins. The empty prefix is the
+	// tenant-wide default for public caches. Private caches do not use retention
+	// grace policies, although the empty prefix also matches their stored names.
 	resolveGraceSeconds(cache: StoredCache): GraceSeconds | undefined {
+		if (isPrivateCache(cache)) {
+			return undefined;
+		}
+
 		return this.context.db
 			.select({
 				cachePrefix: schema.retentionGracePolicies.cachePrefix,

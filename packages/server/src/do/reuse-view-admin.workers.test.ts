@@ -318,6 +318,10 @@ describe('reuse views', () => {
 		{
 			name: 'an exact selector with an invalid cache name',
 			body: { selectors: [{ kind: 'exact', pattern: 'PR-1' }] }
+		},
+		{
+			name: 'an exact selector naming a private cache',
+			body: { selectors: [{ kind: 'exact', pattern: '_private-builds' }] }
 		}
 	])('rejects $name', async ({ body }) => {
 		const token = await initialise();
