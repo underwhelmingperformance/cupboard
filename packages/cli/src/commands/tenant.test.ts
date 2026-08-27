@@ -2,8 +2,9 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheReadCredentialResponseSchema,
 	type TenantCreateBody,
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
@@ -22,18 +23,21 @@ import {
 	parseQuotaBytes,
 	readCredentialFromOptions,
 	ReadUserWithoutCredentialError,
+	runTenantClearCacheCredential,
 	runTenantClearCredential,
 	runTenantCreate,
 	runTenantList,
 	runTenantReadMode,
 	runTenantRemove,
 	runTenantResume,
+	runTenantRotateCacheCredential,
 	runTenantRotateCredential,
 	runTenantSuspend,
 	type TenantClient
 } from './tenant.ts';
 
 const acmeTenant = tenantIdSchema.parse('acme');
+const buildsCache = cacheNameSchema.parse('builds');
 const alice = readUserInputSchema.parse('alice');
 
 // A generated read password: 32 random bytes in base64url. The value is
@@ -45,6 +49,12 @@ const rotateCallSchema = z.object({
 	read: z.object({ user: z.string(), password: generatedPasswordSchema })
 });
 const rotateCallsSchema = z.tuple([rotateCallSchema]);
+const rotateCacheCallSchema = z.object({
+	id: z.string(),
+	cacheName: z.string(),
+	read: z.object({ user: z.string(), password: generatedPasswordSchema })
+});
+const rotateCacheCallsSchema = z.tuple([rotateCacheCallSchema]);
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -105,6 +115,10 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 			Promise.resolve({ id, readMode: 'private' }),
 		clearReadCredential: ({ id }) =>
 			Promise.resolve({ id, readMode: 'private' }),
+		rotateCacheReadCredential: ({ id, cacheName }) =>
+			Promise.resolve({ id, cacheName, hasCredential: true }),
+		clearCacheReadCredential: ({ id, cacheName }) =>
+			Promise.resolve({ id, cacheName, hasCredential: false }),
 		remove: ({ id }) => Promise.resolve({ id, status: 'offboarding' }),
 		...overrides
 	};
@@ -573,6 +587,136 @@ describe('runTenantClearCredential', () => {
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'acme' }],
 			results: [[{ label: 'acme', value: 'private' }]]
+		});
+	});
+});
+
+describe('runTenantRotateCacheCredential', () => {
+	it('generates a password and reports the same value it sends', async () => {
+		const results: ResultRow[][] = [];
+		const calls: {
+			id: string;
+			cacheName: string;
+			read: { user: string; password: string };
+		}[] = [];
+
+		await runTenantRotateCacheCredential(
+			acmeTenant,
+			buildsCache,
+			{},
+			reporter(results),
+			{
+				rotateCacheReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve(
+						cacheReadCredentialResponseSchema.parse({
+							id: 'acme',
+							cacheName: 'builds',
+							hasCredential: true
+						})
+					);
+				}
+			}
+		);
+		const [call] = rotateCacheCallsSchema.parse(calls);
+
+		// The operator must see the exact generated password sent to the server;
+		// another value could not authenticate.
+		const sentPassword = call.read.password;
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{
+					id: 'acme',
+					cacheName: 'builds',
+					read: { user: 'cupboard', password: sentPassword }
+				}
+			],
+			results: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Private cache', value: 'builds' },
+					{ label: 'Read user', value: 'cupboard' },
+					{ label: 'Read password', value: sentPassword }
+				]
+			]
+		});
+	});
+
+	it('sends the supplied read user', async () => {
+		const results: ResultRow[][] = [];
+		const calls: {
+			id: string;
+			cacheName: string;
+			read: { user: string; password: string };
+		}[] = [];
+
+		await runTenantRotateCacheCredential(
+			acmeTenant,
+			buildsCache,
+			{ readUser: alice },
+			reporter(results),
+			{
+				rotateCacheReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve(
+						cacheReadCredentialResponseSchema.parse({
+							id: 'acme',
+							cacheName: 'builds',
+							hasCredential: true
+						})
+					);
+				}
+			}
+		);
+		const [call] = rotateCacheCallsSchema.parse(calls);
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Tenant', value: 'acme' },
+				{ label: 'Private cache', value: 'builds' },
+				{ label: 'Read user', value: 'alice' },
+				{ label: 'Read password', value: call.read.password }
+			]
+		]);
+	});
+});
+
+describe('runTenantClearCacheCredential', () => {
+	it('clears the credential and reports that the tenant credential applies', async () => {
+		const results: ResultRow[][] = [];
+		const calls: { id: string; cacheName: string }[] = [];
+
+		await runTenantClearCacheCredential(
+			acmeTenant,
+			buildsCache,
+			reporter(results),
+			{
+				clearCacheReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve(
+						cacheReadCredentialResponseSchema.parse({
+							id: 'acme',
+							cacheName: 'builds',
+							hasCredential: false
+						})
+					);
+				}
+			}
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ id: 'acme', cacheName: 'builds' }],
+			results: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Private cache', value: 'builds' },
+					{
+						label: 'Read credential',
+						value: 'cleared; readers now use the tenant credential'
+					}
+				]
+			]
 		});
 	});
 });

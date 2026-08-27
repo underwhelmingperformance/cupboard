@@ -32,7 +32,11 @@ import {
 } from '../http/http.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
-import { isReadAuthorised, unauthorisedResponse } from './read-auth.ts';
+import {
+	isReadAuthorised,
+	type ReadVerifier,
+	unauthorisedResponse
+} from './read-auth.ts';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
@@ -76,21 +80,53 @@ export function cacheScope(
 	};
 }
 
-// Private tenants require Basic authentication before content dispatch.
-// Admission reads the verifier from the authoritative D1 row on every request,
-// so credential rotation or revocation takes effect immediately. A missing
-// verifier fails closed. Successful private reads stay on the control Worker
-// and never enter the cache-owning tenant Worker.
-export async function guardRead(
+/**
+ * What a read request addresses: a cache in the public namespace, where the
+ * tenant's read mode decides whether readers authenticate, or a cache in the
+ * private namespace, where they always do.
+ */
+export interface ReadScope {
+	readonly visibility: 'public' | 'private';
+	readonly cache: StoredCache;
+}
+
+/**
+ * Authenticates a read, or returns the refusal to send instead.
+ *
+ * Admission reads every verifier from the authoritative D1 rows on each
+ * request, so credential rotation or revocation takes effect immediately.
+ *
+ * A request in the private namespace must authenticate. `cacheVerifier` is the
+ * addressed cache's own credential when it has one, and it is then the only
+ * credential that opens the cache; a cache without one takes the tenant
+ * credential. Neither being present is a refusal, so a missing row cannot open
+ * a private cache to anyone.
+ *
+ * A request in the public namespace authenticates only when the whole tenant is
+ * private. Successful authenticated reads stay on the control Worker and never
+ * enter the cache-owning tenant Worker.
+ */
+export async function guardScopedRead(
 	request: Request,
-	entry: TenantEntry
+	entry: TenantEntry,
+	scope: ReadScope,
+	cacheVerifier?: ReadVerifier
 ): Promise<Response | undefined> {
+	if (scope.visibility === 'private') {
+		return authenticateRead(request, cacheVerifier ?? entry.readVerifier);
+	}
+
 	if (entry.readMode !== 'private') {
 		return undefined;
 	}
 
-	const verifier = entry.readVerifier;
+	return authenticateRead(request, entry.readVerifier);
+}
 
+async function authenticateRead(
+	request: Request,
+	verifier: ReadVerifier | undefined
+): Promise<Response | undefined> {
 	if (verifier !== undefined && (await isReadAuthorised(request, verifier))) {
 		return undefined;
 	}

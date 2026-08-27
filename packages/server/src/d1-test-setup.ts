@@ -16,6 +16,7 @@ import {
 	objectIncarnation,
 	tenant,
 	tenantBlob,
+	tenantCacheReadCredential,
 	tenantCasBlob,
 	tenantMaintenanceEligibility,
 	tenantMaintenanceFailure,
@@ -42,6 +43,7 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
+	await database.delete(tenantCacheReadCredential).run();
 	await database.delete(tenantCasBlob).run();
 	await database.delete(tenantBlob).run();
 	await database.delete(tenantMaintenanceEligibility).run();

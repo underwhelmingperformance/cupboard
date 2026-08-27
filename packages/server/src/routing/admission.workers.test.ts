@@ -1,8 +1,15 @@
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type PrivateStoredCache,
+	privateStoredCache,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type ParsedTenantCreateBody,
-	tenantCreateBodySchema
+	type ParsedTenantReadCredential,
+	tenantCreateBodySchema,
+	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { readUserSchema } from '@cupboard/shared/http';
 import {
@@ -23,11 +30,16 @@ import {
 	type TenantEntry,
 	tenantMemberKey
 } from '../control/tenant-membership.ts';
-import { ensureTenant, setTenantStatus } from '../control/tenant-registry.ts';
+import {
+	ensureTenant,
+	setCacheReadCredential,
+	setTenantStatus
+} from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
+	isReadPasswordMatching,
 	readPasswordHashSchema,
 	readPasswordSaltSchema
 } from '../read/read-auth.ts';
@@ -42,6 +54,12 @@ import {
 import worker from './handler.ts';
 
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+const cachePassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
+const cacheCredential: ParsedTenantReadCredential =
+	tenantReadCredentialSchema.parse({
+		user: 'reader',
+		password: cachePassword
+	});
 
 async function admitWithFaults(
 	slug: string,
@@ -490,6 +508,168 @@ describe('layered admission gate', () => {
 					passwordSalt: 'salt'
 				}
 			}
+		});
+	});
+});
+
+// Counts the D1 batches a call issues, so a test can show that admission reads
+// the tenant row and the cache verifier in one round trip.
+function countingD1(inner: D1Database, batches: number[]): D1Database {
+	return {
+		prepare: (query) => inner.prepare(query),
+		batch: (statements) => {
+			batches.push(statements.length);
+
+			return inner.batch(statements);
+		},
+		exec: (query) => inner.exec(query),
+		withSession: (constraint) => inner.withSession(constraint),
+		dump: () => Promise.reject(new Error('dump is not supported here'))
+	};
+}
+
+interface PrivateAdmission {
+	readonly entry: TenantEntry | undefined;
+	readonly cacheUser: string | undefined;
+	readonly cacheAcceptsPassword: boolean;
+	readonly batches: number[];
+}
+
+async function admitPrivate(
+	slug: string,
+	cache?: PrivateStoredCache
+): Promise<PrivateAdmission> {
+	const batches: number[] = [];
+	const countedEnv = {
+		...env,
+		CUPBOARD_DB: countingD1(env.CUPBOARD_DB, batches)
+	};
+	const ctx = createExecutionContext();
+	const admission = await admitTenant(
+		countedEnv,
+		ctx,
+		tenantIdSchema.parse(slug),
+		cache
+	);
+	await waitOnExecutionContext(ctx);
+	const verifier = admission?.cacheVerifier;
+
+	return {
+		entry: admission?.entry,
+		cacheUser: verifier?.user,
+		cacheAcceptsPassword:
+			verifier !== undefined &&
+			(await isReadPasswordMatching(
+				cachePassword,
+				verifier.passwordHash,
+				verifier.passwordSalt
+			)),
+		batches
+	};
+}
+
+describe('private cache admission', () => {
+	const builds = cacheNameSchema.parse('builds');
+	const guides = cacheNameSchema.parse('guides');
+
+	it("returns the selected cache's verifier from one batch", async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await setCacheReadCredential(
+			database(),
+			tenantIdSchema.parse('acme'),
+			builds,
+			cacheCredential,
+			now
+		);
+		await refreshTenantMembership(env);
+
+		expect(
+			await admitPrivate('acme', privateStoredCache(builds))
+		).toStrictEqual({
+			entry: { status: 'active', readMode: 'public' },
+			cacheUser: 'reader',
+			cacheAcceptsPassword: true,
+			batches: [2]
+		});
+	});
+
+	it('admits the tenant without a cache verifier when the selected cache has none', async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await refreshTenantMembership(env);
+
+		expect(
+			await admitPrivate('acme', privateStoredCache(builds))
+		).toStrictEqual({
+			entry: { status: 'active', readMode: 'public' },
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
+			batches: [2]
+		});
+	});
+
+	it("does not return a sibling cache's verifier", async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await setCacheReadCredential(
+			database(),
+			tenantIdSchema.parse('acme'),
+			guides,
+			cacheCredential,
+			now
+		);
+		await refreshTenantMembership(env);
+
+		expect(
+			await admitPrivate('acme', privateStoredCache(builds))
+		).toStrictEqual({
+			entry: { status: 'active', readMode: 'public' },
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
+			batches: [2]
+		});
+	});
+
+	it('reads only the tenant row when no private cache is named', async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await setCacheReadCredential(
+			database(),
+			tenantIdSchema.parse('acme'),
+			builds,
+			cacheCredential,
+			now
+		);
+		await refreshTenantMembership(env);
+
+		expect(await admitPrivate('acme')).toStrictEqual({
+			entry: { status: 'active', readMode: 'public' },
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
+			batches: []
+		});
+	});
+
+	it('refuses an offboarded tenant even inside the private namespace', async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await setCacheReadCredential(
+			database(),
+			tenantIdSchema.parse('acme'),
+			builds,
+			cacheCredential,
+			now
+		);
+		await refreshTenantMembership(env);
+		await database()
+			.update(d1Schema.tenant)
+			.set({ status: 'offboarded' })
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
+			.run();
+
+		expect(
+			await admitPrivate('acme', privateStoredCache(builds))
+		).toStrictEqual({
+			entry: undefined,
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
+			batches: [2]
 		});
 	});
 });

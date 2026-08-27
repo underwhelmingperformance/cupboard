@@ -1,5 +1,9 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { controlContract } from '@cupboard/protocol/contract';
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
@@ -27,6 +31,17 @@ type ControlClient = JsonifiedClient<
 // The real derived client, exactly as the CLI builds it: the OpenAPI link
 // over the control contract at the worker's `/control` prefix, with
 // responses validated against the contract's output schemas.
+const readPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
+
+function cacheCredentialGrants(
+	tenant: string,
+	actions: readonly string[]
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{ type: 'cupboard_tenant', actions, tenant }
+	]);
+}
+
 function controlClient(token?: string): ControlClient {
 	const link = new OpenAPILink(controlContract, {
 		url: `${currentOrigin()}/control`,
@@ -316,6 +331,110 @@ describe('control contract round trip', () => {
 			readMode: { id: 'acme', readMode: 'public' },
 			rotated: { id: 'acme', readMode: 'public' },
 			cleared: { id: 'acme', readMode: 'public' }
+		});
+	});
+
+	it('sets and clears a private cache read credential through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			readMode: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const rotated = await client.tenants.rotateCacheReadCredential({
+			id: 'acme',
+			cacheName: 'builds',
+			read: { user: 'reader', password: readPassword }
+		});
+		const cleared = await client.tenants.clearCacheReadCredential({
+			id: 'acme',
+			cacheName: 'builds'
+		});
+
+		expect({ rotated, cleared }).toStrictEqual({
+			rotated: { id: 'acme', cacheName: 'builds', hasCredential: true },
+			cleared: { id: 'acme', cacheName: 'builds', hasCredential: false }
+		});
+	});
+
+	// The two procedures declare their own operations and take the tenant slug as
+	// their resource, so authority over one tenant does not reach another, and
+	// authority over the tenant credential does not reach a cache credential.
+	it.each([
+		{
+			name: 'another tenant',
+			grants: cacheCredentialGrants('beta', [
+				'tenant:rotate-cache-read-credential'
+			])
+		},
+		{
+			name: 'the tenant credential only',
+			grants: cacheCredentialGrants('acme', ['tenant:rotate-read-credential'])
+		}
+	])('returns FORBIDDEN for a token scoped to $name', async ({ grants }) => {
+		const admin = controlClient(await issueControlAdminToken());
+		await admin.tenants.create({
+			id: 'acme',
+			readMode: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const client = controlClient(
+			await issueControlAdminToken('operator', grants)
+		);
+
+		const [error] = await safe(
+			client.tenants.rotateCacheReadCredential({
+				id: 'acme',
+				cacheName: 'builds',
+				read: { user: 'reader', password: readPassword }
+			})
+		);
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
+		});
+	});
+
+	it('accepts a token scoped to the tenant for both cache credential procedures', async () => {
+		const admin = controlClient(await issueControlAdminToken());
+		await admin.tenants.create({
+			id: 'acme',
+			readMode: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const client = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', [
+					'tenant:rotate-cache-read-credential',
+					'tenant:clear-cache-read-credential'
+				])
+			)
+		);
+
+		const rotated = await client.tenants.rotateCacheReadCredential({
+			id: 'acme',
+			cacheName: 'builds',
+			read: { user: 'reader', password: readPassword }
+		});
+		const cleared = await client.tenants.clearCacheReadCredential({
+			id: 'acme',
+			cacheName: 'builds'
+		});
+
+		expect({ rotated, cleared }).toStrictEqual({
+			rotated: { id: 'acme', cacheName: 'builds', hasCredential: true },
+			cleared: { id: 'acme', cacheName: 'builds', hasCredential: false }
 		});
 	});
 

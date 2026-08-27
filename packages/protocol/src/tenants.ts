@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
@@ -119,4 +119,20 @@ export type ParsedTenantReadModeResponse = z.output<
 >;
 export type TenantReadModeResponse = z.input<
 	typeof tenantReadModeResponseSchema
+>;
+
+// The result of setting or clearing one private cache's read credential.
+// `cacheName` is the local name. `hasCredential` reports whether that cache now
+// has a credential of its own; when it has none, readers authenticate with the
+// tenant credential.
+export const cacheReadCredentialResponseSchema = z.strictObject({
+	id: tenantIdSchema,
+	cacheName: cacheNameSchema,
+	hasCredential: z.boolean()
+});
+export type ParsedCacheReadCredentialResponse = z.output<
+	typeof cacheReadCredentialResponseSchema
+>;
+export type CacheReadCredentialResponse = z.input<
+	typeof cacheReadCredentialResponseSchema
 >;

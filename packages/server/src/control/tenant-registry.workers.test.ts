@@ -1,4 +1,10 @@
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheName,
+	cacheNameSchema,
+	privateStoredCache,
+	type TenantId,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type ParsedTenantCreateBody,
@@ -8,7 +14,7 @@ import {
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -23,6 +29,7 @@ import {
 } from '../errors.ts';
 import {
 	hashReadPassword,
+	isReadPasswordMatching,
 	type ReadPasswordHash,
 	readPasswordHashSchema,
 	type ReadPasswordSalt,
@@ -30,11 +37,13 @@ import {
 } from '../read/read-auth.ts';
 
 import {
+	clearCacheReadCredential,
 	clearTenantReadCredential,
 	ensureTenant,
 	finaliseOffboardedTenant,
 	listTenants,
 	resumeTenant,
+	setCacheReadCredential,
 	setTenantReadCredential,
 	setTenantReadMode,
 	setTenantStatus
@@ -43,6 +52,8 @@ import {
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const acme = tenantIdSchema.parse('acme');
 const ghost = tenantIdSchema.parse('ghost');
+const builds = cacheNameSchema.parse('builds');
+const guides = cacheNameSchema.parse('guides');
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -85,11 +96,14 @@ function privateBodyWithRead(id: string): ParsedTenantCreateBody {
 	});
 }
 
-function readCredential(user: string): ParsedTenantReadCredential {
-	return tenantReadCredentialSchema.parse({
-		user,
-		password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-	});
+const readPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
+const rotatedReadPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu45';
+
+function readCredential(
+	user: string,
+	password: string = readPassword
+): ParsedTenantReadCredential {
+	return tenantReadCredentialSchema.parse({ user, password });
 }
 
 function quotaBody(id: string, quotaBytes: number): ParsedTenantCreateBody {
@@ -117,6 +131,16 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	}
 
 	return rejected;
+}
+
+// Returns the rejected error's fields, or undefined if the call resolves. Race
+// tests assert this result alongside the stored rows.
+async function rejectionFields(
+	run: () => Promise<unknown>
+): Promise<ReturnType<typeof errorFields> | undefined> {
+	const rejected = await rejectedBy(run);
+
+	return rejected === undefined ? undefined : errorFields(rejected);
 }
 
 function errorFields(error: unknown): {
@@ -157,6 +181,80 @@ async function storedReadVerifier(id: TenantId): Promise<{
 				.where(eq(d1Schema.tenant.id, id))
 				.get()
 		);
+}
+
+interface StoredCacheCredential {
+	readonly cache: string;
+	readonly readUser: string;
+	readonly createdAt: string;
+	readonly acceptsPassword: boolean;
+	readonly storesPlaintext: boolean;
+}
+
+// Every private-cache credential row the tenant holds, in stored-name order,
+// with the verifier checked against the password it was set from.
+async function storedCacheCredentials(
+	id: TenantId,
+	password: string = readPassword
+): Promise<StoredCacheCredential[]> {
+	const rows = await database()
+		.select()
+		.from(d1Schema.tenantCacheReadCredential)
+		.where(eq(d1Schema.tenantCacheReadCredential.tenant, id))
+		.orderBy(asc(d1Schema.tenantCacheReadCredential.cache))
+		.all();
+
+	return Promise.all(
+		rows.map(async (row) => ({
+			cache: row.cache,
+			readUser: row.readUser,
+			createdAt: row.createdAt,
+			acceptsPassword: await isReadPasswordMatching(
+				password,
+				row.readPasswordHash,
+				row.readPasswordSalt
+			),
+			storesPlaintext: row.readPasswordHash === password
+		}))
+	);
+}
+
+// Deletes the tenant row directly. No application path does this: finalising an
+// offboarded tenant keeps a tombstone, so only an operator removing that row
+// leaves a guarded write with no tenant to match.
+async function deleteTenantRow(id: TenantId): Promise<void> {
+	await database()
+		.delete(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, id))
+		.run();
+}
+
+async function isPasswordAccepted(
+	id: TenantId,
+	cacheName: CacheName,
+	password: string
+): Promise<boolean> {
+	const cache = privateStoredCache(cacheName);
+	const row = await database()
+		.select()
+		.from(d1Schema.tenantCacheReadCredential)
+		.where(
+			and(
+				eq(d1Schema.tenantCacheReadCredential.tenant, id),
+				eq(d1Schema.tenantCacheReadCredential.cache, cache)
+			)
+		)
+		.get();
+
+	if (row === undefined) {
+		return false;
+	}
+
+	return isReadPasswordMatching(
+		password,
+		row.readPasswordHash,
+		row.readPasswordSalt
+	);
 }
 
 describe('tenant registry', () => {
@@ -706,4 +804,273 @@ describe('tenant lifecycle operations', () => {
 			tenant: acme
 		});
 	});
+});
+
+describe('private cache read credentials', () => {
+	const cacheCredentialWrites = [
+		{
+			operation: 'set',
+			run: (id: TenantId) =>
+				setCacheReadCredential(
+					database(),
+					id,
+					builds,
+					readCredential('reader'),
+					now
+				)
+		},
+		{
+			operation: 'clear',
+			run: (id: TenantId) => clearCacheReadCredential(database(), id, builds)
+		}
+	];
+
+	const retirements = [
+		{
+			status: 'offboarding',
+			retire: async (id: TenantId) => {
+				await setTenantStatus(database(), id, 'offboarding');
+			}
+		},
+		{
+			status: 'offboarded',
+			retire: async (id: TenantId) => {
+				await setTenantStatus(database(), id, 'offboarding');
+				await finaliseOffboardedTenant(database(), id);
+			}
+		}
+	];
+
+	it('stores a hashed verifier for the named cache', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		expect(await storedCacheCredentials(acme)).toStrictEqual([
+			{
+				cache: 'private/builds',
+				readUser: 'reader',
+				createdAt: now,
+				acceptsPassword: true,
+				storesPlaintext: false
+			}
+		]);
+	});
+
+	it('replaces the verifier so the previous password stops working', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('rotated', rotatedReadPassword),
+			now
+		);
+		const [stored] = await storedCacheCredentials(acme, rotatedReadPassword);
+
+		expect({
+			stored,
+			acceptsPreviousPassword: await isPasswordAccepted(
+				acme,
+				builds,
+				readPassword
+			)
+		}).toStrictEqual({
+			stored: {
+				cache: 'private/builds',
+				readUser: 'rotated',
+				createdAt: now,
+				acceptsPassword: true,
+				storesPlaintext: false
+			},
+			acceptsPreviousPassword: false
+		});
+	});
+
+	it('keeps one cache credential when a sibling cache is cleared', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+		await setCacheReadCredential(
+			database(),
+			acme,
+			guides,
+			readCredential('reader'),
+			now
+		);
+
+		await clearCacheReadCredential(database(), acme, builds);
+
+		expect(await storedCacheCredentials(acme)).toStrictEqual([
+			{
+				cache: 'private/guides',
+				readUser: 'reader',
+				createdAt: now,
+				acceptsPassword: true,
+				storesPlaintext: false
+			}
+		]);
+	});
+
+	it('clears a cache that has no credential of its own', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		await clearCacheReadCredential(database(), acme, builds);
+
+		expect(await storedCacheCredentials(acme)).toStrictEqual([]);
+	});
+
+	it('deletes every cache credential when the tenant is finalised', async () => {
+		await provision(createBody(acme, 'private'));
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+		await setCacheReadCredential(
+			database(),
+			acme,
+			guides,
+			readCredential('reader'),
+			now
+		);
+		await setTenantStatus(database(), acme, 'offboarding');
+
+		await finaliseOffboardedTenant(database(), acme);
+
+		expect(await storedCacheCredentials(acme)).toStrictEqual([]);
+	});
+
+	it.each(
+		cacheCredentialWrites.flatMap((write) =>
+			retirements.map((retirement) => ({ ...write, ...retirement }))
+		)
+	)(
+		'refuses to $operation a cache credential for an $status tenant',
+		async ({ retire, run }) => {
+			await ensureTenant(database(), createBody(acme), now);
+			await retire(acme);
+
+			const rejected = await rejectedBy(() => run(acme));
+
+			expect(errorFields(rejected)).toStrictEqual({
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: acme
+			});
+		}
+	);
+
+	it('rotates a cache credential while the tenant is suspended', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+		await setTenantStatus(database(), acme, 'suspended');
+
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		expect(await storedCacheCredentials(acme)).toStrictEqual([
+			{
+				cache: 'private/builds',
+				readUser: 'reader',
+				createdAt: now,
+				acceptsPassword: true,
+				storesPlaintext: false
+			}
+		]);
+	});
+
+	// Rotation reads the tenant status before hashing the password. Start
+	// rotation without awaiting it, then finish offboarding while hashing delays
+	// the insert. This exercises the live-tenant condition in the insert.
+	it('writes no credential when offboarding completes after the status check', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rotation = setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		await setTenantStatus(database(), acme, 'offboarding');
+		await finaliseOffboardedTenant(database(), acme);
+
+		expect({
+			error: await rejectionFields(() => rotation),
+			stored: await storedCacheCredentials(acme)
+		}).toStrictEqual({
+			error: {
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: acme
+			},
+			stored: []
+		});
+	});
+
+	it('writes no credential when the tenant row is deleted after the status check', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rotation = setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		await deleteTenantRow(acme);
+
+		expect({
+			error: await rejectionFields(() => rotation),
+			stored: await storedCacheCredentials(acme)
+		}).toStrictEqual({
+			error: {
+				name: 'TenantNotFoundError',
+				status: StatusCodes.NOT_FOUND,
+				id: acme
+			},
+			stored: []
+		});
+	});
+
+	it.each(cacheCredentialWrites)(
+		'refuses to $operation a cache credential for an unknown tenant',
+		async ({ run }) => {
+			const rejected = await rejectedBy(() => run(ghost));
+
+			expect(errorFields(rejected)).toStrictEqual({
+				name: 'TenantNotFoundError',
+				status: StatusCodes.NOT_FOUND,
+				id: ghost
+			});
+		}
+	);
 });

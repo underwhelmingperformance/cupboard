@@ -1,9 +1,15 @@
 import { randomBytes } from 'node:crypto';
 
 import type { CliUi } from '@cupboard/cli-ui';
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheName,
+	cacheNameSchema,
+	type TenantId,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	defaultReadUser,
+	type ParsedCacheReadCredentialResponse,
 	type ParsedTenantListResponse,
 	type ParsedTenantMutateResponse,
 	type ParsedTenantReadModeResponse,
@@ -41,6 +47,15 @@ export interface TenantClient {
 	clearReadCredential(input: {
 		id: TenantId;
 	}): Promise<ParsedTenantReadModeResponse>;
+	rotateCacheReadCredential(input: {
+		id: TenantId;
+		cacheName: CacheName;
+		read: { user: ReadUser; password: string };
+	}): Promise<ParsedCacheReadCredentialResponse>;
+	clearCacheReadCredential(input: {
+		id: TenantId;
+		cacheName: CacheName;
+	}): Promise<ParsedCacheReadCredentialResponse>;
 	remove(input: { id: TenantId }): Promise<ParsedTenantMutateResponse>;
 }
 
@@ -330,6 +345,67 @@ export function registerTenantCommands(
 		});
 
 	tenant
+		.command('rotate-cache-credential')
+		.description(
+			"Set one private cache's own read credential to a newly generated password."
+		)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument('<id>', 'tenant slug')
+		.argument('<cache>', 'private cache name')
+		.option(
+			'--read-user <user>',
+			'the Basic-auth user this cache requires from readers',
+			parseReadUser
+		)
+		.action(
+			async (
+				url: URL,
+				id: string,
+				cache: string,
+				options: RotateCredentialOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = controlRpc(url, {
+					credential: cachedOwnerProvider(url, {
+						signal: programOptions.signal
+					}),
+					signal: programOptions.signal
+				});
+
+				await runTenantRotateCacheCredential(
+					tenantIdSchema.parse(id),
+					cacheNameSchema.parse(cache),
+					options,
+					reporter,
+					rpc.tenants
+				);
+			}
+		);
+
+	tenant
+		.command('clear-cache-credential')
+		.description(
+			"Clear one private cache's own read credential; readers then use the tenant credential."
+		)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument('<id>', 'tenant slug')
+		.argument('<cache>', 'private cache name')
+		.action(async (url: URL, id: string, cache: string) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runTenantClearCacheCredential(
+				tenantIdSchema.parse(id),
+				cacheNameSchema.parse(cache),
+				reporter,
+				rpc.tenants
+			);
+		});
+
+	tenant
 		.command('remove')
 		.alias('delete')
 		.description('Begin offboarding a tenant.')
@@ -493,6 +569,60 @@ export async function runTenantRotateCredential(
 		kind: 'tenant',
 		data: { ...result, readUser: user, generatedReadPassword: password },
 		rows
+	});
+}
+
+export async function runTenantRotateCacheCredential(
+	id: TenantId,
+	cacheName: CacheName,
+	options: RotateCredentialOptions,
+	reporter: Reporter,
+	client: Pick<TenantClient, 'rotateCacheReadCredential'>
+): Promise<void> {
+	const user = readUserOrDefault(options.readUser);
+	const password = generateReadPassword();
+
+	const result = await reporter.phase('Rotating cache read credential', () =>
+		client.rotateCacheReadCredential({
+			id,
+			cacheName,
+			read: { user, password }
+		})
+	);
+
+	reporter.result({
+		kind: 'tenant',
+		data: { ...result, readUser: user, generatedReadPassword: password },
+		rows: [
+			{ label: 'Tenant', value: result.id },
+			{ label: 'Private cache', value: result.cacheName },
+			{ label: 'Read user', value: user },
+			{ label: 'Read password', value: password }
+		]
+	});
+}
+
+export async function runTenantClearCacheCredential(
+	id: TenantId,
+	cacheName: CacheName,
+	reporter: Reporter,
+	client: Pick<TenantClient, 'clearCacheReadCredential'>
+): Promise<void> {
+	const result = await reporter.phase('Clearing cache read credential', () =>
+		client.clearCacheReadCredential({ id, cacheName })
+	);
+
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [
+			{ label: 'Tenant', value: result.id },
+			{ label: 'Private cache', value: result.cacheName },
+			{
+				label: 'Read credential',
+				value: 'cleared; readers now use the tenant credential'
+			}
+		]
 	});
 }
 

@@ -16,11 +16,13 @@ import {
 	controlOidcTrustGet,
 	controlOidcTrustList,
 	controlOidcTrustRemove,
+	controlTenantClearCacheReadCredential,
 	controlTenantClearReadCredential,
 	controlTenantCreate,
 	controlTenantList,
 	controlTenantOffboard,
 	controlTenantResume,
+	controlTenantRotateCacheReadCredential,
 	controlTenantRotateReadCredential,
 	controlTenantSetReadMode,
 	controlTenantSuspend
@@ -106,6 +108,23 @@ export const controlRouter = os.router({
 		clearReadCredential: os.tenants.clearReadCredential.handler(
 			({ input, context }) =>
 				controlTenantClearReadCredential(context.env, input.id)
+		),
+		rotateCacheReadCredential: os.tenants.rotateCacheReadCredential.handler(
+			({ input, context }) =>
+				controlTenantRotateCacheReadCredential(
+					context.env,
+					input.id,
+					input.cacheName,
+					input.read
+				)
+		),
+		clearCacheReadCredential: os.tenants.clearCacheReadCredential.handler(
+			({ input, context }) =>
+				controlTenantClearCacheReadCredential(
+					context.env,
+					input.id,
+					input.cacheName
+				)
 		),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)
