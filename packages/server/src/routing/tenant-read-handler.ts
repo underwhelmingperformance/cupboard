@@ -1,5 +1,7 @@
 import {
+	cacheFromSelector,
 	DEFAULT_CACHE,
+	publicCacheSelectorSchema,
 	type StoredCache,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -13,12 +15,7 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import {
-	cacheInfoResponse,
-	cacheScope,
-	serveNar,
-	serveNarInfo
-} from '../read/read.ts';
+import { cacheInfoResponse, serveNar, serveNarInfo } from '../read/read.ts';
 
 import { tenantServer } from './durable-object.ts';
 import { parseTenantPath } from './tenant-routing.ts';
@@ -48,6 +45,81 @@ function innerRequest(context: Context<TenantReadHonoEnv>): Request {
 	return new Request(inner, context.req.raw);
 }
 
+/**
+ * The reads this Worker serves through Workers Cache, relative to the cache
+ * each one addresses. The control Worker forwards a read here only after it has
+ * admitted the tenant and found the read needs no credential.
+ *
+ * Hono answers HEAD by re-dispatching the request to the GET handler with the
+ * body stripped, so a separate HEAD registration would never match.
+ */
+function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
+	const app = new Hono<TenantReadHonoEnv>();
+
+	app.get('/nix-cache-info', async (context) => {
+		const cache = context.get('cache');
+		const response = await cacheInfoResponse(
+			innerRequest(context),
+			context.env,
+			context.get('tenant'),
+			cache,
+			false
+		);
+
+		return cache === DEFAULT_CACHE ? response : noStore(response);
+	});
+
+	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, (context) => {
+		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
+
+		if (storePathHash === undefined) {
+			return noStore(notFoundResponse());
+		}
+
+		return serveNarInfo(
+			context.req.raw,
+			context.env,
+			context.get('tenant'),
+			context.get('cache'),
+			storePathHash,
+			false
+		);
+	});
+
+	app.get('/nar/:name', (context) => {
+		const nar = parseNarName(context.req.param('name'));
+
+		if (nar === undefined) {
+			return noStore(notFoundResponse());
+		}
+
+		return serveNar(
+			context.req.raw,
+			context.env,
+			context.get('tenant'),
+			nar.narHash,
+			false,
+			nar.incarnation
+		);
+	});
+
+	app.get('/attestation-bundles/:digest', async (context, next) => {
+		if (parseAttestationDigestName(context.req.param('digest')) === undefined) {
+			return next();
+		}
+
+		return noStore(
+			await tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+	});
+
+	return app;
+}
+
+const cachedReadApp = buildCachedReadApp();
+
 function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
 
@@ -67,15 +139,26 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
-		const scope = cacheScope(route.rest);
+		context.set('tenant', route.tenant);
+		context.set('cache', DEFAULT_CACHE);
+		context.set('tenantRest', route.rest);
+		await next();
+	});
 
-		if (scope === undefined) {
+	// Only the public namespace is mounted here, and deliberately so: every read
+	// in the private namespace must stay on the control Worker, where the reader
+	// is authenticated and the response is marked `no-store`. Giving this Worker
+	// a private mount would put private content behind Workers Cache.
+	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
+		const selector = publicCacheSelectorSchema.safeParse(
+			context.req.param('cacheName')
+		);
+
+		if (!selector.success) {
 			return noStore(notFoundResponse());
 		}
 
-		context.set('tenant', route.tenant);
-		context.set('cache', scope.cache);
-		context.set('tenantRest', route.rest);
+		context.set('cache', cacheFromSelector(selector.data));
 		await next();
 	});
 
@@ -88,84 +171,9 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 				)
 			)
 	);
-	const bundleHandler = async (
-		context: Context<TenantReadHonoEnv>,
-		next: () => Promise<void>
-	): Promise<Response | undefined> => {
-		if (
-			parseAttestationDigestName(context.req.param('digest') ?? '') ===
-			undefined
-		) {
-			await next();
 
-			return undefined;
-		}
-
-		return noStore(
-			await tenantServer(context.env, context.get('tenant')).fetch(
-				innerRequest(context)
-			)
-		);
-	};
-	app.get('/t/:tenant/attestation-bundles/:digest', bundleHandler);
-	app.get(
-		'/t/:tenant/cache/:cacheName/attestation-bundles/:digest',
-		bundleHandler
-	);
-	const narHandler = (context: Context<TenantReadHonoEnv>) => {
-		const nar = parseNarName(context.req.param('name') ?? '');
-
-		if (nar === undefined) {
-			return noStore(notFoundResponse());
-		}
-
-		return serveNar(
-			context.req.raw,
-			context.env,
-			context.get('tenant'),
-			nar.narHash,
-			false,
-			nar.incarnation
-		);
-	};
-	app.get('/t/:tenant/nar/:name', narHandler);
-	app.get('/t/:tenant/cache/:cacheName/nar/:name', narHandler);
-	const narInfoHandler = (context: Context<TenantReadHonoEnv>) => {
-		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
-
-		if (storePathHash === undefined) {
-			return noStore(notFoundResponse());
-		}
-
-		return serveNarInfo(
-			context.req.raw,
-			context.env,
-			context.get('tenant'),
-			context.get('cache'),
-			storePathHash,
-			false
-		);
-	};
-	app.get(String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`, narInfoHandler);
-	app.get(
-		String.raw`/t/:tenant/cache/:cacheName/:name{[0-9a-z]+\.narinfo}`,
-		narInfoHandler
-	);
-	const cacheInfoHandler = async (context: Context<TenantReadHonoEnv>) => {
-		const response = await cacheInfoResponse(
-			innerRequest(context),
-			context.env,
-			context.get('tenant'),
-			context.get('cache'),
-			false
-		);
-
-		return context.get('cache') === DEFAULT_CACHE
-			? response
-			: noStore(response);
-	};
-	app.get('/t/:tenant/nix-cache-info', cacheInfoHandler);
-	app.get('/t/:tenant/cache/:cacheName/nix-cache-info', cacheInfoHandler);
+	app.route('/t/:tenant', cachedReadApp);
+	app.route('/t/:tenant/cache/:cacheName', cachedReadApp);
 
 	return app;
 }

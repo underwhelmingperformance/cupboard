@@ -1,13 +1,15 @@
 import { type Logger } from '@cupboard/logger';
-import { type StoredCache, type TenantId } from '@cupboard/nix-store/scalars';
+import { type TenantId } from '@cupboard/nix-store/scalars';
 
 import { type TenantEntry } from '../control/tenant-membership.ts';
+import { type ReadScope } from '../read/read.ts';
 
 /**
  * The Hono environment for the worker app: the admission middleware resolves
- * a tenant request's slug, tenant entry and tenant-relative path, and (for
- * reads) the cache the path addresses, before any route runs. `logger` is the
- * request-scoped logger, seeded before admission and narrowed with the tenant.
+ * a tenant request's slug, tenant entry and tenant-relative path before any
+ * route runs, and the mount a read matches decides which cache in which
+ * namespace it addresses. `logger` is the request-scoped logger, seeded before
+ * admission and narrowed with the tenant.
  */
 export interface WorkerHonoEnv {
 	Bindings: Env;
@@ -19,6 +21,6 @@ export interface WorkerHonoEnv {
 		// its status only then, and otherwise reconfirms against D1.
 		tenantEntryFresh: boolean;
 		tenantRest: string;
-		cache: StoredCache;
+		readScope: ReadScope;
 	};
 }
