@@ -46,6 +46,32 @@ inputs:
   github-token:
     description: GitHub token used to record the attestations on the repository.
     required: false
+  signing-profile:
+    description:
+      Select the Sigstore instance that signs the statements. sigstore-default
+      leaves the choice to the repository's visibility, tsa-only signs with
+      GitHub's instance and creates no Rekor entry, and rekor-and-tsa signs with
+      the public-good instance and records the signature in Rekor. Defaults to
+      tsa-only for a private destination cache and to sigstore-default
+      otherwise.
+    required: false
+  upload-to-github:
+    description:
+      Record each bundle in the repository's attestation store when true, where
+      every reader of the repository can read it. Each in-toto subject digest is
+      a NAR hash; because the attestation store is append-only, publishing a
+      bundle permanently reveals that each subject path exists and identifies
+      its contents to a reader who already holds a matching copy. Defaults to
+      false for a private destination cache and to true otherwise.
+    required: false
+  subject-grouping:
+    description:
+      Select how many subjects one statement covers. run signs one statement for
+      the whole run, so a reader of one bundle learns every subject; individual
+      signs one statement per subject, so no bundle names another subject.
+      Individual grouping makes no claim about the complete run. Defaults to
+      individual for a private destination cache and to run otherwise.
+    required: false
 outputs:
   bundle-path:
     description:
@@ -158,6 +184,11 @@ runs:
         BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
         PREDICATE_FILE: ${{ steps.subjects.outputs.predicate-file }}
         PREDICATE_TYPE: ${{ steps.subjects.outputs.predicate-type }}
+        DESTINATION_VISIBILITY:
+          ${{ steps.subjects.outputs.destination-visibility }}
+        SIGNING_PROFILE: ${{ inputs.signing-profile }}
+        UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
+        SUBJECT_GROUPING: ${{ inputs.subject-grouping }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
       run: |
         node --experimental-transform-types \
@@ -167,4 +198,8 @@ runs:
           --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
           --predicate-file "$PREDICATE_FILE" \
           --predicate-type "$PREDICATE_TYPE" \
+          --destination-visibility "$DESTINATION_VISIBILITY" \
+          --signing-profile "$SIGNING_PROFILE" \
+          --upload-to-github "$UPLOAD_TO_GITHUB" \
+          --subject-grouping "$SUBJECT_GROUPING" \
           --github-token "$GH_TOKEN"

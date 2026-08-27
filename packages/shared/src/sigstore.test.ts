@@ -1,11 +1,22 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { VerificationError } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
 
 import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
 	identityPolicy,
-	verificationPolicy
+	verificationPolicy,
+	verifyBundle
 } from './sigstore.ts';
+import {
+	githubInstanceBundle,
+	signerIdentity,
+	signerIssuer
+} from './sigstore-bundle-fixture.ts';
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -130,5 +141,82 @@ describe('verificationPolicy', () => {
 		expect(
 			verificationPolicy({ identity: /release/, issuer: /issuer/ })
 		).toStrictEqual({ subjectAlternativeName: 'release' });
+	});
+});
+
+async function withTrustedRoot<T>(
+	trustedRoot: string,
+	body: (trustedRootFile: string) => Promise<T>
+): Promise<T> {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-sigstore-'));
+	const trustedRootFile = path.join(directory, 'trusted-root.json');
+
+	try {
+		await writeFile(trustedRootFile, trustedRoot);
+
+		return await body(trustedRootFile);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('verifyBundle against a GitHub-instance bundle', () => {
+	const subjectDigest = 'aa'.repeat(32);
+	const predicateType = 'https://slsa.dev/provenance/v1';
+	const policy = { identity: signerIdentity, issuer: signerIssuer };
+
+	it('verifies a bundle using only an RFC 3161 timestamp', async () => {
+		const fixture = githubInstanceBundle({ subjectDigest, predicateType });
+		const verified = await withTrustedRoot(fixture.trustedRoot, (trustedRoot) =>
+			verifyBundle(fixture.bundle, policy, {
+				trustedRoot,
+				tlogThreshold: 0,
+				ctlogThreshold: 0,
+				timestampThreshold: 1
+			})
+		);
+
+		expect({
+			predicateType: verified.predicateType,
+			subjectDigests: verified.subjectDigests,
+			tlogEntries: verified.tlogEntries,
+			verifiedTimestampCount: verified.verifiedTimestampCount,
+			identity: verified.signer.identity?.subjectAlternativeName,
+			issuer: verified.signer.identity?.extensions?.issuer
+		}).toStrictEqual({
+			predicateType,
+			subjectDigests: [subjectDigest],
+			tlogEntries: [],
+			verifiedTimestampCount: 1,
+			identity: signerIdentity,
+			issuer: signerIssuer
+		});
+	});
+
+	// The Sigstore verifier requires one transparency-log entry unless the
+	// caller lowers the threshold, so verifying this bundle needs
+	// `--tlog-threshold 0`. Nothing else in verification requires a Rekor entry.
+	it('requires the caller to lower the transparency-log threshold', async () => {
+		const fixture = githubInstanceBundle({ subjectDigest, predicateType });
+		const refusal = await withTrustedRoot(
+			fixture.trustedRoot,
+			async (trustedRoot) => {
+				try {
+					await verifyBundle(fixture.bundle, policy, {
+						trustedRoot,
+						ctlogThreshold: 0
+					});
+				} catch (error) {
+					return error;
+				}
+
+				return;
+			}
+		);
+
+		expect(refusal).toBeInstanceOf(VerificationError);
+		expect(
+			refusal instanceof VerificationError ? refusal.code : undefined
+		).toBe('TLOG_ERROR');
 	});
 });

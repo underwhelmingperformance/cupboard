@@ -60,6 +60,17 @@ export class BooleanInputInvalidError extends UsageError {
 	}
 }
 
+export class ChoiceInputInvalidError extends UsageError {
+	constructor(
+		public readonly input: string,
+		public readonly value: string,
+		public readonly choices: readonly string[]
+	) {
+		super(`${input} must be one of ${choices.join(', ')}`);
+		this.name = 'ChoiceInputInvalidError';
+	}
+}
+
 export class BuildInstallablesMissingError extends UsageError {
 	constructor() {
 		super('installables must contain at least one value');
@@ -225,6 +236,26 @@ export class PredicateTypeRequiredError extends UsageError {
 	constructor() {
 		super('predicate-type is required when predicate-file is supplied');
 		this.name = 'PredicateTypeRequiredError';
+	}
+}
+
+/**
+ * Individual grouping signs a statement that names only the subject it covers,
+ * which requires reading the predicate. Only the build-origin predicate has a
+ * known shape here, so any other predicate type fails the run instead of being
+ * signed whole beside one subject.
+ */
+export class PredicateGroupingUnsupportedError extends UsageError {
+	constructor(public readonly predicateType: string) {
+		super('subject-grouping individual requires a build-origin predicate');
+		this.name = 'PredicateGroupingUnsupportedError';
+	}
+}
+
+export class BuildOriginSubjectMissingError extends UsageError {
+	constructor(public readonly subjects: readonly string[]) {
+		super('the build-origin predicate records none of these subjects');
+		this.name = 'BuildOriginSubjectMissingError';
 	}
 }
 

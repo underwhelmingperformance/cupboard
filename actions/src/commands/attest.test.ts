@@ -792,6 +792,46 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
+	it.each([
+		{ selection: {}, expected: 'public' },
+		{ selection: { cache: 'builds' }, expected: 'public' },
+		{ selection: { privateCache: 'ci' }, expected: 'private' }
+	])(
+		'reports a $expected destination for $selection',
+		async ({ selection, expected }) => {
+			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+			const receiptFile = await receiptFileIn(directory);
+			const outputFile = path.join(directory, 'output');
+
+			try {
+				await attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme',
+						...selection
+					},
+					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+					createGithubReporter(),
+					{
+						fetch: () =>
+							Promise.resolve(new Response(committedNarInfo(remotePath, 0xbb)))
+					}
+				);
+
+				const outputs = await readFile(outputFile, 'utf8');
+
+				expect(
+					outputs
+						.split('\n')
+						.find((line) => line.startsWith('destination-visibility='))
+				).toBe(`destination-visibility=${expected}`);
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it('reports no predicate file for a receipt that records no origin', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 		const receiptFile = path.join(directory, 'receipt.json');

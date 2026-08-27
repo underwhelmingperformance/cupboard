@@ -35,6 +35,7 @@ import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
+import { cacheVisibility } from '../attestation-signing.ts';
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
 	CommittedSubjectInvalidError,
@@ -264,30 +265,39 @@ export function registerAttestCommand(
 		)
 		.requiredOption(
 			'--receipt-file <path>',
-			'current-run receipt produced by the build action'
+			'Resolve the subjects from a current-run receipt produced by the build action.'
 		)
 		.option(
 			'--checksums-file <path>',
-			'where to write checksums for all accepted receipt subjects'
+			'Write the checksums for all accepted receipt subjects here. Defaults to a path under RUNNER_TEMP.'
 		)
 		.option(
 			'--built-checksums-file <path>',
-			'where to write checksums for accepted subjects built by this run'
+			'Write the checksums for the accepted subjects this run built here. Defaults to a file beside the checksums file.'
 		)
 		.option(
 			'--predicate-file <path>',
-			'where to write the build-origin predicate'
+			'Write the build-origin predicate here. Defaults to a file beside the checksums file.'
 		)
-		.requiredOption('--url <url>', 'destination cupboard tenant URL')
-		.option('--cache <name>', 'destination named cache')
-		.option('--private-cache <name>', 'destination private cache')
+		.requiredOption(
+			'--url <url>',
+			'Check every subject against the narinfos this cupboard tenant has committed.'
+		)
+		.option(
+			'--cache <name>',
+			'Check the subjects against a named public destination cache.'
+		)
+		.option(
+			'--private-cache <name>',
+			'Check the subjects against a private destination cache.'
+		)
 		.option(
 			'--read-user <user>',
-			'username for private destination-cache reads'
+			'Username for reading a private destination cache. Requires --read-password.'
 		)
 		.option(
 			'--read-password <password>',
-			'password for private destination-cache reads'
+			'Password for reading a private destination cache. Requires --read-user.'
 		)
 		.action((options: AttestOptions) => attestAction(options, environment));
 }
@@ -489,4 +499,9 @@ export async function attestAction(
 	await setOutput(environment, 'built-subject-count', String(built.length));
 	await setOutput(environment, 'predicate-file', predicateFile);
 	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
+	await setOutput(
+		environment,
+		'destination-visibility',
+		cacheVisibility(inputs.cache)
+	);
 }

@@ -128,20 +128,27 @@ export function registerAttestCommands(
 		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			'Authenticate with a GitHub Actions OIDC token. Defaults to the cached owner login.'
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			'Request this OIDC audience with --github-oidc. Defaults to the tenant URL.',
 			parseAudience
 		)
-		.option('--cache <name>', 'attach on a named cache rather than the default')
+		.option('--cache <name>', 'Attach on a named public cache.')
 		.addOption(privateCacheOption('attach on'))
-		.option('--read-user <user>', 'private-read username', parseReadUser)
-		.option('--read-password <password>', 'private-read password')
+		.option(
+			'--read-user <user>',
+			'Username for reading a private cache. Defaults to CUPBOARD_READ_USER.',
+			parseReadUser
+		)
+		.option(
+			'--read-password <password>',
+			'Password for reading a private cache. Defaults to CUPBOARD_READ_PASSWORD.'
+		)
 		.option(
 			'--attestation <bundle>',
-			'Sigstore bundle containing a DSSE envelope; every in-toto subject must match a given store path',
+			'Attach this Sigstore bundle. Every in-toto subject in its DSSE envelope must match one of the given store paths. Repeat the option to attach several bundles.',
 			collect,
 			[]
 		)
@@ -213,61 +220,80 @@ export function registerAttestCommands(
 			'Verify Sigstore attestation bundles against a Sigstore trust root and threshold policy.'
 		)
 		.argument('[bundles...]', 'local Sigstore bundle files')
-		.option('--nar-hash <hash>', 'expected NAR hash for local bundle mode')
+		.option(
+			'--nar-hash <hash>',
+			'Expect every bundle to attest this NAR hash. Local verification requires it.'
+		)
 		.option(
 			'--url <url>',
-			'remote tenant URL to verify against (e.g. https://cupboard.example.workers.dev/t/<slug>)',
+			'Verify against this tenant, such as https://cupboard.example.workers.dev/t/<slug>. Remote verification requires it together with --store-path-hash.',
 			parseWorkerUrl
 		)
-		.option('--store-path-hash <hash>', 'remote store-path hash to inspect')
 		.option(
-			'--cache <name>',
-			'verify against a named cache rather than the default'
+			'--store-path-hash <hash>',
+			'Inspect this store-path hash at the tenant. Remote verification requires it together with --url.'
 		)
+		.option('--cache <name>', 'Verify against a named public cache.')
 		.addOption(privateCacheOption('verify against'))
-		.option('--bundle-digest <digest>', 'remote bundle digest to verify')
-		.option('--read-user <user>', 'private-read username', parseReadUser)
-		.option('--read-password <password>', 'private-read password')
-		.option('--trusted-public-key <key>', 'trusted narinfo public key')
+		.option(
+			'--bundle-digest <digest>',
+			'Verify only the remote bundle with this digest. Pass it when the cache holds several bundles of the predicate type.'
+		)
+		.option(
+			'--read-user <user>',
+			'Username for reading a private cache. Defaults to CUPBOARD_READ_USER.',
+			parseReadUser
+		)
+		.option(
+			'--read-password <password>',
+			'Password for reading a private cache. Defaults to CUPBOARD_READ_PASSWORD.'
+		)
+		.option(
+			'--trusted-public-key <key>',
+			'Require the remote narinfo to carry a signature from this public key. Cannot be used with --trust-cache-pubkey.'
+		)
 		.option(
 			'--trust-cache-pubkey',
-			'fetch /pubkey from the cache and use it as the narinfo trust source'
+			'Fetch /pubkey from the cache and trust it for the remote narinfo signature. Cannot be used with --trusted-public-key.'
 		)
 		.requiredOption(
 			'--predicate-type <type>',
-			'required in-toto predicate type for each verified bundle'
+			'Require this in-toto predicate type on every verified bundle.'
 		)
 		.option(
 			'--trusted-root <path>',
-			'Sigstore trusted_root.json file; defaults to the public Sigstore root'
+			"Verify against the Sigstore trust roots in this trusted_root.json file. Defaults to the public Sigstore roots; pass the roots that `gh attestation trusted-root` writes to verify a bundle signed with GitHub's Sigstore instance."
 		)
 		.option(
 			'--tlog-threshold <count>',
-			'minimum Rekor transparency-log entries required; default is Sigstore verifier policy',
+			"Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one; pass 0 for a bundle signed with GitHub's Sigstore instance, which creates no Rekor entry.",
 			parseVerifierThreshold('--tlog-threshold')
 		)
 		.option(
 			'--ctlog-threshold <count>',
-			'minimum certificate-transparency log entries required; default is Sigstore verifier policy',
+			'Require this many certificate-transparency log entries. Defaults to the Sigstore verifier policy.',
 			parseVerifierThreshold('--ctlog-threshold')
 		)
 		.option(
 			'--timestamp-threshold <count>',
-			'minimum signed timestamps required; default is Sigstore verifier policy',
+			'Require this many verified signed timestamps. Defaults to the Sigstore verifier policy.',
 			parseVerifierThreshold('--timestamp-threshold')
 		)
-		.option('--certificate-identity <identity>', 'expected signing identity')
+		.option(
+			'--certificate-identity <identity>',
+			'Require the signing certificate to carry exactly this identity. Pass this or --certificate-identity-regex, not both.'
+		)
 		.option(
 			'--certificate-identity-regex <regex>',
-			'regular expression for the signing identity'
+			'Require the signing identity to match this regular expression. Pass this or --certificate-identity, not both.'
 		)
 		.option(
 			'--certificate-oidc-issuer <issuer>',
-			'expected signing OIDC issuer'
+			'Require the signing certificate to carry exactly this OIDC issuer. Pass this or --certificate-oidc-issuer-regex, not both.'
 		)
 		.option(
 			'--certificate-oidc-issuer-regex <regex>',
-			'regular expression for the signing OIDC issuer'
+			'Require the signing OIDC issuer to match this regular expression. Pass this or --certificate-oidc-issuer, not both.'
 		)
 		.addHelpText(
 			'after',
@@ -281,7 +307,15 @@ export function registerAttestCommands(
 				'  # Remote mode: verify what a cache holds for a store path',
 				'  cupboard attest verify --url https://cache.example.workers.dev/t/acme \\',
 				'    --store-path-hash <hash> --trust-cache-pubkey \\',
-				'    --predicate-type https://slsa.dev/provenance/v1'
+				'    --predicate-type https://slsa.dev/provenance/v1',
+				'',
+				"  # A bundle signed with GitHub's Sigstore instance carries RFC 3161",
+				'  # timestamps and no Rekor entry, so verify it against GitHub trust',
+				'  # roots and require no transparency-log entry.',
+				'  gh attestation trusted-root > github-trusted-root.json',
+				'  cupboard attest verify ./app.sigstore.json --nar-hash sha256:... \\',
+				'    --predicate-type https://slsa.dev/provenance/v1 \\',
+				'    --trusted-root github-trusted-root.json --tlog-threshold 0'
 			].join('\n')
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
