@@ -2,7 +2,7 @@ import {
 	cacheNamePattern,
 	cacheNamePrefixPattern,
 	type CachePriority,
-	cacheSelectorSchema
+	publicCacheSelectorSchema
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
@@ -17,16 +17,17 @@ export const reuseViewNameSchema = z
 	.brand('ReuseViewName');
 export type ParsedReuseViewName = z.output<typeof reuseViewNameSchema>;
 
-// A prefix selector's pattern is bounded by a cache name's own maximum
-// length, since a longer prefix could never match one; the empty prefix
-// matches every cache, current and future.
+// A prefix selector's pattern has the same maximum length as a public cache's
+// local name because a longer prefix could not match one. The pattern can be
+// empty; the empty prefix matches every public cache.
 const reuseViewSelectorPatternMaxLength = 63;
 
 export const reuseViewSelectorKindSchema = z.enum(['exact', 'prefix']);
 
-// An `exact` selector names one cache by its wire name, including `_default`;
-// a `prefix` selector matches every named cache whose name starts with its
-// pattern, so it may be shorter, including empty (which also covers default).
+// The pattern of an `exact` selector is a public selector, including
+// `_default`. A `prefix` selector matches named public caches whose stored
+// names start with its pattern. The empty prefix also matches the default
+// cache. Reuse-view selectors never match private caches.
 export const reuseViewSelectorSchema = z
 	.strictObject({
 		kind: reuseViewSelectorKindSchema,
@@ -35,7 +36,7 @@ export const reuseViewSelectorSchema = z
 	.refine(
 		(selector) =>
 			selector.kind !== 'exact' ||
-			cacheSelectorSchema.safeParse(selector.pattern).success,
+			publicCacheSelectorSchema.safeParse(selector.pattern).success,
 		{
 			message:
 				"An exact selector pattern must be a valid cache name or '_default'"

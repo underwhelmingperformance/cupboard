@@ -51,6 +51,25 @@ describe('cacheUrl', () => {
 			value: 'https://cupboard.example.workers.dev/t/acme/',
 			cache: storedCacheSchema.parse('builds'),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
+		},
+		{
+			name: 'a private cache uses the private URL namespace',
+			value: 'https://cupboard.example.workers.dev',
+			cache: storedCacheSchema.parse('private/builds'),
+			expected: 'https://cupboard.example.workers.dev/private-cache/builds'
+		},
+		{
+			name: 'a private cache preserves a tenant path prefix',
+			value: 'https://cupboard.example.workers.dev/t/acme',
+			cache: storedCacheSchema.parse('private/builds'),
+			expected:
+				'https://cupboard.example.workers.dev/t/acme/private-cache/builds'
+		},
+		{
+			name: 'a public cache called private stays under the public namespace',
+			value: 'https://cupboard.example.workers.dev/t/acme',
+			cache: storedCacheSchema.parse('private'),
+			expected: 'https://cupboard.example.workers.dev/t/acme/cache/private'
 		}
 	])('$name', ({ value, cache, expected }) => {
 		expect(cacheUrl(base(value), cache).href).toBe(expected);

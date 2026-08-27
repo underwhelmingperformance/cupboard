@@ -1,9 +1,24 @@
 import { InvalidCacheUrlSegmentError } from './errors.ts';
-import { DEFAULT_CACHE, type StoredCache } from './scalars.ts';
+import {
+	DEFAULT_CACHE,
+	isPrivateCache,
+	privateCacheLocalName,
+	type StoredCache
+} from './scalars.ts';
 
 export function cacheUrl(baseUrl: URL, cache: StoredCache | undefined): URL {
 	if (cache === undefined || cache === DEFAULT_CACHE) {
 		return new URL(baseUrl);
+	}
+
+	// A private cache uses a separate URL namespace. Appending its stored name as
+	// one path segment would encode the slash as `%2F`.
+	if (isPrivateCache(cache)) {
+		return appendPathSegments(
+			baseUrl,
+			'private-cache',
+			privateCacheLocalName(cache)
+		);
 	}
 
 	return appendPathSegments(baseUrl, 'cache', cache);

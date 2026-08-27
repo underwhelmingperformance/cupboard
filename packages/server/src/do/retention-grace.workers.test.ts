@@ -4,6 +4,7 @@ import {
 	DEFAULT_CACHE,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
+	privateStoredCache,
 	rootNameSchema,
 	type StoredCache,
 	storedCacheSchema,
@@ -1032,6 +1033,40 @@ describe('retention grace transitions', () => {
 			withoutPolicies: undefined,
 			prCache: 3600,
 			otherCache: 604_800
+		});
+	});
+
+	it('does not apply retention grace policies to a private cache', async () => {
+		await useTestServer('transition-private-cache');
+		await bootstrap();
+
+		const resolved = await runInDurableObject(currentServer(), (instance) => {
+			const service = new RetentionService(instance.context);
+
+			service.addGracePolicy({
+				cachePrefix: '',
+				graceSeconds: graceSecondsSchema.parse(604_800)
+			});
+			service.addGracePolicy({
+				cachePrefix: 'private',
+				graceSeconds: graceSecondsSchema.parse(3600)
+			});
+
+			return {
+				privateCache: service.resolveGraceSeconds(
+					privateStoredCache(buildsCache)
+				),
+				privateCoverage: service.graceCoverage(privateStoredCache(buildsCache)),
+				publicCacheCalledPrivate: service.resolveGraceSeconds(
+					storedCacheSchema.parse('private')
+				)
+			};
+		});
+
+		expect(resolved).toStrictEqual({
+			privateCache: undefined,
+			privateCoverage: { covered: false },
+			publicCacheCalledPrivate: 3600
 		});
 	});
 });

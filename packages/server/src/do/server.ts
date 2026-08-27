@@ -5,6 +5,7 @@ import {
 	cachePrioritySchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
+	isPrivateCache,
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
@@ -66,6 +67,7 @@ import {
 	type R2ObjectKey,
 	type RequestOrigin,
 	textResponse,
+	uncachedNotFoundResponse,
 	verificationBatchSize
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
@@ -559,14 +561,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		this.app.get('/cache/:cacheName/nix-cache-info', (context) =>
-			textResponse(
-				context.req.raw,
-				this.cacheAdmin.cacheInfoBody(context.get('cache')),
-				{
-					'content-type': 'text/x-nix-cache-info; charset=utf-8'
+		// The Worker's fallback forwards unmatched tenant GET requests to this
+		// Durable Object without authenticating the reader. Private caches require
+		// authentication, so these routes return 404 before serving their content.
+		const refusePrivateCache = createMiddleware<TenantHonoEnv>(
+			async (context, next) => {
+				if (isPrivateCache(context.get('cache'))) {
+					return uncachedNotFoundResponse();
 				}
-			)
+
+				await next();
+			}
+		);
+
+		this.app.get(
+			'/cache/:cacheName/nix-cache-info',
+			refusePrivateCache,
+			(context) =>
+				textResponse(
+					context.req.raw,
+					this.cacheAdmin.cacheInfoBody(context.get('cache')),
+					{
+						'content-type': 'text/x-nix-cache-info; charset=utf-8'
+					}
+				)
 		);
 
 		// Apply `no-store` to thrown reuse errors as well as ordinary responses.
@@ -702,6 +720,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.on(
 			'GET',
 			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
+			refusePrivateCache,
 			(context) =>
 				this.attestations.handleServeList(
 					context.req.raw,
@@ -715,6 +734,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				'/attestation-bundles/:digest',
 				'/cache/:cacheName/attestation-bundles/:digest'
 			],
+			refusePrivateCache,
 			(context) =>
 				this.attestations.handleServeBundle(
 					context.req.raw,

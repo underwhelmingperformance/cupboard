@@ -31,6 +31,7 @@ import {
 import { reuseCandidateLimit } from './reuse-view-lookup-service.ts';
 import {
 	committedPath,
+	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
 	type ReuseSelector,
@@ -123,6 +124,61 @@ describe('reuse-view narinfo lookup', () => {
 			});
 		}
 	);
+
+	it.each([
+		{
+			label: 'the empty prefix does not select a private cache',
+			cache: 'private/builds',
+			storePathHash: '6'.repeat(32),
+			isServed: false
+		},
+		{
+			label: 'a matching prefix does not select a private cache',
+			cache: 'private/builds',
+			storePathHash: '7'.repeat(32),
+			prefix: 'p',
+			isServed: false
+		},
+		{
+			label: 'the empty prefix selects a public cache called private',
+			cache: 'private',
+			storePathHash: '8'.repeat(32),
+			isServed: true
+		},
+		{
+			label: 'a matching prefix selects a public cache',
+			cache: 'pr-9',
+			storePathHash: '9'.repeat(32),
+			prefix: 'p',
+			isServed: true
+		}
+	])('$label', async ({ cache, storePathHash, prefix = '', isServed }) => {
+		const committed = await committedPath('reuse-private-source', 'source', {
+			storePathHash: '5'.repeat(32)
+		});
+		await insertBackedRow(cache, storePathHash, committed.storePathHash);
+		await setView([{ kind: 'prefix', pattern: prefix }]);
+
+		const narInfo = await readFetch(lookupPath(storePathHash));
+		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+			body: JSON.stringify({ storePathHashes: [storePathHash] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+		const body = cacheAvailabilityResponseSchema.parse(
+			await availability.json()
+		);
+
+		expect({
+			narInfoStatus: narInfo.status,
+			availabilityStatus: availability.status,
+			body
+		}).toStrictEqual({
+			narInfoStatus: isServed ? StatusCodes.OK : StatusCodes.NOT_FOUND,
+			availabilityStatus: StatusCodes.OK,
+			body: { missingStorePathHashes: isServed ? [] : [storePathHash] }
+		});
+	});
 
 	it('answers a miss no-store when no selected cache holds the hash', async () => {
 		const path = await committedPath('reuse-unselected', 'other', {

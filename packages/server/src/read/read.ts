@@ -1,9 +1,9 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheFromSelector,
-	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
+	publicCacheSelectorSchema,
 	type StoredCache,
 	type StorePathHash,
 	type TenantId
@@ -42,8 +42,10 @@ interface ReadEnv {
 	readonly CUPBOARD_DO: DurableObjectNamespace;
 }
 
-// Bare paths and `/cache/_default/` select the stored default cache. Another
-// valid selector selects a named cache; a malformed cache prefix is rejected.
+// Bare paths and `/cache/_default/` select the default cache. Any other public
+// selector after `/cache/` selects the named public cache with that local name.
+// The parser rejects private selectors because these read routes do not
+// authenticate the reader. It also rejects malformed selectors.
 export function cacheScope(
 	pathname: string
 ): undefined | { cache: StoredCache; rest: string } {
@@ -60,7 +62,9 @@ export function cacheScope(
 		return undefined;
 	}
 
-	const selector = cacheSelectorSchema.safeParse(remainder.slice(0, separator));
+	const selector = publicCacheSelectorSchema.safeParse(
+		remainder.slice(0, separator)
+	);
 
 	if (!selector.success) {
 		return undefined;

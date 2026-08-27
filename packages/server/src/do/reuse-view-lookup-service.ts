@@ -3,8 +3,10 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheFromSelector,
-	cacheSelectorSchema,
 	type NixSha256HashString,
+	PRIVATE_STORED_RANGE_END,
+	PRIVATE_STORED_RANGE_START,
+	publicCacheSelectorSchema,
 	referencesSchema,
 	type StorePathHash,
 	type TenantId
@@ -130,27 +132,53 @@ function prefixUpperBound(prefix: string): string {
 	return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
 }
 
+// Prefix selectors match public caches only. Exclude the private stored-name
+// range from every prefix query. A public cache called `private` sorts below
+// that range and remains matchable.
+function outsidePrivateRange(): SQL | undefined {
+	return or(
+		lt(schema.narInfos.cache, sql`${PRIVATE_STORED_RANGE_START}`),
+		gte(schema.narInfos.cache, sql`${PRIVATE_STORED_RANGE_END}`)
+	);
+}
+
+const privateRangeParameters = 2;
+
+function selectorParameters(selector: {
+	kind: 'exact' | 'prefix';
+	pattern: string;
+}): number {
+	if (selector.kind === 'exact') {
+		return 1;
+	}
+
+	return selector.pattern === ''
+		? privateRangeParameters
+		: 2 + privateRangeParameters;
+}
+
 function selectorCondition(selector: {
 	kind: 'exact' | 'prefix';
 	pattern: string;
 }): SQL | undefined {
 	if (selector.kind === 'exact') {
 		const cache = cacheFromSelector(
-			cacheSelectorSchema.parse(selector.pattern)
+			publicCacheSelectorSchema.parse(selector.pattern)
 		);
 
 		return eq(schema.narInfos.cache, cache);
 	}
 
 	if (selector.pattern === '') {
-		return undefined;
+		return outsidePrivateRange();
 	}
 
-	// The bounds are cache-name prefixes, not resolved cache names, so they
-	// address the column's raw ordering rather than a `StoredCache` value.
+	// Prefix patterns are not complete selectors, so compare them directly with
+	// the stored names in the `cache` column.
 	return and(
 		gte(schema.narInfos.cache, sql`${selector.pattern}`),
-		lt(schema.narInfos.cache, sql`${prefixUpperBound(selector.pattern)}`)
+		lt(schema.narInfos.cache, sql`${prefixUpperBound(selector.pattern)}`),
+		outsidePrivateRange()
 	);
 }
 
@@ -230,7 +258,7 @@ export class ReuseViewLookupService {
 
 		if (selector.kind === 'exact') {
 			const cache = cacheFromSelector(
-				cacheSelectorSchema.parse(selector.pattern)
+				publicCacheSelectorSchema.parse(selector.pattern)
 			);
 
 			return this.context.db
@@ -240,18 +268,7 @@ export class ReuseViewLookupService {
 				.all();
 		}
 
-		// The bounds are cache-name prefixes, not resolved cache names, so they
-		// address the column's raw ordering rather than a `StoredCache` value.
-		const cacheRange =
-			selector.pattern === ''
-				? undefined
-				: and(
-						gte(schema.narInfos.cache, sql`${selector.pattern}`),
-						lt(
-							schema.narInfos.cache,
-							sql`${prefixUpperBound(selector.pattern)}`
-						)
-					);
+		const cacheRange = selectorCondition(selector);
 
 		return this.context.db
 			.select()
@@ -291,13 +308,15 @@ export class ReuseViewLookupService {
 			const condition = selectorCondition(selector);
 			return condition === undefined ? [] : [condition];
 		});
+		// An empty prefix matches every public cache, so its condition alone covers
+		// the other selectors.
 		const cacheFilter = hasAllCacheSelector
-			? undefined
+			? outsidePrivateRange()
 			: or(...selectorConditions);
 		const selectorParameterCount = hasAllCacheSelector
-			? 0
+			? privateRangeParameters
 			: selectors.reduce(
-					(count, selector) => count + (selector.kind === 'exact' ? 1 : 2),
+					(count, selector) => count + selectorParameters(selector),
 					0
 				);
 		const maxHashesPerQuery = Math.max(
