@@ -1,3 +1,4 @@
+import { existsSync, readdirSync } from 'node:fs';
 import { access, mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -203,6 +204,34 @@ async function readActionOutputs(
 	);
 }
 
+async function readEnvironmentValue(
+	environmentFile: string,
+	name: string
+): Promise<string> {
+	const contents = await readFile(environmentFile, 'utf8');
+	const headerEnd = contents.indexOf('\n');
+
+	if (headerEnd === -1) {
+		throw new Error(`Environment file has no value for ${name}`);
+	}
+
+	const header = contents.slice(0, headerEnd);
+	const prefix = `${name}<<`;
+
+	if (!header.startsWith(prefix)) {
+		throw new Error(`Environment file does not start with ${prefix}`);
+	}
+
+	const delimiter = header.slice(prefix.length);
+	const terminator = `${delimiter}\n`;
+
+	if (!contents.endsWith(terminator)) {
+		throw new Error(`Environment file has no closing delimiter for ${name}`);
+	}
+
+	return contents.slice(headerEnd + 1, -terminator.length);
+}
+
 describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-netrc-'));
@@ -308,7 +337,7 @@ describe('resolveSetupInputs', () => {
 			cache: 'constructor'
 		}
 	])(
-		'refuses a private cache with no read credential and $name',
+		'requires a read credential for a private cache with $name',
 		({ cache }) => {
 			expect(() =>
 				resolveSetupInputs({ ...baseOptions, privateCache: cache }, environment)
@@ -822,6 +851,171 @@ describe('fetchCachePublicKeyAt', () => {
 	});
 });
 
+describe('setupAction private-cache masking', () => {
+	it('registers both forms of every private credential before it writes anything', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-mask-')
+		);
+		const environmentFile = path.join(directory, 'github-env');
+		const outputFile = path.join(directory, 'github-output');
+		const netrcFile = path.join(directory, 'cupboard-netrc');
+		const masked: Record<string, unknown>[] = [];
+		let probes = 0;
+
+		await setupAction(
+			{
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test/t/acme',
+				privateCache: 'release, archive',
+				privateCacheCredentials: JSON.stringify({
+					release: { user: 'ci', password: readPassword }
+				}),
+				readUser: 'alice',
+				// The tenant password is taken verbatim, so percent-encoding it into
+				// the userinfo of a substituter URL changes it.
+				readPassword: 's3cr%t/pass',
+				reuseView: 'pr-view',
+				trustedPublicKey: 'acme:AAAA'
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: environmentFile,
+				GITHUB_OUTPUT: outputFile
+			},
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath: path.join(directory, 'bin', 'cupboard'),
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				fetch: (input, init) => {
+					probes += 1;
+
+					return stubFetch((url) =>
+						cacheInfoBody(url.includes('/reuse/') ? 50 : 40)
+					)(input, init);
+				},
+				// The written state is read synchronously, so each record describes
+				// the run at the moment the mask was registered.
+				mask: (value) => {
+					masked.push({
+						value,
+						probes,
+						wroteNetrc: existsSync(netrcFile),
+						wroteNixConfig: readdirSync(directory).some((entry) =>
+							entry.startsWith('cupboard-nix-')
+						),
+						wroteEnvironment: existsSync(environmentFile)
+					});
+				}
+			}
+		);
+
+		const outputs = await readActionOutputs(outputFile);
+		const generatedConfigFile = outputs['nix-config-file'];
+
+		if (generatedConfigFile === undefined) {
+			throw new Error('setup did not output the generated Nix config path');
+		}
+
+		const releaseUrl = `https://ci:${readPassword}@cache.example.test/t/acme/private-cache/release`;
+		const archiveUrl =
+			'https://alice:s3cr%25t%2Fpass@cache.example.test/t/acme/private-cache/archive';
+		const nixConfig = await readFile(generatedConfigFile, 'utf8');
+		const [substituters] = nixConfig.split('\n', 1);
+
+		expect({ masked, substituters }).toStrictEqual({
+			masked: [readPassword, releaseUrl, 's3cr%t/pass', archiveUrl].map(
+				(value) => ({
+					value,
+					probes: 0,
+					wroteNetrc: false,
+					wroteNixConfig: false,
+					wroteEnvironment: false
+				})
+			),
+			substituters: `extra-substituters = ${releaseUrl} ${archiveUrl} https://cache.example.test/t/acme/reuse/pr-view`
+		});
+	});
+});
+
+describe('setupAction Nix configuration', () => {
+	it('keeps private credentials in a protected file and includes it by path', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-config-')
+		);
+		const callerConfigFile = path.join(directory, 'caller-nix.conf');
+		const environmentFile = path.join(directory, 'github-env');
+		const outputFile = path.join(directory, 'github-output');
+		const credential = { user: 'ci', password: readPassword };
+
+		await setupAction(
+			{
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test/t/acme',
+				privateCache: 'release',
+				privateCacheCredentials: JSON.stringify({ release: credential }),
+				trustedPublicKey: 'acme:AAAA',
+				nixConfigFile: callerConfigFile
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: environmentFile,
+				GITHUB_OUTPUT: outputFile
+			},
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath: path.join(directory, 'bin', 'cupboard'),
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				fetch: stubFetch(() => cacheInfoBody(40))
+			}
+		);
+
+		const outputs = await readActionOutputs(outputFile);
+		const generatedConfigFile = outputs['nix-config-file'];
+
+		if (generatedConfigFile === undefined) {
+			throw new Error('setup did not output the generated Nix config path');
+		}
+
+		const credentialUrl = `https://${credential.user}:${credential.password}@cache.example.test/t/acme/private-cache/release`;
+		const generatedConfig = await readFile(generatedConfigFile, 'utf8');
+		const environmentConfig = await readEnvironmentValue(
+			environmentFile,
+			'NIX_CONFIG'
+		);
+		const callerConfig = await readFile(callerConfigFile, 'utf8');
+		const generatedConfigStats = await stat(generatedConfigFile);
+
+		expect({
+			generatedDirectory: path.dirname(generatedConfigFile),
+			generatedNameMatches:
+				/^cupboard-nix-[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}\.conf$/u.test(
+					path.basename(generatedConfigFile)
+				),
+			generatedMode: generatedConfigStats.mode & 0o777,
+			generatedConfig,
+			environmentConfig,
+			callerConfig
+		}).toStrictEqual({
+			generatedDirectory: path.resolve(directory),
+			generatedNameMatches: true,
+			generatedMode: 0o600,
+			generatedConfig: `extra-substituters = ${credentialUrl}\nextra-trusted-public-keys = acme:AAAA\n`,
+			environmentConfig: `include ${generatedConfigFile}\n`,
+			callerConfig: `!include ${generatedConfigFile}\n`
+		});
+	});
+});
+
 describe('setupAction cancellation', () => {
 	it('preserves an in-flight probe abort and writes no Nix configuration', async () => {
 		const directory = await mkdtemp(
@@ -890,8 +1084,10 @@ describe('setupAction cancellation', () => {
 		await expect(pending).rejects.toBe(reason);
 		expect({
 			environmentFile: await isPathPresent(environmentFile),
-			configFile: await isPathPresent(path.join(directory, 'cupboard-nix.conf'))
-		}).toStrictEqual({ environmentFile: false, configFile: false });
+			configFiles: readdirSync(directory).filter((entry) =>
+				entry.startsWith('cupboard-nix-')
+			)
+		}).toStrictEqual({ environmentFile: false, configFiles: [] });
 	});
 });
 

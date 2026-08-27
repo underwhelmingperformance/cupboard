@@ -18,6 +18,7 @@ import {
 	reuseViewPrioritySchema
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import { workflowCommands } from '@cupboard/shared/github-actions';
 import {
 	basicAuthHeader,
 	type BasicCredential,
@@ -117,6 +118,7 @@ export interface SetupActionDependencies {
 	readonly acquire?: typeof acquireCupboard;
 	readonly fetch?: typeof fetch;
 	readonly installRelease?: typeof installCupboard;
+	readonly mask?: (value: string) => void;
 	readonly signal?: AbortSignal;
 }
 
@@ -131,6 +133,8 @@ interface WriteNetrcOptions {
 	readonly readPassword: string;
 	readonly runnerTemporaryDirectory: string;
 }
+
+type NixIncludeKind = 'required' | 'optional';
 
 export function registerSetupCommand(
 	program: Command,
@@ -292,13 +296,13 @@ export function resolveSetupInputs(
 }
 
 /**
- * The caches the run configures: the public caches the `cache` input names,
- * then the private caches the `private-cache` input names. Naming neither
- * configures the tenant's default cache.
+ * Resolves the caches to configure. Public caches from `cache` come first,
+ * followed by private caches from `private-cache`. If both inputs are empty,
+ * the run configures the tenant's default cache.
  *
- * Every read of a private cache authenticates. A cache with its own entry in
- * `private-cache-credentials` uses it; the rest use the shared `read-user` and
- * `read-password`, and a private cache left with no credential fails the run.
+ * Every private cache requires a credential. Its entry in
+ * `private-cache-credentials` takes precedence over the shared `read-user` and
+ * `read-password`. The run fails if neither source provides a credential.
  */
 function resolveCaches(
 	options: SetupOptions,
@@ -333,6 +337,33 @@ function resolveCaches(
 	];
 }
 
+/**
+ * Registers every private-cache password and credential-bearing URL as a run
+ * secret. The runner replaces each exact value with `***` in the log.
+ *
+ * Percent-encoding can change a password when the URL places it in userinfo, so
+ * masking the raw password does not necessarily mask the complete URL. Register
+ * both forms before setup writes any output.
+ *
+ * GitHub Actions applies a mask only to log output written after the command.
+ */
+function maskPrivateCacheCredentials(
+	inputs: SetupInputs,
+	mask: (value: string) => void
+): void {
+	for (const selection of inputs.caches) {
+		if (selection.credential === undefined) {
+			continue;
+		}
+
+		mask(selection.credential.password);
+
+		if (inputs.cacheUrl !== undefined) {
+			mask(canonicalHref(substituterUrlFor(inputs.cacheUrl, selection)));
+		}
+	}
+}
+
 export async function setupAction(
 	options: SetupOptions,
 	environment: Environment = env,
@@ -342,6 +373,15 @@ export async function setupAction(
 	dependencies.signal?.throwIfAborted();
 
 	const inputs = resolveSetupInputs(options, environment);
+
+	maskPrivateCacheCredentials(
+		inputs,
+		dependencies.mask ??
+			((value) => {
+				workflowCommands().addMask(value);
+			})
+	);
+
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
@@ -502,11 +542,11 @@ export interface ResolveSubstitutersOptions {
 }
 
 /**
- * When a reuse view is configured, fetches the `nix-cache-info` document of
- * every configured cache and of the view, and requires each cache's priority to
- * be numerically lower than the view's. The caches remain ahead of the view in
- * the returned list. The check and ordering prevent a divergent
- * input-addressed path in the view from replacing a destination's choice.
+ * When a reuse view is configured, fetches `nix-cache-info` for every configured
+ * cache and for the view. Each cache must have a numerically lower priority than
+ * the view. The returned list puts the caches before the view. This ordering
+ * prevents a divergent input-addressed path in the view from replacing the path
+ * selected from a destination cache.
  * The probes use Basic authentication because the runner's netrc applies only
  * to later Nix reads, and fetch ignores a credential in the URL.
  */
@@ -575,8 +615,8 @@ async function configureNix(
 		inputs.trustedPublicKey === ''
 			? await fetchTrustedPublicKey(inputs, reporter, dependencies)
 			: inputs.trustedPublicKey;
-	// A private reuse view and its destination use the same host. Netrc entries
-	// are host-scoped, so one entry supplies credentials for both paths.
+	// A reuse view and its destination use the same host. If the tenant requires
+	// authentication, one host-scoped netrc entry supplies both reads.
 	const substituters = await resolveSubstituters(
 		{
 			cacheUrl: inputs.cacheUrl,
@@ -606,25 +646,37 @@ async function configureNix(
 		trustedPublicKey,
 		netrcFile === undefined ? {} : { netrcFile }
 	).render();
-	const generatedConfigFile = path.join(
+	const generatedConfigFile = path.resolve(
 		runnerTemporaryDirectory,
-		'cupboard-nix.conf'
+		`cupboard-nix-${randomUUID()}.conf`
 	);
+	const requiredInclude = renderNixInclude(generatedConfigFile, 'required');
 
 	dependencies.signal?.throwIfAborted();
-	await writeFile(generatedConfigFile, nixConfig, { mode: 0o600 });
+	await writeFile(generatedConfigFile, nixConfig, { flag: 'wx', mode: 0o600 });
 	dependencies.signal?.throwIfAborted();
 	await appendEnvironmentFile(
 		inputs.environment.GITHUB_ENV,
-		environmentFileBlock('NIX_CONFIG', nixConfig)
+		environmentFileBlock('NIX_CONFIG', requiredInclude)
 	);
 	dependencies.signal?.throwIfAborted();
 	await setOutput(inputs.environment, 'nix-config-file', generatedConfigFile);
 
-	if (inputs.nixConfigFile !== '') {
-		dependencies.signal?.throwIfAborted();
-		await appendEnvironmentFile(inputs.nixConfigFile, nixConfig);
+	if (inputs.nixConfigFile === '') {
+		return;
 	}
+
+	dependencies.signal?.throwIfAborted();
+	await appendEnvironmentFile(
+		inputs.nixConfigFile,
+		renderNixInclude(generatedConfigFile, 'optional')
+	);
+}
+
+function renderNixInclude(filePath: string, kind: NixIncludeKind): string {
+	const directive = kind === 'required' ? 'include' : '!include';
+
+	return `${directive} ${filePath}\n`;
 }
 
 function environmentFileBlock(name: string, value: string): string {

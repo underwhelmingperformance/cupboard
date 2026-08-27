@@ -15,7 +15,12 @@ inputs:
     description: Path to the cupboard binary installed by actions/setup.
     required: true
   cache:
-    description: Named cache to inspect and publish to.
+    description: Named public cache to inspect and publish to.
+    required: false
+  private-cache:
+    description:
+      Private cache to inspect and publish to. Set either cache or
+      private-cache, not both.
     required: false
   reuse-view:
     description: Named reuse view to probe for substitutable paths.
@@ -170,6 +175,7 @@ runs:
         URL: ${{ inputs.url }}
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         CACHE: ${{ inputs.cache }}
+        PRIVATE_CACHE: ${{ inputs.private-cache }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TTL: ${{ inputs.ttl }}
         AUDIENCE: ${{ inputs.audience }}
@@ -195,6 +201,7 @@ runs:
           --url "$URL"
           --cupboard-path "$CUPBOARD_PATH"
           --cache "$CACHE"
+          --private-cache "$PRIVATE_CACHE"
           --reuse-view "$REUSE_VIEW"
           --ttl "$TTL"
           --audience "$AUDIENCE"

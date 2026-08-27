@@ -77,6 +77,7 @@ const jobSchema = z.looseObject({
 	if: z.string().optional(),
 	uses: z.string().optional(),
 	needs: needsSchema.optional(),
+	outputs: scalarMapSchema.optional(),
 	steps: stepsSchema,
 	strategy: strategySchema.optional(),
 	permissions: permissionsSchema.optional(),
@@ -347,6 +348,7 @@ describe('cupboard acquisition', () => {
 			setupInputs: setupInputs.map(() => ({
 				'cache-url': '${{ inputs.url }}',
 				cache: '${{ needs.configure.outputs.cache }}',
+				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
 				'read-user': '${{ secrets.read_user }}',
@@ -530,6 +532,7 @@ describe('cohort planning and publication', () => {
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				cache: '${{ needs.configure.outputs.cache }}',
+				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				optimise: '${{ inputs.push }}',
@@ -592,6 +595,7 @@ describe('cohort planning and publication', () => {
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				cache: '${{ needs.configure.outputs.cache }}',
+				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				'read-user': '${{ secrets.read_user }}',
@@ -672,6 +676,7 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
+					'private-cache': '${{ needs.configure.outputs.private-cache }}',
 					'read-user': '${{ secrets.read_user }}',
 					'read-password': '${{ secrets.read_password }}'
 				}
@@ -715,6 +720,7 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ needs.configure.outputs.cache }}',
+					'private-cache': '${{ needs.configure.outputs.private-cache }}',
 					'read-user': '${{ secrets.read_user }}',
 					'read-password': '${{ secrets.read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
@@ -778,7 +784,7 @@ describe('resolved publication inputs', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
 		const validation =
-			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
+			'for name in PRESET CACHE PRIVATE_CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
 
 		expect({
 			validation: resolve.includes(validation),
@@ -795,6 +801,26 @@ describe('resolved publication inputs', () => {
 			carriageReturn: true,
 			buildersValidation: true,
 			beforeOutputs: true
+		});
+	});
+
+	it('resolves the destination cache selection once for every later job', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
+
+		expect({
+			publicDefault: workflow.on.workflow_call?.inputs.cache?.default,
+			privateDefault:
+				workflow.on.workflow_call?.inputs['private-cache']?.default,
+			publicOutput: workflow.jobs.configure?.outputs?.cache,
+			privateOutput: workflow.jobs.configure?.outputs?.['private-cache'],
+			written: resolve.includes('echo "private-cache=${PRIVATE_CACHE}"')
+		}).toStrictEqual({
+			publicDefault: '',
+			privateDefault: '',
+			publicOutput: '${{ steps.resolve.outputs.cache }}',
+			privateOutput: '${{ steps.resolve.outputs.private-cache }}',
+			written: true
 		});
 	});
 
@@ -819,6 +845,15 @@ describe('resolved publication inputs', () => {
 	// `scripts/prepare-ssh-transport.test.ts` runs the equivalent guards in
 	// actions/prepare against real inputs.
 	it.each([
+		{
+			name: 'a public and a private destination cache together',
+			condition: 'if [ -n "${CACHE}" ] && [ -n "${PRIVATE_CACHE}" ]; then'
+		},
+		{
+			name: 'a preset alongside an explicit cache selection',
+			condition:
+				'if [ -n "${CACHE}${PRIVATE_CACHE}${ROOT_PREFIX}${TTL}" ]; then'
+		},
 		{
 			name: 'a direct store together with classic builders',
 			condition: 'if [ -n "${STORE}" ] && [ -n "${BUILDERS}" ]; then'

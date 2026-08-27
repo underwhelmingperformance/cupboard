@@ -21,6 +21,7 @@ import { Derivation } from '@cupboard/nix-store/derivation';
 import {
 	hasControlCharacter,
 	rootNameSchema,
+	type StoredCache,
 	type StorePathBasename,
 	storePathBasenameSchema,
 	storePathSchema,
@@ -93,9 +94,10 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
+	cacheArguments,
 	isEnabled,
 	provided,
-	providedCache,
+	providedCacheSelection,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -358,6 +360,7 @@ export interface BuildCohortOptions {
 	readonly url?: string;
 	readonly cupboardPath?: string;
 	readonly cache?: string;
+	readonly privateCache?: string;
 	readonly reuseView?: string;
 	readonly ttl?: string;
 	readonly audience?: string;
@@ -383,7 +386,7 @@ export interface BuildCohortInputs {
 	readonly cohort: CohortMatrixEntry;
 	readonly url: URL;
 	readonly cupboardPath: string;
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly ttl: string;
 	readonly audience: string;
@@ -486,7 +489,7 @@ export function resolveBuildCohortInputs(
 		cohort: cohort.data,
 		url,
 		cupboardPath,
-		cache: provided(options.cache) ?? '',
+		cache: providedCacheSelection(options.cache, options.privateCache),
 		reuseView: provided(options.reuseView) ?? '',
 		ttl: provided(options.ttl) ?? '',
 		audience: provided(options.audience) ?? '',
@@ -549,7 +552,8 @@ export function registerBuildCohortCommand(
 			'--cupboard-path <path>',
 			'path to the cupboard binary installed by actions/setup'
 		)
-		.option('--cache <name>', 'named cache to inspect and publish to')
+		.option('--cache <name>', 'Inspect and publish to a named public cache.')
+		.option('--private-cache <name>', 'Inspect and publish to a private cache.')
 		.option(
 			'--reuse-view <name>',
 			'named reuse view to probe for substitutable paths'
@@ -1534,9 +1538,7 @@ export function cohortBuildPushArguments(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.gcBetweenCohorts) {
 		arguments_.push('--gc-between-cohorts');
@@ -1643,9 +1645,7 @@ export function cohortReceiptPushArguments(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.runRoot !== '') {
 		arguments_.push('--run-root', inputs.runRoot);
@@ -1833,9 +1833,7 @@ export function cohortPushArguments(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.store !== '') {
 		arguments_.push('--store', inputs.store);
@@ -1925,7 +1923,7 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 			? ''
 			: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
 	const destinationSource = canonicalHref(
-		cacheUrlFor(inputs.url, providedCache(inputs.cache))
+		cacheUrlFor(inputs.url, inputs.cache)
 	);
 	const attachOnly = new Set(options.attachOnlyPaths);
 	const hasIntermediates = paths.intermediatePaths.length > 0;
@@ -2221,12 +2219,9 @@ export function planReprobeArguments(
 		'reprobe',
 		canonicalHref(inputs.url),
 		'--targets-file',
-		targetsFile
+		targetsFile,
+		...cacheArguments(inputs.cache)
 	];
-
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
 
 	if (inputs.reuseView !== '') {
 		arguments_.push('--reuse-view', inputs.reuseView);
@@ -2353,9 +2348,7 @@ async function planCohort(
 		arguments_.push('--audience', inputs.audience);
 	}
 
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
+	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.reuseView !== '') {
 		arguments_.push('--reuse-view', inputs.reuseView);

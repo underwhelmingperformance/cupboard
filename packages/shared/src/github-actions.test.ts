@@ -114,6 +114,25 @@ describe('workflowCommands', () => {
 		expect(out).toStrictEqual(['Installing\n']);
 	});
 
+	it('registers a run secret under GitHub Actions', () => {
+		const { commands, out, err } = commandsUnder({ GITHUB_ACTIONS: 'true' });
+
+		commands.addMask('100% secret');
+
+		expect({ out, err }).toStrictEqual({
+			out: ['::add-mask::100%25 secret\n'],
+			err: []
+		});
+	});
+
+	it('writes nothing for a run secret off GitHub Actions', () => {
+		const { commands, out, err } = commandsUnder({});
+
+		commands.addMask('secret');
+
+		expect({ out, err }).toStrictEqual({ out: [], err: [] });
+	});
+
 	it('reports where it runs from the environment contract', () => {
 		expect({
 			on: isGithubActions({ GITHUB_ACTIONS: 'true' }),

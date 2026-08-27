@@ -21,8 +21,9 @@ on:
           'pull-request-and-branch' gives each pull_request run a pr-<number>
           cache with a 14-day TTL. A run on the configured branch uses the
           default cache. Both roots start with github:<repository>; other refs
-          are rejected before planning. Only branch runs use reuse-view. This
-          input is mutually exclusive with cache, root-prefix, and ttl; leave it
+          are rejected before planning. Only branch runs use reuse-view. Every
+          preset publishes to a public cache, so this input is mutually
+          exclusive with cache, private-cache, root-prefix, and ttl; leave it
           empty to use those explicit inputs.
         required: false
         default: ''
@@ -36,8 +37,19 @@ on:
         type: string
       cache:
         description:
-          Named cache to publish to. Leave empty to publish to the default
-          cache.
+          Named public cache to publish to. Leave empty to publish to the
+          default cache.
+        required: false
+        default: ''
+        type: string
+      private-cache:
+        description:
+          Private cache to publish to. Set either cache or private-cache, not
+          both. The workflow supplies one read_user and read_password pair for
+          all authenticated reads, so supply the credential that the selected
+          private cache accepts. If the cache has its own verifier, the tenant
+          credential is rejected by setup's initial cache-info probe, before
+          publication starts.
         required: false
         default: ''
         type: string
@@ -246,6 +258,7 @@ jobs:
     outputs:
       cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
       cache: ${{ steps.resolve.outputs.cache }}
+      private-cache: ${{ steps.resolve.outputs.private-cache }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
@@ -301,6 +314,7 @@ jobs:
         env:
           PRESET: ${{ inputs.preset }}
           CACHE: ${{ inputs.cache }}
+          PRIVATE_CACHE: ${{ inputs.private-cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
@@ -316,12 +330,16 @@ jobs:
           STORE_KNOWN_HOSTS: ${{ inputs.store-known-hosts }}
         run: |
           set -euo pipefail
-          for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
+          for name in PRESET CACHE PRIVATE_CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
             if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
               echo "::error::${name} must not contain line breaks"
               exit 1
             fi
           done
+          if [ -n "${CACHE}" ] && [ -n "${PRIVATE_CACHE}" ]; then
+            echo '::error::cache selects a public cache and private-cache selects a private cache; set only one'
+            exit 1
+          fi
           if [[ "${BUILDERS}" == *$'\n'* || "${BUILDERS}" == *$'\r'* ]]; then
             echo '::error::builders must not contain line breaks; separate inline builders with semicolons'
             exit 1
@@ -393,8 +411,8 @@ jobs:
               fi
               ;;
             pull-request-and-branch)
-              if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then
-                echo '::error::preset is mutually exclusive with cache, root-prefix and ttl'
+              if [ -n "${CACHE}${PRIVATE_CACHE}${ROOT_PREFIX}${TTL}" ]; then
+                echo '::error::preset is mutually exclusive with cache, private-cache, root-prefix and ttl'
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
@@ -419,6 +437,7 @@ jobs:
           esac
           {
             echo "cache=${CACHE}"
+            echo "private-cache=${PRIVATE_CACHE}"
             echo "root-prefix=${ROOT_PREFIX}"
             echo "ttl=${TTL}"
             echo "reuse-view=${REUSE_VIEW}"
@@ -493,6 +512,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
@@ -523,6 +543,7 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
           optimise: ${{ inputs.push }}
@@ -615,6 +636,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
@@ -633,6 +655,7 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           read-user: ${{ secrets.read_user }}
@@ -663,6 +686,7 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
 
@@ -677,6 +701,7 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
+          private-cache: ${{ needs.configure.outputs.private-cache }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
