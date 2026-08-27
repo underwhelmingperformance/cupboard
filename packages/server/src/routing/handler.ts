@@ -1,7 +1,9 @@
 import {
 	cacheFromSelector,
+	cacheNameSchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
+	privateStoredCache,
 	publicCacheSelectorSchema,
 	type TenantId,
 	tenantIdSchema
@@ -21,9 +23,15 @@ import {
 	TenantWritesStoppedError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { notFoundResponse, TextBody, textResponse } from '../http/http.ts';
+import {
+	notFoundResponse,
+	TextBody,
+	textResponse,
+	uncachedNotFoundResponse
+} from '../http/http.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
 import { guardScopedRead } from '../read/read.ts';
+import { unauthorisedResponse } from '../read/read-auth.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
 import { tenantServer } from './durable-object.ts';
@@ -31,14 +39,22 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { readApp } from './read-app.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
-import { innerRequest, tenantUncachedRead } from './tenant-forward.ts';
-import { parseTenantPath } from './tenant-routing.ts';
+import {
+	innerRequest,
+	tenantUncachedRead,
+	withoutStoring
+} from './tenant-forward.ts';
+import {
+	isLiteralNamespacePath,
+	parsePrivateCachePath,
+	parseTenantPath
+} from './tenant-routing.ts';
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
 const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
-	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
+	/^(?:(?:\/cache\/[^/]+)|(?:\/private-cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -72,9 +88,13 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	app.get(
 		'/.well-known/oauth-authorization-server/t/:tenant',
 		async (context) => {
-			const tenant = tenantIdSchema.safeParse(context.req.param('tenant'));
+			const slug = context.req.param('tenant');
+			const tenant = tenantIdSchema.safeParse(slug);
+			// This document publishes the tenant's issuer, which clients compare as
+			// a string. Serve it under the one spelling of the slug.
+			const rawSlug = new URL(context.req.url).pathname.split('/').at(-1);
 
-			if (!tenant.success) {
+			if (rawSlug !== slug || !tenant.success) {
 				return notFoundResponse();
 			}
 
@@ -117,17 +137,22 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
+		// A read inside the private namespace needs the addressed cache's own read
+		// verifier as well as the tenant row. Naming the cache here loads both in
+		// one D1 batch, before any route runs.
+		const privateCache = parsePrivateCachePath(route.rest);
 		const admission = await admitTenant(
 			context.env,
 			context.executionCtx,
-			route.tenant
+			route.tenant,
+			privateCache?.cache
 		);
 
 		if (admission === undefined) {
 			return notFoundResponse();
 		}
 
-		const { entry, fresh } = admission;
+		const { entry, fresh, cacheVerifier, isCacheDeleted } = admission;
 
 		if (
 			isTenantRead(context.req.method, route.rest) &&
@@ -141,7 +166,12 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantEntryFresh', fresh);
 		context.set('tenantRest', route.rest);
 		context.set('readScope', { visibility: 'public', cache: DEFAULT_CACHE });
+		context.set('isCacheDeleted', isCacheDeleted);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
+
+		if (cacheVerifier !== undefined) {
+			context.set('cacheVerifier', cacheVerifier);
+		}
 
 		await next();
 	});
@@ -150,9 +180,22 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// The private namespace is not read-addressable here, so a `_private-`
 	// selector is refused with the same 404 as a malformed one. A write parses
 	// its own selector, which does admit the private namespace, so only reads
-	// pass through this rule.
+	// pass through the scoping rule below. Refuse a request that did not spell
+	// the namespace and the name literally, whatever the method, because other
+	// routing stages read the raw segments and may reject them or derive a
+	// different identity.
 	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
-		if (!isTenantRead(context.req.method, context.get('tenantRest'))) {
+		if (
+			!isLiteralNamespacePath(
+				context.get('tenantRest'),
+				'cache',
+				context.req.param('cacheName')
+			)
+		) {
+			return notFoundResponse();
+		}
+
+		if (!isScopedContentRead(context.req.raw, context.get('tenantRest'))) {
 			return next();
 		}
 
@@ -172,6 +215,45 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		return next();
 	});
 
+	// A `/private-cache/<name>/` prefix carries a private cache's local name, not
+	// a selector, so this namespace addresses every private cache and nothing
+	// else. Every request under the prefix authenticates, whatever its method and
+	// whether or not the cache exists, so the namespace answers no reader without
+	// a credential. A path that names no cache has no verifier to check a
+	// credential against and is refused outright, and so is a request that did
+	// not spell the namespace and the name literally: admission parses the raw
+	// path, so it loaded no verifier for such a request, and the tenant verifier
+	// must not stand in for a cache credential.
+	app.use('/t/:tenant/private-cache/:cacheName/*', async (context, next) => {
+		const cacheName = context.req.param('cacheName');
+		const name = cacheNameSchema.safeParse(cacheName);
+
+		if (
+			!name.success ||
+			!isLiteralNamespacePath(
+				context.get('tenantRest'),
+				'private-cache',
+				cacheName
+			)
+		) {
+			return unauthorisedResponse();
+		}
+
+		context.set('readScope', {
+			visibility: 'private',
+			cache: privateStoredCache(name.data)
+		});
+
+		const denied = await guardScopedRead(
+			context.req.raw,
+			context.get('tenantEntry'),
+			context.get('readScope'),
+			context.get('cacheVerifier')
+		);
+
+		return denied ?? next();
+	});
+
 	// Fetch discovery and signing keys from the tenant Durable Object without
 	// caching them. Discovery uses the stored issuer, so an alias cannot advertise
 	// another identity.
@@ -184,10 +266,26 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		)
 	);
 
-	// The binary-cache protocol, served for the default cache at the bare tenant
-	// prefix and for a named cache under `/cache/<name>/`.
 	app.route('/t/:tenant', readApp);
 	app.route('/t/:tenant/cache/:cacheName', readApp);
+	app.route('/t/:tenant/private-cache/:cacheName', readApp);
+
+	// A `/reuse/<view>/` prefix names a reuse view in the public namespace. A
+	// request that did not spell the namespace and the name literally is refused
+	// here, with the same 404 the namespace gives a malformed view name.
+	app.use('/t/:tenant/reuse/:view/*', async (context, next) => {
+		if (
+			!isLiteralNamespacePath(
+				context.get('tenantRest'),
+				'reuse',
+				context.req.param('view')
+			)
+		) {
+			return withoutStoring(notFoundResponse());
+		}
+
+		await next();
+	});
 
 	app.post('/t/:tenant/reuse/:view/api/v1/missing-paths', async (context) => {
 		const denied = await guardScopedRead(
@@ -306,6 +404,15 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		return dispatchTenant(inner, context.env, tenant, writeStatus);
 	});
 
+	// Nothing in the private namespace reaches the Durable Object fallback below,
+	// which serves reads without authenticating the reader. A request the read
+	// app does not serve ends here instead: as a 404 when the namespace
+	// middleware has already accepted the reader's credential, and as a refusal
+	// when the path names no cache to check a credential against. Register these
+	// after the mount above so the read app's routes still match.
+	app.all('/t/:tenant/private-cache', refusePrivateNamespace);
+	app.all('/t/:tenant/private-cache/*', refusePrivateNamespace);
+
 	// Keep the fallback last so specialised read routes can apply their cache
 	// policy before Durable Object dispatch.
 	app.all('/t/:tenant/*', (context) =>
@@ -393,8 +500,7 @@ function isTenantWrite(inner: Request): boolean {
 }
 
 // A read addresses cache content: the binary-cache protocol plus the two
-// read-only POST endpoints. Admission requires an active tenant for these, and
-// only these carry a cache prefix the edge parses.
+// read-only POST endpoints. Admission requires an active tenant for these.
 function isTenantRead(method: string, pathname: string): boolean {
 	return (
 		method === 'GET' ||
@@ -402,6 +508,32 @@ function isTenantRead(method: string, pathname: string): boolean {
 		isUploadPreviewRequest(method, pathname) ||
 		isCacheAvailabilityRequest(method, pathname)
 	);
+}
+
+// A read of the cache content the request's prefix addresses. A commit upgrade
+// is sent as a GET, and an upload preview is one of the read-only POSTs, but
+// both negotiate a write. A write may name a private cache, so neither is
+// scoped as a read of the cache the prefix names.
+function isScopedContentRead(request: Request, pathname: string): boolean {
+	if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+		return false;
+	}
+
+	return (
+		request.method === 'GET' ||
+		request.method === 'HEAD' ||
+		isCacheAvailabilityRequest(request.method, pathname)
+	);
+}
+
+// Ends a request in the private namespace that addresses no cache content. The
+// namespace middleware has already checked the reader's credential whenever the
+// path names a cache, and a path that names none is refused without consulting
+// any tenant or cache state, so neither answer reports whether a cache exists.
+function refusePrivateNamespace(context: Context<WorkerHonoEnv>): Response {
+	return context.get('readScope').visibility === 'private'
+		? uncachedNotFoundResponse()
+		: unauthorisedResponse();
 }
 
 function isUploadPreviewRequest(method: string, pathname: string): boolean {

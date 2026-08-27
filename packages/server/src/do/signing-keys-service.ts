@@ -1022,6 +1022,35 @@ export class SigningKeysService {
 		return this.publicKeyBody;
 	}
 
+	/**
+	 * Whether a re-signing backfill or one of its queued cache-tag purges
+	 * remains outstanding.
+	 *
+	 * The alarm calls this before it gives the backfill a turn. Both tables are
+	 * local, so deciding costs no D1 statement.
+	 */
+	hasBackfillWork(): boolean {
+		const continuation = this.context.db
+			.select({ id: schema.cachePurgeContinuations.id })
+			.from(schema.cachePurgeContinuations)
+			.where(eq(schema.cachePurgeContinuations.kind, 'backfill'))
+			.limit(1)
+			.get();
+
+		if (continuation !== undefined) {
+			return true;
+		}
+
+		const backfill = this.context.db
+			.select({ keyId: schema.signingKeyBackfills.keyId })
+			.from(schema.signingKeyBackfills)
+			.where(ne(schema.signingKeyBackfills.state, 'complete'))
+			.limit(1)
+			.get();
+
+		return backfill !== undefined;
+	}
+
 	async runBackfillOnce(): Promise<void> {
 		const purge = await this.processContinuation();
 

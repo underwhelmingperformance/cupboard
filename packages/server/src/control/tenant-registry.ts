@@ -405,8 +405,8 @@ export async function setTenantReadCredential(
 
 /**
  * Replaces one private cache's own read credential, only while the tenant is
- * active or suspended. The credential is exclusive: while the row exists, the
- * tenant credential no longer opens that cache.
+ * active or suspended. While the row exists, only the cache-specific credential
+ * authenticates reads of that cache.
  */
 export async function setCacheReadCredential(
 	database: Database,
@@ -467,7 +467,7 @@ export async function setCacheReadCredential(
 /**
  * Removes one private cache's own read credential, only while the tenant is
  * active or suspended. Readers of that cache then authenticate with the tenant
- * credential. Removing a credential the cache does not have succeeds.
+ * credential. The operation is idempotent.
  */
 export async function clearCacheReadCredential(
 	database: Database,
@@ -499,15 +499,13 @@ export async function clearCacheReadCredential(
 		return;
 	}
 
-	// A live tenant may have no credential for this cache, and clearing an
-	// absent credential succeeds. Re-read the tenant to distinguish that result
-	// from a missing or retired tenant.
+	// A zero-row delete succeeds for a live tenant. Re-read the tenant so a
+	// missing or retired tenant still receives the corresponding error.
 	await requireLiveTenant(database, id);
 }
 
-// Matches the tenant row only while its status still admits writes. Offboarding
-// and offboarded are terminal, so a tenant this condition rejects never becomes
-// writable again.
+// Matches a tenant while its status permits writes. The `offboarding` and
+// `offboarded` states are terminal.
 function liveTenantFilter(id: TenantId): SQL | undefined {
 	return and(
 		eq(d1Schema.tenant.id, id),
@@ -515,8 +513,8 @@ function liveTenantFilter(id: TenantId): SQL | undefined {
 	);
 }
 
-// Why a write guarded on a live tenant matched no row: either the tenant row is
-// gone, or offboarding has retired it.
+// Reports whether an unmatched live-tenant guard refers to a missing tenant or
+// a retired tenant.
 async function refuseRetiredTenant(
 	database: Database,
 	id: TenantId
@@ -609,6 +607,12 @@ export async function finaliseOffboardedTenant(
 			.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id)),
 		database
 			.delete(d1Schema.tenantCacheReadCredential)
-			.where(eq(d1Schema.tenantCacheReadCredential.tenant, id))
+			.where(eq(d1Schema.tenantCacheReadCredential.tenant, id)),
+		// An absent lifecycle row means generation one. Finalisation deletes these
+		// rows only after the tenant drain has removed every reference edge, so
+		// the deletion cannot reauthorise a first-generation edge.
+		database
+			.delete(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, id))
 	]);
 }

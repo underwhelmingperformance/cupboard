@@ -56,14 +56,17 @@ export const tenantRouter = os.router({
 			context.services.cacheAdmin.listCaches()
 		),
 		put: os.caches.put.handler(({ input, context }) =>
-			context.services.cacheAdmin.putCache(input.cacheName, input.priority)
+			context.services.cacheAdmin.putCache(
+				cacheFromSelector(input.cacheName),
+				input.priority
+			)
 		),
 		remove: os.caches.remove.handler(({ input, context }) => {
 			const origin = requestOriginSchema.parse(
 				new URL(context.request.url).origin
 			);
 			return context.services.cacheAdmin.removeCache(
-				input.params.cacheName,
+				cacheFromSelector(input.params.cacheName),
 				input.query.force,
 				origin
 			);

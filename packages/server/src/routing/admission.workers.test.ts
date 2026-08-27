@@ -35,6 +35,7 @@ import {
 	setCacheReadCredential,
 	setTenantStatus
 } from '../control/tenant-registry.ts';
+import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -513,7 +514,7 @@ describe('layered admission gate', () => {
 });
 
 // Counts the D1 batches a call issues, so a test can show that admission reads
-// the tenant row and the cache verifier in one round trip.
+// the tenant row, the cache verifier and the cache lifecycle in one round trip.
 function countingD1(inner: D1Database, batches: number[]): D1Database {
 	return {
 		prepare: (query) => inner.prepare(query),
@@ -532,6 +533,7 @@ interface PrivateAdmission {
 	readonly entry: TenantEntry | undefined;
 	readonly cacheUser: string | undefined;
 	readonly cacheAcceptsPassword: boolean;
+	readonly isCacheDeleted: boolean | undefined;
 	readonly batches: number[];
 }
 
@@ -557,6 +559,7 @@ async function admitPrivate(
 	return {
 		entry: admission?.entry,
 		cacheUser: verifier?.user,
+		isCacheDeleted: admission?.isCacheDeleted,
 		cacheAcceptsPassword:
 			verifier !== undefined &&
 			(await isReadPasswordMatching(
@@ -589,7 +592,8 @@ describe('private cache admission', () => {
 			entry: { status: 'active', readMode: 'public' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
-			batches: [2]
+			isCacheDeleted: false,
+			batches: [3]
 		});
 	});
 
@@ -603,7 +607,8 @@ describe('private cache admission', () => {
 			entry: { status: 'active', readMode: 'public' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			batches: [2]
+			isCacheDeleted: false,
+			batches: [3]
 		});
 	});
 
@@ -624,7 +629,8 @@ describe('private cache admission', () => {
 			entry: { status: 'active', readMode: 'public' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			batches: [2]
+			isCacheDeleted: false,
+			batches: [3]
 		});
 	});
 
@@ -643,7 +649,42 @@ describe('private cache admission', () => {
 			entry: { status: 'active', readMode: 'public' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
+			isCacheDeleted: false,
 			batches: []
+		});
+	});
+
+	it('reports a deleted cache and keeps returning its verifier', async () => {
+		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await setCacheReadCredential(
+			database(),
+			tenantIdSchema.parse('acme'),
+			builds,
+			cacheCredential,
+			now
+		);
+		await refreshTenantMembership(env);
+		await database()
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant: tenantIdSchema.parse('acme'),
+				cache: privateStoredCache(builds),
+				generation: secondCacheGeneration,
+				deletedAt: now,
+				updatedAt: now
+			})
+			.run();
+
+		// A deletion keeps the cache credential, so the reader still authenticates.
+		// The deleted cache state causes the content request to fail.
+		expect(
+			await admitPrivate('acme', privateStoredCache(builds))
+		).toStrictEqual({
+			entry: { status: 'active', readMode: 'public' },
+			cacheUser: 'reader',
+			cacheAcceptsPassword: true,
+			isCacheDeleted: true,
+			batches: [3]
 		});
 	});
 
@@ -669,7 +710,8 @@ describe('private cache admission', () => {
 			entry: undefined,
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			batches: [2]
+			isCacheDeleted: undefined,
+			batches: [3]
 		});
 	});
 });

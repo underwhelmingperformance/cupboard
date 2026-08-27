@@ -13,6 +13,15 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray } from 'drizzle-orm';
 
+import {
+	isMetadataOfCommit,
+	isNarInfoObjectVersion,
+	type NarInfoObjectMetadata,
+	narInfoObjectMetadata,
+	type NarInfoObjectVersion,
+	type NarInfoReferenceVersion,
+	recordedNarInfoMetadata
+} from '../blob/narinfo-object-metadata.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -39,69 +48,6 @@ import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
-
-interface NarInfoReferenceVersion {
-	readonly generation: NarInfoGeneration;
-	readonly narHash: NixSha256HashString;
-}
-
-interface NarInfoObjectVersion extends NarInfoReferenceVersion {
-	readonly narUrl: string;
-	readonly signatureGeneration: SigningKeyGeneration;
-}
-
-interface NarInfoObjectMetadata {
-	readonly [key: string]: string;
-	readonly generation: string;
-	readonly narHash: string;
-	readonly narUrl: string;
-	readonly signatureGeneration: string;
-}
-
-function narInfoObjectMetadata(
-	version: NarInfoObjectVersion
-): NarInfoObjectMetadata {
-	return {
-		generation: String(version.generation),
-		narHash: version.narHash,
-		narUrl: version.narUrl,
-		signatureGeneration: String(version.signatureGeneration)
-	};
-}
-
-function objectMetadata(
-	object: R2Object | null
-): NarInfoObjectMetadata | undefined {
-	const generation = object?.customMetadata?.generation;
-	const narHash = object?.customMetadata?.narHash;
-	const narUrl = object?.customMetadata?.narUrl;
-	const signatureGeneration = object?.customMetadata?.signatureGeneration;
-
-	if (
-		generation === undefined ||
-		narHash === undefined ||
-		narUrl === undefined ||
-		signatureGeneration === undefined
-	) {
-		return undefined;
-	}
-
-	return { generation, narHash, narUrl, signatureGeneration };
-}
-
-function isObjectVersion(
-	object: R2Object | null,
-	version: NarInfoObjectVersion
-): boolean {
-	const metadata = objectMetadata(object);
-
-	return (
-		metadata?.generation === String(version.generation) &&
-		metadata.narHash === version.narHash &&
-		metadata.narUrl === version.narUrl &&
-		metadata.signatureGeneration === String(version.signatureGeneration)
-	);
-}
 
 function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
 	return row.pendingSignatureGeneration ?? row.signatureGeneration;
@@ -324,7 +270,7 @@ export class NarInfoObjectsService {
 		);
 
 		if (
-			isObjectVersion(existing, {
+			isNarInfoObjectVersion(existing, {
 				generation: row.generation,
 				narHash: row.narHash,
 				narUrl: narInfo.url,
@@ -487,7 +433,7 @@ export class NarInfoObjectsService {
 
 		return (
 			narInfo !== undefined &&
-			isObjectVersion(object, {
+			isNarInfoObjectVersion(object, {
 				generation: row.generation,
 				narHash: row.narHash,
 				narUrl: narInfo.url,
@@ -754,7 +700,7 @@ export class NarInfoObjectsService {
 				const object = await this.context.env.BLOBS.head(
 					narInfoObjectKey(tenant, storePathHash, cache)
 				);
-				const metadata = objectMetadata(object);
+				const metadata = recordedNarInfoMetadata(object);
 
 				return metadata === undefined
 					? undefined
@@ -792,14 +738,8 @@ export class NarInfoObjectsService {
 		);
 		const backed = await presentNarObjects(this.context.env.BLOBS, objects);
 		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
-		const hasCurrentObject = (row: NarInfoRow): boolean => {
-			const metadata = present.get(row.storePathHash);
-
-			return (
-				metadata?.generation === String(row.generation) &&
-				metadata.narHash === row.narHash
-			);
-		};
+		const hasCurrentObject = (row: NarInfoRow): boolean =>
+			isMetadataOfCommit(present.get(row.storePathHash), row);
 
 		for (const row of committedRows) {
 			if (hasCurrentObject(row) && backed.has(row.narHash)) {

@@ -7,7 +7,7 @@ function headerSet(request: Request): Record<string, string> {
 }
 
 describe('canonicalCacheRequest', () => {
-	it('removes query parameters and fragments without changing the request', () => {
+	it('replaces query parameters and fragments with the key version', () => {
 		const request = new Request(
 			'https://cache.example/t/acme/abc.narinfo?token=one#part',
 			{
@@ -23,7 +23,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			ifNoneMatch: canonical.headers.get('if-none-match')
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2',
 			method: 'HEAD',
 			ifNoneMatch: '"abc"'
 		});
@@ -50,7 +50,7 @@ describe('canonicalCacheRequest', () => {
 			method: canonical.method,
 			headers: headerSet(canonical)
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2',
 			method: 'GET',
 			headers: {
 				accept: 'text/x-nix-narinfo',

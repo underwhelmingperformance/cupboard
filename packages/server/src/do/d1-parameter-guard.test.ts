@@ -12,6 +12,7 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
+	privateStoredCache,
 	rootNameSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
@@ -28,6 +29,7 @@ import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { narInfoReferenceQuery } from '../read/read.ts';
 import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
 import {
@@ -325,6 +327,23 @@ describe('selected D1 statements', () => {
 						inArray(d1Schema.blobReference.storePathHash, storePaths)
 					)
 				);
+
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(
+				maxBoundParameters
+			);
+		});
+	});
+
+	describe('private narinfo authorisation (read/read.ts)', () => {
+		it('reference SELECT stays within the parameter budget at maxInClauseValues', () => {
+			// The filter binds the tenant, the cache, one store path per requested
+			// path, and the two generation literals the lifecycle comparison embeds.
+			const query = narInfoReferenceQuery(
+				database,
+				tenant,
+				privateStoredCache(cache),
+				Array.from({ length: maxInClauseValues }, () => testStorePathHash)
+			);
 
 			expect(query.toSQL().params.length).toBeLessThanOrEqual(
 				maxBoundParameters

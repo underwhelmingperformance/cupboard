@@ -1,6 +1,8 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	isPrivateCache,
 	type NarInfoGeneration,
+	narInfoGenerationSchema,
 	type NixSha256HashString,
 	type PredicateType,
 	predicateTypeSchema,
@@ -27,9 +29,13 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from '@cupboard/shared/in-toto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 
+import {
+	authorisedByCacheGeneration,
+	referencedCacheLifecycle
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -63,6 +69,7 @@ import {
 import {
 	batchNonEmpty,
 	chunk,
+	deleteObjects,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';
@@ -258,6 +265,19 @@ export class AttestationsService {
 			.run();
 	}
 
+	/**
+	 * Whether the cache holds a live attestation reference to the bundle.
+	 *
+	 * An `attestation_ref` row records the narinfo generation but not the cache
+	 * generation. Join it to `blob_ref` on the tenant, stored name, path and
+	 * narinfo generation, then apply the lifecycle-generation predicate. This
+	 * excludes references from an earlier cache incarnation after the stored name
+	 * is reused.
+	 *
+	 * The inner join also excludes a reference after path retirement has removed
+	 * its reference edge, even if attestation cleanup has not yet removed the
+	 * reference.
+	 */
 	private async hasOwnBundleReferenceInCache(
 		cache: StoredCache,
 		digest: Sha256HexDigest
@@ -266,16 +286,71 @@ export class AttestationsService {
 		const reference = await this.context.d1
 			.select({ digest: d1Schema.attestationReference.digest })
 			.from(d1Schema.attestationReference)
+			.innerJoin(
+				d1Schema.blobReference,
+				and(
+					eq(
+						d1Schema.blobReference.tenant,
+						d1Schema.attestationReference.tenant
+					),
+					eq(d1Schema.blobReference.cache, d1Schema.attestationReference.cache),
+					eq(
+						d1Schema.blobReference.storePathHash,
+						d1Schema.attestationReference.storePathHash
+					),
+					eq(
+						d1Schema.blobReference.generation,
+						d1Schema.attestationReference.generation
+					)
+				)
+			)
+			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 			.where(
 				and(
 					eq(d1Schema.attestationReference.tenant, tenant),
 					eq(d1Schema.attestationReference.cache, cache),
-					eq(d1Schema.attestationReference.digest, digest)
+					eq(d1Schema.attestationReference.digest, digest),
+					authorisedByCacheGeneration()
 				)
 			)
 			.get();
 
 		return reference !== undefined;
+	}
+
+	/**
+	 * Returns the greatest narinfo generation among the reference edges for this
+	 * tenant, stored name and path that the current cache generation authorises,
+	 * or `undefined` when it authorises none.
+	 *
+	 * A recommit can leave an earlier edge behind until the drain retires it.
+	 * Narinfo generations increase and never repeat for a stored name and path,
+	 * so the greatest authorised generation identifies the current commit.
+	 * Advancing the cache generation excludes every edge from the previous cache
+	 * incarnation.
+	 */
+	private async authorisedNarInfoGeneration(
+		cache: StoredCache,
+		storePathHash: StorePathHash
+	): Promise<NarInfoGeneration | undefined> {
+		const tenant = this.context.requireTenant();
+		const edge = await this.context.d1
+			.select({ generation: d1Schema.blobReference.generation })
+			.from(d1Schema.blobReference)
+			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, tenant),
+					eq(d1Schema.blobReference.cache, cache),
+					eq(d1Schema.blobReference.storePathHash, storePathHash),
+					authorisedByCacheGeneration()
+				)
+			)
+			.orderBy(desc(d1Schema.blobReference.generation))
+			.limit(1)
+			.get();
+
+		return edge?.generation;
 	}
 
 	private async availableBundleIncarnation(
@@ -343,11 +418,16 @@ export class AttestationsService {
 		request: Request,
 		key: string,
 		contentType: string,
-		cacheControl = 'no-store'
+		cacheControl = 'no-store',
+		isServable?: (object: R2Object) => boolean
 	): Promise<Response> {
 		const object = await this.context.env.BLOBS.get(key);
 
 		if (object === null) {
+			return uncachedNotFoundResponse();
+		}
+
+		if (isServable !== undefined && !isServable(object)) {
 			return uncachedNotFoundResponse();
 		}
 
@@ -613,6 +693,14 @@ export class AttestationsService {
 		hash: string
 	): Promise<Response> {
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
+		const committed = await this.authorisedNarInfoGeneration(
+			cache,
+			storePathHash
+		);
+
+		if (committed === undefined) {
+			return uncachedNotFoundResponse();
+		}
 
 		return this.serveTenantObject(
 			request,
@@ -621,7 +709,9 @@ export class AttestationsService {
 				storePathHash,
 				cache
 			),
-			'application/json; charset=utf-8'
+			'application/json; charset=utf-8',
+			'no-store',
+			(object) => isListOfCommittedGeneration(object, cache, committed)
 		);
 	}
 
@@ -697,9 +787,79 @@ export class AttestationsService {
 				httpMetadata: {
 					contentType: 'application/json; charset=utf-8',
 					cacheControl: 'no-store'
+				},
+				// Readers validate the published response body against a strict
+				// schema. Store the narinfo generation in R2 custom metadata so the
+				// response schema does not change.
+				customMetadata: {
+					[listGenerationMetadataKey]: String(resolvedGeneration)
 				}
 			})
 		);
+	}
+
+	/**
+	 * Removes the list objects when the retired narinfo generation was the last
+	 * committed generation for each path. One bulk call can remove all of these
+	 * objects because no later generation uses them.
+	 */
+	async discardLists(
+		cache: StoredCache,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<void> {
+		if (storePathHashes.length === 0) {
+			return;
+		}
+
+		const tenant = this.context.requireTenant();
+		const keys = [...new Set(storePathHashes)].map((storePathHash) =>
+			attestationListObjectKey(tenant, storePathHash, cache)
+		);
+
+		await this.context.objectWrites.write(keys, () =>
+			deleteObjects(this.context.env.BLOBS, keys)
+		);
+	}
+
+	/**
+	 * Removes the list object of a retired narinfo generation, and preserves an
+	 * object that belongs to a later generation of the same path.
+	 *
+	 * An object with no recorded generation was written before this server
+	 * recorded one, so it describes a generation older than the recommit that
+	 * kept the path. Remove it too.
+	 *
+	 * Call head inside the ordered mutation, after any abandoned publication for
+	 * the key has settled. If head runs before that wait, it can observe the old
+	 * object while an abandoned publication is about to replace it. Deleting
+	 * based on that observation would remove the newly published list.
+	 */
+	async discardListOfGeneration(
+		cache: StoredCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration
+	): Promise<void> {
+		const key = attestationListObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
+			cache
+		);
+
+		await this.context.objectWrites.write([key], async () => {
+			const object = await this.context.env.BLOBS.head(key);
+
+			if (object === null) {
+				return;
+			}
+
+			const recorded = recordedListGeneration(object);
+
+			if (recorded !== undefined && recorded !== generation) {
+				return;
+			}
+
+			await this.context.env.BLOBS.delete(key);
+		});
 	}
 
 	async removeReferencesForDigest(
@@ -759,6 +919,50 @@ export class AttestationsService {
 			);
 		}
 	}
+}
+
+// The R2 metadata entry naming the narinfo generation a list object describes.
+export const listGenerationMetadataKey = 'narinfo-generation';
+
+function recordedListGeneration(
+	object: R2Object
+): NarInfoGeneration | undefined {
+	const recorded = object.customMetadata?.[listGenerationMetadataKey];
+
+	if (recorded === undefined) {
+		return undefined;
+	}
+
+	const parsed = narInfoGenerationSchema.safeParse(Number(recorded));
+
+	return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Whether a list object describes the narinfo generation the path currently
+ * has committed.
+ *
+ * A path keeps one list object across all of its commits. A commit without an
+ * attestation leaves the object from the previous generation in place. The
+ * generation in the object metadata identifies which commit produced the list,
+ * including after another cache reuses the stored name.
+ *
+ * Generation metadata and private caches were introduced together, so a private
+ * list without this metadata cannot be valid. Public list objects can predate
+ * the metadata; their contents are already public, so continue serving them.
+ */
+function isListOfCommittedGeneration(
+	object: R2Object,
+	cache: StoredCache,
+	committed: NarInfoGeneration
+): boolean {
+	const recorded = recordedListGeneration(object);
+
+	if (recorded === undefined) {
+		return !isPrivateCache(cache);
+	}
+
+	return recorded === committed;
 }
 
 const attestationStatementSchema = inTotoStatementSchema({

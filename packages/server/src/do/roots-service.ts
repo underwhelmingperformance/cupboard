@@ -70,7 +70,10 @@ export class RootsService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	private writeRoot(cache: StoredCache, request: RootSetCommand): StoredRoot {
+	private async writeRoot(
+		cache: StoredCache,
+		request: RootSetCommand
+	): Promise<StoredRoot> {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const expiresAt = resolveRootExpiry({
@@ -81,7 +84,7 @@ export class RootsService {
 			now
 		});
 
-		this.cacheAdmin.loadOrCreateCache(cache);
+		await this.cacheAdmin.loadOrCreateCache(cache);
 
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
@@ -314,7 +317,7 @@ export class RootsService {
 		requested: RootSetCommand,
 		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
 	): Promise<RootWrite> {
-		return this.context.criticalSection((): Promise<RootWrite> => {
+		return this.context.criticalSection(async (): Promise<RootWrite> => {
 			const absent =
 				expectedIdentities === undefined
 					? requested.targets
@@ -327,24 +330,24 @@ export class RootsService {
 						);
 
 			if (absent.length > 0) {
-				return Promise.resolve({ kind: 'rejected', unavailable: absent });
+				return { kind: 'rejected', unavailable: absent };
 			}
 
-			return Promise.resolve({
+			return {
 				kind: 'written',
-				stored: this.writeRoot(cache, requested)
-			});
+				stored: await this.writeRoot(cache, requested)
+			};
 		});
 	}
 
 	// The first negotiation creates a run root; later negotiations can only extend
 	// its expiry. They do not replace targets or release paths into grace. Commits
 	// add their paths as they finish.
-	bindRunRoot(
+	async bindRunRoot(
 		cache: StoredCache,
 		name: RootName,
 		explicitTtlSeconds: TtlSeconds | undefined
-	): void {
+	): Promise<void> {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const expiresAt = resolveRootExpiry({
@@ -355,7 +358,7 @@ export class RootsService {
 			now
 		});
 
-		this.cacheAdmin.loadOrCreateCache(cache);
+		await this.cacheAdmin.loadOrCreateCache(cache);
 
 		this.context.db
 			.insert(schema.retentionRoots)

@@ -57,10 +57,15 @@ export async function tenantUncachedRead(
 		innerRequest(context)
 	);
 
-	if (!shouldForceNoStore) {
-		return response;
-	}
+	return shouldForceNoStore ? withoutStoring(response) : response;
+}
 
+/**
+ * Copies a response with `no-store`, so a body served under a credential
+ * reaches no cache. A response a fetch returned carries immutable headers, so
+ * the policy can only be applied to a copy.
+ */
+export function withoutStoring(response: Response): Response {
 	const headers = new Headers(response.headers);
 	headers.set('cache-control', 'no-store');
 

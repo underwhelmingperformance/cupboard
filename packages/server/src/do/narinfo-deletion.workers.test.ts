@@ -36,6 +36,7 @@ import {
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { chunk } from './bulk.ts';
+import { teardownDrainStatements } from './cache-admin-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	DeletionQueueService,
@@ -43,6 +44,7 @@ import {
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { StatementBudget } from './statement-budget.ts';
 
 const selectDeletions = 'SELECT cache, store_path_hash FROM narinfo_deletion';
 const defaultCache: StoredCache = DEFAULT_CACHE;
@@ -242,7 +244,11 @@ describe('narinfo deletion queue', () => {
 
 				try {
 					await instance.context.criticalSection(() =>
-						queue.retireTornDownNarInfos(DEFAULT_CACHE, entries)
+						queue.retireTornDownNarInfos(
+							DEFAULT_CACHE,
+							entries,
+							new StatementBudget(teardownDrainStatements)
+						)
 					);
 
 					return;

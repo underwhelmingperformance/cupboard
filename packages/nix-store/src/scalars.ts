@@ -251,6 +251,17 @@ export const cacheSelectorSchema = z.union([
 export type CacheSelector = z.output<typeof cacheSelectorSchema>;
 
 /**
+ * A selector for a named cache: a public cache's local name or a private
+ * cache's selector. The cache administration API cannot create or remove the
+ * default cache, so this schema excludes `_default`.
+ */
+export const namedCacheSelectorSchema = z.union([
+	cacheNameSchema,
+	privateCacheSelectorSchema
+]);
+export type NamedCacheSelector = z.output<typeof namedCacheSelectorSchema>;
+
+/**
  * The stored name of a cache: `CacheName` for a named public cache,
  * `DEFAULT_CACHE` for the default cache, or `PrivateStoredCache` for a private
  * cache. Convert a selector with `cacheFromSelector`. Parse a raw database
@@ -354,6 +365,19 @@ export const narInfoGenerationSchema = z
 	.max(Number.MAX_SAFE_INTEGER)
 	.brand('NarInfoGeneration');
 export type NarInfoGeneration = z.infer<typeof narInfoGenerationSchema>;
+
+// One lifetime of a cache name. A cache name can be deleted and created again,
+// and deletion advances this number, so the reference edges of the deleted
+// cache no longer match the current generation for the cache name. Counting
+// from one lets an absent lifecycle row and an unstamped edge both mean the
+// first generation.
+export const cacheGenerationSchema = z
+	.number()
+	.int()
+	.min(1)
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('CacheGeneration');
+export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
 export const compressionSchema = z.literal('zstd');
 

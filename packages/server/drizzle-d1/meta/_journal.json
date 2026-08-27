@@ -134,6 +134,13 @@
 			"when": 1787841952350,
 			"tag": "0018_tenant_cache_read_credential",
 			"breakpoints": true
+		},
+		{
+			"idx": 19,
+			"version": "6",
+			"when": 1787928992549,
+			"tag": "0019_nar_read_authority",
+			"breakpoints": true
 		}
 	]
 }

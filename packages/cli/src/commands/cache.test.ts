@@ -86,6 +86,27 @@ describe('runCacheList', () => {
 		]);
 	});
 
+	it('lists a private cache under the selector that addresses it', async () => {
+		const results: ResultRow[][] = [];
+		const response = cacheListResponseSchema.parse({
+			caches: [
+				{ name: 'private/builds', priority: 30, storePaths: 5 },
+				{ name: 'builds', priority: 40, storePaths: 1 }
+			]
+		});
+
+		await runCacheList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: '_private-builds', value: 'priority 30; 5 path(s)' },
+				{ label: 'builds', value: 'priority 40; 1 path(s)' }
+			]
+		]);
+	});
+
 	it('reports nothing when there are no caches', async () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
@@ -206,6 +227,30 @@ describe('runCacheInspect', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Cache', value: 'builds' },
+				{ label: 'Priority', value: '30' },
+				{ label: 'Store paths', value: '5' }
+			]
+		]);
+	});
+
+	it('finds a private cache by the selector the user writes', async () => {
+		const results: ResultRow[][] = [];
+
+		await runCacheInspect('_private-builds', reporter(results), {
+			list: () =>
+				Promise.resolve(
+					cacheListResponseSchema.parse({
+						caches: [
+							{ name: 'builds', priority: 40, storePaths: 1 },
+							{ name: 'private/builds', priority: 30, storePaths: 5 }
+						]
+					})
+				)
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Cache', value: '_private-builds' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' }
 			]

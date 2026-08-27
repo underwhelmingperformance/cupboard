@@ -8,8 +8,13 @@ import {
 	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
+import {
+	type DeletePathResponse,
+	type UploadId,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -24,6 +29,7 @@ import { z } from 'zod';
 
 import { buildVersion } from '../build-info.generated.ts';
 import * as schema from '../db/schema.ts';
+import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
@@ -3194,6 +3200,43 @@ describe('upload flow', () => {
 		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
+	it('refuses the NAR of a deleted path even when its cleanup fails', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
+		const beforeDelete = await readFetch(narPath);
+
+		// The narinfo object survives the failed cleanup and the queue entry stays
+		// for garbage collection, but the reference edge is already retired.
+		const failingDelete = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockImplementation(() => Promise.reject(new Error('R2 unavailable')));
+		let deleted: DeletePathResponse;
+
+		try {
+			deleted = await deletePath(token, metadata.storePathHash);
+		} finally {
+			failingDelete.mockRestore();
+		}
+
+		const afterDelete = await readFetch(narPath);
+
+		expect({
+			beforeDelete: beforeDelete.status,
+			deleted,
+			afterDelete: afterDelete.status
+		}).toStrictEqual({
+			beforeDelete: StatusCodes.OK,
+			deleted: {
+				storePathHash: metadata.storePathHash,
+				deleted: true,
+				narScheduledForDeletion: false
+			},
+			afterDelete: StatusCodes.NOT_FOUND
+		});
+	});
+
 	it('retains a NAR still referenced by another store path', async () => {
 		vi.setSystemTime(testBase);
 
@@ -3227,6 +3270,57 @@ describe('upload flow', () => {
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
 		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
+	});
+
+	it('purges a cached NAR when its last public reference is retired', async () => {
+		const token = await initialise();
+		const first = uploadMetadata({ fileSize: narBytes.byteLength });
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'second',
+			storePathHash: '22222222222222222222222222222222'
+		});
+		await commitPath(token, first);
+		await commitSharedPath(token, second);
+		const purge = await runInDurableObject(currentServer(), (instance) =>
+			vi.spyOn(instance.context, 'purgeCacheTags').mockResolvedValue(undefined)
+		);
+		// Each pass purges one queued batch. Run more passes than the deletions
+		// queue so the queue is empty whatever order the batches were written in.
+		const drainQueuedPurges = async (): Promise<string[]> => {
+			for (let pass = 0; pass < 4; pass += 1) {
+				await runInDurableObject(currentServer(), (instance) =>
+					instance.alarm()
+				);
+			}
+
+			const tags = purge.mock.calls
+				.flatMap(([batch]) => [...batch])
+				.toSorted(byCodeUnit);
+			purge.mockClear();
+
+			return tags;
+		};
+
+		try {
+			await deletePath(token, first.storePathHash);
+			const afterFirst = await drainQueuedPurges();
+
+			await deletePath(token, second.storePathHash);
+			const afterSecond = await drainQueuedPurges();
+
+			expect({ afterFirst, afterSecond }).toStrictEqual({
+				afterFirst: [
+					narInfoCacheTag(fixtureTenant, DEFAULT_CACHE, first.storePathHash)
+				],
+				afterSecond: [
+					narCacheTag(fixtureTenant, second.narHash),
+					narInfoCacheTag(fixtureTenant, DEFAULT_CACHE, second.storePathHash)
+				].toSorted(byCodeUnit)
+			});
+		} finally {
+			purge.mockRestore();
+		}
 	});
 
 	it('is idempotent when deleting an absent store path', async () => {
@@ -3309,14 +3403,15 @@ describe('upload flow', () => {
 
 		deleteSpy.mockRestore();
 
-		// Reproduce a crash after deleting the local row but before removing the
-		// published narinfo object and D1 reference edge.
+		// Reproduce a crash after retiring the reference edge, which the deletion
+		// does before it reports success, but before removing the published
+		// narinfo object.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 1,
-			narFileSize: narBytes.byteLength,
+			narBlobs: 0,
+			narFileSize: 0,
 			pendingUploads: 0,
-			totalFileSize: narBytes.byteLength
+			totalFileSize: 0
 		});
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
@@ -3325,8 +3420,8 @@ describe('upload flow', () => {
 
 		const recovered = await runGcResult();
 
-		// Replaying the deletion marker removes the object and retires the edge. The
-		// blob grace period starts when that edge is retired.
+		// Replaying the deletion marker removes the object the failed pass left
+		// behind.
 		expect(recovered.narInfosDeleted).toBe(1);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
@@ -3352,8 +3447,10 @@ describe('upload flow', () => {
 		await deletePath(token, metadata.storePathHash);
 		deleteSpy.mockRestore();
 
-		// Recommit the path before deletion-marker replay reaches it.
-		await commitSharedPath(token, metadata);
+		// Recommit the path before deletion-marker replay reaches it. The deletion
+		// retired the tenant's reference to the NAR, so the recommit uploads it
+		// again.
+		await commitPath(token, metadata);
 
 		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
 

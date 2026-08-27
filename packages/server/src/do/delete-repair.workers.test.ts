@@ -192,7 +192,8 @@ describe('delete marker replay', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 1,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			tenantBlobs: [

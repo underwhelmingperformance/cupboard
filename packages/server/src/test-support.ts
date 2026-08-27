@@ -5,6 +5,7 @@ import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	type CacheGeneration,
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
 	narInfoGenerationSchema,
@@ -16,6 +17,7 @@ import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type SigningKeyId,
+	type StoredCache,
 	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema,
@@ -133,12 +135,14 @@ import {
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import { listGenerationMetadataKey } from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations } from './do/migrate.ts';
 import type { CupboardServer } from './do/server.ts';
 import {
+	attestationListObjectKey,
 	attestationStagingObjectKey,
 	blobReaperBatchSize,
 	blobReaperGraceMs,
@@ -915,6 +919,42 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	};
 }
 
+/**
+ * A D1 binding that counts the statements sent through it, so a test can hold
+ * an operation to the per-invocation statement budget that Workers Free
+ * enforces.
+ *
+ * Drizzle prepares one statement for each statement it sends, whether the
+ * statement runs on its own or as one member of a batch, so counting
+ * preparations counts what the invocation spends. `batch` adds nothing of its
+ * own because its members were prepared through this binding first.
+ */
+export function countingD1(inner: D1Database): {
+	readonly binding: D1Database;
+	readonly statementsSent: () => number;
+} {
+	let sent = 0;
+
+	return {
+		statementsSent: () => sent,
+		binding: {
+			prepare: (query) => {
+				sent += 1;
+
+				return inner.prepare(query);
+			},
+			batch: (statements) => inner.batch(statements),
+			exec: (query) => {
+				sent += 1;
+
+				return inner.exec(query);
+			},
+			withSession: (constraint) => inner.withSession(constraint),
+			dump: () => Promise.reject(new Error('dump is not supported here'))
+		}
+	};
+}
+
 export interface FlakyR2Plan {
 	failures: number;
 	/**
@@ -1362,6 +1402,7 @@ export async function blobReferenceRows(): Promise<
 		storePathHash: StorePathHash;
 		generation: number;
 		narHash: NixSha256HashString;
+		cacheGeneration: CacheGeneration | null;
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
@@ -1465,6 +1506,30 @@ export async function pendingAttestationRows(): Promise<
 	);
 
 	return rows.toSorted((left, right) => byCodeUnit(left.id, right.id));
+}
+
+/**
+ * Publishes an attestation list object for a path, as the server does when a
+ * bundle is attached to `generation`. Omit `generation` to reproduce a legacy
+ * list object without generation metadata.
+ */
+export async function publishAttestationList(fields: {
+	readonly cache?: StoredCache;
+	readonly storePathHash: StorePathHash;
+	readonly generation?: number;
+	readonly attestations?: readonly unknown[];
+}): Promise<void> {
+	await env.BLOBS.put(
+		attestationListObjectKey(fixtureTenant, fields.storePathHash, fields.cache),
+		JSON.stringify({ attestations: fields.attestations ?? [] }),
+		fields.generation === undefined
+			? undefined
+			: {
+					customMetadata: {
+						[listGenerationMetadataKey]: String(fields.generation)
+					}
+				}
+	);
 }
 
 export async function stageAttestationBundle(
