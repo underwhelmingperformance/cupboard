@@ -134,6 +134,12 @@ importers:
       '@octokit/request-error':
         specifier: ^7.1.1
         version: 7.1.1
+      '@sigstore/bundle':
+        specifier: ^5.0.0
+        version: 5.0.0
+      '@sigstore/sign':
+        specifier: ^5.0.0
+        version: 5.0.0(supports-color@10.2.2)
       commander:
         specifier: ^15.0.0
         version: 15.0.0
@@ -150,9 +156,6 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
-      '@sigstore/sign':
-        specifier: ^5.0.0
-        version: 5.0.0(supports-color@10.2.2)
       '@types/semver':
         specifier: ^7.8.0
         version: 7.8.0

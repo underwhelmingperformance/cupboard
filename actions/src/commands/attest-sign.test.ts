@@ -87,9 +87,16 @@ const privatePolicy: SigningPolicy = {
 	grouping: 'individual'
 };
 
+// The evidence each profile promises: `tsa-only` a timestamp and no Rekor
+// entry, `rekor-and-tsa` both, and `sigstore-default` whatever the instance the
+// repository's visibility selects produces.
 function signedEvidence(policy: SigningPolicy): BundleEvidence {
-	return policy.profile === 'tsa-only'
-		? { tlogEntryCount: 0, timestampCount: 1 }
+	if (policy.profile === 'tsa-only') {
+		return { tlogEntryCount: 0, timestampCount: 1 };
+	}
+
+	return policy.profile === 'rekor-and-tsa'
+		? { tlogEntryCount: 1, timestampCount: 1 }
 		: { tlogEntryCount: 1, timestampCount: 0 };
 }
 
@@ -632,16 +639,17 @@ describe('attestSignAction', () => {
 			destination: 'private',
 			given: {},
 			disclosed: [
-				"Signing with the GitHub Sigstore instance (GitHub's private Fulcio and its RFC 3161 timestamp authority).",
-				'Signing one statement for each of the 2 accepted subjects, so no bundle names another subject.',
+				'Signing with the public-good Sigstore instance.',
+				'Signing one statement for each of the 2 accepted subjects. Each bundle will contain one subject.',
 				'Signing can contact the following external services.',
 				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
-				'  An RFC 3161 timestamp authority receives the signature imprint and the time of the request.',
+				'  Certificate transparency receives the signing certificate and the identity it certifies.',
+				'  An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
 				'Signing publishes evidence or complete bundles to the following destinations.',
 				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
 			],
 			produced: [
-				"The bundles are in the trust domain of the GitHub Sigstore instance (GitHub's private Fulcio and its RFC 3161 timestamp authority).",
+				'The bundles are in the trust domain of the public-good Sigstore instance.',
 				'The action signed 3 bundles that carry 0 Rekor entries and 3 RFC 3161 timestamps.',
 				"The action recorded no bundle in the repository's attestation store."
 			]
@@ -653,11 +661,12 @@ describe('attestSignAction', () => {
 				uploadToGithub: 'true'
 			},
 			disclosed: [
-				'Signing with the public-good Sigstore instance (the public Fulcio and Rekor).',
-				'Signing one statement for each of the 2 accepted subjects, so no bundle names another subject.',
+				'Signing with the public-good Sigstore instance.',
+				'Signing one statement for each of the 2 accepted subjects. Each bundle will contain one subject.',
 				'Signing can contact the following external services.',
 				'  OIDC and Fulcio receive the workload identity and an ephemeral public key.',
 				'  Certificate transparency receives the signing certificate and the identity it certifies.',
+				'  An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
 				'  Rekor receives the signature metadata and the certified identity.',
 				'Signing publishes evidence or complete bundles to the following destinations.',
 				'  Rekor stores a permanent public record of the signature, and that record remains after the cache drops the path.',
@@ -665,8 +674,8 @@ describe('attestSignAction', () => {
 				'  The action writes the complete bundle to files on the runner. Attaching one to the destination cache makes it readable under the read policy of that cache.'
 			],
 			produced: [
-				'The bundles are in the trust domain of the public-good Sigstore instance (the public Fulcio and Rekor).',
-				'The action signed 3 bundles that carry 3 Rekor entries and 0 RFC 3161 timestamps.',
+				'The bundles are in the trust domain of the public-good Sigstore instance.',
+				'The action signed 3 bundles that carry 3 Rekor entries and 3 RFC 3161 timestamps.',
 				"The action recorded 3 of 3 bundles in the repository's attestation store."
 			]
 		}

@@ -351,8 +351,12 @@ describe('signingDisclosure', () => {
 			profile: 'tsa-only',
 			uploadToGithub: false,
 			expected: {
-				instances: ['github'],
-				services: ['oidc-and-fulcio', 'rfc-3161-tsa'],
+				instances: ['public-good'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa'
+				],
 				publications: ['bundle-files']
 			}
 		},
@@ -360,8 +364,12 @@ describe('signingDisclosure', () => {
 			profile: 'tsa-only',
 			uploadToGithub: true,
 			expected: {
-				instances: ['github'],
-				services: ['oidc-and-fulcio', 'rfc-3161-tsa'],
+				instances: ['public-good'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa'
+				],
 				publications: ['github-attestation-store', 'bundle-files']
 			}
 		},
@@ -370,7 +378,12 @@ describe('signingDisclosure', () => {
 			uploadToGithub: false,
 			expected: {
 				instances: ['public-good'],
-				services: ['oidc-and-fulcio', 'certificate-transparency', 'rekor'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa',
+					'rekor'
+				],
 				publications: ['rekor', 'bundle-files']
 			}
 		},
@@ -379,7 +392,12 @@ describe('signingDisclosure', () => {
 			uploadToGithub: true,
 			expected: {
 				instances: ['public-good'],
-				services: ['oidc-and-fulcio', 'certificate-transparency', 'rekor'],
+				services: [
+					'oidc-and-fulcio',
+					'certificate-transparency',
+					'rfc-3161-tsa',
+					'rekor'
+				],
 				publications: ['rekor', 'github-attestation-store', 'bundle-files']
 			}
 		},
@@ -444,45 +462,93 @@ describe('signingDisclosure', () => {
 describe('producedLines', () => {
 	it.each([
 		{
+			profile: 'sigstore-default',
 			evidence: {
 				bundleCount: 2,
 				tlogEntryCount: 0,
 				timestampCount: 2,
 				uploadedCount: 0
 			},
-			instance: 'github'
+			instance: 'github',
+			lines: [
+				'The bundles are in the trust domain of the GitHub Sigstore instance.',
+				'The action signed 2 bundles that carry 0 Rekor entries and 2 RFC 3161 timestamps.',
+				"The action recorded no bundle in the repository's attestation store."
+			]
 		},
 		{
+			profile: 'sigstore-default',
 			evidence: {
 				bundleCount: 1,
 				tlogEntryCount: 1,
 				timestampCount: 0,
 				uploadedCount: 1
 			},
-			instance: 'public-good'
+			instance: 'public-good',
+			lines: [
+				'The bundle is in the trust domain of the public-good Sigstore instance.',
+				'The action signed 1 bundle that carries 1 Rekor entry and 0 RFC 3161 timestamps.',
+				"The action recorded 1 of 1 bundle in the repository's attestation store."
+			]
 		},
 		{
+			profile: 'sigstore-default',
 			evidence: {
 				bundleCount: 1,
 				tlogEntryCount: 0,
 				timestampCount: 0,
 				uploadedCount: 0
 			},
-			instance: undefined
+			instance: undefined,
+			lines: [
+				'The bundle carries no Rekor entry and no RFC 3161 timestamp.',
+				'The action signed 1 bundle that carries 0 Rekor entries and 0 RFC 3161 timestamps.',
+				"The action recorded no bundle in the repository's attestation store."
+			]
+		},
+		{
+			profile: 'tsa-only',
+			evidence: {
+				bundleCount: 1,
+				tlogEntryCount: 0,
+				timestampCount: 1,
+				uploadedCount: 0
+			},
+			instance: 'public-good',
+			lines: [
+				'The bundle is in the trust domain of the public-good Sigstore instance.',
+				'The action signed 1 bundle that carries 0 Rekor entries and 1 RFC 3161 timestamp.',
+				"The action recorded no bundle in the repository's attestation store."
+			]
+		},
+		{
+			profile: 'rekor-and-tsa',
+			evidence: {
+				bundleCount: 3,
+				tlogEntryCount: 3,
+				timestampCount: 3,
+				uploadedCount: 2
+			},
+			instance: 'public-good',
+			lines: [
+				'The bundles are in the trust domain of the public-good Sigstore instance.',
+				'The action signed 3 bundles that carry 3 Rekor entries and 3 RFC 3161 timestamps.',
+				"The action recorded 2 of 3 bundles in the repository's attestation store."
+			]
 		}
-	])(
-		'reports the $instance trust domain from the evidence',
-		({ evidence, instance }) => {
+	] as const)(
+		'reports the $instance trust domain for the $profile profile',
+		({ profile, evidence, instance, lines }) => {
 			expect({
-				instance: producedInstance(evidence),
-				lines: producedLines(evidence).length
-			}).toStrictEqual({ instance, lines: 3 });
+				instance: producedInstance(profile, evidence),
+				lines: producedLines(profile, evidence)
+			}).toStrictEqual({ instance, lines });
 		}
 	);
 
 	it('reports a run that signed nothing as one line', () => {
 		expect(
-			producedLines({
+			producedLines('tsa-only', {
 				bundleCount: 0,
 				tlogEntryCount: 0,
 				timestampCount: 0,
@@ -503,22 +569,9 @@ describe('githubStatementSigner', () => {
 		}
 	};
 
-	it.each([
-		{ profile: 'tsa-only', uploadToGithub: false, sigstore: 'github' },
-		{ profile: 'tsa-only', uploadToGithub: true, sigstore: 'github' },
-		{
-			profile: 'rekor-and-tsa',
-			uploadToGithub: false,
-			sigstore: 'public-good'
-		},
-		{
-			profile: 'sigstore-default',
-			uploadToGithub: true,
-			sigstore: undefined
-		}
-	] as const)(
-		'signs $profile with upload-to-github $uploadToGithub',
-		async ({ profile, uploadToGithub, sigstore }) => {
+	it.each([{ uploadToGithub: false }, { uploadToGithub: true }] as const)(
+		'delegates sigstore-default with upload-to-github $uploadToGithub',
+		async ({ uploadToGithub }) => {
 			mocks.attest.mockReset();
 			mocks.attest.mockResolvedValue({
 				bundle,
@@ -534,7 +587,11 @@ describe('githubStatementSigner', () => {
 					}
 				],
 				githubToken: 'token',
-				policy: { profile, uploadToGithub, grouping: 'run' }
+				policy: {
+					profile: 'sigstore-default',
+					uploadToGithub,
+					grouping: 'run'
+				}
 			})(statement);
 
 			expect({ result, calls: mocks.attest.mock.calls }).toStrictEqual({
@@ -555,8 +612,7 @@ describe('githubStatementSigner', () => {
 							predicateType: statement.predicateType,
 							predicate: statement.predicate,
 							token: 'token',
-							skipWrite: !uploadToGithub,
-							...(sigstore !== undefined && { sigstore })
+							skipWrite: !uploadToGithub
 						}
 					]
 				]
@@ -577,7 +633,11 @@ describe('githubStatementSigner', () => {
 		const result = await githubStatementSigner({
 			subjects: [],
 			githubToken: 'token',
-			policy: { profile: 'tsa-only', uploadToGithub: false, grouping: 'run' }
+			policy: {
+				profile: 'sigstore-default',
+				uploadToGithub: false,
+				grouping: 'run'
+			}
 		})(statement);
 
 		expect(result.evidence).toStrictEqual({

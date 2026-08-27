@@ -240,10 +240,10 @@ export class PredicateTypeRequiredError extends UsageError {
 }
 
 /**
- * Individual grouping signs a statement that names only the subject it covers,
- * which requires reading the predicate. Only the build-origin predicate has a
- * known shape here, so any other predicate type fails the run instead of being
- * signed whole beside one subject.
+ * Individual grouping requires each statement to contain only its subject. The
+ * action must therefore filter the predicate as well as the in-toto subject
+ * list. It knows how to filter only a build-origin predicate, so it rejects any
+ * other predicate type.
  */
 export class PredicateGroupingUnsupportedError extends UsageError {
 	constructor(public readonly predicateType: string) {
@@ -254,7 +254,7 @@ export class PredicateGroupingUnsupportedError extends UsageError {
 
 export class BuildOriginSubjectMissingError extends UsageError {
 	constructor(public readonly subjects: readonly string[]) {
-		super('the build-origin predicate records none of these subjects');
+		super('the build-origin predicate contains none of the requested subjects');
 		this.name = 'BuildOriginSubjectMissingError';
 	}
 }
@@ -345,7 +345,7 @@ export class ReadPasswordRequiredError extends UsageError {
 }
 
 /**
- * The `private-cache-credentials` input is a JSON object mapping a private
+ * The `private-cache-credentials` input is a JSON object that maps each private
  * cache's local name to its read credential.
  */
 export class PrivateCacheCredentialsInvalidError extends UsageError {
@@ -359,22 +359,21 @@ export class PrivateCacheCredentialsInvalidError extends UsageError {
 }
 
 /**
- * A credential names a cache the run does not configure. The workflow expects
- * a cache it did not list, so the run fails instead of reading that cache
- * without the credential.
+ * Each entry in `private-cache-credentials` must match a cache in
+ * `private-cache`.
  */
 export class UnknownPrivateCacheCredentialError extends UsageError {
 	constructor(public readonly cache: string) {
 		super(
-			`private-cache-credentials names '${cache}', which private-cache does not list`
+			`add '${cache}' to private-cache or remove its private-cache-credentials entry`
 		);
 		this.name = 'UnknownPrivateCacheCredentialError';
 	}
 }
 
 /**
- * Every read of a private cache authenticates, so a listed private cache needs
- * either its own credential or the shared read-user and read-password pair.
+ * Every private-cache read requires either a cache-specific credential or the
+ * shared `read-user` and `read-password` pair.
  */
 export class PrivateCacheCredentialMissingError extends UsageError {
 	constructor(public readonly cache: string) {
@@ -856,6 +855,54 @@ export class AttestationSigningError extends CodedError {
 			withCause(options.cause)
 		);
 		this.name = 'AttestationSigningError';
+	}
+}
+
+/**
+ * A produced bundle failed its generation self-check. The action runs this
+ * check before it writes the bundle to a file or the repository's attestation
+ * store. Rekor may already have recorded an entry during signing.
+ */
+export abstract class AttestationSelfCheckError extends CodedError {}
+
+export class AttestationEvidenceShapeError extends AttestationSelfCheckError {
+	constructor(
+		public readonly profile: string,
+		public readonly expected: string,
+		public readonly tlogEntryCount: number,
+		public readonly timestampCount: number
+	) {
+		super(
+			`The ${profile} profile requires ${expected}; the produced bundle has ${String(tlogEntryCount)} Rekor entries and ${String(timestampCount)} RFC 3161 timestamps`
+		);
+		this.name = 'AttestationEvidenceShapeError';
+	}
+}
+
+export class AttestationBundleUnverifiedError extends AttestationSelfCheckError {
+	constructor(
+		public readonly detail: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(`The produced bundle ${detail}`, withCause(options.cause));
+		this.name = 'AttestationBundleUnverifiedError';
+	}
+}
+
+/**
+ * The attestation store refused a bundle, or `GITHUB_REPOSITORY` is not an
+ * `owner/name` pair.
+ */
+export class AttestationStoreWriteError extends CodedError {
+	constructor(
+		public readonly repository: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Could not record the bundle in the attestation store of ${repository}`,
+			withCause(options.cause)
+		);
+		this.name = 'AttestationStoreWriteError';
 	}
 }
 

@@ -346,22 +346,25 @@ private netrc file under `$RUNNER_TEMP`, sets mode `0600`, appends
 
 `cache` and `private-cache` each take a list, written one entry per line or
 separated by commas, and may be used together: setup writes one substituter set
-covering every cache the two inputs name. Naming neither uses the tenant's
-default cache. Every read of a private cache authenticates, and a netrc entry is
-keyed by host alone, so the substituter URL of a private cache carries its own
-credential. That URL is written only to the protected generated config file. A
-private cache takes its credential from `private-cache-credentials`, a JSON
-object mapping the cache's local name to its user and password, and otherwise
-from `read-user` and `read-password`; a private cache left without a credential
-fails the run.
+covering every selected cache. If both lists are empty, setup selects the
+tenant's default cache. Every read of a private cache requires authentication.
+Because netrc entries are keyed only by host, each private-cache substituter URL
+contains the credential for that cache. Setup writes that URL only to the
+protected generated config file.
 
-Before it fetches or writes anything, setup registers each private cache's
-password and each credential-bearing substituter URL as a run secret, so the
-runner replaces both with `***` in the log. Both forms are registered because
-percent-encoding the password into the URL's userinfo can change it. Masking
-covers only the log, so a credential that a later step writes into a job
-artefact or a summary is still readable. Supply the credentials from repository
-or environment secrets rather than from the workflow file.
+`private-cache-credentials` is a JSON object that maps each private cache's
+local name to its user and password. A private cache that has no entry in this
+object uses `read-user` and `read-password`. The run fails if neither source
+provides a credential.
+
+Before it fetches or writes anything, setup registers each private-cache
+password and each credential-bearing substituter URL as a run secret. The runner
+replaces those values with `***` in the log. Setup registers the raw password
+and the URL because percent-encoding can change the password when it is placed
+in URL userinfo. Masking covers only the log, so a credential that a later step
+writes into a job artefact or a summary is still readable. Supply the
+credentials from repository or environment secrets rather than from the workflow
+file.
 
 ```yaml
 - uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
@@ -373,8 +376,9 @@ or environment secrets rather than from the workflow file.
 ```
 
 `reuse-view` adds a named tenant reuse view as a second substituter, after the
-destination cache. Setup verifies the two priorities keep the destination first;
-see [docs/reuse-views.md](./reuse-views.md) for the ordering rules.
+destination cache. Setup verifies that the advertised priorities put the
+destination first; see [docs/reuse-views.md](./reuse-views.md) for the ordering
+rules.
 
 ## `actions/push`
 
@@ -411,11 +415,11 @@ The default OIDC audience is the `url` input. The default retention root is
 `github:${{ github.repository }}/${{ github.ref_name }}`. `wait` defaults to
 `true` and `wait-timeout` defaults to `10m`.
 
-A push addresses one cache. `cache` names a public one and `private-cache` a
-private one; setting both fails the run. `actions/plan`, `actions/attest`,
-`actions/attest-attach` and `actions/build-cohort` take the same pair. The
-reusable flake publish workflow described below takes the pair too and passes
-the selection to every one of those actions.
+A push addresses one cache. `cache` selects a public cache and `private-cache`
+selects a private cache; setting both fails the run. `actions/plan`,
+`actions/attest`, `actions/attest-attach` and `actions/build-cohort` take the
+same pair. The reusable flake publish workflow described below takes the pair
+too and passes the selection to every one of those actions.
 
 Attestation bundle paths are also newline-delimited. They attach a bundle that
 already exists; `actions/attest` below produces one with the right subjects:
@@ -499,41 +503,45 @@ before adding it to the receipt; its dependencies may still be substituted. This
 is useful when a failed signing or attachment step will be retried after the
 path was pushed.
 
-The action defines outputs for both supported receipt versions. `bundle-path`,
-`built-checksums-file`, and `built-subject-count` describe the SLSA
-build-provenance bundle. A version 2 receipt produces no build-origin bundle, so
+The action defines outputs for both supported receipt versions. `bundle-path`
+and `origin-bundle-path` each contain one bundle path per line because
+individual grouping can produce several bundles. `built-checksums-file` and
+`built-subject-count` describe the subjects of the SLSA build-provenance
+bundles. A version 2 receipt produces no build-origin bundle, so
 `origin-bundle-path` is empty. Version 3 receipts from `build-cohort` also use
-`checksums-file` and `subject-count` for their build-origin bundle.
-`id-token: write` lets the action obtain its Sigstore signing certificate, and
-`attestations: write` records the attestations on the repository so
-`gh attestation verify` can find them.
+`checksums-file` and `subject-count` for the subjects of their build-origin
+bundles. `id-token: write` lets the action obtain its Sigstore signing
+certificate, and `attestations: write` records the attestations on the
+repository so `gh attestation verify` can find them.
 
-The action signs both statements directly so it can retry transient signing
-failures. A workflow cannot retry a `uses:` step, and neither
-`actions/attest-build-provenance` nor `actions/attest` accepts a retry input.
-Each statement gets up to four attempts with exponential back-off. Every attempt
-starts with a new key, certificate and log entry. The action retries only when
-Fulcio or a witness does not respond, or responds with 408, 429 or a 5xx status.
-It stops immediately when the OIDC token cannot be read or decoded, or when
-Fulcio refuses to issue the certificate. If all attempts fail, the step fails
-and does not attach a bundle. Publication has already completed at this point.
+The signing command can retry transient service failures. A workflow cannot
+retry a `uses:` step. Neither `actions/attest-build-provenance` nor
+`actions/attest` has an input that enables retries. Each statement gets up to
+four attempts with exponential back-off. Every attempt starts with a new key,
+certificate and log entry. The action retries only when Fulcio or a witness does
+not respond, or responds with 408, 429 or a 5xx status. It stops immediately
+when the OIDC token cannot be read or decoded, or when Fulcio refuses to issue
+the certificate. If all attempts fail, the step fails and does not attach a
+bundle. Publication has already completed at this point.
 
 The two bundles make different claims over different subjects. The SLSA
 build-provenance bundle covers paths built by the workflow. It records the
 repository, commit, workflow file and runner.
 
-Only a version 3 receipt from `build-cohort` produces a build-origin bundle. The
-bundle covers every accepted receipt subject. It records origin information from
-events observed during the run. For a path the run built, it records the store
-path, the NAR hash, the derivation that produced it, the store where the build
-ran, whether the coordinating machine watched the build or the build store
-reported it, and the builder from the activity log when one was reported. For a
-path already registered in the build store, it records the store and that the
-run did not observe the build. For a copied path, it records the signatures
-reported by the store, the content address when present, and sources from the
-copy activities that the run observed. Those activities can include failed copy
-attempts. A path that was already valid when the run started, or that another
-store fetched without the run observing it, has no source recorded.
+Only a version 3 receipt from `build-cohort` produces build-origin bundles. They
+cover every accepted receipt subject. With `run` grouping, one statement covers
+all accepted subjects. With `individual` grouping, each statement covers one
+subject. The predicate records origin information from events observed during
+the run. For a path the run built, it records the store path, the NAR hash, the
+derivation that produced it, the store where the build ran, whether the
+coordinating machine watched the build or the build store reported it, and the
+builder from the activity log when one was reported. For a path already
+registered in the build store, it records the store and that the run did not
+observe the build. For a copied path, it records the signatures reported by the
+store, the content address when present, and sources from the copy activities
+that the run observed. Those activities can include failed copy attempts. A path
+that was already valid when the run started, or that another store fetched
+without the run observing it, has no source recorded.
 
 A path published by reference has no local store entry. The run reads its
 metadata from another cache and asks the destination to publish bytes already
@@ -547,11 +555,12 @@ The statement does not claim reproducibility, producer trust, an unobserved copy
 source, or that a republished path's bytes came from the cache that served its
 metadata. Its predicate type is
 `https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
-and `cupboard attest verify --predicate-type` takes that value to verify it. One
-statement covers every accepted subject in the receipt, so verifying it for one
-path also reports the recorded origin of the others. A version 2 receipt records
-no origin, so such a run produces only the build-provenance bundle and leaves
-`origin-bundle-path` empty.
+and `cupboard attest verify --predicate-type` takes that value to verify it.
+With `run` grouping, verifying a statement for one path also reports the
+recorded origin of every other accepted subject. With `individual` grouping, the
+statement reports only that path. A version 2 receipt records no origin, so such
+a run produces only build-provenance bundles and leaves `origin-bundle-path`
+empty.
 
 Publication comes before signing because the attest action verifies every
 receipt subject against the destination's committed narinfo. The attach action
@@ -559,6 +568,69 @@ then files both signed bundles against each matching path in that same receipt.
 Its `bundle` input takes one path per line and ignores an empty line, so the
 same workflow step also works for a run that produced only the build-provenance
 bundle.
+
+### Attesting to a private cache
+
+When the destination is private, leave `signing-profile`, `upload-to-github` and
+`subject-grouping` unset. `actions/attest` then selects `tsa-only`, `false` and
+`individual`. Each bundle carries an RFC 3161 timestamp and no Rekor entry. The
+action does not record the bundles in the repository's attestation store, and it
+signs a separate statement for each subject. Each bundle therefore contains one
+subject.
+
+The action derives all three inputs from the destination cache's visibility
+whenever the workflow leaves them unset. A public destination gets
+`sigstore-default`, `true` and `run`. An unresolved destination uses the private
+defaults because publication cannot be undone.
+
+Those defaults prevent automatic publication and keep each bundle to one
+subject; they do not make the bundle non-disclosing. Every subject digest in
+either bundle is the destination's NAR hash for that path. Publishing that
+digest does not bypass private-cache authorisation, so a reader with only the
+digest cannot fetch the NAR through that cache. The digest still discloses that
+the path exists and identifies its contents to anyone holding a copy from
+elsewhere.
+
+`tsa-only` requires at least one RFC 3161 timestamp and forbids a Rekor entry.
+`rekor-and-tsa` requires at least one of each. The action constructs a Sigstore
+client for these profiles in the public-good trust domain. Both profiles request
+a certificate from the public Fulcio and a timestamp from the public-good
+timestamp authority. `rekor-and-tsa` also records the signature in Rekor. The
+public-good trusted root lists that timestamp authority, so a verifier can use
+the published trusted root to check either type of bundle.
+
+`sigstore-default` delegates signing to `@actions/attest`. That library selects
+the Sigstore instance according to the repository's visibility, so the selected
+instance determines the evidence in the bundle.
+
+After the Sigstore client returns a bundle, the action checks its evidence,
+verification material, subjects and predicate type against the requested values.
+For `rekor-and-tsa`, Rekor has already recorded the entry that forms part of the
+bundle. A failed check stops the action before it writes bundle files or records
+the bundle in the repository's attestation store, but it cannot withdraw the
+Rekor entry.
+
+Setting these inputs explicitly overrides the derived defaults, and for a
+private destination the override is a disclosure decision. `upload-to-github`
+set to `true` records each bundle in the repository's attestation store. Anyone
+who can read the repository can then read the complete bundle and its subject
+digests. `rekor-and-tsa` puts the same digests in a public append-only log.
+Before signing begins, the action reports the instances it may use, the services
+it may contact and the destinations to which it may publish a complete bundle.
+Afterwards, it reports the trust domain and evidence found in the produced
+bundles.
+
+The upload is the only step that writes a bundle to the repository's attestation
+store, so `gh attestation verify` cannot find a bundle that the action did not
+upload. Verify such a bundle from the file or from the destination cache. A
+`tsa-only` bundle verifies against the public-good trusted root, which
+`cupboard attest verify` fetches by default, and requires a transparency-log
+threshold of zero because it carries no log entry:
+
+```bash
+cupboard attest verify ./bundle.sigstore.json --nar-hash sha256:... \
+  --predicate-type https://slsa.dev/provenance/v1 --tlog-threshold 0
+```
 
 ## Build, publish, and attest
 

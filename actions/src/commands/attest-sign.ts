@@ -19,7 +19,6 @@ import {
 	destinationVisibilities,
 	disclosureLines,
 	type GithubSignerOptions,
-	githubStatementSigner,
 	type ProducedEvidence,
 	producedLines,
 	type SignedAttestation,
@@ -43,6 +42,10 @@ import {
 } from '../errors.ts';
 import { isEnabled, provided, providedChoice } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
+import {
+	type SigstoreSignerDependencies,
+	statementSignerFor
+} from '../sigstore-signing.ts';
 
 export interface AttestSignOptions {
 	readonly checksumsFile?: string;
@@ -82,9 +85,12 @@ export interface AttestSignIo {
 
 export interface AttestSignDependencies extends SigningDependencies {
 	/**
-	 * Defaults to {@link githubStatementSigner}.
+	 * Defaults to {@link statementSignerFor}.
 	 */
-	readonly signerFor?: (options: GithubSignerOptions) => StatementSigner;
+	readonly signerFor?: (
+		options: GithubSignerOptions,
+		signing?: SigstoreSignerDependencies
+	) => StatementSigner;
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
 	/**
 	 * Defaults to {@link setGithubOutput}.
@@ -139,19 +145,19 @@ export function registerAttestSignCommand(
 		)
 		.option(
 			'--destination-visibility <visibility>',
-			'Take the signing defaults from the visibility of the destination cache. Accepts public or private, and defaults to private, whose defaults publish nothing.'
+			'Take the signing defaults from the visibility of the destination cache. Accepts public or private. If omitted, use the private defaults, which do not publish a bundle.'
 		)
 		.option(
 			'--signing-profile <profile>',
-			"Select the Sigstore instance that signs the statements. sigstore-default leaves the choice to the repository's visibility, tsa-only signs with GitHub's instance and creates no Rekor entry, and rekor-and-tsa signs with the public-good instance and records the signature in Rekor. Defaults to the profile the destination visibility implies."
+			"Select the evidence in each signed bundle. sigstore-default selects the Sigstore instance according to the repository's visibility. tsa-only uses the public-good trust domain and adds an RFC 3161 timestamp without a Rekor entry. rekor-and-tsa uses the same trust domain and adds both. The default depends on the destination visibility."
 		)
 		.option(
 			'--upload-to-github <boolean>',
-			"Record each bundle in the repository's attestation store when true. Defaults to the value the destination visibility implies."
+			"When true, record each bundle in the repository's attestation store. The default depends on the destination visibility."
 		)
 		.option(
 			'--subject-grouping <grouping>',
-			'Select how many subjects one statement covers. run signs one statement that covers all accepted subjects, up to the per-statement limit; individual signs one statement per subject, so no bundle names another subject. Defaults to the grouping the destination visibility implies.'
+			'Select how many subjects each statement covers. run signs one statement for all accepted subjects, up to the per-statement limit. individual signs a separate statement for each subject, so each bundle contains one subject. The default depends on the destination visibility.'
 		)
 		.action((options: AttestSignOptions) =>
 			attestSignAction(options, createGithubReporter(), dependencies)
@@ -205,14 +211,14 @@ export function resolveAttestSignInputs(
 }
 
 /**
- * The signing policy for this run. The destination's visibility supplies the
- * defaults and each input overrides one of them, so an explicit input is the
- * caller's own decision to disclose.
+ * Resolves the signing policy for this run. The destination visibility supplies
+ * the defaults, and each explicit policy input overrides its corresponding
+ * default. An override for a private destination can publish information that
+ * the defaults keep off public services.
  *
- * An absent visibility resolves to `private`, whose defaults publish nothing.
- * Treating it as public instead would publish a private cache's NAR hashes
- * whenever a caller failed to pass the value, and no later step can retract
- * them.
+ * An absent visibility uses the private defaults, which do not publish a
+ * bundle. If it used the public defaults, an omitted value could publish a
+ * private cache's NAR hashes. No later step can retract them.
  */
 function resolveSigningPolicy(options: AttestSignOptions): SigningPolicy {
 	const defaults = defaultSigningPolicy(
@@ -287,8 +293,8 @@ const nodeAttestSignIo: AttestSignIo = {
 };
 
 /**
- * Build provenance covers only paths built by this run. The action signs no
- * build provenance when this run built none of the published paths.
+ * Build provenance covers only paths built by this run. The action does not
+ * sign build provenance when this run built none of the published paths.
  * Build-origin attestations cover every accepted receipt subject.
  */
 export async function attestSignAction(
@@ -305,15 +311,15 @@ export async function attestSignAction(
 	}
 
 	const builtSubjects = await readSubjects(inputs.builtChecksumsFile, io);
-	const signerFor = dependencies.signerFor ?? githubStatementSigner;
+	const signerFor = dependencies.signerFor ?? statementSignerFor;
 	const provenanceStatement =
 		dependencies.provenanceStatement ?? slsaProvenanceStatement;
 	const signing: SigningDependencies =
 		dependencies.delay === undefined ? {} : { delay: dependencies.delay };
 	const setOutput = dependencies.setOutput ?? setGithubOutput;
-	// Read the build-origin predicate before signing anything. Reading it later
-	// would record a provenance attestation on the repository for a run that
-	// then fails on an unreadable file.
+	// Read the build-origin predicate before signing. If this read happened
+	// later, an unreadable file could fail the run after the action had already
+	// recorded a provenance attestation in the repository.
 	const originPredicate =
 		inputs.predicateFile === ''
 			? undefined
@@ -366,6 +372,7 @@ export async function attestSignAction(
 	await setOutput('origin-bundle-path', bundlePaths(originBundles));
 
 	const produced = producedLines(
+		inputs.policy.profile,
 		producedEvidence([...provenanceBundles, ...originBundles])
 	);
 
@@ -405,11 +412,6 @@ function producedEvidence(bundles: readonly SignedBundle[]): ProducedEvidence {
 	};
 }
 
-/**
- * The statement to sign for one group of subjects. Run grouping signs the same
- * statement for every group; individual grouping builds one that names only
- * the subject it covers.
- */
 type StatementFor = (
 	subjects: readonly AttestationSubject[]
 ) => AttestationStatement;
@@ -419,10 +421,10 @@ function runStatement(statement: AttestationStatement): StatementFor {
 }
 
 /**
- * The build-origin statement for one group of subjects. Under individual
- * grouping the predicate keeps only the entries the group covers, because the
- * run-level document lists every accepted subject and signing it beside one
- * subject would name the others.
+ * Returns the build-origin statement for a group of subjects. With individual
+ * grouping, the predicate contains only the entries for the current subject.
+ * The source predicate contains every accepted subject, so signing it unchanged
+ * would disclose the other subjects in each bundle.
  */
 function originStatementFor(
 	inputs: AttestSignInputs,
@@ -442,9 +444,9 @@ function originStatementFor(
 
 	const parsed = buildOriginPredicateSchema.parse(predicate);
 
-	// Project every subject now. A subject the predicate does not record has to
-	// fail the run before the first statement is signed, because signing records
-	// an attestation on the repository that the failure cannot withdraw.
+	// Validate every subject before signing begins. Otherwise a missing subject
+	// could fail the run after an earlier bundle had already been recorded in the
+	// repository's attestation store, where it cannot be withdrawn.
 	for (const subject of subjects) {
 		soleSubjectPredicate(parsed, [subject]);
 	}

@@ -29,9 +29,10 @@
 		"./in-toto": "./src/in-toto.ts",
 		"./limits": "./src/limits.ts",
 		"./octokit": "./src/octokit.ts",
-		"./retry": "./src/retry.ts",
 		"./response-body": "./src/response-body.ts",
+		"./retry": "./src/retry.ts",
 		"./sigstore": "./src/sigstore.ts",
+		"./sigstore-bundle-fixture": "./src/sigstore-bundle-fixture.ts",
 		"./slsa": "./src/slsa.ts",
 		"./timeout": "./src/timeout.ts"
 	},
