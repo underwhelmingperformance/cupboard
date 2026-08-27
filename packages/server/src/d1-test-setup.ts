@@ -7,6 +7,7 @@ import {
 	attestationReference,
 	blobReference,
 	blobState,
+	cacheLifecycle,
 	casObject,
 	controlAuthKey,
 	controlTrust,
@@ -43,6 +44,7 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
+	await database.delete(cacheLifecycle).run();
 	await database.delete(tenantCacheReadCredential).run();
 	await database.delete(tenantCasBlob).run();
 	await database.delete(tenantBlob).run();

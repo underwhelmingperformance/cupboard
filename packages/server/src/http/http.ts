@@ -73,6 +73,13 @@ export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}, must-revalidate`;
 
+// NAR bytes are content-addressed, so a stored response stays valid for as long
+// as the cache keeps it. A deletion invalidates it by purging its tag, and a
+// queued purge stays queued for the whole of this lifetime.
+export const narCacheTtlSeconds = 31_536_000;
+
+export const narCacheControl = `public, max-age=${String(narCacheTtlSeconds)}, immutable`;
+
 // An edge can serve a deleted narinfo until its cache TTL expires. Keep an
 // unreferenced NAR for the TTL plus a margin for propagation and clock skew.
 export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;

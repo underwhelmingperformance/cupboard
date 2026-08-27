@@ -1,4 +1,4 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { namedCacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -28,7 +28,7 @@ export const cachesContract = {
 		.route({ method: 'PUT', path: '/caches/{cacheName}' })
 		.input(
 			z.strictObject({
-				cacheName: cacheNameSchema,
+				cacheName: namedCacheSelectorSchema,
 				...cachePutBodySchema.shape
 			})
 		)
@@ -50,7 +50,7 @@ export const cachesContract = {
 			// The detailed shape also carries headers and body, so the top level
 			// stays open; the parts we consume are strict.
 			z.object({
-				params: z.strictObject({ cacheName: cacheNameSchema }),
+				params: z.strictObject({ cacheName: namedCacheSelectorSchema }),
 				query: forceQuerySchema
 			})
 		)

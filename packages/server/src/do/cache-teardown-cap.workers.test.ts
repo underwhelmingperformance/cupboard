@@ -1,5 +1,6 @@
 import {
 	cacheNameSchema,
+	nixSha256HashSchema,
 	storedCacheSchema,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -20,6 +21,7 @@ import {
 	authorisedFetch,
 	blobReferenceRows,
 	bootstrap,
+	currentNarObjectKey,
 	currentServer,
 	driveToCompletion,
 	narBytes,
@@ -27,6 +29,7 @@ import {
 	narInfoGeneration,
 	pushPath,
 	queueUnflushedNarInfoDeletion,
+	readFetch,
 	resetTestServer,
 	tenantBlobRows,
 	tenantUsageRow,
@@ -83,7 +86,7 @@ async function rowsRemaining(
 describe('cache teardown', () => {
 	beforeEach(resetTestServer);
 
-	it('empties a forced cache at once for a cache within the cap', async () => {
+	it('removes narinfo rows before cache deletion returns and drains narinfo objects later', async () => {
 		await useTestServer('teardown-drain');
 		const { token } = await bootstrap();
 		const first = buildMetadata('a');
@@ -93,21 +96,47 @@ describe('cache teardown', () => {
 			await pushPath(token, metadata, 'builds');
 		}
 
-		const response = await authorisedFetch('/caches/builds?force=true', token, {
-			method: 'DELETE'
-		});
-		const removed = cacheRemoveResponseSchema.parse(await response.json());
+		// Observe the object and marker immediately after runCacheTeardown
+		// returns, within the same Durable Object invocation. Workerd can deliver
+		// the due alarm once the invocation ends, and its teardown pass would
+		// remove both before a later observation. Use the instance's R2 binding
+		// because workerd refuses I/O through a binding from another worker
+		// instance.
+		const onReturn = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runCacheTeardown(buildsCache, origin);
+
+				const object = await instance.context.env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, first.storePathHash, buildsCache)
+				);
+
+				return {
+					object: object !== null,
+					pending: await state.storage.get(
+						`${teardownEntryPrefix}${buildsCache}`
+					)
+				};
+			}
+		);
+		// The teardown drain never restores a narinfo row, so alarm delivery
+		// cannot change this count.
+		const rowsOnReturn = await rowsRemaining(paths);
+
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => (await teardownPending('builds')) === undefined,
+			paths.length + 1
+		);
 
 		expect({
-			status: response.status,
-			removed,
-			rows: await rowsRemaining(paths),
+			onReturn,
+			rowsOnReturn,
 			object: await isNarInfoObjectPresent(first.storePathHash, 'builds'),
 			pending: await teardownPending('builds')
 		}).toStrictEqual({
-			status: StatusCodes.OK,
-			removed: { name: 'builds', removed: true, storePathsRemoved: 3 },
-			rows: 0,
+			onReturn: { object: true, pending: origin },
+			rowsOnReturn: 0,
 			object: false,
 			pending: undefined
 		});
@@ -122,14 +151,14 @@ describe('cache teardown', () => {
 			await pushPath(token, metadata, 'builds');
 		}
 
-		await currentServer().runCacheTeardown(buildsCache, origin, 1);
+		await currentServer().runCacheTeardown(buildsCache, origin);
 
 		expect(await rowsRemaining(paths)).toBe(0);
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
 			async () => (await teardownPending('builds')) === undefined,
-			paths.length
+			paths.length + 1
 		);
 
 		const present = await Promise.all(
@@ -140,6 +169,55 @@ describe('cache teardown', () => {
 			objectsLeft: present.filter(Boolean).length,
 			pending: await teardownPending('builds')
 		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
+	});
+
+	it('refuses reads as soon as an over-cap teardown returns, then drains the edges', async () => {
+		await useTestServer('teardown-edges');
+		const { token } = await bootstrap();
+		const first = buildMetadata('a');
+		const paths = [first, buildMetadata('b'), buildMetadata('c')];
+
+		for (const metadata of paths) {
+			await pushPath(token, metadata, 'builds');
+		}
+
+		// The three paths share one NAR, so one read covers the cache.
+		const narPath = `/cache/builds/${await currentNarObjectKey(
+			nixSha256HashSchema.parse(first.narHash)
+		)}`;
+		const beforeTeardown = await readFetch(narPath);
+
+		// Count the surviving edges in the same Durable Object invocation as the
+		// deletion. Once the invocation ends, workerd can deliver the due alarm.
+		// Its teardown pass could retire the edges before a later count. The
+		// subsequent read returns 404 because the deletion revoked the generation.
+		const undrainedEdges = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				await instance.runCacheTeardown(buildsCache, origin);
+
+				return blobReferenceRows();
+			}
+		);
+		const afterTeardown = await readFetch(narPath);
+
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(1),
+			async () => (await teardownPending('builds')) === undefined,
+			paths.length + 1
+		);
+
+		expect({
+			beforeTeardown: beforeTeardown.status,
+			afterTeardown: afterTeardown.status,
+			undrained: undrainedEdges.length,
+			edges: await blobReferenceRows()
+		}).toStrictEqual({
+			beforeTeardown: StatusCodes.OK,
+			afterTeardown: StatusCodes.NOT_FOUND,
+			undrained: paths.length,
+			edges: []
+		});
 	});
 
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
@@ -187,6 +265,13 @@ describe('cache teardown', () => {
 			method: 'DELETE'
 		});
 		const removed = cacheRemoveResponseSchema.parse(await response.json());
+
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => (await teardownPending('builds')) === undefined,
+			4
+		);
+
 		const usage = await tenantUsageRow();
 
 		expect({
@@ -229,12 +314,12 @@ describe('cache teardown', () => {
 		});
 		await pushPath(token, path, 'builds');
 
-		await currentServer().runCacheTeardown(buildsCache, origin, 1);
+		await currentServer().runCacheTeardown(buildsCache, origin);
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
 			async () => (await teardownPending('builds')) === undefined,
-			2
+			3
 		);
 
 		const usage = await tenantUsageRow();
@@ -273,6 +358,13 @@ describe('cache teardown', () => {
 			method: 'DELETE'
 		});
 		const removed = cacheRemoveResponseSchema.parse(await response.json());
+
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => (await teardownPending('builds')) === undefined,
+			3
+		);
+
 		const usage = await tenantUsageRow();
 		const presence = await tenantBlobRows();
 		const edges = await blobReferenceRows();
@@ -321,6 +413,12 @@ describe('cache teardown', () => {
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
 			method: 'DELETE'
 		});
+
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => (await teardownPending('builds')) === undefined,
+			3
+		);
 
 		expect({
 			status: response.status,

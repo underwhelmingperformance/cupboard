@@ -311,7 +311,7 @@ export class UploadsService {
 		// run root. Each pending upload then records the root its commit must attach
 		// to.
 		if (body.attachRoot !== undefined) {
-			this.roots.bindRunRoot(
+			await this.roots.bindRunRoot(
 				cache,
 				body.attachRoot.name,
 				body.attachRoot.ttlSeconds

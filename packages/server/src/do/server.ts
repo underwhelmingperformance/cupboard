@@ -2,10 +2,12 @@ import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheFromSelector,
+	cacheNameSchema,
 	cachePrioritySchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	isPrivateCache,
+	privateStoredCache,
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
@@ -225,6 +227,31 @@ function reuseNotFound(): Response {
 // Persist incomplete garbage collection so alarms can drain a large backlog
 // across bounded passes without holding the input gate continuously.
 export const gcContinuationKey = 'maintenance:gc-pending';
+
+// Which maintenance pass the previous alarm ran. The next alarm resumes after
+// it, so a pass with a permanent backlog cannot starve the others. The key sits
+// outside every queue prefix, so no queue listing returns it.
+export const maintenancePassCursorKey = 'maintenance:alarm-pass';
+
+type MaintenancePassKey =
+	| 'garbage-collection'
+	| 'reconcile'
+	| 'signing-key-backfill'
+	| 'teardown'
+	| 'verify-backstop';
+
+/**
+ * One bounded background task an alarm can run.
+ *
+ * `isDue` reports whether the pass has work without running a D1 statement, so
+ * an alarm can choose between the passes and still leave the whole invocation's
+ * D1 allowance to the one it runs.
+ */
+interface MaintenancePass {
+	readonly key: MaintenancePassKey;
+	readonly isDue: () => Promise<boolean>;
+	readonly run: () => Promise<void>;
+}
 
 const garbageCollectionLimitSchema = z.number().int().positive();
 
@@ -549,6 +576,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
+		// The Worker forwards a read in its private namespace with the namespace
+		// prefix intact, so the prefix carries the cache's local name rather than a
+		// selector. Only a forward that has already authenticated the reader
+		// arrives here: the Worker answers every other request under that prefix
+		// itself.
+		this.app.use('/private-cache/:cacheName/*', async (context, next) => {
+			const name = parseRequestValue(
+				cacheNameSchema,
+				context.req.param('cacheName')
+			);
+
+			context.set('cache', privateStoredCache(name));
+			await next();
+		});
+
 		this.app.get('/pubkey', async (context) =>
 			// Served uncached so a rotation is visible across colos at once; the
 			// strong ETag still lets Nix revalidate conditionally.
@@ -586,6 +628,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						'content-type': 'text/x-nix-cache-info; charset=utf-8'
 					}
 				)
+		);
+
+		this.app.get('/private-cache/:cacheName/nix-cache-info', (context) =>
+			textResponse(
+				context.req.raw,
+				this.cacheAdmin.cacheInfoBody(context.get('cache')),
+				{
+					'content-type': 'text/x-nix-cache-info; charset=utf-8',
+					'cache-control': 'no-store'
+				}
+			)
 		);
 
 		// Apply `no-store` to thrown reuse errors as well as ordinary responses.
@@ -736,6 +789,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				'/cache/:cacheName/attestation-bundles/:digest'
 			],
 			refusePrivateCache,
+			(context) =>
+				this.attestations.handleServeBundle(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('digest')
+				)
+		);
+
+		// The private namespace's attestation reads. They serve the same objects
+		// for the private cache the prefix names, and the Worker has authenticated
+		// the reader before forwarding.
+		this.app.get('/private-cache/:cacheName/attestations/:hash', (context) =>
+			this.attestations.handleServeList(
+				context.req.raw,
+				context.get('cache'),
+				context.req.param('hash')
+			)
+		);
+		this.app.get(
+			'/private-cache/:cacheName/attestation-bundles/:digest',
 			(context) =>
 				this.attestations.handleServeBundle(
 					context.req.raw,
@@ -1590,22 +1663,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.reconcileQueue.clearOrigin();
 	}
 
-	// Use this alarm when a verification queue request is lost. Before the
-	// deadline, rearm it. At the deadline, resolve a bounded set of reuse rows that
-	// need no decoding, then request the queue again. Fresh NAR decoding must stay
-	// off the Durable Object.
+	// Use this alarm when a verification queue request is lost. At the deadline,
+	// resolve a bounded set of reuse rows that need no decoding, then request the
+	// queue again. Fresh NAR decoding must stay off the Durable Object.
+	// {@link armVerifyBackstopAlarm} handles a deadline that has not arrived.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
-		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
-
-		if (dueAt === undefined) {
-			return;
-		}
-
-		if (Date.now() < dueAt) {
-			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
-			return;
-		}
-
 		const pending = this.context.db
 			.select({ id: schema.pendingUploads.id })
 			.from(schema.pendingUploads)
@@ -1692,6 +1754,125 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	/**
+	 * The maintenance passes an alarm chooses between, in the order they take
+	 * turns.
+	 *
+	 * Every `isDue` reads durable storage or the local database, so deciding
+	 * which passes have work runs no D1 statement and leaves the whole
+	 * allowance to the pass that runs.
+	 */
+	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
+		return [
+			{
+				key: 'reconcile',
+				isDue: () => this.reconcileQueue.hasPending(),
+				run: () => this.reconcileNegotiatedOnce()
+			},
+			{
+				key: 'teardown',
+				isDue: () => this.cacheAdmin.hasPendingTeardown(),
+				run: () => this.resumeCacheTeardown()
+			},
+			{
+				key: 'verify-backstop',
+				isDue: () => this.isVerifyBackstopDue(),
+				run: () => this.resumeVerifyBackstop(logger)
+			},
+			{
+				key: 'signing-key-backfill',
+				isDue: () => Promise.resolve(this.signingKeys.hasBackfillWork()),
+				run: () => this.signingKeys.runBackfillOnce()
+			},
+			{
+				key: 'garbage-collection',
+				isDue: () => this.hasGarbageCollectionContinuation(),
+				run: () => this.resumeGarbageCollection()
+			}
+		];
+	}
+
+	/**
+	 * Runs the first pass with work, starting after the one the previous alarm
+	 * ran, then wakes the alarm again for the passes it skipped.
+	 *
+	 * Record the turn before running the pass. A pass that throws has then still
+	 * used its turn, so a failing pass cannot hold the cursor and stop the
+	 * others from ever running. Cloudflare retries an alarm whose handler
+	 * throws, so the failure needs no re-arming here.
+	 */
+	private async runOneMaintenancePass(logger: Logger): Promise<void> {
+		const passes = this.maintenancePasses(logger);
+		const start = await this.maintenancePassStart(passes);
+		let ran: MaintenancePassKey | undefined;
+
+		for (const pass of [...passes.slice(start), ...passes.slice(0, start)]) {
+			if (!(await pass.isDue())) {
+				continue;
+			}
+
+			await this.ctx.storage.put(maintenancePassCursorKey, pass.key);
+			ran = pass.key;
+			await pass.run();
+			break;
+		}
+
+		await this.rearmForSkippedPasses(passes, ran);
+	}
+
+	// Resume after the pass the previous alarm ran. An unrecognised or absent
+	// cursor starts at the first pass.
+	private async maintenancePassStart(
+		passes: readonly MaintenancePass[]
+	): Promise<number> {
+		const previous = await this.ctx.storage.get<string>(
+			maintenancePassCursorKey
+		);
+		const index = passes.findIndex((pass) => pass.key === previous);
+
+		return index === -1 ? 0 : (index + 1) % passes.length;
+	}
+
+	// Wake the alarm for the passes this alarm skipped, whose work nothing else
+	// would wake. Leave out the pass that ran: it arms its own next wake, and
+	// some passes wait out a retry delay before they run again, which an
+	// immediate alarm here would cancel.
+	private async rearmForSkippedPasses(
+		passes: readonly MaintenancePass[],
+		ran: MaintenancePassKey | undefined
+	): Promise<void> {
+		for (const pass of passes) {
+			if (pass.key !== ran && (await pass.isDue())) {
+				await this.ctx.storage.setAlarm(Date.now());
+
+				return;
+			}
+		}
+	}
+
+	// Waking for a backstop deadline that has not arrived reads and writes
+	// durable storage alone, so it runs on every alarm rather than taking a
+	// maintenance pass's turn.
+	private async armVerifyBackstopAlarm(): Promise<void> {
+		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
+
+		if (dueAt === undefined || Date.now() >= dueAt) {
+			return;
+		}
+
+		await armAlarmNoLaterThan(this.ctx.storage, dueAt);
+	}
+
+	private async isVerifyBackstopDue(): Promise<boolean> {
+		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
+
+		return dueAt !== undefined && Date.now() >= dueAt;
+	}
+
+	private async hasGarbageCollectionContinuation(): Promise<boolean> {
+		return (await this.ctx.storage.get(gcContinuationKey)) !== undefined;
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
@@ -1731,11 +1912,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// One alarm drives every bounded background task. Close commit sessions first
-	// so their credit is returned. Then run reconciliation, cache teardown, the
-	// verification backstop, queued cache purges, and signing-key backfill. Run
-	// garbage collection last because its continuation can wait on another
-	// collection pass.
+	/**
+	 * One alarm drives every bounded background task.
+	 *
+	 * Close commit sessions first so their credit is returned, then arm the
+	 * deadlines the alarm owns and run the queued cache purges. None of that
+	 * reaches D1.
+	 *
+	 * The maintenance passes do reach D1, and each of them sizes its own work
+	 * for a single Worker invocation. Workers Free permits 50 D1 statements per
+	 * invocation. A Durable Object alarm is one invocation, so the alarm
+	 * reserves that allowance for one maintenance pass and re-arms while another
+	 * pass still has work.
+	 */
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		const logger = rootLogger().with({ trigger: 'alarm' });
@@ -1745,23 +1934,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.uploadState.sessionsAwaitingVerdict()
 		);
 		await this.armCommitSocketClose();
-		await this.reconcileNegotiatedOnce();
-		await this.resumeCacheTeardown();
-		await this.resumeVerifyBackstop(logger);
+		await this.armVerifyBackstopAlarm();
 		await new CachePurgeQueueService(this.context).runOnce();
-		await this.signingKeys.runBackfillOnce();
-		await this.resumeGarbageCollection();
+		await this.runOneMaintenancePass(logger);
 	}
 
 	async runCacheTeardown(
 		cache: StoredCache,
-		origin: RequestOrigin,
-		limit?: number
+		origin: RequestOrigin
 	): Promise<void> {
 		await this.initialise();
 		await this.metered('cache-teardown', () =>
 			this.withMaintenanceEligibility(() =>
-				this.cacheAdmin.tearDownCache(cache, origin, limit)
+				this.cacheAdmin.tearDownCache(cache, origin)
 			)
 		);
 	}

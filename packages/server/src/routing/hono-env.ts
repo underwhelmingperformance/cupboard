@@ -1,7 +1,10 @@
 import { type Logger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 
-import { type TenantEntry } from '../control/tenant-membership.ts';
+import {
+	type TenantEntry,
+	type TenantReadVerifier
+} from '../control/tenant-membership.ts';
 import { type ReadScope } from '../read/read.ts';
 
 /**
@@ -22,5 +25,12 @@ export interface WorkerHonoEnv {
 		tenantEntryFresh: boolean;
 		tenantRest: string;
 		readScope: ReadScope;
+		// The addressed private cache's own read verifier, when it has one.
+		// Admission loads it alongside the tenant row, and while it is present it
+		// is the only credential that opens that cache.
+		cacheVerifier?: TenantReadVerifier;
+		// Whether the addressed private cache has been deleted. False for every
+		// request outside the private namespace, which reads no lifecycle state.
+		isCacheDeleted: boolean;
 	};
 }

@@ -15,10 +15,15 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import { cacheInfoResponse, serveNar, serveNarInfo } from '../read/read.ts';
+import {
+	cacheInfoResponse,
+	publicNarAuthority,
+	serveNar,
+	serveNarInfo
+} from '../read/read.ts';
 
 import { tenantServer } from './durable-object.ts';
-import { parseTenantPath } from './tenant-routing.ts';
+import { isLiteralNamespacePath, parseTenantPath } from './tenant-routing.ts';
 
 interface TenantReadHonoEnv {
 	Bindings: TenantEnv;
@@ -93,13 +98,15 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
+		// Only public caches are mounted here, so a reference from any of them
+		// authorises the read.
 		return serveNar(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			nar.narHash,
-			false,
-			nar.incarnation
+			nar,
+			publicNarAuthority,
+			false
 		);
 	});
 
@@ -150,11 +157,16 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	// is authenticated and the response is marked `no-store`. Giving this Worker
 	// a private mount would put private content behind Workers Cache.
 	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
-		const selector = publicCacheSelectorSchema.safeParse(
-			context.req.param('cacheName')
-		);
+		const cacheName = context.req.param('cacheName');
+		const selector = publicCacheSelectorSchema.safeParse(cacheName);
 
-		if (!selector.success) {
+		// The Workers Cache key retains the raw pathname. Hono decodes the matched
+		// path and the cache parameter used for R2 keys and cache tags. Refuse the
+		// request if the raw and decoded paths identify different caches.
+		if (
+			!selector.success ||
+			!isLiteralNamespacePath(context.get('tenantRest'), 'cache', cacheName)
+		) {
 			return noStore(notFoundResponse());
 		}
 

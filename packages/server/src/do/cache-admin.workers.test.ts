@@ -29,6 +29,7 @@ import {
 	CommitSocketError,
 	commitUploadRejection,
 	currentServer,
+	driveToCompletion,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
@@ -39,6 +40,8 @@ import {
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
+
+import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 const buildsCache = cacheNameSchema.parse('builds');
@@ -227,6 +230,18 @@ describe('cache registry admin', () => {
 			}
 		);
 		const removed = cacheRemoveResponseSchema.parse(await forced.json());
+
+		// The deletion leaves the published objects to its alarm passes, so drain
+		// them before asking whether the narinfo object has gone.
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () =>
+				(await runInDurableObject(currentServer(), (_instance, state) =>
+					state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+				)) === undefined,
+			3
+		);
+
 		const object = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);

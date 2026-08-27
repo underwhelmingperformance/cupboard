@@ -20,10 +20,10 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 const forwardedBody = 'served by the tenant Worker';
 
-// A public read that needs no credential goes to the cache-owning tenant Worker,
-// which the workers pool does not bind. This supplies one and records what
-// reaches it, so the test can read the headers that crossed the boundary. A
-// Proxy keeps every other binding as it is.
+// The workers pool does not provide the cache-owning tenant Worker binding used
+// by public reads that require no credential. This helper supplies that binding
+// and records each forwarded request so the test can inspect its headers. The
+// proxy preserves every other binding.
 function envWithRecordingTenantWorker(forwarded: Request[]): Env {
 	return new Proxy(env, {
 		get(target, property, receiver): unknown {
@@ -84,7 +84,7 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			body: forwardedBody,
 			forwarded: [
 				{
-					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`,
+					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2`,
 					headers: { accept: 'text/x-nix-narinfo' }
 				}
 			]

@@ -102,7 +102,8 @@ describe('blob_ref / tenant_blob reference edges', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 0,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			tenantBlobs: [
@@ -169,7 +170,8 @@ describe('blob_ref / tenant_blob reference edges', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 1,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			generation: 1
@@ -278,14 +280,16 @@ describe('blob_ref / tenant_blob reference edges', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 0,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				},
 				{
 					tenant: 'v1',
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 1,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			edges: [],
@@ -347,7 +351,8 @@ describe('blob_ref / tenant_blob reference edges', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 0,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			afterReplay: {

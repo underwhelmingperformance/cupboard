@@ -46,6 +46,7 @@ import {
 } from '../errors.ts';
 import {
 	adminGrants,
+	authorisedFetch,
 	currentOrigin,
 	currentServer,
 	fetchPath,
@@ -54,7 +55,10 @@ import {
 	migrateThrough,
 	provisionNamedTenant,
 	readFetch,
-	resetTestServer
+	resetTestServer,
+	testPushId,
+	uploadMetadata,
+	uploadPathNegotiation
 } from '../test-support.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
@@ -570,11 +574,18 @@ const trustClassGrants = {
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
 			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
 		}
+	],
+	'private-write': [
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+			resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
+		}
 	]
 } as const;
 
 async function installTrustedIdp(
-	scope: 'admin' | 'write',
+	scope: 'admin' | 'write' | 'private-write',
 	options: {
 		failFirstFetches?: number;
 		protectedType?: string;
@@ -715,6 +726,26 @@ async function exchange(
 const ciRequest = [
 	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
 ];
+
+const privateCiRequest = [
+	{
+		type: 'cupboard_cache',
+		actions: ['upload:negotiate'],
+		cache: '_private-ci'
+	}
+];
+
+// Negotiates one upload for a cache with the issued token, so a test can see
+// which caches the token actually opens.
+function negotiateFor(token: string, cache: string): Promise<Response> {
+	const path = uploadPathNegotiation(uploadMetadata({ fileSize: 1234 }));
+
+	return authorisedFetch(`/cache/${cache}/uploads`, token, {
+		body: JSON.stringify({ pushId: testPushId, paths: [path] }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
+}
 
 function refreshTokenRows(): Promise<
 	{
@@ -2105,6 +2136,34 @@ describe('requested grants', () => {
 					'The requested authorization_details are not permitted',
 				problem: 'not-permitted'
 			}
+		});
+	});
+
+	it('confines a grant for a private selector to that private cache', async () => {
+		const subjectToken = await installTrustedIdp('private-write');
+		const issued = await exchange(subjectToken, privateCiRequest);
+		const refused = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(ciRequest)
+		});
+		const refusedBody = oauthErrorShape(await refused.json());
+		const negotiated = await negotiateFor(issued.access_token, '_private-ci');
+		const denied = await negotiateFor(issued.access_token, 'ci');
+
+		expect({
+			granted: issued.authorization_details,
+			refusedStatus: refused.status,
+			refusedProblem: refusedBody.problem,
+			negotiated: negotiated.status,
+			denied: denied.status
+		}).toStrictEqual({
+			granted: privateCiRequest,
+			refusedStatus: StatusCodes.BAD_REQUEST,
+			refusedProblem: 'not-permitted',
+			negotiated: StatusCodes.OK,
+			denied: StatusCodes.FORBIDDEN
 		});
 	});
 

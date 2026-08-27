@@ -2,7 +2,10 @@ import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CachePriority,
-	cachePrioritySchema
+	cachePrioritySchema,
+	DEFAULT_CACHE,
+	selectorForCache,
+	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import type {
 	CacheSummary,
@@ -219,7 +222,9 @@ export async function runCacheInspect(
 	const { caches } = await reporter.phase('Inspecting cache', () =>
 		client.list()
 	);
-	const summary = caches.find((candidate) => candidate.name === name);
+	const summary = caches.find(
+		(candidate) => cacheSelector(candidate.name) === name
+	);
 
 	if (summary === undefined) {
 		reporter.info(`No cache named ${name}.`);
@@ -277,6 +282,14 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 	return rows;
 }
 
+// Cache summaries contain stored names; CLI arguments and output use
+// selectors.
+function cacheSelector(name: string): string {
+	const cache = storedCacheSchema.safeParse(name);
+
+	return cache.success ? selectorForCache(cache.data) : name;
+}
+
 function cacheLabel(name: string): string {
-	return name === '' ? '(default)' : name;
+	return name === DEFAULT_CACHE ? '(default)' : cacheSelector(name);
 }

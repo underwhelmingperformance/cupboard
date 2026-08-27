@@ -132,7 +132,8 @@ describe('multi-tenant writes', () => {
 					cache: '',
 					storePathHash: metadata.storePathHash,
 					generation: 0,
-					narHash: nar.narHash
+					narHash: nar.narHash,
+					cacheGeneration: 1
 				}
 			],
 			presence: [

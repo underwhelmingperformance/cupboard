@@ -10,13 +10,15 @@ import {
 	notFoundResponse,
 	parseAttestationDigestName,
 	parseNarInfoName,
-	parseNarName
+	parseNarName,
+	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
 import {
 	cacheInfoResponse,
 	guardScopedRead,
 	missingStorePathHashes,
+	narAuthorityForScope,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
@@ -26,13 +28,13 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 import {
 	cachedTenantRead,
 	innerRequest,
-	tenantUncachedRead
+	tenantUncachedRead,
+	withoutStoring
 } from './tenant-forward.ts';
 
 /**
- * Every route of the Nix binary-cache protocol, relative to the cache a read
- * addresses. The worker app mounts this sub-app at each prefix that addresses a
- * cache, and the middleware on the mount sets the cache these routes read.
+ * The Nix binary-cache routes relative to a selected cache. The worker mounts
+ * this sub-app at each cache prefix, and mount middleware sets the read scope.
  *
  * Hono answers HEAD by re-dispatching the request to the GET handler with the
  * body stripped, so a separate HEAD registration would never match.
@@ -72,7 +74,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		const denied = await guardRead(context);
+		const denied = await guardContentRead(context);
 
 		if (denied !== undefined) {
 			return denied;
@@ -97,7 +99,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		const denied = await guardRead(context);
+		const denied = await guardContentRead(context);
 
 		if (denied !== undefined) {
 			return denied;
@@ -109,21 +111,28 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 					context.req.raw,
 					context.env,
 					context.get('tenant'),
-					nar.narHash,
-					true,
-					nar.incarnation
+					nar,
+					narAuthorityForScope(context.get('readScope')),
+					true
 				);
 	});
 
 	// Serve signing keys uncached so rotation is visible immediately. One key set
 	// signs everything the tenant publishes, so every cache prefix returns it.
-	app.get('/pubkey', (context) => {
+	// The key remains public at the bare tenant prefix even for a private tenant.
+	// Under the private-cache prefix, require authentication and add `no-store`.
+	app.get('/pubkey', async (context) => {
 		const pubkeyUrl = new URL(context.req.url);
 		pubkeyUrl.pathname = '/pubkey';
 
-		return tenantServer(context.env, context.get('tenant')).fetch(
-			new Request(pubkeyUrl, context.req.raw)
-		);
+		const response = await tenantServer(
+			context.env,
+			context.get('tenant')
+		).fetch(new Request(pubkeyUrl, context.req.raw));
+
+		return context.get('readScope').visibility === 'public'
+			? response
+			: withoutStoring(response);
 	});
 
 	// Path and cache deletion can change attestation lists and bundle references,
@@ -136,7 +145,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return next();
 		}
 
-		const denied = await guardRead(context);
+		const denied = await guardContentRead(context);
 
 		return denied ?? tenantUncachedRead(context);
 	});
@@ -146,7 +155,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			return next();
 		}
 
-		const denied = await guardRead(context);
+		const denied = await guardContentRead(context);
 
 		if (denied !== undefined) {
 			return denied;
@@ -166,13 +175,17 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			cacheAvailabilityRequestSchema,
 			context.req.raw
 		);
+		// A deleted cache cannot satisfy an availability request, even while its
+		// teardown drain is still removing narinfo objects.
 		const response: CacheAvailabilityResponse = {
-			missingStorePathHashes: await missingStorePathHashes(
-				context.env,
-				context.get('tenant'),
-				context.get('readScope').cache,
-				request.storePathHashes
-			)
+			missingStorePathHashes: context.get('isCacheDeleted')
+				? [...new Set(request.storePathHashes)]
+				: await missingStorePathHashes(
+						context.env,
+						context.get('tenant'),
+						context.get('readScope').cache,
+						request.storePathHashes
+					)
 		};
 
 		return context.json(response, StatusCodes.OK, {
@@ -189,13 +202,36 @@ function guardRead(
 	return guardScopedRead(
 		context.req.raw,
 		context.get('tenantEntry'),
-		context.get('readScope')
+		context.get('readScope'),
+		context.get('cacheVerifier')
 	);
 }
 
-// Whether the read needed no credential to pass the guard. An authenticated
-// body must not enter Workers Cache, so only these reads go to the cache-owning
-// tenant Worker; the rest are served here with `no-store`.
+/**
+ * Authenticates a read of cache content and refuses it while the addressed
+ * cache is deleted.
+ *
+ * Cache deletion retains the read credential and removes narinfo and
+ * attestation objects asynchronously. Authentication can therefore succeed
+ * while those objects remain. Return 404 after authentication so the objects
+ * are inaccessible without revealing the cache state to an unauthenticated
+ * reader.
+ */
+async function guardContentRead(
+	context: Context<WorkerHonoEnv>
+): Promise<Response | undefined> {
+	const denied = await guardRead(context);
+
+	if (denied !== undefined) {
+		return denied;
+	}
+
+	return context.get('isCacheDeleted') ? uncachedNotFoundResponse() : undefined;
+}
+
+// Only unauthenticated public reads may enter Workers Cache. The cache-owning
+// tenant Worker handles those reads; the control Worker serves all others with
+// `no-store`.
 function isCacheableRead(context: Context<WorkerHonoEnv>): boolean {
 	return (
 		context.get('readScope').visibility === 'public' &&

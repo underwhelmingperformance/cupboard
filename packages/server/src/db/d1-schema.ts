@@ -1,5 +1,6 @@
 import {
 	type AuthKeyId,
+	type CacheGeneration,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
@@ -121,6 +122,11 @@ export const blobState = sqliteTable(
 // targets a captured `(tenant, cache, store_path_hash, generation)` and so can
 // never remove a newer recommitted edge. The `nar_hash` index backs the reaper's
 // "is this hash referenced anywhere" probe, which is on a non-key column.
+//
+// These rows also authorise NAR reads. The
+// `(tenant, nar_hash, cache, cache_generation)` index answers that check in one
+// seek and supplies every `blob_ref` column needed by the check. The same index
+// supports a single cache and the half-open range for a namespace.
 export const blobReference = sqliteTable(
 	'blob_ref',
 	{
@@ -128,7 +134,11 @@ export const blobReference = sqliteTable(
 		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
-		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		// The generation of the cache name when this edge was committed. Null
+		// represents the first generation and preserves edges written before this
+		// column existed.
+		cacheGeneration: integer('cache_generation').$type<CacheGeneration>()
 	},
 	(table) => [
 		primaryKey({
@@ -139,8 +149,52 @@ export const blobReference = sqliteTable(
 				table.generation
 			]
 		}),
-		index('blob_ref_nar_hash_idx').on(table.narHash)
+		index('blob_ref_nar_hash_idx').on(table.narHash),
+		index('blob_ref_tenant_nar_hash_cache_idx').on(
+			table.tenant,
+			table.narHash,
+			table.cache,
+			table.cacheGeneration
+		)
 	]
+);
+
+// The current generation of one cache name. Only reference edges from this
+// generation authorise a read. Deleting a cache advances the generation in one
+// write, which revokes all of the cache's existing edges before physical
+// cleanup begins. A later cache with the same name uses the advanced generation
+// and cannot reach the previous cache's edges.
+//
+// A missing lifecycle row represents generation 1. A null
+// `blob_ref.cache_generation` also represents generation 1. The first deletion
+// writes generation 2 and immediately revokes those edges.
+export const cacheLifecycle = sqliteTable(
+	'cache_lifecycle',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
+		generation: integer('generation').$type<CacheGeneration>().notNull(),
+		// When the cache was last deleted, and null while it is live. Deletion sets
+		// it in the same statement that advances the generation, and registering
+		// the cache name again clears it.
+		//
+		// Private-cache reads consult this column. A deleted cache retains its
+		// published narinfo and attestation state until the teardown drain removes
+		// them, and it retains its read credential indefinitely.
+		//
+		// The NAR reference query does not inspect this column. Deletion advances
+		// the lifecycle generation, which invalidates every existing reference
+		// edge. Before a recreated named cache can commit an edge,
+		// `loadOrCreateCache` registers the cache and clears this column. The new
+		// edge then records the advanced generation. A generation-authorised edge
+		// for a named cache therefore belongs to its live incarnation.
+		//
+		// The default cache is never registered. Its public reads use the lifecycle
+		// generation alone.
+		deletedAt: text('deleted_at').$type<IsoTimestamp>(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.tenant, table.cache] })]
 );
 
 // The control-plane signing key set, held in D1 so the stateless Worker can issue
