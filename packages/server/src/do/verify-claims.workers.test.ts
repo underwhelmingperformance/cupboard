@@ -14,6 +14,7 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 import {
+	asOneInvocation,
 	commitPath,
 	currentServer,
 	deferFreshUpload,
@@ -768,13 +769,17 @@ describe('claiming a verification batch', () => {
 				.mockResolvedValue(false);
 
 			try {
-				await verification.processPendingWithoutDecode(rootLogger(), 2);
+				await asOneInvocation(() =>
+					verification.processPendingWithoutDecode(rootLogger(), 2)
+				);
 				const first = committedProbe.mock.calls.map(
 					([, metadata]) => metadata.storePathHash
 				);
 				committedProbe.mockClear();
 
-				await verification.processPendingWithoutDecode(rootLogger(), 2);
+				await asOneInvocation(() =>
+					verification.processPendingWithoutDecode(rootLogger(), 2)
+				);
 				const second = committedProbe.mock.calls.map(
 					([, metadata]) => metadata.storePathHash
 				);
@@ -947,7 +952,9 @@ describe('claiming a verification batch', () => {
 							);
 
 						try {
-							await verification.processPendingWithoutDecode(rootLogger(), 2);
+							await asOneInvocation(() =>
+								verification.processPendingWithoutDecode(rootLogger(), 2)
+							);
 							const firstRows = instance.context.db
 								.select({ id: schema.pendingUploads.id })
 								.from(schema.pendingUploads)
@@ -955,14 +962,18 @@ describe('claiming a verification batch', () => {
 								.all();
 							const probed = probe.mock.calls.map(([narHash]) => narHash);
 
-							await verification.processPendingWithoutDecode(rootLogger(), 2);
+							await asOneInvocation(() =>
+								verification.processPendingWithoutDecode(rootLogger(), 2)
+							);
 							const secondRows = instance.context.db
 								.select({ id: schema.pendingUploads.id })
 								.from(schema.pendingUploads)
 								.orderBy(schema.pendingUploads.id)
 								.all();
 
-							await verification.processPendingWithoutDecode(rootLogger(), 2);
+							await asOneInvocation(() =>
+								verification.processPendingWithoutDecode(rootLogger(), 2)
+							);
 
 							return {
 								firstPass: { rows: firstRows, probed },
@@ -1052,7 +1063,9 @@ describe('claiming a verification batch', () => {
 					);
 
 				try {
-					await verification.processPendingWithoutDecode(rootLogger(), 1);
+					await asOneInvocation(() =>
+						verification.processPendingWithoutDecode(rootLogger(), 1)
+					);
 				} finally {
 					committedProbe.mockRestore();
 				}

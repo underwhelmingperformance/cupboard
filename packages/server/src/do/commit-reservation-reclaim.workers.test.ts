@@ -16,6 +16,7 @@ import {
 	commitPath,
 	currentNarObjectKey,
 	currentServer,
+	drivenDirectly,
 	expectSingleCommitDecision,
 	flakyD1,
 	initialise,
@@ -164,7 +165,7 @@ describe('when a commit retry finds an abandoned reservation', () => {
 		);
 
 		await runInDurableObject(currentServer(), async (instance) => {
-			const pipeline = pipelineFor(instance.context);
+			const pipeline = drivenDirectly(pipelineFor(instance.context));
 			const realD1 = instance.context.d1;
 
 			Object.defineProperty(instance.context, 'd1', {
@@ -206,7 +207,11 @@ describe('when a commit retry finds an abandoned reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				pipelineFor(instance.context).commit(rootLogger(), '', fresh.uploadId)
+				drivenDirectly(pipelineFor(instance.context)).commit(
+					rootLogger(),
+					'',
+					fresh.uploadId
+				)
 		);
 
 		expect(outcome).toStrictEqual({
@@ -256,7 +261,11 @@ describe('when a commit resumes its existing reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				pipelineFor(instance.context).commit(rootLogger(), '', reuse.uploadId)
+				drivenDirectly(pipelineFor(instance.context)).commit(
+					rootLogger(),
+					'',
+					reuse.uploadId
+				)
 		);
 
 		expect(outcome).toStrictEqual({
@@ -308,7 +317,7 @@ describe('when another commit holds the reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				pipelineFor(instance.context).concedeToWinner(
+				drivenDirectly(pipelineFor(instance.context)).concedeToWinner(
 					rootLogger(),
 					'',
 					reuse.uploadId,
@@ -407,7 +416,7 @@ describe('when reclaiming a row after failed verification', () => {
 
 			const result = await runInDurableObject(currentServer(), (instance) =>
 				instance.context.criticalSection(() =>
-					pipelineFor(instance.context).reclaimReservedRow(
+					drivenDirectly(pipelineFor(instance.context)).reclaimReservedRow(
 						'',
 						metadata.storePathHash,
 						narInfoGenerationSchema.parse(7),
@@ -453,7 +462,7 @@ describe('when reclaiming a row after failed verification', () => {
 
 		const result = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.criticalSection(() =>
-				pipelineFor(instance.context).reclaimReservedRow(
+				drivenDirectly(pipelineFor(instance.context)).reclaimReservedRow(
 					'',
 					metadata.storePathHash,
 					narInfoGenerationSchema.parse(7),

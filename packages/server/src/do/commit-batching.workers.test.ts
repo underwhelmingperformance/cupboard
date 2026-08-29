@@ -1,34 +1,49 @@
 import { rootLogger } from '@cupboard/logger';
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	uploadCommitDecisionSchema,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { narInfos } from '../db/schema.ts';
+import { d1StatementsPerInvocation } from '../http/http.ts';
 import {
 	authorisedFetch,
 	commitPath,
 	commitUpload,
+	countingD1,
 	currentServer,
+	drivenDirectly,
 	expectSingleCommitDecision,
 	initialise,
 	negotiateUploads,
 	openCommitSession,
 	provisionFixtureTenant,
 	resetTestServer,
+	syntheticStorePathHash,
 	testPushId,
 	uploadMetadata,
 	uploadPathNegotiation,
+	useTestServer,
 	verifiableNar
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
+import { boundedD1 } from './bounded-io.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
@@ -36,6 +51,7 @@ import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
+import { withStatementAllowance } from './statement-scope.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
@@ -108,7 +124,7 @@ describe('commit batching', () => {
 			const outcomes = await runInDurableObject(
 				currentServer(),
 				async (instance) => {
-					const pipeline = pipelineFor(instance.context);
+					const pipeline = drivenDirectly(pipelineFor(instance.context));
 					const [head, ...rest] = paths;
 
 					if (head === undefined) {
@@ -196,7 +212,7 @@ describe('commit batching', () => {
 		const counts = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const pipeline = pipelineFor(instance.context);
+				const pipeline = drivenDirectly(pipelineFor(instance.context));
 				const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
 
 				try {
@@ -441,4 +457,172 @@ describe('commit batching', () => {
 			}))
 		});
 	});
+});
+
+// More reuse commits than one invocation's D1 allowance can charge. Each
+// materialisation charges five statements, so a burst this size needs more than
+// one invocation on the Free allowance of 50.
+const pagedBurst = 14;
+
+/**
+ * Commits one path, then drives a burst of reuse commits for its NAR through
+ * one `materialiseBatched` flush under a single invocation allowance.
+ *
+ * Reports each request outcome, the D1 statement count, and the tenant's final
+ * reference edges, presence rows, and usage.
+ */
+async function drivePagedBurst(server: string): Promise<{
+	readonly kinds: readonly string[];
+	readonly statements: number;
+	readonly allowance: number;
+	readonly edges: number;
+	readonly presence: number;
+	readonly narinfoUsage: number | null | undefined;
+}> {
+	await useTestServer(server);
+
+	const token = await initialise();
+	const nar = await verifiableNar('paged-burst');
+	const paths = Array.from({ length: pagedBurst }, (_, index) =>
+		uploadMetadata({
+			name: `paged-${String(index)}`,
+			storePathHash: syntheticStorePathHash(index),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		})
+	);
+	const [committed, ...reused] = paths;
+
+	if (committed === undefined) {
+		throw new Error('the burst needs at least one path');
+	}
+
+	await commitPath(token, committed, nar);
+
+	for (const metadata of reused) {
+		const decision = expectSingleCommitDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await commitUpload(token, decision.uploadId);
+	}
+
+	const counting = countingD1(env.CUPBOARD_DB);
+
+	return runInDurableObject(currentServer(), async (instance, state) => {
+		const real = instance.context.d1;
+
+		Object.defineProperty(instance.context, 'd1', {
+			configurable: true,
+			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
+		});
+
+		const local = drizzle(state.storage, { schema: { narInfos } });
+		const generations = new Map(
+			local
+				.select({
+					storePathHash: narInfos.storePathHash,
+					generation: narInfos.generation
+				})
+				.from(narInfos)
+				.all()
+				.map((row) => [row.storePathHash, row.generation] as const)
+		);
+		const pipeline = pipelineFor(instance.context);
+		const before = counting.statementsSent();
+
+		// Use one allowance for the complete burst, as a dispatched method does.
+		const kinds = await withStatementAllowance(async () => {
+			const probe = await pipeline.probeMaterialisation(committed);
+
+			return Promise.all(
+				paths.map((metadata) => {
+					const generation = generations.get(metadata.storePathHash);
+
+					if (generation === undefined) {
+						throw new Error('the committed path has no narinfo row');
+					}
+
+					return pipeline.materialiseBatched(rootLogger(), {
+						cache: DEFAULT_CACHE,
+						metadata,
+						generation,
+						probe,
+						mustOwnBlob: true,
+						graceDecision: undefined,
+						attachRootName: undefined
+					});
+				})
+			);
+		});
+		const statements = counting.statementsSent() - before;
+
+		Object.defineProperty(instance.context, 'd1', {
+			configurable: true,
+			value: real
+		});
+
+		const tenant = instance.context.requireTenant();
+		const edges = await instance.context.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(eq(d1Schema.blobReference.tenant, tenant))
+			.all();
+		const presence = await instance.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(eq(d1Schema.tenantBlob.tenant, tenant))
+			.all();
+		const usage = await instance.context.d1
+			.select({ narinfos: d1Schema.tenantUsage.narinfos })
+			.from(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, tenant))
+			.get();
+
+		return {
+			kinds: kinds.map((outcome) => outcome.kind).toSorted(byCodeUnit),
+			statements,
+			allowance: d1StatementsPerInvocation,
+			edges: edges.length,
+			presence: presence.length,
+			narinfoUsage: usage?.narinfos
+		};
+	});
+}
+
+describe('materialise flush paging', () => {
+	beforeEach(resetTestServer);
+
+	it('charges requests within the allowance and defers the remaining requests', async () => {
+		const driven = await drivePagedBurst('flush-paging');
+
+		// The burst replays paths this fixture already committed, so the charge
+		// statements are conditional no-ops and the tenant's edges and usage must
+		// come out unchanged: paging a flush must not charge a path twice. Nine of
+		// the fourteen fit the allowance once the probe and the account read have
+		// taken theirs. The flush returns `deferred` for the other five requests and
+		// leaves their uploads pending for verification.
+		expect({
+			deferred: driven.kinds.filter((kind) => kind === 'deferred').length,
+			materialised: driven.kinds.filter((kind) => kind === 'materialised')
+				.length,
+			otherKinds: driven.kinds.filter(
+				(kind) => kind !== 'deferred' && kind !== 'materialised'
+			),
+			withinAllowance: driven.statements <= driven.allowance,
+			edges: driven.edges,
+			presence: driven.presence,
+			narinfoUsage: driven.narinfoUsage
+		}).toStrictEqual({
+			deferred: 5,
+			materialised: 9,
+			otherKinds: [],
+			withinAllowance: true,
+			edges: pagedBurst,
+			presence: 1,
+			narinfoUsage: pagedBurst
+		});
+	}, 240_000);
 });

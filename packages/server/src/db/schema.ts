@@ -130,7 +130,12 @@ export const pendingUploads = sqliteTable(
 		graceDecisionJson: text('grace_decision_json'),
 		// A commit attaches the path to the run root captured during negotiation.
 		// Null preserves the behaviour of pushes that did not request a root.
-		attachRootName: text('attach_root_name').$type<RootName>()
+		attachRootName: text('attach_root_name').$type<RootName>(),
+		// The verdict reported by the queue consumer. It remains here until a pass
+		// has enough D1 allowance to apply it. A recorded verdict prevents another
+		// consumer from claiming the row and repeating the decode. Rows created
+		// before this column was added contain null.
+		recordedVerdictJson: text('recorded_verdict_json')
 	},
 	// Maintenance finds the soonest-expiring upload, probes for work awaiting
 	// verification, and checks listed staging keys for pending owners. Without
@@ -143,7 +148,10 @@ export const pendingUploads = sqliteTable(
 				sql`${table.verdict} IS NULL OR ${table.verdict} = 'servable' OR ${table.verdict} = 'mismatch' OR ${table.verdict} = 'over-quota'`
 			),
 		index('pending_upload_verdict_idx').on(table.verdict),
-		index('pending_upload_r2_key_idx').on(table.r2Key)
+		index('pending_upload_r2_key_idx').on(table.r2Key),
+		index('pending_upload_recorded_verdict_idx')
+			.on(table.id)
+			.where(sql`${table.recordedVerdictJson} IS NOT NULL`)
 	]
 );
 

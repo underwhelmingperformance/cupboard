@@ -77,6 +77,7 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
+import { affordableOperations } from './statement-scope.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -148,7 +149,11 @@ export interface MaterialiseRequest {
 }
 
 export type BatchedMaterialiseOutcome =
-	MaterialiseOutcome | { readonly kind: 'gone' };
+	| MaterialiseOutcome
+	| { readonly kind: 'gone' }
+	// The invocation's allowance cannot cover this request. The caller leaves the
+	// upload pending so a later verification pass can settle it.
+	| { readonly kind: 'deferred' };
 
 type ChargeOutcome =
 	| { readonly kind: 'charged' }
@@ -168,8 +173,14 @@ interface PendingMaterialise {
 	readonly reject: (error: unknown) => void;
 }
 
-// Each materialisation adds five statements. Cap a flush below D1's statement
-// and parameter limits; larger bursts drain through later flushes.
+// Each materialisation adds five statements, and the charge batch adds one for
+// the tenant status read. A flush also reads the tenant account before it takes
+// the gate.
+const statementsPerMaterialise = 5;
+const materialiseFlushOverheadStatements = 2;
+
+// A flush handles at most this many requests to stay below D1's parameter
+// limit. The remaining statement allowance can reduce the batch further.
 const materialiseFlushCap = 32;
 
 // Bound winner re-resolution so repeated recommits cannot pin one request.
@@ -335,6 +346,23 @@ export class CommitPipelineService {
 				graceDecision,
 				attachRootName
 			});
+		}
+
+		if (outcome.kind === 'deferred') {
+			// This invocation's D1 allowance cannot charge the commit. Keep the
+			// upload pending, request verification, and return the protocol's
+			// existing deferred outcome.
+			this.uploadState.markUploadPending(uploadId);
+			await this.requestVerification(logger, this.context.requireTenant());
+
+			return {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				...(graceDecision?.reportsGrace === true && {
+					grace: capturedGraceFact(graceDecision)
+				})
+			};
 		}
 
 		if (outcome.kind === 'materialised') {
@@ -1020,13 +1048,33 @@ export class CommitPipelineService {
 		let batch: PendingMaterialise[] = [];
 		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
 
-		// Read the account outside the gate. The charge batch rechecks any value
-		// that becomes stale before this flush runs.
-		const account = await this.tenantAccount(this.context.requireTenant());
-
 		try {
+			// Page the flush from the invocation's remaining D1 allowance. A larger
+			// allowance settles more of a burst in one invocation; an allowance
+			// that covers the whole flush settles every request immediately.
+			// Under a small allowance, the flush returns `deferred` for requests
+			// that it cannot charge. The pending upload remains available for a
+			// verification pass.
+			const affordable = Math.min(
+				materialiseFlushCap,
+				affordableOperations(
+					statementsPerMaterialise,
+					materialiseFlushOverheadStatements
+				)
+			);
+
+			if (affordable === 0) {
+				this.deferQueuedMaterialisations();
+
+				return;
+			}
+
+			// Read the account outside the gate. The charge batch rechecks any value
+			// that becomes stale before this flush runs.
+			const account = await this.tenantAccount(this.context.requireTenant());
+
 			await this.context.criticalSection(async () => {
-				batch = this.materialiseQueue.splice(0, materialiseFlushCap);
+				batch = this.materialiseQueue.splice(0, affordable);
 				outcomes = await this.processMaterialiseFlushLocked(
 					batch.map((item) => item.request),
 					account
@@ -1065,10 +1113,35 @@ export class CommitPipelineService {
 		}
 	}
 
+	// Answer every request still queued. This queue contains callers waiting for
+	// a response. The pending rows contain the durable work.
+	private deferQueuedMaterialisations(): void {
+		const queued = [...this.materialiseQueue];
+		this.materialiseQueue.length = 0;
+
+		for (const item of queued) {
+			item.resolve({ kind: 'deferred' });
+		}
+	}
+
 	private async drainMaterialiseQueue(logger: Logger): Promise<void> {
 		try {
 			while (this.materialiseQueue.length > 0) {
 				await this.flushMaterialiseQueue(logger);
+			}
+		} catch (error) {
+			// Nothing awaits this drain, so a request left queued here would leave
+			// its caller waiting for a flush that will not run. Reject them instead.
+			logger.error('materialise drain failed', {
+				settles: this.materialiseQueue.length,
+				error
+			});
+
+			const stranded = [...this.materialiseQueue];
+			this.materialiseQueue.length = 0;
+
+			for (const item of stranded) {
+				item.reject(error);
 			}
 		} finally {
 			this.materialiseDrain = undefined;

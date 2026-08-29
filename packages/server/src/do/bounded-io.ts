@@ -1,6 +1,12 @@
-import { UnboundableIoError } from '../errors.ts';
+import {
+	StatementParameterLimitError,
+	UnboundableIoError,
+	UncountableStatementError
+} from '../errors.ts';
 
+import { maxBoundParameters } from './bulk.ts';
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
+import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
 
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
@@ -11,10 +17,23 @@ function bounded<A extends unknown[], R>(
 		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
 }
 
-// Refuses a member the per-call bound cannot cover. A session or multipart
-// handle issues its own requests, and those requests do not pass through these
-// proxies, so handing the handle out would leave them unbounded. The wrapper
-// throws instead.
+// Decrement the invocation's statement allowance before calling D1. If the call
+// would exceed the allowance, throw before D1 receives the statement.
+function charged<A extends unknown[], R>(
+	method: (...arguments_: A) => Promise<R>,
+	subrequest: string
+): (...arguments_: A) => Promise<R> {
+	const run = bounded(method, subrequest);
+
+	return (...arguments_: A) => {
+		spendStatements(1, subrequest);
+
+		return run(...arguments_);
+	};
+}
+
+// A session or multipart handle issues requests outside these per-call proxies.
+// Reject the member when the wrapper cannot apply a deadline to those requests.
 function unboundable(member: string): () => never {
 	return () => {
 		throw new UnboundableIoError(member);
@@ -36,10 +55,9 @@ function passThrough(target: object, property: PropertyKey): unknown {
 }
 
 /**
- * An {@link R2Bucket} whose network calls are bounded. `head`/`delete`/`list`
- * are metadata calls capped at the per-call limit; `get`/`put` transfer blob bytes,
- * so they are bounded only by an enclosing critical-section deadline and run
- * unbounded off the gate.
+ * Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
+ * per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
+ * critical-section deadline and can continue without the input gate.
  */
 export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	return new Proxy(bucket, {
@@ -72,8 +90,8 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	});
 }
 
-// The real statement behind each bounded proxy, so `batch` hands D1 the native
-// statements the driver built rather than the proxies.
+// Associate each bounded proxy with its native statement. `batch` unwraps its
+// arguments before passing them to D1.
 const realStatement = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
 
 function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
@@ -81,20 +99,28 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 		get(target, property) {
 			switch (property) {
 				case 'bind': {
-					return (...values: unknown[]): D1PreparedStatement =>
-						boundedStatement(target.bind(...values));
+					return (...values: unknown[]): D1PreparedStatement => {
+						if (values.length > maxBoundParameters) {
+							throw new StatementParameterLimitError(
+								values.length,
+								maxBoundParameters
+							);
+						}
+
+						return boundedStatement(target.bind(...values));
+					};
 				}
 				case 'run': {
-					return bounded(target.run.bind(target), 'd1.run');
+					return charged(target.run.bind(target), 'd1.run');
 				}
 				case 'all': {
-					return bounded(target.all.bind(target), 'd1.all');
+					return charged(target.all.bind(target), 'd1.all');
 				}
 				case 'first': {
-					return bounded(target.first.bind(target), 'd1.first');
+					return charged(target.first.bind(target), 'd1.first');
 				}
 				case 'raw': {
-					return bounded(target.raw.bind(target), 'd1.raw');
+					return charged(target.raw.bind(target), 'd1.raw');
 				}
 				default: {
 					return passThrough(target, property);
@@ -109,10 +135,14 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 }
 
 /**
- * A {@link D1Database} whose network calls are bounded. `prepare` returns a
- * bounded statement whose terminal `run`/`all`/`first`/`raw` are capped;
- * `batch` is bounded as one call (D1 batches are atomic, so it must never be
- * decomposed) and receives the native statements via {@link realStatement}.
+ * Wraps a {@link D1Database} with deadlines and statement accounting. `prepare`
+ * does not change the invocation's allowance. Each terminal `run`, `all`,
+ * `first` or `raw` call decrements the allowance by one. `batch` decrements it
+ * by the number of members and sends the corresponding native statements to
+ * D1. A D1 batch is atomic, so this wrapper never decomposes one.
+ *
+ * `exec` can execute an unknown number of statements from one string. An active
+ * statement allowance therefore rejects the call before dispatch.
  */
 export function boundedD1(database: D1Database): D1Database {
 	return new Proxy(database, {
@@ -123,8 +153,10 @@ export function boundedD1(database: D1Database): D1Database {
 						boundedStatement(target.prepare(query));
 				}
 				case 'batch': {
-					return (statements: D1PreparedStatement[]) =>
-						boundedSubrequest(
+					return (statements: D1PreparedStatement[]) => {
+						spendStatements(statements.length, 'd1.batch');
+
+						return boundedSubrequest(
 							() =>
 								target.batch(
 									statements.map(
@@ -133,9 +165,16 @@ export function boundedD1(database: D1Database): D1Database {
 								),
 							'd1.batch'
 						);
+					};
 				}
 				case 'exec': {
-					return bounded(target.exec.bind(target), 'd1.exec');
+					return (query: string): Promise<D1ExecResult> => {
+						if (hasStatementAllowance()) {
+							throw new UncountableStatementError('d1.exec');
+						}
+
+						return bounded(target.exec.bind(target), 'd1.exec')(query);
+					};
 				}
 				case 'withSession':
 				case 'dump': {

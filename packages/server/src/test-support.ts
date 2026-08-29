@@ -141,6 +141,7 @@ import { chunk } from './do/bulk.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations } from './do/migrate.ts';
 import type { CupboardServer } from './do/server.ts';
+import { withStatementAllowance } from './do/statement-scope.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -354,11 +355,11 @@ export async function provisionFixtureTenant(
 }
 
 /**
- * Provisions a named tenant for a route-level test: writes its D1 row,
+ * Provisions a named tenant for a route-level test. Writes its D1 row,
  * optionally configures its Durable Object with its path-based issuer, and
- * seeds the membership filter and marker. Returns the tenant's issuer URL. Pass
- * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
- * test can prove that the route 500s on an unconfigured identity.
+ * seeds the membership filter and marker. Returns the tenant's issuer URL.
+ * With `configure: false`, the route admits the slug but leaves its Durable
+ * Object unconfigured.
  */
 export async function provisionNamedTenant(
 	name: string,
@@ -608,6 +609,83 @@ export async function clearAbandonedAlarms(): Promise<void> {
 		await runInDurableObject(stub, (_instance, state) =>
 			state.storage.deleteAlarm()
 		);
+	}
+}
+
+interface SuspendedAlarmArming {
+	/**
+	 * The original `setAlarm` method, restored after the last fence ends.
+	 */
+	readonly armAlarm: DurableObjectStorage['setAlarm'];
+	/**
+	 * The number of active fences.
+	 */
+	depth: number;
+}
+
+const suspendedAlarmArming = new WeakMap<
+	DurableObjectStorage,
+	SuspendedAlarmArming
+>();
+
+/**
+ * Prevents the harness's Durable Object from arming an alarm while `body` runs.
+ * The function restores `setAlarm` before it returns.
+ *
+ * Workerd schedules alarms with the real clock even when the test pool isolates
+ * storage. An immediate alarm can therefore run before a test inspects the state
+ * produced by the method that armed it. Deleting an alarm after it becomes due
+ * does not cancel delivery. This function disables `setAlarm`, and the test
+ * calls `alarm()` explicitly at the required point.
+ *
+ * Overlapping fences share a reference count. The first fence saves and
+ * disables `setAlarm`; the last fence restores the saved method. This remains
+ * correct when overlapping bodies finish out of order.
+ */
+export async function withoutAlarmArming<T>(
+	body: () => Promise<T>
+): Promise<T> {
+	const stub = currentServer();
+
+	await runInDurableObject(stub, (_instance, state) => {
+		const { storage } = state;
+		const fence = suspendedAlarmArming.get(storage);
+
+		if (fence !== undefined) {
+			fence.depth += 1;
+
+			return;
+		}
+
+		suspendedAlarmArming.set(storage, {
+			armAlarm: storage.setAlarm.bind(storage),
+			depth: 1
+		});
+		storage.setAlarm = () => Promise.resolve();
+	});
+
+	try {
+		return await body();
+	} finally {
+		await runInDurableObject(stub, (_instance, state) => {
+			const { storage } = state;
+			const fence = suspendedAlarmArming.get(storage);
+
+			if (fence === undefined) {
+				throw new Error(
+					'Alarm arming was already restored while a fence still held it.'
+				);
+			}
+
+			fence.depth -= 1;
+
+			if (fence.depth > 0) {
+				return;
+			}
+
+			storage.setAlarm = fence.armAlarm;
+			suspendedAlarmArming.delete(storage);
+		});
 	}
 }
 
@@ -893,8 +971,9 @@ export interface FlakyD1Plan {
 }
 
 /**
- * A D1 binding whose next `failures` matching reads throw, then delegates: the
- * shape of a transient control-plane fault under an authoritative D1 read.
+ * A D1 binding that throws for the next `failures` matching reads and delegates
+ * all later operations. This models a transient control-plane fault during an
+ * authoritative D1 read.
  */
 export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	return {
@@ -920,14 +999,49 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 }
 
 /**
- * A D1 binding that counts the statements sent through it, so a test can hold
- * an operation to the per-invocation statement budget that Workers Free
- * enforces.
+ * Wraps a service so direct test calls use one invocation's D1 statement
+ * allowance.
  *
- * Drizzle prepares one statement for each statement it sends, whether the
- * statement runs on its own or as one member of a batch, so counting
- * preparations counts what the invocation spends. `batch` adds nothing of its
- * own because its members were prepared through this binding first.
+ * Production dispatch adds the allowance before it calls a service. Tests that
+ * call the service directly bypass that dispatch, so this wrapper adds the same
+ * boundary to one instance without changing the shared prototype.
+ */
+export function drivenDirectly<Service extends object>(
+	service: Service
+): Service {
+	return new Proxy(service, {
+		get(target, property, receiver) {
+			const value: unknown = Reflect.get(target, property, receiver);
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			return (...parameters: unknown[]): unknown =>
+				withStatementAllowance((): unknown =>
+					Reflect.apply(value, receiver, parameters)
+				);
+		}
+	});
+}
+
+/**
+ * Runs `body` under one invocation's D1 statement allowance.
+ *
+ * Use this when a test calls code below the Durable Object dispatch boundary.
+ */
+export function asOneInvocation<T>(body: () => T): T {
+	return withStatementAllowance(body);
+}
+
+/**
+ * Wraps a D1 binding and counts every prepared statement. Tests use the count to
+ * enforce the Workers Free limit for one invocation.
+ *
+ * Drizzle prepares each statement before execution, including every batch
+ * member. Counting preparations therefore counts executed D1 statements.
+ * `batch` does not add another statement because all of its members have
+ * already passed through `prepare`.
  */
 export function countingD1(inner: D1Database): {
 	readonly binding: D1Database;
@@ -955,6 +1069,104 @@ export function countingD1(inner: D1Database): {
 	};
 }
 
+export interface StatementCounter {
+	readonly statementsSent: () => number;
+}
+
+/**
+ * The method used to exclude automatic alarm delivery from a measured run.
+ *
+ * `input-gate` keeps the Durable Object's input gate locked for the complete run.
+ * Workerd defers scheduled work until the run finishes, so only the measured
+ * calls can change the observed state.
+ *
+ * `disarmed-alarm` deletes any armed alarm before each measured call and once
+ * more after the run. Use it when a measured call opens or waits for its own
+ * critical section. The runtime does not enter a nested input gate while
+ * The runtime cannot enter a nested input gate while the outer gate is locked,
+ * so `input-gate` would time out in this case.
+ */
+export type InvocationIsolation = 'input-gate' | 'disarmed-alarm';
+
+export type MeasuredInvocation<Observation extends object> = {
+	readonly invocation: number;
+	readonly statements: number;
+} & Observation;
+
+export interface MeasureInvocationsOptions<Observation extends object> {
+	/**
+	 * The maximum number of calls. The run stops early when `isDue` returns false.
+	 */
+	readonly attempts: number;
+	readonly isolation?: InvocationIsolation;
+	/**
+	 * Sets up the run's starting state, under the same isolation.
+	 */
+	readonly prepare?: () => unknown;
+	/**
+	 * Whether another call has work to do. If absent, every attempt runs.
+	 */
+	readonly isDue?: () => Promise<boolean> | boolean;
+	/**
+	 * Makes one complete call and returns its observation.
+	 */
+	readonly run: () => Promise<Observation>;
+}
+
+/**
+ * Makes up to `attempts` complete calls. For each call, it records the number
+ * of D1 statements and the observation returned by `run`.
+ *
+ * Queued maintenance leaves an armed alarm. Fake timers freeze `Date` in the
+ * isolate, but the alarm scheduler continues to use real time, so the alarm
+ * remains due. Workerd can deliver it at any `await` inside
+ * `runInDurableObject`, which would add another pass's statements to the
+ * measured call. `isolation` selects how the run prevents that delivery.
+ *
+ * `run` can read state before and after the call it measures. Those reads occur
+ * inside the statement-counting window, so they must use only the Durable
+ * Object's local storage.
+ */
+export async function measureInvocations<Observation extends object>(
+	state: DurableObjectState,
+	counting: StatementCounter,
+	options: MeasureInvocationsOptions<Observation>
+): Promise<readonly MeasuredInvocation<Observation>[]> {
+	const isolation = options.isolation ?? 'input-gate';
+	const measured: MeasuredInvocation<Observation>[] = [];
+	const drive = async (): Promise<void> => {
+		await options.prepare?.();
+
+		for (let attempt = 0; attempt < options.attempts; attempt += 1) {
+			if (options.isDue !== undefined && !(await options.isDue())) {
+				break;
+			}
+
+			if (isolation === 'disarmed-alarm') {
+				await state.storage.deleteAlarm();
+			}
+
+			const before = counting.statementsSent();
+			const observed = await options.run();
+			measured.push({
+				invocation: measured.length + 1,
+				statements: counting.statementsSent() - before,
+				...observed
+			});
+		}
+
+		if (isolation === 'disarmed-alarm') {
+			await state.storage.deleteAlarm();
+		}
+	};
+
+	await (isolation === 'input-gate'
+		? state.blockConcurrencyWhile(drive)
+		: drive());
+
+	return measured;
+}
+
 export interface FlakyR2Plan {
 	failures: number;
 	/**
@@ -967,17 +1179,28 @@ export interface FlakyR2Plan {
 	 * the code under test.
 	 */
 	readonly onMatch?: () => void;
+	/**
+	 * Limits the fault to the keys this predicate accepts. Probes run
+	 * concurrently, so a test that needs one named object to fail must select it
+	 * by key rather than by the order the probes reach the binding. Every key
+	 * matches when the predicate is absent.
+	 */
+	readonly matches?: (key: string) => boolean;
 }
 
 /**
- * An R2 binding whose next `failures` head probes throw, then delegates: the
- * shape of a transient storage fault under a presence check. Every other
- * operation passes straight through.
+ * An R2 binding that throws for the next `failures` HEAD requests and delegates
+ * all later operations. This models a transient storage fault during a presence
+ * check. Every other operation passes straight through.
  */
 export function flakyR2(inner: R2Bucket, plan: FlakyR2Plan): R2Bucket {
 	return {
 		head(key) {
 			plan.onMatch?.();
+
+			if (plan.matches?.(key) === false) {
+				return inner.head(key);
+			}
 
 			if (plan.failures > 0) {
 				plan.failures -= 1;
@@ -1219,8 +1442,8 @@ export function syntheticNarHash(index: number): NixSha256HashString {
 }
 
 /**
- * A deterministic, syntactically valid store-path hash derived from an index,
- * whose lexical order tracks the index so a seeded backlog drains predictably.
+ * A deterministic, syntactically valid store-path hash derived from an index.
+ * Its lexical order follows the index so a seeded backlog drains predictably.
  */
 export function syntheticStorePathHash(index: number): StorePathHash {
 	let remaining = index;
@@ -1637,8 +1860,8 @@ export async function isTenantUsagePresent(id: string): Promise<boolean> {
 }
 
 /**
- * Models a delete whose row-first transaction committed but whose queued cleanup
- * did not reach D1, leaving the captured reference edge behind.
+ * Models a deletion where the row transaction committed before D1 received the
+ * queued cleanup. The captured reference edge remains in D1.
  */
 export async function queueUnflushedNarInfoDeletion(fields: {
 	readonly storePathHash: StorePathHash;
@@ -2232,9 +2455,9 @@ export function commitSessionFromResponse(
 	};
 }
 
-// What a client declares on the upgrade to be paced by the server's credit. A
-// session that declares nothing is admitted the way an older client is: it
-// spends no credit and the server does not pace it.
+// The client declares these capabilities during the upgrade when it asks the
+// server to pace commits. A legacy session does not use server-side pacing or
+// credit accounting.
 export const commitCreditAccept = `${commitBatchCapability},${commitCreditCapability}`;
 
 /**

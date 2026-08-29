@@ -21,6 +21,7 @@ import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	currentServer,
 	initialise,
@@ -36,7 +37,6 @@ import {
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { chunk } from './bulk.ts';
-import { teardownDrainStatements } from './cache-admin-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	DeletionQueueService,
@@ -44,7 +44,6 @@ import {
 	type TornDownNarInfo
 } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { StatementBudget } from './statement-budget.ts';
 
 const selectDeletions = 'SELECT cache, store_path_hash FROM narinfo_deletion';
 const defaultCache: StoredCache = DEFAULT_CACHE;
@@ -188,8 +187,10 @@ describe('narinfo deletion queue', () => {
 			currentServer(),
 			async (instance) => {
 				const queue = buildDeletionQueue(instance.context);
-				const retired = await instance.context.criticalSection(() =>
-					queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+				const retired = await asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+					)
 				);
 
 				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
@@ -201,8 +202,10 @@ describe('narinfo deletion queue', () => {
 			currentServer(),
 			async (instance) => {
 				const queue = buildDeletionQueue(instance.context);
-				const retired = await instance.context.criticalSection(() =>
-					queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+				const retired = await asOneInvocation(() =>
+					instance.context.criticalSection(() =>
+						queue.flushQueuedNarInfoDeletions(undefined, flushLimit)
+					)
 				);
 
 				return { retired, hasMore: queue.hasQueuedNarInfoDeletions() };
@@ -243,11 +246,9 @@ describe('narinfo deletion queue', () => {
 				const queue = buildDeletionQueue(instance.context);
 
 				try {
-					await instance.context.criticalSection(() =>
-						queue.retireTornDownNarInfos(
-							DEFAULT_CACHE,
-							entries,
-							new StatementBudget(teardownDrainStatements)
+					await asOneInvocation(() =>
+						instance.context.criticalSection(() =>
+							queue.retireTornDownNarInfos(DEFAULT_CACHE, entries)
 						)
 					);
 

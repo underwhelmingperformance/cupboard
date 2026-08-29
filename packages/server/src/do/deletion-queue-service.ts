@@ -28,21 +28,21 @@ import {
 import { outsidePrivateCaches } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import {
-	d1StatementsPerReaperInvocation,
-	type RequestOrigin
-} from '../http/http.ts';
+import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
 
 import {
 	type AttestationCasService,
 	type AttestationReference
 } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import { chunk, maxInClauseValues } from './bulk.ts';
+import { chunk, drainStatementBatches, maxInClauseValues } from './bulk.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { StatementBudget } from './statement-budget.ts';
+import {
+	affordableOperations,
+	statementsRemaining
+} from './statement-scope.ts';
 
 export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
@@ -62,9 +62,11 @@ const teardownChunksPerFlush = 4;
 export const maxNarInfoDeletionsFlushedPerRun =
 	teardownChunksPerFlush * maxFencedRetireRows;
 
-// The credit update embeds the tenant and hash filter twice. Together with the
-// fixed bindings, a chunk uses 2N + 6 parameters; 45 stays below D1's limit of
-// 100.
+// The presence credit update embeds the tenant and hash filter twice. Together
+// with the fixed bindings, a chunk of N hashes binds 2N + 6 parameters. The
+// drain measures the statement it builds and narrows the chunk itself; this is
+// the width the parameter guard inspects, and the widest chunk a page of
+// `maxFencedRetireRows` paths can produce.
 export const maxTeardownPresenceChunk = 45;
 
 // One query finds the attestation references of every path in a chunk.
@@ -78,38 +80,26 @@ const attestationQueryStatementsPerChunk = 1;
 // each reference.
 const attestationRetirementStatements = 5;
 
-// Once a chunk holds no attestation reference, retiring its narinfos runs the
-// usage credit and edge delete, the presence credit and delete, and the
-// public-purge reference query. A chunk of `maxFencedRetireRows` paths names no
-// more distinct NAR hashes than one presence batch accepts, so it runs one
-// presence batch.
+// After retiring all attestation references, the chunk credits usage, deletes
+// edges, updates presence accounting and queries the public references needed
+// for cache purges. A chunk contains at most `maxFencedRetireRows` paths, so all
+// of its distinct NAR hashes fit in one presence batch.
 const narInfoRetirementStatementsPerChunk = 5;
 
-// What a chunk costs when none of its paths carries an attestation reference.
+// The fixed D1 statement cost of retiring one teardown chunk.
 export const minimumStatementsPerTeardownChunk =
 	attestationQueryStatementsPerChunk + narInfoRetirementStatementsPerChunk;
 
-/**
- * The D1 statements a queue flush may run.
- *
- * Four chunks of unattested paths cost the same as they did before attestation
- * retirement drew on the budget. A queue of attested paths now retires fewer
- * paths per flush instead of running more statements, and the durable queue
- * carries the rest into the next pass.
- */
-const narInfoDeletionFlushStatements =
-	teardownChunksPerFlush * minimumStatementsPerTeardownChunk;
-
-// What retiring one path costs beside its attestation references: the edge
-// credit and delete, the two presence reads, the presence credit and delete,
-// the query for the path's attestation references, the unreferenced-hash probe,
-// and the two maintenance-eligibility statements around the request.
+// The fixed D1 statement cost of retiring one path. This includes the edge
+// credit and delete, two presence reads, the presence credit and delete, the
+// attestation-reference query, the unreferenced-hash probe and the two
+// maintenance-eligibility statements around the request.
 const statementsPerSinglePathRetirement = 10;
 
-// How many of one path's attestation references a single invocation may retire
-// within what is left of its statement limit.
+// The maximum number of attestation references that one invocation can retire
+// after paying the fixed cost for the path.
 const maxSinglePathAttestationRetirements = Math.floor(
-	(d1StatementsPerReaperInvocation - statementsPerSinglePathRetirement) /
+	(d1StatementsPerInvocation - statementsPerSinglePathRetirement) /
 		attestationRetirementStatements
 );
 
@@ -267,9 +257,8 @@ export class DeletionQueueService {
 				.from(d1Schema.tenantBlob)
 				.where(presenceFilter)
 		]);
-		// A cached public NAR outlives the edges that authorised it, so invalidate
-		// it once no public cache of the tenant references the hash. Only the
-		// retirement of a public edge can remove the last such reference.
+		// Invalidate a cached public NAR after the tenant's final public reference
+		// is retired. Retiring a private edge does not change public authorisation.
 		const hasPublicReference = stillReferencedRows.some(
 			(row) => !isPrivateCache(row.cache)
 		);
@@ -344,8 +333,8 @@ export class DeletionQueueService {
 		);
 	}
 
-	// Reports whether the hash has no committed reference in any tenant. The
-	// global reaper, not this deletion path, decides when to remove the NAR.
+	// Reports whether any tenant still has a committed reference to the hash. The
+	// global reaper owns removal of the NAR object.
 	private async blobHashUnreferenced(
 		narHash: NixSha256HashString
 	): Promise<boolean> {
@@ -376,19 +365,25 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires the attestation references of one narinfo generation, as far as one
-	 * invocation's share of the D1 budget reaches, and reports whether it retired
-	 * them all.
+	 * Retires as many of one narinfo generation's attestation references as the
+	 * available D1 statements permit, and reports whether it retired them all.
 	 *
-	 * A path may carry any number of references, so a single request cannot
-	 * assume it can retire them all. The caller keeps the queue entry when this
-	 * returns false, and garbage collection retires the rest.
+	 * A path may have any number of references, so one invocation might not
+	 * retire them all. When this returns false the caller keeps the queue entry,
+	 * and garbage collection retires the remainder.
+	 *
+	 * The remaining D1 allowance and `maxSinglePathAttestationRetirements`
+	 * jointly limit the page.
 	 */
 	private async retireAttestationRefs(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<boolean> {
+		const affordable = Math.min(
+			maxSinglePathAttestationRetirements,
+			affordableOperations(attestationRetirementStatements)
+		);
 		const tenant = this.context.requireTenant();
 		const references = await this.context.d1
 			.select({
@@ -409,52 +404,50 @@ export class DeletionQueueService {
 			)
 			// One reference more than this invocation may retire, so a surplus row
 			// reports the path unfinished.
-			.limit(maxSinglePathAttestationRetirements + 1)
+			.limit(affordable + 1)
 			.all();
+		const retiring = references.slice(0, affordable);
 
-		for (const reference of references.slice(
-			0,
-			maxSinglePathAttestationRetirements
-		)) {
+		for (const reference of retiring) {
 			await this.attestationCas.removeCapturedReference(reference);
 		}
 
-		return references.length <= maxSinglePathAttestationRetirements;
+		return references.length <= affordable;
 	}
 
 	/**
-	 * Retires one chunk of queued narinfo deletions and returns the number of
-	 * published narinfo objects it removed, or `undefined` when the budget could
-	 * not cover the whole chunk.
+	 * Retires one chunk of queued narinfo deletions. Returns the number of
+	 * published narinfo objects removed, or `undefined` when the remaining D1
+	 * allowance is too small for the complete chunk.
 	 *
 	 * Attestation references go first because their unbounded count determines
-	 * whether the budget can finish the chunk. The drain reserves the fixed
-	 * narinfo-retirement cost and retires only the references the remaining
-	 * budget can cover. A surplus reference stops the chunk before it retires the
+	 * whether the chunk can finish. The drain keeps back the fixed
+	 * narinfo-retirement cost and retires only the references the rest of the
+	 * allowance covers. A surplus reference stops the chunk before it retires the
 	 * reference edges or clears the queue entries.
 	 *
-	 * References already removed remain absent, and the bundle route still
-	 * requires both an attestation reference and its matching
-	 * generation-authorised reference edge. An interrupted pass can therefore
-	 * reduce what is available, but it cannot expose a retired bundle.
+	 * The bundle route requires both an attestation reference and its matching
+	 * generation-authorised reference edge. Removing references before the rest
+	 * of the chunk therefore reduces access immediately, even if the pass is
+	 * interrupted.
 	 */
 	private async retireTornDownChunk(
 		cache: StoredCache,
 		tenant: TenantId,
 		batch: readonly TornDownNarInfo[],
-		now: IsoTimestamp,
-		budget: StatementBudget
+		now: IsoTimestamp
 	): Promise<number | undefined> {
-		if (!budget.take(attestationQueryStatementsPerChunk)) {
+		// Start a chunk only when the remaining allowance covers its attestation
+		// query and fixed narinfo-retirement work.
+		if (statementsRemaining() < minimumStatementsPerTeardownChunk) {
 			return undefined;
 		}
 
-		// Keep back what finishing the chunk costs, so a chunk whose references
-		// this pass can clear also finishes in this pass. Read one reference more
-		// than that leaves room for, so a surplus row reports the chunk unfinished.
-		const affordable = budget.operationsLeft(
+		// Reserve the fixed narinfo-retirement cost before selecting attestation
+		// references. Read one additional reference to detect an unfinished chunk.
+		const affordable = affordableOperations(
 			attestationRetirementStatements,
-			narInfoRetirementStatementsPerChunk
+			attestationQueryStatementsPerChunk + narInfoRetirementStatementsPerChunk
 		);
 		const references = await this.capturedAttestationReferences(
 			tenant,
@@ -464,10 +457,6 @@ export class DeletionQueueService {
 		);
 		const retiring = references.slice(0, affordable);
 
-		if (!budget.take(retiring.length * attestationRetirementStatements)) {
-			return undefined;
-		}
-
 		for (const reference of retiring) {
 			await this.attestationCas.removeCapturedReference(reference);
 		}
@@ -476,7 +465,7 @@ export class DeletionQueueService {
 			return undefined;
 		}
 
-		if (!budget.take(narInfoRetirementStatementsPerChunk)) {
+		if (statementsRemaining() < narInfoRetirementStatementsPerChunk) {
 			return undefined;
 		}
 
@@ -526,18 +515,25 @@ export class DeletionQueueService {
 		// A shared hash retains its presence row until its final edge is retired.
 		// The caller's critical section makes this Durable Object the sole writer
 		// for the tenant's presence rows while the credit and delete run.
-		const narHashes = [...new Set(batch.map((entry) => entry.narHash))];
+		//
+		// Every hash in the claimed chunk fits in one presence batch. The statement
+		// reserve above covers that batch.
+		const retiredHashes = await drainStatementBatches(
+			this.context.d1,
+			[...new Set(batch.map((entry) => entry.narHash))],
+			(hashes) => {
+				const { update, presenceDelete } = teardownPresenceBatch(
+					this.context.d1,
+					tenant,
+					hashes,
+					now
+				);
 
-		for (const hashes of chunk(narHashes, maxTeardownPresenceChunk)) {
-			const { update, presenceDelete } = teardownPresenceBatch(
-				this.context.d1,
-				tenant,
-				hashes,
-				now
-			);
-			await this.context.d1.batch([update, presenceDelete]);
-			await this.purgeUnreferencedNars(cache, hashes);
-		}
+				return [update, presenceDelete];
+			}
+		);
+
+		await this.purgeUnreferencedNars(cache, retiredHashes);
 
 		await this.discardRetiredLists(cache, removable, superseded);
 
@@ -560,9 +556,9 @@ export class DeletionQueueService {
 	}
 
 	// The attestation references filed against the exact narinfo generations this
-	// chunk retires. Fetches at most one reference beyond the number the budget
-	// can retire. The surplus row tells the caller to leave the chunk's queue
-	// entries in place.
+	// chunk retires. Fetches at most one reference beyond the number the pass can
+	// retire. The surplus row tells the caller to leave the chunk's queue entries
+	// in place.
 	private capturedAttestationReferences(
 		tenant: TenantId,
 		cache: StoredCache,
@@ -597,13 +593,12 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Removes the attestation list objects a retired chunk leaves behind.
+	 * Removes the attestation list objects left by a retired chunk.
 	 *
-	 * `removable` names the paths whose retired generation was the last one
-	 * committed. Nothing newer owns their lists, so one bulk call removes them.
-	 * `superseded` names the paths a later generation recommitted; their list
-	 * object goes only while it still records the retired generation, because
-	 * the later generation may already own it.
+	 * `removable` contains paths for which the retired generation was the latest
+	 * commit. One bulk call removes their lists. `superseded` contains paths with
+	 * a later committed generation. For those paths, the method removes a list
+	 * only if it still records the retired generation.
 	 *
 	 * Neither step reads the reference rows, so a replay after a crash between
 	 * reference removal and list removal still discards the stale object.
@@ -649,9 +644,9 @@ export class DeletionQueueService {
 			.run();
 	}
 
-	// The caller must hold the critical section. The row cap and the statement
-	// budget both bound one pass; an alarm resumes the remaining durable queue
-	// entries.
+	// The caller must hold the critical section. The row cap and the invocation's
+	// D1 allowance both bound one pass; an alarm resumes the remaining durable
+	// queue entries.
 	async flushQueuedNarInfoDeletions(
 		origin?: RequestOrigin,
 		limit: number = maxNarInfoDeletionsFlushedPerRun
@@ -679,18 +674,12 @@ export class DeletionQueueService {
 			byCache.set(entry.cache, entries);
 		}
 
-		// Every cache in this flush draws on one budget, because they all run in
-		// the same invocation.
-		const budget = new StatementBudget(narInfoDeletionFlushStatements);
+		// Every cache in this flush draws on the same invocation allowance, so a
+		// cache that exhausts it leaves the rest of the queue for the next pass.
 		let deleted = 0;
 
 		for (const [cache, entries] of byCache) {
-			deleted += await this.retireTornDownNarInfos(
-				cache,
-				entries,
-				budget,
-				origin
-			);
+			deleted += await this.retireTornDownNarInfos(cache, entries, origin);
 		}
 
 		return deleted;
@@ -712,10 +701,9 @@ export class DeletionQueueService {
 	 * Retires the reference edge of one queued narinfo deletion and returns the
 	 * queue entry it retired, or `undefined` when the queue holds no such entry.
 	 *
-	 * The edge is what authorises a NAR read through the cache, so it goes
-	 * before the object deletion and the accounting that follow it. A caller
-	 * that reports a deletion to a client must let a failure here reach the
-	 * client, because a surviving edge keeps the NAR readable.
+	 * The reference edge authorises NAR reads through the cache. Retire it before
+	 * deleting objects or updating accounting. A caller that reports a deletion
+	 * to a client must propagate a failure here because the NAR remains readable.
 	 *
 	 * The caller must hold the critical section.
 	 */
@@ -778,9 +766,9 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Removes what a retired narinfo leaves behind: its published object, its
-	 * cached copies, its attestations and its queue entry. The caller must have
-	 * retired the reference edge and must hold the critical section.
+	 * Removes the published object, cached copies, attestations and queue entry
+	 * for a retired narinfo. The caller must have retired the reference edge and
+	 * must hold the critical section.
 	 *
 	 * A path carrying more attestation references than one invocation may retire
 	 * keeps its queue entry, so garbage collection retires the rest.
@@ -843,9 +831,9 @@ export class DeletionQueueService {
 			storePathHash,
 			queued.generation
 		);
-		// Nothing newer owns this path's list, so it goes whatever the reference
-		// rows say. A replay after a crash between reference removal and this
-		// deletion therefore still discards the stale object.
+		// This is the latest generation for the path, so remove its list even if an
+		// earlier attempt already removed the reference rows. This also removes the
+		// stale object when replaying after an interruption.
 		await this.attestations.discardLists(cache, [storePathHash]);
 
 		// Re-check the live edges because another path may have committed the same
@@ -865,14 +853,12 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Advances the lifecycle generation and records the cache as deleted. One
-	 * statement does both however many edges the cache holds, so a deletion can
-	 * revoke a cache of any size and let the physical cleanup drain afterwards.
+	 * Advances the lifecycle generation and records the cache as deleted in one
+	 * statement. This revokes a cache of any size before physical cleanup drains
+	 * its edges.
 	 *
-	 * The generation mismatch immediately revokes existing reference edges. The
-	 * advanced generation also belongs to the next cache created under the same
-	 * name, so an edge the drain has not reached yet cannot authorise a read
-	 * through that later cache.
+	 * A later cache with the same name uses the advanced generation. Its reads
+	 * therefore exclude every edge left by the deleted cache.
 	 *
 	 * For the private namespace, the deletion timestamp makes content reads
 	 * return absent-object results and makes availability report every requested
@@ -904,15 +890,12 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Ends the deleted state a deletion recorded for this cache name. Registering
-	 * the name again creates the next cache under it, and that cache has to
-	 * answer its readers.
+	 * Clears the deletion timestamp when this cache name is registered again.
 	 *
 	 * The generation stays where the deletion left it, so the edges of the
 	 * deleted cache remain revoked while the new cache commits its own.
 	 *
-	 * The filter keeps this to a statement that writes no row unless a deletion
-	 * has left a timestamp behind.
+	 * The filter updates only a row with a deletion timestamp.
 	 */
 	async clearCacheDeletion(cache: StoredCache): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -930,9 +913,8 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Queues one bounded page of reference edges whose cache generation no longer
-	 * matches the current lifecycle generation, so the ordinary retirement drain
-	 * removes them and credits what they held.
+	 * Queues one bounded page of reference edges from an earlier cache generation.
+	 * The ordinary retirement drain removes the edges and credits their usage.
 	 *
 	 * A commit inserts its edge inside the same critical section that a cache
 	 * deletion runs in, and it records its local narinfo before that insert, so
@@ -994,8 +976,8 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires the queued narinfo deletions of one cache, as far as `budget`
-	 * reaches, and returns the number of published narinfo objects it removed.
+	 * Retires queued narinfo deletions for one cache within the invocation's D1
+	 * allowance. Returns the number of published narinfo objects removed.
 	 *
 	 * The caller must hold the critical section. Each chunk completes its
 	 * attestation retirement, generation checks, object deletions, edge
@@ -1003,13 +985,11 @@ export class DeletionQueueService {
 	 * a timeout can repeat at most one chunk. Exact generation filters make
 	 * replays idempotent and preserve objects from later recommits.
 	 *
-	 * Whatever the budget stops short of stays in the durable queue for the next
-	 * pass.
+	 * The durable queue retains every unprocessed entry for the next pass.
 	 */
 	async retireTornDownNarInfos(
 		cache: StoredCache,
 		entries: readonly TornDownNarInfo[],
-		budget: StatementBudget,
 		_origin?: RequestOrigin
 	): Promise<number> {
 		if (entries.length === 0) {
@@ -1022,13 +1002,7 @@ export class DeletionQueueService {
 		let deletedObjects = 0;
 
 		for (const batch of chunk(entries, maxFencedRetireRows)) {
-			const retired = await this.retireTornDownChunk(
-				cache,
-				tenant,
-				batch,
-				now,
-				budget
-			);
+			const retired = await this.retireTornDownChunk(cache, tenant, batch, now);
 
 			if (retired === undefined) {
 				break;

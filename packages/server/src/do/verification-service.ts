@@ -1,6 +1,7 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
 import {
 	type NarInfoGeneration,
+	nixSha256HashSchema,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash,
@@ -24,18 +25,21 @@ import {
 	exists,
 	gt,
 	inArray,
+	isNotNull,
 	isNull,
 	lte,
 	ne,
 	or,
 	sql
 } from 'drizzle-orm';
+import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
+	maxVerificationRpcRows,
 	narInfoObjectKey,
 	narInfoObjectPrefix,
 	narObjectKey,
@@ -47,8 +51,8 @@ import {
 } from '../http/http.ts';
 
 import {
-	batchNonEmpty,
 	chunk,
+	executeChunkedStatement,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';
@@ -65,8 +69,18 @@ import {
 	storedGraceFact
 } from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { type ReconcileTarget } from './reconcile-queue-service.ts';
+import {
+	type ReconcileTarget,
+	statementsPerReconcileEdgeQuery,
+	statementsPerReconcileProbe,
+	statementsPerReconcileRemoval,
+	statementsPerReconcileRestore
+} from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import {
+	affordableOperations,
+	statementsRemaining
+} from './statement-scope.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 import {
@@ -77,8 +91,99 @@ import {
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 
+// These constants determine the page sizes for the settle and drain passes. The
+// D1 binding enforces the statement limit even if one of the constants becomes
+// inaccurate. An inaccurate constant can therefore reduce the work completed
+// by a pass, but cannot cause the pass to exceed the limit.
+//
+// Before settling any rows, a pass reads the shared blob rows and the tenant's
+// presence rows for the whole page. The page contains at most the number of
+// distinct NAR hashes allowed in one `IN (...)` list, so each read requires one
+// D1 statement.
+export const pendingSettlePrefetchStatements = 2;
+
+// Classifying one committed-recovery candidate reads the path's committed
+// reference edge. A reuse row skips this read.
+const settleClassifyStatements = 1;
+
+// Preparing one row reads the NAR's current incarnation, the row's committed
+// reference edge, and the shared blob row from which the narinfo is rendered.
+const settlePrepareStatements = 3;
+
+// Charging one commit probes the tenant's quota, then runs a batch containing
+// the tenant status read and the five statements that credit usage and record
+// the reference edge and the presence row.
+const settleChargeStatements = 7;
+
+// After charging a row, publication reads the shared blob row for the narinfo.
+const settlePublishStatements = 1;
+
+// Re-reading one row's shared blob row and presence row is a two-statement
+// batch.
+const settleRowProbeStatements = 2;
+
+// Reclaiming a reserved narinfo row reads the row's reference edge.
+const settleReclaimStatements = 1;
+
+// If charging reports that the tenant is over quota, the service reads the
+// blob and presence rows again, charges a second time, and reclaims the
+// reserved narinfo row. The row does not reach the publication read. The result
+// is unknown until the first charge completes, so every row reserves enough
+// statements for the more expensive result.
+const settleOverQuotaStatements =
+	settleRowProbeStatements + settleChargeStatements + settleReclaimStatements;
+
+/**
+ * The maximum number of D1 statements needed to settle one pending row without
+ * decoding its NAR.
+ *
+ * Every row uses the same maximum because the result is unknown before the
+ * first charge completes.
+ */
+export const statementsPerPendingSettleRow =
+	settleClassifyStatements +
+	settlePrepareStatements +
+	settleChargeStatements +
+	Math.max(settlePublishStatements, settleOverQuotaStatements);
+
+// Promoting a freshly verified upload writes the shared blob row for the new
+// canonical object and reads the row back. Complete invocations show that this
+// requires six more statements than settling a row for an existing canonical
+// object.
+const settlePromoteStatements = 6;
+
+/**
+ * The maximum number of D1 statements needed to apply one recorded verdict.
+ *
+ * Applying a verdict runs the same reservation, charge and publication as
+ * settling a row without a decode, and promotes the upload's bytes as well. It
+ * skips the classification read, because the queue consumer has already
+ * classified the row. A page of verdicts also requires the same prefetch as a
+ * page of pending rows.
+ *
+ * Complete invocations show that a successful settlement requires 17 of these
+ * statements. The remaining statements cover the case in which charging
+ * reports that the tenant is over quota.
+ */
+export const statementsPerRecordedVerdict =
+	statementsPerPendingSettleRow -
+	settleClassifyStatements +
+	settlePromoteStatements;
+
 const pendingDecodeFreeCursorKey =
 	'maintenance:verification-decode-free-cursor';
+
+// The rotating cursor for the verdict drain. Each pass stores the upload ID of
+// the last valid verdict in its page. The drain wraps to the lowest upload ID
+// when no row follows the cursor. A pass with no verdict to apply deletes the
+// cursor, so the next pass starts from the beginning.
+const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
+
+function parseUploadIdCursor(value: unknown): UploadId | undefined {
+	const parsed = uploadIdSchema.safeParse(value);
+
+	return parsed.success ? parsed.data : undefined;
+}
 
 type DecodeFreeCandidateKind = 'reuse' | 'recovery';
 
@@ -120,6 +225,18 @@ function edgeKey(
 	return `${cache}\0${storePathHash}\0${String(generation)}\0${narHash}`;
 }
 
+// Returns the number of D1 statements required to repair an observation.
+// Removing a row with a missing NAR requires one statement. Restoring a missing
+// narinfo object requires two. A healthy row requires no repair and returns
+// zero.
+function repairStatements(observation: RowObservation): number {
+	if (!observation.isNarPresent) {
+		return statementsPerReconcileRemoval;
+	}
+
+	return observation.objectPresent ? 0 : statementsPerReconcileRestore;
+}
+
 function reconcileCandidates(
 	observations: readonly (RowObservation | undefined)[]
 ): NarInfoRow[] {
@@ -148,7 +265,28 @@ export function mapVerificationProbes<T, U>(
 	return mapWithConcurrency(items, maxOutgoingConnections, probe);
 }
 
-type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
+/**
+ * The result of reconciling one row. `failed` means that a D1, R2 or narinfo
+ * publication error interrupted the repair and the row still needs attention.
+ */
+type ReconcileOutcome = 'removed' | 'restored' | 'unchanged' | 'failed';
+
+interface ReconcileCounts {
+	readonly removed: number;
+	readonly restored: number;
+}
+
+function reconcileCounts(outcome: ReconcileOutcome): ReconcileCounts {
+	if (outcome === 'removed') {
+		return { removed: 1, restored: 0 };
+	}
+
+	if (outcome === 'restored') {
+		return { removed: 0, restored: 1 };
+	}
+
+	return { removed: 0, restored: 0 };
+}
 
 /**
  * The consumer must fetch and verify `r2Key` unless `reuse` is true. A reuse
@@ -189,11 +327,100 @@ export interface VerificationResult {
 	readonly verdict: VerificationVerdict;
 }
 
+// The verdicts stored on an upload row until a pass can apply them. An
+// `abandoned` result releases the lease immediately and is not stored.
+const narVerificationSchema = z.union([
+	z.strictObject({
+		ok: z.literal(true),
+		fileHash: nixSha256HashSchema.optional(),
+		fileSize: z.number().optional()
+	}),
+	z.strictObject({
+		ok: z.literal(false),
+		reason: z.literal('nar-hash-mismatch'),
+		actualNarHash: z.string()
+	}),
+	z.strictObject({
+		ok: z.literal(false),
+		reason: z.literal('nar-size-mismatch'),
+		actualNarSize: z.number()
+	}),
+	z.strictObject({ ok: z.literal(false), reason: z.literal('undecodable') })
+]);
+
+const heldVerdictSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		kind: z.literal('verified'),
+		verification: narVerificationSchema
+	}),
+	z.strictObject({ kind: z.literal('promoted') }),
+	z.strictObject({ kind: z.literal('missing') })
+]);
+
+// The recorded owner fences verdict application. If the current claim owner
+// differs, the verdict is stale and must not be applied.
+const recordedVerdictSchema = z.strictObject({
+	owner: z.string(),
+	verdict: heldVerdictSchema
+});
+
+type RecordedVerdict = z.output<typeof recordedVerdictSchema>;
+
+/**
+ * Parses a recorded verdict, or returns `undefined` if this build cannot read
+ * it.
+ *
+ * The column contains text. JSON written by an older build can fail the current
+ * schema, and malformed JSON fails during parsing. The caller clears either
+ * value so the drain can continue with later verdicts.
+ */
+function parseRecordedVerdict(
+	recordedVerdictJson: string | null
+): RecordedVerdict | undefined {
+	if (recordedVerdictJson === null) {
+		return undefined;
+	}
+
+	let document: unknown;
+
+	try {
+		document = JSON.parse(recordedVerdictJson);
+	} catch {
+		return undefined;
+	}
+
+	const parsed = recordedVerdictSchema.safeParse(document);
+
+	return parsed.success ? parsed.data : undefined;
+}
+
+interface HeldVerdictRow extends RecordedVerdict {
+	readonly pending: PendingUploadRow;
+}
+
 interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
 	readonly metadata: ParsedUploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
 	readonly owner: string;
+}
+
+/**
+ * The committed reference edges returned by a read and the store path hashes
+ * included in that read. The edge is unknown for every excluded hash.
+ */
+interface CommittedEdges {
+	readonly keys: ReadonlySet<string>;
+	readonly covered: ReadonlySet<StorePathHash>;
+}
+
+/**
+ * A verdict that is ready to materialise and the upload row from the start of
+ * the pass. The row provides the values needed to fence the later clear.
+ */
+interface ReadyRecordedVerdict {
+	readonly held: PendingUploadRow;
+	readonly settle: PreparedSettle;
 }
 
 type PreparedVerdict =
@@ -222,6 +449,11 @@ function isAwaitingVerdict(
 
 // A lease older than `verifyClaimLeaseMs` belongs to a pass presumed dead, so
 // another pass can claim the row again.
+//
+// A recorded verdict remains assigned to its claim owner after the lease
+// expires. Sending the row to the queue consumer again would repeat the NAR
+// decode. A client re-drive revokes the claim, which invalidates the recorded
+// verdict and makes the row claimable again.
 function claimableFilter(now: Date) {
 	const leasedBefore = isoTimestamp(
 		new Date(now.getTime() - verifyClaimLeaseMs)
@@ -231,6 +463,10 @@ function claimableFilter(now: Date) {
 		or(
 			eq(schema.pendingUploads.verdict, 'pending'),
 			eq(schema.pendingUploads.verdict, 'committing')
+		),
+		or(
+			isNull(schema.pendingUploads.recordedVerdictJson),
+			isNull(schema.pendingUploads.claimOwner)
 		),
 		or(
 			isNull(schema.pendingUploads.claimedAt),
@@ -258,10 +494,11 @@ export function buildLeaseUpdate(
 		.where(inArray(schema.pendingUploads.id, uploadIds));
 }
 
-// Claims form a contiguous prefix in id order, subject to the row limit and the
-// cumulative uncompressed size of fresh rows. Reuse rows cost no decode bytes.
-// Always admit the first fresh row so a lone NAR above `maxNarBytes` cannot
-// starve. `truncated` records that claimable rows remain.
+// Claims form a contiguous prefix in ID order. The row limit and cumulative
+// uncompressed size of fresh rows bound the prefix. Reuse rows contribute zero
+// bytes to the size. Always admit the first fresh row so a single NAR larger
+// than `maxNarBytes` can make progress. `truncated` records that claimable rows
+// remain.
 function chunkClaims(
 	pendings: readonly (typeof schema.pendingUploads.$inferSelect)[],
 	limit: number,
@@ -322,9 +559,9 @@ export class VerificationService {
 		) => void
 	) {}
 
-	// Re-read the session after the settle's awaits because `attachSession` can
-	// move the waiter to a reconnected socket. If the row has already cleared,
-	// there is no newer session to use in place of the captured id.
+	// Re-read the session after settlement awaits because `attachSession` can
+	// move the waiter to a reconnected socket. Use the captured ID if settlement
+	// has already removed the row.
 	private currentSessionId(
 		uploadId: UploadId,
 		captured: SessionId | null
@@ -663,12 +900,11 @@ export class VerificationService {
 			return 'continue';
 		}
 
-		// The flush applies captured grace only after the durable charge, so an
-		// interruption between the two leaves a committed generation while the
-		// decision remains on the pending row. Reapply it before the waiters
-		// hear the verdict and before the row holding it is cleared; the
-		// application is identity-checked and monotonic, so re-running an
-		// already-applied decision changes nothing.
+		// The flush applies captured grace after the durable charge. An interruption
+		// between these operations leaves the committed generation and its pending
+		// grace decision in different states. Reapply the decision before notifying
+		// waiters and clearing the pending row. The identity check and monotonic
+		// update make repeated application safe.
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const confirmed = confirmGrace(
 			this.context,
@@ -852,7 +1088,7 @@ export class VerificationService {
 			isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
 		});
 
-		if (outcome.kind === 'gone') {
+		if (outcome.kind === 'gone' || outcome.kind === 'deferred') {
 			return false;
 		}
 
@@ -881,7 +1117,7 @@ export class VerificationService {
 				isStillSettleable: () => this.ownsActiveClaim(owner, pending.id, signal)
 			});
 
-			if (retried.kind === 'gone') {
+			if (retried.kind === 'gone' || retried.kind === 'deferred') {
 				return false;
 			}
 
@@ -889,8 +1125,8 @@ export class VerificationService {
 		}
 
 		if (outcome.kind === 'over-quota') {
-			// Reclaim the reserved narinfo row. Otherwise reconciliation could restore
-			// an unreferenced path that was never charged to the tenant.
+			// Reclaim the reserved narinfo row so reconciliation cannot restore a path
+			// without a reference or a corresponding tenant charge.
 			return this.failReservedUpload(
 				pending,
 				metadata,
@@ -901,8 +1137,9 @@ export class VerificationService {
 			);
 		}
 
-		// Publishing can stop after reservation and before the charge fence. Reclaim
-		// the row so a later scan cannot restore an unreferenced, uncharged path.
+		// Reclaim the reservation after publication stops before the charge fence.
+		// This prevents a later scan from restoring a path without a reference or a
+		// corresponding tenant charge.
 		if (outcome.kind === 'tenant-inactive') {
 			// The grace confirmation runs inside the same gated callback as the
 			// identity proof: the input gate reopens the moment that callback
@@ -1055,9 +1292,10 @@ export class VerificationService {
 		}
 	}
 
-	// Reclaim the reserved narinfo row before recording mismatch or over-quota. If
-	// another pass already committed the generation, leave the upload row, root,
-	// and waiter to that pass so a late failure cannot retire a servable path.
+	// Reclaim the reserved narinfo row before recording a mismatch or over-quota
+	// result. If another pass committed the generation first, that pass retains
+	// ownership of the upload row, root and waiter. This prevents a late failure
+	// from retiring a servable path.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
@@ -1311,28 +1549,30 @@ export class VerificationService {
 		return present;
 	}
 
-	// A deferred commit reserves its narinfo row before creating a reference edge.
-	// Require the edge so reconciliation cannot serve a reserved, unverified row.
-	// Read outside the gate; if a commit creates the edge afterwards, this pass
-	// leaves the row for the next scan.
+	/**
+	 * Reads the committed reference edges for `rows` and reports which store path
+	 * hashes were included in the completed queries.
+	 *
+	 * A deferred commit reserves its narinfo row before creating a reference
+	 * edge. Requiring the edge stops reconciliation serving a reserved,
+	 * unverified row. The read runs outside the gate; if a commit creates the
+	 * edge afterwards, this pass leaves the row for the next scan.
+	 *
+	 * The read stops before a query that would exceed the D1 allowance. `covered`
+	 * contains only the hashes from completed queries. Callers must defer every
+	 * other row because its reference edge is unknown.
+	 */
 	private async committedEdgeKeys(
 		rows: readonly NarInfoRow[]
-	): Promise<ReadonlySet<string>> {
+	): Promise<CommittedEdges> {
 		if (rows.length === 0) {
-			return new Set();
+			return { keys: new Set(), covered: new Set() };
 		}
 
 		const tenant = this.context.requireTenant();
 		const hashes = [...new Set(rows.map((row) => row.storePathHash))];
-
-		const hashChunks = chunk(hashes, maxInClauseValues);
-		const queries = hashChunks.map((hashChunk) => {
-			const edgeFilter = and(
-				eq(d1Schema.blobReference.tenant, tenant),
-				inArray(d1Schema.blobReference.storePathHash, hashChunk)
-			);
-
-			return this.context.d1
+		const read = await executeChunkedStatement(hashes, (hashChunk) =>
+			this.context.d1
 				.select({
 					cache: d1Schema.blobReference.cache,
 					storePathHash: d1Schema.blobReference.storePathHash,
@@ -1340,14 +1580,17 @@ export class VerificationService {
 					narHash: d1Schema.blobReference.narHash
 				})
 				.from(d1Schema.blobReference)
-				.where(edgeFilter);
-		});
-
-		const chunkResults = await batchNonEmpty(this.context.d1, queries);
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						inArray(d1Schema.blobReference.storePathHash, [...hashChunk])
+					)
+				)
+		);
 
 		const keys = new Set<string>();
 
-		for (const edges of chunkResults) {
+		for (const edges of read.results) {
 			for (const edge of edges) {
 				keys.add(
 					edgeKey(edge.cache, edge.storePathHash, edge.generation, edge.narHash)
@@ -1355,7 +1598,7 @@ export class VerificationService {
 			}
 		}
 
-		return keys;
+		return { keys, covered: new Set(read.processed) };
 	}
 
 	// Re-check the generation under the caller's critical section because a commit
@@ -1407,6 +1650,8 @@ export class VerificationService {
 			}
 		} catch {
 			this.warnSkippedRow(logger);
+
+			return 'failed';
 		}
 
 		return 'unchanged';
@@ -1704,6 +1949,131 @@ export class VerificationService {
 	}
 
 	/**
+	 * Stores each accepted verdict on its upload row. An `abandoned` result
+	 * releases the lease so another pass can claim the row.
+	 *
+	 * Every statement here runs against the Durable Object's own database, and
+	 * the writes are synchronous, so the batch is durable before this returns.
+	 */
+	private holdVerdicts(
+		owner: string,
+		results: readonly VerificationResult[]
+	): void {
+		for (const { uploadId, verdict } of results) {
+			if (!this.ownsClaim(owner, uploadId)) {
+				continue;
+			}
+
+			if (verdict.kind === 'abandoned') {
+				this.releaseLease(uploadId, owner);
+				continue;
+			}
+
+			this.context.db
+				.update(schema.pendingUploads)
+				.set({
+					recordedVerdictJson: JSON.stringify({
+						owner,
+						verdict
+					} satisfies RecordedVerdict)
+				})
+				.where(
+					and(
+						eq(schema.pendingUploads.id, uploadId),
+						eq(schema.pendingUploads.claimOwner, owner)
+					)
+				)
+				.run();
+		}
+	}
+
+	private heldVerdictPage(
+		after: UploadId | undefined,
+		limit: number
+	): PendingUploadRow[] {
+		return this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					isNotNull(schema.pendingUploads.recordedVerdictJson),
+					after === undefined ? undefined : gt(schema.pendingUploads.id, after)
+				)
+			)
+			.orderBy(asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+	}
+
+	/**
+	 * Reads the upload rows for the verdicts that this pass will apply. The page
+	 * starts after the cursor saved by the previous pass.
+	 *
+	 * A pass reads far fewer rows than a batch can contain. The rotating cursor
+	 * prevents a repeatedly failing verdict from blocking every later verdict.
+	 *
+	 * The method clears a verdict if its owner no longer owns the row or if this
+	 * build cannot parse it. Clearing either value makes the row available for a
+	 * new claim. The caller applies the remaining verdicts.
+	 */
+	private heldVerdicts(
+		after: UploadId | undefined,
+		limit: number
+	): HeldVerdictRow[] {
+		const page = this.heldVerdictPage(after, limit);
+		const rows =
+			after === undefined || page.length > 0
+				? page
+				: this.heldVerdictPage(undefined, limit);
+		const held: HeldVerdictRow[] = [];
+
+		for (const pending of rows) {
+			const parsed = parseRecordedVerdict(pending.recordedVerdictJson);
+
+			if (parsed?.owner !== pending.claimOwner) {
+				this.clearRecordedVerdict(pending);
+				continue;
+			}
+
+			held.push({ pending, ...parsed });
+		}
+
+		return held;
+	}
+
+	/**
+	 * Clears a recorded verdict only if the upload ID, claim owner and exact
+	 * verdict text still match the values read at the start of the pass.
+	 *
+	 * Verdict application can await before it clears the value. During that time,
+	 * a client re-drive can revoke the claim and another consumer can record a
+	 * replacement. The comparison prevents this pass from deleting the
+	 * replacement and leaving its row leased without a verdict. `heldVerdicts`
+	 * uses the same comparison when it clears an unreadable or stale verdict.
+	 */
+	private clearRecordedVerdict(pending: PendingUploadRow): void {
+		const { claimOwner, recordedVerdictJson } = pending;
+
+		if (recordedVerdictJson === null) {
+			return;
+		}
+
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ recordedVerdictJson: sql`null` })
+			.where(
+				and(
+					eq(schema.pendingUploads.id, pending.id),
+					claimOwner === null
+						? isNull(schema.pendingUploads.claimOwner)
+						: eq(schema.pendingUploads.claimOwner, claimOwner),
+					eq(schema.pendingUploads.recordedVerdictJson, recordedVerdictJson)
+				)
+			)
+			.run();
+	}
+
+	/**
 	 * Releases the specified leases only while `owner` still owns them.
 	 */
 	releaseClaimLeases(owner: string, uploadIds: readonly UploadId[]): void {
@@ -1748,26 +2118,43 @@ export class VerificationService {
 		return renewed === distinctIds.length;
 	}
 
-	// Reconciles a targeted set of committed paths, the per-push counterpart of the
-	// scanning {@link verifyBatch}. The probes run outside the gate; one short
-	// critical section applies the generation-checked reconciles. The DO alarm
-	// drives this in bounded chunks for a recently negotiated closure, so a missing
-	// narinfo object is restored and a lost NAR removed without the negotiate
-	// heading R2 on its hot path.
+	/**
+	 * Reconciles the committed paths from one push. {@link verifyBatch} performs
+	 * the corresponding periodic scan. The probes run outside the gate, then one
+	 * short critical section applies the generation-checked repairs.
+	 *
+	 * The Durable Object alarm calls this method after negotiating a closure.
+	 * This keeps the R2 HEAD requests used for reconciliation out of the
+	 * negotiation request. Reconciliation restores a missing narinfo object or
+	 * removes a path after its NAR disappears.
+	 *
+	 * Returns every target that still needs reconciliation. This includes targets
+	 * outside the current D1 allowance and targets for which a probe or repair
+	 * failed. The caller keeps them in the queue for the next pass.
+	 */
 	async reconcileTargets(
 		logger: Logger,
 		targets: readonly ReconcileTarget[],
 		origin: RequestOrigin | undefined
-	): Promise<void> {
+	): Promise<readonly ReconcileTarget[]> {
 		const rows = targets
 			.map((target) => this.narInfoRow(target.cache, target.storePathHash))
 			.filter((row): row is NarInfoRow => row !== undefined);
 
 		if (rows.length === 0) {
-			return;
+			return [];
 		}
 
-		const observations = await mapVerificationProbes(rows, (row) =>
+		// Reserve enough D1 statements for the edge query and one removal. The pass
+		// can therefore repair at least one probed row when every row needs removal.
+		const probeLimit = affordableOperations(
+			statementsPerReconcileProbe,
+			statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval
+		);
+		const probed = rows.slice(0, probeLimit);
+		const deferred: ReconcileTarget[] = rows.slice(probeLimit);
+
+		const observations = await mapVerificationProbes(probed, (row) =>
 			this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
 		);
 		const committedEdges = await this.committedEdgeKeys(
@@ -1775,21 +2162,55 @@ export class VerificationService {
 		);
 
 		await this.context.criticalSection(async () => {
-			for (const observation of observations) {
+			for (const [index, row] of probed.entries()) {
+				const observation = observations[index];
+
+				// Keep the target queued when its probe throws. A later pass will probe
+				// the row again.
 				if (observation === undefined) {
+					deferred.push(row);
 					continue;
 				}
 
-				await this.reconcileObservation(
+				// Keep a row queued if its repair would exceed the remaining allowance
+				// or if the edge query did not cover its store path hash.
+				const repair = repairStatements(observation);
+
+				if (
+					repair > 0 &&
+					(statementsRemaining() < repair ||
+						!committedEdges.covered.has(row.storePathHash))
+				) {
+					deferred.push(row);
+					continue;
+				}
+
+				const outcome = await this.reconcileObservation(
 					logger,
 					observation,
 					origin,
-					committedEdges
+					committedEdges.keys
 				);
+
+				if (outcome === 'failed') {
+					deferred.push(row);
+				}
 			}
 		});
+
+		return deferred;
 	}
 
+	/**
+	 * Scans one page of committed narinfos from the durable cursor, restoring a
+	 * missing narinfo object and removing a path after its NAR disappears.
+	 *
+	 * The preceding settle pass and this scan share one D1 statement allowance.
+	 * The remaining allowance determines the page size. The scan advances its
+	 * cursor through every row it examines, and the next pass starts at the first
+	 * unexamined row. After a failed probe, the scan revisits the row when the
+	 * cursor wraps.
+	 */
 	async verifyBatch(
 		logger: Logger,
 		origin: RequestOrigin | undefined,
@@ -1808,6 +2229,31 @@ export class VerificationService {
 		const fromCache = cursor?.cache ?? '';
 		const fromHash = cursor?.lastStorePathHash ?? '';
 
+		// Reserve one probe statement per row, plus the edge query and one removal.
+		// This leaves enough statements to repair at least one row. The page also
+		// fits in one `IN (...)` list, so the edge query requires one statement.
+		const pageLimit = Math.min(
+			limit,
+			maxInClauseValues,
+			affordableOperations(
+				statementsPerReconcileProbe,
+				statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval
+			)
+		);
+
+		// Leave the cursor unchanged when the settle pass used the whole allowance.
+		// The next invocation will start the scan at the same row.
+		if (pageLimit === 0) {
+			return {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: fromHash,
+				cursorCache: fromCache,
+				wrapped: false
+			} satisfies VerifyReport;
+		}
+
 		// Verification spans every cache and resumes after the composite
 		// `(cache, storePathHash)` cursor. Keep both parts in the predicate so a
 		// pass cannot skip the beginning of the next cache.
@@ -1820,7 +2266,7 @@ export class VerificationService {
 				or(gt(schema.narInfos.cache, fromCache), and(sameCache, afterHash))
 			)
 			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
-			.limit(limit)
+			.limit(pageLimit)
 			.all();
 
 		// Probe R2 for every row outside any critical section, so the batch's
@@ -1860,39 +2306,61 @@ export class VerificationService {
 			reconcileCandidates(observations)
 		);
 
-		// Apply the reconciles and advance the cursor in one short critical section.
-		// What remains inside the gate is fast synchronous SQLite plus the rare write
-		// for an unhealthy row.
+		// Apply the repairs and advance the cursor in one short critical section.
+		// The section contains synchronous SQLite work and an occasional write for
+		// an unhealthy row.
 		return this.context.criticalSection(async () => {
 			let narInfoObjectsRestored = 0;
 			let danglingNarInfosRemoved = 0;
+			let reconciled = 0;
 
-			for (const observation of observations) {
+			for (const [index, row] of rows.entries()) {
+				const observation = observations[index];
+
 				if (observation === undefined) {
+					// A failed probe cannot determine the row's state. Advance the cursor
+					// so this scan can continue; a later scan will reach the row after the
+					// cursor wraps.
+					reconciled = index + 1;
 					continue;
+				}
+
+				// A healthy row requires no further D1 work. For an unhealthy row, stop
+				// if the repair would exceed the remaining allowance or if the edge
+				// query did not cover the row. Leave the cursor before that row so the
+				// next scan examines it again.
+				const repair = repairStatements(observation);
+
+				if (
+					repair > 0 &&
+					(statementsRemaining() < repair ||
+						!committedEdges.covered.has(row.storePathHash))
+				) {
+					break;
 				}
 
 				const outcome = await this.reconcileObservation(
 					logger,
 					observation,
 					origin,
-					committedEdges
+					committedEdges.keys
 				);
 
-				if (outcome === 'removed') {
-					danglingNarInfosRemoved += 1;
-				} else if (outcome === 'restored') {
-					narInfoObjectsRestored += 1;
-				}
+				const counts = reconcileCounts(outcome);
+
+				danglingNarInfosRemoved += counts.removed;
+				narInfoObjectsRestored += counts.restored;
+
+				reconciled = index + 1;
 			}
 
 			// A short batch reaches the end of the scan. `wrapped` reports that the
-			// next pass will restart from the first cache's lowest hash.
-			const hasWrapped = rows.length < limit;
-			const last = rows.at(-1);
-			const nextCache = hasWrapped || last === undefined ? '' : last.cache;
-			const nextHash =
-				hasWrapped || last === undefined ? '' : last.storePathHash;
+			// next pass will restart from the lowest hash in the first cache. A page
+			// truncated by the allowance has not reached the end.
+			const hasWrapped = reconciled === rows.length && rows.length < pageLimit;
+			const last = reconciled === 0 ? undefined : rows[reconciled - 1];
+			const nextCache = hasWrapped ? '' : (last?.cache ?? fromCache);
+			const nextHash = hasWrapped ? '' : (last?.storePathHash ?? fromHash);
 			const now = isoTimestamp(new Date());
 
 			this.context.db
@@ -1910,7 +2378,7 @@ export class VerificationService {
 				.run();
 
 			return {
-				scanned: rows.length,
+				scanned: reconciled,
 				narInfoObjectsRestored,
 				danglingNarInfosRemoved,
 				cursor: nextHash,
@@ -1970,17 +2438,35 @@ export class VerificationService {
 		);
 	}
 
-	// Resolves up to `limit` rows that need no NAR decode. A committed fresh row
-	// can finish crash recovery from its durable reference, and a reuse row can
-	// adopt its canonical object. Other fresh rows remain for the queue consumer.
+	/**
+	 * Resolves up to `limit` rows that need no NAR decode. A committed fresh row
+	 * can finish crash recovery from its durable reference, and a reuse row can
+	 * adopt its canonical object. Other fresh rows remain for the queue consumer.
+	 *
+	 * The remaining D1 allowance determines the page size. Claiming removes a row
+	 * from the pending set, so unclaimed rows remain available to a later pass.
+	 * The durable claim cursor records where that pass should resume.
+	 */
 	async processPendingWithoutDecode(
 		logger: Logger,
 		limit: number,
 		signal?: AbortSignal
 	): Promise<number> {
 		signal?.throwIfAborted();
+		const affordable = Math.min(
+			limit,
+			affordableOperations(
+				statementsPerPendingSettleRow,
+				pendingSettlePrefetchStatements
+			)
+		);
+
+		if (affordable === 0) {
+			return 0;
+		}
+
 		const { owner, reuse, recoveryCandidates } =
-			await this.claimPendingWithoutDecode(limit, signal);
+			await this.claimPendingWithoutDecode(affordable, signal);
 		const claimedIds = [...reuse, ...recoveryCandidates].map((row) => row.id);
 
 		try {
@@ -2089,10 +2575,19 @@ export class VerificationService {
 		}
 	}
 
-	// Apply one queue batch in a single RPC. Prepare uploads concurrently and flush
-	// their materialisations together. A failure leaves only that upload for a
-	// later pass. Count only the verdicts this owner commits, so the caller requests
-	// another pass only after making progress.
+	/**
+	 * Accepts one queue batch. It first stores every verdict in the Durable
+	 * Object's SQLite database. The synchronous local writes preserve the
+	 * consumer's decode results if the remaining D1 allowance covers only part of
+	 * the batch.
+	 *
+	 * A stored verdict prevents another consumer from claiming the row and
+	 * decoding the same NAR again. A later pass applies the verdict.
+	 *
+	 * The method applies as many verdicts as the D1 allowance permits and returns
+	 * the number of settled rows. The consumer uses this count to decide whether
+	 * to continue a truncated batch.
+	 */
 	async recordVerifications(
 		logger: Logger,
 		owner: string,
@@ -2100,32 +2595,110 @@ export class VerificationService {
 		signal?: AbortSignal
 	): Promise<number> {
 		signal?.throwIfAborted();
-		let applied = 0;
+		this.holdVerdicts(owner, results);
+		signal?.throwIfAborted();
 
-		const ready: PreparedSettle[] = [];
+		return this.applyRecordedVerdicts(logger, signal);
+	}
+
+	/**
+	 * Whether any upload row has a recorded verdict awaiting application.
+	 *
+	 * The alarm calls this before running the verdict drain. The query uses the
+	 * Durable Object's local SQLite database.
+	 */
+	hasRecordedVerdicts(): boolean {
+		return (
+			this.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(isNotNull(schema.pendingUploads.recordedVerdictJson))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	 * The number of upload rows with a recorded verdict awaiting application.
+	 *
+	 * The drain compares this count before and after each pass. Applying a verdict
+	 * or discarding an inapplicable verdict reduces the count and records
+	 * progress.
+	 */
+	recordedVerdictCount(): number {
+		return this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(isNotNull(schema.pendingUploads.recordedVerdictJson))
+			.all().length;
+	}
+
+	/**
+	 * Applies recorded verdicts up to the invocation's D1 allowance. It prepares
+	 * the verdicts concurrently and flushes their materialisations together.
+	 *
+	 * A completed attempt clears the verdict. If the attempt does not settle the
+	 * row, clearing the verdict makes the row available for a new claim. An error
+	 * leaves the verdict in place, so the next pass retries application without
+	 * repeating the decode. The D1 binding can return such an error when the
+	 * statement allowance is exhausted.
+	 *
+	 * Returns how many rows it settled.
+	 */
+	async applyRecordedVerdicts(
+		logger: Logger,
+		signal?: AbortSignal
+	): Promise<number> {
+		signal?.throwIfAborted();
+		const affordable = Math.min(
+			maxVerificationRpcRows,
+			affordableOperations(
+				statementsPerRecordedVerdict,
+				pendingSettlePrefetchStatements
+			)
+		);
+
+		if (affordable === 0) {
+			return 0;
+		}
+
+		const after = parseUploadIdCursor(
+			await this.context.ctx.storage.get(recordedVerdictCursorKey)
+		);
+		const held = this.heldVerdicts(after, affordable);
+
+		if (held.length === 0) {
+			await this.context.ctx.storage.delete(recordedVerdictCursorKey);
+
+			return 0;
+		}
+
+		// Save the final upload ID in this page. The next pass starts after that ID
+		// and eventually wraps to any earlier verdicts that still need application.
+		const last = held.at(-1);
+
+		if (last !== undefined) {
+			await this.context.ctx.storage.put(
+				recordedVerdictCursorKey,
+				last.pending.id
+			);
+		}
+
+		let applied = 0;
+		const ready: ReadyRecordedVerdict[] = [];
 
 		await mapWithConcurrency(
-			results,
+			held,
 			maxOutgoingConnections,
-			async ({ uploadId, verdict }) => {
+			async ({ pending, owner, verdict }) => {
 				try {
 					signal?.throwIfAborted();
-					if (!this.ownsClaim(owner, uploadId)) {
-						return;
-					}
-
-					if (verdict.kind === 'abandoned') {
-						// The consumer abandoned the claim after a transient fault. Release
-						// the lease so the next pass can retry promptly. This does not count
-						// as progress for the continuation decision.
-						this.releaseLease(uploadId, owner);
-						return;
-					}
 
 					if (verdict.kind === 'missing') {
-						if (await this.recordMissingObject(uploadId, owner, signal)) {
+						if (await this.recordMissingObject(pending.id, owner, signal)) {
 							applied += 1;
 						}
+						this.clearRecordedVerdict(pending);
 						return;
 					}
 
@@ -2134,7 +2707,7 @@ export class VerificationService {
 					const promotion: PromotionState =
 						verdict.kind === 'promoted' ? 'already-promoted' : 'promote';
 					const prepared = await this.prepareRecordedVerdict(
-						uploadId,
+						pending.id,
 						verification,
 						promotion,
 						owner,
@@ -2143,25 +2716,27 @@ export class VerificationService {
 
 					if (prepared.kind === 'applied') {
 						applied += 1;
+						this.clearRecordedVerdict(pending);
 						return;
 					}
 
 					if (prepared.kind === 'ignored') {
+						this.clearRecordedVerdict(pending);
 						return;
 					}
 
-					ready.push(prepared.settle);
+					ready.push({ held: pending, settle: prepared.settle });
 				} catch (error) {
 					signal?.throwIfAborted();
 					if (error instanceof UploadedObjectNotFoundError) {
-						if (await this.recordMissingObject(uploadId, owner, signal)) {
+						if (await this.recordMissingObject(pending.id, owner, signal)) {
 							applied += 1;
 						}
+						this.clearRecordedVerdict(pending);
 						return;
 					}
 
-					this.releaseLease(uploadId, owner);
-					logger.warn('verification verdict not recorded', {
+					logger.warn('verification verdict not applied', {
 						kind: 'fresh',
 						reason: 'prepare-failed'
 					});
@@ -2175,11 +2750,15 @@ export class VerificationService {
 		}
 
 		// Read the shared blob rows in chunks, then materialise each surviving upload
-		// from that snapshot. Failed materialisations remain for another pass and do
-		// not count as progress.
-		const prefetched = await this.prefetchedFactsFor(logger, ready, signal);
+		// from that snapshot.
+		const prefetched = await this.prefetchedFactsFor(
+			logger,
+			ready.map((entry) => entry.settle),
+			signal
+		);
 
-		await mapWithConcurrency(ready, maxOutgoingConnections, async (item) => {
+		await mapWithConcurrency(ready, maxOutgoingConnections, async (entry) => {
+			const item = entry.settle;
 			try {
 				signal?.throwIfAborted();
 				const didApply = await this.materialiseVerified(
@@ -2195,10 +2774,11 @@ export class VerificationService {
 				if (didApply) {
 					applied += 1;
 				}
+
+				this.clearRecordedVerdict(entry.held);
 			} catch {
 				signal?.throwIfAborted();
-				this.releaseLease(item.pending.id, owner);
-				logger.warn('verification verdict not recorded', {
+				logger.warn('verification verdict not applied', {
 					kind: 'fresh',
 					reason: 'materialisation-failed'
 				});

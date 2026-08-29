@@ -50,6 +50,7 @@ import {
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
@@ -59,6 +60,7 @@ import {
 	currentServer,
 	currentServerTenant,
 	deletePath,
+	drivenDirectly,
 	expectSingleUploadDecision,
 	flakyD1,
 	issueServerSignedToken,
@@ -1754,7 +1756,9 @@ describe('retention grace at publication', () => {
 					...instance.context.env,
 					BLOBS: headTappingBucket(instance.context.env.BLOBS, moveWinner)
 				});
-				const outcome = await pipelineFor(context).concedeToWinner(
+				const outcome = await drivenDirectly(
+					pipelineFor(context)
+				).concedeToWinner(
 					rootLogger(),
 					DEFAULT_CACHE,
 					uploadIdSchema.parse('loser-upload'),
@@ -1860,7 +1864,9 @@ describe('retention grace at publication', () => {
 					...instance.context.env,
 					BLOBS: headTappingBucket(instance.context.env.BLOBS, churn)
 				});
-				const outcome = await pipelineFor(context).concedeToWinner(
+				const outcome = await drivenDirectly(
+					pipelineFor(context)
+				).concedeToWinner(
 					rootLogger(),
 					DEFAULT_CACHE,
 					uploadIdSchema.parse('loser-upload'),
@@ -1961,9 +1967,8 @@ describe('retention grace at publication', () => {
 					)
 				});
 
-				await verificationFor(context).processPendingWithoutDecode(
-					rootLogger(),
-					10
+				await asOneInvocation(() =>
+					verificationFor(context).processPendingWithoutDecode(rootLogger(), 10)
 				);
 
 				return hasMoved;
@@ -2597,7 +2602,7 @@ describe('retention grace facts reported to clients', () => {
 					)
 				});
 
-				const settled = await pipelineFor(context).commit(
+				const settled = await drivenDirectly(pipelineFor(context)).commit(
 					rootLogger(),
 					DEFAULT_CACHE,
 					reuse.uploadId

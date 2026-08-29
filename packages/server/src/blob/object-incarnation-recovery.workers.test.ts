@@ -16,7 +16,7 @@ import type { ObjectReaperPhase } from '../do/blob-reaper-service.ts';
 import {
 	blobReaperGraceMs,
 	casObjectKey,
-	d1StatementsPerReaperInvocation,
+	d1StatementsPerInvocation,
 	narObjectKey,
 	objectDeletionBatchSize,
 	objectRecoveryBatchSize
@@ -914,7 +914,7 @@ describe('abandoned object version recovery', () => {
 		);
 
 		expect({
-			statementLimit: d1StatementsPerReaperInvocation,
+			statementLimit: d1StatementsPerInvocation,
 			pageSize: objectDeletionBatchSize,
 			afterFirst,
 			afterSecond: await markerCount(),

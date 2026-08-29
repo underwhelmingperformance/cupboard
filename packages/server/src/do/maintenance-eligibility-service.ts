@@ -13,8 +13,10 @@ import {
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { d1StatementsPerInvocation } from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
+import { withHeldStatements } from './statement-scope.ts';
 
 // Use one fixed past instant for work due now. Repeated mutations in the same
 // push then leave the published wake time unchanged.
@@ -181,6 +183,35 @@ function maintenanceWakeWins(
 	return sql`(${fresherAndChanged}) or (${sooner})`;
 }
 
+// Reconciliation can spend one D1 statement before an error. The fallback
+// invalidation requires another, so the body reserves two statements. The
+// leading invalidation runs before the body starts.
+const trailingEligibilityStatements = 2;
+const leadingEligibilityStatements = 1;
+
+/**
+ * The D1 statements a maintenance pass has for its own work.
+ *
+ * A pass spends one statement invalidating the eligibility projection before
+ * its body and keeps two back for the reconciliation after it.
+ *
+ * Pages use the remaining allowance and the cost constants to choose an initial
+ * size. Those constants are page hints only. If an estimate drifts, the binding
+ * refuses the next D1 call before it is sent, and the caller retains the
+ * unprocessed work for a later invocation.
+ */
+export const maintenancePassStatements =
+	d1StatementsPerInvocation -
+	leadingEligibilityStatements -
+	trailingEligibilityStatements;
+
+/**
+ * Invalidates the tenant's eligibility projection, runs `body`, and reconciles
+ * the projection afterwards.
+ *
+ * Reconciliation also runs after an error from `body`. The function reserves
+ * its statements from the invocation's D1 allowance before calling `body`.
+ */
 export async function withMaintenanceEligibility<T>(
 	maintenanceEligibility: MaintenanceEligibilityService,
 	reconcileMaintenanceEligibility: () => Promise<void>,
@@ -189,7 +220,7 @@ export async function withMaintenanceEligibility<T>(
 	await maintenanceEligibility.invalidate();
 
 	try {
-		return await body();
+		return await withHeldStatements(trailingEligibilityStatements, body);
 	} finally {
 		await reconcileMaintenanceEligibility();
 	}

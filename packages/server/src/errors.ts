@@ -127,7 +127,7 @@ export class PrivateViewDefaultSelectorError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
 	constructor(public readonly view: ReuseViewContractName) {
-		super('A private reuse view cannot select the default cache');
+		super('Private reuse views select named private caches only');
 		this.name = 'PrivateViewDefaultSelectorError';
 	}
 }
@@ -1107,5 +1107,119 @@ export class UnboundableIoError extends Error {
 			`${member} cannot be bounded; use the raw binding outside a critical section`
 		);
 		this.name = 'UnboundableIoError';
+	}
+}
+
+/**
+ * Returns the first instance of `errorType` in `error` or its `cause` chain.
+ *
+ * Drizzle wraps whatever its driver callback throws in an error of its own, so
+ * a refusal from the D1 binding reaches the caller as the cause of a query
+ * error rather than on its own.
+ */
+export function causedBy<T>(
+	error: unknown,
+	errorType: abstract new (...parameters: never[]) => T
+): T | undefined {
+	let current: unknown = error;
+
+	while (current instanceof Error) {
+		if (current instanceof errorType) {
+			return current;
+		}
+
+		current = current.cause;
+	}
+
+	return undefined;
+}
+
+/**
+ * Work that requires the invocation's D1 allowance but runs outside an
+ * allowance scope.
+ *
+ * Production page-sizing calls run beneath a wrapped dispatch method. This
+ * error exposes a dispatch method that is missing the wrapper.
+ */
+export class MissingStatementAllowanceError extends Error {
+	constructor() {
+		super('This work requires an invocation D1 allowance and none is in force');
+		this.name = 'MissingStatementAllowanceError';
+	}
+}
+
+/**
+ * A D1 call that exceeds the invocation's remaining statement allowance. The
+ * binding throws before dispatching the statement or batch.
+ */
+export class StatementAllowanceExceededError extends Error {
+	constructor(
+		public readonly subject: string,
+		public readonly statements: number,
+		public readonly available: number
+	) {
+		super(
+			`${subject} needs ${String(statements)} D1 statements and this invocation has ${String(available)} left`
+		);
+		this.name = 'StatementAllowanceExceededError';
+	}
+}
+
+/**
+ * A D1 call with a statement count that cannot be determined before dispatch.
+ * The active allowance requires an exact count.
+ */
+export class UncountableStatementError extends Error {
+	constructor(public readonly subject: string) {
+		super(
+			`${subject} runs an unknown number of statements and cannot be counted against an invocation's D1 allowance`
+		);
+		this.name = 'UncountableStatementError';
+	}
+}
+
+/**
+ * A D1 statement with more bound parameters than the platform accepts. The
+ * local binding enforces the production limit during tests.
+ */
+export class StatementParameterLimitError extends Error {
+	constructor(
+		public readonly parameters: number,
+		public readonly limit: number
+	) {
+		super(
+			`A D1 statement bound ${String(parameters)} parameters and the limit is ${String(limit)}`
+		);
+		this.name = 'StatementParameterLimitError';
+	}
+}
+
+/**
+ * A batch for one item that exceeds the D1 statement limit for an invocation.
+ * The item cannot be split into a narrower chunk, so a later invocation would
+ * reach the same limit.
+ */
+export class BatchStatementLimitError extends Error {
+	constructor(
+		public readonly statements: number,
+		public readonly limit: number
+	) {
+		super(
+			`A D1 batch for one item needs ${String(statements)} statements and an invocation may run ${String(limit)}`
+		);
+		this.name = 'BatchStatementLimitError';
+	}
+}
+
+/**
+ * A batch builder that produced an empty batch for a non-empty chunk. Reporting
+ * the chunk as processed would acknowledge work that was not executed.
+ */
+export class EmptyStatementBatchError extends Error {
+	constructor(public readonly items: number) {
+		super(
+			`A D1 batch builder produced no statements for a chunk of ${String(items)} items`
+		);
+		this.name = 'EmptyStatementBatchError';
 	}
 }

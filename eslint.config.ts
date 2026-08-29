@@ -226,12 +226,14 @@ export default defineConfig(
 		}
 	},
 	{
-		// The database meter and deadline scope use `AsyncLocalStorage` to keep
-		// interleaved requests from sharing accounting or deadlines. Workerd exposes
-		// it through `nodejs_compat`; permit only `node:async_hooks` in these modules.
+		// The database meter, the deadline scope and the D1 statement allowance use
+		// `AsyncLocalStorage` to keep interleaved requests from sharing accounting,
+		// deadlines or allowances. Workerd exposes it through `nodejs_compat`;
+		// permit only `node:async_hooks` in these modules.
 		files: [
 			'packages/server/src/do/database-cost-meter.ts',
-			'packages/server/src/do/deadline.ts'
+			'packages/server/src/do/deadline.ts',
+			'packages/server/src/do/statement-scope.ts'
 		],
 		rules: {
 			'no-restricted-imports': [

@@ -11,12 +11,11 @@ import * as schema from '../db/schema.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import { narCacheTtlSeconds, narInfoCacheTtlSeconds } from '../http/http.ts';
 
-import { armAlarmNoLaterThan } from './alarm.ts';
+import { armAlarmNoLaterThan, noProgressRetryMs } from './alarm.ts';
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
 const cachePurgeBatchSize = 100;
-const cachePurgeRetryMs = 30_000;
 const tagsSchema = z.array(z.string()).min(1).max(cachePurgeBatchSize);
 
 /**
@@ -133,7 +132,7 @@ export class CachePurgeQueueService {
 					this.context.ctx.storage,
 					Math.min(
 						Date.parse(continuation.expiresAt),
-						Date.now() + cachePurgeRetryMs
+						Date.now() + noProgressRetryMs
 					)
 				);
 

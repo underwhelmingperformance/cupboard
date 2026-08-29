@@ -288,6 +288,13 @@
 			"when": 1787607035880,
 			"tag": "0040_dusty_tombstone",
 			"breakpoints": true
+		},
+		{
+			"idx": 41,
+			"version": "6",
+			"when": 1788007504430,
+			"tag": "0041_pending_upload_recorded_verdict",
+			"breakpoints": true
 		}
 	]
 }

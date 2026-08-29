@@ -109,6 +109,20 @@ async function deferUpload(
 	};
 }
 
+/**
+ * Gives the verdict drain `attempts` turns. Each alarm applies as many held
+ * verdicts as one invocation's D1 allowance covers, so a batch needs one turn
+ * per verdict the recording invocation could not afford.
+ */
+async function drainRecordedVerdicts(attempts: number): Promise<void> {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await state.storage.deleteAlarm();
+			await instance.alarm();
+		});
+	}
+}
+
 describe('batched verify fault isolation', () => {
 	beforeEach(resetTestServer);
 
@@ -130,19 +144,27 @@ describe('batched verify fault isolation', () => {
 					: originalPut(key, value, options)
 			);
 
+		// Read the rows while the outage is still in place. The failed upload holds
+		// its verdict, and the drain retries the application on every alarm, so a
+		// restored object write would settle the row before it could be observed.
 		try {
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+
+			// One invocation applies one verdict, so give the drain a turn for each
+			// upload in the batch. Each pass resumes after the previous row, so the
+			// failing upload does not delay its sibling.
+			await drainRecordedVerdicts(2);
+
+			expect({
+				sibling: await pendingUploadVerdict(sibling.uploadId),
+				failing: await pendingUploadVerdict(failing.uploadId)
+			}).toStrictEqual({
+				sibling: undefined,
+				failing: 'pending'
+			});
 		} finally {
 			put.mockRestore();
 		}
-
-		expect({
-			sibling: await pendingUploadVerdict(sibling.uploadId),
-			failing: await pendingUploadVerdict(failing.uploadId)
-		}).toStrictEqual({
-			sibling: undefined,
-			failing: 'pending'
-		});
 	});
 
 	it('keeps the Durable Object instance usable and the upload pending when D1 rejects inside the settle gate', async () => {
@@ -172,21 +194,24 @@ describe('batched verify fault isolation', () => {
 				return originalPrepare(query);
 			});
 
+		// Keep the outage in place while the row is read. The upload holds its
+		// verdict, and a restored status query would let the drain settle the row
+		// before this assertion could see it pending.
 		try {
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+
+			const isSameInstance = await runInDurableObject(
+				currentServer(),
+				(instance) => instance.context.discovery === marker
+			);
+
+			expect({
+				verdict: await pendingUploadVerdict(upload.uploadId),
+				isSameInstance
+			}).toStrictEqual({ verdict: 'pending', isSameInstance: true });
 		} finally {
 			prepare.mockRestore();
 		}
-
-		const isSameInstance = await runInDurableObject(
-			currentServer(),
-			(instance) => instance.context.discovery === marker
-		);
-
-		expect({
-			verdict: await pendingUploadVerdict(upload.uploadId),
-			isSameInstance
-		}).toStrictEqual({ verdict: 'pending', isSameInstance: true });
 	});
 
 	it('settles uploads when the prefetch D1 batch faults and falls back to per-path probes', async () => {
@@ -240,21 +265,23 @@ describe('batched verify fault isolation', () => {
 
 		const sent = await collectVerificationPasses();
 
+		// Read the rows while the outage is still in place, for the reason the
+		// sibling fixture gives: the drain retries a held verdict on every alarm.
 		try {
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 2);
+
+			expect({
+				sent: sent.length,
+				first: await pendingUploadVerdict(first.uploadId),
+				second: await pendingUploadVerdict(second.uploadId)
+			}).toStrictEqual({
+				sent: 0,
+				first: 'pending',
+				second: 'pending'
+			});
 		} finally {
 			put.mockRestore();
 		}
-
-		expect({
-			sent: sent.length,
-			first: await pendingUploadVerdict(first.uploadId),
-			second: await pendingUploadVerdict(second.uploadId)
-		}).toStrictEqual({
-			sent: 0,
-			first: 'pending',
-			second: 'pending'
-		});
 	});
 
 	it('does not continue a truncated batch after a stale verdict finds no row', async () => {
@@ -670,9 +697,9 @@ describe('batched verify fault isolation', () => {
 				).verification;
 				const activeClaims = new ActiveVerificationClaims([uploadId]);
 				const controller = new AbortController();
-				queueMicrotask(() => {
-					controller.abort(timeout);
-				});
+				// Recording an abandoned verdict only updates local SQLite and finishes
+				// synchronously. Abort before the call to model an expired deadline.
+				controller.abort(timeout);
 
 				let isTimedOut = false;
 

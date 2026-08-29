@@ -5,8 +5,9 @@ import {
 
 import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 
-import { chunk } from './bulk.ts';
+import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 
 export interface ReconcileTarget {
 	readonly cache: StoredCache;
@@ -28,15 +29,54 @@ const reconcileOriginKey = 'maintenance:reconcile-origin';
 // is split into successive writes.
 const maxStoragePutEntries = 128;
 
-// One alarm firing reconciles at most this many queued paths, each costing up to
-// two R2 heads, so a firing stays well under the Worker subrequest cap and a
-// large backlog converges across firings.
-const maxPathsReconciledPerRun = 200;
+// These constants determine the page size for a reconcile pass. The D1 binding
+// enforces the statement limit if one becomes inaccurate, which can reduce the
+// work completed by the pass.
+//
+// Probing one target reads the shared blob row for the NAR's current
+// incarnation. The subsequent R2 HEAD requests do not use D1.
+export const statementsPerReconcileProbe = 1;
+
+// One query reads the committed reference edges for a whole page. Every page
+// fits in one `IN (...)` list.
+export const statementsPerReconcileEdgeQuery = 1;
+
+// Restoring a missing narinfo object re-reads the NAR's incarnation under the
+// critical section, then reads the shared blob row used to render the narinfo.
+export const statementsPerReconcileRestore = 2;
+
+// Removing a path after its NAR disappears credits and deletes the reference
+// edge, reads the remaining edges and the presence row, then credits and deletes
+// that presence row. It also queries the path's attestation references and
+// checks for references from other tenants. Each attestation reference requires
+// five additional statements from the remaining allowance.
+export const statementsPerReconcileRemoval = 8;
+
+/**
+ * The maximum number of queued paths claimed by one alarm.
+ *
+ * The page reserves one statement per probe, the edge query and one removal.
+ * Every pass can therefore repair at least one probed target. The page also
+ * fits in one `IN (...)` list, so the edge query requires one statement.
+ */
+export const maxPathsReconciledPerRun = Math.min(
+	maxInClauseValues,
+	Math.floor(
+		(maintenancePassStatements -
+			statementsPerReconcileEdgeQuery -
+			statementsPerReconcileRemoval) /
+			statementsPerReconcileProbe
+	)
+);
 
 export class ReconcileQueueService {
 	constructor(private readonly context: ServerContext) {}
 
-	private entryKey(target: ReconcileTarget): string {
+	/**
+	 * The queue key of one target. A pass that finishes only part of its page
+	 * uses this to clear the targets it finished and leave the rest queued.
+	 */
+	entryKey(target: ReconcileTarget): string {
 		return `${reconcileEntryPrefix}${target.cache}:${target.storePathHash}`;
 	}
 

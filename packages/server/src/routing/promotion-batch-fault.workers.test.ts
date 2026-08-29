@@ -1,15 +1,22 @@
 import { rootLogger } from '@cupboard/logger';
+import type {
+	NixSha256HashString,
+	StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
 	armBlobReaperTimer,
+	blobReferenceRows,
 	blobStateArmTimes,
 	blobStateNarHashes,
 	commitPath,
+	currentServer,
 	currentServerTenant,
 	deferFreshUpload,
 	expectSingleCommitDecision,
@@ -20,7 +27,8 @@ import {
 	resetTestServer,
 	testBase,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 const byNarHash = (a: string, b: string) => a.localeCompare(b);
@@ -52,7 +60,7 @@ function statementDetail(statement: D1PreparedStatement): StatementDetail {
 
 interface BatchFaultPlan {
 	/**
-	 * The NAR hashes whose work this fault applies to.
+	 * The NAR hashes selected for fault injection.
 	 */
 	readonly narHashes: ReadonlySet<string>;
 	/**
@@ -73,13 +81,12 @@ interface BatchFault {
 /**
  * Rejects the D1 batches a plan selects, and reports how many it rejected.
  *
- * The binding is shared by everything this isolate runs, so a fault chosen by
- * call index lands on whichever batch happens to be that many calls in. This
- * rejects a batch only when it binds one of the test's own NAR hashes and its
- * SQL matches, which makes the fault independent of what else is running.
+ * The isolate shares one binding across its tests, so call order is not stable.
+ * This helper rejects a batch only when it binds one of the selected NAR hashes
+ * and contains the selected SQL operation.
  *
- * The rejection count is part of what each test asserts. A query that stops
- * matching then fails the test rather than quietly injecting no fault at all.
+ * Each test asserts the rejection count, so a query change that prevents fault
+ * injection also fails the test.
  */
 function failBatchesFor(plan: BatchFaultPlan): BatchFault {
 	const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
@@ -114,8 +121,28 @@ function failBatchesFor(plan: BatchFaultPlan): BatchFault {
 	};
 }
 
-// The batch that reserves the promotion's incarnation. It runs before the
-// stored blob metadata is read, and a fault after it is what these tests place.
+// Returns the D1 reference edges written while charging one NAR hash, reduced to
+// the fields that identify the published path.
+async function referenceEdgesFor(narHash: NixSha256HashString): Promise<
+	{
+		storePathHash: StorePathHash;
+		generation: number;
+		narHash: NixSha256HashString;
+	}[]
+> {
+	const rows = await blobReferenceRows();
+
+	return rows
+		.filter((row) => row.narHash === narHash)
+		.map((row) => ({
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			narHash: row.narHash
+		}));
+}
+
+// The batch that reserves the promotion's incarnation. The tests allow this
+// batch and inject a fault into a later batch.
 const promotionReservation = '"object_incarnation"';
 
 // The batch that prefetches the tenant's presence rows for a page of hashes.
@@ -208,12 +235,14 @@ describe('promotion after a transient D1 batch failure', () => {
 });
 
 // A persistent D1 read fault can occur after R2 promotion has completed. The
-// claim must remain pending and lose its lease so the next pass can finish it
-// from the durable `blob_state` row.
+// claim must remain pending and keep the verdict the pass recorded, so the NAR
+// is never decoded again. A row holding both a recorded verdict and its claim
+// owner is not claimable, so the verdict-drain maintenance pass is what
+// finishes the upload from the durable `blob_state` row.
 describe('promotion followed by a persistent D1 fault', () => {
 	beforeEach(resetTestServer);
 
-	it('leaves the claim immediately retryable when all batch attempts reject', async () => {
+	it('leaves the recorded verdict for the drain when all batch attempts reject', async () => {
 		const token = await initialise();
 
 		const fresh = await deferFreshUpload(
@@ -222,35 +251,63 @@ describe('promotion followed by a persistent D1 fault', () => {
 			'1'.repeat(32)
 		);
 
-		// The promotion reserves its incarnation and then reads the stored blob
-		// metadata. Let the reservation through and reject everything after it,
-		// including the per-row reads attempted after the prefetch fails.
-		const fault = failBatchesFor({
-			narHashes: new Set([fresh.metadata.narHash]),
-			matches: (sql) => !sql.includes(promotionReservation)
+		// Recording a verdict the pass could not apply arms an immediate alarm, and
+		// its drain would settle the row while this test is still reading the state
+		// the faulted pass left. Observe with arming suspended, then run the drain
+		// where the assertions expect it.
+		const observed = await withoutAlarmArming(async () => {
+			// The promotion reserves its incarnation and then reads the stored blob
+			// metadata. Let the reservation through and reject everything after it,
+			// including the per-row reads attempted after the prefetch fails.
+			const fault = failBatchesFor({
+				narHashes: new Set([fresh.metadata.narHash]),
+				matches: (sql) => !sql.includes(promotionReservation)
+			});
+
+			try {
+				await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+			} finally {
+				fault.restore();
+			}
+
+			const afterFaultedPass = {
+				rejectedBatches: fault.rejected(),
+				verdictAfterFaultedPass: await pendingUploadVerdict(fresh.uploadId),
+				blobStateAfterFaultedPass: await blobStateNarHashes(),
+				edgesAfterFaultedPass: await referenceEdgesFor(fresh.metadata.narHash)
+			};
+
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
+
+			return {
+				...afterFaultedPass,
+				verdictAfterConsumerPass: await pendingUploadVerdict(fresh.uploadId)
+			};
 		});
 
-		try {
-			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
-		} finally {
-			fault.restore();
-		}
+		await runInDurableObject(currentServer(), (instance) => instance.alarm());
 
 		expect({
-			rejectedBatches: fault.rejected(),
-			freshVerdict: await pendingUploadVerdict(fresh.uploadId),
-			blobState: await blobStateNarHashes()
+			...observed,
+			verdictAfterDrain: await pendingUploadVerdict(fresh.uploadId),
+			edgesAfterDrain: await referenceEdgesFor(fresh.metadata.narHash)
 		}).toStrictEqual({
 			// The prefetch of the stored blob metadata, the presence prefetch, and
-			// the charge the settle would have run.
+			// the batch that would have charged the upload during settlement.
 			rejectedBatches: 3,
-			freshVerdict: 'pending',
-			blobState: [{ narHash: fresh.metadata.narHash }]
+			verdictAfterFaultedPass: 'pending',
+			blobStateAfterFaultedPass: [{ narHash: fresh.metadata.narHash }],
+			edgesAfterFaultedPass: [],
+			verdictAfterConsumerPass: 'pending',
+			verdictAfterDrain: undefined,
+			edgesAfterDrain: [
+				{
+					storePathHash: fresh.metadata.storePathHash,
+					generation: 0,
+					narHash: fresh.metadata.narHash
+				}
+			]
 		});
-
-		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
-
-		expect(await pendingUploadVerdict(fresh.uploadId)).toBeUndefined();
 	});
 });
 
