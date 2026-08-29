@@ -45,7 +45,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { eq, or } from 'drizzle-orm';
+import { and, eq, isNull, or } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -93,7 +93,12 @@ import {
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
 
-import { armAlarmNoLaterThan } from './alarm.ts';
+import {
+	armAlarmNoLaterThan,
+	type MaintenanceProgress,
+	MaintenanceRetrySchedule,
+	noProgressRetryMs
+} from './alarm.ts';
 import {
 	AttestationCasService,
 	type AttestationReference,
@@ -146,6 +151,7 @@ import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import {
 	MaintenanceEligibilityService,
+	maintenancePassStatements,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
@@ -164,6 +170,7 @@ import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
+import { enterStatementAllowanceOnDispatch } from './statement-scope.ts';
 import { StatsService } from './stats-service.ts';
 import {
 	type TenantIdentity,
@@ -174,8 +181,10 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
+	pendingSettlePrefetchStatements,
 	type PendingVerification,
 	type PendingVerificationBatch,
+	statementsPerPendingSettleRow,
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
@@ -233,9 +242,9 @@ function reuseNotFound(): Response {
 // across bounded passes without holding the input gate continuously.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
-// Which maintenance pass the previous alarm ran. The next alarm resumes after
-// it, so a pass with a permanent backlog cannot starve the others. The key sits
-// outside every queue prefix, so no queue listing returns it.
+// The maintenance pass run by the previous alarm. The next alarm resumes after
+// it, which prevents a permanent backlog from starving other passes. The key
+// sits outside every queue prefix.
 export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
@@ -243,19 +252,22 @@ type MaintenancePassKey =
 	| 'reconcile'
 	| 'signing-key-backfill'
 	| 'teardown'
+	| 'verdict-drain'
 	| 'verify-backstop';
 
 /**
  * One bounded background task an alarm can run.
  *
- * `isDue` reports whether the pass has work without running a D1 statement, so
- * an alarm can choose between the passes and still leave the whole invocation's
- * D1 allowance to the one it runs.
+ * `hasWork` reads durable storage or local SQLite. The alarm therefore leaves
+ * the complete D1 allowance for the selected pass. A pass is due after its retry
+ * deadline and while work remains.
+ *
+ * The result from `run` determines the next retry deadline.
  */
 interface MaintenancePass {
 	readonly key: MaintenancePassKey;
-	readonly isDue: () => Promise<boolean>;
-	readonly run: () => Promise<void>;
+	readonly hasWork: () => Promise<boolean>;
+	readonly run: () => Promise<MaintenanceProgress>;
 }
 
 const garbageCollectionLimitSchema = z.number().int().positive();
@@ -329,7 +341,18 @@ function mergeGarbageCollectionContinuation(
 	];
 }
 
-const verifyBackstopReuseSettleLimit = 16;
+/**
+ * How many deferred rows one backstop pass reads.
+ *
+ * The page reserves the same maximum cost for every row after subtracting the
+ * page prefetch from the invocation's D1 allowance. This value is a page limit;
+ * the D1 binding enforces the allowance during settlement. Unprocessed rows
+ * remain pending, and the pass requests another verification run.
+ */
+export const verifyBackstopReuseSettleLimit = Math.floor(
+	(maintenancePassStatements - pendingSettlePrefetchStatements) /
+		statementsPerPendingSettleRow
+);
 
 type MaintenanceKind = 'gc' | 'verify';
 
@@ -365,6 +388,14 @@ class CountingSemaphore {
 }
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
+	// Put the invocation's D1 allowance on every method the runtime can dispatch
+	// to: a request, an alarm, an RPC, and any method added later. No dispatched
+	// method can run without an allowance, and none has to remember to open the
+	// allowance itself.
+	static {
+		enterStatementAllowanceOnDispatch(this.prototype);
+	}
+
 	private readonly app = new Hono<TenantHonoEnv>();
 
 	private readonly maintenanceChains = new Map<
@@ -412,11 +443,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly roots: RootsService;
 	private readonly offboarding: OffboardingService;
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
+	private readonly maintenanceRetry: MaintenanceRetrySchedule;
 	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
 		this.context = new ServerContext(ctx, env);
+		this.maintenanceRetry = new MaintenanceRetrySchedule(ctx.storage);
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
@@ -581,11 +614,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// The Worker forwards a read in its private namespace with the namespace
-		// prefix intact, so the prefix carries the cache's local name rather than a
-		// selector. Only a forward that has already authenticated the reader
-		// arrives here: the Worker answers every other request under that prefix
-		// itself.
+		// The Worker preserves the private namespace prefix when forwarding an
+		// authenticated read. That prefix contains the cache's local name.
 		this.app.use('/private-cache/:cacheName/*', async (context, next) => {
 			const name = parseRequestValue(
 				cacheNameSchema,
@@ -1284,8 +1314,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Invalidate eligibility before cron maintenance and reconcile it afterwards.
-	// A crash during the pass must leave the tenant due rather than preserve a
-	// stale future wake time. Mutating request paths reconcile only afterwards.
+	// The leading invalidation keeps the tenant due if the pass is interrupted.
+	// Mutating request paths reconcile only after the mutation.
 	private async withMaintenanceEligibility<T>(
 		body: () => Promise<T>
 	): Promise<T> {
@@ -1564,24 +1594,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Share the cron verification chain and reset the queue-request guard before
 	// this pass claims rows. A later deferral then requests another pass.
+	//
+	// Settlement and scanning share the invocation's D1 allowance. The requested
+	// limit caps the page, and the remaining allowance determines the work
+	// completed by this invocation.
 	private verifyInteractive(
 		logger: Logger,
 		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport> {
-		return this.runExclusiveMaintenance('verify', async () => {
-			this.commitPipeline.onVerificationPassStarted();
-			await this.verification.processPendingWithoutDecode(logger, limit);
+		return this.runExclusiveMaintenance('verify', () =>
+			(async () => {
+				this.commitPipeline.onVerificationPassStarted();
+				await this.verification.processPendingWithoutDecode(logger, limit);
 
-			if (this.verification.hasPendingUploads()) {
-				await this.commitPipeline.requestVerification(
-					logger,
-					this.context.requireTenant()
-				);
-			}
+				if (this.verification.hasPendingUploads()) {
+					await this.commitPipeline.requestVerification(
+						logger,
+						this.context.requireTenant()
+					);
+				}
 
-			return this.verification.verifyBatch(logger, purgeOrigin, limit);
-		});
+				return this.verification.verifyBatch(logger, purgeOrigin, limit);
+			})()
+		);
 	}
 
 	private async armGarbageContinuation(
@@ -1654,20 +1690,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// Drain negotiated paths in bounded alarm passes so R2 probes stay off the push
-	// path and release the input gate between chunks. Clear the origin only after
-	// the queue drains.
-	private async reconcileNegotiatedOnce(): Promise<void> {
+	// The alarm drains negotiated paths in bounded passes. That keeps the R2
+	// probes off the push path and releases the input gate between passes. Clear
+	// the keys of the targets the pass reconciled, leave the deferred ones
+	// queued, and clear the origin only after the queue drains.
+	//
+	// Report a stall when every attempted target remains queued. The retry delay
+	// then prevents a persistent probe or repair fault from running alarms back to
+	// back.
+	private async reconcileNegotiatedOnce(): Promise<MaintenanceProgress> {
 		const queued = await this.reconcileQueue.claimChunk();
 
 		if (queued.size === 0) {
 			await this.reconcileQueue.clearOrigin();
-			return;
+
+			return 'progressed';
 		}
 
 		const origin = await this.reconcileQueue.origin();
 
-		await this.metered('reconcile', (logger) =>
+		const deferred = await this.metered('reconcile', (logger) =>
 			this.withMaintenanceEligibility(() =>
 				this.verification.reconcileTargets(
 					logger,
@@ -1676,15 +1718,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
+		const deferredKeys = new Set(
+			deferred.map((target) => this.reconcileQueue.entryKey(target))
+		);
+		const cleared = queued
+			.keys()
+			.filter((key) => !deferredKeys.has(key))
+			.toArray();
 
-		await this.reconcileQueue.clearKeys(queued.keys().toArray());
+		await this.reconcileQueue.clearKeys(cleared);
 
-		if (await this.reconcileQueue.hasPending()) {
-			await this.ctx.storage.setAlarm(Date.now());
-			return;
+		if (!(await this.reconcileQueue.hasPending())) {
+			await this.reconcileQueue.clearOrigin();
+
+			return 'progressed';
 		}
 
-		await this.reconcileQueue.clearOrigin();
+		if (cleared.length === 0) {
+			return 'stalled';
+		}
+
+		await this.ctx.storage.setAlarm(Date.now());
+
+		return 'progressed';
 	}
 
 	// Use this alarm when a verification queue request is lost. At the deadline,
@@ -1692,14 +1748,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// queue again. Fresh NAR decoding must stay off the Durable Object.
 	// {@link armVerifyBackstopAlarm} handles a deadline that has not arrived.
 	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
+		// The verdict drain owns rows with a recorded verdict. Exclude them from the
+		// pending check used to maintain the verification backstop deadline.
+		const awaitingVerdict = or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
 		const pending = this.context.db
 			.select({ id: schema.pendingUploads.id })
 			.from(schema.pendingUploads)
 			.where(
-				or(
-					eq(schema.pendingUploads.verdict, 'pending'),
-					eq(schema.pendingUploads.verdict, 'committing')
-				)
+				and(awaitingVerdict, isNull(schema.pendingUploads.recordedVerdictJson))
 			)
 			.limit(1)
 			.get();
@@ -1723,6 +1782,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	// Settle decode-free rows within the invocation's D1 allowance, then build the
+	// claim snapshot from the Durable Object's local SQLite database.
+	//
+	// Request another queue pass after settlement makes progress and claimable
+	// rows remain. This continues decode-free reuse rows that were outside the
+	// current allowance. The request also arms the backstop in case the queue
+	// message is lost.
 	private async claimVerificationBatchOperation(
 		limit: number,
 		maxNarBytes: number,
@@ -1733,23 +1799,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// taking the snapshot so a deferral after it triggers a fresh request.
 		this.commitPipeline.onVerificationPassStarted();
 
-		return this.metered('claim-verifications', async (logger) => {
-			const signal = currentDeadlineSignal();
-			signal?.throwIfAborted();
-			await this.withMaintenanceEligibility(() =>
-				this.verification.processPendingWithoutDecode(logger, limit, signal)
-			);
-			signal?.throwIfAborted();
+		return this.metered('claim-verifications', (logger) =>
+			(async () => {
+				const signal = currentDeadlineSignal();
+				signal?.throwIfAborted();
+				const settled = await this.withMaintenanceEligibility(() =>
+					this.verification.processPendingWithoutDecode(logger, limit, signal)
+				);
+				signal?.throwIfAborted();
 
-			const batch = this.verification.listPendingForVerify(
-				limit,
-				maxNarBytes,
-				signal
-			);
-			onClaimed?.(batch);
+				const batch = this.verification.listPendingForVerify(
+					limit,
+					maxNarBytes,
+					signal
+				);
+				onClaimed?.(batch);
 
-			return batch;
-		});
+				if (settled > 0 && this.verification.hasPendingUploads()) {
+					await this.commitPipeline.requestVerification(
+						logger,
+						this.context.requireTenant()
+					);
+				}
+
+				return batch;
+			})()
+		);
 	}
 
 	private validateVerificationResults(
@@ -1762,86 +1837,156 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	// The RPC stores every non-abandoned verdict on its upload row; an abandoned
+	// verdict releases the lease locally. It then applies as many stored verdicts
+	// as the allowance covers and arms the alarm when recorded verdicts remain.
 	private recordVerificationsOperation(
 		owner: string,
 		results: readonly VerificationResult[]
 	): Promise<number> {
-		return this.metered('record-verifications', async (logger) => {
-			const signal = currentDeadlineSignal();
-			signal?.throwIfAborted();
-			const applied = await this.withMaintenanceEligibility(() =>
-				this.verification.recordVerifications(logger, owner, results, signal)
-			);
-			signal?.throwIfAborted();
+		return this.metered('record-verifications', (logger) =>
+			(async () => {
+				const signal = currentDeadlineSignal();
+				signal?.throwIfAborted();
+				const applied = await this.withMaintenanceEligibility(() =>
+					this.verification.recordVerifications(logger, owner, results, signal)
+				);
+				signal?.throwIfAborted();
 
-			return applied;
-		});
+				if (this.verification.hasRecordedVerdicts()) {
+					await this.ctx.storage.setAlarm(Date.now());
+				}
+
+				return applied;
+			})()
+		);
+	}
+
+	// Apply the verdicts the upload rows are still holding. A pass that left the
+	// queue no shorter failed on every verdict it tried, so it reports a stall
+	// and waits before the next attempt.
+	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
+		const before = this.verification.recordedVerdictCount();
+		await this.metered('verdict-drain', (logger) =>
+			this.withMaintenanceEligibility(() =>
+				this.verification.applyRecordedVerdicts(logger)
+			)
+		);
+		const remaining = this.verification.recordedVerdictCount();
+
+		if (remaining === 0) {
+			return 'progressed';
+		}
+
+		if (remaining >= before) {
+			return 'stalled';
+		}
+
+		await this.ctx.storage.setAlarm(Date.now());
+
+		return 'progressed';
 	}
 
 	/**
 	 * The maintenance passes an alarm chooses between, in the order they take
 	 * turns.
 	 *
-	 * Every `isDue` reads durable storage or the local database, so deciding
-	 * which passes have work runs no D1 statement and leaves the whole
-	 * allowance to the pass that runs.
+	 * Every `hasWork` callback reads durable storage or the local SQLite database.
+	 * The selected pass receives the complete D1 allowance.
 	 */
 	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
 		return [
 			{
 				key: 'reconcile',
-				isDue: () => this.reconcileQueue.hasPending(),
+				hasWork: () => this.reconcileQueue.hasPending(),
 				run: () => this.reconcileNegotiatedOnce()
 			},
 			{
 				key: 'teardown',
-				isDue: () => this.cacheAdmin.hasPendingTeardown(),
-				run: () => this.resumeCacheTeardown()
+				hasWork: () => this.cacheAdmin.hasPendingTeardown(),
+				run: async () => {
+					await this.resumeCacheTeardown();
+
+					return 'progressed';
+				}
+			},
+			{
+				key: 'verdict-drain',
+				hasWork: () => Promise.resolve(this.verification.hasRecordedVerdicts()),
+				run: () => this.drainRecordedVerdicts()
 			},
 			{
 				key: 'verify-backstop',
-				isDue: () => this.isVerifyBackstopDue(),
-				run: () => this.resumeVerifyBackstop(logger)
+				hasWork: () => this.isVerifyBackstopDue(),
+				run: async () => {
+					await this.resumeVerifyBackstop(logger);
+
+					return 'progressed';
+				}
 			},
 			{
 				key: 'signing-key-backfill',
-				isDue: () => Promise.resolve(this.signingKeys.hasBackfillWork()),
-				run: () => this.signingKeys.runBackfillOnce()
+				hasWork: () => Promise.resolve(this.signingKeys.hasBackfillWork()),
+				run: async () => {
+					await this.signingKeys.runBackfillOnce();
+
+					return 'progressed';
+				}
 			},
 			{
 				key: 'garbage-collection',
-				isDue: () => this.hasGarbageCollectionContinuation(),
-				run: () => this.resumeGarbageCollection()
+				hasWork: () => this.hasGarbageCollectionContinuation(),
+				run: async () => {
+					await this.resumeGarbageCollection();
+
+					return 'progressed';
+				}
 			}
 		];
 	}
 
 	/**
-	 * Runs the first pass with work, starting after the one the previous alarm
-	 * ran, then wakes the alarm again for the passes it skipped.
+	 * Runs the first due pass, starting after the pass in the alarm cursor,
+	 * then arms the alarm for the next pass that will be due.
 	 *
-	 * Record the turn before running the pass. A pass that throws has then still
-	 * used its turn, so a failing pass cannot hold the cursor and stop the
-	 * others from ever running. Cloudflare retries an alarm whose handler
-	 * throws, so the failure needs no re-arming here.
+	 * Record the turn before running the pass. If the pass throws, the next alarm
+	 * continues with another pass instead of leaving the cursor on the failure.
+	 * Cloudflare retries a failed alarm handler.
 	 */
 	private async runOneMaintenancePass(logger: Logger): Promise<void> {
 		const passes = this.maintenancePasses(logger);
 		const start = await this.maintenancePassStart(passes);
-		let ran: MaintenancePassKey | undefined;
 
 		for (const pass of [...passes.slice(start), ...passes.slice(0, start)]) {
-			if (!(await pass.isDue())) {
+			const now = Date.now();
+			const dueAt = await this.maintenancePassDueAt(pass, now);
+
+			if (dueAt === undefined || dueAt > now) {
 				continue;
 			}
 
 			await this.ctx.storage.put(maintenancePassCursorKey, pass.key);
-			ran = pass.key;
-			await pass.run();
+			const progress = await pass.run();
+			await this.recordMaintenanceProgress(pass.key, progress);
 			break;
 		}
 
-		await this.rearmForSkippedPasses(passes, ran);
+		await this.armForMaintenancePasses(passes);
+	}
+
+	// A pass that stalled waits out its retry deadline and arms the alarm for it,
+	// so the work it left behind is not stranded. A pass that progressed clears
+	// its deadline and is due again at once.
+	private async recordMaintenanceProgress(
+		key: MaintenancePassKey,
+		progress: MaintenanceProgress
+	): Promise<void> {
+		const now = Date.now();
+		await this.maintenanceRetry.record(key, progress, now);
+
+		if (progress === 'stalled') {
+			await armAlarmNoLaterThan(this.ctx.storage, now + noProgressRetryMs);
+		}
 	}
 
 	// Resume after the pass the previous alarm ran. An unrecognised or absent
@@ -1857,26 +2002,56 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return index === -1 ? 0 : (index + 1) % passes.length;
 	}
 
-	// Wake the alarm for the passes this alarm skipped, whose work nothing else
-	// would wake. Leave out the pass that ran: it arms its own next wake, and
-	// some passes wait out a retry delay before they run again, which an
-	// immediate alarm here would cancel.
-	private async rearmForSkippedPasses(
-		passes: readonly MaintenancePass[],
-		ran: MaintenancePassKey | undefined
-	): Promise<void> {
-		for (const pass of passes) {
-			if (pass.key !== ran && (await pass.isDue())) {
-				await this.ctx.storage.setAlarm(Date.now());
+	// Returns when a pass with work may run. A pass without a retry deadline may
+	// run now, while a stalled pass retains its recorded deadline.
+	private async maintenancePassDueAt(
+		pass: MaintenancePass,
+		now: number
+	): Promise<number | undefined> {
+		if (!(await pass.hasWork())) {
+			return undefined;
+		}
 
-				return;
+		const notBefore = await this.maintenanceRetry.notBefore(pass.key);
+
+		return notBefore === undefined || now >= notBefore ? now : notBefore;
+	}
+
+	/**
+	 * Arms the shared alarm for the earliest maintenance pass that has work.
+	 *
+	 * Durable Object storage holds one alarm. Delivery clears that deadline, so
+	 * a later deadline is not retained when an earlier alarm fires. Recompute the
+	 * next wake from the durable retry records after every handler. A pass that
+	 * is ready now takes precedence over every future deadline.
+	 */
+	private async armForMaintenancePasses(
+		passes: readonly MaintenancePass[]
+	): Promise<void> {
+		const now = Date.now();
+		let earliest: number | undefined;
+
+		for (const pass of passes) {
+			const dueAt = await this.maintenancePassDueAt(pass, now);
+
+			if (dueAt === undefined) {
+				continue;
 			}
+
+			earliest = earliest === undefined ? dueAt : Math.min(earliest, dueAt);
+
+			if (earliest === now) {
+				break;
+			}
+		}
+
+		if (earliest !== undefined) {
+			await armAlarmNoLaterThan(this.ctx.storage, earliest);
 		}
 	}
 
-	// Waking for a backstop deadline that has not arrived reads and writes
-	// durable storage alone, so it runs on every alarm rather than taking a
-	// maintenance pass's turn.
+	// Preserve a future backstop deadline on every alarm. This uses durable
+	// storage and does not consume a maintenance pass turn.
 	private async armVerifyBackstopAlarm(): Promise<void> {
 		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
 
@@ -1924,11 +2099,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The cron reaches maintenance through these Durable Object RPC methods
-	// rather than over HTTP, so no token is issued or exchanged. The `/gc` and
-	// `/verify` routes run the same passes for manual use. The RPC passes cover
-	// every cache and skip the edge-cache purge, leaving stale edge entries to the
-	// narinfo TTL and the orphan-blob grace window.
+	// Cron invokes these Durable Object RPC methods directly. The `/gc` and
+	// `/verify` routes run the same passes for manual use. RPC passes cover every
+	// cache and leave stale edge-cache entries to expire under the narinfo TTL and
+	// orphan-blob grace window.
 	async runGarbageCollection(collectLimit?: number): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
@@ -1939,15 +2113,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	/**
 	 * One alarm drives every bounded background task.
 	 *
-	 * Close commit sessions first so their credit is returned, then arm the
-	 * deadlines the alarm owns and run the queued cache purges. None of that
-	 * reaches D1.
+	 * Close commit sessions first so their credit is returned, then arm owned
+	 * deadlines and run queued cache purges. These operations use local or
+	 * durable storage.
 	 *
-	 * The maintenance passes do reach D1, and each of them sizes its own work
-	 * for a single Worker invocation. Workers Free permits 50 D1 statements per
-	 * invocation. A Durable Object alarm is one invocation, so the alarm
-	 * reserves that allowance for one maintenance pass and re-arms while another
-	 * pass still has work.
+	 * The maintenance passes do reach D1. Workers Free permits 50 D1 statements
+	 * per invocation, and a Durable Object alarm is one invocation, so the alarm
+	 * runs one maintenance pass under that allowance and arms the alarm again
+	 * for whichever pass is due next.
 	 */
 	override async alarm(): Promise<void> {
 		await this.initialise();
@@ -1995,6 +2168,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	// One cron invocation settles pending rows and scans a page of committed
+	// narinfos under the same D1 allowance. The claim and scan cursors preserve
+	// unfinished work for the next cron run.
 	async runVerification(): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('verify', async () => {
@@ -2097,8 +2273,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// A preceding consumer cannot send a claim owner. Leave its methods callable,
-	// but schedule a current pass without returning or changing any rows.
+	// A legacy consumer cannot send a claim owner. This compatibility method
+	// schedules a current pass and returns an empty claim set.
 	async claimPendingVerifications(
 		limit: number
 	): Promise<PendingVerification[]> {
@@ -2716,6 +2892,7 @@ type MeteredMethod =
 	| 'record-missing-object'
 	| 'record-verification'
 	| 'record-verifications'
+	| 'verdict-drain'
 	| 'verification'
 	| 'verify-backstop';
 

@@ -40,6 +40,7 @@ import m0037 from './0037_wakeful_longshot.sql';
 import m0038 from './0038_pending_staging_indexes.sql';
 import m0039 from './0039_refresh_token_families.sql';
 import m0040 from './0040_dusty_tombstone.sql';
+import m0041 from './0041_pending_upload_recorded_verdict.sql';
 
 export default {
 	journal,
@@ -84,6 +85,7 @@ export default {
 		m0037,
 		m0038,
 		m0039,
-		m0040
+		m0040,
+		m0041
 	}
 };

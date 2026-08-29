@@ -86,12 +86,14 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export const blobReaperBatchSize = 500;
 
-// Workers Free permits 50 D1 statements in one invocation. Each reaper queue
-// message runs one phase whose page fits within this limit.
-export const d1StatementsPerReaperInvocation = 50;
-export const objectDeletionBatchSize = d1StatementsPerReaperInvocation - 1;
+// Workers Free permits 50 D1 statements in one invocation, counting each
+// statement of a batch. The D1 binding holds every maintenance invocation to
+// this allowance and refuses the statement that would exceed it.
+export const d1StatementsPerInvocation = 50;
+
+export const objectDeletionBatchSize = d1StatementsPerInvocation - 1;
 export const objectRecoveryBatchSize = Math.floor(
-	(d1StatementsPerReaperInvocation - 1) / 3
+	(d1StatementsPerInvocation - 1) / 3
 );
 
 // Verification SQL reconstructs NAR object keys from `nar_hash`. Keep these

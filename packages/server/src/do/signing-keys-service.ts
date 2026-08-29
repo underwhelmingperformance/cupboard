@@ -52,9 +52,10 @@ import {
 	type TextBody
 } from '../http/http.ts';
 
-import { armAlarmNoLaterThan } from './alarm.ts';
+import { armAlarmNoLaterThan, noProgressRetryMs } from './alarm.ts';
 import { type ServerContext } from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
+import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	bootstrapKeyId,
@@ -65,10 +66,36 @@ import {
 	signingKeyName,
 	storedSignaturesSchema
 } from './signing-keys.ts';
+import { affordableOperations } from './statement-scope.ts';
 
 const sequenceId = 'singleton';
+
+// Staging re-signs rows and writes them to the Durable Object's local SQLite
+// database. Its size is independent of the D1 statement calculations below.
 const backfillBatchSize = 32;
-const purgeRetryMs = 30_000;
+
+// Publishing one continuation entry reads the shared blob row from which its
+// narinfo is rendered. The publish then re-renders the entry if the row changed
+// while that read was in flight, reads the shared blob row again to confirm the
+// written object, probes the path's committed reference edge, and renders the
+// narinfo once more.
+const statementsPerBackfillEntry = 5;
+
+/**
+ * How many entries of a continuation one backfill pass publishes.
+ *
+ * The alarm runs one D1-issuing maintenance pass per invocation, so the pass may
+ * spend the whole per-invocation allowance on publication. A pass that reaches
+ * this many entries settles them, keeps the rest in the continuation, and wakes
+ * the alarm for another pass.
+ *
+ * This value is a page limit. The D1 binding enforces the invocation allowance
+ * if an entry requires more statements than the estimate, and the pass then
+ * publishes fewer entries.
+ */
+export const backfillEntriesPerPass = Math.floor(
+	maintenancePassStatements / statementsPerBackfillEntry
+);
 
 const purgeEntrySchema = z.strictObject({
 	cache: storedCacheSchema,
@@ -596,9 +623,15 @@ export class SigningKeysService {
 		}
 	}
 
+	/**
+	 * Records the entries this pass published and removes them from the
+	 * continuation. The continuation row survives while `remaining` holds the
+	 * entries a later pass still has to publish.
+	 */
 	private settleContinuation(
 		continuation: typeof schema.cachePurgeContinuations.$inferSelect,
 		entries: readonly PurgeEntry[],
+		remaining: readonly PurgeEntry[],
 		now: IsoTimestamp
 	): void {
 		this.context.db.transaction((tx) => {
@@ -659,14 +692,34 @@ export class SigningKeysService {
 				}
 			}
 
+			if (remaining.length > 0) {
+				tx.update(schema.cachePurgeContinuations)
+					.set({ entriesJson: JSON.stringify(remaining) })
+					.where(eq(schema.cachePurgeContinuations.id, continuation.id))
+					.run();
+
+				return;
+			}
+
 			tx.delete(schema.cachePurgeContinuations)
 				.where(eq(schema.cachePurgeContinuations.id, continuation.id))
 				.run();
 		});
 	}
 
+	/**
+	 * Publishes as many entries of the oldest backfill continuation as one
+	 * invocation's D1 allowance covers, purges their cache tags, and records them.
+	 *
+	 * Reports `partial` when entries remain, so the caller wakes the alarm for
+	 * another pass rather than staging more work on top of them.
+	 *
+	 * If publication or cache-tag purging fails, the pass removes none of the
+	 * selected entries from the continuation. A later pass retries the same
+	 * leading page and may publish the same objects again.
+	 */
 	private async processContinuation(): Promise<
-		'none' | 'settled' | 'retrying'
+		'none' | 'settled' | 'partial' | 'retrying'
 	> {
 		const continuation = this.context.db
 			.select()
@@ -679,9 +732,18 @@ export class SigningKeysService {
 			return 'none';
 		}
 
-		const entries = purgeEntriesSchema.parse(
+		const queued = purgeEntriesSchema.parse(
 			JSON.parse(continuation.entriesJson) as unknown
 		);
+		// A publication that fails removes no entry from the continuation, so the
+		// page must be one the invocation's allowance covers in full. Otherwise
+		// the entry the binding refused would fail the same page on every pass.
+		const affordable = Math.min(
+			backfillEntriesPerPass,
+			affordableOperations(statementsPerBackfillEntry)
+		);
+		const entries = queued.slice(0, affordable);
+		const remaining = queued.slice(affordable);
 		const now = isoTimestamp(new Date());
 
 		try {
@@ -702,15 +764,16 @@ export class SigningKeysService {
 
 			await armAlarmNoLaterThan(
 				this.context.ctx.storage,
-				Date.now() + purgeRetryMs
+				Date.now() + noProgressRetryMs
 			);
 			return 'retrying';
 		}
 
 		try {
 			await this.context.purgeCacheTags(entries.map((entry) => entry.tag));
-			this.settleContinuation(continuation, entries, now);
-			return 'settled';
+			this.settleContinuation(continuation, entries, remaining, now);
+
+			return remaining.length > 0 ? 'partial' : 'settled';
 		} catch (error) {
 			const message = errorMessage(error);
 			this.context.db
@@ -730,7 +793,7 @@ export class SigningKeysService {
 
 			await armAlarmNoLaterThan(
 				this.context.ctx.storage,
-				Date.now() + purgeRetryMs
+				Date.now() + noProgressRetryMs
 			);
 			return 'retrying';
 		}
@@ -1026,8 +1089,8 @@ export class SigningKeysService {
 	 * Whether a re-signing backfill or one of its queued cache-tag purges
 	 * remains outstanding.
 	 *
-	 * The alarm calls this before it gives the backfill a turn. Both tables are
-	 * local, so deciding costs no D1 statement.
+	 * The alarm calls this before running the backfill. Both queries use the
+	 * Durable Object's local SQLite database.
 	 */
 	hasBackfillWork(): boolean {
 		const continuation = this.context.db
@@ -1058,6 +1121,14 @@ export class SigningKeysService {
 			return;
 		}
 
+		// Staging another batch while entries are still queued would grow the
+		// backlog faster than the passes drain it.
+		if (purge === 'partial') {
+			await this.context.ctx.storage.setAlarm(Date.now());
+
+			return;
+		}
+
 		const row = this.context.db
 			.select()
 			.from(schema.signingKeyBackfills)
@@ -1080,7 +1151,7 @@ export class SigningKeysService {
 			this.markRetrying(row.keyId, 'resigning', failedAt, errorMessage(error));
 			await armAlarmNoLaterThan(
 				this.context.ctx.storage,
-				Date.now() + purgeRetryMs
+				Date.now() + noProgressRetryMs
 			);
 			return;
 		}

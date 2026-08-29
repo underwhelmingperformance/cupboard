@@ -18,7 +18,6 @@ import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import {
-	d1StatementsPerReaperInvocation,
 	narObjectKey,
 	type RequestOrigin,
 	requestOriginSchema
@@ -31,8 +30,7 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
-import { StatementBudget } from './statement-budget.ts';
-
+import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
 // statements a single Worker invocation may run.
@@ -40,36 +38,19 @@ import { StatementBudget } from './statement-budget.ts';
 // Once the chunk empties the queue, the pass sweeps for revoked edges.
 const revokedEdgeSweepStatementsPerPass = 1;
 
-// `withMaintenanceEligibility` wraps the pass: it invalidates the projection
-// before the retirement work and reconciles it afterwards.
-const maintenanceEligibilityStatementsPerInvocation = 2;
-
 /**
- * How many D1 statements the retirement drain of one pass may run.
+ * The most paths one pass reads from the teardown queue.
  *
- * A single Worker invocation may run 50. The pass spends two of them on
- * maintenance eligibility and one on the revoked-edge sweep, so the drain has
- * the remaining 47. An alarm runs one maintenance pass per invocation, so no
- * other pass draws on the same allowance.
- *
- * The drain takes from this budget for each chunk and for each attestation
- * reference it retires, so a cache whose paths carry many attestations retires
- * fewer paths per pass rather than running more statements.
- */
-export const teardownDrainStatements =
-	d1StatementsPerReaperInvocation -
-	maintenanceEligibilityStatementsPerInvocation -
-	revokedEdgeSweepStatementsPerPass;
-
-/**
- * The most paths one pass reads from the teardown queue. The drain retires all
- * of them when no path carries an attestation reference, and stops on its
- * statement budget before the end of the page when some do. This is therefore a
- * cap on the rows read rather than on the statements run.
+ * This caps the rows read, not the statements executed. The drain can retire
+ * the entire page when its paths have no attestation references. Otherwise the
+ * remaining D1 allowance can stop it earlier. The calculation reserves one
+ * statement for the revoked-edge sweep.
  */
 export const maxPathsTornDownPerRun =
-	Math.floor(teardownDrainStatements / minimumStatementsPerTeardownChunk) *
-	maxFencedRetireRows;
+	Math.floor(
+		(maintenancePassStatements - revokedEdgeSweepStatementsPerPass) /
+			minimumStatementsPerTeardownChunk
+	) * maxFencedRetireRows;
 
 // Each cache being torn down has its own durable marker because several cache
 // deletion queues can be active at once. The complete suffix is the cache name,
@@ -100,17 +81,14 @@ export class CacheAdminService {
 	// The caller holds the input gate. The retirement service applies the
 	// generation fence that protects a recommitted path.
 	//
-	// The drain takes its statements from a budget that leaves room for the
-	// sweep below, so the pass stays within the D1 statements one invocation may
-	// run whatever the queued paths carry.
+	// The drain sizes its page from the current allowance and keeps one D1
+	// statement for the sweep below. The binding enforces the invocation limit if
+	// the page estimate drifts.
 	//
-	// Once the queue is empty, look for reference edges that the revoked
-	// generation left behind and queue a page of them for the next pass. An
-	// interrupted deletion is the only thing that produces such edges, so an
-	// ordinary teardown finds none. Decide from the queue this pass leaves
-	// behind rather than from the size of the chunk it drained: a chunk that
-	// emptied the queue must still reach the sweep, or a stranded edge would
-	// keep its storage and its charge against the tenant for good.
+	// After the queue becomes empty, sweep for reference edges left by an
+	// interrupted deletion and queue them for the next pass. Check the queue after
+	// the drain because the last full chunk may have emptied it. A missed sweep
+	// would leave the storage and tenant charge in place indefinitely.
 	private async drainTeardownChunk(
 		cache: StoredCache,
 		origin: RequestOrigin,
@@ -127,12 +105,7 @@ export class CacheAdminService {
 			.limit(limit)
 			.all();
 
-		await this.deletionQueue.retireTornDownNarInfos(
-			cache,
-			queued,
-			new StatementBudget(teardownDrainStatements),
-			origin
-		);
+		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
 
 		if (this.hasQueuedDeletions(cache)) {
 			return;
@@ -298,15 +271,12 @@ export class CacheAdminService {
 	/**
 	 * Registers the cache in the local registry if it is not there already.
 	 *
-	 * A registry row is absent for a cache that has never been written to and for
-	 * one a deletion removed, so creating the row is where a cache of a deleted
-	 * name comes back. Clearing the D1 deleted timestamp there costs one
-	 * statement per cache rather than one per write, and a cache that is already
-	 * registered runs no D1 statement at all.
+	 * Creating a registry row also clears the D1 deletion timestamp. This handles
+	 * the first write to a new cache and recreation after deletion. The transition
+	 * uses one D1 statement per newly registered cache.
 	 *
-	 * The default cache is never registered, so its deleted timestamp stays as a
-	 * deletion left it. Nothing reads it: that cache is always in the public
-	 * namespace, whose reads consult no lifecycle state.
+	 * The default cache is always public and uses only the lifecycle generation
+	 * for read authorisation.
 	 */
 	async loadOrCreateCache(cache: StoredCache): Promise<void> {
 		if (cache === DEFAULT_CACHE) {
@@ -361,21 +331,18 @@ export class CacheAdminService {
 	}
 
 	/**
-	 * Deletes a cache by revoking its read authority, removing its local state
-	 * atomically, and leaving its published state to be retired by the bounded
-	 * alarm passes {@link resumeTeardownPass} runs.
+	 * Deletes a cache by revoking its read authority and removing its local state
+	 * atomically. Bounded alarm passes run by {@link resumeTeardownPass} retire the
+	 * published state.
 	 *
 	 * Revocation advances the cache generation and records the deletion in one D1
-	 * statement, independently of the number of reference edges. If that
-	 * statement fails, no local state has changed. Once it succeeds, the read
-	 * query rejects edges from earlier generations and a read in the private
-	 * namespace is refused, both while cleanup continues.
+	 * statement, independently of the number of reference edges. The local
+	 * transaction starts after this statement succeeds. Read queries then exclude
+	 * earlier generations while cleanup continues.
 	 *
-	 * The request retires nothing itself, so its D1 statement count does not
-	 * grow with the number of committed paths and stays within the invocation's
-	 * D1 budget. The marker is written whatever the queue holds, because the
-	 * first pass also has to sweep for edges an interrupted earlier deletion
-	 * stranded, which the local queue does not record.
+	 * The request runs one D1 statement regardless of the number of committed
+	 * paths. It always writes the teardown marker because the first pass must also
+	 * sweep for edges left by an interrupted earlier deletion.
 	 *
 	 * The deletion queue is durable, so garbage collection can resume it after a
 	 * crash before the alarm marker is written. The blob reaper later collects

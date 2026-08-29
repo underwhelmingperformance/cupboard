@@ -24,6 +24,7 @@ import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
@@ -291,9 +292,9 @@ describe('signing key rotation', () => {
 				new NarInfoObjectsService(instance.context)
 			);
 			await service.keyList();
-			await service.runBackfillOnce();
-			await service.runBackfillOnce();
-			await service.runBackfillOnce();
+			await asOneInvocation(() => service.runBackfillOnce());
+			await asOneInvocation(() => service.runBackfillOnce());
+			await asOneInvocation(() => service.runBackfillOnce());
 		});
 
 		const repaired = await fetchNarInfo(before.storePathHash);
@@ -425,7 +426,7 @@ describe('signing key rotation', () => {
 						.mockRejectedValueOnce(new Error('purge unavailable'));
 
 					try {
-						await service.runBackfillOnce();
+						await asOneInvocation(() => service.runBackfillOnce());
 
 						const continuations = instance.context.db
 							.select()
@@ -533,8 +534,8 @@ describe('signing key rotation', () => {
 					});
 
 					try {
-						const pending = withDeadlineBudget(1000, () =>
-							service.runBackfillOnce()
+						const pending = asOneInvocation(() =>
+							withDeadlineBudget(1000, () => service.runBackfillOnce())
 						);
 						await publicationStarted.promise;
 						let didTimeout = false;

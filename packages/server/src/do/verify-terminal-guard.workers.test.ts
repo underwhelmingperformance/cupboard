@@ -27,6 +27,7 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	currentServer,
 	deleteBlobState,
+	drivenDirectly,
 	expectSingleUploadDecision,
 	fileHash,
 	initialise,
@@ -135,9 +136,10 @@ describe('terminal verdicts against straggling verifications', () => {
 					new UploadStateService(instance.context).markUploadPending(
 						upload.uploadId
 					);
-					const verification = (
-						instance as unknown as { verification: VerificationService }
-					).verification;
+					const verification = drivenDirectly(
+						(instance as unknown as { verification: VerificationService })
+							.verification
+					);
 					const replacement = verification.listPendingForVerify(
 						10,
 						Number.MAX_SAFE_INTEGER
@@ -224,9 +226,10 @@ describe('terminal verdicts against straggling verifications', () => {
 					.run();
 				const legacyClaims = await instance.claimPendingVerifications(10);
 
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const replacement = verification.listPendingForVerify(
 					10,
 					Number.MAX_SAFE_INTEGER
@@ -321,9 +324,10 @@ describe('terminal verdicts against straggling verifications', () => {
 		const settled = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const uploadState = (
 					verification as unknown as { uploadState: UploadStateService }
 				).uploadState;
@@ -428,9 +432,10 @@ describe('terminal verdicts against straggling verifications', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const pipeline = (
 					verification as unknown as {
 						commitPipeline: CommitPipelineService;
@@ -517,9 +522,10 @@ describe('terminal verdicts against straggling verifications', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const uploadState = (
 					verification as unknown as { uploadState: UploadStateService }
 				).uploadState;
@@ -655,9 +661,10 @@ describe('terminal verdicts against straggling verifications', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const originalPut = env.BLOBS.put.bind(env.BLOBS);
 				const { promise: held, resolve: release } =
 					Promise.withResolvers<undefined>();
@@ -870,9 +877,10 @@ describe('terminal verdicts against straggling verifications', () => {
 				const applied = await runInDurableObject(
 					currentServer(),
 					async (instance) => {
-						const verification = (
-							instance as unknown as { verification: VerificationService }
-						).verification;
+						const verification = drivenDirectly(
+							(instance as unknown as { verification: VerificationService })
+								.verification
+						);
 						const deletion = vi
 							.spyOn(
 								verification as unknown as {
@@ -952,9 +960,10 @@ describe('terminal verdicts against straggling verifications', () => {
 			const result = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					const verification = (
-						instance as unknown as { verification: VerificationService }
-					).verification;
+					const verification = drivenDirectly(
+						(instance as unknown as { verification: VerificationService })
+							.verification
+					);
 					const pipeline = (
 						verification as unknown as {
 							commitPipeline: CommitPipelineService;
@@ -1083,9 +1092,10 @@ describe('terminal verdicts against straggling verifications', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const verification = (
-					instance as unknown as { verification: VerificationService }
-				).verification;
+				const verification = drivenDirectly(
+					(instance as unknown as { verification: VerificationService })
+						.verification
+				);
 				const narInfoObjects = (
 					verification as unknown as {
 						narInfoObjects: NarInfoObjectsService;

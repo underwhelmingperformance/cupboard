@@ -526,6 +526,37 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasAttachRoot: false }]);
 	});
 
+	it('leaves recorded_verdict_json null for a pending upload created before 0041', async () => {
+		const insertPreVerdictPendingUpload =
+			"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z', 'pending')";
+		const selectRecordedVerdicts =
+			'SELECT id, recorded_verdict_json FROM pending_upload';
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-recorded-verdict'),
+			async (_instance, state) => {
+				// A pending upload from before 0041 has no recorded-verdict column.
+				// The migration must add it as NULL. The queue consumer treats NULL as
+				// an upload without a verdict and can still claim the row. The anchor
+				// is fixed so later migrations cannot
+				// silently retarget the test.
+				await migrateThrough(state, 40);
+				state.storage.sql.exec(insertPreVerdictPendingUpload);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const rows = state.storage.sql.exec(selectRecordedVerdicts).toArray();
+
+				return rows.map((row) => ({
+					id: row.id,
+					hasRecordedVerdict: row.recorded_verdict_json !== null
+				}));
+			}
+		);
+
+		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
+	});
+
 	it('migrates a pre-0034 sweep scan to the collect phase', async () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";

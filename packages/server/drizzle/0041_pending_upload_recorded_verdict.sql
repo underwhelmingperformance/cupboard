@@ -1,0 +1,2 @@
+ALTER TABLE `pending_upload` ADD `recorded_verdict_json` text;--> statement-breakpoint
+CREATE INDEX `pending_upload_recorded_verdict_idx` ON `pending_upload` (`id`) WHERE "pending_upload"."recorded_verdict_json" IS NOT NULL;

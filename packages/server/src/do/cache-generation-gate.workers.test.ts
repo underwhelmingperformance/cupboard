@@ -26,7 +26,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
 	attestationListObjectKey,
-	d1StatementsPerReaperInvocation,
+	d1StatementsPerInvocation,
 	narInfoObjectKey,
 	narObjectKey,
 	requestOriginSchema
@@ -246,9 +246,9 @@ async function deleteAndParkTeardown(cache: StoredCache): Promise<void> {
 }
 
 /**
- * Counts the D1 statements a deletion runs, with the chunking a deployment
- * uses. The deletion retires nothing itself, so the count must not grow with
- * the number of paths the cache holds.
+ * Counts the D1 statements used by a deletion with production chunk sizes. The
+ * deletion revokes the generation and schedules the drain. Its statement count
+ * must therefore remain independent of the number of paths in the cache.
  *
  * The count is taken inside one Durable Object invocation. A deletion arms the
  * alarm that drains the cache before it returns, and the statements of that
@@ -751,8 +751,7 @@ describe('deleted private cache', () => {
 			basic(cacheReader)
 		);
 
-		// A push registers the cache name again, which ends the deleted state the
-		// deletion recorded. Without that the new cache would answer nothing.
+		// A push registers the cache name again and creates a new active generation.
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const freshRead = await readFetch(
@@ -889,7 +888,7 @@ describe('attestation list generation', () => {
 
 		// Park the drain so the list object of the deleted cache survives, then
 		// commit the same path again. The new commit takes the next generation and
-		// attaches no attestation, so nothing rewrites the object.
+		// leaves the previous list object in place.
 		await deleteAndParkTeardown(buildsCache);
 		await pushPath(token, metadata, 'builds', nar);
 
@@ -982,8 +981,8 @@ describe('cache generation gate', () => {
 		const beforeDeletion = await readFetch(narUrl, basic(cacheReader));
 
 		// Count the surviving edges in the same Durable Object invocation as the
-		// deletion. Once the invocation ends, workerd can deliver the due alarm,
-		// whose teardown pass could retire the edges before a later count. The
+		// deletion. Once the invocation ends, workerd can deliver the due alarm.
+		// Its teardown pass could retire the edges before a later count. The
 		// subsequent read returns 404 because the deletion revoked the generation.
 		const undrained = await runInDurableObject(
 			currentServer(),
@@ -1109,9 +1108,9 @@ describe('cache generation gate', () => {
 		const strandedNar = await verifiableNar('residue');
 		const stranded = indexedMetadata(0, strandedNar);
 
-		// An edge with no narinfo row behind it: what an interrupted deletion
-		// leaves once the row transaction has run and the drain has not. The
-		// deletion finds nothing to queue and must still retire this edge.
+		// Seed the state left when the row transaction commits but the drain does
+		// not run: a reference edge without a narinfo row. A later deletion must
+		// still retire this edge.
 		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
 
 		// Read the marker in the same invocation as the deletion. Once that
@@ -1155,8 +1154,8 @@ describe('cache generation gate', () => {
 		const stranded = indexedMetadata(1, strandedNar);
 
 		await pushPath(token, committed, 'builds', committedNar);
-		// An edge with no narinfo row behind it, which is what an interrupted
-		// earlier deletion leaves. The transaction that queues the teardown reads
+		// Seed a reference edge without a narinfo row. An interrupted earlier
+		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
 		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
 
@@ -1216,18 +1215,18 @@ describe('cache generation gate', () => {
 	});
 
 	it('keeps the deletion D1 statement count independent of how many paths the cache holds', async () => {
-		const small = await deletionStatements('gen-budget-small', 1);
-		const large = await deletionStatements('gen-budget-large', 120);
+		const small = await deletionStatements('gen-allowance-small', 1);
+		const large = await deletionStatements('gen-allowance-large', 120);
 
 		// The generation revocation and the two maintenance-eligibility statements.
 		// A deletion that retired a chunk of paths itself would add roughly six
-		// statements for every 45 paths and pass the invocation budget on a cache
+		// statements for every 45 paths and pass the invocation allowance on a cache
 		// of a few hundred.
 		expect({
 			small,
 			large,
-			budget: d1StatementsPerReaperInvocation
-		}).toStrictEqual({ small: 3, large: 3, budget: 50 });
+			allowance: d1StatementsPerInvocation
+		}).toStrictEqual({ small: 3, large: 3, allowance: 50 });
 	}, 240_000);
 
 	it('keeps a full teardown pass within the D1 statements one invocation may run', async () => {
@@ -1236,9 +1235,8 @@ describe('cache generation gate', () => {
 			'gen-pass-large',
 			maxFencedRetireRows + 1
 		);
-		// A second chunk adds only its own retirement statements, so the difference
-		// is the cost of a chunk and the remainder is what a pass spends whatever
-		// it retires.
+		// A second chunk adds only its retirement statements. The difference gives
+		// the per-chunk cost, and the remainder gives the fixed cost of a pass.
 		const perChunk = twoChunks - oneChunk;
 		const perPass = oneChunk - perChunk;
 
@@ -1252,18 +1250,18 @@ describe('cache generation gate', () => {
 			perPass,
 			worstCase:
 				perPass + (maxPathsTornDownPerRun / maxFencedRetireRows) * perChunk,
-			budget: d1StatementsPerReaperInvocation
+			allowance: d1StatementsPerInvocation
 		}).toStrictEqual({
 			oneChunk: 9,
 			twoChunks: 15,
 			perChunk: 6,
 			perPass: 3,
 			worstCase: 45,
-			budget: 50
+			allowance: 50
 		});
 	}, 240_000);
 
-	it('keeps every attested teardown pass within the D1 statement budget', async () => {
+	it('keeps every attested teardown pass within the D1 statement allowance', async () => {
 		// Twelve references in one chunk is more attestation work than a pass can
 		// afford, so the drain has to stop inside the chunk and resume. Measuring
 		// each pass means an attestation retirement that grows costlier fails here
@@ -1277,16 +1275,16 @@ describe('cache generation gate', () => {
 		expect({
 			perPass,
 			worstPass: Math.max(...perPass),
-			budget: d1StatementsPerReaperInvocation,
+			allowance: d1StatementsPerInvocation,
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
-			// The first pass retires the eight references it can afford beside the
-			// chunk's own retirement, and leaves the chunk unfinished. The second
+			// The first pass retires the eight references the allowance covers beside
+			// the chunk's own retirement, and leaves the chunk unfinished. The second
 			// retires the last four, finishes the chunk, and sweeps.
 			perPass: [43, 29],
 			worstPass: 43,
-			budget: 50,
+			allowance: 50,
 			references: [],
 			edges: []
 		});
