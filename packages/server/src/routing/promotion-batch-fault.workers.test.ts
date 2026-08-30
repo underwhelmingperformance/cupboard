@@ -25,6 +25,102 @@ import {
 
 const byNarHash = (a: string, b: string) => a.localeCompare(b);
 
+interface StatementDetail {
+	readonly sql: string;
+	readonly parameters: readonly unknown[];
+}
+
+// Workerd's prepared statements carry the SQL they will run and the values they
+// bind. The Workers types do not describe either, so read them through a guard
+// rather than trusting the shape.
+function statementDetail(statement: D1PreparedStatement): StatementDetail {
+	const candidate: unknown = statement;
+
+	if (
+		typeof candidate === 'object' &&
+		candidate !== null &&
+		'statement' in candidate &&
+		typeof candidate.statement === 'string' &&
+		'params' in candidate &&
+		Array.isArray(candidate.params)
+	) {
+		return { sql: candidate.statement, parameters: candidate.params };
+	}
+
+	throw new Error('A D1 prepared statement did not expose its SQL and values.');
+}
+
+interface BatchFaultPlan {
+	/**
+	 * The NAR hashes whose work this fault applies to.
+	 */
+	readonly narHashes: ReadonlySet<string>;
+	/**
+	 * Whether the batch contains the SQL operation this plan rejects.
+	 */
+	readonly matches: (sql: string) => boolean;
+	/**
+	 * How many matching batches to reject. The rest run normally.
+	 */
+	readonly limit?: number;
+}
+
+interface BatchFault {
+	readonly rejected: () => number;
+	readonly restore: () => void;
+}
+
+/**
+ * Rejects the D1 batches a plan selects, and reports how many it rejected.
+ *
+ * The binding is shared by everything this isolate runs, so a fault chosen by
+ * call index lands on whichever batch happens to be that many calls in. This
+ * rejects a batch only when it binds one of the test's own NAR hashes and its
+ * SQL matches, which makes the fault independent of what else is running.
+ *
+ * The rejection count is part of what each test asserts. A query that stops
+ * matching then fails the test rather than quietly injecting no fault at all.
+ */
+function failBatchesFor(plan: BatchFaultPlan): BatchFault {
+	const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+	const limit = plan.limit ?? Infinity;
+	let rejected = 0;
+
+	const spy = vi
+		.spyOn(env.CUPBOARD_DB, 'batch')
+		.mockImplementation((statements) => {
+			const details = statements.map((statement) => statementDetail(statement));
+			const isThisTest = details.some((detail) =>
+				detail.parameters.some(
+					(value) => typeof value === 'string' && plan.narHashes.has(value)
+				)
+			);
+			const sql = details.map((detail) => detail.sql).join(' ');
+
+			if (isThisTest && rejected < limit && plan.matches(sql)) {
+				rejected += 1;
+
+				return Promise.reject(new Error('simulated D1 fault'));
+			}
+
+			return originalBatch(statements);
+		});
+
+	return {
+		rejected: () => rejected,
+		restore: () => {
+			spy.mockRestore();
+		}
+	};
+}
+
+// The batch that reserves the promotion's incarnation. It runs before the
+// stored blob metadata is read, and a fault after it is what these tests place.
+const promotionReservation = '"object_incarnation"';
+
+// The batch that prefetches the tenant's presence rows for a page of hashes.
+const presencePrefetch = '"tenant_blob"';
+
 async function deferReuseUpload(
 	token: string,
 	firstSeed: string,
@@ -79,35 +175,29 @@ describe('promotion after a transient D1 batch failure', () => {
 			'c'.repeat(32)
 		);
 
-		// The claim pin uses the first batch. Fail the first promotion batch so
-		// both claims must use the retry.
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		let batchCallCount = 0;
-		const batchSpy = vi
-			.spyOn(env.CUPBOARD_DB, 'batch')
-			.mockImplementation((...arguments_) => {
-				batchCallCount += 1;
-
-				if (batchCallCount === 2) {
-					return Promise.reject(new Error('simulated D1 transient fault'));
-				}
-
-				return originalBatch(...arguments_);
-			});
+		// Both claims share the presence prefetch, so rejecting it once makes both
+		// of them settle through the retry.
+		const fault = failBatchesFor({
+			narHashes: new Set([fresh.metadata.narHash, reuse.narHash]),
+			matches: (sql) => sql.includes(presencePrefetch),
+			limit: 1
+		});
 
 		try {
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
-			batchSpy.mockRestore();
+			fault.restore();
 		}
 
 		const blobState = await blobStateNarHashes();
 
 		expect({
+			rejectedBatches: fault.rejected(),
 			freshVerdict: await pendingUploadVerdict(fresh.uploadId),
 			reuseVerdict: await pendingUploadVerdict(reuse.uploadId),
 			blobStateHashes: blobState.map((row) => row.narHash).toSorted(byNarHash)
 		}).toStrictEqual({
+			rejectedBatches: 1,
 			freshVerdict: undefined,
 			reuseVerdict: undefined,
 			blobStateHashes: [fresh.metadata.narHash, reuse.narHash].toSorted(
@@ -132,32 +222,28 @@ describe('promotion followed by a persistent D1 fault', () => {
 			'1'.repeat(32)
 		);
 
-		// The pin batch is call 1. Calls 2-4 read the stored blob metadata after
-		// promotion, including the per-row fallback after prefetch fails.
-		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
-		let batchCallCount = 0;
-		const batchSpy = vi
-			.spyOn(env.CUPBOARD_DB, 'batch')
-			.mockImplementation((...arguments_) => {
-				batchCallCount += 1;
-
-				if (batchCallCount >= 2 && batchCallCount <= 4) {
-					return Promise.reject(new Error('simulated persistent D1 fault'));
-				}
-
-				return originalBatch(...arguments_);
-			});
+		// The promotion reserves its incarnation and then reads the stored blob
+		// metadata. Let the reservation through and reject everything after it,
+		// including the per-row reads attempted after the prefetch fails.
+		const fault = failBatchesFor({
+			narHashes: new Set([fresh.metadata.narHash]),
+			matches: (sql) => !sql.includes(promotionReservation)
+		});
 
 		try {
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
-			batchSpy.mockRestore();
+			fault.restore();
 		}
 
 		expect({
+			rejectedBatches: fault.rejected(),
 			freshVerdict: await pendingUploadVerdict(fresh.uploadId),
 			blobState: await blobStateNarHashes()
 		}).toStrictEqual({
+			// The prefetch of the stored blob metadata, the presence prefetch, and
+			// the charge the settle would have run.
+			rejectedBatches: 3,
 			freshVerdict: 'pending',
 			blobState: [{ narHash: fresh.metadata.narHash }]
 		});
