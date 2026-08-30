@@ -1,4 +1,3 @@
-import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -14,6 +13,7 @@ import {
 } from '../retention.ts';
 
 import { baseProcedure } from './base.ts';
+import { cacheScopedProcedure } from './cache-scoped.ts';
 
 export const policiesContract = {
 	list: baseProcedure
@@ -53,12 +53,13 @@ export const policiesContract = {
 	// `upload:confirm` may read grace coverage; policy-admin authority is not
 	// required. A grace-mode CI run checks coverage before it publishes, and a
 	// confirm response already reports the resolved grace for each path.
-	graceCoverage: baseProcedure
-		.meta({
-			requires: 'upload:confirm',
-			resource: { cache: { field: 'cacheName' } }
-		})
-		.route({ method: 'GET', path: '/cache/{cacheName}/grace-coverage' })
-		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
-		.output(graceCoverageResponseSchema)
+	graceCoverage: cacheScopedProcedure(
+		{
+			method: 'GET',
+			suffix: '/grace-coverage',
+			requires: 'upload:confirm'
+		},
+		{},
+		graceCoverageResponseSchema
+	)
 };
