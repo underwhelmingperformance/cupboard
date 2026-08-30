@@ -6,10 +6,10 @@ import {
 	claimMatchSchema,
 	oidcAudienceSchema,
 	oidcIssuerSchema,
+	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody,
 	type TrustRuleId,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
@@ -188,7 +188,7 @@ export async function getControlTrust(
 
 export async function addControlTrust(
 	database: Database,
-	body: ParsedOidcTrustAddBody,
+	body: OidcTrustAddBody,
 	now: IsoTimestamp,
 	canUseLoopbackHttp = false
 ): Promise<OidcTrustSummary> {

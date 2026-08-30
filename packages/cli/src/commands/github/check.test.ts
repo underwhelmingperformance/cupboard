@@ -10,7 +10,9 @@ import {
 import { type Operation, type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	oidcTrustListResponseSchema,
-	type OidcTrustSummary
+	type OidcTrustSummary,
+	type OidcTrustSummaryInput,
+	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
 import {
 	reuseViewListResponseSchema,
@@ -62,7 +64,7 @@ function storedRule(
 	id: string,
 	body: ReturnType<typeof githubPrAddBody>
 ): OidcTrustSummary {
-	return { id, ...body, disabled: false };
+	return oidcTrustSummarySchema.parse({ id, ...body, disabled: false });
 }
 
 function withoutOperation(
@@ -114,7 +116,7 @@ function pullRequestView(
 function checkClient(overrides: {
 	graceSeconds?: number | undefined;
 	extraPolicies?: { cachePrefix: string; graceSeconds: number }[];
-	rules?: OidcTrustSummary[];
+	rules?: OidcTrustSummaryInput[];
 	views?: ReuseViewSummary[];
 }): GithubCheckClient {
 	return {

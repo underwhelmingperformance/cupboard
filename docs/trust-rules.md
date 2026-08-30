@@ -139,11 +139,17 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
 ```
 
 A push that names both a target root and a run root asks for two grants on the
-same cache, one per root selector. Rule selection picks exactly one trust rule
-per exchange, so that single rule must permit both grants. If the target-root
-and run-root allowances are split across two rules, the exchange is evaluated
-against whichever rule was selected, and that rule cannot grant the other
-allowance.
+same cache, one per root selector. Rule selection first finds the
+highest-precedence set of rules for the verified identity. The requested grants
+can distinguish rules tied at that precedence only when exactly one rule permits
+the complete request. Rules are never combined, so one rule must permit both
+grants. If the target-root and run-root allowances are split across two rules,
+neither rule permits the complete exchange.
+
+This allows two rules with the same identity claims to grant disjoint authority,
+such as access to different caches. If two tied rules both permit a request, the
+exchange remains ambiguous and is refused. A less specific identity rule cannot
+grant a request that the highest-precedence rules refuse.
 
 The exchange is all-or-nothing, so a rule that cannot grant both refuses the
 whole exchange. That is the safer failure: the push fails at token exchange

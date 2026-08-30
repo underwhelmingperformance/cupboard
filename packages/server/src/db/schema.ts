@@ -514,11 +514,11 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
 
-// Decoded issuer, audience, and claim values select a candidate trust rule. The
-// caller must then verify the token against the issuer's discovered JWKS before
-// granting any authority from `permitted_grants_json`. The owner rule takes its
-// wildcard identity from `tenant_identity`. `display_json` records provenance
-// from a preset, and disabling a rule retains its audit row.
+// Decoded issuer and audience values select a configured verification target.
+// After verification, the claims and requested grants select a policy rule.
+// The owner rule takes its wildcard identity from `tenant_identity`.
+// `display_json` records provenance from a preset, and disabling a rule retains
+// its audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {
 	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),

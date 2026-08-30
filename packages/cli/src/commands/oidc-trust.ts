@@ -3,12 +3,11 @@ import { readFile } from 'node:fs/promises';
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type ClaimMatch,
-	type OidcTrustAddBody,
+	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema,
+	type OidcTrustListResponse,
+	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustListResponse,
-	type ParsedOidcTrustRemoveResponse,
-	type ParsedOidcTrustSummary,
 	type TrustRuleId,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
@@ -76,7 +75,7 @@ function withAttest(
 // control grants that have no dedicated flags.
 async function addBodyFor(
 	options: OidcTrustAddOptions
-): Promise<OidcTrustAddBody> {
+): Promise<OidcTrustAddBodyInput> {
 	if (options.fromFile !== undefined) {
 		return loadAddBody(options.fromFile);
 	}
@@ -103,7 +102,7 @@ async function addBodyFor(
 	});
 }
 
-async function loadAddBody(path: string): Promise<OidcTrustAddBody> {
+async function loadAddBody(path: string): Promise<OidcTrustAddBodyInput> {
 	let parsed: unknown;
 
 	try {
@@ -144,10 +143,10 @@ interface OidcTrustAddOptions {
  * The OIDC trust operations required by the command implementations.
  */
 export interface OidcTrustClient {
-	list(): Promise<ParsedOidcTrustListResponse>;
-	get(input: { id: TrustRuleId }): Promise<ParsedOidcTrustSummary>;
-	add(input: OidcTrustAddBody): Promise<ParsedOidcTrustSummary>;
-	remove(input: { id: TrustRuleId }): Promise<ParsedOidcTrustRemoveResponse>;
+	list(): Promise<OidcTrustListResponse>;
+	get(input: { id: TrustRuleId }): Promise<OidcTrustSummary>;
+	add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
+	remove(input: { id: TrustRuleId }): Promise<OidcTrustRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -302,12 +301,11 @@ export function githubPrAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubPrOptions
-): OidcTrustAddBody {
+): OidcTrustAddBodyInput {
 	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
 
-	// Rule selection occurs before token verification and chooses one matching
-	// rule. Pin the event so a token from the same repository cannot select this
-	// rule for a branch or tag build.
+	// Pin the event so a verified token from the same repository cannot select
+	// this rule for a branch or tag build.
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
@@ -345,7 +343,7 @@ export function githubTagAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubTagOptions
-): OidcTrustAddBody {
+): OidcTrustAddBodyInput {
 	const cacheTemplate = options.cacheTemplate ?? '{tag}';
 
 	// Pin the ref type so a branch or pull-request token from the same repository
@@ -387,7 +385,7 @@ export function githubBranchAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubBranchOptions
-): OidcTrustAddBody {
+): OidcTrustAddBodyInput {
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
@@ -734,7 +732,7 @@ export async function runOidcTrustList(
 }
 
 export async function runOidcTrustAdd(
-	body: OidcTrustAddBody,
+	body: OidcTrustAddBodyInput,
 	reporter: Reporter,
 	client: Pick<OidcTrustClient, 'add'>
 ): Promise<void> {

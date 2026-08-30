@@ -199,7 +199,8 @@ export const oidcTrustAddBodySchema = z.strictObject({
 	permittedGrants: z.array(permittedGrantSchema).min(1),
 	display: oidcTrustDisplaySchema.optional()
 });
-export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
+export type OidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
+export type OidcTrustAddBodyInput = z.input<typeof oidcTrustAddBodySchema>;
 
 // Control-plane identities have one stable subject. Patterned subjects cannot
 // be represented by the control trust store and would make every row read fail.
@@ -220,12 +221,13 @@ export const oidcTrustSummarySchema = z.strictObject({
 	display: oidcTrustDisplaySchema.optional(),
 	disabled: z.boolean()
 });
-export type ParsedOidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
+export type OidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
+export type OidcTrustSummaryInput = z.input<typeof oidcTrustSummarySchema>;
 
 export const oidcTrustListResponseSchema = z.strictObject({
 	rules: z.array(oidcTrustSummarySchema)
 });
-export type ParsedOidcTrustListResponse = z.output<
+export type OidcTrustListResponse = z.output<
 	typeof oidcTrustListResponseSchema
 >;
 
@@ -233,15 +235,9 @@ export const oidcTrustRemoveResponseSchema = z.strictObject({
 	id: trustRuleIdSchema,
 	removed: z.boolean()
 });
-export type ParsedOidcTrustRemoveResponse = z.output<
+export type OidcTrustRemoveResponse = z.output<
 	typeof oidcTrustRemoveResponseSchema
 >;
 
 export type TokenExchangeRequest = z.input<typeof tokenExchangeRequestSchema>;
 export type TokenResponse = z.input<typeof tokenResponseSchema>;
-export type OidcTrustAddBody = z.input<typeof oidcTrustAddBodySchema>;
-export type OidcTrustSummary = z.input<typeof oidcTrustSummarySchema>;
-export type OidcTrustListResponse = z.input<typeof oidcTrustListResponseSchema>;
-export type OidcTrustRemoveResponse = z.input<
-	typeof oidcTrustRemoveResponseSchema
->;

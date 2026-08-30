@@ -161,11 +161,11 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 });
 
 // These rules determine which external OIDC identities can receive control
-// grants. Decoded `iss`, `aud`, and `claims_json` values select a candidate;
-// token verification must succeed before `permitted_grants_json` can authorise
-// an exchange. The initial signup creates the wildcard owner rule, and the
-// control admin API adds scoped identities. Disabling a rule retains its audit
-// row. Control tokens use an issuer separate from every tenant issuer.
+// grants. Decoded issuer and audience values select a configured verification
+// target. After verification, the claims and requested grants select a policy
+// rule. The initial signup creates the wildcard owner rule, and the control
+// admin API adds scoped identities. Disabling a rule retains its audit row.
+// Control tokens use an issuer separate from every tenant issuer.
 export const controlTrust = sqliteTable('control_trust', {
 	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),

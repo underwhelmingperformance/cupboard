@@ -21,11 +21,14 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	firstClaimMismatch,
+	hasMatchingOidcTrustIdentity,
 	isRuleInteractive,
-	matchOidcTrust,
 	type OidcClaims,
-	type OidcTrustRule
+	type OidcTrustRule,
+	oidcTrustVerificationTarget,
+	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
+import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray } from 'drizzle-orm';
 
@@ -47,6 +50,7 @@ import {
 import { isConstantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
+	InvalidAuthorizationDetailsError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	SubjectTokenRequiredError,
@@ -80,6 +84,16 @@ interface PreparedIssuedResponse {
 	readonly body: TokenResponse;
 	readonly refreshToken?: PreparedRefreshToken;
 }
+
+type IssuanceAuthority =
+	| {
+			readonly kind: 'external';
+			readonly claims: VerifiedOidcClaims;
+	  }
+	| {
+			readonly kind: 'refresh';
+			readonly grants: AuthorizationDetails;
+	  };
 
 interface ParsedRefreshToken {
 	readonly id: string;
@@ -128,19 +142,58 @@ export class TokenExchangeService {
 			throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 		}
 
-		// Decode the claims only to select a trust rule. Verify the token against that
-		// rule's issuer, audience, and JWKS before resolving grants. Unverified claims
-		// cannot authorise the exchange.
-		const claims = this.oidcTrust.decodeInbound(body.subject_token);
+		// Decode only to choose a configured issuer and audience for verification
+		// and to refuse a token when its claims match no rule. Policy selection
+		// below uses only verified claims.
+		const decoded = this.oidcTrust.decodeInbound(body.subject_token);
 		const snapshots = this.oidcTrust.enabledOidcTrustRuleSnapshots();
-		const rule = matchOidcTrust(
-			snapshots.map((snapshot) => snapshot.rule),
-			claims
-		);
+		const rules = snapshots.map((snapshot) => snapshot.rule);
+		const target = oidcTrustVerificationTarget(rules, decoded);
 
-		if (rule === undefined) {
-			throw await this.untrustedRefusal(claims, body.subject_token);
+		if (target === undefined || !hasMatchingOidcTrustIdentity(rules, decoded)) {
+			throw await this.untrustedRefusal(rules, decoded, body.subject_token);
 		}
+
+		let verified: VerifiedOidcClaims;
+
+		try {
+			verified = await this.oidcTrust.verifyInbound(
+				target,
+				body.subject_token,
+				configuredAudiences(rules)
+			);
+		} catch (error) {
+			// Expose claim-mismatch diagnostics only after successful verification,
+			// even if the decoded claims identify a configured repository.
+			// Token-verification failures therefore remain generic. Propagate
+			// issuer-availability errors unchanged because they are retryable and
+			// do not indicate invalid tokens.
+			if (
+				error instanceof SubjectTokenVerificationFailedError &&
+				this.repositoryPinnedCandidate(rules, decoded) !== undefined
+			) {
+				throw new TenantSubjectTokenUntrustedError();
+			}
+
+			throw error;
+		}
+		const requested = parseRequestedGrants(body.authorization_details);
+		const selection = selectOidcTrust(rules, verified, requested);
+
+		switch (selection.outcome) {
+			case 'authority-unmatched': {
+				throw new InvalidAuthorizationDetailsError('not-permitted');
+			}
+			case 'identity-unmatched':
+			case 'ambiguous': {
+				throw this.verifiedUntrustedRefusal(rules, verified);
+			}
+			case 'selected': {
+				break;
+			}
+		}
+
+		const { rule } = selection;
 
 		const snapshot = snapshots.find((candidate) => candidate.rule === rule);
 
@@ -148,10 +201,6 @@ export class TokenExchangeService {
 			throw new TenantSubjectTokenUntrustedError();
 		}
 
-		const verified = await this.oidcTrust.verifyInbound(
-			rule,
-			body.subject_token
-		);
 		const verifiedSubject =
 			typeof verified.sub === 'string' && verified.sub !== ''
 				? verified.sub
@@ -163,13 +212,9 @@ export class TokenExchangeService {
 
 		const subject = oidcSubjectSchema.parse(verifiedSubject);
 
-		return this.issuedResponse(
-			snapshot,
-			subject,
-			verified,
-			parseRequestedGrants(body.authorization_details),
-			{ issued_token_type: issuedAccessTokenType }
-		);
+		return this.issuedResponse(snapshot, subject, verified, requested, {
+			issued_token_type: issuedAccessTokenType
+		});
 	}
 
 	// Return a generic refusal unless both claimed repository IDs exactly match an
@@ -179,18 +224,23 @@ export class TokenExchangeService {
 	// claims. Forged tokens and tokens from other repositories receive no details
 	// about the rule.
 	private async untrustedRefusal(
+		rules: readonly OidcTrustRule[],
 		claims: OidcClaims,
 		subjectToken: string
 	): Promise<SubjectTokenUntrustedError> {
-		const candidate = this.repositoryPinnedCandidate(claims);
+		const candidate = this.repositoryPinnedCandidate(rules, claims);
 
 		if (candidate === undefined) {
 			return new TenantSubjectTokenUntrustedError();
 		}
 
-		let verified: OidcClaims;
+		let verified: VerifiedOidcClaims;
 		try {
-			verified = await this.oidcTrust.verifyInbound(candidate, subjectToken);
+			verified = await this.oidcTrust.verifyInbound(
+				candidate,
+				subjectToken,
+				configuredAudiences(rules)
+			);
 		} catch {
 			// Collapse signature failures and issuer outages to the same generic
 			// refusal. Neither failure can expose a claim value. Candidate verification
@@ -199,24 +249,40 @@ export class TokenExchangeService {
 			return new TenantSubjectTokenUntrustedError();
 		}
 
-		const mismatch = firstClaimMismatch(candidate, verified);
+		return this.claimRefusal(candidate, verified);
+	}
 
-		if (mismatch === undefined) {
-			return new TenantSubjectTokenUntrustedError();
-		}
+	private verifiedUntrustedRefusal(
+		rules: readonly OidcTrustRule[],
+		claims: OidcClaims
+	): SubjectTokenUntrustedError {
+		const candidate = this.repositoryPinnedCandidate(rules, claims);
 
-		return new TenantSubjectTokenClaimMismatchError(candidate.id, mismatch);
+		return candidate === undefined
+			? new TenantSubjectTokenUntrustedError()
+			: this.claimRefusal(candidate, claims);
+	}
+
+	private claimRefusal(
+		candidate: OidcTrustRule,
+		claims: OidcClaims
+	): SubjectTokenUntrustedError {
+		const mismatch = firstClaimMismatch(candidate, claims);
+
+		return mismatch === undefined
+			? new TenantSubjectTokenUntrustedError()
+			: new TenantSubjectTokenClaimMismatchError(candidate.id, mismatch);
 	}
 
 	// Prefer the rule with more claim bindings so a broad repository rule cannot
 	// hide a narrower branch or workflow mismatch. Rule IDs make ties deterministic.
 	private repositoryPinnedCandidate(
+		rules: readonly OidcTrustRule[],
 		claims: OidcClaims
 	): OidcTrustRule | undefined {
 		const pins = ['repository_id', 'repository_owner_id'];
 
-		return this.oidcTrust
-			.enabledOidcTrustRules()
+		return rules
 			.filter((rule) =>
 				pins.every((name) => {
 					const expected = rule.claims[name];
@@ -353,11 +419,13 @@ export class TokenExchangeService {
 		const prepared = await this.prepareIssuedResponse(
 			snapshot.rule,
 			family.subject,
-			{},
+			{
+				kind: 'refresh',
+				grants: this.familyGrants(family)
+			},
 			parseRequestedGrants(body.authorization_details),
 			{},
-			family,
-			this.familyGrants(family)
+			family
 		);
 
 		if (prepared.refreshToken === undefined) {
@@ -387,14 +455,14 @@ export class TokenExchangeService {
 	private async issuedResponse(
 		snapshot: OidcTrustRuleSnapshot,
 		subject: OidcSubject,
-		claims: OidcClaims,
+		claims: VerifiedOidcClaims,
 		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
 		const prepared = await this.prepareIssuedResponse(
 			snapshot.rule,
 			subject,
-			claims,
+			{ kind: 'external', claims },
 			requested,
 			extra
 		);
@@ -424,17 +492,16 @@ export class TokenExchangeService {
 	private async prepareIssuedResponse(
 		rule: OidcTrustRule,
 		subject: OidcSubject,
-		claims: OidcClaims,
+		authority: IssuanceAuthority,
 		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>,
-		family?: RefreshTokenFamily,
-		familyGrants?: AuthorizationDetails
+		family?: RefreshTokenFamily
 	): Promise<PreparedIssuedResponse> {
 		const isInteractive = isRuleInteractive(rule);
 		const granted =
-			familyGrants === undefined
-				? resolveRequestedGrants(rule, claims, requested)
-				: attenuatedGrants(familyGrants, requested);
+			authority.kind === 'external'
+				? resolveRequestedGrants(rule, authority.claims, requested)
+				: attenuatedGrants(authority.grants, requested);
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,
@@ -661,6 +728,14 @@ export class TokenExchangeService {
 
 		throw new UnsupportedGrantTypeError(body.grant_type);
 	}
+}
+
+// Every configured audience identifies this deployment, so any of them may
+// appear alongside the verified audience in a token's `aud` array.
+function configuredAudiences(
+	rules: readonly OidcTrustRule[]
+): ReadonlySet<string> {
+	return new Set(rules.map((rule) => rule.audience));
 }
 
 // The wire form is `<id>.<secret>`. The ID selects the row, and the secret
