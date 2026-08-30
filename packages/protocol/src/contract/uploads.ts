@@ -1,4 +1,3 @@
-import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -15,6 +14,7 @@ import {
 } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
+import { cacheScopedProcedure } from './cache-scoped.ts';
 
 export const uploadsContract = {
 	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
@@ -22,34 +22,26 @@ export const uploadsContract = {
 	// issues replacement credentials for the same staging prefix after authorising
 	// the current token. Replacement credentials let a long push continue using
 	// bytes already staged. Their expiry never exceeds the token expiry.
-	credential: baseProcedure
-		.meta({
-			requires: 'upload:negotiate',
-			resource: { cache: { field: 'cacheName' } }
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/credential' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				pushId: pushIdSchema.optional()
-			})
-		)
-		.output(pushCredentialSchema),
+	credential: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/uploads/credential',
+			requires: 'upload:negotiate'
+		},
+		{ pushId: pushIdSchema.optional() },
+		pushCredentialSchema
+	),
 
-	negotiate: baseProcedure
-		.meta({
+	negotiate: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/uploads',
 			requires: 'upload:negotiate',
-			resource: { cache: { field: 'cacheName' } },
 			maintenance: true
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/uploads' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				...uploadNegotiateRequestSchema.shape
-			})
-		)
-		.output(uploadNegotiateResponseSchema),
+		},
+		uploadNegotiateRequestSchema.shape,
+		uploadNegotiateResponseSchema
+	),
 
 	// Classifies a closure exactly as negotiation would, including the grace facts
 	// needed for a report. Preview creates no upload, repairs no stale narinfo, and
@@ -57,20 +49,16 @@ export const uploadsContract = {
 	// The cache-scoped grant and ownership check prevent cross-tenant existence
 	// disclosure. Preview does not set `maintenance` and does not schedule
 	// background work.
-	preview: baseProcedure
-		.meta({
+	preview: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/uploads/preview',
 			requires: 'upload:preview',
-			resource: { cache: { field: 'cacheName' } },
 			replaySafety: 'replay-safe'
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/preview' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				...uploadPreviewRequestSchema.shape
-			})
-		)
-		.output(uploadPreviewResponseSchema),
+		},
+		uploadPreviewRequestSchema.shape,
+		uploadPreviewResponseSchema
+	),
 
 	// Confirms an unretained publication by store path without uploading bytes.
 	// It runs the same exact-generation check and monotonic grace extension as an
@@ -78,20 +66,16 @@ export const uploadsContract = {
 	// committed. A successful confirm extends a grace deadline and can mark the
 	// cache grace-managed, so it mutates retention state and carries
 	// `maintenance: true` like negotiate.
-	confirm: baseProcedure
-		.meta({
+	confirm: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/uploads/confirm',
 			requires: 'upload:confirm',
-			resource: { cache: { field: 'cacheName' } },
 			maintenance: true
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/confirm' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				...uploadConfirmRequestSchema.shape
-			})
-		)
-		.output(uploadConfirmResponseSchema),
+		},
+		uploadConfirmRequestSchema.shape,
+		uploadConfirmResponseSchema
+	),
 
 	// Returns the status of the upload identified by `uploadId`. Upload IDs are
 	// unique across caches, so the authoriser reads the cache from the pending row.

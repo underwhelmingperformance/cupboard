@@ -1,26 +1,18 @@
-import {
-	cacheSelectorSchema,
-	storePathHashSchema
-} from '@cupboard/nix-store/scalars';
-import { z } from 'zod';
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 
 import { pathDeletionResponseSchema } from '../upload.ts';
 
-import { baseProcedure } from './base.ts';
+import { cacheScopedProcedure } from './cache-scoped.ts';
 
 export const pathsContract = {
-	remove: baseProcedure
-		.meta({
+	remove: cacheScopedProcedure(
+		{
+			method: 'DELETE',
+			suffix: '/paths/{hash}',
 			requires: 'narinfo:delete',
-			resource: { cache: { field: 'cacheName' } },
 			maintenance: true
-		})
-		.route({ method: 'DELETE', path: '/cache/{cacheName}/paths/{hash}' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				hash: storePathHashSchema
-			})
-		)
-		.output(pathDeletionResponseSchema)
+		},
+		{ hash: storePathHashSchema },
+		pathDeletionResponseSchema
+	)
 };
