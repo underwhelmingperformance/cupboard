@@ -1,5 +1,5 @@
 import type {
-	OidcTrustAddBody,
+	OidcTrustAddBodyInput,
 	OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import {
@@ -20,16 +20,16 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-const ownerSummary: OidcTrustSummary = {
+const ownerSummary = oidcTrustSummarySchema.parse({
 	id: 'owner',
 	issuer: 'https://accounts.google.com',
 	audience: 'client-id.apps.googleusercontent.com',
 	claims: { sub: 'owner-subject' },
 	permittedGrants: [{ type: 'cupboard_wildcard' }],
 	disabled: false
-};
+});
 
-const additionBody: OidcTrustAddBody = {
+const additionBody: OidcTrustAddBodyInput = {
 	issuer: 'https://token.actions.githubusercontent.com',
 	audience: 'https://cache.example.workers.dev',
 	claims: { repository_owner_id: '5678' },
@@ -46,14 +46,14 @@ const additionBody: OidcTrustAddBody = {
 };
 
 function addedSummary(id: string, isDisabled = false): OidcTrustSummary {
-	return {
+	return oidcTrustSummarySchema.parse({
 		id,
 		issuer: additionBody.issuer,
 		audience: additionBody.audience,
 		claims: additionBody.claims,
 		permittedGrants: additionBody.permittedGrants,
 		disabled: isDisabled
-	};
+	});
 }
 
 const orpcErrorBodySchema = z.strictObject({
@@ -81,7 +81,10 @@ function rulesById(
 	return Object.fromEntries(rules.map((rule) => [rule.id, rule]));
 }
 
-function addRule(token: string, body: OidcTrustAddBody): Promise<Response> {
+function addRule(
+	token: string,
+	body: OidcTrustAddBodyInput
+): Promise<Response> {
 	return authorisedFetch('/oidc-trust', token, {
 		body: JSON.stringify(body),
 		headers: { 'content-type': 'application/json' },
@@ -116,7 +119,7 @@ describe('oidc-trust admin API', () => {
 
 	it('round-trips a pattern claim through add and list', async () => {
 		const token = await adminToken();
-		const patternBody: OidcTrustAddBody = {
+		const patternBody: OidcTrustAddBodyInput = {
 			...additionBody,
 			claims: {
 				repository_owner_id: '5678',
@@ -129,14 +132,14 @@ describe('oidc-trust admin API', () => {
 		const list = await listRules(token);
 		const id = z.uuid().parse(summary.id);
 
-		const expected: OidcTrustSummary = {
+		const expected = oidcTrustSummarySchema.parse({
 			id,
 			issuer: patternBody.issuer,
 			audience: patternBody.audience,
 			claims: patternBody.claims,
 			permittedGrants: patternBody.permittedGrants,
 			disabled: false
-		};
+		});
 
 		expect({
 			status: added.status,
@@ -215,7 +218,7 @@ describe('oidc-trust admin API', () => {
 		const token = await adminToken();
 		const legacyResponse = await addRule(token, additionBody);
 		const legacy = oidcTrustSummarySchema.parse(await legacyResponse.json());
-		const exactBody: OidcTrustAddBody = {
+		const exactBody: OidcTrustAddBodyInput = {
 			...additionBody,
 			issuer: `${additionBody.issuer}/`
 		};

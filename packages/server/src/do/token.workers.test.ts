@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	oidcAudienceSchema,
@@ -574,11 +575,18 @@ const trustClassGrants = {
 
 async function installTrustedIdp(
 	scope: 'admin' | 'write',
-	options: { failFirstFetches?: number; protectedType?: string } = {}
+	options: {
+		failFirstFetches?: number;
+		protectedType?: string;
+		tokenAudience?: string | string[];
+		azp?: string;
+	} = {}
 ): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
-	const signer = new SignJWT({});
+	const signer = new SignJWT(
+		options.azp === undefined ? {} : { azp: options.azp }
+	);
 	const subjectToken = await signer
 		.setProtectedHeader({
 			alg: 'RS256',
@@ -588,7 +596,7 @@ async function installTrustedIdp(
 			})
 		})
 		.setIssuer('https://idp.test')
-		.setAudience('cupboard-aud')
+		.setAudience(options.tokenAudience ?? 'cupboard-aud')
 		.setSubject('alice')
 		.setIssuedAt()
 		.setExpirationTime('5m')
@@ -644,6 +652,26 @@ async function installTrustedIdp(
 	});
 
 	return subjectToken;
+}
+
+async function installAdditionalTrustRule(
+	id: string,
+	permittedGrants: readonly PermittedGrant[],
+	options: { audience?: string; claims?: Record<string, string> } = {}
+): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { oidcTrust } })
+			.insert(oidcTrust)
+			.values({
+				id: trustRuleIdSchema.parse(id),
+				issuer: 'https://idp.test',
+				audience: options.audience ?? 'cupboard-aud',
+				claimsJson: JSON.stringify(options.claims ?? { sub: 'alice' }),
+				permittedGrantsJson: JSON.stringify(permittedGrants),
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:01.000Z')
+			})
+			.run();
+	});
 }
 
 async function installTrustedOwner(): Promise<string> {
@@ -1990,6 +2018,96 @@ describe('requested grants', () => {
 		});
 	});
 
+	it('uses requested authority to distinguish tied identity rules', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const privateGrant: PermittedGrant = {
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { exact: 'private', validate: 'cacheName' }
+			}
+		};
+		await installAdditionalTrustRule('private-rule', [privateGrant]);
+		const requested = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+		];
+
+		const exchanged = await exchange(subjectToken, requested);
+		const claims = decodeJwt(exchanged.access_token);
+
+		expect({
+			status: exchanged.status,
+			granted: exchanged.authorization_details,
+			tokenGrants: claims.authorization_details
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: requested,
+			tokenGrants: requested
+		});
+	});
+
+	it('refuses tied rules that both permit the requested authority', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const overlappingGrant: PermittedGrant = {
+			type: 'cupboard_cache',
+			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+		};
+		await installAdditionalTrustRule('overlapping-rule', [overlappingGrant]);
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(ciRequest)
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			problem: body.problem,
+			detail: body.detail
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			problem: 'subject-token-untrusted',
+			detail: undefined
+		});
+	});
+
+	it('does not combine requested authority from separate rules', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const privateGrant: PermittedGrant = {
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { exact: 'private', validate: 'cacheName' }
+			}
+		};
+		await installAdditionalTrustRule('private-rule', [privateGrant]);
+		const requested = [
+			...ciRequest,
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+		];
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(requested)
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({ status: response.status, body }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_authorization_details',
+				error_description:
+					'The requested authorization_details are not permitted',
+				problem: 'not-permitted'
+			}
+		});
+	});
+
 	// `upload:commit` can modify only state created by upload negotiation.
 	// `upload:confirm` can refresh any committed path, so commit permission must
 	// not imply confirm permission.
@@ -2637,5 +2755,96 @@ describe('untrusted exchange diagnostics', () => {
 		expect(refused.status).toBe(StatusCodes.BAD_REQUEST);
 		expect(refused.body.problem).toBe('subject-token-untrusted');
 		expect(refused.body.detail).toBeUndefined();
+	});
+
+	it('reports 503, not untrusted, when the pinned issuer is unavailable', async () => {
+		const { sign } = await installGithubBranchRule();
+		const subjectToken = await sign(branchRuleClaims);
+		vi.stubGlobal('fetch', () =>
+			Promise.reject(new Error('issuer is unavailable'))
+		);
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		await response.text();
+
+		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+	});
+});
+
+describe('multi-audience subject tokens', () => {
+	beforeEach(resetTestServer);
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	const secondAudienceGrant: PermittedGrant = {
+		type: 'cupboard_cache',
+		actions: ['upload:commit'],
+		resources: { cache: { exact: 'other', validate: 'cacheName' } }
+	};
+
+	it('exchanges a token whose audiences are all configured', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			tokenAudience: ['cupboard-aud', 'cupboard-aud-2'],
+			azp: 'cupboard-aud'
+		});
+		await installAdditionalTrustRule(
+			'second-audience-rule',
+			[secondAudienceGrant],
+			{ audience: 'cupboard-aud-2', claims: { sub: 'bob' } }
+		);
+
+		const exchanged = await exchange(subjectToken, ciRequest);
+
+		expect({
+			status: exchanged.status,
+			granted: exchanged.authorization_details
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: ciRequest
+		});
+	});
+
+	it('refuses a multi-audience token without an authorised party', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			tokenAudience: ['cupboard-aud', 'cupboard-aud-2']
+		});
+		await installAdditionalTrustRule(
+			'second-audience-rule',
+			[secondAudienceGrant],
+			{ audience: 'cupboard-aud-2', claims: { sub: 'bob' } }
+		);
+
+		const refused = await refusedExchange(subjectToken);
+
+		expect({
+			status: refused.status,
+			problem: refused.body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			problem: 'subject-token-invalid'
+		});
+	});
+
+	it('refuses a token with an unconfigured audience', async () => {
+		const subjectToken = await installTrustedIdp('write', {
+			tokenAudience: ['cupboard-aud', 'unconfigured-aud'],
+			azp: 'cupboard-aud'
+		});
+
+		const refused = await refusedExchange(subjectToken);
+
+		expect({
+			status: refused.status,
+			problem: refused.body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			problem: 'subject-token-invalid'
+		});
 	});
 });

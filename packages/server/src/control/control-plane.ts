@@ -18,16 +18,19 @@ import {
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import {
+	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody,
 	type TrustRuleId
 } from '@cupboard/protocol/oidc';
 import {
-	matchOidcTrust,
-	type OidcTrustRule
+	hasMatchingOidcTrustIdentity,
+	type OidcTrustVerificationTarget,
+	oidcTrustVerificationTarget,
+	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
+import { selectOidcTrust } from '@cupboard/protocol/oidc-trust-selection';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
@@ -40,7 +43,6 @@ import {
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
-import type { JWTPayload } from 'jose';
 
 import {
 	type AccessClaims,
@@ -60,6 +62,7 @@ import {
 	ControlNotConfiguredError,
 	ControlSubjectTokenUntrustedError,
 	InvalidAccessTokenError,
+	InvalidAuthorizationDetailsError,
 	IssuerUnavailableError,
 	OidcIssuerTransportRequiredError,
 	SubjectTokenNotJwtError,
@@ -150,11 +153,13 @@ export function controlInstanceInitialise(
 	);
 }
 
-// RFC 8693 token exchange for the control plane: an external OIDC ID token is
-// matched to a control trust rule on its unverified claims, the signature is then
-// checked against that rule's issuer JWKS, and only then is a global-admin token
-// issued with the control signing key. A subject token whose signature does not
-// verify against that rule's issuer is refused, whatever claims it carries.
+// RFC 8693 token exchange for the control plane: the unverified claims of an
+// external OIDC ID token choose a configured issuer and audience, the
+// signature is checked against that issuer's JWKS, a control trust rule is
+// selected from the verified claims and requested grants, and only then is a
+// global-admin token issued with the control signing key. A subject token
+// whose signature does not verify against the configured issuer is refused,
+// whatever claims it carries.
 export async function controlTokenExchange(
 	request: Request,
 	env: Env
@@ -232,26 +237,43 @@ export async function controlTokenExchange(
 		database,
 		canUseHttpLoopback
 	);
-	const rule = matchOidcTrust(
-		snapshots.map(({ rule }) => rule),
-		claims
-	);
+	const rules = snapshots.map(({ rule }) => rule);
+	const target = oidcTrustVerificationTarget(rules, claims);
 
-	if (rule === undefined) {
+	if (target === undefined || !hasMatchingOidcTrustIdentity(rules, claims)) {
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
+	// Every configured audience identifies this deployment, so any of them may
+	// appear alongside the verified audience in a token's `aud` array.
+	const verified = await verifyControlInbound(
+		target,
+		exchange.subject_token,
+		new Set(rules.map((rule) => rule.audience)),
+		canUseHttpLoopback
+	);
+	const requested = parseRequestedGrants(exchange.authorization_details);
+	const selection = selectOidcTrust(rules, verified, requested);
+
+	switch (selection.outcome) {
+		case 'authority-unmatched': {
+			throw new InvalidAuthorizationDetailsError('not-permitted');
+		}
+		case 'identity-unmatched':
+		case 'ambiguous': {
+			throw new ControlSubjectTokenUntrustedError();
+		}
+		case 'selected': {
+			break;
+		}
+	}
+
+	const { rule } = selection;
 	const snapshot = snapshots.find(({ rule: candidate }) => candidate === rule);
 
 	if (snapshot === undefined) {
 		throw new ControlSubjectTokenUntrustedError();
 	}
-
-	const verified = await verifyControlInbound(
-		rule,
-		exchange.subject_token,
-		canUseHttpLoopback
-	);
 	const verifiedSubject =
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
@@ -265,11 +287,7 @@ export async function controlTokenExchange(
 
 	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
-	const grants = resolveRequestedGrants(
-		rule,
-		verified,
-		parseRequestedGrants(exchange.authorization_details)
-	);
+	const grants = resolveRequestedGrants(rule, verified, requested);
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
 		{
@@ -320,19 +338,20 @@ async function verifyControlSelfIssued(
 }
 
 async function verifyControlInbound(
-	rule: OidcTrustRule,
+	target: OidcTrustVerificationTarget,
 	token: string,
+	trustedAudiences: ReadonlySet<string>,
 	canUseHttpLoopback: boolean
-): Promise<JWTPayload> {
+): Promise<VerifiedOidcClaims> {
 	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
 	// or JWKS-fetch failure is a retryable 503.
 	let issuer;
 	try {
 		issuer = await (
 			canUseHttpLoopback ? localDevelopmentDiscovery : discovery
-		).resolve(rule.issuer);
+		).resolve(target.issuer);
 	} catch (error: unknown) {
-		throw new IssuerUnavailableError(rule.issuer, { cause: error });
+		throw new IssuerUnavailableError(target.issuer, { cause: error });
 	}
 
 	try {
@@ -340,8 +359,9 @@ async function verifyControlInbound(
 			issuer.resolver,
 			token,
 			{
-				issuer: rule.issuer,
-				audience: rule.audience,
+				issuer: target.issuer,
+				audience: target.audience,
+				trustedAudiences,
 				algorithms: issuer.algorithms,
 				requireIdTokenClaims: true
 			},
@@ -349,7 +369,7 @@ async function verifyControlInbound(
 		);
 	} catch (error) {
 		if (error instanceof OidcKeysUnreachableError) {
-			throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			throw new IssuerUnavailableError(target.issuer, { cause: error });
 		}
 
 		throw new SubjectTokenVerificationFailedError();
@@ -525,7 +545,7 @@ export function controlOidcTrustGet(
 
 export function controlOidcTrustAdd(
 	env: Env,
-	body: ParsedOidcTrustAddBody
+	body: OidcTrustAddBody
 ): Promise<OidcTrustSummary> {
 	const now = new Date();
 	return addControlTrust(

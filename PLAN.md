@@ -1018,11 +1018,15 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 
 ### Trust rules and the owner
 
-- [x] `oidc_trust` rules federate an external identity into a scope: filter by
-      issuer, exact-match every configured claim, most-specific match wins.
-      Prefer stable ID claims (GitHub `repository_id`, `repository_owner_id`).
-      Providers are data, not hardcoded branches. The same evaluator fits
-      Google, Entra, Auth0, Okta, and GitHub Actions.
+- [x] `oidc_trust` rules federate an external identity into a scope. Decoded
+      issuer and audience values choose a configured verification target. After
+      verification, interactive rules take precedence and the rules with the
+      most configured claim matches form the preferred identity tier. Requested
+      grants can distinguish tied rules only when one rule permits the complete
+      request; rules are never combined. Prefer stable ID claims (GitHub
+      `repository_id`, `repository_owner_id`). Providers are data, not hardcoded
+      branches. The same evaluator fits Google, Entra, Auth0, Okta, and GitHub
+      Actions.
 - [x] The owner is an `admin` rule seeded on DO init from deploy config
       (`CUPBOARD_OWNER_*`), pinned on issuer, subject, and audience. Break-glass
       is a redeploy with updated config. CI rules are `write`-scoped, added

@@ -1,3 +1,4 @@
+import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
@@ -129,7 +130,16 @@ async function signedToken(options: {
 		.sign(privateKey);
 }
 
-async function trustedControlToken(protectedType: string): Promise<string> {
+interface TrustedControlIdentity {
+	readonly token: string;
+	readonly issuer: string;
+	readonly audience: string;
+}
+
+async function trustedControlIdentity(
+	protectedType: string,
+	permittedGrants?: readonly PermittedGrant[]
+): Promise<TrustedControlIdentity> {
 	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
 	const audience = 'cupboard-control';
 	const { publicKey, privateKey } = await generateKeyPair('RS256', {
@@ -140,7 +150,8 @@ async function trustedControlToken(protectedType: string): Promise<string> {
 	await seedControlTrust({
 		issuer,
 		audience,
-		claims: { sub: 'global-admin' }
+		claims: { sub: 'global-admin' },
+		permittedGrants
 	});
 	vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
 		const url = input instanceof Request ? input.url : String(input);
@@ -168,7 +179,7 @@ async function trustedControlToken(protectedType: string): Promise<string> {
 		);
 	});
 
-	return new SignJWT({})
+	const token = await new SignJWT({})
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: protectedType })
 		.setIssuer(issuer)
 		.setAudience(audience)
@@ -176,6 +187,8 @@ async function trustedControlToken(protectedType: string): Promise<string> {
 		.setIssuedAt()
 		.setExpirationTime('5m')
 		.sign(privateKey);
+
+	return { token, issuer, audience };
 }
 
 describe('control plane POST /token', () => {
@@ -474,7 +487,7 @@ describe('control plane POST /token', () => {
 	});
 
 	it('does not relabel an external access JWT as an ID token', async () => {
-		const subjectToken = await trustedControlToken('at+jwt');
+		const { token: subjectToken } = await trustedControlIdentity('at+jwt');
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
@@ -490,6 +503,48 @@ describe('control plane POST /token', () => {
 			status: StatusCodes.BAD_REQUEST,
 			error: 'invalid_request',
 			problem: 'subject-token-invalid'
+		});
+	});
+
+	it('uses requested authority to distinguish tied control rules', async () => {
+		const acmeGrant: PermittedGrant = {
+			type: 'cupboard_tenant',
+			actions: ['tenant:suspend'],
+			resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+		};
+		const betaGrant: PermittedGrant = {
+			type: 'cupboard_tenant',
+			actions: ['tenant:suspend'],
+			resources: { tenant: { exact: 'beta', validate: 'tenant' } }
+		};
+		const identity = await trustedControlIdentity('JWT', [acmeGrant]);
+		await seedControlTrust({
+			issuer: identity.issuer,
+			audience: identity.audience,
+			claims: { sub: 'global-admin' },
+			permittedGrants: [betaGrant]
+		});
+		const requested = [
+			{ type: 'cupboard_tenant', actions: ['tenant:suspend'], tenant: 'beta' }
+		];
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: identity.token,
+			subject_token_type: subjectTokenTypeIdToken,
+			authorization_details: JSON.stringify(requested)
+		});
+		const body = tokenResponseSchema.parse(await response.json());
+		const claims = decodeJwt(body.access_token);
+
+		expect({
+			status: response.status,
+			granted: body.authorization_details,
+			tokenGrants: claims.authorization_details
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: requested,
+			tokenGrants: requested
 		});
 	});
 

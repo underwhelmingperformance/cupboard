@@ -28,7 +28,8 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	authorizationDetailsSchema,
+	type PermittedGrant
 } from '@cupboard/protocol/grants';
 import { instanceNameSchema } from '@cupboard/protocol/instance';
 import {
@@ -1026,6 +1027,7 @@ export async function seedControlTrust(fields: {
 	readonly issuer: string;
 	readonly audience: string;
 	readonly claims?: Readonly<Record<string, string>>;
+	readonly permittedGrants?: readonly PermittedGrant[];
 }): Promise<TrustRuleId> {
 	const createdAt = new Date();
 	const id = trustRuleIdSchema.parse(crypto.randomUUID());
@@ -1036,6 +1038,9 @@ export async function seedControlTrust(fields: {
 			issuer: fields.issuer,
 			audience: fields.audience,
 			claimsJson: JSON.stringify(fields.claims ?? {}),
+			...(fields.permittedGrants !== undefined && {
+				permittedGrantsJson: JSON.stringify(fields.permittedGrants)
+			}),
 			createdAt: isoTimestamp(createdAt)
 		})
 		.run();

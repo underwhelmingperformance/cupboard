@@ -7,7 +7,7 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	type ClaimMatch,
-	type OidcTrustAddBody,
+	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema
 } from '@cupboard/protocol/oidc';
 
@@ -288,10 +288,10 @@ export interface AddBodyOptions {
 	readonly audience: string;
 	readonly claims: Record<string, ClaimMatch>;
 	readonly permittedGrants: readonly PermittedGrant[];
-	readonly display?: OidcTrustAddBody['display'];
+	readonly display?: OidcTrustAddBodyInput['display'];
 }
 
-export function buildAddBody(options: AddBodyOptions): OidcTrustAddBody {
+export function buildAddBody(options: AddBodyOptions): OidcTrustAddBodyInput {
 	const parsed = oidcTrustAddBodySchema.safeParse({
 		issuer: options.issuer,
 		audience: options.audience,

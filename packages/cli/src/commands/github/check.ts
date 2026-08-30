@@ -1,18 +1,14 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
-import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
-import {
-	type AuthorizationDetail,
-	type AuthorizationDetails
-} from '@cupboard/protocol/grants';
-import { type ParsedOidcTrustSummary } from '@cupboard/protocol/oidc';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
+import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
 import {
 	claimMismatches,
 	firstClaimMismatch,
 	isClaimSatisfied,
-	isRuleInteractive,
-	matchOidcTrust,
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
@@ -46,6 +42,26 @@ import {
 	pullRequestPrefix,
 	pullRequestViewName
 } from './convention.ts';
+import {
+	CheckFinding,
+	GracePolicyMissingFinding,
+	GracePolicyTooShortFinding,
+	PassedCheckFinding,
+	ReuseViewMissingFinding,
+	ReuseViewPriorityInsufficientFinding,
+	ReuseViewSelectorsMismatchFinding,
+	ReuseViewStoreDirectoryMismatchFinding,
+	ReuseViewUnreadableFinding,
+	RootPrefixOutsideGrantFinding,
+	RootPrefixUnspecifiedFinding
+} from './finding.ts';
+import {
+	RepositoryTrustRuleMissingFinding,
+	TrustRuleAudienceMismatchFinding,
+	TrustRuleClaimMismatchFinding,
+	TrustRuleIssuerMismatchFinding,
+	trustSelectionFinding
+} from './trust-selection.ts';
 import { verifyWorkflowReference } from './workflow-reference.ts';
 
 export interface GithubCheckOptions {
@@ -61,7 +77,7 @@ export interface GithubCheckClient {
 	readonly policies: Pick<PolicyClient, 'graceList'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list'>;
 	readonly oidcTrust: {
-		list(): Promise<{ rules: ParsedOidcTrustSummary[] }>;
+		list(): Promise<{ rules: OidcTrustSummary[] }>;
 	};
 }
 
@@ -72,13 +88,7 @@ export interface GithubCheckDependencies {
 	readonly signal?: AbortSignal;
 }
 
-export interface CheckFinding {
-	readonly check: string;
-	readonly status: 'ok' | 'failed' | 'unverified';
-	readonly detail?: string;
-}
-
-function toMatcherRule(summary: ParsedOidcTrustSummary): OidcTrustRule {
+function toMatcherRule(summary: OidcTrustSummary): OidcTrustRule {
 	return {
 		id: summary.id,
 		issuer: summary.issuer,
@@ -97,10 +107,11 @@ const triggerClaims = new Set(['event_name', 'ref', 'ref_type']);
 // prefer the modelled trigger and then the fewest total mismatches. This follows
 // the server's disclosure boundary while avoiding a sibling rule's event
 // mismatch when a more relevant rule has configuration drift.
-function unmatchedDetail(
+function unmatchedFinding(
+	check: string,
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
-): string {
+): CheckFinding {
 	const candidates = rules.filter((rule) => {
 		const pinned = rule.claims.repository_id;
 
@@ -129,31 +140,26 @@ function unmatchedDetail(
 		.at(0)?.rule;
 
 	if (candidate === undefined) {
-		return 'no rule pins this repository';
+		return new RepositoryTrustRuleMissingFinding(check);
 	}
 
 	const mismatch = firstClaimMismatch(candidate, claims);
 
-	if (mismatch === undefined) {
-		return `rule ${candidate.id} expects audience ${candidate.audience}; the modelled run uses ${String(claims.aud)}`;
+	if (mismatch !== undefined) {
+		return new TrustRuleClaimMismatchFinding(check, candidate, mismatch);
 	}
 
-	const presented =
-		mismatch.presented === undefined
-			? 'the modelled run has no value for this claim'
-			: `the modelled run uses ${mismatch.presented}`;
+	// All configured claims match, so matching failed because the issuer or
+	// audience differs. claimMismatches compares neither value.
+	const hasMatchingIssuer =
+		typeof claims.iss === 'string' &&
+		IssuerUrl.parse(claims.iss)?.value === candidate.issuer;
 
-	return `rule ${candidate.id} expects ${mismatch.claim} to match ${mismatch.expected}; ${presented}`;
-}
-
-function describeAuthorizationDetail(detail: AuthorizationDetail): string {
-	if (detail.type !== 'cupboard_cache') {
-		return detail.type;
+	if (!hasMatchingIssuer) {
+		return new TrustRuleIssuerMismatchFinding(check, candidate, claims.iss);
 	}
 
-	const root = detail.root === undefined ? '' : ` with root ${detail.root}`;
-
-	return `${detail.actions.join(', ')} on cache ${detail.cache}${root}`;
+	return new TrustRuleAudienceMismatchFinding(check, candidate, claims.aud);
 }
 
 // Matching claims do not grant authority by themselves. Model the quickstart's
@@ -165,36 +171,21 @@ function checkTrustRule(
 	claims: OidcClaims,
 	requests: readonly AuthorizationDetails[]
 ): CheckFinding {
-	const matched = matchOidcTrust(rules, claims);
-
-	if (matched === undefined) {
-		return { check, status: 'failed', detail: unmatchedDetail(rules, claims) };
-	}
-
-	if (isRuleInteractive(matched)) {
-		return {
-			check,
-			status: 'failed',
-			detail: `interactive rule ${matched.id} matches the modelled claims; workflows must use a scoped CI rule`
-		};
-	}
-
 	for (const request of requests) {
-		const refused = request.find(
-			(detail) =>
-				!isGrantPermittedByRule(matched.permittedGrants, detail, claims)
-		);
+		const selection = selectModelledOidcTrust(rules, claims, request);
 
-		if (refused !== undefined) {
-			return {
-				check,
-				status: 'failed',
-				detail: `rule ${matched.id} matches the modelled claims but does not permit ${describeAuthorizationDetail(refused)}; remove it and re-run setup`
-			};
+		if (selection.outcome === 'identity-unmatched') {
+			return unmatchedFinding(check, rules, claims);
+		}
+
+		const finding = trustSelectionFinding(check, request, selection);
+
+		if (finding !== undefined) {
+			return finding;
 		}
 	}
 
-	return { check, status: 'ok' };
+	return new PassedCheckFinding(check);
 }
 
 // Mirror the server's policy selection. The longest cache-name prefix wins,
@@ -262,23 +253,20 @@ async function checkGracePolicy(
 		const cacheLabel = cache === DEFAULT_CACHE ? 'default' : cache;
 
 		if (graceSeconds === undefined) {
-			return {
-				check,
-				status: 'failed',
-				detail: `no grace policy covers the ${cacheLabel} cache; a push with require-grace would fail because no policy would retain its paths`
-			};
+			return new GracePolicyMissingFinding(check, cacheLabel);
 		}
 
 		if (graceSeconds < minimumGraceSeconds) {
-			return {
+			return new GracePolicyTooShortFinding(
 				check,
-				status: 'failed',
-				detail: `the ${cacheLabel} cache has ${String(graceSeconds)}s of grace; GitHub publication requires at least ${String(minimumGraceSeconds)}s`
-			};
+				cacheLabel,
+				graceSeconds,
+				minimumGraceSeconds
+			);
 		}
 	}
 
-	return { check, status: 'ok' };
+	return new PassedCheckFinding(check);
 }
 
 function hasPullRequestViewSelectors(
@@ -301,19 +289,11 @@ async function checkReuseView(
 	const definition = views.find((view) => view.name === pullRequestViewName);
 
 	if (definition === undefined) {
-		return {
-			check,
-			status: 'failed',
-			detail: `the ${pullRequestViewName} view is not defined`
-		};
+		return new ReuseViewMissingFinding(check, pullRequestViewName);
 	}
 
 	if (!hasPullRequestViewSelectors(definition.selectors)) {
-		return {
-			check,
-			status: 'failed',
-			detail: `stored selectors differ from the single ${pullRequestPrefix} prefix setup would write`
-		};
+		return new ReuseViewSelectorsMismatchFinding(check, pullRequestPrefix);
 	}
 
 	const destination = await fetchCacheInfo(url);
@@ -326,32 +306,28 @@ async function checkReuseView(
 			throw error;
 		}
 
-		return {
-			check,
-			status: 'failed',
-			detail: `could not read nix-cache-info from the ${pullRequestViewName} view`
-		};
+		return new ReuseViewUnreadableFinding(check, pullRequestViewName);
 	}
 
 	// Nix only uses a substituter for paths in its advertised store directory. A
 	// view for another store therefore cannot provide paths for this destination.
 	if (view.storeDirectory !== destination.storeDirectory) {
-		return {
+		return new ReuseViewStoreDirectoryMismatchFinding(
 			check,
-			status: 'failed',
-			detail: `view advertises store directory ${view.storeDirectory}; the destination advertises ${destination.storeDirectory}`
-		};
+			view.storeDirectory,
+			destination.storeDirectory
+		);
 	}
 
 	if (view.priority <= destination.priority) {
-		return {
+		return new ReuseViewPriorityInsufficientFinding(
 			check,
-			status: 'failed',
-			detail: `view priority ${String(view.priority)} does not exceed the destination's ${String(destination.priority)}`
-		};
+			view.priority,
+			destination.priority
+		);
 	}
 
-	return { check, status: 'ok' };
+	return new PassedCheckFinding(check);
 }
 
 // The branch rule grants a root prefix. Every root that the caller writes must
@@ -363,25 +339,16 @@ function checkRootPrefix(
 	const check = 'root prefix';
 
 	if (options.rootPrefix === undefined) {
-		return {
-			check,
-			status: 'unverified',
-			detail:
-				"no --root-prefix given; pass the value from the caller's workflow"
-		};
+		return new RootPrefixUnspecifiedFinding(check);
 	}
 
 	const grant = `github:${identity.fullName}/${options.branch}/`;
 
 	if (!`${options.rootPrefix}/`.startsWith(grant)) {
-		return {
-			check,
-			status: 'failed',
-			detail: `${options.rootPrefix} does not nest under the granted ${grant}`
-		};
+		return new RootPrefixOutsideGrantFinding(check, options.rootPrefix, grant);
 	}
 
-	return { check, status: 'ok' };
+	return new PassedCheckFinding(check);
 }
 
 export async function runGithubCheck(
@@ -492,10 +459,7 @@ export async function runGithubCheck(
 
 	const rows: ResultRow[] = findings.map((finding) => ({
 		label: finding.check,
-		value:
-			finding.detail === undefined
-				? finding.status
-				: `${finding.status}: ${finding.detail}`
+		value: finding.render()
 	}));
 
 	reporter.result({ kind: 'github-check', data: { findings }, rows });

@@ -33,6 +33,15 @@ export interface OidcClaims {
 	readonly [claim: string]: unknown;
 }
 
+declare const verifiedOidcClaimsBrand: unique symbol;
+
+/**
+ * Claims returned after an OIDC verifier has accepted the token.
+ */
+export type VerifiedOidcClaims = OidcClaims & {
+	readonly [verifiedOidcClaimsBrand]: true;
+};
+
 // Issuer identifiers use the exact, case-sensitive value configured at ingress.
 // A malformed `iss` fails validation and never matches.
 function hasMatchingIssuer(rule: OidcTrustRule, claims: OidcClaims): boolean {
@@ -80,20 +89,73 @@ function interactiveRank(rule: OidcTrustRule): number {
 	return isRuleInteractive(rule) ? 1 : 0;
 }
 
+export interface OidcTrustVerificationTarget {
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
+}
+
 /**
- * The trust rule whose issuer, audience and configured claims all match the
- * verified token, or `undefined` when none does. Selection prefers the
- * interactive owner rule (so the owner is never downgraded), then the most
- * specific rule. Selection rejects two matches with the same rank and
- * specificity because a generated rule ID cannot decide which authority the
- * token receives. Matching never substitutes for verification: the caller must
- * already have checked the token's signature, issuer, audience and expiry with
- * `jose`.
+ * Returns a configured issuer and audience to use for verification, or
+ * `undefined` when no pair matches the decoded token. A token has one `iss`
+ * value, so all matching rules use the same issuer. If the token's `aud`
+ * array matches several configured audiences and its `azp` claim names one of
+ * them, that audience is used, because verification requires `azp` to equal
+ * the verified audience. Otherwise the first audience in sorted order is
+ * chosen so rule order cannot affect the target.
+ *
+ * Decoded claims only route verification to a configured trust domain. They
+ * do not select a rule or grant authority.
  */
-export function matchOidcTrust(
+export function oidcTrustVerificationTarget(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
-): OidcTrustRule | undefined {
+): OidcTrustVerificationTarget | undefined {
+	const targets = rules
+		.filter(
+			(rule) =>
+				hasMatchingIssuer(rule, claims) && hasMatchingAudience(rule, claims)
+		)
+		.map(({ issuer, audience }) => ({ issuer, audience }))
+		.toSorted((left, right) => left.audience.localeCompare(right.audience));
+	const authorisedParty = claims.azp;
+
+	return (
+		targets.find((target) => target.audience === authorisedParty) ?? targets[0]
+	);
+}
+
+/**
+ * Whether the supplied claims satisfy the issuer, audience and
+ * configured-claim constraints of any rule. Verification does not change the
+ * token payload, so the caller can refuse a token whose decoded claims
+ * satisfy no rule. Satisfying these identity constraints does not grant
+ * authority; policy selection still requires verified claims.
+ */
+export function hasMatchingOidcTrustIdentity(
+	rules: readonly OidcTrustRule[],
+	claims: OidcClaims
+): boolean {
+	return rules.some(
+		(rule) =>
+			hasMatchingIssuer(rule, claims) &&
+			hasMatchingAudience(rule, claims) &&
+			hasMatchingClaims(rule, claims)
+	);
+}
+
+/**
+ * Returns the highest-precedence tier of rules whose issuer, audience and
+ * configured claims match the supplied claim set. Interactive rules take
+ * precedence so an owner is never downgraded. Among rules of the same kind,
+ * the tier with the most claim bindings takes precedence.
+ *
+ * Rule IDs make the returned order deterministic but do not decide which rule
+ * grants authority.
+ */
+export function preferredModelledOidcTrustRules(
+	rules: readonly OidcTrustRule[],
+	claims: OidcClaims
+): readonly OidcTrustRule[] {
 	const matches = rules
 		.filter(
 			(rule) =>
@@ -104,21 +166,33 @@ export function matchOidcTrust(
 		.toSorted(
 			(left, right) =>
 				interactiveRank(right) - interactiveRank(left) ||
-				specificity(right) - specificity(left)
+				specificity(right) - specificity(left) ||
+				left.id.localeCompare(right.id)
 		);
 	const selected = matches[0];
-	const competing = matches[1];
 
-	if (
-		selected !== undefined &&
-		competing !== undefined &&
-		interactiveRank(selected) === interactiveRank(competing) &&
-		specificity(selected) === specificity(competing)
-	) {
-		return undefined;
+	if (selected === undefined) {
+		return [];
 	}
 
-	return selected;
+	return matches.filter(
+		(candidate) =>
+			interactiveRank(candidate) === interactiveRank(selected) &&
+			specificity(candidate) === specificity(selected)
+	);
+}
+
+/**
+ * Returns the sole rule in the preferred identity tier. A tie is ambiguous
+ * because a generated rule ID cannot decide which authority the token receives.
+ */
+export function matchModelledOidcTrust(
+	rules: readonly OidcTrustRule[],
+	claims: OidcClaims
+): OidcTrustRule | undefined {
+	const preferred = preferredModelledOidcTrustRules(rules, claims);
+
+	return preferred.length === 1 ? preferred[0] : undefined;
 }
 
 export interface ClaimMismatch {

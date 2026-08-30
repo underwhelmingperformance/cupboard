@@ -24,11 +24,14 @@ import {
 	inboundAlgorithmAllowlist,
 	type InboundVerifyOptions,
 	intersectAlgorithms,
+	OidcAuthorisedPartyMismatchError,
+	OidcAuthorisedPartyMissingError,
 	OidcDiscoveryError,
 	OidcDiscoveryStore,
 	OidcKeysUnreachableError,
 	OidcTokenDecodeError,
 	OidcTokenVerificationError,
+	OidcUntrustedAudienceError,
 	verifyInboundOidcToken
 } from './oidc.ts';
 
@@ -247,11 +250,12 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 }
 
 function verifyOptions(
-	overrides: Partial<Omit<InboundVerifyOptions, 'algorithms'>> = {}
+	overrides: Partial<InboundVerifyOptions> = {}
 ): InboundVerifyOptions {
 	return {
 		issuer,
 		audience,
+		trustedAudiences: new Set(),
 		algorithms: inboundAlgorithmAllowlist,
 		requireIdTokenClaims: true,
 		...overrides
@@ -380,7 +384,7 @@ describe('verifyInboundOidcToken', () => {
 		},
 		{
 			name: 'an algorithm outside the accepted set',
-			options: { issuer, audience, algorithms: ['ES256'] },
+			options: verifyOptions({ algorithms: ['ES256'] }),
 			at: now
 		}
 	])('rejects $name', async ({ options, at }) => {
@@ -540,37 +544,73 @@ describe('verifyInboundOidcToken', () => {
 		}
 	);
 
-	it('rejects an untrusted additional audience', async () => {
+	it.each([
+		{ name: 'with', azp: { azp: audience } },
+		{ name: 'without', azp: {} }
+	])('rejects an untrusted additional audience $name azp', async ({ azp }) => {
 		const idp = await inboundIssuer();
 		const token = await idp.signWithAudience([audience, 'untrusted-client'], {
+			sub: 'owner',
+			...azp
+		});
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcUntrustedAudienceError);
+	});
+
+	it('accepts a trusted additional audience with the expected authorised party', async () => {
+		const idp = await inboundIssuer();
+		const token = await idp.signWithAudience([audience, 'partner-client'], {
 			sub: 'owner',
 			azp: audience
 		});
 
-		await expect(
-			verifyInboundOidcToken(
-				createLocalJWKSet(idp.jwks),
-				token,
-				verifyOptions(),
-				now
-			)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		const payload = await verifyInboundOidcToken(
+			createLocalJWKSet(idp.jwks),
+			token,
+			verifyOptions({ trustedAudiences: new Set(['partner-client']) }),
+			now
+		);
+
+		expect({ aud: payload.aud, azp: payload.azp }).toStrictEqual({
+			aud: [audience, 'partner-client'],
+			azp: audience
+		});
 	});
 
-	it('rejects multiple distinct audiences without an authorised party', async () => {
+	it('rejects a trusted additional audience without an authorised party', async () => {
 		const idp = await inboundIssuer();
-		const token = await idp.signWithAudience([audience, 'untrusted-client'], {
+		const token = await idp.signWithAudience([audience, 'partner-client'], {
 			sub: 'owner'
+		});
+		const options = verifyOptions({
+			trustedAudiences: new Set(['partner-client'])
 		});
 
 		await expect(
-			verifyInboundOidcToken(
-				createLocalJWKSet(idp.jwks),
-				token,
-				verifyOptions(),
-				now
-			)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+			verifyInboundOidcToken(createLocalJWKSet(idp.jwks), token, options, now)
+		).rejects.toBeInstanceOf(OidcAuthorisedPartyMissingError);
+	});
+
+	it('rejects an authorised party naming the additional audience', async () => {
+		const idp = await inboundIssuer();
+		const token = await idp.signWithAudience([audience, 'partner-client'], {
+			sub: 'owner',
+			azp: 'partner-client'
+		});
+		const options = verifyOptions({
+			trustedAudiences: new Set(['partner-client'])
+		});
+
+		await expect(
+			verifyInboundOidcToken(createLocalJWKSet(idp.jwks), token, options, now)
+		).rejects.toBeInstanceOf(OidcAuthorisedPartyMismatchError);
 	});
 
 	it.each([
@@ -635,7 +675,7 @@ describe('verifyInboundOidcToken', () => {
 					verifyOptions(),
 					now
 				)
-			).rejects.toBeInstanceOf(OidcTokenVerificationError);
+			).rejects.toBeInstanceOf(OidcAuthorisedPartyMismatchError);
 		}
 	);
 
@@ -688,7 +728,7 @@ describe('verifyInboundOidcToken', () => {
 			verifyInboundOidcToken(
 				createLocalJWKSet(idp.jwks),
 				token,
-				{ issuer, audience, algorithms: [] },
+				{ issuer, audience, trustedAudiences: new Set(), algorithms: [] },
 				now
 			)
 		);
@@ -1223,7 +1263,12 @@ describe('OidcDiscoveryStore', () => {
 		const payload = await verifyInboundOidcToken(
 			resolved.resolver,
 			token,
-			{ issuer, audience, algorithms: resolved.algorithms },
+			{
+				issuer,
+				audience,
+				trustedAudiences: new Set(),
+				algorithms: resolved.algorithms
+			},
 			now
 		);
 
@@ -1257,7 +1302,12 @@ describe('OidcDiscoveryStore', () => {
 			verifyInboundOidcToken(
 				resolved.resolver,
 				token,
-				{ issuer, audience, algorithms: resolved.algorithms },
+				{
+					issuer,
+					audience,
+					trustedAudiences: new Set(),
+					algorithms: resolved.algorithms
+				},
 				now
 			)
 		);

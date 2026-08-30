@@ -1,6 +1,9 @@
 import type { OidcAudience, OidcIssuer } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
-import type { OidcClaims } from '@cupboard/protocol/oidc-trust-match';
+import type {
+	OidcClaims,
+	VerifiedOidcClaims
+} from '@cupboard/protocol/oidc-trust-match';
 import { readResponseBytes } from '@cupboard/shared/response-body';
 import {
 	createRemoteJWKSet,
@@ -9,7 +12,6 @@ import {
 	decodeProtectedHeader,
 	errors as joseErrors,
 	type FetchImplementation,
-	type JWTPayload,
 	jwtVerify,
 	type JWTVerifyGetKey
 } from 'jose';
@@ -45,11 +47,42 @@ export class OidcTokenDecodeError extends Error {
 }
 
 export class OidcTokenVerificationError extends Error {
-	constructor(options: { readonly cause: unknown }) {
-		super('Subject token failed signature or required-claim verification', {
-			cause: options.cause
-		});
+	constructor(
+		options: { readonly cause?: unknown } = {},
+		message = 'Subject token failed signature or required-claim verification'
+	) {
+		super(message, { cause: options.cause });
 		this.name = 'OidcTokenVerificationError';
+	}
+}
+
+export class OidcUntrustedAudienceError extends OidcTokenVerificationError {
+	constructor() {
+		super(
+			{},
+			'Subject token contains an audience that this deployment does not trust'
+		);
+		this.name = 'OidcUntrustedAudienceError';
+	}
+}
+
+export class OidcAuthorisedPartyMissingError extends OidcTokenVerificationError {
+	constructor() {
+		super(
+			{},
+			'Subject token has multiple distinct audiences but no authorised party'
+		);
+		this.name = 'OidcAuthorisedPartyMissingError';
+	}
+}
+
+export class OidcAuthorisedPartyMismatchError extends OidcTokenVerificationError {
+	constructor() {
+		super(
+			{},
+			"Subject token's authorised party does not match the verified audience"
+		);
+		this.name = 'OidcAuthorisedPartyMismatchError';
 	}
 }
 
@@ -77,9 +110,9 @@ export class OidcDiscoveryError extends Error {
 }
 
 /**
- * Decodes unverified claims so the caller can select a trust rule. The caller
- * must verify the token against that rule before using any claim for
- * authorisation.
+ * Decodes unverified claims so the caller can find a configured issuer and
+ * audience for verification. The caller must not use these claims for policy
+ * selection or authorisation.
  */
 export function decodeInboundClaims(token: string): OidcClaims {
 	try {
@@ -92,6 +125,12 @@ export function decodeInboundClaims(token: string): OidcClaims {
 export interface InboundVerifyOptions {
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
+	/**
+	 * Audiences that this deployment accepts in addition to `audience` when
+	 * the token's `aud` claim is an array. Verification fails if any
+	 * additional audience is absent from this set.
+	 */
+	readonly trustedAudiences: ReadonlySet<string>;
 	readonly algorithms: readonly string[];
 	readonly requireIdTokenClaims?: boolean;
 }
@@ -127,7 +166,7 @@ export async function verifyInboundOidcToken(
 	token: string,
 	options: InboundVerifyOptions,
 	now: Date
-): Promise<JWTPayload> {
+): Promise<VerifiedOidcClaims> {
 	let expectedTokenType: 'JWT' | undefined;
 
 	if (options.requireIdTokenClaims) {
@@ -180,32 +219,28 @@ export async function verifyInboundOidcToken(
 			(typeof authorisedParty !== 'string' ||
 				authorisedParty !== options.audience)
 		) {
-			throw new OidcTokenVerificationError({
-				cause: new Error(
-					'ID token authorised party does not match the expected audience'
-				)
-			});
+			throw new OidcAuthorisedPartyMismatchError();
 		}
 
 		if (Array.isArray(tokenAudience)) {
-			const distinctAudiences = new Set(tokenAudience);
-			const hasAdditionalAudience =
-				distinctAudiences.size > 1 &&
-				[...distinctAudiences].some(
-					(audience) => audience !== options.audience
-				);
+			const additionalAudiences = new Set(tokenAudience);
+			additionalAudiences.delete(options.audience);
 
-			if (
-				distinctAudiences.size > 1 &&
-				(hasAdditionalAudience || verified.payload.azp !== options.audience)
-			) {
-				throw new OidcTokenVerificationError({
-					cause: new Error('Multi-audience token is not exclusively authorised')
-				});
+			const hasUntrustedAudience = [...additionalAudiences].some(
+				(audience) => !options.trustedAudiences.has(audience)
+			);
+
+			if (hasUntrustedAudience) {
+				throw new OidcUntrustedAudienceError();
+			}
+
+			if (authorisedParty === undefined && additionalAudiences.size > 0) {
+				throw new OidcAuthorisedPartyMissingError();
 			}
 		}
 
-		return verified.payload;
+		// `jwtVerify` established the invariant represented by the opaque brand.
+		return verified.payload as VerifiedOidcClaims;
 	} catch (error) {
 		if (error instanceof OidcTokenVerificationError) {
 			throw error;

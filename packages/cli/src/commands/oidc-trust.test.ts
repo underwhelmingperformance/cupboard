@@ -3,9 +3,10 @@ import {
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
 import {
-	type OidcTrustAddBody,
+	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
+	type OidcTrustSummaryInput,
 	oidcTrustSummarySchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
@@ -90,7 +91,7 @@ const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 const ciGrantRow =
 	'cache owner-ci: upload:negotiate, upload:status, upload:commit';
 
-function summary(overrides: Partial<OidcTrustSummary>) {
+function summary(overrides: Partial<OidcTrustSummaryInput>) {
 	return oidcTrustSummarySchema.parse({
 		id: 'rule-1',
 		issuer: 'https://token.actions.githubusercontent.com',
@@ -163,9 +164,9 @@ describe('runOidcTrustList', () => {
 
 describe('runOidcTrustAdd', () => {
 	it('adds the rule and reports its summary', async () => {
-		const calls: OidcTrustAddBody[] = [];
+		const calls: OidcTrustAddBodyInput[] = [];
 		const results: ResultRow[][] = [];
-		const body: OidcTrustAddBody = {
+		const body: OidcTrustAddBodyInput = {
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
 			claims: { repository_owner_id: '5678', repository_id: '1234' },

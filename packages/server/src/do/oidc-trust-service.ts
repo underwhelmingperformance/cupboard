@@ -3,21 +3,22 @@ import {
 	type OidcIssuer,
 	oidcIssuerSchema,
 	type OidcSubject,
+	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody,
 	type TrustRuleId,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import {
 	type OidcClaims,
-	type OidcTrustRule
+	type OidcTrustRule,
+	type OidcTrustVerificationTarget,
+	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
-import type { JWTPayload } from 'jose';
 
 import * as schema from '../db/schema.ts';
 import {
@@ -113,16 +114,17 @@ export class OidcTrustService {
 	}
 
 	private async verifyInboundOnce(
-		rule: OidcTrustRule,
-		token: string
-	): Promise<JWTPayload> {
+		target: OidcTrustVerificationTarget,
+		token: string,
+		trustedAudiences: ReadonlySet<string>
+	): Promise<VerifiedOidcClaims> {
 		// Discovery and JWKS fetch failures are retryable issuer outages.
 		// Signature and claim failures remain non-retryable token errors.
 		let issuer;
 		try {
-			issuer = await this.context.discovery.resolve(rule.issuer);
+			issuer = await this.context.discovery.resolve(target.issuer);
 		} catch (error: unknown) {
-			throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			throw new IssuerUnavailableError(target.issuer, { cause: error });
 		}
 
 		try {
@@ -132,8 +134,9 @@ export class OidcTrustService {
 				issuer.resolver,
 				token,
 				{
-					issuer: rule.issuer,
-					audience: rule.audience,
+					issuer: target.issuer,
+					audience: target.audience,
+					trustedAudiences,
 					algorithms: issuer.algorithms,
 					requireIdTokenClaims: true
 				},
@@ -141,7 +144,7 @@ export class OidcTrustService {
 			);
 		} catch (error) {
 			if (error instanceof OidcKeysUnreachableError) {
-				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+				throw new IssuerUnavailableError(target.issuer, { cause: error });
 			}
 
 			throw new SubjectTokenVerificationFailedError();
@@ -175,7 +178,7 @@ export class OidcTrustService {
 		return oidcTrustSummaryFromRow(row, canUseLoopbackHttp(this.context.env));
 	}
 
-	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
+	addRule(body: OidcTrustAddBody): OidcTrustSummary {
 		if (
 			!isAllowedIssuerTransport(
 				body.issuer,
@@ -247,9 +250,13 @@ export class OidcTrustService {
 		}
 	}
 
-	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
+	async verifyInbound(
+		target: OidcTrustVerificationTarget,
+		token: string,
+		trustedAudiences: ReadonlySet<string>
+	): Promise<VerifiedOidcClaims> {
 		try {
-			return await this.verifyInboundOnce(rule, token);
+			return await this.verifyInboundOnce(target, token, trustedAudiences);
 		} catch (error) {
 			// Only the transient upstream refusal is retried; a token that failed
 			// verification is refused at once. One short in-place retry absorbs an
@@ -260,7 +267,7 @@ export class OidcTrustService {
 
 			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
 
-			return this.verifyInboundOnce(rule, token);
+			return this.verifyInboundOnce(target, token, trustedAudiences);
 		}
 	}
 

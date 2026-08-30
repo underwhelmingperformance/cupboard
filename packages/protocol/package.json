@@ -30,6 +30,8 @@
 		"./oidc": "./src/oidc.ts",
 		"./oidc-issuer": "./src/oidc-issuer.ts",
 		"./oidc-trust-match": "./src/oidc-trust-match.ts",
+		"./oidc-trust-diagnostics": "./src/oidc-trust-diagnostics.ts",
+		"./oidc-trust-selection": "./src/oidc-trust-selection.ts",
 		"./plan": "./src/plan.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",

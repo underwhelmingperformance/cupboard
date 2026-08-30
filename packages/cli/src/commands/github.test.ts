@@ -13,7 +13,7 @@ import {
 	graceSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import {
-	type OidcTrustAddBody,
+	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
 	oidcTrustSummarySchema,
@@ -98,7 +98,7 @@ const previousBranchBody = githubBranchAddBody(url, identity, {
 	jobWorkflowRef: previousWorkflowReference
 });
 
-function storedRule(id: string, body: OidcTrustAddBody) {
+function storedRule(id: string, body: OidcTrustAddBodyInput) {
 	return oidcTrustSummarySchema.parse({ id, ...body, disabled: false });
 }
 
@@ -109,7 +109,7 @@ interface Recorded {
 		selectors: readonly ReuseViewSelector[];
 		priority?: number;
 	}[];
-	readonly ruleAdds: OidcTrustAddBody[];
+	readonly ruleAdds: OidcTrustAddBodyInput[];
 	readonly ruleRemoves: string[];
 }
 
@@ -449,7 +449,7 @@ describe('runGithubSetup', () => {
 	it('retains safe rules for a previous workflow while adding the new rules', async () => {
 		const results: ResultRow[][] = [];
 		const verifiedReferences: string[] = [];
-		const legacyPrBody: OidcTrustAddBody = {
+		const legacyPrBody: OidcTrustAddBodyInput = {
 			...previousPrBody,
 			claims: {
 				repository_id: String(identity.repositoryId),
@@ -1130,7 +1130,7 @@ describe('runGithubSetup', () => {
 	it('reports a rule matching other workflow references instead of skipping it', async () => {
 		const results: ResultRow[][] = [];
 		const verifiedReferences: string[] = [];
-		const legacy: OidcTrustSummary = {
+		const legacy = oidcTrustSummarySchema.parse({
 			id: 'legacy',
 			issuer: prBody.issuer,
 			audience: prBody.audience,
@@ -1141,7 +1141,7 @@ describe('runGithubSetup', () => {
 			},
 			permittedGrants: prBody.permittedGrants,
 			disabled: false
-		};
+		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [

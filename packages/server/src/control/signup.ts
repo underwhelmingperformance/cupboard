@@ -5,13 +5,13 @@ import {
 	oidcIssuerSchema
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
 	type SignupResponse
 } from '@cupboard/protocol/signup';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
-import type { JWTPayload } from 'jose';
 
 import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -148,7 +148,7 @@ async function verifySignupToken(
 	audience: OidcAudience,
 	token: string,
 	canUseHttpLoopback: boolean
-): Promise<JWTPayload> {
+): Promise<VerifiedOidcClaims> {
 	let resolved;
 	try {
 		resolved = await (
@@ -165,6 +165,7 @@ async function verifySignupToken(
 			{
 				issuer,
 				audience,
+				trustedAudiences: new Set(),
 				algorithms: resolved.algorithms,
 				requireIdTokenClaims: true
 			},
@@ -179,7 +180,7 @@ async function verifySignupToken(
 	}
 }
 
-function verifiedSubject(verified: JWTPayload): string {
+function verifiedSubject(verified: VerifiedOidcClaims): string {
 	if (typeof verified.sub !== 'string' || verified.sub === '') {
 		throw new SubjectTokenSubjectMissingError();
 	}

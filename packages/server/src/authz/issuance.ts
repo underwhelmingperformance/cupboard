@@ -13,8 +13,8 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	isRuleInteractive,
-	type OidcClaims,
-	type OidcTrustRule
+	type OidcTrustRule,
+	type VerifiedOidcClaims
 } from '@cupboard/protocol/oidc-trust-match';
 
 import {
@@ -55,6 +55,10 @@ export function parseRequestedGrants(
 		throw new InvalidAuthorizationDetailsError('malformed');
 	}
 
+	if (result.data.length === 0) {
+		throw new InvalidAuthorizationDetailsError('empty');
+	}
+
 	return result.data;
 }
 
@@ -67,7 +71,7 @@ export function parseRequestedGrants(
  */
 export function resolveRequestedGrants(
 	rule: OidcTrustRule,
-	claims: OidcClaims,
+	claims: VerifiedOidcClaims,
 	requested: AuthorizationDetails | undefined
 ): AuthorizationDetails {
 	if (requested === undefined) {

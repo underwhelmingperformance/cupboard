@@ -5,12 +5,10 @@ import {
 	type GraceSeconds
 } from '@cupboard/nix-store/scalars';
 import {
-	type OidcTrustAddBody,
+	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
-	type OidcTrustSummary,
-	type ParsedOidcTrustListResponse,
-	type ParsedOidcTrustRemoveResponse,
-	type ParsedOidcTrustSummary
+	type OidcTrustRemoveResponse,
+	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import {
@@ -84,9 +82,9 @@ export interface GithubSetupClient {
 	readonly policies: Pick<PolicyClient, 'graceList' | 'graceAdd'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
 	readonly oidcTrust: {
-		list(): Promise<ParsedOidcTrustListResponse>;
-		add(input: OidcTrustAddBody): Promise<ParsedOidcTrustSummary>;
-		remove(input: { id: string }): Promise<ParsedOidcTrustRemoveResponse>;
+		list(): Promise<OidcTrustListResponse>;
+		add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
+		remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
 	};
 }
 
@@ -238,7 +236,7 @@ function isDeepEqual(left: unknown, right: unknown): boolean {
 // field that affects matching or the authority issued by an exchange.
 function isRuleMatchingBody(
 	rule: OidcTrustSummary,
-	body: OidcTrustAddBody
+	body: OidcTrustAddBodyInput
 ): boolean {
 	return (
 		rule.issuer === body.issuer &&
@@ -252,7 +250,7 @@ interface DesiredTrustRule {
 	readonly step: string;
 	readonly kind: 'pull-request' | 'branch';
 	readonly trigger: string;
-	readonly body: OidcTrustAddBody;
+	readonly body: OidcTrustAddBodyInput;
 	readonly tokenClaims: Readonly<Record<string, string>>;
 }
 
@@ -643,7 +641,7 @@ function planTrustRule(
 	client: GithubSetupClient,
 	rules: OidcTrustListResponse['rules'],
 	step: string,
-	body: OidcTrustAddBody
+	body: OidcTrustAddBodyInput
 ): PlannedSetupStep {
 	const matching = rules.find(
 		(rule) => !rule.disabled && isRuleMatchingBody(rule, body)

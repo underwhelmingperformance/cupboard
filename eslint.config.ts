@@ -155,11 +155,26 @@ export default defineConfig(
 			'no-restricted-imports': [
 				'error',
 				{
-					paths: nodeBuiltInImports.map((name) => ({
-						name,
-						message:
-							'Server and shared runtime code must use Cloudflare Worker APIs.'
-					})),
+					paths: [
+						...nodeBuiltInImports.map((name) => ({
+							name,
+							message:
+								'Server and shared runtime code must use Cloudflare Worker APIs.'
+						})),
+						{
+							name: '@cupboard/protocol/oidc-trust-diagnostics',
+							message: 'Authority-issuing code must use verified OIDC claims.'
+						},
+						{
+							name: '@cupboard/protocol/oidc-trust-match',
+							importNames: [
+								'matchModelledOidcTrust',
+								'preferredModelledOidcTrustRules'
+							],
+							message:
+								'Authority-issuing code must not select policy from modelled OIDC claims.'
+						}
+					],
 					patterns: [
 						{
 							group: ['node:*'],

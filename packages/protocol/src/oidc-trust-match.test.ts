@@ -7,8 +7,10 @@ import {
 } from './oidc.ts';
 import {
 	firstClaimMismatch,
-	matchOidcTrust,
-	type OidcTrustRule
+	hasMatchingOidcTrustIdentity,
+	matchModelledOidcTrust,
+	type OidcTrustRule,
+	oidcTrustVerificationTarget
 } from './oidc-trust-match.ts';
 
 const github = oidcIssuerSchema.parse(
@@ -54,7 +56,7 @@ const exactRepoRule: OidcTrustRule = {
 
 const rules = [ownerRule, repoRule, exactRepoRule];
 
-describe('matchOidcTrust', () => {
+describe('matchModelledOidcTrust', () => {
 	it.each([
 		{
 			name: 'selects the owner rule for a matching id_token',
@@ -119,12 +121,12 @@ describe('matchOidcTrust', () => {
 			id: undefined
 		}
 	])('$name', ({ claims, id }) => {
-		expect(matchOidcTrust(rules, claims)?.id).toBe(id);
+		expect(matchModelledOidcTrust(rules, claims)?.id).toBe(id);
 	});
 
 	it('does not match a numeric claim against a string-configured value', () => {
 		expect(
-			matchOidcTrust(rules, {
+			matchModelledOidcTrust(rules, {
 				iss: github,
 				aud: audience,
 				repository_owner_id: 5678
@@ -145,17 +147,17 @@ describe('matchOidcTrust', () => {
 		const base = { iss: github, aud: audience };
 
 		expect({
-			match: matchOidcTrust([patternRule], {
+			match: matchModelledOidcTrust([patternRule], {
 				...base,
 				job_workflow_ref:
 					'acme/infra/.github/workflows/publish.yml@refs/heads/main'
 			})?.id,
-			noMatch: matchOidcTrust([patternRule], {
+			noMatch: matchModelledOidcTrust([patternRule], {
 				...base,
 				job_workflow_ref:
 					'other/repo/.github/workflows/publish.yml@refs/heads/main'
 			})?.id,
-			absent: matchOidcTrust([patternRule], base)?.id
+			absent: matchModelledOidcTrust([patternRule], base)?.id
 		}).toStrictEqual({
 			match: 'pattern',
 			noMatch: undefined,
@@ -165,7 +167,7 @@ describe('matchOidcTrust', () => {
 
 	it('rejects when only the token issuer ends with a trailing slash', () => {
 		expect(
-			matchOidcTrust(rules, {
+			matchModelledOidcTrust(rules, {
 				iss: `${github}/`,
 				aud: audience,
 				repository_owner_id: '5678'
@@ -196,8 +198,10 @@ describe('matchOidcTrust', () => {
 		};
 
 		expect({
-			forward: matchOidcTrust([ownerClaimRule, actorClaimRule], claims)?.id,
-			reversed: matchOidcTrust([actorClaimRule, ownerClaimRule], claims)?.id
+			forward: matchModelledOidcTrust([ownerClaimRule, actorClaimRule], claims)
+				?.id,
+			reversed: matchModelledOidcTrust([actorClaimRule, ownerClaimRule], claims)
+				?.id
 		}).toStrictEqual({ forward: undefined, reversed: undefined });
 	});
 
@@ -219,8 +223,8 @@ describe('matchOidcTrust', () => {
 		const claims = { iss: github, aud: audience, sub: 'shared', actor: 'ci' };
 
 		expect({
-			forward: matchOidcTrust([interactiveRule, ciRule], claims)?.id,
-			reversed: matchOidcTrust([ciRule, interactiveRule], claims)?.id
+			forward: matchModelledOidcTrust([interactiveRule, ciRule], claims)?.id,
+			reversed: matchModelledOidcTrust([ciRule, interactiveRule], claims)?.id
 		}).toStrictEqual({ forward: 'zzz-owner', reversed: 'zzz-owner' });
 	});
 
@@ -246,9 +250,71 @@ describe('matchOidcTrust', () => {
 			actor: 'ci'
 		};
 
-		expect(matchOidcTrust([interactiveRule, specificCiRule], claims)?.id).toBe(
-			'owner'
+		expect(
+			matchModelledOidcTrust([interactiveRule, specificCiRule], claims)?.id
+		).toBe('owner');
+	});
+});
+
+describe('oidcTrustVerificationTarget', () => {
+	it('returns one shared target for several rules in the same trust domain', () => {
+		expect(
+			oidcTrustVerificationTarget([repoRule, exactRepoRule], {
+				iss: github,
+				aud: audience
+			})
+		).toStrictEqual({ issuer: github, audience });
+	});
+
+	it('returns undefined when no configured target matches', () => {
+		expect(
+			oidcTrustVerificationTarget(rules, {
+				iss: 'https://untrusted.example.com',
+				aud: audience
+			})
+		).toBeUndefined();
+	});
+
+	it('resolves an audience array by authorised party, then sorted order', () => {
+		const otherAudience = oidcAudienceSchema.parse(
+			'https://other.example.workers.dev'
 		);
+		const otherRule: OidcTrustRule = {
+			...repoRule,
+			id: trustRuleIdSchema.parse('other-audience'),
+			audience: otherAudience
+		};
+		const claims = { iss: github, aud: [otherAudience, audience] };
+
+		expect({
+			forward: oidcTrustVerificationTarget([repoRule, otherRule], claims),
+			reversed: oidcTrustVerificationTarget([otherRule, repoRule], claims),
+			authorisedParty: oidcTrustVerificationTarget([repoRule, otherRule], {
+				...claims,
+				azp: otherAudience
+			})
+		}).toStrictEqual({
+			forward: { issuer: github, audience },
+			reversed: { issuer: github, audience },
+			authorisedParty: { issuer: github, audience: otherAudience }
+		});
+	});
+});
+
+describe('hasMatchingOidcTrustIdentity', () => {
+	it('distinguishes a full identity match from a configured-claim mismatch', () => {
+		const base = { iss: github, aud: audience };
+
+		expect({
+			matched: hasMatchingOidcTrustIdentity(rules, {
+				...base,
+				repository_owner_id: '5678'
+			}),
+			unmatched: hasMatchingOidcTrustIdentity(rules, {
+				...base,
+				repository_owner_id: '9999'
+			})
+		}).toStrictEqual({ matched: true, unmatched: false });
 	});
 });
 
