@@ -120,9 +120,38 @@ cupboard config "$url" "$(cupboard pubkey "$url")" | sudo tee -a /etc/nix/nix.co
 
 ## Private caches
 
-A private cache needs credentials, which Nix reads from a netrc file rather than
-from `nix.conf` or `nixConfig`. `cupboard config` prints the netrc line when
-given read credentials:
+Create a private cache by pushing to it:
+
+```sh
+cupboard push "$url" ./result --private-cache release
+```
+
+The push creates `release` if it does not exist.
+
+### Public and private namespaces
+
+A cache is private by its address. A public cache is read at
+`/t/<tenant>/cache/<name>/`, or at the bare tenant URL for the tenant's default
+cache, and a private cache is read at `/t/<tenant>/private-cache/<name>/`, where
+every request authenticates with HTTP Basic credentials and every response is
+`cache-control: no-store`. The two namespaces are separate: `cache/foo` and
+`private-cache/foo` name different caches, which can both exist and hold
+different paths. Visibility is part of a cache's identity rather than a setting
+on it, so a cache is created public or private and no command turns one into the
+other.
+
+Every command that addresses one cache takes `--cache` for a public cache and
+`--private-cache` for a private one, and refuses the two together. Commands that
+take a cache by its selector, such as `cupboard cache create`, write a private
+cache as `_private-<name>`.
+
+### A private tenant
+
+A tenant can also require a credential on its public routes. Every read of a
+public cache then authenticates with the tenant's credential, while `/pubkey`
+stays open so a client can still fetch the key it has to trust. One credential
+covers the whole host, so Nix reads it from a netrc file. `cupboard config`
+prints the netrc line when given read credentials:
 
 ```sh
 cupboard config "$url" "$(cupboard pubkey "$url")" \
@@ -132,3 +161,56 @@ cupboard config "$url" "$(cupboard pubkey "$url")" \
 Point Nix at the file with `nix.settings.netrc-file` (or `netrc-file` in
 `nix.conf`). Keep the credentials out of the Nix store; reference a path managed
 outside it, such as one provided by a secrets tool.
+
+### One credential per cache
+
+A private cache is read with the tenant's credential unless it has one of its
+own. The tenant credential opens every private cache the tenant has, so a cache
+shared with a reader who should not see the others needs its own:
+
+```sh
+cupboard tenant rotate-cache-credential \
+  https://cupboard.example.workers.dev acme release --read-user reader
+```
+
+The command generates the password and prints it once. The deployment stores
+only a verifier, so cupboard cannot recover the password later. Shell history,
+an environment variable or a recipient may still retain a copy. A cache that has
+its own credential accepts that credential and no other, the tenant credential
+included. Two credentials therefore never open the same cache, and giving a
+cache its own credential never widens what a credential already opens.
+
+`cupboard tenant clear-cache-credential` removes a cache's credential, and the
+tenant credential reads that cache again afterwards. Both commands address the
+deployment host and name the tenant, so they need operator authority. A private
+cache with neither its own credential nor a tenant credential refuses every
+read.
+
+### What a private cache protects
+
+Every read through a private cache requires a credential the cache accepts. This
+applies to its narinfos and to NARs served through its prefix. A narinfo maps a
+store-path hash to the NAR that holds the path's contents, and records that
+path's references, deriver and signatures. Nix needs the narinfo before it can
+ask for any bytes.
+
+The bytes are addressed by their NAR hash. A private cache serves a NAR under
+`/t/<tenant>/private-cache/<name>/nar/<hash>.nar.zst` only when that cache has a
+path that references the hash. A private cache's own credential authorises only
+reads through that cache. The public routes serve no NAR referenced only by
+private caches. Knowing the hash does not bypass these checks. Deleting the last
+path that references a NAR in a cache stops that cache serving the NAR before
+the deletion reports success.
+
+Public caches are the exception to the per-cache rule: none has a credential of
+its own, and a reader admitted to one can address every other, so all of a
+tenant's public caches share one authorisation range. A NAR that any public
+cache references is served from every public prefix of the tenant, including
+`/t/<tenant>/nar/<hash>.nar.zst`.
+
+Publishing a NAR hash does not bypass private-cache authorisation. It does
+disclose that the path exists and identifies its contents to anyone holding a
+copy from elsewhere. The in-toto subject digest of a cupboard attestation is the
+NAR hash. A public transparency log exposes that digest to everyone, and a
+repository's attestation store exposes it to every reader of that repository.
+Both are append-only, so a published NAR hash cannot be withdrawn.

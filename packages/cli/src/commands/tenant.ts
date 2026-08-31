@@ -297,13 +297,13 @@ export function registerTenantCommands(
 	tenant
 		.command('rotate-credential')
 		.description(
-			"Set a private cache's read credential to a newly generated password."
+			"Set the tenant's read credential to a newly generated password."
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option(
 			'--read-user <user>',
-			'the Basic-auth user a private cache requires from readers',
+			'the Basic-auth user required for tenant reads',
 			parseReadUser
 		)
 		.action(async (url: URL, id: string, options: RotateCredentialOptions) => {

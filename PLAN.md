@@ -767,6 +767,12 @@ cache.
     the cache-owning tenant entrypoint. Keying cache entries by credential is
     deferred unless a later measured need justifies it.
   - Per-cache private mode is deferred; this is a global toggle first.
+  - Superseded: per-cache privacy is a namespace, not a mode. A private cache
+    has its own identity (stored name `private/<name>`, selector
+    `_private-<name>`) and is read under `/t/<tenant>/private-cache/<name>/`, so
+    visibility is fixed at creation and no cache is ever switched between the
+    two. The tenant-wide toggle described above still governs the public
+    namespace.
 
 - [x] Support one or more named cache paths for organisation:
   - [x] `/cache/:cacheName/nix-cache-info`
@@ -2793,29 +2799,24 @@ The change is cheapest before a release and while tokens are stateless:
 - Access tokens are short-lived and carry no server-side record (V4). Changing
   their claim shape costs nothing to deploy; outstanding tokens expire within
   minutes.
-- V5 is a fresh deploy with no field compatibility to keep, so a token's own
-  shape and the stored shape of a trust rule are both free to change.
+- V5 is a fresh deploy with no field compatibility to keep, so the access-token
+  claims and the stored representation of a trust rule are both free to change.
 - The contract already declares each procedure's required authority once, in
   `meta({ scope })`. V7 enriches that declaration rather than inventing a new
   one.
-
-Deferring the model and instead adding a second bespoke claim, a `cb_caches`
-sibling to `cb_roots`, would spread enforcement across more sites and carry both
-claims into a released, compatibility-bound token.
 
 ### The model
 
 A grant is an operation paired with the resources it may act on:
 
-- **Operations** are the verbs the server gates, one per contract procedure or
-  hand-written route so that no path is left unguarded. On the tenant Durable
-  Object the push lifecycle is `upload:negotiate`, `upload:prepare`,
-  `upload:status`, and `upload:commit`; the attestation lifecycle is
-  `attestation:negotiate`, `attestation:prepare`, and `attestation:attach`;
-  retention is `root:set`; and the admin verbs cover `cache:create`,
-  `cache:delete`, `narinfo:delete`, signing keys, trust rules, and policy. On
-  the control plane: `tenant:create`, `tenant:suspend`, `tenant:resume`,
-  `tenant:remove`, `tenant:read`, `control-key:rotate`, and
+- **Operations** are the verbs the server gates. Every contract procedure and
+  hand-written route has one. On the tenant Durable Object the push lifecycle is
+  `upload:negotiate`, `upload:prepare`, `upload:status`, and `upload:commit`;
+  the attestation lifecycle is `attestation:negotiate`, `attestation:prepare`,
+  and `attestation:attach`; retention is `root:set`; and the admin verbs cover
+  `cache:create`, `cache:delete`, `narinfo:delete`, signing keys, trust rules,
+  and policy. On the control plane: `tenant:create`, `tenant:suspend`,
+  `tenant:resume`, `tenant:remove`, `tenant:read`, `control-key:rotate`, and
   `control-key:retire`.
 - **Resources** name what an operation acts on, in three shapes. Tenant-DO cache
   operations carry a cache (an exact name) and, where the operation sets
@@ -3836,6 +3837,13 @@ the tenant's existing read mode and credential rather than introducing a second
 visibility boundary. A public tenant exposes configured views publicly. A
 private tenant's existing Basic credential guards each view exactly as it guards
 every stored cache.
+
+Superseded in part: private reuse views now use a separate namespace, as private
+caches do. A private view has the stored name `private/<view>` and the contract
+name `_private-<view>`. Clients read it under
+`/t/<tenant>/private-reuse/<view>/`, where every request authenticates with the
+tenant credential. Its selectors resolve against private stored names only.
+Public views keep the behaviour described above.
 
 Reuse-view `nix-cache-info` and narinfo responses are always `no-store`,
 including for public tenants. An answer can change when the view definition
@@ -5814,7 +5822,7 @@ remaining work.
         path. Attestation refuses an unverified remotely produced subject.
 19. [ ] Connect cross-run pruning end to end. Supply `--previous-receipt-file`
         from the composite action and the workflow; upload per-cohort receipt
-        fragments and a plan-stage fragment naming the expected keys; add an
+        fragments and a plan-stage fragment that lists the expected keys; add an
         aggregation job that runs on failure and publishes state only for a
         complete, identity-valid set; define the manifest digest over the
         receipt schema, manifest contents, resolved target identities, source
