@@ -148,6 +148,20 @@
 			"when": 1788280910522,
 			"tag": "0020_deployment_ledger",
 			"breakpoints": true
+		},
+		{
+			"idx": 21,
+			"version": "6",
+			"when": 1788282863601,
+			"tag": "0021_cache_access_expand",
+			"breakpoints": true
+		},
+		{
+			"idx": 22,
+			"version": "6",
+			"when": 1788282875260,
+			"tag": "0022_cache_access_legacy_write_mirror",
+			"breakpoints": true
 		}
 	]
 }
