@@ -28,8 +28,12 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme default-only
 ## Read semantics
 
 The view serves `nix-cache-info` and narinfo at `/t/<tenant>/reuse/<view>/`,
-following the tenant's read mode: a public tenant exposes those routes publicly,
-while a private tenant requires the existing Basic read credential.
+following the tenant's read mode. A public tenant exposes those routes publicly,
+while a private tenant requires the existing Basic read credential. Private
+views use separate routes that always require authentication; see [Private
+views][private-views].
+
+[private-views]: #private-views
 
 Every reuse-view response, hit or miss, is served with
 `cache-control: no-store`, so a shared HTTP cache never stores a stale or
@@ -42,6 +46,53 @@ Cupboard handles that risk the same way for every candidate. When a store-path
 hash resolves to more than one semantically distinct result across the view's
 caches, the lookup returns a miss instead of choosing between them, and the
 affected target is built locally instead of substituted.
+
+## Private views
+
+`--private` defines a view in the private namespace:
+
+```bash
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
+  --private --prefix pr-
+```
+
+Here `pull-requests` is the local name. Its stored name is
+`private/pull-requests`, and its contract name is `_private-pull-requests`.
+Clients read it at `/t/<tenant>/private-reuse/pull-requests/`.
+
+A view is public or private according to its namespace, exactly as a cache is.
+The selectors in a view's body are plain names local to that namespace. A
+private view's selectors match private caches, while a public view's selectors
+match public caches. No selector reaches across the two namespaces, and the same
+definition selects different caches in each. A private view refuses the
+`_default` exact selector because the tenant's default cache is public and the
+private namespace has no default cache.
+
+Every request under `/private-reuse/` authenticates with the tenant's read
+credential, regardless of the method or whether the view exists. A view can
+select several caches, so a credential for one private cache does not open a
+view over that cache. A tenant without a read credential has no readable private
+view. A private view's responses carry `cache-control: no-store` like every
+other reuse-view response, misses included.
+
+A narinfo served by a private view refers to the view's NAR route. That route
+requires the tenant's read credential and serves a NAR only when one of the
+tenant's private caches references its hash. This private-namespace rule is
+wider than the per-cache rule described in [What a private cache
+protects][private-cache-privacy], because a view's selectors can change after
+the server returns a narinfo and before the reader requests the corresponding
+NAR.
+
+[private-cache-privacy]: ./nix.md#what-a-private-cache-protects
+
+`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input, so the
+input configures only public views. To use a private view, configure
+`/private-reuse/<view>/` directly and put the tenant credential in the URL's
+userinfo, as for a private cache.
+
+`cupboard reuse-view remove --private` removes a private view.
+`cupboard reuse-view list` reports public and private views in one list, each
+under the name that addresses it.
 
 ## Priorities
 

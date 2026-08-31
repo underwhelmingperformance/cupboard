@@ -22,7 +22,7 @@ deployment by its bare host and are marked "operator only" in the help:
 - `cupboard init` (alias `cupboard deploy`) provisions the Workers, R2 bucket,
   D1 database, and queues on a Cloudflare account.
 - `cupboard tenant` creates, suspends, resumes, and removes tenants, and rotates
-  their read credentials.
+  the read credential of a tenant or of one of its private caches.
 - `cupboard control-key` rotates the keys that sign control-plane tokens.
 
 A **tenant admin** owns one tenant within a deployment. They push paths, manage
@@ -57,6 +57,14 @@ https://cupboard.example.workers.dev/t/acme
 
 The default cache is implied by the bare tenant URL; a named cache is selected
 with `--cache <name>` where the command supports it.
+
+A cache is public or private by its address, and a private cache is selected
+with `--private-cache <name>` instead. Its reads live under
+`/t/acme/private-cache/<name>/` and authenticate with the tenant's read
+credential or with one the cache has of its own; see [Private
+caches][private-caches].
+
+[private-caches]: ./docs/nix.md#private-caches
 
 ## Getting started
 
