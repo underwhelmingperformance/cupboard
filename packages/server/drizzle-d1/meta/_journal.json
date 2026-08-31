@@ -141,6 +141,20 @@
 			"when": 1787928992549,
 			"tag": "0019_nar_read_authority",
 			"breakpoints": true
+		},
+		{
+			"idx": 20,
+			"version": "6",
+			"when": 1788218141637,
+			"tag": "0020_cache_access_expand",
+			"breakpoints": true
+		},
+		{
+			"idx": 21,
+			"version": "6",
+			"when": 1788226012318,
+			"tag": "0021_cache_access_legacy_write_mirror",
+			"breakpoints": true
 		}
 	]
 }
