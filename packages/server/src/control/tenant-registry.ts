@@ -12,7 +12,16 @@ import type {
 	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
-import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	isNull,
+	ne,
+	notInArray,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
@@ -20,6 +29,7 @@ import { cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	CacheNotFoundError,
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
@@ -451,6 +461,16 @@ export async function setCacheReadCredential(
 	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
 	// recreate the credential that cleanup deleted.
 	const identity = cacheMigrationColumns(cache, 'private');
+	const lifecycleIdentity = cacheIdentityCondition(
+		d1Schema.cacheLifecycle.cacheKind,
+		d1Schema.cacheLifecycle.cacheName,
+		cache
+	);
+	const liveLifecycle = and(
+		eq(d1Schema.cacheLifecycle.tenant, d1Schema.tenant.id),
+		lifecycleIdentity,
+		isNull(d1Schema.cacheLifecycle.deletedAt)
+	);
 	const insert = database.insert(migrationSchema.cacheReadCredentials).select(
 		database
 			.select({
@@ -472,6 +492,7 @@ export async function setCacheReadCredential(
 				createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
 			})
 			.from(d1Schema.tenant)
+			.innerJoin(d1Schema.cacheLifecycle, liveLifecycle)
 			.where(liveTenantFilter(id))
 	);
 	const set = {
@@ -480,18 +501,30 @@ export async function setCacheReadCredential(
 		readPasswordSalt,
 		createdAt: now
 	};
-	const written = await insert
-		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheReadCredentials.tenant,
-				migrationSchema.cacheReadCredentials.legacyCache
-			],
-			set
-		})
-		.run();
+	const written =
+		cache.kind === 'default'
+			? await insert
+					.onConflictDoUpdate({
+						target: [migrationSchema.cacheReadCredentials.tenant],
+						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'default'`,
+						set
+					})
+					.run()
+			: await insert
+					.onConflictDoUpdate({
+						target: [
+							migrationSchema.cacheReadCredentials.tenant,
+							migrationSchema.cacheReadCredentials.cacheName
+						],
+						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'named'`,
+						set
+					})
+					.run();
 
 	if (written.meta.changes === 0) {
-		await refuseRetiredTenant(database, id);
+		await requireLiveTenant(database, id);
+
+		throw new CacheNotFoundError(cache);
 	}
 }
 

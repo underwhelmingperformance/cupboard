@@ -53,6 +53,22 @@ function controlClient(token?: string): ControlClient {
 	return createORPCClient(link);
 }
 
+async function provisionNamedCacheLifecycle(tenant: string): Promise<void> {
+	await env.CUPBOARD_DB.prepare(
+		`INSERT INTO cache_lifecycle (
+			tenant,
+			cache_kind,
+			cache_name,
+			access,
+			generation,
+			deleted_at,
+			updated_at
+		) VALUES (?, 'named', 'builds', 'public', 1, NULL, ?)`
+	)
+		.bind(tenant, '2026-01-01T00:00:00.000Z')
+		.run();
+}
+
 describe('control contract round trip', () => {
 	beforeEach(resetTestServer);
 
@@ -338,6 +354,7 @@ describe('control contract round trip', () => {
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
+		await provisionNamedCacheLifecycle('acme');
 		const rotated = await client.tenants.rotateNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds',
@@ -385,6 +402,7 @@ describe('control contract round trip', () => {
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
+		await provisionNamedCacheLifecycle('acme');
 		const client = controlClient(
 			await issueControlAdminToken('operator', grants)
 		);
@@ -414,6 +432,7 @@ describe('control contract round trip', () => {
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
+		await provisionNamedCacheLifecycle('acme');
 		const client = controlClient(
 			await issueControlAdminToken(
 				'operator',

@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { cacheIdentityCondition, cacheScopeFromRow } from '../db/cache.ts';
+import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -129,6 +130,24 @@ function quotaBody(id: string, quotaBytes: number): TenantCreateBody {
 
 async function provision(body: TenantCreateBody): Promise<void> {
 	await ensureTenant(database(), body, now);
+}
+
+async function registerCaches(
+	id: TenantId,
+	...caches: readonly CacheScope[]
+): Promise<void> {
+	await database()
+		.insert(d1Schema.cacheLifecycle)
+		.values(
+			caches.map((cache): typeof d1Schema.cacheLifecycle.$inferInsert => ({
+				tenant: id,
+				cacheKind: cache.kind,
+				cacheName: cache.kind === 'named' ? cache.name : undefined,
+				access: 'private',
+				generation: firstCacheGeneration,
+				updatedAt: now
+			}))
+		);
 }
 
 async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
@@ -500,10 +519,15 @@ describe('tenant registry', () => {
 		expect(ids).toStrictEqual(['alpha', 'beta']);
 	});
 
-	it.each([
-		{ name: 'suspends', status: 'suspended' as const },
-		{ name: 'offboards', status: 'offboarding' as const }
-	])(
+	const statusCases: {
+		readonly name: string;
+		readonly status: 'suspended' | 'offboarding';
+	}[] = [
+		{ name: 'suspends', status: 'suspended' },
+		{ name: 'offboards', status: 'offboarding' }
+	];
+
+	it.each(statusCases)(
 		'$name a tenant and reflects it in the registry row',
 		async ({ status }) => {
 			await provision(createBody(acme));
@@ -830,6 +854,7 @@ describe('private cache read credentials', () => {
 
 	it('stores a hashed verifier for the named cache', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds);
 
 		await setCacheReadCredential(
 			database(),
@@ -850,8 +875,28 @@ describe('private cache read credentials', () => {
 		]);
 	});
 
+	it('refuses a credential for a cache which does not exist', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rejected = await rejectedBy(() =>
+			setCacheReadCredential(
+				database(),
+				acme,
+				builds,
+				readCredential('reader'),
+				now
+			)
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'CacheNotFoundError',
+			status: StatusCodes.NOT_FOUND
+		});
+	});
+
 	it('replaces the verifier so the previous password stops working', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -890,6 +935,7 @@ describe('private cache read credentials', () => {
 
 	it('keeps one cache credential when a sibling cache is cleared', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds, guides);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -928,6 +974,7 @@ describe('private cache read credentials', () => {
 
 	it('deletes every cache credential when the tenant is finalised', async () => {
 		await provision(createBody(acme, 'private'));
+		await registerCaches(acme, builds, guides);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -957,6 +1004,7 @@ describe('private cache read credentials', () => {
 		'refuses to $operation a cache credential for an $status tenant',
 		async ({ retire, run }) => {
 			await ensureTenant(database(), createBody(acme), now);
+			await registerCaches(acme, builds);
 			await retire(acme);
 
 			const rejected = await rejectedBy(() => run(acme));
@@ -971,6 +1019,7 @@ describe('private cache read credentials', () => {
 
 	it('rotates a cache credential while the tenant is suspended', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds);
 		await setTenantStatus(database(), acme, 'suspended');
 
 		await setCacheReadCredential(
@@ -997,6 +1046,7 @@ describe('private cache read credentials', () => {
 	// the insert. This exercises the live-tenant condition in the insert.
 	it('writes no credential when offboarding completes after the status check', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds);
 
 		const rotation = setCacheReadCredential(
 			database(),
@@ -1024,6 +1074,7 @@ describe('private cache read credentials', () => {
 
 	it('writes no credential when the tenant row is deleted after the status check', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await registerCaches(acme, builds);
 
 		const rotation = setCacheReadCredential(
 			database(),
