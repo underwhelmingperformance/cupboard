@@ -4,6 +4,27 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+function migrationStatements(file: string): string[] {
+	const migrationsDirectory = path.resolve(
+		import.meta.dirname,
+		'..',
+		'packages',
+		'server',
+		'drizzle-d1'
+	);
+
+	return readFileSync(path.join(migrationsDirectory, file), 'utf8')
+		.split('--> statement-breakpoint')
+		.map((statement) => statement.trim())
+		.filter((statement) => statement.length > 0);
+}
+
+function applyMigration(database: DatabaseSync, file: string): void {
+	for (const statement of migrationStatements(file)) {
+		database.exec(statement);
+	}
+}
+
 function applyMigrations(database: DatabaseSync, through: string): void {
 	const migrationsDirectory = path.resolve(
 		import.meta.dirname,
@@ -17,18 +38,21 @@ function applyMigrations(database: DatabaseSync, through: string): void {
 		.toSorted((left, right) => left.localeCompare(right));
 
 	for (const file of files) {
-		const statements = readFileSync(
-			path.join(migrationsDirectory, file),
-			'utf8'
-		)
-			.split('--> statement-breakpoint')
-			.map((statement) => statement.trim())
-			.filter((statement) => statement.length > 0);
-
-		for (const statement of statements) {
-			database.exec(statement);
-		}
+		applyMigration(database, file);
 	}
+}
+
+function insertTenant(database: DatabaseSync): void {
+	database
+		.prepare(
+			`
+				INSERT INTO tenant (
+					id, status, read_mode, owner_issuer, owner_subject,
+					owner_audience, config_version, created_at
+				) VALUES (?, 'active', 'public', 'issuer', 'subject', 'audience', 1, ?)
+			`
+		)
+		.run('alice', '2026-01-01T00:00:00.000Z');
 }
 
 describe('cache access expansion', () => {
@@ -37,16 +61,7 @@ describe('cache access expansion', () => {
 	beforeEach(() => {
 		database = new DatabaseSync(':memory:');
 		applyMigrations(database, '0022_cache_access_legacy_write_mirror.sql');
-		database
-			.prepare(
-				`
-				INSERT INTO tenant (
-					id, status, read_mode, owner_issuer, owner_subject,
-					owner_audience, config_version, created_at
-				) VALUES (?, 'active', 'public', 'issuer', 'subject', 'audience', 1, ?)
-			`
-			)
-			.run('alice', '2026-01-01T00:00:00.000Z');
+		insertTenant(database);
 	});
 
 	afterEach(() => {
@@ -173,5 +188,242 @@ describe('cache access expansion', () => {
 			{ cache: 'guides', access: 'private' },
 			{ cache: 'private/builds', access: 'private' }
 		]);
+	});
+});
+
+describe('cache access backfill', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		applyMigrations(database, '0022_cache_access_legacy_write_mirror.sql');
+		insertTenant(database);
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	it('preserves writes made after expansion', () => {
+		database
+			.prepare(
+				`
+				INSERT INTO blob_ref (
+					tenant, cache, store_path_hash, generation, nar_hash, cache_generation
+				) VALUES ('alice', 'private/builds', 'path', 3, 'sha256:nar', 2)
+			`
+			)
+			.run();
+
+		applyMigration(database, '0023_cache_access_backfill.sql');
+
+		expect(
+			database
+				.prepare(
+					`
+					SELECT cache, cache_kind, cache_name, store_path_hash,
+						generation, nar_hash, cache_generation
+					FROM blob_ref
+					`
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{
+				cache: 'private/builds',
+				cache_kind: 'named',
+				cache_name: 'builds',
+				store_path_hash: 'path',
+				generation: 3,
+				nar_hash: 'sha256:nar',
+				cache_generation: 2
+			}
+		]);
+	});
+
+	it('mirrors tenants created after the backfill', () => {
+		applyMigration(database, '0023_cache_access_backfill.sql');
+
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, read_mode, owner_issuer, owner_subject,
+						owner_audience, config_version, created_at
+					) VALUES (
+						'bob', 'active', 'private', 'issuer', 'subject',
+						'audience', 1, '2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run();
+
+		expect(
+			database
+				.prepare(
+					`
+						SELECT tenant, cache, cache_kind, cache_name, access,
+							generation, deleted_at, updated_at
+						FROM cache_lifecycle
+						WHERE tenant = 'bob'
+					`
+				)
+				.all()
+				.map((row) => ({
+					...row,
+					cache_name: row.cache_name ?? undefined,
+					deleted_at: row.deleted_at ?? undefined
+				}))
+		).toStrictEqual([
+			{
+				tenant: 'bob',
+				cache: '',
+				cache_kind: 'default',
+				cache_name: undefined,
+				access: 'private',
+				generation: 1,
+				deleted_at: undefined,
+				updated_at: '2026-01-02T00:00:00.000Z'
+			}
+		]);
+	});
+
+	it('creates every lifecycle referenced by an offboarding tenant', () => {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, read_mode, owner_issuer, owner_subject,
+						owner_audience, config_version, created_at
+					) VALUES (
+						'bob', 'offboarding', 'public', 'issuer', 'subject',
+						'audience', 1, '2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run();
+		database
+			.prepare(
+				`
+					INSERT INTO blob_ref (
+						tenant, cache, store_path_hash, generation, nar_hash,
+						cache_generation
+					) VALUES ('bob', 'builds', 'path', 4, 'sha256:nar', 3)
+				`
+			)
+			.run();
+
+		applyMigration(database, '0023_cache_access_backfill.sql');
+
+		expect(
+			database
+				.prepare(
+					`
+						SELECT cache, cache_kind, cache_name, access, generation
+						FROM cache_lifecycle
+						WHERE tenant = 'bob'
+						ORDER BY cache
+					`
+				)
+				.all()
+				.map((row) => ({
+					...row,
+					cache_name: row.cache_name ?? undefined
+				}))
+		).toStrictEqual([
+			{
+				cache: '',
+				cache_kind: 'default',
+				cache_name: undefined,
+				access: 'public',
+				generation: 1
+			},
+			{
+				cache: 'builds',
+				cache_kind: 'named',
+				cache_name: 'builds',
+				access: 'public',
+				generation: 3
+			}
+		]);
+	});
+
+	it('rejects retained references for an offboarded tenant', () => {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, read_mode, owner_issuer, owner_subject,
+						owner_audience, config_version, created_at
+					) VALUES (
+						'bob', 'offboarded', 'private', 'issuer', 'subject',
+						'audience', 1, '2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run();
+		database
+			.prepare(
+				`
+					INSERT INTO blob_ref (
+						tenant, cache, store_path_hash, generation, nar_hash,
+						cache_generation
+					) VALUES ('bob', 'builds', 'path', 1, 'sha256:nar', 1)
+				`
+			)
+			.run();
+
+		expect(() => {
+			applyMigration(database, '0023_cache_access_backfill.sql');
+		}).toThrow(/CHECK constraint failed/u);
+	});
+
+	it('rejects malformed legacy credential keys', () => {
+		database
+			.prepare(
+				`
+				INSERT INTO tenant_cache_read_credential (
+					tenant, cache, read_user, read_password_hash,
+					read_password_salt, created_at
+				) VALUES (
+					'alice', 'builds', 'reader', 'hash', 'salt',
+					'2026-01-01T00:00:00.000Z'
+				)
+				`
+			)
+			.run();
+
+		expect(() => {
+			applyMigration(database, '0023_cache_access_backfill.sql');
+		}).toThrow(/CHECK constraint failed/u);
+	});
+
+	it('rejects public and private aliases of one native cache', () => {
+		database
+			.prepare(
+				`
+				INSERT INTO blob_ref (
+					tenant, cache, store_path_hash, generation, nar_hash, cache_generation
+				) VALUES ('alice', 'builds', 'path', 1, 'sha256:nar', 1)
+				`
+			)
+			.run();
+		database
+			.prepare(
+				`
+				INSERT INTO tenant_cache_read_credential (
+					tenant, cache, read_user, read_password_hash,
+					read_password_salt, created_at
+				) VALUES (
+					'alice', 'private/builds', 'reader', 'hash', 'salt',
+					'2026-01-01T00:00:00.000Z'
+				)
+				`
+			)
+			.run();
+
+		expect(() => {
+			applyMigration(database, '0023_cache_access_backfill.sql');
+		}).toThrow(/CHECK constraint failed/u);
 	});
 });
