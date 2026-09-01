@@ -772,7 +772,10 @@ describe('deleted private cache', () => {
 			whileDeleted: StatusCodes.NOT_FOUND,
 			freshRead: StatusCodes.OK,
 			freshNarRead: StatusCodes.OK,
-			generations: [{ cache: privateBuilds, generation: 2 }]
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: privateBuilds, generation: 2 }
+			]
 		});
 	});
 
@@ -1012,7 +1015,10 @@ describe('cache generation gate', () => {
 			afterDeletion: StatusCodes.NOT_FOUND,
 			undrainedEdges: paths.length,
 			edges: [],
-			generations: [{ cache: privateBuilds, generation: 2 }],
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: privateBuilds, generation: 2 }
+			],
 			credentials: [{ cache: privateBuilds }]
 		});
 	});
@@ -1047,7 +1053,10 @@ describe('cache generation gate', () => {
 		}).toStrictEqual({
 			oldRead: StatusCodes.NOT_FOUND,
 			newRead: StatusCodes.OK,
-			generations: [{ cache: buildsCache, generation: 2 }],
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: buildsCache, generation: 2 }
+			],
 			edges: [
 				{ storePathHash: oldPath.storePathHash, cacheGeneration: 1 },
 				{ storePathHash: newPath.storePathHash, cacheGeneration: 2 }
@@ -1097,7 +1106,10 @@ describe('cache generation gate', () => {
 			afterRecreation: StatusCodes.NOT_FOUND,
 			freshRead: StatusCodes.OK,
 			legacyCacheGeneration: undefined,
-			generations: [{ cache: buildsCache, generation: 2 }]
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: buildsCache, generation: 2 }
+			]
 		});
 	});
 

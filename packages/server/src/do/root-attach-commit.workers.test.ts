@@ -82,7 +82,12 @@ async function pushWithRoot(
 async function rootTargetRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select()
+			.select({
+				cache: schema.retentionRootTargets.cache,
+				rootName: schema.retentionRootTargets.rootName,
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				storePath: schema.retentionRootTargets.storePath
+			})
 			.from(schema.retentionRootTargets)
 			.all()
 			.toSorted((left, right) =>
@@ -100,11 +105,24 @@ async function retentionState(): Promise<{
 }> {
 	return runInDurableObject(currentServer(), (instance) => ({
 		roots: instance.context.db
-			.select()
+			.select({
+				cache: schema.retentionRoots.cache,
+				name: schema.retentionRoots.name,
+				expiresAt: schema.retentionRoots.expiresAt,
+				createdAt: schema.retentionRoots.createdAt,
+				updatedAt: schema.retentionRoots.updatedAt
+			})
 			.from(schema.retentionRoots)
 			.all()
 			.map((row) => ({ ...row, expiresAt: row.expiresAt ?? undefined })),
-		grace: instance.context.db.select().from(schema.retentionGrace).all(),
+		grace: instance.context.db
+			.select({
+				cache: schema.retentionGrace.cache,
+				storePathHash: schema.retentionGrace.storePathHash,
+				retainUntil: schema.retentionGrace.retainUntil
+			})
+			.from(schema.retentionGrace)
+			.all(),
 		caches: instance.context.db
 			.select({
 				name: schema.caches.name,
