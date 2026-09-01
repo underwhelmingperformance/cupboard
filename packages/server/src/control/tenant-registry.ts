@@ -480,15 +480,25 @@ export async function setCacheReadCredential(
 		readPasswordSalt,
 		createdAt: now
 	};
-	const written = await insert
-		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheReadCredentials.tenant,
-				migrationSchema.cacheReadCredentials.legacyCache
-			],
-			set
-		})
-		.run();
+	const written =
+		cache.kind === 'default'
+			? await insert
+					.onConflictDoUpdate({
+						target: [migrationSchema.cacheReadCredentials.tenant],
+						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'default'`,
+						set
+					})
+					.run()
+			: await insert
+					.onConflictDoUpdate({
+						target: [
+							migrationSchema.cacheReadCredentials.tenant,
+							migrationSchema.cacheReadCredentials.cacheName
+						],
+						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'named'`,
+						set
+					})
+					.run();
 
 	if (written.meta.changes === 0) {
 		await refuseRetiredTenant(database, id);
