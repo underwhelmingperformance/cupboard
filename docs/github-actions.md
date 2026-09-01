@@ -104,10 +104,9 @@ Choose an immutable cupboard release from the [releases page][] and replace
 
 ### 2. Configure the tenant
 
-One idempotent command writes all tenant configuration required by these runs: a
-24-hour retention grace period for every cache, the `pull-requests` reuse view
-over the per-PR caches, and trust rules for this repository's PR and `main`
-runs:
+One idempotent command writes all tenant configuration required by these runs:
+the `pull-requests` reuse view over the per-PR caches, and trust rules for this
+repository's PR and `main` runs:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
@@ -121,15 +120,9 @@ cupboard's release publishers part of the tenant's trust boundary, but it needs
 to be configured only once.
 
 Re-running the command leaves matching state unchanged. It reports a different
-grace policy or reuse view as drift and does not replace it. The tag-pattern
-trust rules already cover later matching releases. The commands that write each
-setting individually are under [Manual configuration](#manual-configuration).
-
-The grace policy permanently changes collection for the covered caches. The
-first publication accepted under the policy marks its cache as grace-managed.
-`policy remove-grace` does not remove that marker. When the last deadline on a
-grace-managed cache lapses, collection may empty it; a cache without the marker
-is never emptied that way.
+reuse view as drift and does not replace it. The tag-pattern trust rules already
+cover later matching releases. The commands that write each setting individually
+are under [Manual configuration](#manual-configuration).
 
 ### 3. Declare the targets
 
@@ -230,14 +223,14 @@ grants access to the requested caches and roots.
 The check fails if only an interactive administrator rule matches, even when
 that rule's wildcard grant would allow the operations. It does not inspect the
 caller workflow, so the supplied reference must still match the caller's `uses`
-line. The check also verifies grace-policy coverage and duration, the reuse
-view's effective priority over the destination, and whether the root prefix is
-within the grant. If an input is missing for a check, such as `--root-prefix`,
-the command reports the unchecked invariant and returns a non-success status.
+line. The check also verifies the reuse view's effective priority over the
+destination and whether the root prefix is within the grant. If an input is
+missing for a check, such as `--root-prefix`, the command reports the unchecked
+invariant and returns a non-success status.
 
-Listing the configuration by hand remains available (`cupboard policy list`,
-`cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
-only that rows exist, not that they will match a real run.
+Listing the configuration by hand remains available (`cupboard reuse-view list`,
+`cupboard oidc-trust list`), but a listing shows only that rows exist, not that
+they will match a real run.
 
 Open a pull request and confirm that the workflow publishes to `pr-<number>`.
 After merging it, the `main` run should plan already-published targets from the
@@ -261,13 +254,10 @@ The `trusted_workflow` value produces an anchored pattern for the
 repository, where the reusable workflow file lives, and admits only `v*` release
 tags. See [docs/trust-rules.md](./trust-rules.md) for how the claim works.
 
-On the tenant, give every cache a retention grace period, define a view over the
-PR caches, and trust this repository's PR and `main` runs when they use
-cupboard's reusable workflow:
+On the tenant, define a view over the PR caches, and trust this repository's PR
+and `main` runs when they use cupboard's reusable workflow:
 
 ```bash
-cupboard policy add-grace "$tenant" --cache-prefix '' --grace 24h
-
 cupboard reuse-view set "$tenant" pull-requests \
   --select prefix:pr- --priority 50
 
@@ -279,10 +269,6 @@ cupboard oidc-trust add-github-branch "$tenant" \
   --repo "$repo" --branch main \
   --job-workflow-ref "$trusted_workflow"
 ```
-
-The empty grace prefix covers the default cache and every named cache, including
-the per-PR caches. The grace period must be long enough for the workflow's plan
-and cohort jobs to finish.
 
 The view priority is 50, which is greater than the destination's default
 priority of 40. Nix queries lower numeric priorities first, so this ordering
@@ -1128,10 +1114,10 @@ push, and the existing root-prefix grant covers the new target's root.
 
 ### Add another repository to the same tenant
 
-The tenant-wide grace policy and the `pull-requests` view already cover any
-number of repositories. Run quickstart step 2's `cupboard github setup` for the
-new repository: it adds that repository's trust rules and reports the shared
-tenant state as unchanged. The equivalent individual commands are in
+The `pull-requests` view already covers any number of repositories. Run
+quickstart step 2's `cupboard github setup` for the new repository: it adds that
+repository's trust rules and reports the shared tenant state as unchanged. The
+equivalent individual commands are in
 [Manual configuration](#manual-configuration).
 
 ### Tighten or audit a trust rule

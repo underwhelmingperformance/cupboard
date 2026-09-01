@@ -275,7 +275,7 @@ describe('uploadDecisionSchema', () => {
 
 describe('uploadGraceFactSchema', () => {
 	it.each([
-		{ name: 'no policy fact', value: {} },
+		{ name: 'no configured grace fact', value: {} },
 		{
 			name: 'a stored deadline',
 			value: { retainUntil: '2026-01-02T00:00:00.000Z' }
@@ -323,7 +323,7 @@ describe('uploadPreviewResponseSchema', () => {
 			}
 		},
 		{
-			name: 'upload with no matching policy',
+			name: 'upload with no configured grace',
 			value: { action: 'upload', storePathHash, narHash, grace: {} }
 		},
 		{
@@ -406,7 +406,7 @@ describe('uploadConfirmResponseSchema', () => {
 			}
 		},
 		{
-			name: 'a confirmed path with no matching policy',
+			name: 'a confirmed path with no configured grace',
 			value: { storePathHash, confirmed: true, grace: {} }
 		},
 		{

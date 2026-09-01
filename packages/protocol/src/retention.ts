@@ -1,7 +1,4 @@
 import {
-	cacheNamePrefixPattern,
-	cacheScopeSchema,
-	graceSecondsSchema,
 	rootNameSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -125,114 +122,6 @@ export const gcResponseSchema = z.strictObject({
 export type GcResponse = z.output<typeof gcResponseSchema>;
 export type GcResponseInput = z.input<typeof gcResponseSchema>;
 
-// A retention policy applies a default TTL to roots by cache or by root-name
-// prefix (the pattern is a literal prefix).
-export const retentionPolicyScopeSchema = z.enum(['cache', 'root-name-prefix']);
-export type RetentionPolicyScope = z.infer<typeof retentionPolicyScopeSchema>;
-
-export const retentionPolicyAddBodySchema = z.discriminatedUnion('scope', [
-	z.strictObject({
-		scope: z.literal('cache'),
-		cache: cacheScopeSchema,
-		ttlSeconds: ttlSecondsSchema
-	}),
-	z.strictObject({
-		scope: z.literal('root-name-prefix'),
-		pattern: z.string().min(1),
-		ttlSeconds: ttlSecondsSchema
-	})
-]);
-export type RetentionPolicyAddBody = z.output<
-	typeof retentionPolicyAddBodySchema
->;
-
-export const retentionPolicySummarySchema = z.discriminatedUnion('scope', [
-	z.strictObject({
-		id: z.string(),
-		scope: z.literal('cache'),
-		cache: cacheScopeSchema,
-		ttlSeconds: ttlSecondsSchema
-	}),
-	z.strictObject({
-		id: z.string(),
-		scope: z.literal('root-name-prefix'),
-		pattern: z.string().min(1),
-		ttlSeconds: ttlSecondsSchema
-	})
-]);
-export type RetentionPolicySummary = z.output<
-	typeof retentionPolicySummarySchema
->;
-
-export const retentionPolicyListResponseSchema = z.strictObject({
-	policies: z.array(retentionPolicySummarySchema)
-});
-export type RetentionPolicyListResponse = z.output<
-	typeof retentionPolicyListResponseSchema
->;
-
-export const retentionPolicyRemoveResponseSchema = z.strictObject({
-	id: z.string(),
-	removed: z.boolean()
-});
-export type RetentionPolicyRemoveResponse = z.output<
-	typeof retentionPolicyRemoveResponseSchema
->;
-
-// A retention-grace policy applies to paths published in caches whose names
-// start with `cachePrefix`. The empty prefix is the tenant-wide default, and the
-// longest matching prefix wins. A prefix must be able to start a valid cache
-// name, and cannot be longer than a cache name.
-const gracePrefixMaxLength = 63;
-
-export const gracePolicyAddBodySchema = z.strictObject({
-	cachePrefix: z
-		.string()
-		.max(gracePrefixMaxLength)
-		.regex(cacheNamePrefixPattern, {
-			message: 'cachePrefix must be a valid cache-name prefix'
-		}),
-	graceSeconds: graceSecondsSchema
-});
-export type GracePolicyAddBody = z.output<typeof gracePolicyAddBodySchema>;
-
-export const gracePolicySummarySchema = z.strictObject({
-	id: z.string(),
-	cachePrefix: z.string(),
-	graceSeconds: graceSecondsSchema,
-	createdAt: isoTimestampSchema
-});
-export type GracePolicySummary = z.output<typeof gracePolicySummarySchema>;
-
-export const gracePolicyListResponseSchema = z.strictObject({
-	policies: z.array(gracePolicySummarySchema)
-});
-export type GracePolicyListResponse = z.output<
-	typeof gracePolicyListResponseSchema
->;
-
-export const gracePolicyRemoveResponseSchema = z.strictObject({
-	id: z.string(),
-	removed: z.boolean()
-});
-export type GracePolicyRemoveResponse = z.output<
-	typeof gracePolicyRemoveResponseSchema
->;
-
-// For a covered cache, the response reports the grace period that a publication
-// would resolve. The longest matching cache-name prefix wins, as it does for a
-// push. An uncovered cache has no grace period in the response.
-export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
-	z.strictObject({
-		covered: z.literal(true),
-		graceSeconds: graceSecondsSchema
-	}),
-	z.strictObject({ covered: z.literal(false) })
-]);
-export type GraceCoverageResponse = z.output<
-	typeof graceCoverageResponseSchema
->;
-
 export type RootSetBodyInput = z.input<typeof rootSetBodySchema>;
 export type RootTargetInput = z.input<typeof rootTargetSchema>;
 export type RootSummaryInput = z.input<typeof rootSummarySchema>;
@@ -242,26 +131,3 @@ export type RootListEntryInput = z.input<typeof rootListEntrySchema>;
 export type RootListResponseInput = z.input<typeof rootListResponseSchema>;
 export type RootTargetsPageInput = z.input<typeof rootTargetsPageSchema>;
 export type RootRemoveResponseInput = z.input<typeof rootRemoveResponseSchema>;
-export type RetentionPolicyAddBodyInput = z.input<
-	typeof retentionPolicyAddBodySchema
->;
-export type RetentionPolicySummaryInput = z.input<
-	typeof retentionPolicySummarySchema
->;
-export type RetentionPolicyListResponseInput = z.input<
-	typeof retentionPolicyListResponseSchema
->;
-export type RetentionPolicyRemoveResponseInput = z.input<
-	typeof retentionPolicyRemoveResponseSchema
->;
-export type GracePolicyAddBodyInput = z.input<typeof gracePolicyAddBodySchema>;
-export type GracePolicySummaryInput = z.input<typeof gracePolicySummarySchema>;
-export type GracePolicyListResponseInput = z.input<
-	typeof gracePolicyListResponseSchema
->;
-export type GraceCoverageResponseInput = z.input<
-	typeof graceCoverageResponseSchema
->;
-export type GracePolicyRemoveResponseInput = z.input<
-	typeof gracePolicyRemoveResponseSchema
->;

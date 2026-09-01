@@ -3,10 +3,7 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import {
-	cachePrioritySchema,
-	graceSecondsSchema
-} from '@cupboard/nix-store/scalars';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { type Operation, type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	oidcTrustListResponseSchema,
@@ -123,33 +120,6 @@ function checkClient(overrides: {
 	views?: ReuseViewSummaryInput[];
 }): GithubCheckClient {
 	return {
-		policies: {
-			graceList: () =>
-				Promise.resolve({
-					policies: [
-						...(overrides.graceSeconds === undefined
-							? []
-							: [
-									{
-										id: 'grace-0',
-										cachePrefix: '',
-										graceSeconds: graceSecondsSchema.parse(
-											overrides.graceSeconds
-										),
-										createdAt: isoTimestampSchema.parse(
-											'2026-01-01T00:00:00.000Z'
-										)
-									}
-								]),
-						...(overrides.extraPolicies ?? []).map((policy, index) => ({
-							id: `grace-extra-${String(index)}`,
-							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-							...policy,
-							graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
-						}))
-					]
-				})
-		},
 		reuseViews: {
 			list: () =>
 				Promise.resolve(
@@ -324,7 +294,6 @@ describe('runGithubCheck', () => {
 		expect(findings(results)).toStrictEqual([
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
-			{ label: 'grace policy', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);
@@ -408,7 +377,6 @@ describe('runGithubCheck', () => {
 					rows: [
 						{ label: 'pull-request trust rule', value: 'ok' },
 						{ label: 'main trust rule', value: 'ok' },
-						{ label: 'grace policy', value: 'ok' },
 						{ label: 'reuse view', value: `failed: ${detail}` },
 						{ label: 'root prefix', value: 'ok' }
 					]
@@ -416,99 +384,6 @@ describe('runGithubCheck', () => {
 			);
 		}
 	);
-
-	it('fails when a shorter pr- policy shadows the tenant-wide grace', async () => {
-		const results: ResultRow[][] = [];
-
-		let failure: unknown;
-		try {
-			await runGithubCheck(
-				url,
-				options,
-				reporter(results),
-				checkClient({
-					graceSeconds: 86_400,
-					extraPolicies: [{ cachePrefix: 'pr-', graceSeconds: 300 }],
-					rules: [prRule, branchRule]
-				}),
-				checkDependencies({})
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectFailed(failure);
-		expect(
-			findings(results).find((row) => row.label === 'grace policy')
-		).toStrictEqual({
-			label: 'grace policy',
-			value:
-				'failed: the pr-1 cache has 300s of grace; GitHub publication requires at least 3600s'
-		});
-	});
-
-	it('checks an unshadowed PR cache when pr-1 has a longer exception', async () => {
-		const results: ResultRow[][] = [];
-
-		let failure: unknown;
-		try {
-			await runGithubCheck(
-				url,
-				options,
-				reporter(results),
-				checkClient({
-					graceSeconds: 86_400,
-					extraPolicies: [
-						{ cachePrefix: 'pr-', graceSeconds: 300 },
-						{ cachePrefix: 'pr-1', graceSeconds: 86_400 }
-					],
-					rules: [prRule, branchRule]
-				}),
-				checkDependencies({})
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectFailed(failure);
-		expect(
-			findings(results).find((row) => row.label === 'grace policy')
-		).toStrictEqual({
-			label: 'grace policy',
-			value:
-				'failed: the pr-2 cache has 300s of grace; GitHub publication requires at least 3600s'
-		});
-	});
-
-	it('fails when a policy shadows the grace for one pull request cache', async () => {
-		const results: ResultRow[][] = [];
-
-		let failure: unknown;
-		try {
-			await runGithubCheck(
-				url,
-				options,
-				reporter(results),
-				checkClient({
-					graceSeconds: 86_400,
-					extraPolicies: [{ cachePrefix: 'pr-42', graceSeconds: 300 }],
-					rules: [prRule, branchRule]
-				}),
-				checkDependencies({})
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectFailed(failure);
-		expect(
-			findings(results).find((row) => row.label === 'grace policy')
-		).toStrictEqual({
-			label: 'grace policy',
-			value:
-				'failed: the pr-42 cache has 300s of grace; GitHub publication requires at least 3600s'
-		});
-	});
 
 	it('reports every configuration failure before throwing', async () => {
 		const results: ResultRow[][] = [];
@@ -538,7 +413,6 @@ describe('runGithubCheck', () => {
 			checks: [
 				'pull-request trust rule',
 				'main trust rule',
-				'grace policy',
 				'reuse view',
 				'root prefix'
 			],
@@ -553,11 +427,6 @@ describe('runGithubCheck', () => {
 					label: 'main trust rule',
 					value:
 						'failed: rule pr expects event_name to match pull_request; the modelled run uses push'
-				},
-				{
-					label: 'grace policy',
-					value:
-						'failed: no grace policy covers the default cache; a push with require-grace would fail because no policy would retain its paths'
 				},
 				{
 					label: 'reuse view',
@@ -902,7 +771,6 @@ describe('runGithubCheck', () => {
 		expect(findings(results)).toStrictEqual([
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
-			{ label: 'grace policy', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);

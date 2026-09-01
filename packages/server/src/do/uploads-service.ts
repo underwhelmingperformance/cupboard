@@ -337,7 +337,7 @@ export class UploadsService {
 			reusableByNarHash
 		} = await this.classifyClosure(cache, body, hints, true);
 
-		// Capture grace once and store it with every pending upload. A later policy
+		// Capture grace once and store it with every pending upload. A later cache
 		// change cannot alter the decision before commit finishes. Attach grace facts
 		// only when the client requested them, so a client that did not ask still
 		// receives the legacy response shape.
@@ -453,7 +453,7 @@ export class UploadsService {
 
 	// Preview does not create pending rows, repair stale publications, enqueue
 	// reconciliation, claim reusable blobs, or extend grace. A skip reports its
-	// stored deadline; commit and upload actions report the policy that a new
+	// stored deadline; commit and upload actions report the grace that a new
 	// publication would capture.
 	async preview(
 		cacheScope: CacheScope,
@@ -526,8 +526,8 @@ export class UploadsService {
 				if (existing !== undefined && skippable.has(metadata.storePathHash)) {
 					const retainUntil = storedDeadlines.get(metadata.storePathHash);
 
-					// A skip without a stored deadline reports the current policy. An
-					// empty grace fact means that no policy matched.
+					// A skip without a stored deadline reports the current cache grace. An
+					// empty grace fact means that grace was not configured.
 					const decision = {
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
