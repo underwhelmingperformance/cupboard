@@ -645,6 +645,55 @@ describe('githubStatementSigner', () => {
 			timestampCount: 0
 		});
 	});
+
+	it.each([
+		{
+			evidence: 'Rekor-only',
+			verificationMaterial: {
+				tlogEntries: [{ logIndex: '1' }],
+				timestampVerificationData: {}
+			},
+			expected: { tlogEntryCount: 1, timestampCount: 0 }
+		},
+		{
+			evidence: 'timestamp-only',
+			verificationMaterial: {
+				timestampVerificationData: {
+					rfc3161Timestamps: [{ signedTimestamp: 'a' }]
+				}
+			},
+			expected: { tlogEntryCount: 0, timestampCount: 1 }
+		}
+	] as const)(
+		'counts fields omitted from a serialised $evidence bundle',
+		async ({ verificationMaterial, expected }) => {
+			const serialisedBundle = {
+				mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+				verificationMaterial
+			};
+
+			mocks.attest.mockReset();
+			mocks.attest.mockResolvedValue({
+				bundle: serialisedBundle,
+				certificate: 'certificate'
+			});
+
+			const result = await githubStatementSigner({
+				subjects: [],
+				githubToken: 'token',
+				policy: {
+					profile: 'sigstore-default',
+					uploadToGithub: false,
+					grouping: 'run'
+				}
+			})(statement);
+
+			expect(result).toStrictEqual({
+				bundle: `${JSON.stringify(serialisedBundle)}\n`,
+				evidence: expected
+			});
+		}
+	);
 });
 
 describe('slsaProvenanceStatement', () => {
