@@ -6,7 +6,8 @@ import {
 	reuseViewPrioritySchema,
 	type ReuseViewRemoveResponse,
 	type ReuseViewSelector,
-	reuseViewSelectorSchema,
+	type ReuseViewSetSelector,
+	reuseViewSetSelectorSchema,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
@@ -25,7 +26,7 @@ import {
 import { tenantUrlArgument } from '../url-argument.ts';
 
 export interface ReuseViewSetOptions {
-	readonly select: readonly ReuseViewSelector[];
+	readonly select: readonly ReuseViewSetSelector[];
 	readonly access?: CacheAccessMode;
 	readonly priority?: ReuseViewPriority;
 }
@@ -39,7 +40,7 @@ export interface ReuseViewClient {
 	set(input: {
 		name: string;
 		access: CacheAccessMode;
-		selectors: ReuseViewSelector[];
+		selectors: ReuseViewSetSelector[];
 		priority?: number;
 	}): Promise<ReuseViewSummary>;
 	remove(input: { name: string }): Promise<ReuseViewRemoveResponse>;
@@ -47,14 +48,14 @@ export interface ReuseViewClient {
 
 function collectSelector(
 	value: string,
-	previous: readonly ReuseViewSelector[]
-): ReuseViewSelector[] {
+	previous: readonly ReuseViewSetSelector[]
+): ReuseViewSetSelector[] {
 	const selector = parseSelector(value);
 
 	return [...previous, selector];
 }
 
-export function parseSelector(value: string): ReuseViewSelector {
+export function parseSelector(value: string): ReuseViewSetSelector {
 	const candidate: unknown =
 		value === 'default'
 			? { kind: 'default' }
@@ -67,7 +68,7 @@ export function parseSelector(value: string): ReuseViewSelector {
 						: value.startsWith('prefix:')
 							? { kind: 'prefix', prefix: value.slice('prefix:'.length) }
 							: undefined;
-	const selector = reuseViewSelectorSchema.safeParse(candidate);
+	const selector = reuseViewSetSelectorSchema.safeParse(candidate);
 
 	if (!selector.success) {
 		throw new InvalidReuseViewSelectorError(value);
@@ -97,7 +98,7 @@ export function parsePriority(value: string): ReuseViewPriority {
 // of how the two kinds were interleaved on the command line.
 export function selectorsFromOptions(
 	options: ReuseViewSetOptions
-): ReuseViewSelector[] {
+): ReuseViewSetSelector[] {
 	if (options.select.length === 0) {
 		throw new ReuseViewSelectorRequiredError();
 	}
@@ -221,7 +222,7 @@ export async function runReuseViewList(
 export async function runReuseViewSet(
 	name: string,
 	access: CacheAccessMode,
-	selectors: readonly ReuseViewSelector[],
+	selectors: readonly ReuseViewSetSelector[],
 	priority: ReuseViewPriority | undefined,
 	reporter: Reporter,
 	client: Pick<ReuseViewClient, 'set'>

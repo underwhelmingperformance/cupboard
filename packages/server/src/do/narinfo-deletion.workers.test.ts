@@ -84,8 +84,8 @@ async function seedQueuedDeletions(
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 		const cache = resolvedCache(instance.context);
 
-		// Each row binds five parameters. Keep the insert below the driver's
-		// bound-parameter limit.
+		// Keep each insert below the driver's bound-parameter limit as the queue
+		// schema gains generation and writer-admission fields.
 		for (const batch of chunk(entries, 12)) {
 			database
 				.insert(narInfoDeletions)

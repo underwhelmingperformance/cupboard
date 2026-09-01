@@ -15,9 +15,10 @@ import {
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
+import { ManagedPolicyConflictError } from '../errors.ts';
 
 import { reuseViewSummaryFromRow, type ServerContext } from './context.ts';
 import {
@@ -42,13 +43,19 @@ export interface ResolvedReuseView {
 	readonly selectors: readonly ReuseViewSelector[];
 }
 
+interface ViewDefinition {
+	readonly access: CacheAccessMode;
+	readonly selectors: readonly ReuseViewSelector[];
+	readonly priority?: ReuseViewSummary['priority'];
+}
+
 export class ReuseViewAdminService {
 	constructor(private readonly context: ServerContext) {}
 
 	private unchangedView(
 		tx: Parameters<Parameters<ServerContext['db']['transaction']>[0]>[0],
 		name: ReuseViewName,
-		body: ReuseViewSetBody
+		body: ViewDefinition
 	): ReuseViewSummary | undefined {
 		const current = tx
 			.select()
@@ -68,7 +75,8 @@ export class ReuseViewAdminService {
 				.select({
 					kind: schema.reuseViewSelectors.kind,
 					cacheName: schema.reuseViewSelectors.cacheName,
-					prefix: schema.reuseViewSelectors.prefix
+					prefix: schema.reuseViewSelectors.prefix,
+					managedGroupId: schema.reuseViewSelectors.managedGroupId
 				})
 				.from(schema.reuseViewSelectors)
 				.where(eq(schema.reuseViewSelectors.view, name))
@@ -98,40 +106,26 @@ export class ReuseViewAdminService {
 		};
 	}
 
-	listViews(): ReuseViewListResponse {
-		const views = this.context.db.select().from(schema.reuseViews).all();
-		const selectorRows = this.context.db
-			.select()
-			.from(schema.reuseViewSelectors)
-			.all();
-		const rowsByView = new Map<
-			ReuseViewName,
-			(typeof selectorRows)[number][]
-		>();
-
-		for (const row of selectorRows) {
-			rowsByView.set(row.view, [...(rowsByView.get(row.view) ?? []), row]);
-		}
-
-		const selectorsByView = new Map<ReuseViewName, ReuseViewSelector[]>(
-			rowsByView
-				.entries()
-				.map(([view, rows]) => [view, reuseViewSelectorsFromRows(view, rows)])
-		);
-
-		const summaries = views
-			.map((view) =>
-				reuseViewSummaryFromRow(
-					view,
-					(selectorsByView.get(view.name) ?? []).toSorted(selectorSort)
+	private hasManagedSelector(name: ReuseViewName): boolean {
+		return (
+			this.context.db
+				.select({ view: schema.reuseViewSelectors.view })
+				.from(schema.reuseViewSelectors)
+				.where(
+					and(
+						eq(schema.reuseViewSelectors.view, name),
+						eq(schema.reuseViewSelectors.kind, 'managed-group')
+					)
 				)
-			)
-			.toSorted((left, right) => byCodeUnit(left.name, right.name));
-
-		return { views: summaries };
+				.limit(1)
+				.get() !== undefined
+		);
 	}
 
-	setView(name: ReuseViewName, body: ReuseViewSetBody): ReuseViewSummary {
+	private writeView(
+		name: ReuseViewName,
+		body: ViewDefinition
+	): ReuseViewSummary {
 		const now = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
@@ -209,7 +203,7 @@ export class ReuseViewAdminService {
 		});
 	}
 
-	removeView(name: ReuseViewName): ReuseViewRemoveResponse {
+	private removeStoredView(name: ReuseViewName): ReuseViewRemoveResponse {
 		const existing = this.context.db
 			.select({ name: schema.reuseViews.name })
 			.from(schema.reuseViews)
@@ -226,6 +220,70 @@ export class ReuseViewAdminService {
 		});
 
 		return { name, removed: existing !== undefined };
+	}
+
+	listViews(): ReuseViewListResponse {
+		const views = this.context.db.select().from(schema.reuseViews).all();
+		const selectorRows = this.context.db
+			.select()
+			.from(schema.reuseViewSelectors)
+			.all();
+		const rowsByView = new Map<
+			ReuseViewName,
+			(typeof selectorRows)[number][]
+		>();
+
+		for (const row of selectorRows) {
+			rowsByView.set(row.view, [...(rowsByView.get(row.view) ?? []), row]);
+		}
+
+		const selectorsByView = new Map<ReuseViewName, ReuseViewSelector[]>(
+			rowsByView
+				.entries()
+				.map(([view, rows]) => [view, reuseViewSelectorsFromRows(view, rows)])
+		);
+
+		const summaries = views
+			.map((view) =>
+				reuseViewSummaryFromRow(
+					view,
+					(selectorsByView.get(view.name) ?? []).toSorted(selectorSort)
+				)
+			)
+			.toSorted((left, right) => byCodeUnit(left.name, right.name));
+
+		return { views: summaries };
+	}
+
+	setView(name: ReuseViewName, body: ReuseViewSetBody): ReuseViewSummary {
+		if (this.hasManagedSelector(name)) {
+			throw new ManagedPolicyConflictError();
+		}
+
+		return this.writeView(name, body);
+	}
+
+	setManagedView(name: ReuseViewName, body: ViewDefinition): ReuseViewSummary {
+		if (
+			body.selectors.length !== 1 ||
+			body.selectors[0]?.kind !== 'managed-group'
+		) {
+			throw new ManagedPolicyConflictError();
+		}
+
+		return this.writeView(name, body);
+	}
+
+	removeView(name: ReuseViewName): ReuseViewRemoveResponse {
+		if (this.hasManagedSelector(name)) {
+			throw new ManagedPolicyConflictError();
+		}
+
+		return this.removeStoredView(name);
+	}
+
+	removeManagedView(name: ReuseViewName): ReuseViewRemoveResponse {
+		return this.removeStoredView(name);
 	}
 
 	resolve(name: ReuseViewName): ResolvedReuseView | undefined {
@@ -249,7 +307,8 @@ export class ReuseViewAdminService {
 				.select({
 					kind: schema.reuseViewSelectors.kind,
 					cacheName: schema.reuseViewSelectors.cacheName,
-					prefix: schema.reuseViewSelectors.prefix
+					prefix: schema.reuseViewSelectors.prefix,
+					managedGroupId: schema.reuseViewSelectors.managedGroupId
 				})
 				.from(schema.reuseViewSelectors)
 				.where(eq(schema.reuseViewSelectors.view, name))

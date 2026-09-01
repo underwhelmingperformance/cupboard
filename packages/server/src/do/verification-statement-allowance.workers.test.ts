@@ -558,9 +558,9 @@ describe('recorded verdict D1 statement allowance', () => {
 		);
 
 		// Writing all 32 verdicts updates only the Durable Object's local SQLite
-		// database. The complete RPC issues 22 D1 statements while applying one verdict, and the
-		// other 31 verdicts remain for the drain. Each later drain invocation
-		// applies one verdict in 21 statements.
+		// database. The complete RPC issues 23 D1 statements while applying one
+		// verdict, and the other 31 verdicts remain for the drain. Each later drain
+		// invocation applies one verdict within the same allowance.
 		expect({
 			claims: driven.claims,
 			verdictsPerInvocation: Math.floor(46 / statementsPerRecordedVerdict),
@@ -592,7 +592,8 @@ describe('recorded verdict D1 statement allowance', () => {
 		);
 
 		// The RPC applies one of the eight and holds seven. Each alarm gives the
-		// verdict drain a turn, which applies another one, and every upload ends up
+		// verdict drain a turn, which applies another one. Lifecycle and maintenance
+		// statements count towards the same allowance, and every upload ends up
 		// published.
 		expect({
 			claims: driven.claims,
@@ -614,7 +615,7 @@ describe('recorded verdict D1 statement allowance', () => {
 			claims: drainedBatch,
 			appliedByRecord: 1,
 			heldAfterEachInvocation: [7, 6, 5, 4, 3, 2, 1, 0],
-			statementsPerInvocation: [23, 22, 22, 22, 22, 22, 22, 22],
+			statementsPerInvocation: [23, 22, 26, 26, 26, 26, 26, 30],
 			overAllowanceInvocations: [],
 			statementAllowance: 50,
 			heldVerdicts: 0,

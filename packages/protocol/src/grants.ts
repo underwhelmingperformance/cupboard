@@ -9,6 +9,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { managedPolicyIdSchema } from './managed-caches.ts';
+
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
 // `isCoveredByToken` checks the route's required operation against the concrete
 // request resource. Stored trust rules use templates and captures that resolve
@@ -30,6 +32,7 @@ export const cacheOperationSchema = z.enum([
 	'root:list',
 	'root:remove',
 	'cache:read',
+	'cache:provision',
 	'cache:create',
 	'cache:update',
 	'cache:delete',
@@ -61,7 +64,11 @@ const domainOperationSchema = z.enum([
 	'oidc-trust:remove',
 	'reuse-view:list',
 	'reuse-view:set',
-	'reuse-view:remove'
+	'reuse-view:remove',
+	'managed-cache-policy:list',
+	'managed-cache-policy:set',
+	'managed-cache-policy:retire',
+	'managed-cache-group:update'
 ]);
 export const domainOperations = domainOperationSchema.options;
 
@@ -112,6 +119,7 @@ export const operationSchema = z.enum([
 	'root:list',
 	'root:remove',
 	'cache:read',
+	'cache:provision',
 	'cache:create',
 	'cache:update',
 	'cache:delete',
@@ -134,6 +142,10 @@ export const operationSchema = z.enum([
 	'reuse-view:list',
 	'reuse-view:set',
 	'reuse-view:remove',
+	'managed-cache-policy:list',
+	'managed-cache-policy:set',
+	'managed-cache-policy:retire',
+	'managed-cache-group:update',
 	'control:check',
 	'instance:read',
 	'instance:initialise',
@@ -189,7 +201,8 @@ export const authorizationDetailSchema = z.discriminatedUnion('type', [
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
 		cache: cacheScopeSchema,
-		root: rootNameSchema.optional()
+		root: rootNameSchema.optional(),
+		managedPolicy: managedPolicyIdSchema.optional()
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_domain'),
@@ -352,6 +365,19 @@ export function isAuthorizationDetailCovered(
 		return grants.some((grant) => grant.type === 'cupboard_wildcard');
 	}
 
+	if (detail.type === 'cupboard_cache' && detail.managedPolicy !== undefined) {
+		const isPolicyCovered = grants.some(
+			(grant) =>
+				grant.type === 'cupboard_wildcard' ||
+				(grant.type === 'cupboard_cache' &&
+					grant.managedPolicy === detail.managedPolicy)
+		);
+
+		if (!isPolicyCovered) {
+			return false;
+		}
+	}
+
 	const resource = detailResource(detail);
 	const actions: readonly Operation[] = detail.actions;
 
@@ -490,7 +516,8 @@ export type OidcTrustDisplay = z.infer<typeof oidcTrustDisplaySchema>;
 
 const cacheResourcesSchema = z.strictObject({
 	cache: cacheBindingSchema,
-	root: rootBindingSchema.optional()
+	root: rootBindingSchema.optional(),
+	managedPolicy: managedPolicyIdSchema.optional()
 });
 const tenantResourcesSchema = z.strictObject({ tenant: tenantBindingSchema });
 

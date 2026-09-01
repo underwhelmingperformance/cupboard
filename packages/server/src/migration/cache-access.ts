@@ -14,7 +14,11 @@ import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq, sql } from 'drizzle-orm';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
-import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
+import {
+	cacheIdentityColumns,
+	cacheScopeFromRow,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import type { ServerContext } from '../do/context.ts';
@@ -59,34 +63,42 @@ export function cacheMigrationColumns(
 export async function revokeCacheLifecycle(
 	context: ServerContext,
 	tenant: TenantId,
-	scope: CacheScope,
-	access: CacheAccessMode,
+	cache: Pick<
+		ResolvedCache,
+		'scope' | 'access' | 'generation' | 'readRevision'
+	>,
 	now: IsoTimestamp
 ): Promise<void> {
-	const identity = cacheIdentityColumns(scope);
-	const insert = context.d1.insert(d1Schema.cacheLifecycle).values({
-		tenant,
-		...identity,
-		access,
-		generation: cacheGenerationSchema.parse(2),
-		readRevision: cacheReadRevisionSchema.parse(2),
-		deletedAt: now,
-		updatedAt: now
-	});
+	const identity = cacheIdentityColumns(cache.scope);
 	const set: SQLiteUpdateSetSource<typeof d1Schema.cacheLifecycle> = {
-		access,
+		access: cache.access,
 		generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
 		readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
+		state: sql`case when ${d1Schema.cacheLifecycle.managementKind} = 'managed' then 'retiring' else 'deleted' end`,
+		creationExpiresAt: sql`null`,
+		leaseExpiresAt: sql`case when ${d1Schema.cacheLifecycle.managementKind} = 'managed' then coalesce(${d1Schema.cacheLifecycle.leaseExpiresAt}, ${now}) else null end`,
 		deletedAt: now,
 		updatedAt: now
 	};
+	const insert = context.d1.insert(d1Schema.cacheLifecycle).values({
+		tenant,
+		...identity,
+		access: cache.access,
+		generation: cacheGenerationSchema.parse(cache.generation + 1),
+		readRevision: cacheReadRevisionSchema.parse(cache.readRevision + 1),
+		state: 'deleted',
+		managementKind: 'durable',
+		deletedAt: now,
+		updatedAt: now
+	});
 
-	if (scope.kind === 'default') {
+	if (cache.scope.kind === 'default') {
 		await insert
 			.onConflictDoUpdate({
 				target: [d1Schema.cacheLifecycle.tenant],
 				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
-				set
+				set,
+				setWhere: eq(d1Schema.cacheLifecycle.generation, cache.generation)
 			})
 			.run();
 		return;
@@ -99,7 +111,8 @@ export async function revokeCacheLifecycle(
 				d1Schema.cacheLifecycle.cacheName
 			],
 			targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
-			set
+			set,
+			setWhere: eq(d1Schema.cacheLifecycle.generation, cache.generation)
 		})
 		.run();
 }
@@ -118,12 +131,23 @@ export async function clearCacheLifecycleDeletion(
 		access,
 		generation: cacheGenerationSchema.parse(1),
 		readRevision: cacheReadRevisionSchema.parse(1),
+		state: 'active',
+		managementKind: 'durable',
 		deletedAt: sql`null`,
 		updatedAt: now
 	});
 	const set: SQLiteUpdateSetSource<typeof d1Schema.cacheLifecycle> = {
 		access,
 		readRevision: sql<CacheReadRevision>`case when ${d1Schema.cacheLifecycle.access} <> ${access} then ${d1Schema.cacheLifecycle.readRevision} + 1 else ${d1Schema.cacheLifecycle.readRevision} end`,
+		state: 'active',
+		creationExpiresAt: sql`null`,
+		managementKind: 'durable',
+		managedPolicyId: sql`null`,
+		managedPolicyRevision: sql`null`,
+		managedGroupId: sql`null`,
+		leaseExpiresAt: sql`null`,
+		selectionState: sql`null`,
+		updateHold: false,
 		deletedAt: sql`null`,
 		updatedAt: now
 	};

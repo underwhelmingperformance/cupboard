@@ -16,7 +16,7 @@ const runtimeEnvironmentSchema = z.looseObject({
 });
 
 export const additiveLocalMigrationCeiling = 49;
-export const contractLocalMigrationCeiling = 52;
+export const contractLocalMigrationCeiling = 57;
 
 export function configuredRuntimeStage(env: unknown): RuntimeStageId {
 	const { CUPBOARD_RUNTIME_STAGE } = runtimeEnvironmentSchema.parse(env);

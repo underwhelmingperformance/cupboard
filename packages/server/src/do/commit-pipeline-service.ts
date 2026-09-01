@@ -76,6 +76,7 @@ import {
 	storedGraceDeadlines,
 	storedGraceFact
 } from './grace-decision.ts';
+import { renewManagedCacheLease } from './managed-cache-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
@@ -380,6 +381,7 @@ export class CommitPipelineService {
 
 			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
+			await renewManagedCacheLease(this.context, cache);
 
 			return {
 				kind: 'settled',
@@ -1263,6 +1265,7 @@ export class CommitPipelineService {
 				stagingKey,
 				metadata.narHash
 			);
+			await renewManagedCacheLease(this.context, cache);
 
 			return {
 				kind: 'settled',
@@ -1468,6 +1471,7 @@ export class CommitPipelineService {
 					pending.r2Key,
 					metadata.narHash
 				);
+				await renewManagedCacheLease(this.context, cache);
 
 				return {
 					kind: 'settled',

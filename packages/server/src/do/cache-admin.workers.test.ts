@@ -115,7 +115,9 @@ describe('cache registry admin', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			{
 				scope: buildsCache,
@@ -125,7 +127,9 @@ describe('cache registry admin', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			}
 		]);
 	});
@@ -177,7 +181,9 @@ describe('cache registry admin', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			{
 				scope: buildsCache,
@@ -188,6 +194,8 @@ describe('cache registry admin', () => {
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
 				graceManaged: true,
+				lifecycle: 'active',
+				management: { kind: 'durable' },
 				earliestGraceDeadline: earlierLiveDeadline
 			}
 		]);
@@ -364,7 +372,9 @@ describe('cache registry admin', () => {
 					defaultRootRetention: { kind: 'permanent' },
 					grace: { kind: 'none' },
 					rootRetentionOverrides: [],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				}
 			},
 			other: StatusCodes.FORBIDDEN,

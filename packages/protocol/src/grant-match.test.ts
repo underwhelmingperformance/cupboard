@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { isGrantPermittedByRule } from './grant-match.ts';
+import {
+	isGrantPermittedByRule,
+	resolveGrantPermittedByRule
+} from './grant-match.ts';
 import {
 	type AuthorizationDetail,
 	authorizationDetailSchema,
@@ -308,5 +311,42 @@ describe('isGrantPermittedByRule', () => {
 				{ repository: 'Bad Name' }
 			)
 		).toBe(false);
+	});
+
+	it('resolves a managed policy from the stored provisioning rule', () => {
+		const policyId = '11111111-1111-4111-8111-111111111111';
+		const provisioningGrant = grant({
+			type: 'cupboard_cache',
+			actions: ['cache:provision'],
+			resources: {
+				cache: {
+					equalsTemplate: 'gh-1234-pr-{ref}',
+					substitutions: {
+						ref: {
+							claim: 'ref',
+							capture: {
+								pattern: '^refs/pull/(?<ref>[0-9]+)/merge$',
+								group: 'ref'
+							}
+						}
+					},
+					kind: 'named',
+					validate: 'cacheName'
+				},
+				managedPolicy: policyId
+			}
+		});
+		const requested = request({
+			type: 'cupboard_cache',
+			actions: ['cache:provision'],
+			cache: { kind: 'named', name: 'gh-1234-pr-123' }
+		});
+
+		expect(
+			resolveGrantPermittedByRule([provisioningGrant], requested, prClaims)
+		).toStrictEqual({
+			...requested,
+			managedPolicy: policyId
+		});
 	});
 });

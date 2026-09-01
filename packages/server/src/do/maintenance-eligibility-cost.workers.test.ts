@@ -77,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 16,
-			largeBacklogCost: 16
+			emptyBacklogCost: 19,
+			largeBacklogCost: 19
 		});
 	});
 
@@ -94,8 +94,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 9,
-			largeBacklogCost: 9
+			smallBacklogCost: 11,
+			largeBacklogCost: 11
 		});
 	});
 
@@ -216,8 +216,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 59,
-			largeBacklogCost: 59
+			smallBacklogCost: 61,
+			largeBacklogCost: 61
 		});
 	});
 
@@ -270,8 +270,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 68,
-			largeBacklogCost: 68
+			smallBacklogCost: 70,
+			largeBacklogCost: 70
 		});
 	});
 
@@ -305,8 +305,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 5060, rowsWritten: 1009 },
-			largeBacklog: { rowsRead: 5060, rowsWritten: 1009 }
+			smallBacklog: { rowsRead: 5062, rowsWritten: 1009 },
+			largeBacklog: { rowsRead: 5062, rowsWritten: 1009 }
 		});
 	});
 
@@ -329,8 +329,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 65,
-			largeBacklogCost: 65
+			smallBacklogCost: 67,
+			largeBacklogCost: 67
 		});
 	});
 });

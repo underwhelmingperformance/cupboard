@@ -2,6 +2,7 @@ import { attestationsContract } from './attestations.ts';
 import { cachesContract } from './caches.ts';
 import { gcContract } from './gc.ts';
 import { keysContract } from './keys.ts';
+import { managedCachesContract } from './managed-caches.ts';
 import { oidcTrustContract } from './oidc-trust.ts';
 import { pathsContract } from './paths.ts';
 import { checkContract } from './reports.ts';
@@ -18,6 +19,7 @@ import { verifyContract } from './verify.ts';
  */
 export const tenantContract = {
 	caches: cachesContract,
+	managedCaches: managedCachesContract,
 	keys: keysContract,
 	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,

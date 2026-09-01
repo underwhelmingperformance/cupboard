@@ -10,6 +10,7 @@ import type { GarbageCollectionOutcome } from '../do/context.ts';
 import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
+import type { ManagedCacheService } from '../do/managed-cache-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
@@ -38,6 +39,7 @@ export interface TenantRpcServices {
 	// hints and negotiate falls back to its own D1 reads.
 	takeNegotiateHints(request: Request): NegotiateHints | undefined;
 	readonly cacheAdmin: CacheAdminService;
+	readonly managedCaches: ManagedCacheService;
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;
 	readonly retention: RetentionService;

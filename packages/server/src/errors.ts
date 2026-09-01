@@ -11,6 +11,11 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
+	type ManagedCacheCapacityFailure,
+	type ManagedCacheGroupId,
+	type ManagedPolicyId
+} from '@cupboard/protocol/managed-caches';
+import {
 	type OidcIssuer,
 	type SubjectTokenProblem,
 	subjectTokenProblems
@@ -205,6 +210,84 @@ export class CacheAlreadyExistsError extends ServerHttpError {
 	constructor(public readonly cache: CacheScope) {
 		super('The requested cache already exists');
 		this.name = 'CacheAlreadyExistsError';
+	}
+}
+
+export class ManagedCacheConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly cache: CacheScope,
+		options?: ErrorOptions
+	) {
+		super(
+			'The cache does not belong to the authorised managed policy',
+			options
+		);
+		this.name = 'ManagedCacheConflictError';
+	}
+}
+
+export class ManagedCacheCapacityError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor(public readonly failure: ManagedCacheCapacityFailure) {
+		super('The managed cache policy has reached its live cache limit');
+		this.name = 'ManagedCacheCapacityError';
+	}
+}
+
+export class ManagedCacheMutationForbiddenError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly cache: CacheScope) {
+		super('Managed caches can be changed only through their policy');
+		this.name = 'ManagedCacheMutationForbiddenError';
+	}
+}
+
+export class ManagedPolicyConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly policyId?: ManagedPolicyId) {
+		super('The managed cache policy conflicts with existing policy state');
+		this.name = 'ManagedPolicyConflictError';
+	}
+}
+
+export class ManagedGroupNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly groupId: ManagedCacheGroupId) {
+		super('The managed cache group does not exist');
+		this.name = 'ManagedGroupNotFoundError';
+	}
+}
+
+export class ManagedActivationRepairConflictError extends Error {
+	constructor(public readonly repairId: string) {
+		super(`Managed cache repair intent ${repairId} changed concurrently`);
+		this.name = 'ManagedActivationRepairConflictError';
+	}
+}
+
+export class ManagedActivationRepairDeferredError extends Error {
+	constructor(
+		public readonly repairId: string,
+		options: ErrorOptions
+	) {
+		super(
+			`Managed cache activation repair ${repairId} could not be resolved`,
+			options
+		);
+		this.name = 'ManagedActivationRepairDeferredError';
+	}
+}
+
+export class TenantDataMigrationDescriptorMissingError extends Error {
+	constructor(public readonly migrationId: string) {
+		super(`No deployment migration descriptor exists for ${migrationId}`);
+		this.name = 'TenantDataMigrationDescriptorMissingError';
 	}
 }
 

@@ -54,6 +54,34 @@ const os = implement(tenantContract)
 	);
 
 export const tenantRouter = os.router({
+	managedCaches: {
+		policies: {
+			list: os.managedCaches.policies.list.handler(({ context }) =>
+				context.services.managedCaches.listPolicies()
+			),
+			put: os.managedCaches.policies.put.handler(({ input, context }) =>
+				context.services.managedCaches.putPolicy(input)
+			),
+			retire: os.managedCaches.policies.retire.handler(({ input, context }) =>
+				context.services.managedCaches.retirePolicy(input.policyId)
+			)
+		},
+		groups: {
+			setAccess: os.managedCaches.groups.setAccess.handler(
+				({ input, context }) =>
+					context.services.managedCaches.setGroupAccess(
+						input.groupId,
+						input.access
+					)
+			)
+		},
+		provision: os.managedCaches.provision.handler(({ input, context }) =>
+			context.services.managedCaches.provisionCache(
+				input.cacheName,
+				context.claims
+			)
+		)
+	},
 	caches: {
 		list: os.caches.list.handler(({ context }) =>
 			context.services.cacheAdmin.listCaches()

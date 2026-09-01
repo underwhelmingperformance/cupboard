@@ -138,6 +138,34 @@ export const deploymentManifest = cacheDeploymentManifest({
 		{
 			id: d1MigrationId('0031_cache_lifecycle_lookup_index.sql'),
 			sha256: '41f402291fb9c3ba83f2122bc3e9e8cd0ecd0480725749ce15517562a28da4e0'
+		},
+		{
+			id: d1MigrationId('0032_chemical_silver_surfer.sql'),
+			sha256: '2ee3a885f954ed234da15e32ca88a511ec74ad504e66ca8ea5fbd910c36e5afb'
+		},
+		{
+			id: d1MigrationId('0032a_suspend_cache_credential_lifecycle_guard.sql'),
+			sha256: '310f3b51a875cdf88c030396a1011f0a8ded7a6fd1d75c2729f38013792210e6'
+		},
+		{
+			id: d1MigrationId('0033_parallel_leo.sql'),
+			sha256: '1347141db42a4b7c45392f0212f64af0f03dc8ca6cd9b151fdf0830b53cbe0f4'
+		},
+		{
+			id: d1MigrationId('0034_abnormal_the_stranger.sql'),
+			sha256: '2f2758cc224637c3400c402755bca9da3930d8035d43f25e9cd0911a60f9605d'
+		},
+		{
+			id: d1MigrationId('0034a_restore_cache_credential_lifecycle_guard.sql'),
+			sha256: 'd20368041ba8a032af37fcead76a87b2d1d518dd233516f3ffee48722f08e9ae'
+		},
+		{
+			id: d1MigrationId('0035_managed_group_access_transition.sql'),
+			sha256: 'c4409febb55c7c353e59da8760078cee544ea5cbe32c789386f9f0283e99fa5c'
+		},
+		{
+			id: d1MigrationId('0036_managed_group_access_worklist.sql'),
+			sha256: 'dea0e034455c3ed6999ad95a94495ee075bb763f79ba86c7fa7e1f0fe6940bfd'
 		}
 	],
 	durableObject: [
@@ -352,6 +380,26 @@ export const deploymentManifest = cacheDeploymentManifest({
 		{
 			id: durableObjectMigrationId('0052_cache_access_triggers'),
 			sha256: 'e146e395fcc3022a0e650dafe564a2db0055e76fa65e074dc878d9bd451fe728'
+		},
+		{
+			id: durableObjectMigrationId('0053_yielding_scalphunter'),
+			sha256: 'b90fd5f616f3060888d4c6908821c1d09c7f48d5aff2218a15abb51bd1d5c3fc'
+		},
+		{
+			id: durableObjectMigrationId('0054_blushing_magus'),
+			sha256: '461a39569810b4e306172fe88a2d9ee61cc0c6d43f450bb1a3b63dbb66eaa149'
+		},
+		{
+			id: durableObjectMigrationId('0055_blushing_shinobi_shaw'),
+			sha256: '33c089b9a6689a6b11b85bca0a0d93bf7b1268054a79a56f61e0bd4d6114ddde'
+		},
+		{
+			id: durableObjectMigrationId('0056_small_longshot'),
+			sha256: '412a5c8ae2cfe32da0b4a489ed262a9b08534336e244979940aece72f34e1905'
+		},
+		{
+			id: durableObjectMigrationId('0057_managed_group_single_view'),
+			sha256: 'c9193ff7c00702c5dcab1487cd738bcfb8578a11449de7e5e51160a35a8227bf'
 		}
 	]
 });

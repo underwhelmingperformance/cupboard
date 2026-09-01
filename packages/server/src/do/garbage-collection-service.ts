@@ -13,6 +13,7 @@ import {
 	eq,
 	gt,
 	inArray,
+	isNull,
 	lt,
 	lte,
 	or,
@@ -1097,12 +1098,31 @@ export class GarbageCollectionService {
 			.get();
 
 		if (current !== undefined) {
-			return current.cache;
+			const registered = this.context.db
+				.select({ cache: schema.caches.id })
+				.from(schema.caches)
+				.where(
+					and(
+						eq(schema.caches.id, current.cache),
+						isNull(schema.caches.deletedAt)
+					)
+				)
+				.get();
+
+			if (registered !== undefined) {
+				return registered.cache;
+			}
+
+			this.context.db
+				.delete(schema.garbageCollectionTenantRuns)
+				.where(eq(schema.garbageCollectionTenantRuns.id, 1))
+				.run();
 		}
 
 		const first = this.context.db
 			.select({ cache: schema.caches.id })
 			.from(schema.caches)
+			.where(isNull(schema.caches.deletedAt))
 			.orderBy(asc(schema.caches.name))
 			.limit(1)
 			.get();
@@ -1123,7 +1143,7 @@ export class GarbageCollectionService {
 		const next = this.context.db
 			.select({ cache: schema.caches.id })
 			.from(schema.caches)
-			.where(gt(schema.caches.id, cache))
+			.where(and(gt(schema.caches.id, cache), isNull(schema.caches.deletedAt)))
 			.orderBy(asc(schema.caches.id))
 			.limit(1)
 			.get();

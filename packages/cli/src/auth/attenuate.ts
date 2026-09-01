@@ -49,6 +49,10 @@ export interface PreviewGrantIntent {
 	readonly cache: CacheScope;
 }
 
+export interface ManagedCacheProvisionGrantIntent {
+	readonly cache: CacheScope;
+}
+
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
@@ -176,6 +180,21 @@ export function previewAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:preview'],
+			cache: intent.cache
+		}
+	]);
+}
+
+/**
+Requests the policy-bound authority needed to provision one managed cache.
+*/
+export function managedCacheProvisionAuthorizationDetails(
+	intent: ManagedCacheProvisionGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['cache:provision'],
 			cache: intent.cache
 		}
 	]);

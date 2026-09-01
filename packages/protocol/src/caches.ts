@@ -8,6 +8,10 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import {
+	cacheLifecycleStateSchema,
+	cacheManagementSchema
+} from './managed-caches.ts';
 import { cacheRootRetentionSchema } from './retention.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
@@ -42,7 +46,9 @@ export const cacheSummarySchema = z.strictObject({
 	grace: cacheGraceSchema,
 	rootRetentionOverrides: z.array(rootRetentionOverrideSchema),
 	graceManaged: z.boolean().optional(),
-	earliestGraceDeadline: isoTimestampSchema.optional()
+	earliestGraceDeadline: isoTimestampSchema.optional(),
+	lifecycle: cacheLifecycleStateSchema.default('active'),
+	management: cacheManagementSchema.default({ kind: 'durable' })
 });
 export type CacheSummary = z.output<typeof cacheSummarySchema>;
 

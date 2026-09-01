@@ -1,9 +1,11 @@
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
+	type CacheOperation,
 	type PermittedGrant,
 	permittedGrantSchema,
 	type Substitution
 } from '@cupboard/protocol/grants';
+import type { ManagedPolicyId } from '@cupboard/protocol/managed-caches';
 import {
 	type ClaimMatch,
 	type OidcTrustAddBodyInput,
@@ -125,11 +127,11 @@ export class RootBindingRequiredError extends CliUsageError {
 }
 
 export function expandAllow(values: readonly string[]): {
-	cacheActions: string[];
-	rootActions: string[];
+	cacheActions: CacheOperation[];
+	rootActions: CacheOperation[];
 } {
-	const cacheActions = new Set<string>();
-	const rootActions = new Set<string>();
+	const cacheActions = new Set<CacheOperation>();
+	const rootActions = new Set<CacheOperation>();
 
 	for (const value of values) {
 		if (!isAllowShorthand(value)) {
@@ -228,6 +230,7 @@ export interface CacheGrantOptions {
 	readonly root?: string;
 	readonly rootTemplate?: string;
 	readonly substitutions?: Record<string, Substitution>;
+	readonly managedPolicy?: ManagedPolicyId;
 }
 
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
@@ -241,6 +244,10 @@ export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 		throw new RootBindingRequiredError();
 	}
 
+	const actions =
+		options.managedPolicy === undefined
+			? [...cacheActions, ...rootActions]
+			: ['cache:provision', ...cacheActions, ...rootActions];
 	const substitutions = options.substitutions ?? {};
 	const hasRoot =
 		rootActions.length > 0 ||
@@ -249,10 +256,13 @@ export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 
 	return permittedGrantSchema.parse({
 		type: 'cupboard_cache',
-		actions: [...cacheActions, ...rootActions],
+		actions,
 		resources: {
 			cache: cacheBinding(options, substitutions),
-			...(hasRoot && { root: rootBinding(options, substitutions) })
+			...(hasRoot && { root: rootBinding(options, substitutions) }),
+			...(options.managedPolicy !== undefined && {
+				managedPolicy: options.managedPolicy
+			})
 		}
 	});
 }

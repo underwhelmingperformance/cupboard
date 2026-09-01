@@ -30,8 +30,7 @@ import {
 import {
 	cacheIdentityCondition,
 	cacheScopeFromRow,
-	cacheSelectorCondition,
-	cacheSelectorsCondition
+	cacheSelectorCondition
 } from '../db/cache.ts';
 import {
 	authorisedByCacheGeneration,
@@ -160,10 +159,20 @@ export class ReuseViewLookupService {
 	constructor(private readonly context: ServerContext) {}
 
 	private selectorCondition(selector: ReuseViewSelector): SQL | undefined {
-		return cacheSelectorCondition(
-			schema.caches.kind,
-			schema.caches.name,
-			selector
+		if (selector.kind === 'managed-group') {
+			return and(
+				eq(schema.caches.managedGroupId, selector.groupId),
+				eq(schema.caches.lifecycleState, 'active'),
+				or(
+					eq(schema.caches.selectionState, 'source-active'),
+					eq(schema.caches.selectionState, 'target-active')
+				)
+			);
+		}
+
+		return and(
+			eq(schema.caches.managementKind, 'durable'),
+			cacheSelectorCondition(schema.caches.kind, schema.caches.name, selector)
 		);
 	}
 
@@ -195,7 +204,8 @@ export class ReuseViewLookupService {
 				.select({
 					kind: schema.reuseViewSelectors.kind,
 					cacheName: schema.reuseViewSelectors.cacheName,
-					prefix: schema.reuseViewSelectors.prefix
+					prefix: schema.reuseViewSelectors.prefix,
+					managedGroupId: schema.reuseViewSelectors.managedGroupId
 				})
 				.from(schema.reuseViewSelectors)
 				.where(eq(schema.reuseViewSelectors.view, view))
@@ -284,16 +294,15 @@ export class ReuseViewLookupService {
 				.select({
 					kind: schema.reuseViewSelectors.kind,
 					cacheName: schema.reuseViewSelectors.cacheName,
-					prefix: schema.reuseViewSelectors.prefix
+					prefix: schema.reuseViewSelectors.prefix,
+					managedGroupId: schema.reuseViewSelectors.managedGroupId
 				})
 				.from(schema.reuseViewSelectors)
 				.where(eq(schema.reuseViewSelectors.view, view))
 				.all()
 		);
-		const cacheFilter = cacheSelectorsCondition(
-			schema.caches.kind,
-			schema.caches.name,
-			selectors
+		const cacheFilter = or(
+			...selectors.map((selector) => this.selectorCondition(selector))
 		);
 		const candidateStatement = (
 			storePathHashBatch: readonly StorePathHash[]

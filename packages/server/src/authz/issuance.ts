@@ -1,5 +1,5 @@
 import { type AuthKeyId, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
-import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
+import { resolveGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema,
@@ -86,13 +86,23 @@ export function resolveRequestedGrants(
 		throw new InvalidAuthorizationDetailsError('empty');
 	}
 
+	const resolved: AuthorizationDetails = [];
+
 	for (const detail of requested) {
-		if (!isGrantPermittedByRule(rule.permittedGrants, detail, claims)) {
+		const permitted = resolveGrantPermittedByRule(
+			rule.permittedGrants,
+			detail,
+			claims
+		);
+
+		if (permitted === undefined) {
 			throw new InvalidAuthorizationDetailsError('not-permitted');
 		}
+
+		resolved.push(permitted);
 	}
 
-	return requested;
+	return resolved;
 }
 
 /**

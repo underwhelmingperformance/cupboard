@@ -157,7 +157,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 16,
+			rowsRead: 19,
 			rowsWritten: 7
 		});
 	});
@@ -198,7 +198,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 16,
+			rowsRead: 19,
 			rowsWritten: 0
 		});
 	});

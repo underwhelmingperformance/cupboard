@@ -32,7 +32,7 @@ import {
 const legacyD1 = d1SchemaStateIdSchema.parse('legacy-0019');
 const expandedD1 = d1SchemaStateIdSchema.parse('expanded-0023');
 const compatibleD1 = d1SchemaStateIdSchema.parse('compatible-0026');
-const contractedD1 = d1SchemaStateIdSchema.parse('contracted-0031');
+const contractedD1 = d1SchemaStateIdSchema.parse('contracted-0035');
 
 export const cacheMigrationFoundationStage = runtimeStageIdSchema.parse(
 	'cache-migration-foundation'
@@ -69,7 +69,7 @@ const additiveCeiling = durableObjectMigrationIdSchema.parse(
 	'0049_cache_retention_migration_rules'
 );
 const contractCeiling = durableObjectMigrationIdSchema.parse(
-	'0052_cache_access_triggers'
+	'0057_managed_group_single_view'
 );
 export const cachePredecessorLocalMigrationCeiling =
 	durableObjectMigrationIdSchema.parse('0041_pending_upload_recorded_verdict');
@@ -588,7 +588,18 @@ export function cacheDeploymentManifest(
 			),
 			d1MigrationIdSchema.parse('0029_cache_identity_contract.sql'),
 			d1MigrationIdSchema.parse('0030_cache_credential_lifecycle_guard.sql'),
-			d1MigrationIdSchema.parse('0031_cache_lifecycle_lookup_index.sql')
+			d1MigrationIdSchema.parse('0031_cache_lifecycle_lookup_index.sql'),
+			d1MigrationIdSchema.parse('0032_chemical_silver_surfer.sql'),
+			d1MigrationIdSchema.parse(
+				'0032a_suspend_cache_credential_lifecycle_guard.sql'
+			),
+			d1MigrationIdSchema.parse('0033_parallel_leo.sql'),
+			d1MigrationIdSchema.parse('0034_abnormal_the_stranger.sql'),
+			d1MigrationIdSchema.parse(
+				'0034a_restore_cache_credential_lifecycle_guard.sql'
+			),
+			d1MigrationIdSchema.parse('0035_managed_group_access_transition.sql'),
+			d1MigrationIdSchema.parse('0036_managed_group_access_worklist.sql')
 		]),
 		simpleTransition('d1-contracted', 'd1-verified', 'verify', [
 			cacheDeploymentChecks.contractedD1

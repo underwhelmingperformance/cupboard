@@ -16,7 +16,9 @@ describe('cache schemas', () => {
 		storePaths: 5,
 		defaultRootRetention: { kind: 'permanent' },
 		grace: { kind: 'none' },
-		rootRetentionOverrides: []
+		rootRetentionOverrides: [],
+		lifecycle: 'active',
+		management: { kind: 'durable' }
 	};
 
 	it.each([
@@ -53,7 +55,9 @@ describe('cache schemas', () => {
 						rootPrefix: 'release-',
 						retention: { kind: 'duration', seconds: 604_800 }
 					}
-				]
+				],
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			}
 		},
 		{

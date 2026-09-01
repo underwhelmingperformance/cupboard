@@ -1,7 +1,7 @@
 import {
 	type ReuseViewSelector,
 	reuseViewSelectorSchema,
-	reuseViewSelectorsSchema
+	storedReuseViewSelectorsSchema
 } from '@cupboard/protocol/reuse-views';
 
 import * as schema from '../db/schema.ts';
@@ -11,7 +11,7 @@ export function reuseViewSelectorRow(
 	selector: ReuseViewSelector
 ): Pick<
 	typeof schema.reuseViewSelectors.$inferInsert,
-	'kind' | 'cacheName' | 'prefix'
+	'kind' | 'cacheName' | 'prefix' | 'managedGroupId'
 > {
 	switch (selector.kind) {
 		case 'default':
@@ -25,6 +25,14 @@ export function reuseViewSelectorRow(
 		case 'prefix': {
 			return { kind: 'prefix', cacheName: undefined, prefix: selector.prefix };
 		}
+		case 'managed-group': {
+			return {
+				kind: 'managed-group',
+				cacheName: undefined,
+				prefix: undefined,
+				managedGroupId: selector.groupId
+			};
+		}
 	}
 }
 
@@ -36,14 +44,16 @@ export function reuseViewSelectorRow(
 export function reuseViewSelectorFromRow(
 	row: Pick<
 		typeof schema.reuseViewSelectors.$inferSelect,
-		'kind' | 'cacheName' | 'prefix'
+		'kind' | 'cacheName' | 'prefix' | 'managedGroupId'
 	>
 ): ReuseViewSelector | undefined {
 	switch (row.kind) {
 		case 'default':
 		case 'all-named':
 		case 'all': {
-			return row.cacheName === null && row.prefix === null
+			return row.cacheName === null &&
+				row.prefix === null &&
+				row.managedGroupId === null
 				? { kind: row.kind }
 				: undefined;
 		}
@@ -59,6 +69,12 @@ export function reuseViewSelectorFromRow(
 				prefix: row.prefix
 			}).data;
 		}
+		case 'managed-group': {
+			return reuseViewSelectorSchema.safeParse({
+				kind: 'managed-group',
+				groupId: row.managedGroupId
+			}).data;
+		}
 	}
 }
 
@@ -71,7 +87,7 @@ export function reuseViewSelectorsFromRows(
 	view: string,
 	rows: readonly Pick<
 		typeof schema.reuseViewSelectors.$inferSelect,
-		'kind' | 'cacheName' | 'prefix'
+		'kind' | 'cacheName' | 'prefix' | 'managedGroupId'
 	>[]
 ): ReuseViewSelector[] {
 	const selectors = rows.map((row) => {
@@ -83,7 +99,7 @@ export function reuseViewSelectorsFromRows(
 
 		return selector;
 	});
-	const parsed = reuseViewSelectorsSchema.safeParse(selectors);
+	const parsed = storedReuseViewSelectorsSchema.safeParse(selectors);
 
 	if (!parsed.success) {
 		throw new StoredReuseViewSelectorInvalidError(view);

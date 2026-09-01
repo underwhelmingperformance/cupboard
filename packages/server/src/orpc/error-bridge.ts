@@ -6,6 +6,10 @@ import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
 	CacheNotFoundError,
+	ManagedCacheCapacityError,
+	ManagedCacheConflictError,
+	ManagedGroupNotFoundError,
+	ManagedPolicyConflictError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -68,6 +72,42 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache }
+		});
+	}
+
+	if (error instanceof ManagedCacheCapacityError) {
+		return new ORPCError('MANAGED_CACHE_CAPACITY', {
+			status: error.status,
+			message: error.message,
+			data: error.failure
+		});
+	}
+
+	if (error instanceof ManagedCacheConflictError) {
+		return new ORPCError('MANAGED_CACHE_CONFLICT', {
+			status: error.status,
+			message: error.message,
+			data: {
+				cacheName: error.cache.kind === 'named' ? error.cache.name : 'default'
+			}
+		});
+	}
+
+	if (error instanceof ManagedPolicyConflictError) {
+		return new ORPCError('MANAGED_POLICY_CONFLICT', {
+			status: error.status,
+			message: error.message,
+			data: {
+				...(error.policyId !== undefined && { policyId: error.policyId })
+			}
+		});
+	}
+
+	if (error instanceof ManagedGroupNotFoundError) {
+		return new ORPCError('MANAGED_GROUP_NOT_FOUND', {
+			status: error.status,
+			message: error.message,
+			data: { groupId: error.groupId }
 		});
 	}
 

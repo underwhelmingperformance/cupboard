@@ -250,12 +250,7 @@ describe('alarm D1 statement allowance', () => {
 			queuedDeletions: driven.queuedDeletions
 		}).toStrictEqual({
 			queuedDeletionsAtFirstAlarm: committedPaths,
-			passes: [
-				'teardown',
-				'garbage-collection',
-				'teardown',
-				'garbage-collection'
-			],
+			passes: ['teardown', 'garbage-collection', 'teardown'],
 			teardownPending: undefined,
 			collectionPending: undefined,
 			queuedDeletions: 0
@@ -566,18 +561,15 @@ describe('reconcile alarm D1 statement allowance', () => {
 			12
 		);
 
-		// The first pass probes a full page of 38, but its allowance covers only four
-		// of the six
-		// restores, so it clears 36 targets and leaves two queued. The second pass
-		// probes another full page, which the two re-queued targets rejoin at the
-		// front of the queue order, and has enough allowance for both restores.
+		// Each pass keeps enough statement allowance for lifecycle admission and
+		// leaves the targets it cannot process at the front of the queue.
 		expect({
 			pageSize: maxPathsReconciledPerRun,
 			queueDepths: driven.alarms.map((alarm) => alarm.queuedTargets),
 			queuedTargets: driven.queuedTargets
 		}).toStrictEqual({
 			pageSize: 38,
-			queueDepths: [100, 66, 30],
+			queueDepths: [100, 70, 38, 4],
 			queuedTargets: 0
 		});
 	}, 240_000);
@@ -759,10 +751,10 @@ describe('verify backstop alarm D1 statement allowance', () => {
 	it('keeps every backstop alarm within the 50-statement D1 limit', async () => {
 		const driven = await driveBackstopAlarms('alarm-allowance-backstop', 12);
 
-		// Each alarm settles two rows: two statements for maintenance eligibility,
-		// two to prefetch the shared blob facts of the page, and eleven for each
-		// row it settles. This fixture does not spend the over-quota reserve
-		// because every row settles.
+		// Each alarm settles two rows. Lifecycle admission, maintenance eligibility
+		// and the per-row work all count towards the same invocation allowance.
+		// This fixture does not spend the over-quota reserve because every row
+		// settles.
 		expect({
 			pendingAtFirstAlarm: driven.alarms[0]?.pendingRows,
 			settleLimit: verifyBackstopReuseSettleLimit,
@@ -778,7 +770,7 @@ describe('verify backstop alarm D1 statement allowance', () => {
 		}).toStrictEqual({
 			pendingAtFirstAlarm: deferredReuseRows,
 			settleLimit: 2,
-			alarmStatements: [28, 28, 28, 28],
+			alarmStatements: [32, 24, 24, 24, 24, 24, 24],
 			overAllowanceAlarms: [],
 			statementAllowance: 50,
 			passes: ['verify-backstop'],
@@ -935,9 +927,8 @@ describe('signing key backfill alarm D1 statement allowance', () => {
 		const driven = await driveBackfillAlarms('alarm-allowance-backfill', 12);
 
 		// The first alarm stages the whole batch, which writes only to the Durable
-		// Object's own database. Each later alarm publishes nine entries at two
-		// statements each: one to render the narinfo and one to confirm the
-		// written object.
+		// Object's own database. Each later alarm publishes nine entries while the
+		// lifecycle and maintenance statements remain within the same allowance.
 		expect({
 			entriesPerPass: backfillEntriesPerPass,
 			alarmStatements: driven.alarms.map((alarm) => alarm.statements),
@@ -953,7 +944,7 @@ describe('signing key backfill alarm D1 statement allowance', () => {
 			pendingBackfills: driven.pendingBackfills
 		}).toStrictEqual({
 			entriesPerPass: 9,
-			alarmStatements: [0, 27, 27, 27, 15],
+			alarmStatements: [0, 31, 31, 31, 23],
 			overAllowanceAlarms: [],
 			statementAllowance: 50,
 			passes: ['signing-key-backfill'],

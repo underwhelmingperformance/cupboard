@@ -1,5 +1,9 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { type CacheName, type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	cacheGenerationSchema,
+	type CacheName,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type CacheListResponse,
@@ -8,8 +12,9 @@ import {
 	type CacheSummary,
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
+import { cacheManagementSchema } from '@cupboard/protocol/managed-caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNotNull, isNull, min, sql } from 'drizzle-orm';
 
 import {
 	type CacheId,
@@ -23,7 +28,8 @@ import * as schema from '../db/schema.ts';
 import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
-	CacheNotFoundError
+	CacheNotFoundError,
+	ManagedCacheMutationForbiddenError
 } from '../errors.ts';
 import {
 	narObjectKey,
@@ -89,6 +95,51 @@ export class CacheAdminService {
 			.get();
 
 		return row !== undefined;
+	}
+
+	private requireDurable(cache: ResolvedCache): void {
+		const row = this.context.db
+			.select({ managementKind: schema.caches.managementKind })
+			.from(schema.caches)
+			.where(eq(schema.caches.id, cache.id))
+			.get();
+
+		if (row?.managementKind === 'managed') {
+			throw new ManagedCacheMutationForbiddenError(cache.scope);
+		}
+	}
+
+	private async requireManualScope(scope: CacheScope): Promise<void> {
+		if (scope.kind === 'default') {
+			return;
+		}
+
+		const tenant = this.context.requireTenant();
+		const namespaces = await this.context.d1
+			.select({ value: d1Schema.managedPolicyFamily.cacheNamespace })
+			.from(d1Schema.managedPolicyFamily)
+			.where(eq(d1Schema.managedPolicyFamily.tenant, tenant))
+			.all();
+
+		if (namespaces.some(({ value }) => scope.name.startsWith(value))) {
+			throw new ManagedCacheMutationForbiddenError(scope);
+		}
+	}
+
+	private cacheManagement(
+		row: typeof schema.caches.$inferSelect
+	): CacheSummary['management'] {
+		return cacheManagementSchema.parse(
+			row.managementKind === 'durable'
+				? { kind: 'durable' }
+				: {
+						kind: 'managed',
+						policyId: row.managedPolicyId,
+						policyRevision: row.managedPolicyRevision,
+						groupId: row.managedGroupId,
+						leaseExpiresAt: row.leaseExpiresAt
+					}
+		);
 	}
 
 	// The caller holds the input gate. The retirement service applies the
@@ -255,6 +306,8 @@ export class CacheAdminService {
 					rootRetentionOverrides:
 						overrides.get(row.rootRetentionRuleSetId) ?? [],
 					graceManaged: row.graceManaged,
+					lifecycle: row.lifecycleState,
+					management: this.cacheManagement(row),
 					...(earliestGraceDeadline !== undefined && {
 						earliestGraceDeadline
 					})
@@ -281,6 +334,8 @@ export class CacheAdminService {
 		configuration: CachePutBody
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(async () => {
+			await this.requireManualScope(scope);
+
 			if (this.context.cacheRepository.resolve(scope) !== undefined) {
 				throw new CacheAlreadyExistsError(scope);
 			}
@@ -316,6 +371,11 @@ export class CacheAdminService {
 		update: CacheUpdateBody
 	): Promise<CacheSummary> {
 		const cache = this.context.cacheRepository.require(scope);
+		this.requireDurable(cache);
+
+		if (update.kind !== 'priority' && update.kind !== 'access') {
+			await this.context.requireRetentionAdministration();
+		}
 
 		if (update.kind === 'priority') {
 			this.context.db
@@ -420,6 +480,7 @@ export class CacheAdminService {
 		}
 
 		if (cache !== undefined) {
+			this.requireDurable(cache);
 			await this.tearDownCache(cache, origin);
 		}
 
@@ -473,6 +534,8 @@ export class CacheAdminService {
 					: { kind: 'duration', graceSeconds: row.graceSeconds },
 			rootRetentionOverrides,
 			graceManaged: row.graceManaged,
+			lifecycle: row.lifecycleState,
+			management: this.cacheManagement(row),
 			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
 	}
@@ -538,6 +601,13 @@ export class CacheAdminService {
 	 */
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(async () => {
+			const management = this.context.db
+				.select({ kind: schema.caches.managementKind })
+				.from(schema.caches)
+				.where(eq(schema.caches.id, cache.id))
+				.get();
+			const isManaged = management?.kind === 'managed';
+
 			await this.deletionQueue.revokeCacheGeneration(cache);
 
 			const now = isoTimestamp(new Date());
@@ -595,7 +665,14 @@ export class CacheAdminService {
 					.where(eq(schema.retentionGrace.cacheId, cache.id))
 					.run();
 				tx.update(schema.caches)
-					.set({ deletedAt: now })
+					.set({
+						deletedAt: now,
+						creationExpiresAt: sql`NULL`,
+						leaseExpiresAt: isManaged
+							? sql`coalesce(${schema.caches.leaseExpiresAt}, ${now})`
+							: sql`NULL`,
+						lifecycleState: isManaged ? 'retiring' : 'deleted'
+					})
 					.where(eq(schema.caches.id, cache.id))
 					.run();
 				// Remove in-flight uploads so a later commit cannot recreate the cache.
@@ -627,6 +704,26 @@ export class CacheAdminService {
 			// queue. A concurrent repeated deletion can safely enqueue the same
 			// generation again.
 			if (!this.hasQueuedDeletions(cache)) {
+				const tenant = this.context.requireTenant();
+				const deletedGeneration = cacheGenerationSchema.parse(
+					cache.generation + 1
+				);
+				await this.context.d1
+					.update(d1Schema.cacheLifecycle)
+					.set({ state: 'deleted', updatedAt: isoTimestamp(new Date()) })
+					.where(
+						and(
+							eq(d1Schema.cacheLifecycle.tenant, tenant),
+							cacheIdentityCondition(
+								d1Schema.cacheLifecycle.cacheKind,
+								d1Schema.cacheLifecycle.cacheName,
+								cache.scope
+							),
+							eq(d1Schema.cacheLifecycle.generation, deletedGeneration),
+							isNotNull(d1Schema.cacheLifecycle.deletedAt)
+						)
+					)
+					.run();
 				await this.context.ctx.storage.delete(this.teardownKey(cache));
 				this.context.db
 					.delete(schema.caches)

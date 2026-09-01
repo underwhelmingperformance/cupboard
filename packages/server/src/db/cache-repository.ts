@@ -9,6 +9,13 @@ import {
 	type GraceSeconds,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type {
+	CacheLifecycleState,
+	ManagedCacheGroupId,
+	ManagedPolicyId,
+	ManagedPolicyRevision
+} from '@cupboard/protocol/managed-caches';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNull } from 'drizzle-orm';
 
@@ -37,6 +44,17 @@ interface CacheCreation {
 	readonly readRevision: CacheReadRevision;
 	readonly defaultRootTtlSeconds?: TtlSeconds;
 	readonly graceSeconds?: GraceSeconds;
+	readonly lifecycleState?: CacheLifecycleState;
+	readonly creationExpiresAt?: IsoTimestamp;
+	readonly management?:
+		| { readonly kind: 'durable' }
+		| {
+				readonly kind: 'managed';
+				readonly policyId: ManagedPolicyId;
+				readonly policyRevision: ManagedPolicyRevision;
+				readonly groupId: ManagedCacheGroupId;
+				readonly leaseExpiresAt?: IsoTimestamp;
+		  };
 }
 
 export class CacheRepository {
@@ -56,7 +74,8 @@ export class CacheRepository {
 			.where(
 				and(
 					cacheIdentityCondition(schema.caches.kind, schema.caches.name, scope),
-					isNull(schema.caches.deletedAt)
+					isNull(schema.caches.deletedAt),
+					eq(schema.caches.lifecycleState, 'active')
 				)
 			)
 			.get();
@@ -85,6 +104,10 @@ export class CacheRepository {
 	}
 
 	create(scope: CacheScope, configuration: CacheCreation): ResolvedCache {
+		const selectionState: 'detached' | 'source-active' =
+			configuration.lifecycleState === 'creating'
+				? 'detached'
+				: 'source-active';
 		const created = this.database
 			.insert(schema.caches)
 			.values({
@@ -96,6 +119,16 @@ export class CacheRepository {
 				readRevision: configuration.readRevision,
 				defaultRootTtlSeconds: configuration.defaultRootTtlSeconds,
 				graceSeconds: configuration.graceSeconds,
+				lifecycleState: configuration.lifecycleState ?? 'active',
+				creationExpiresAt: configuration.creationExpiresAt,
+				managementKind: configuration.management?.kind ?? 'durable',
+				...(configuration.management?.kind === 'managed' && {
+					managedPolicyId: configuration.management.policyId,
+					managedPolicyRevision: configuration.management.policyRevision,
+					managedGroupId: configuration.management.groupId,
+					leaseExpiresAt: configuration.management.leaseExpiresAt,
+					selectionState
+				}),
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()

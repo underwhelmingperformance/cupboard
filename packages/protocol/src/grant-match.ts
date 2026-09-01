@@ -198,6 +198,13 @@ function isGrantPermitted(
 				return false;
 			}
 
+			if (
+				requested.managedPolicy !== undefined &&
+				requested.managedPolicy !== permitted.resources.managedPolicy
+			) {
+				return false;
+			}
+
 			if (requested.root === undefined) {
 				return true;
 			}
@@ -228,4 +235,38 @@ export function isGrantPermittedByRule(
 	return permittedGrants.some((permitted) =>
 		isGrantPermitted(permitted, requested, rendered)
 	);
+}
+
+/**
+ * Resolves one requested grant against a stored rule. A managed policy remains
+ * server-selected when the caller requests `cache:provision`: the stored rule
+ * supplies the policy identity after its cache template and claims match.
+ */
+export function resolveGrantPermittedByRule(
+	permittedGrants: readonly PermittedGrant[],
+	requested: AuthorizationDetail,
+	claims: OidcClaims
+): AuthorizationDetail | undefined {
+	const rendered = stringClaims(claims);
+
+	for (const permitted of permittedGrants) {
+		if (!isGrantPermitted(permitted, requested, rendered)) {
+			continue;
+		}
+
+		if (
+			requested.type === 'cupboard_cache' &&
+			permitted.type === 'cupboard_cache' &&
+			permitted.resources.managedPolicy !== undefined
+		) {
+			return {
+				...requested,
+				managedPolicy: permitted.resources.managedPolicy
+			};
+		}
+
+		return requested;
+	}
+
+	return undefined;
 }

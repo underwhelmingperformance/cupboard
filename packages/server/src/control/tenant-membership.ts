@@ -236,6 +236,7 @@ async function readTenantAndCacheRows(
 							access: d1Schema.cacheLifecycle.access,
 							generation: d1Schema.cacheLifecycle.generation,
 							readRevision: d1Schema.cacheLifecycle.readRevision,
+							state: d1Schema.cacheLifecycle.state,
 							deletedAt: d1Schema.cacheLifecycle.deletedAt
 						})
 						.from(d1Schema.cacheLifecycle)
@@ -262,7 +263,8 @@ async function readTenantAndCacheRows(
 							access: lifecycle.access,
 							generation: lifecycle.generation,
 							readRevision: lifecycle.readRevision,
-							isDeleted: lifecycle.deletedAt !== null
+							isDeleted:
+								lifecycle.deletedAt !== null || lifecycle.state !== 'active'
 						}
 		};
 	} catch (error) {

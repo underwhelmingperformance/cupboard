@@ -25,12 +25,14 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
+import { managedCacheProvisionAuthorizationDetails } from '../auth/attenuate.ts';
+import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
-import { cacheLabel } from '../client/client.ts';
+import { cacheLabel, CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -48,6 +50,11 @@ interface CacheCreateOptions {
 	readonly priority?: CachePriority;
 	readonly rootTtl?: TtlSeconds;
 	readonly grace?: GraceSeconds;
+}
+
+interface CacheProvisionOptions {
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
 }
 
 interface CacheSetAccessOptions {
@@ -187,6 +194,66 @@ export function registerCacheCommands(
 					reporter,
 					rpc.caches
 				);
+			}
+		);
+
+	cache
+		.command('provision')
+		.description(
+			'Provision a managed cache from the current GitHub OIDC policy.'
+		)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'cache name when the URL does not select one')
+		.requiredOption(
+			'--github-oidc',
+			'authenticate with the GitHub Actions OIDC rule that grants this managed cache'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheProvisionOptions
+			) => {
+				const target = cacheCommandTarget(url, name);
+
+				if (target.cache.kind === 'default') {
+					throw new NamedCacheTargetRequiredError('Managed cache provision');
+				}
+				const cacheName = target.cache.name;
+
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: managedCacheProvisionAuthorizationDetails({
+							cache: target.cache
+						})
+					}
+				);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
+					signal: programOptions.signal
+				});
+				const summary = await reporter.phase('Provisioning managed cache', () =>
+					rpc.managedCaches.provision({ cacheName })
+				);
+
+				reporter.result({
+					kind: 'cache',
+					data: summary,
+					rows: summaryRows(summary)
+				});
 			}
 		);
 

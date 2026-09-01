@@ -186,12 +186,20 @@ describe('validateDeploymentManifest', () => {
 			'0028_drop_cache_credential_lifecycle_guard.sql',
 			'0029_cache_identity_contract.sql',
 			'0030_cache_credential_lifecycle_guard.sql',
-			'0031_cache_lifecycle_lookup_index.sql'
+			'0031_cache_lifecycle_lookup_index.sql',
+			'0032_chemical_silver_surfer.sql',
+			'0032a_suspend_cache_credential_lifecycle_guard.sql',
+			'0033_parallel_leo.sql',
+			'0034_abnormal_the_stranger.sql',
+			'0034a_restore_cache_credential_lifecycle_guard.sql',
+			'0035_managed_group_access_transition.sql',
+			'0036_managed_group_access_worklist.sql'
 		].map((id) => ({ id: d1MigrationId(id), sha256: '1'.repeat(64) }));
 		const durableObject = [
 			'0041_pending_upload_recorded_verdict',
 			'0049_cache_retention_migration_rules',
-			'0052_cache_access_triggers'
+			'0056_small_longshot',
+			'0057_managed_group_single_view'
 		].map((id) => ({
 			id: durableObjectMigrationId(id),
 			sha256: '2'.repeat(64)

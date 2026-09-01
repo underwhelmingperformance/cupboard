@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { managedPolicyIdSchema } from '../managed-caches.ts';
 import {
 	reuseViewListResponseSchema,
 	reuseViewNameSchema,
@@ -9,6 +10,13 @@ import {
 } from '../reuse-views.ts';
 
 import { baseProcedure } from './base.ts';
+
+const managedViewConflictError = {
+	MANAGED_POLICY_CONFLICT: {
+		status: 409,
+		data: z.strictObject({ policyId: managedPolicyIdSchema.optional() })
+	}
+};
 
 // Reuse views are tenant-wide configuration. They specify the caches that may
 // satisfy another cache's reads. Mutations require tenant-domain authority, not
@@ -29,11 +37,13 @@ export const reuseViewsContract = {
 				...reuseViewSetBodySchema.shape
 			})
 		)
+		.errors(managedViewConflictError)
 		.output(reuseViewSummarySchema),
 
 	remove: baseProcedure
 		.meta({ requires: 'reuse-view:remove' })
 		.route({ method: 'DELETE', path: '/reuse-views/{name}' })
 		.input(z.strictObject({ name: reuseViewNameSchema }))
+		.errors(managedViewConflictError)
 		.output(reuseViewRemoveResponseSchema)
 };

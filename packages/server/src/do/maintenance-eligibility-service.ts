@@ -95,6 +95,28 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
+	private earliestManagedCacheLease(
+		now: IsoTimestamp
+	): IsoTimestamp | undefined {
+		return (
+			this.context.db
+				.select({ leaseExpiresAt: schema.caches.leaseExpiresAt })
+				.from(schema.caches)
+				.where(
+					and(
+						eq(schema.caches.managementKind, 'managed'),
+						eq(schema.caches.lifecycleState, 'active'),
+						eq(schema.caches.updateHold, false),
+						isNotNull(schema.caches.leaseExpiresAt),
+						sql`${schema.caches.leaseExpiresAt} > ${now}`
+					)
+				)
+				.orderBy(asc(schema.caches.leaseExpiresAt))
+				.limit(1)
+				.get()?.leaseExpiresAt ?? undefined
+		);
+	}
+
 	private earliestAuthKeyRetirement(): IsoTimestamp | undefined {
 		return (
 			this.context.db
@@ -114,21 +136,22 @@ export class MaintenanceEligibilityService {
 
 	// When no work is due now, wake for the earliest upload, attestation, root,
 	// grace, or auth-key deadline.
-	private earliestFutureWake(): IsoTimestamp | undefined {
+	private earliestFutureWake(now: IsoTimestamp): IsoTimestamp | undefined {
 		return [
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
+			this.earliestManagedCacheLease(now),
 			this.earliestAuthKeyRetirement()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private nextWakeAt(): IsoTimestamp | undefined {
+	private nextWakeAt(now: IsoTimestamp): IsoTimestamp | undefined {
 		return this.hasImmediateWork()
 			? wakeImmediately
-			: this.earliestFutureWake();
+			: this.earliestFutureWake(now);
 	}
 
 	async invalidate(): Promise<void> {
@@ -149,7 +172,7 @@ export class MaintenanceEligibilityService {
 	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = isoTimestamp(now);
-		const nextWakeAt = this.nextWakeAt();
+		const nextWakeAt = this.nextWakeAt(reconciledAt);
 
 		await this.context.d1
 			.insert(d1Schema.tenantMaintenanceEligibility)

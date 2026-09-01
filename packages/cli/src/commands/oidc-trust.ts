@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 
 import type { CliUi } from '@cupboard/cli-ui';
+import type { ManagedPolicyId } from '@cupboard/protocol/managed-caches';
 import {
 	type ClaimMatch,
 	type OidcTrustAddBodyInput,
@@ -41,6 +42,7 @@ interface GithubPrOptions {
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
 	readonly attest?: boolean;
+	readonly managedPolicy?: ManagedPolicyId;
 }
 
 interface GithubTagOptions {
@@ -337,6 +339,7 @@ export function githubPrAddBody(
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
 				allow: withAttest(['push', 'root', 'attach'], options.attest),
+				managedPolicy: options.managedPolicy,
 				substitutions: collectSubstitutions({
 					templateSource: 'github-pr',
 					captures: []

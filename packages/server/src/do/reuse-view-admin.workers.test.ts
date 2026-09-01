@@ -5,8 +5,11 @@ import type {
 	ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import {
+	managedCacheGroupIdSchema,
 	reuseViewListResponseSchema,
 	reuseViewMaxSelectors,
+	reuseViewNameSchema,
+	reuseViewPrioritySchema,
 	reuseViewRemoveResponseSchema,
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
@@ -27,6 +30,8 @@ import {
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
+
+import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
 
 const orpcErrorBodySchema = z.strictObject({
 	defined: z.boolean(),
@@ -166,6 +171,57 @@ describe('reuse views', () => {
 			afterStatus: StatusCodes.OK,
 			afterViews: { views: [] },
 			derivedState: { before, after: before }
+		});
+	});
+
+	it('reserves managed views for the managed-cache coordinator', async () => {
+		const token = await initialise();
+		const view = reuseViewNameSchema.parse('pull-requests');
+		const groupId = managedCacheGroupIdSchema.parse(
+			'0199a0ea-1a00-7000-8000-000000000001'
+		);
+		await runInDurableObject(currentServer(), (instance) => {
+			new ReuseViewAdminService(instance.context).setManagedView(view, {
+				access: 'private',
+				selectors: [{ kind: 'managed-group', groupId }],
+				priority: reuseViewPrioritySchema.parse(50)
+			});
+		});
+
+		const overwrite = await setViewRaw(token, view, {
+			access: 'private',
+			selectors: [{ kind: 'all' }]
+		});
+		const remove = await authorisedFetch(`/reuse-views/${view}`, token, {
+			method: 'DELETE'
+		});
+
+		expect({
+			overwrite: {
+				status: overwrite.status,
+				body: orpcErrorBodyShape(await overwrite.json())
+			},
+			remove: {
+				status: remove.status,
+				body: orpcErrorBodyShape(await remove.json())
+			}
+		}).toStrictEqual({
+			overwrite: {
+				status: StatusCodes.CONFLICT,
+				body: {
+					defined: true,
+					code: 'MANAGED_POLICY_CONFLICT',
+					status: StatusCodes.CONFLICT
+				}
+			},
+			remove: {
+				status: StatusCodes.CONFLICT,
+				body: {
+					defined: true,
+					code: 'MANAGED_POLICY_CONFLICT',
+					status: StatusCodes.CONFLICT
+				}
+			}
 		});
 	});
 

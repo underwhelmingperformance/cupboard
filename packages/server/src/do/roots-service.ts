@@ -30,6 +30,10 @@ import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { maxBoundParameters } from './bulk.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
+import {
+	assertManagedRootRetention,
+	renewManagedCacheLease
+} from './managed-cache-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -417,12 +421,15 @@ export class RootsService {
 	): Promise<RootSetResponse> {
 		const cache = this.context.cacheRepository.require(cacheScope);
 		const requested = this.buildRootSetCommand(rootName, body);
+		await assertManagedRootRetention(this.context, cache, requested.retention);
 		const servable = await this.servableTargets(cache, requested.targets);
 		const write = await this.gatedRootWrite(cache, requested);
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);
 		}
+
+		await renewManagedCacheLease(this.context, cache);
 
 		return this.rootSummaryFrom(
 			rootName,
@@ -440,6 +447,7 @@ export class RootsService {
 	): Promise<RootEnsureResponse> {
 		const cache = this.context.cacheRepository.require(cacheScope);
 		const requested = this.buildRootSetCommand(rootName, body);
+		await assertManagedRootRetention(this.context, cache, requested.retention);
 		const identities = await this.servableTargetIdentities(
 			cache,
 			requested.targets
@@ -460,6 +468,8 @@ export class RootsService {
 				unavailable: [...write.unavailable]
 			};
 		}
+
+		await renewManagedCacheLease(this.context, cache);
 
 		return {
 			status: 'retained',

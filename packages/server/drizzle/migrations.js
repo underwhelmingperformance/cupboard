@@ -52,6 +52,11 @@ import m0049 from './0049_cache_retention_migration_rules.sql';
 import m0050 from './0050_cache_access_assertions.sql';
 import m0051 from './0051_cache_access_contract.sql';
 import m0052 from './0052_cache_access_triggers.sql';
+import m0053 from './0053_yielding_scalphunter.sql';
+import m0054 from './0054_blushing_magus.sql';
+import m0055 from './0055_blushing_shinobi_shaw.sql';
+import m0056 from './0056_small_longshot.sql';
+import m0057 from './0057_managed_group_single_view.sql';
 
 export default {
 	journal,
@@ -108,6 +113,11 @@ export default {
 		m0049,
 		m0050,
 		m0051,
-		m0052
+		m0052,
+		m0053,
+		m0054,
+		m0055,
+		m0056,
+		m0057
 	}
 };

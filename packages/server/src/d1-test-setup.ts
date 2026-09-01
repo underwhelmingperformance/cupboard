@@ -12,6 +12,11 @@ import {
 	controlAuthKey,
 	controlTrust,
 	globalAdmin,
+	managedCacheGroup,
+	managedGroupAccessTransition,
+	managedGroupAccessTransitionCache,
+	managedPolicyFamily,
+	managedPolicyRevision,
 	manifestState,
 	objectDeletion,
 	objectIncarnation,
@@ -44,6 +49,11 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
+	await database.delete(managedPolicyRevision).run();
+	await database.delete(managedPolicyFamily).run();
+	await database.delete(managedGroupAccessTransitionCache).run();
+	await database.delete(managedGroupAccessTransition).run();
+	await database.delete(managedCacheGroup).run();
 	await database.delete(cacheLifecycle).run();
 	await database.delete(tenantCacheReadCredential).run();
 	await database.delete(tenantCasBlob).run();

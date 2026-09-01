@@ -922,13 +922,7 @@ export class DeletionQueueService {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
-		await revokeCacheLifecycle(
-			this.context,
-			tenant,
-			cache.scope,
-			cache.access,
-			now
-		);
+		await revokeCacheLifecycle(this.context, tenant, cache, now);
 	}
 
 	/**

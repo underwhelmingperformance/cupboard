@@ -24,6 +24,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { legacyCacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import type { WriterEpoch } from '@cupboard/protocol/deployment-manifest';
+import type {
+	CacheLifecycleState,
+	ManagedCacheGroupId,
+	ManagedPolicyId,
+	ManagedPolicyRevision
+} from '@cupboard/protocol/managed-caches';
 import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
 	ReuseViewName,
@@ -82,6 +88,30 @@ export const caches = sqliteTable(
 			.$type<CacheReadRevision>()
 			.notNull()
 			.default(cacheReadRevisionSchema.parse(1)),
+		lifecycleState: text('lifecycle_state', {
+			enum: ['creating', 'active', 'retiring', 'deleted']
+		})
+			.$type<CacheLifecycleState>()
+			.notNull()
+			.default('active'),
+		creationExpiresAt: text('creation_expires_at').$type<IsoTimestamp>(),
+		managementKind: text('management_kind', {
+			enum: ['durable', 'managed']
+		})
+			.notNull()
+			.default('durable'),
+		managedPolicyId: text('managed_policy_id').$type<ManagedPolicyId>(),
+		managedPolicyRevision: integer(
+			'managed_policy_revision'
+		).$type<ManagedPolicyRevision>(),
+		managedGroupId: text('managed_group_id').$type<ManagedCacheGroupId>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		selectionState: text('selection_state', {
+			enum: ['source-active', 'detached', 'reconciling', 'target-active']
+		}),
+		updateHold: integer('update_hold', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		rootRetentionRuleSetId: integer('root_retention_rule_set_id')
 			.$type<RootRetentionRuleSetId>()
 			.notNull()
@@ -109,12 +139,26 @@ export const caches = sqliteTable(
 			'cache_identity_access_check',
 			sql`${table.access} IN ('public', 'private')`
 		),
+		check(
+			'cache_identity_creation_shape_check',
+			sql`(${table.lifecycleState} = 'creating' AND ${table.creationExpiresAt} IS NOT NULL) OR (${table.lifecycleState} <> 'creating' AND ${table.creationExpiresAt} IS NULL)`
+		),
+		check(
+			'cache_identity_management_shape_check',
+			sql`(${table.managementKind} = 'durable' AND ${table.managedPolicyId} IS NULL AND ${table.managedPolicyRevision} IS NULL AND ${table.managedGroupId} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.selectionState} IS NULL) OR (${table.managementKind} = 'managed' AND ${table.managedPolicyId} IS NOT NULL AND ${table.managedPolicyRevision} IS NOT NULL AND ${table.managedGroupId} IS NOT NULL AND ((${table.lifecycleState} = 'creating' AND ${table.leaseExpiresAt} IS NULL AND ${table.selectionState} = 'detached') OR (${table.lifecycleState} <> 'creating' AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.selectionState} IS NOT NULL)))`
+		),
 		uniqueIndex('cache_one_default_idx')
 			.on(table.kind)
 			.where(sql`${table.kind} = 'default' AND ${table.deletedAt} IS NULL`),
 		uniqueIndex('cache_named_name_idx')
 			.on(table.name)
-			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
+			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`),
+		index('cache_managed_group_selection_idx').on(
+			table.managedGroupId,
+			table.access,
+			table.lifecycleState,
+			table.selectionState
+		)
 	]
 );
 
@@ -753,16 +797,17 @@ export const reuseViewSelectors = sqliteTable(
 		id: integer('id').primaryKey({ autoIncrement: true }),
 		view: text('view').$type<ReuseViewName>().notNull(),
 		kind: text('kind', {
-			enum: ['default', 'named', 'prefix', 'all-named', 'all']
+			enum: ['default', 'named', 'prefix', 'all-named', 'all', 'managed-group']
 		}).notNull(),
 		cacheName: text('cache_name').$type<CacheName>(),
-		prefix: text('prefix')
+		prefix: text('prefix'),
+		managedGroupId: text('managed_group_id').$type<ManagedCacheGroupId>()
 	},
 	(table) => [
 		check('reuse_view_selector_view_check', cacheNameConstraint(table.view)),
 		check(
 			'reuse_view_selector_identity_check',
-			sql`(${table.kind} IN ('default', 'all-named', 'all') AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)} AND ${table.prefix} IS NULL) OR (${table.kind} = 'prefix' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NOT NULL AND ${cacheNamePrefixConstraint(table.prefix)})`
+			sql`(${table.kind} IN ('default', 'all-named', 'all') AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL AND ${table.managedGroupId} IS NULL) OR (${table.kind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)} AND ${table.prefix} IS NULL AND ${table.managedGroupId} IS NULL) OR (${table.kind} = 'prefix' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NOT NULL AND ${cacheNamePrefixConstraint(table.prefix)} AND ${table.managedGroupId} IS NULL) OR (${table.kind} = 'managed-group' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL AND ${table.managedGroupId} IS NOT NULL)`
 		),
 		uniqueIndex('reuse_view_selector_singleton_idx')
 			.on(table.view, table.kind)
@@ -772,7 +817,10 @@ export const reuseViewSelectors = sqliteTable(
 			.where(sql`${table.kind} = 'named'`),
 		uniqueIndex('reuse_view_selector_prefix_idx')
 			.on(table.view, table.prefix)
-			.where(sql`${table.kind} = 'prefix'`)
+			.where(sql`${table.kind} = 'prefix'`),
+		uniqueIndex('reuse_view_selector_managed_group_idx')
+			.on(table.managedGroupId)
+			.where(sql`${table.kind} = 'managed-group'`)
 	]
 );
 

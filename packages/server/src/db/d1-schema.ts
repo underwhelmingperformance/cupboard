@@ -13,7 +13,18 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type { InstanceName } from '@cupboard/protocol/instance';
+import type {
+	CacheLifecycleState,
+	GitHubOwnerId,
+	GitHubRepositoryId,
+	ManagedCacheGroupId,
+	ManagedCacheNamespace,
+	ManagedPolicyId,
+	ManagedPolicyRevision,
+	ManagedPolicyStatus
+} from '@cupboard/protocol/managed-caches';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
+import { reuseViewDefaultPriority } from '@cupboard/protocol/reuse-views';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { ReadUser } from '@cupboard/shared/http';
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
@@ -180,6 +191,30 @@ export const cacheLifecycle = sqliteTable(
 			.$type<CacheReadRevision>()
 			.notNull()
 			.default(cacheReadRevisionSchema.parse(1)),
+		state: text('state', {
+			enum: ['creating', 'active', 'retiring', 'deleted']
+		})
+			.$type<CacheLifecycleState>()
+			.notNull()
+			.default('active'),
+		creationExpiresAt: text('creation_expires_at').$type<IsoTimestamp>(),
+		managementKind: text('management_kind', {
+			enum: ['durable', 'managed']
+		})
+			.notNull()
+			.default('durable'),
+		managedPolicyId: text('managed_policy_id').$type<ManagedPolicyId>(),
+		managedPolicyRevision: integer(
+			'managed_policy_revision'
+		).$type<ManagedPolicyRevision>(),
+		managedGroupId: text('managed_group_id').$type<ManagedCacheGroupId>(),
+		leaseExpiresAt: text('lease_expires_at').$type<IsoTimestamp>(),
+		selectionState: text('selection_state', {
+			enum: ['source-active', 'detached', 'reconciling', 'target-active']
+		}),
+		updateHold: integer('update_hold', { mode: 'boolean' })
+			.notNull()
+			.default(false),
 		deletedAt: text('deleted_at').$type<IsoTimestamp>(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
@@ -192,6 +227,14 @@ export const cacheLifecycle = sqliteTable(
 			'cache_lifecycle_access_check',
 			sql`${table.access} IN ('public', 'private')`
 		),
+		check(
+			'cache_lifecycle_creation_shape_check',
+			sql`(${table.state} = 'creating' AND ${table.creationExpiresAt} IS NOT NULL) OR (${table.state} <> 'creating' AND ${table.creationExpiresAt} IS NULL)`
+		),
+		check(
+			'cache_lifecycle_management_shape_check',
+			sql`(${table.managementKind} = 'durable' AND ${table.managedPolicyId} IS NULL AND ${table.managedPolicyRevision} IS NULL AND ${table.managedGroupId} IS NULL AND ${table.leaseExpiresAt} IS NULL AND ${table.selectionState} IS NULL) OR (${table.managementKind} = 'managed' AND ${table.managedPolicyId} IS NOT NULL AND ${table.managedPolicyRevision} IS NOT NULL AND ${table.managedGroupId} IS NOT NULL AND ((${table.state} = 'creating' AND ${table.leaseExpiresAt} IS NULL AND ${table.selectionState} = 'detached') OR (${table.state} <> 'creating' AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.selectionState} IS NOT NULL)))`
+		),
 		uniqueIndex('cache_lifecycle_default_identity_idx')
 			.on(table.tenant)
 			.where(sql`${table.cacheKind} = 'default'`),
@@ -201,6 +244,220 @@ export const cacheLifecycle = sqliteTable(
 		index('cache_lifecycle_native_identity_idx').on(
 			table.tenant,
 			table.cacheKind,
+			table.cacheName
+		),
+		index('cache_lifecycle_managed_capacity_idx').on(
+			table.tenant,
+			table.managedPolicyId,
+			table.state,
+			table.leaseExpiresAt
+		),
+		index('cache_lifecycle_managed_group_selection_idx').on(
+			table.tenant,
+			table.managedGroupId,
+			table.access,
+			table.state,
+			table.selectionState
+		)
+	]
+);
+
+export const managedCacheGroup = sqliteTable(
+	'managed_cache_group',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		id: text('id').$type<ManagedCacheGroupId>().notNull(),
+		access: text('access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		reuseViewName: text('reuse_view_name').notNull(),
+		reuseViewPriority: integer('reuse_view_priority')
+			.notNull()
+			.default(reuseViewDefaultPriority),
+		state: text('state', {
+			enum: ['active', 'transitioning', 'retiring', 'retired']
+		})
+			.notNull()
+			.default('active'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.id] }),
+		check(
+			'managed_cache_group_access_check',
+			sql`${table.access} IN ('public', 'private')`
+		),
+		uniqueIndex('managed_cache_group_view_idx').on(
+			table.tenant,
+			table.reuseViewName
+		)
+	]
+);
+
+export const managedPolicyFamily = sqliteTable(
+	'managed_policy_family',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		id: text('id').$type<ManagedPolicyId>().notNull(),
+		ownerId: text('owner_id').$type<GitHubOwnerId>().notNull(),
+		repositoryId: text('repository_id').$type<GitHubRepositoryId>().notNull(),
+		cacheNamespace: text('cache_namespace')
+			.$type<ManagedCacheNamespace>()
+			.notNull(),
+		status: text('status', {
+			enum: ['active', 'updating', 'update-failed', 'retiring']
+		})
+			.$type<ManagedPolicyStatus>()
+			.notNull(),
+		currentRevision: integer('current_revision')
+			.$type<ManagedPolicyRevision>()
+			.notNull(),
+		pendingRevision: integer('pending_revision').$type<ManagedPolicyRevision>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.id] }),
+		check(
+			'managed_policy_family_status_check',
+			sql`${table.status} IN ('active', 'updating', 'update-failed', 'retiring')`
+		),
+		check(
+			'managed_policy_family_revision_check',
+			sql`${table.currentRevision} > 0 AND (${table.pendingRevision} IS NULL OR ${table.pendingRevision} > ${table.currentRevision})`
+		),
+		uniqueIndex('managed_policy_repository_idx').on(
+			table.tenant,
+			table.repositoryId
+		),
+		uniqueIndex('managed_policy_namespace_idx').on(
+			table.tenant,
+			table.cacheNamespace
+		)
+	]
+);
+
+export const managedPolicyRevision = sqliteTable(
+	'managed_policy_revision',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		policyId: text('policy_id').$type<ManagedPolicyId>().notNull(),
+		revision: integer('revision').$type<ManagedPolicyRevision>().notNull(),
+		groupId: text('group_id').$type<ManagedCacheGroupId>().notNull(),
+		access: text('access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		priority: integer('priority').notNull(),
+		defaultRootTtlSeconds: integer('default_root_ttl_seconds'),
+		maximumRootDurationSeconds: integer(
+			'maximum_root_duration_seconds'
+		).notNull(),
+		allowPermanentRoots: integer('allow_permanent_roots', {
+			mode: 'boolean'
+		}).notNull(),
+		graceSeconds: integer('grace_seconds'),
+		creationLeaseSeconds: integer('creation_lease_seconds').notNull(),
+		provisionalLeaseSeconds: integer('provisional_lease_seconds').notNull(),
+		activityLeaseSeconds: integer('activity_lease_seconds').notNull(),
+		maximumLiveCaches: integer('maximum_live_caches').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.policyId, table.revision] }),
+		check(
+			'managed_policy_revision_values_check',
+			sql`${table.revision} > 0 AND ${table.priority} > 0 AND ${table.maximumRootDurationSeconds} > 0 AND ${table.creationLeaseSeconds} > 0 AND ${table.provisionalLeaseSeconds} > 0 AND ${table.activityLeaseSeconds} > 0 AND ${table.maximumLiveCaches} > 0`
+		),
+		index('managed_policy_revision_group_idx').on(
+			table.tenant,
+			table.groupId,
+			table.revision
+		)
+	]
+);
+
+export const managedGroupAccessTransition = sqliteTable(
+	'managed_group_access_transition',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		id: text('id').notNull(),
+		groupId: text('group_id').$type<ManagedCacheGroupId>().notNull(),
+		targetGroupId: text('target_group_id')
+			.$type<ManagedCacheGroupId>()
+			.notNull(),
+		sourceAccess: text('source_access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		targetAccess: text('target_access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		status: text('status', {
+			enum: ['running', 'finalising', 'complete', 'failed']
+		})
+			.notNull()
+			.default('running'),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		lastFailureJson: text('last_failure_json'),
+		participantPoliciesJson: text('participant_policies_json')
+			.notNull()
+			.default('[]'),
+		phase: text('phase', {
+			enum: [
+				'cancel-creations',
+				'prepare-policies',
+				'capture-caches',
+				'move-caches',
+				'switch-view',
+				'release-holds',
+				'activate-policies'
+			]
+		})
+			.notNull()
+			.default('cancel-creations'),
+		policyCursor: text('policy_cursor').$type<ManagedPolicyId>(),
+		cacheCursor: text('cache_cursor').$type<CacheName>()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.id] }),
+		check(
+			'managed_group_access_transition_access_check',
+			sql`${table.sourceAccess} IN ('public', 'private') AND ${table.targetAccess} IN ('public', 'private') AND ${table.sourceAccess} <> ${table.targetAccess}`
+		),
+		uniqueIndex('managed_group_access_transition_active_idx')
+			.on(table.tenant, table.groupId)
+			.where(sql`${table.status} IN ('running', 'finalising')`),
+		index('managed_group_access_transition_work_idx').on(
+			table.tenant,
+			table.status,
+			table.groupId
+		)
+	]
+);
+
+export const managedGroupAccessTransitionCache = sqliteTable(
+	'managed_group_access_transition_cache',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		transitionId: text('transition_id').notNull(),
+		cacheName: text('cache_name').$type<CacheName>().notNull(),
+		generation: integer('generation').$type<CacheGeneration>().notNull(),
+		targetReadRevision: integer('target_read_revision')
+			.$type<CacheReadRevision>()
+			.notNull(),
+		policyId: text('policy_id').$type<ManagedPolicyId>().notNull(),
+		state: text('state', { enum: ['pending', 'moved', 'complete'] })
+			.notNull()
+			.default('pending')
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.tenant, table.transitionId, table.cacheName]
+		}),
+		index('managed_group_access_transition_cache_work_idx').on(
+			table.tenant,
+			table.transitionId,
+			table.state,
 			table.cacheName
 		)
 	]

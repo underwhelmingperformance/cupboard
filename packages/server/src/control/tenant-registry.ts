@@ -202,6 +202,15 @@ export async function ensureTenant(
 	const readRevision = sql<number>`${firstCacheReadRevision}`.as(
 		'read_revision'
 	);
+	const lifecycleState = sql<'active'>`'active'`.as('state');
+	const creationExpiresAt = sql<null>`null`.as('creation_expires_at');
+	const managementKind = sql<'durable'>`'durable'`.as('management_kind');
+	const managedPolicyId = sql<null>`null`.as('managed_policy_id');
+	const managedPolicyRevision = sql<null>`null`.as('managed_policy_revision');
+	const managedGroupId = sql<null>`null`.as('managed_group_id');
+	const leaseExpiresAt = sql<null>`null`.as('lease_expires_at');
+	const selectionState = sql<null>`null`.as('selection_state');
+	const updateHold = sql<boolean>`false`.as('update_hold');
 	const deletedAt = sql<null>`null`.as('deleted_at');
 	const updatedAt = sql<IsoTimestamp>`${now}`.as('updated_at');
 	const zero = sql<number>`0`;
@@ -215,6 +224,15 @@ export async function ensureTenant(
 			access: cacheAccess,
 			generation,
 			readRevision,
+			state: lifecycleState,
+			creationExpiresAt,
+			managementKind,
+			managedPolicyId,
+			managedPolicyRevision,
+			managedGroupId,
+			leaseExpiresAt,
+			selectionState,
+			updateHold,
 			deletedAt,
 			updatedAt
 		})

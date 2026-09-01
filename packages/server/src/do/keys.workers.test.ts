@@ -39,6 +39,7 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
+import { noProgressRetryMs } from './alarm.ts';
 import { withDeadlineBudget } from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -396,17 +397,18 @@ describe('signing key rotation', () => {
 			currentServer(),
 			async (instance, state) => {
 				await state.storage.deleteAlarm();
-				let scheduledAlarmAt = Infinity;
+				const scheduledAlarms: number[] = [];
 				const getAlarm = vi
 					.spyOn(state.storage, 'getAlarm')
-					.mockImplementation(() => Promise.resolve(scheduledAlarmAt));
+					.mockResolvedValue(Infinity);
 				const setAlarm = vi
 					.spyOn(state.storage, 'setAlarm')
 					.mockImplementation((scheduledTime) => {
-						scheduledAlarmAt =
+						const alarmAt =
 							typeof scheduledTime === 'number'
 								? scheduledTime
 								: scheduledTime.getTime();
+						scheduledAlarms.push(alarmAt);
 
 						return Promise.resolve();
 					});
@@ -418,7 +420,6 @@ describe('signing key rotation', () => {
 				try {
 					const rotation = await service.rotateKey();
 					await service.runBackfillOnce();
-					scheduledAlarmAt = Infinity;
 					instance.context.db
 						.update(schema.cachePurgeContinuations)
 						.set({ expiresAt: isoTimestamp(new Date(0)) })
@@ -428,13 +429,20 @@ describe('signing key rotation', () => {
 						.mockRejectedValueOnce(new Error('purge unavailable'));
 
 					try {
-						await asOneInvocation(() => service.runBackfillOnce());
+						scheduledAlarms.length = 0;
+						const stalledAt = Date.now();
+						const clock = vi.spyOn(Date, 'now').mockReturnValue(stalledAt);
+
+						try {
+							await asOneInvocation(() => service.runBackfillOnce());
+						} finally {
+							clock.mockRestore();
+						}
 
 						const continuations = instance.context.db
 							.select()
 							.from(schema.cachePurgeContinuations)
 							.all();
-						const retryAlarmAt = scheduledAlarmAt;
 						const keys = await service.keyList();
 
 						return {
@@ -442,7 +450,10 @@ describe('signing key rotation', () => {
 							continuations,
 							keys,
 							purgeCalls: purge.mock.calls,
-							retryAlarmAt
+							retryAlarms: scheduledAlarms.filter(
+								(alarmAt) => alarmAt === stalledAt + noProgressRetryMs
+							),
+							stalledAt
 						};
 					} finally {
 						purge.mockRestore();
@@ -471,7 +482,7 @@ describe('signing key rotation', () => {
 			})),
 			backfill: incoming.backfill,
 			purgeCalls: result.purgeCalls,
-			retryAlarmAt: result.retryAlarmAt
+			retryAlarms: result.retryAlarms
 		}).toStrictEqual({
 			continuations: [{ kind: 'backfill', lastError: 'purge unavailable' }],
 			backfill: {
@@ -487,7 +498,7 @@ describe('signing key rotation', () => {
 				}
 			},
 			purgeCalls: [[[`narinfo:v1:default:${before.storePathHash}`]]],
-			retryAlarmAt: Date.now() + 30_000
+			retryAlarms: [result.stalledAt + noProgressRetryMs]
 		});
 	});
 
@@ -504,17 +515,19 @@ describe('signing key rotation', () => {
 			currentServer(),
 			async (instance, state) => {
 				await state.storage.deleteAlarm();
-				let scheduledAlarmAt = Infinity;
+				let configuredAlarmAt = Infinity;
+				const scheduledAlarms: number[] = [];
 				const getAlarm = vi
 					.spyOn(state.storage, 'getAlarm')
-					.mockImplementation(() => Promise.resolve(scheduledAlarmAt));
+					.mockImplementation(() => Promise.resolve(configuredAlarmAt));
 				const setAlarm = vi
 					.spyOn(state.storage, 'setAlarm')
 					.mockImplementation((scheduledTime) => {
-						scheduledAlarmAt =
+						scheduledAlarms.push(
 							typeof scheduledTime === 'number'
 								? scheduledTime
-								: scheduledTime.getTime();
+								: scheduledTime.getTime()
+						);
 
 						return Promise.resolve();
 					});
@@ -527,7 +540,8 @@ describe('signing key rotation', () => {
 					const rotation = await service.rotateKey();
 					await service.runBackfillOnce();
 					const existingAlarmAt = Date.now() + 10_000;
-					scheduledAlarmAt = existingAlarmAt;
+					configuredAlarmAt = existingAlarmAt;
+					scheduledAlarms.length = 0;
 					const publicationStarted = Promise.withResolvers<undefined>();
 					const put = vi.spyOn(env.BLOBS, 'put').mockImplementation(() => {
 						publicationStarted.resolve(undefined);
@@ -552,7 +566,6 @@ describe('signing key rotation', () => {
 							.select()
 							.from(schema.cachePurgeContinuations)
 							.all();
-						const retryAlarmAt = scheduledAlarmAt;
 						const keys = await service.keyList();
 
 						return {
@@ -561,8 +574,10 @@ describe('signing key rotation', () => {
 							keys,
 							didTimeout,
 							existingAlarmAt,
-							publicationStarted: put.mock.calls.length > 0,
-							retryAlarmAt
+							postponingAlarms: scheduledAlarms.filter(
+								(alarmAt) => alarmAt > existingAlarmAt
+							),
+							publicationStarted: put.mock.calls.length > 0
 						};
 					} finally {
 						put.mockRestore();
@@ -591,8 +606,8 @@ describe('signing key rotation', () => {
 			})),
 			backfill: incoming.backfill,
 			didTimeout: result.didTimeout,
-			publicationStarted: result.publicationStarted,
-			retryAlarmAt: result.retryAlarmAt
+			postponingAlarms: result.postponingAlarms,
+			publicationStarted: result.publicationStarted
 		}).toStrictEqual({
 			continuations: [
 				{ kind: 'backfill', lastError: 'A storage subrequest timed out' }
@@ -610,8 +625,8 @@ describe('signing key rotation', () => {
 				}
 			},
 			didTimeout: true,
-			publicationStarted: true,
-			retryAlarmAt: result.existingAlarmAt
+			postponingAlarms: [],
+			publicationStarted: true
 		});
 	});
 

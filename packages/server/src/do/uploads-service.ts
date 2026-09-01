@@ -46,6 +46,11 @@ import {
 	serialiseGraceDecision,
 	storedGraceDeadlines
 } from './grace-decision.ts';
+import {
+	assertManagedCacheWritable,
+	assertManagedRootRetention,
+	renewManagedCacheLease
+} from './managed-cache-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	factsFromHints,
@@ -315,11 +320,17 @@ export class UploadsService {
 		}
 
 		const cache = this.context.cacheRepository.require(cacheScope);
+		await assertManagedCacheWritable(this.context, cache);
 
 		// Reject paths from another store directory before creating or extending the
 		// run root. Each pending upload then records the root its commit must attach
 		// to.
 		if (body.attachRoot !== undefined) {
+			await assertManagedRootRetention(
+				this.context,
+				cache,
+				body.attachRoot.retention
+			);
 			this.roots.bindRunRoot(
 				cache,
 				body.attachRoot.name,
@@ -328,6 +339,7 @@ export class UploadsService {
 		}
 
 		if (body.paths.length === 0) {
+			await renewManagedCacheLease(this.context, cache);
 			return { uploads: [] };
 		}
 
@@ -450,6 +462,10 @@ export class UploadsService {
 				storePathHash: row.storePathHash
 			}))
 		);
+
+		if (body.attachRoot !== undefined || skipFacts.size > 0) {
+			await renewManagedCacheLease(this.context, cache);
+		}
 
 		return { uploads };
 	}

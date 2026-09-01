@@ -96,6 +96,11 @@ export function cacheSelectorCondition(
 		case 'all': {
 			return undefined;
 		}
+		case 'managed-group': {
+			throw new TypeError(
+				'Managed-group selectors require cache lifecycle columns'
+			);
+		}
 	}
 }
 

@@ -52,6 +52,7 @@ import {
 	driveToCompletion,
 	fetchPath,
 	fileAttestationReference,
+	measureInvocations,
 	namedCache,
 	narBytes,
 	narInfoGeneration,
@@ -311,7 +312,7 @@ async function deletionStatements(
 
 	const counting = countingD1(env.CUPBOARD_DB);
 
-	return runInDurableObject(currentServer(), async (instance) => {
+	return runInDurableObject(currentServer(), async (instance, state) => {
 		const real = instance.context.d1;
 
 		Object.defineProperty(instance.context, 'd1', {
@@ -319,16 +320,25 @@ async function deletionStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const [measurement] = await measureInvocations(state, counting, {
+			attempts: 1,
+			run: async () => {
+				await instance.runCacheTeardown(buildsCache, origin);
 
-		const spent = counting.statementsSent();
+				return {};
+			}
+		});
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return spent;
+		if (measurement === undefined) {
+			throw new Error('The deletion measurement did not run');
+		}
+
+		return measurement.statements;
 	});
 }
 
@@ -360,7 +370,7 @@ async function teardownPassStatements(
 
 	const counting = countingD1(env.CUPBOARD_DB);
 
-	return runInDurableObject(currentServer(), async (instance) => {
+	return runInDurableObject(currentServer(), async (instance, state) => {
 		const real = instance.context.d1;
 
 		Object.defineProperty(instance.context, 'd1', {
@@ -368,18 +378,26 @@ async function teardownPassStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const [measurement] = await measureInvocations(state, counting, {
+			attempts: 1,
+			prepare: () => instance.runCacheTeardown(buildsCache, origin),
+			run: async () => {
+				await instance.resumeCacheTeardown();
 
-		const beforePass = counting.statementsSent();
-		await instance.resumeCacheTeardown();
-		const spent = counting.statementsSent() - beforePass;
+				return {};
+			}
+		});
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return spent;
+		if (measurement === undefined) {
+			throw new Error('The teardown-pass measurement did not run');
+		}
+
+		return measurement.statements;
 	});
 }
 
@@ -449,30 +467,26 @@ async function attestedTeardownPassStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const measurements = await measureInvocations(state, counting, {
+			attempts: maxPasses,
+			prepare: () => instance.runCacheTeardown(buildsCache, origin),
+			isDue: async () =>
+				(await state.storage.get(
+					`${teardownEntryPrefix}${String(cache.id)}`
+				)) !== undefined,
+			run: async () => {
+				await instance.resumeCacheTeardown();
 
-		const perPass: number[] = [];
-
-		for (let taken = 0; taken < maxPasses; taken += 1) {
-			const marker = await state.storage.get(
-				`${teardownEntryPrefix}${String(cache.id)}`
-			);
-
-			if (marker === undefined) {
-				break;
+				return {};
 			}
-
-			const before = counting.statementsSent();
-			await instance.resumeCacheTeardown();
-			perPass.push(counting.statementsSent() - before);
-		}
+		});
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return perPass;
+		return measurements.map((measurement) => measurement.statements);
 	});
 }
 
@@ -1444,11 +1458,11 @@ describe('cache generation gate', () => {
 				perPass + (maxPathsTornDownPerRun / maxFencedRetireRows) * perChunk,
 			allowance: d1StatementsPerInvocation
 		}).toStrictEqual({
-			oneChunk: 9,
-			twoChunks: 15,
+			oneChunk: 10,
+			twoChunks: 16,
 			perChunk: 6,
-			perPass: 3,
-			worstCase: 45,
+			perPass: 4,
+			worstCase: 46,
 			allowance: 50
 		});
 	}, 240_000);
@@ -1474,7 +1488,7 @@ describe('cache generation gate', () => {
 			// The first pass retires the eight references the allowance covers beside
 			// the chunk's own retirement, and leaves the chunk unfinished. The second
 			// retires the last four, finishes the chunk, and sweeps.
-			perPass: [43, 29],
+			perPass: [43, 30],
 			worstPass: 43,
 			allowance: 50,
 			references: [],

@@ -1276,7 +1276,9 @@ describe('migrations', () => {
 							retention: { kind: 'duration', seconds: 200 }
 						}
 					],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				},
 				{
 					scope: { kind: 'named', name: 'builds' },
@@ -1295,7 +1297,9 @@ describe('migrations', () => {
 							retention: { kind: 'duration', seconds: 200 }
 						}
 					],
-					graceManaged: true
+					graceManaged: true,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				},
 				{
 					scope: { kind: 'named', name: 'pr-one' },
@@ -1314,7 +1318,9 @@ describe('migrations', () => {
 							retention: { kind: 'duration', seconds: 200 }
 						}
 					],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				},
 				{
 					scope: { kind: 'named', name: 'secret' },
@@ -1333,7 +1339,9 @@ describe('migrations', () => {
 							retention: { kind: 'duration', seconds: 200 }
 						}
 					],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				},
 				{
 					scope: { kind: 'named', name: 'future' },
@@ -1343,7 +1351,9 @@ describe('migrations', () => {
 					defaultRootRetention: { kind: 'permanent' },
 					grace: { kind: 'none' },
 					rootRetentionOverrides: [],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				}
 			],
 			roots: [

@@ -30,6 +30,7 @@
 		"./grants": "./src/grants.ts",
 		"./instance": "./src/instance.ts",
 		"./keys": "./src/keys.ts",
+		"./managed-caches": "./src/managed-caches.ts",
 		"./oidc": "./src/oidc.ts",
 		"./oidc-issuer": "./src/oidc-issuer.ts",
 		"./oidc-trust-match": "./src/oidc-trust-match.ts",

@@ -10,7 +10,13 @@ import {
 	cacheAvailabilityResponseSchema,
 	reuseViewAvailabilityMaxPaths
 } from '@cupboard/protocol/cache-availability';
+import {
+	managedCacheGroupIdSchema,
+	managedPolicyIdSchema,
+	managedPolicyRevisionSchema
+} from '@cupboard/protocol/managed-caches';
 import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -130,6 +136,48 @@ describe('reuse-view narinfo lookup', () => {
 			});
 		}
 	);
+
+	it('excludes managed caches from all selectors in both lookup modes', async () => {
+		const cache = namedCache('managed-pr-1');
+		const path = await committedPath('reuse-managed-all', cache);
+		await setView([{ kind: 'all' }]);
+		await runInDurableObject(fixtureWorkerServer(), (instance) => {
+			const policyId = managedPolicyIdSchema.parse(crypto.randomUUID());
+			const groupId = managedCacheGroupIdSchema.parse(crypto.randomUUID());
+			instance.context.db
+				.update(schema.caches)
+				.set({
+					managementKind: 'managed',
+					managedPolicyId: policyId,
+					managedPolicyRevision: managedPolicyRevisionSchema.parse(1),
+					managedGroupId: groupId,
+					leaseExpiresAt: isoTimestamp(new Date('2099-01-01T00:00:00.000Z')),
+					selectionState: 'source-active'
+				})
+				.where(eq(schema.caches.name, cache.name))
+				.run();
+		});
+
+		const narInfo = await readFetch(lookupPath(path.storePathHash));
+		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+			body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+		const body = cacheAvailabilityResponseSchema.parse(
+			await availability.json()
+		);
+
+		expect({
+			narInfoStatus: narInfo.status,
+			availabilityStatus: availability.status,
+			body
+		}).toStrictEqual({
+			narInfoStatus: StatusCodes.NOT_FOUND,
+			availabilityStatus: StatusCodes.OK,
+			body: { missingStorePathHashes: [path.storePathHash] }
+		});
+	});
 
 	const accessCases: {
 		readonly label: string;

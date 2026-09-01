@@ -726,7 +726,9 @@ describe('private cache access', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			removed: {
 				scope: privateCache,
@@ -742,7 +744,9 @@ describe('private cache access', () => {
 					defaultRootRetention: { kind: 'permanent' },
 					grace: { kind: 'none' },
 					rootRetentionOverrides: [],
-					graceManaged: false
+					graceManaged: false,
+					lifecycle: 'active',
+					management: { kind: 'durable' }
 				}
 			],
 			credentials: []

@@ -9,11 +9,14 @@ import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	bootstrap,
 	cacheWriteGrants,
@@ -84,7 +87,9 @@ describe('tenant contract round trip', () => {
 				defaultRootRetention: { kind: 'duration', seconds: 3600 },
 				grace: { kind: 'duration', graceSeconds: 60 },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			listed: {
 				caches: [
@@ -96,7 +101,9 @@ describe('tenant contract round trip', () => {
 						defaultRootRetention: { kind: 'permanent' },
 						grace: { kind: 'none' },
 						rootRetentionOverrides: [],
-						graceManaged: false
+						graceManaged: false,
+						lifecycle: 'active',
+						management: { kind: 'durable' }
 					},
 					{
 						scope: { kind: 'named', name: 'builds' },
@@ -106,7 +113,9 @@ describe('tenant contract round trip', () => {
 						defaultRootRetention: { kind: 'duration', seconds: 3600 },
 						grace: { kind: 'duration', graceSeconds: 60 },
 						rootRetentionOverrides: [],
-						graceManaged: false
+						graceManaged: false,
+						lifecycle: 'active',
+						management: { kind: 'durable' }
 					}
 				]
 			},
@@ -178,7 +187,9 @@ describe('tenant contract round trip', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			reprioritised: {
 				scope: { kind: 'named', name: 'builds' },
@@ -188,7 +199,9 @@ describe('tenant contract round trip', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			configured: {
 				scope: { kind: 'named', name: 'builds' },
@@ -203,7 +216,9 @@ describe('tenant contract round trip', () => {
 						retention: { kind: 'duration', seconds: 900 }
 					}
 				],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			},
 			cleared: {
 				scope: { kind: 'named', name: 'builds' },
@@ -213,9 +228,39 @@ describe('tenant contract round trip', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			}
 		});
+	});
+
+	it('refuses retention updates while deployment has fenced administration', async () => {
+		await useTestServer('contract-cache-retention-fenced');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await drizzle(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.deploymentRuntimeControl)
+			.set({ retentionAdministration: 'closed' })
+			.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'));
+
+		const [error] = await safe(
+			client.caches.update.inDefaultCache({
+				kind: 'set-default-root-ttl',
+				retention: { kind: 'duration', seconds: 3600 }
+			})
+		);
+		const priority = await client.caches.update.inDefaultCache({
+			kind: 'priority',
+			priority: 30
+		});
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			code: 'SERVICE_UNAVAILABLE',
+			status: StatusCodes.SERVICE_UNAVAILABLE
+		});
+		expect(priority.priority).toBe(30);
 	});
 
 	it('returns CACHE_ALREADY_EXISTS without changing the cache', async () => {
@@ -250,7 +295,9 @@ describe('tenant contract round trip', () => {
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
 				rootRetentionOverrides: [],
-				graceManaged: false
+				graceManaged: false,
+				lifecycle: 'active',
+				management: { kind: 'durable' }
 			}
 		});
 		expect(error).toBeInstanceOf(ORPCError);

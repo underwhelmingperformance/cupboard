@@ -171,6 +171,7 @@ import {
 	maintenancePassStatements,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
+import { ManagedCacheService } from './managed-cache-service.ts';
 import {
 	admitMigrationSource,
 	applyMigrations,
@@ -282,6 +283,7 @@ export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
 	| 'garbage-collection'
+	| 'managed-cache-retirement'
 	| 'reconcile'
 	| 'signing-key-backfill'
 	| 'teardown'
@@ -436,6 +438,13 @@ class CountingSemaphore {
 	}
 }
 
+class UnsupportedProjectionRepairOperationError extends Error {
+	constructor(public readonly operation: string) {
+		super(`Unsupported projection repair operation: ${operation}`);
+		this.name = 'UnsupportedProjectionRepairOperationError';
+	}
+}
+
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Put the invocation's D1 allowance on every method the runtime can dispatch
 	// to: a request, an alarm, an RPC, and any method added later. No dispatched
@@ -484,6 +493,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly reuseLookup: ReuseViewLookupService;
 	private readonly integrityCheck: IntegrityCheckService;
 	private readonly cacheAdmin: CacheAdminService;
+	private readonly managedCaches: ManagedCacheService;
 	private readonly garbageCollection: GarbageCollectionService;
 	private readonly tokenExchange: TokenExchangeService;
 	private readonly uploads: UploadsService;
@@ -528,6 +538,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.reuseLookup = new ReuseViewLookupService(this.context);
 		this.integrityCheck = new IntegrityCheckService(this.context);
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
+		this.managedCaches = new ManagedCacheService(
+			this.context,
+			this.cacheAdmin,
+			this.reuseViews
+		);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
 			this.deletionQueue,
@@ -1301,6 +1316,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					: this.context.negotiateHints.take(token, Date.now());
 			},
 			cacheAdmin: this.cacheAdmin,
+			managedCaches: this.managedCaches,
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
 			retention: this.retention,
@@ -2049,6 +2065,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				hasWork: () => this.hasGarbageCollectionContinuation(),
 				run: async () => {
 					await this.resumeGarbageCollection();
+
+					return 'progressed';
+				}
+			},
+			{
+				key: 'managed-cache-retirement',
+				hasWork: () => this.managedCaches.hasLifecycleWork(),
+				run: async () => {
+					await this.withMaintenanceEligibility(() =>
+						this.managedCaches.retireEligibleCaches(1)
+					);
 
 					return 'progressed';
 				}
@@ -2810,6 +2837,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		return { outcome: 'complete' };
+	}
+
+	async resolveProjectionRepair(
+		tenant: TenantId,
+		id: string,
+		operation: string,
+		payloadJson: string
+	): Promise<{ readonly outcome: 'complete' | 'rolled-back' }> {
+		await this.initialise(tenant);
+
+		if (operation !== 'managed-cache-activation') {
+			throw new UnsupportedProjectionRepairOperationError(operation);
+		}
+
+		const outcome = await this.managedCaches.resolveManagedActivationRepair(
+			id,
+			payloadJson
+		);
+
+		return { outcome };
 	}
 
 	// The socket attachment preserves cache and session identity across

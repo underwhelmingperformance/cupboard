@@ -9,6 +9,9 @@ import { z } from 'zod';
 
 import { isoTimestampSchema } from './scalars.ts';
 
+export const managedCacheGroupIdSchema = z.uuid().brand('ManagedCacheGroupId');
+export type ManagedCacheGroupId = z.infer<typeof managedCacheGroupIdSchema>;
+
 // Reuse-view names use the same lowercase and length constraints as cache names
 // because both appear as path segments. A separate brand prevents a reuse-view
 // name from being passed where code expects a cache name.
@@ -23,7 +26,7 @@ const reuseViewPrefixMaxLength = 63;
 /**
 The caches a view may query.
 */
-export const reuseViewSelectorSchema = z.discriminatedUnion('kind', [
+export const reuseViewSetSelectorSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('default') }),
 	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema }),
 	z.strictObject({
@@ -37,7 +40,16 @@ export const reuseViewSelectorSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('all-named') }),
 	z.strictObject({ kind: z.literal('all') })
 ]);
+
+export const reuseViewSelectorSchema = z.discriminatedUnion('kind', [
+	...reuseViewSetSelectorSchema.options,
+	z.strictObject({
+		kind: z.literal('managed-group'),
+		groupId: managedCacheGroupIdSchema
+	})
+]);
 export type ReuseViewSelector = z.output<typeof reuseViewSelectorSchema>;
+export type ReuseViewSetSelector = z.output<typeof reuseViewSetSelectorSchema>;
 
 // A request can contain at most 32 selectors, which bounds request size and
 // selector matching work.
@@ -52,6 +64,14 @@ function hasDuplicateSelector(
 }
 
 export const reuseViewSelectorsSchema = z
+	.array(reuseViewSetSelectorSchema)
+	.min(1)
+	.max(reuseViewMaxSelectors)
+	.refine((selectors) => !hasDuplicateSelector(selectors), {
+		message: 'Selectors must not repeat the same cache or prefix'
+	});
+
+export const storedReuseViewSelectorsSchema = z
 	.array(reuseViewSelectorSchema)
 	.min(1)
 	.max(reuseViewMaxSelectors)
