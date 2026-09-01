@@ -5,7 +5,9 @@ import {
 	type CachePriority,
 	cachePrioritySchema,
 	type CacheReadRevision,
-	type CacheScope
+	type CacheScope,
+	type GraceSeconds,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -27,6 +29,15 @@ import {
 	firstCacheReadRevision
 } from './cache-generation.ts';
 import * as schema from './schema.ts';
+
+interface CacheCreation {
+	readonly access: CacheAccessMode;
+	readonly priority: CachePriority;
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
+	readonly defaultRootTtlSeconds?: TtlSeconds;
+	readonly graceSeconds?: GraceSeconds;
+}
 
 export class CacheRepository {
 	constructor(private readonly database: SchemaDatabase) {}
@@ -73,22 +84,18 @@ export class CacheRepository {
 		return cache;
 	}
 
-	create(
-		scope: CacheScope,
-		access: CacheAccessMode,
-		priority: CachePriority,
-		generation: CacheGeneration,
-		readRevision: CacheReadRevision
-	): ResolvedCache {
+	create(scope: CacheScope, configuration: CacheCreation): ResolvedCache {
 		const created = this.database
 			.insert(schema.caches)
 			.values({
 				kind: scope.kind,
 				name: scope.kind === 'named' ? scope.name : undefined,
-				access,
-				priority,
-				generation,
-				readRevision,
+				access: configuration.access,
+				priority: configuration.priority,
+				generation: configuration.generation,
+				readRevision: configuration.readRevision,
+				defaultRootTtlSeconds: configuration.defaultRootTtlSeconds,
+				graceSeconds: configuration.graceSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()

@@ -204,6 +204,6 @@ function confirmRow(path: UploadConfirmedPath): ResultRow {
 
 	return {
 		label: path.storePathHash,
-		value: 'no retention grace policy matched'
+		value: 'no cache retention grace configured'
 	};
 }

@@ -30,7 +30,9 @@ const defaultCache: CacheScope = { kind: 'default' };
 interface RootEnsureBody {
 	readonly name: string;
 	readonly targets: string[];
-	readonly ttlSeconds?: number;
+	readonly retention:
+		| { readonly kind: 'inherit' | 'permanent' }
+		| { readonly kind: 'duration'; readonly seconds: number };
 }
 import {
 	type AvailabilityPartition,
@@ -162,6 +164,7 @@ function runOptions(
 	return {
 		targets: [],
 		cache: defaultCache,
+		retention: { kind: 'inherit' },
 		storeIdentity: { kind: 'daemon' },
 		plannedSubstitutionPolicy: {
 			kind: 'known',
@@ -251,7 +254,11 @@ describe('runPlanCohort', () => {
 			expect(rootClient.ensure.calls).toStrictEqual([
 				{
 					cache: defaultCache,
-					input: { name: appRoot, targets: [appPath, otherPath] }
+					input: {
+						name: appRoot,
+						targets: [appPath, otherPath],
+						retention: { kind: 'inherit' }
+					}
 				}
 			]);
 

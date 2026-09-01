@@ -1,14 +1,18 @@
-import { storePathSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	rootNameSchema,
+	storePathSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type UploadAttachRootInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -16,12 +20,16 @@ import * as schema from '../db/schema.ts';
 import {
 	authorisedFetch,
 	currentServer,
+	defaultCache,
 	issueServerSignedToken,
 	resetTestServer,
+	resolvedCache,
 	testPushId,
 	uploadMetadata,
 	uploadPathNegotiation
 } from '../test-support.ts';
+
+import { RetentionRuleService } from './retention-rule-service.ts';
 
 const runRootName = 'ci/run-1';
 
@@ -113,20 +121,29 @@ async function plannedUploadRows(): Promise<
 	);
 }
 
-async function addRootNamePolicy(
+async function setRootTtlOverride(
 	pattern: string,
 	ttlSeconds: number
 ): Promise<void> {
+	await runInDurableObject(currentServer(), async (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
+		await new RetentionRuleService(instance.context).setRule(
+			cache,
+			rootNameSchema.parse(pattern),
+			{ kind: 'duration', seconds: ttlSecondsSchema.parse(ttlSeconds) }
+		);
+	});
+}
+
+async function setDefaultRootTtl(ttlSeconds: number): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
 		instance.context.db
-			.insert(schema.retentionPolicies)
-			.values({
-				id: 'policy-1',
-				kind: 'root-name-prefix',
-				rootNamePrefix: pattern,
-				defaultTtlSeconds: ttlSecondsSchema.parse(ttlSeconds),
-				createdAt: isoTimestamp(new Date())
-			})
+			.update(schema.caches)
+			.set({ defaultRootTtlSeconds: ttlSecondsSchema.parse(ttlSeconds) })
+			.where(eq(schema.caches.id, cache.id))
 			.run();
 	});
 }
@@ -135,6 +152,9 @@ describe('negotiate binds the run root', () => {
 	beforeEach(resetTestServer);
 
 	it('creates the root, resolves its expiry, and stamps every planned row', async () => {
+		await setDefaultRootTtl(1800);
+		await setRootTtlOverride('ci/', 7200);
+		await setRootTtlOverride('ci/run-', 10_800);
 		const token = await issueServerSignedToken(pushGrants('ci/'));
 		const paths = [
 			uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 }),
@@ -143,7 +163,7 @@ describe('negotiate binds the run root', () => {
 
 		const response = await negotiate(token, paths, {
 			name: runRootName,
-			ttlSeconds: 3600
+			retention: { kind: 'duration', seconds: 3600 }
 		});
 
 		expect(response.status).toBe(StatusCodes.OK);
@@ -187,12 +207,15 @@ describe('negotiate binds the run root', () => {
 		const first = await negotiate(
 			token,
 			[uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 })],
-			{ name: runRootName, ttlSeconds: 3600 }
+			{ name: runRootName, retention: { kind: 'duration', seconds: 3600 } }
 		);
 		const second = await negotiate(
 			token,
 			[uploadMetadata({ storePathHash: 'b'.repeat(32), fileSize: 1 })],
-			{ name: runRootName, ttlSeconds: laterTtlSeconds }
+			{
+				name: runRootName,
+				retention: { kind: 'duration', seconds: laterTtlSeconds }
+			}
 		);
 
 		expect({
@@ -215,17 +238,30 @@ describe('negotiate binds the run root', () => {
 	});
 
 	it.each([
-		{ name: 'permanent with no matching policy', expiresAt: undefined },
+		{ name: 'permanent with no cache default', expiresAt: undefined },
 		{
-			name: 'the matching root-name policy ttl',
-			policyTtlSeconds: 7200,
+			name: 'the cache default ttl',
+			defaultTtlSeconds: 3600,
+			expiresAt: oneHourLater
+		},
+		{
+			name: 'the longest matching root-prefix override',
+			defaultTtlSeconds: 1800,
+			overrides: [
+				{ prefix: 'ci/', ttlSeconds: 3600 },
+				{ prefix: 'ci/run-', ttlSeconds: 7200 }
+			],
 			expiresAt: twoHoursLater
 		}
 	])(
 		'resolves an absent ttl to $name',
-		async ({ policyTtlSeconds, expiresAt }) => {
-			if (policyTtlSeconds !== undefined) {
-				await addRootNamePolicy('ci/', policyTtlSeconds);
+		async ({ defaultTtlSeconds, overrides = [], expiresAt }) => {
+			if (defaultTtlSeconds !== undefined) {
+				await setDefaultRootTtl(defaultTtlSeconds);
+			}
+
+			for (const override of overrides) {
+				await setRootTtlOverride(override.prefix, override.ttlSeconds);
 			}
 
 			const token = await issueServerSignedToken(pushGrants('ci/'));
@@ -253,6 +289,33 @@ describe('negotiate binds the run root', () => {
 		}
 	);
 
+	it('lets explicit permanence override a timed cache default and prefix rule', async () => {
+		await setDefaultRootTtl(1800);
+		await setRootTtlOverride('ci/', 3600);
+		const token = await issueServerSignedToken(pushGrants('ci/'));
+		const response = await negotiate(
+			token,
+			[uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 })],
+			{ name: runRootName, retention: { kind: 'permanent' } }
+		);
+
+		expect({
+			status: response.status,
+			roots: await retentionRootRows()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			roots: [
+				{
+					cache: { kind: 'default' },
+					name: runRootName,
+					expiresAt: undefined,
+					createdAt: bindTime,
+					updatedAt: bindTime
+				}
+			]
+		});
+	});
+
 	it.each([
 		{ name: 'no root grant at all', grants: pushGrants() },
 		{ name: 'a grant naming a different root', grants: pushGrants('other') },
@@ -278,7 +341,7 @@ describe('negotiate binds the run root', () => {
 		const response = await negotiate(
 			token,
 			[uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 })],
-			{ name: runRootName, ttlSeconds: 3600 }
+			{ name: runRootName, retention: { kind: 'duration', seconds: 3600 } }
 		);
 
 		expect({
@@ -331,7 +394,7 @@ describe('negotiate binds the run root', () => {
 
 		const response = await negotiate(token, [metadata], {
 			name: runRootName,
-			ttlSeconds: 3600
+			retention: { kind: 'duration', seconds: 3600 }
 		});
 
 		expect({

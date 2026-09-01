@@ -3602,7 +3602,7 @@ describe('upload flow', () => {
 			const summary = await setRoot(token, {
 				name: 'github:owner/repo/main',
 				targets: [committed.storePath],
-				ttlSeconds: 604_800
+				retention: { kind: 'duration', seconds: 604_800 }
 			});
 			const expiresAt = new Date(testBase.getTime() + 604_800 * 1000);
 
@@ -3672,7 +3672,7 @@ describe('upload flow', () => {
 			await setRoot(token, {
 				name: 'pr-1',
 				targets: [first.storePath],
-				ttlSeconds: 604_800
+				retention: { kind: 'duration', seconds: 604_800 }
 			});
 
 			const later = new Date(testBase.getTime() + 3600 * 1000);
@@ -3707,7 +3707,7 @@ describe('upload flow', () => {
 			const response = await authorisedFetch('/roots/pr-1/ensure', token, {
 				body: JSON.stringify({
 					targets: [committed.storePath],
-					ttlSeconds: 604_800
+					retention: { kind: 'duration', seconds: 604_800 }
 				}),
 				headers: { 'content-type': 'application/json' },
 				method: 'POST'
@@ -3834,7 +3834,11 @@ describe('upload flow', () => {
 			await commitPath(token, committed);
 			const path = committed.storePath;
 
-			await setRoot(token, { name: 'pr-9', targets: [path], ttlSeconds: 60 });
+			await setRoot(token, {
+				name: 'pr-9',
+				targets: [path],
+				retention: { kind: 'duration', seconds: 60 }
+			});
 			await setRoot(token, { name: 'main', targets: [path] });
 
 			vi.setSystemTime(new Date(testBase.getTime() + 120 * 1000));
@@ -4159,7 +4163,7 @@ describe('upload flow', () => {
 			await setRoot(token, {
 				name: 'pr',
 				targets: [b.storePath],
-				ttlSeconds: 60
+				retention: { kind: 'duration', seconds: 60 }
 			});
 
 			vi.setSystemTime(new Date(testBase.getTime() + 120_000));
@@ -4198,7 +4202,7 @@ describe('upload flow', () => {
 			await setRoot(token, {
 				name: 'pr',
 				targets: [b.storePath],
-				ttlSeconds: 60
+				retention: { kind: 'duration', seconds: 60 }
 			});
 
 			vi.setSystemTime(new Date(testBase.getTime() + 120_000));

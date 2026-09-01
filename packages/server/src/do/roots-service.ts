@@ -3,16 +3,17 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type StorePathHash,
-	type StorePathString,
-	type TtlSeconds
+	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
+	type CacheRootRetention,
 	type RootEnsureBody,
 	type RootEnsureResponse,
 	rootListPageSize,
 	type RootListResponse,
 	type RootRemoveResponse,
+	type RootRetentionRequest,
 	type RootSetBody,
 	type RootSetResponse,
 	type RootSummary,
@@ -25,7 +26,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
-import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { maxBoundParameters } from './bulk.ts';
@@ -62,6 +62,17 @@ type RootWrite =
 	  }
 	| { readonly kind: 'written'; readonly stored: StoredRoot };
 
+function rootExpiry(
+	retention: CacheRootRetention,
+	now: Date
+): IsoTimestamp | undefined {
+	if (retention.kind === 'permanent') {
+		return undefined;
+	}
+
+	return isoTimestamp(new Date(now.getTime() + retention.seconds * 1000));
+}
+
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
@@ -72,13 +83,11 @@ export class RootsService {
 	private writeRoot(cache: ResolvedCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
-		const expiresAt = resolveRootExpiry({
-			explicitTtlSeconds: request.ttlSeconds,
-			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, request.name),
-			name: request.name,
-			coldPathTtlSeconds: coldPathTtlSeconds(this.context.env),
-			now
-		});
+		const resolvedRetention =
+			request.retention.kind === 'inherit'
+				? this.retention.resolveRootRetention(cache, request.name)
+				: request.retention;
+		const expiresAt = rootExpiry(resolvedRetention, now);
 
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
@@ -295,7 +304,7 @@ export class RootsService {
 		return {
 			name: rootName,
 			targets: resolveRootTargets(body.targets),
-			ttlSeconds: body.ttlSeconds
+			retention: body.retention
 		};
 	}
 
@@ -340,17 +349,15 @@ export class RootsService {
 	bindRunRoot(
 		cache: ResolvedCache,
 		name: RootName,
-		explicitTtlSeconds: TtlSeconds | undefined
+		retention: RootRetentionRequest
 	): void {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
-		const expiresAt = resolveRootExpiry({
-			explicitTtlSeconds,
-			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, name),
-			name,
-			coldPathTtlSeconds: coldPathTtlSeconds(this.context.env),
-			now
-		});
+		const resolvedRetention =
+			retention.kind === 'inherit'
+				? this.retention.resolveRootRetention(cache, name)
+				: retention;
+		const expiresAt = rootExpiry(resolvedRetention, now);
 
 		this.context.db
 			.insert(schema.retentionRoots)

@@ -53,10 +53,15 @@ inputs:
   ttl:
     description: Retention TTL such as 7d or 12h.
     required: false
+  permanent:
+    description:
+      Retain the target root permanently. Conflicts with ttl and no-retain.
+    required: false
+    default: 'false'
   no-retain:
     description:
       Push without adding the paths to a retention root or pin. The cache keeps
-      them only while a matching grace policy applies. Conflicts with root and
+      them only while the cache has configured grace. Conflicts with root and
       ttl.
     required: false
     default: 'false'
@@ -103,6 +108,12 @@ inputs:
   run-root-ttl:
     description: Expire the run root after this duration. Requires run-root.
     required: false
+  run-root-permanent:
+    description:
+      Retain the run root permanently. Conflicts with run-root-ttl and requires
+      run-root.
+    required: false
+    default: 'false'
   root-groups:
     description: >-
       JSON array of {root, paths} objects. Replaces the flat paths and root
@@ -192,6 +203,7 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
         ROOT: ${{ inputs.root }}
         TTL: ${{ inputs.ttl }}
+        PERMANENT: ${{ inputs.permanent }}
         # The program's option is `--retain`; only the two valid literals
         # invert here, so any other value reaches the strict boolean parse
         # unchanged and is refused there.
@@ -207,6 +219,7 @@ runs:
         REFERENCE_SOURCE: ${{ inputs.reference-source }}
         RUN_ROOT: ${{ inputs.run-root }}
         RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
+        RUN_ROOT_PERMANENT: ${{ inputs.run-root-permanent }}
         ROOT_GROUPS: ${{ inputs.root-groups }}
       run: |
         args=(push
@@ -224,6 +237,7 @@ runs:
           --audience "$AUDIENCE"
           --root "$ROOT"
           --ttl "$TTL"
+          --permanent "$PERMANENT"
           --retain "$RETAIN"
           --require-grace "$REQUIRE_GRACE"
           --wait "$WAIT"
@@ -234,6 +248,7 @@ runs:
           --reference-source "$REFERENCE_SOURCE"
           --run-root "$RUN_ROOT"
           --run-root-ttl "$RUN_ROOT_TTL"
+          --run-root-permanent "$RUN_ROOT_PERMANENT"
           --root-groups "$ROOT_GROUPS")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \

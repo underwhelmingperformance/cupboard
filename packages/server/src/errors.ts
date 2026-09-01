@@ -215,15 +215,6 @@ export class CacheAccessMismatchError extends ServerHttpError {
 	}
 }
 
-export class StoredRetentionPolicyInvalidError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(public readonly id: string) {
-		super('The stored retention policy has no valid selector');
-		this.name = 'StoredRetentionPolicyInvalidError';
-	}
-}
-
 export class LastSigningKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

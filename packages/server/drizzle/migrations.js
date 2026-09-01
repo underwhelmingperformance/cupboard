@@ -48,6 +48,10 @@ import m0045 from './0045_cache_access_contract.sql';
 import m0046 from './0046_cache_access_triggers.sql';
 import m0047 from './0047_cache_grant_json.sql';
 import m0048 from './0048_cache_incarnation_expand.sql';
+import m0049 from './0049_cache_retention_expand.sql';
+import m0050 from './0050_cache_retention_empty_rule_set.sql';
+import m0051 from './0051_cache_retention_migration_state.sql';
+import m0052 from './0052_cache_retention_migration_rules.sql';
 
 export default {
 	journal,
@@ -100,6 +104,10 @@ export default {
 		m0045,
 		m0046,
 		m0047,
-		m0048
+		m0048,
+		m0049,
+		m0050,
+		m0051,
+		m0052
 	}
 };

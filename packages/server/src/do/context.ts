@@ -1,13 +1,11 @@
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type AuthKeyId,
-	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type RootName,
 	type TenantId,
-	tenantIdSchema,
-	type TtlSeconds
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
 import {
@@ -25,10 +23,7 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { type OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
-import {
-	type GracePolicySummary,
-	type RetentionPolicySummary
-} from '@cupboard/protocol/retention';
+import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
 	type ReuseViewSelector,
 	type ReuseViewSummary
@@ -53,7 +48,6 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredOidcTrustInvalidError,
-	StoredRetentionPolicyInvalidError,
 	TenantNotConfiguredError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
@@ -126,7 +120,7 @@ export interface AuthKey {
 export interface RootSetCommand {
 	readonly name: RootName;
 	readonly targets: readonly ResolvedRootTarget[];
-	readonly ttlSeconds: TtlSeconds | undefined;
+	readonly retention: RootRetentionRequest;
 }
 
 export type ReserveOutcome =
@@ -303,46 +297,6 @@ export function oidcTrustSummaryFromRow(
 		permittedGrants: [...rule.permittedGrants],
 		...(rule.display !== undefined && { display: rule.display }),
 		disabled: Boolean(row.disabledAt)
-	};
-}
-
-export function policySummaryFromRow(
-	row: typeof schema.retentionPolicies.$inferSelect,
-	cache: CacheScope | undefined
-): RetentionPolicySummary {
-	if (row.kind === 'cache') {
-		if (cache === undefined) {
-			throw new StoredRetentionPolicyInvalidError(row.id);
-		}
-
-		return {
-			id: row.id,
-			scope: 'cache',
-			cache,
-			ttlSeconds: row.defaultTtlSeconds
-		};
-	}
-
-	if (row.rootNamePrefix === null) {
-		throw new StoredRetentionPolicyInvalidError(row.id);
-	}
-
-	return {
-		id: row.id,
-		scope: 'root-name-prefix',
-		pattern: row.rootNamePrefix,
-		ttlSeconds: row.defaultTtlSeconds
-	};
-}
-
-export function gracePolicySummaryFromRow(
-	row: typeof schema.retentionGracePolicies.$inferSelect
-): GracePolicySummary {
-	return {
-		id: row.id,
-		cachePrefix: row.cachePrefix,
-		graceSeconds: row.graceSeconds,
-		createdAt: row.createdAt
 	};
 }
 

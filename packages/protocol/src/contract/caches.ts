@@ -1,9 +1,4 @@
-import {
-	cacheAccessModeSchema,
-	cacheNameSchema,
-	cachePrioritySchema,
-	cacheScopeSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -27,22 +22,10 @@ const cacheAlreadyExistsError = {
 	}
 };
 
-const namedCacheAccessUpdateSchema = z.strictObject({
-	cacheName: cacheNameSchema,
-	kind: z.literal('access'),
-	access: cacheAccessModeSchema
-});
-
-const namedCachePriorityUpdateSchema = z.strictObject({
-	cacheName: cacheNameSchema,
-	kind: z.literal('priority'),
-	priority: cachePrioritySchema
-});
-
-const namedCacheUpdateSchema = z.discriminatedUnion('kind', [
-	namedCacheAccessUpdateSchema,
-	namedCachePriorityUpdateSchema
-]);
+const namedCacheUpdateSchema = z.intersection(
+	cacheUpdateBodySchema,
+	z.strictObject({ cacheName: cacheNameSchema })
+);
 
 export const cachesContract = {
 	list: baseProcedure

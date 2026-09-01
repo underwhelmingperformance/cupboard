@@ -41,7 +41,6 @@ import {
 	registerOidcTrustCommands
 } from './commands/oidc-trust.ts';
 import { registerPlanCommands } from './commands/plan-cohort.ts';
-import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerReuseViewCommands } from './commands/reuse-view.ts';
@@ -174,7 +173,6 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);
 	registerCacheCommands(program, options);
-	registerPolicyCommands(program, options);
 	registerReuseViewCommands(program, options);
 	registerOidcTrustCommands(program, options);
 	registerGithubCommands(program, options);

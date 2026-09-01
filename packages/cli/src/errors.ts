@@ -152,15 +152,6 @@ export class InvalidRootNameError extends CliUsageError {
 	}
 }
 
-export class InvalidPolicyScopeError extends CliUsageError {
-	constructor(public readonly value: string) {
-		super(
-			`Invalid policy scope (expected cache or root-name-prefix): ${value}`
-		);
-		this.name = 'InvalidPolicyScopeError';
-	}
-}
-
 export class InvalidAudienceError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --audience (expected a non-empty string): ${value}`);
@@ -260,6 +251,23 @@ export class InvalidGraceError extends CliUsageError {
 			`Grace must be between 0 and ${String(maxSeconds)} seconds: ${value}`
 		);
 		this.name = 'InvalidGraceError';
+	}
+}
+
+export class RootRetentionOptionError extends CliUsageError {
+	constructor() {
+		super('Specify exactly one of --root-ttl or --permanent.');
+		this.name = 'RootRetentionOptionError';
+	}
+}
+
+export class RootRetentionOptionConflictError extends CliUsageError {
+	constructor(
+		public readonly left = '--ttl',
+		public readonly right = '--permanent'
+	) {
+		super(`${left} and ${right} cannot be used together.`);
+		this.name = 'RootRetentionOptionConflictError';
 	}
 }
 
@@ -783,7 +791,7 @@ export class AttestAttachBundleRequiredError extends CliUsageError {
 }
 
 export class NoRetainConflictError extends CliUsageError {
-	constructor(public readonly flag: '--root' | '--ttl') {
+	constructor(public readonly flag: '--root' | '--ttl' | '--permanent') {
 		super(`--no-retain cannot be combined with ${flag}`);
 		this.name = 'NoRetainConflictError';
 	}
@@ -793,6 +801,13 @@ export class RunRootTtlWithoutRunRootError extends CliUsageError {
 	constructor() {
 		super('--run-root-ttl requires --run-root');
 		this.name = 'RunRootTtlWithoutRunRootError';
+	}
+}
+
+export class RunRootRetentionWithoutRunRootError extends CliUsageError {
+	constructor(public readonly option: '--run-root-permanent') {
+		super(`${option} requires --run-root`);
+		this.name = 'RunRootRetentionWithoutRunRootError';
 	}
 }
 
@@ -839,7 +854,7 @@ export class OidcRetentionChoiceRequiredError extends CliUsageError {
 				'to keep the pushed paths under a named root that this run owns; ' +
 				"choose this for a build's own outputs. Use --no-retain to publish " +
 				"them unretained, kept only by the destination cache's retention " +
-				'grace policy; choose this for intermediates that a later job will ' +
+				'grace; choose this for intermediates that a later job will ' +
 				'substitute and root itself.'
 		);
 		this.name = 'OidcRetentionChoiceRequiredError';
@@ -950,22 +965,6 @@ export class GithubSetupDriftError extends CliError {
 				'it with `cupboard oidc-trust remove`) and re-run setup.'
 		);
 		this.name = 'GithubSetupDriftError';
-	}
-}
-
-/**
- * A grace shorter than the supported minimum risks expiring while a run is
- * still publishing; refused before any policy is stored.
- */
-export class GraceTooShortError extends CliUsageError {
-	constructor(
-		public readonly graceSeconds: number,
-		public readonly minimumSeconds: number
-	) {
-		super(
-			`--grace must be at least ${String(minimumSeconds)} seconds; got ${String(graceSeconds)}`
-		);
-		this.name = 'GraceTooShortError';
 	}
 }
 

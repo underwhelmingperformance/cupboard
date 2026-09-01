@@ -8,10 +8,7 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import {
-	cachePrioritySchema,
-	graceSecondsSchema
-} from '@cupboard/nix-store/scalars';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
@@ -19,7 +16,6 @@ import {
 	oidcTrustSummarySchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
-import type { GracePolicyAddBodyInput } from '@cupboard/protocol/retention';
 import {
 	reuseViewListResponseSchema,
 	type ReuseViewSelectorInput,
@@ -42,7 +38,6 @@ import {
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
-	GraceTooShortError,
 	ReadCredentialPairError,
 	WorkflowReferenceMutableError
 } from '../errors.ts';
@@ -75,7 +70,6 @@ const ruleCreated = `created: ${pinnedWorkflowReference}`;
 const options: GithubSetupOptions = {
 	repo: 'acme/app',
 	branch: 'main',
-	grace: '24h',
 	workflowRef: pinnedWorkflowReference
 };
 
@@ -103,7 +97,7 @@ function storedRule(id: string, body: OidcTrustAddBodyInput) {
 }
 
 interface Recorded {
-	readonly graceAdds: GracePolicyAddBodyInput[];
+	readonly graceAdds: unknown[];
 	readonly viewSets: {
 		name: string;
 		selectors: readonly ReuseViewSelectorInput[];
@@ -134,27 +128,6 @@ function setupClient(stored: Stored): {
 		ruleRemoves: []
 	};
 	const client: GithubSetupClient = {
-		policies: {
-			graceList: () =>
-				Promise.resolve({
-					policies: (stored.gracePolicies ?? []).map((policy, index) => ({
-						id: `grace-${String(index)}`,
-						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-						...policy,
-						graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
-					}))
-				}),
-			graceAdd(input) {
-				recorded.graceAdds.push(input);
-
-				return Promise.resolve({
-					id: 'grace-new',
-					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-					cachePrefix: input.cachePrefix,
-					graceSeconds: graceSecondsSchema.parse(input.graceSeconds)
-				});
-			}
-		},
 		reuseViews: {
 			list: () =>
 				Promise.resolve(
@@ -287,7 +260,7 @@ describe('runGithubSetup', () => {
 
 		expect({ recorded, results }).toStrictEqual({
 			recorded: {
-				graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				graceAdds: [],
 				viewSets: [
 					{
 						access: 'public',
@@ -301,7 +274,6 @@ describe('runGithubSetup', () => {
 			},
 			results: [
 				[
-					{ label: 'grace policy', value: 'created: tenant-wide grace 86400s' },
 					{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated }
@@ -343,7 +315,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -357,36 +328,6 @@ describe('runGithubSetup', () => {
 				}
 			]
 		});
-	});
-
-	// The check command treats a sub-hour grace as failed, so setup must not
-	// store one; the refusal lands before any tenant write.
-	it('refuses a sub-hour grace before writing anything', async () => {
-		const { client, recorded } = setupClient({});
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				{ ...options, grace: '30m' },
-				reporter([]),
-				client,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect({ failure, recorded }).toStrictEqual({
-			failure: new GraceTooShortError(1800, 3600),
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: []
-			}
-		});
-		expect(failure).toBeInstanceOf(GraceTooShortError);
 	});
 
 	it('refuses a mutable workflow ref before writing anything', async () => {
@@ -441,7 +382,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
 				{ label: 'main trust rule', value: 'unchanged' }
@@ -497,7 +437,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -601,7 +540,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -728,7 +666,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'possibly conflicting trust rule dispatch',
@@ -799,7 +736,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'possibly conflicting trust rule dispatch',
@@ -843,7 +779,7 @@ describe('runGithubSetup', () => {
 
 		expect({ recorded, outcomes: results[0] }).toStrictEqual({
 			recorded: {
-				graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				graceAdds: [],
 				viewSets: [
 					{
 						access: 'public',
@@ -856,7 +792,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'created: tenant-wide grace 86400s' },
 				{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated }
@@ -970,7 +905,7 @@ describe('runGithubSetup', () => {
 			)
 		).rejects.toBe(failure);
 		expect(recorded).toStrictEqual({
-			graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			graceAdds: [],
 			viewSets: [
 				{
 					access: 'public',
@@ -1030,7 +965,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: ['conflict']
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule conflict',
@@ -1119,7 +1053,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -1180,7 +1113,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -1253,7 +1185,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: ['previous-branch']
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated },
@@ -1310,10 +1241,6 @@ describe('runGithubSetup', () => {
 			steps: ['reuse view'],
 			outcomes: [
 				{
-					label: 'grace policy',
-					value: 'missing: setup would create it after the drift is resolved'
-				},
-				{
 					label: 'reuse view',
 					value:
 						"drift: stored priority 40 does not exceed the destination's 40"
@@ -1322,7 +1249,7 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('still reports policy and view drift without changing them', async () => {
+	it('reports view drift without changing configuration', async () => {
 		const results: ResultRow[][] = [];
 		const { ui, captured } = fakeCliUi({
 			interactive: true,
@@ -1376,13 +1303,8 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			prompts: [],
-			steps: ['grace policy', 'reuse view'],
+			steps: ['reuse view'],
 			outcomes: [
-				{
-					label: 'grace policy',
-					value:
-						'drift: stored tenant-wide grace is 3600s, setup would write 86400s'
-				},
 				{
 					label: 'reuse view',
 					value:
@@ -1446,7 +1368,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: ['exact']
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'conflicting trust rule exact',
@@ -1566,7 +1487,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{
 					label: 'pull-request trust rule',
@@ -1625,7 +1545,6 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'unchanged' },
 				{ label: 'main trust rule', value: 'unchanged' }
@@ -1648,7 +1567,6 @@ describe('registerGithubCommands', () => {
 		expect(setup?.options.map((option) => option.flags)).toStrictEqual([
 			'--repo <owner/name>',
 			'--branch <name>',
-			'--grace <duration>',
 			'--workflow-ref <owner/repo/path@ref>',
 			'-y, --yes',
 			'--read-user <user>',

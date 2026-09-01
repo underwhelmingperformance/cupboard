@@ -723,6 +723,9 @@ describe('private cache access', () => {
 				access: 'private',
 				priority: 40,
 				storePaths: 1,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			removed: {
@@ -736,6 +739,9 @@ describe('private cache access', () => {
 					access: 'public',
 					priority: 41,
 					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [],
 					graceManaged: false
 				}
 			],

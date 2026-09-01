@@ -5,11 +5,14 @@ import {
 import {
 	type CacheName,
 	cacheNameSchema,
-	cachePrioritySchema
+	cachePrioritySchema,
+	graceSecondsSchema,
+	rootNameSchema,
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import {
-	cacheListResponseSchema,
 	cacheRemoveResponseSchema,
+	type CacheSummaryInput,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
 import type { ResultRow } from '@cupboard/reporter';
@@ -23,13 +26,37 @@ const cacheName = (value: string): CacheName => cacheNameSchema.parse(value);
 import {
 	type CacheClient,
 	parsePriority,
+	runCacheClearGrace,
+	runCacheClearRootTtl,
 	runCacheCreate,
 	runCacheInspect,
 	runCacheList,
 	runCacheRemove,
 	runCacheSetAccess,
-	runCacheSetPriority
+	runCacheSetGrace,
+	runCacheSetPriority,
+	runCacheSetRootTtl
 } from './cache.ts';
+
+function cacheSummary(
+	value: Omit<
+		CacheSummaryInput,
+		'defaultRootRetention' | 'grace' | 'rootRetentionOverrides'
+	> &
+		Partial<
+			Pick<
+				CacheSummaryInput,
+				'defaultRootRetention' | 'grace' | 'rootRetentionOverrides'
+			>
+		>
+) {
+	return cacheSummarySchema.parse({
+		defaultRootRetention: { kind: 'permanent' },
+		grace: { kind: 'none' },
+		rootRetentionOverrides: [],
+		...value
+	});
+}
 
 function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 	return {
@@ -43,7 +70,7 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 		put: {
 			inDefaultCache: ({ access, priority }) =>
 				Promise.resolve(
-					cacheSummarySchema.parse({
+					cacheSummary({
 						scope: { kind: 'default' },
 						access,
 						priority,
@@ -52,7 +79,7 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 				),
 			inNamedCache: ({ cacheName, access, priority }) =>
 				Promise.resolve(
-					cacheSummarySchema.parse({
+					cacheSummary({
 						scope: { kind: 'named', name: cacheName },
 						access,
 						priority,
@@ -63,7 +90,7 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 		update: {
 			inDefaultCache: (input) =>
 				Promise.resolve(
-					cacheSummarySchema.parse({
+					cacheSummary({
 						scope: { kind: 'default' },
 						access: input.kind === 'access' ? input.access : 'public',
 						priority: input.kind === 'priority' ? input.priority : 40,
@@ -72,7 +99,7 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 				),
 			inNamedCache: (input) =>
 				Promise.resolve(
-					cacheSummarySchema.parse({
+					cacheSummary({
 						scope: { kind: 'named', name: input.cacheName },
 						access: input.kind === 'access' ? input.access : 'public',
 						priority: input.kind === 'priority' ? input.priority : 40,
@@ -108,32 +135,40 @@ describe('parsePriority', () => {
 describe('runCacheList', () => {
 	it('reports a row per cache, labelling the default and its grace state', async () => {
 		const results: ResultRow[][] = [];
-		const response = cacheListResponseSchema.parse({
+		const response = {
 			caches: [
-				{
+				cacheSummary({
 					scope: { kind: 'default' },
 					access: 'private',
 					priority: 40,
 					storePaths: 0,
 					graceManaged: false
-				},
-				{
+				}),
+				cacheSummary({
 					scope: { kind: 'named', name: 'builds' },
 					access: 'public',
 					priority: 30,
 					storePaths: 5,
+					defaultRootRetention: { kind: 'duration', seconds: 1_209_600 },
+					grace: { kind: 'duration', graceSeconds: 86_400 },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'github:acme/',
+							retention: { kind: 'duration', seconds: 604_800 }
+						}
+					],
 					graceManaged: true,
 					earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
-				},
-				{
+				}),
+				cacheSummary({
 					scope: { kind: 'named', name: 'drained' },
 					access: 'private',
 					priority: 45,
 					storePaths: 0,
 					graceManaged: true
-				}
+				})
 			]
-		});
+		};
 
 		await runCacheList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -141,15 +176,20 @@ describe('runCacheList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: '(default)', value: 'private; priority 40; 0 path(s)' },
+				{
+					label: '(default)',
+					value:
+						'private; priority 40; 0 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+				},
 				{
 					label: 'builds',
 					value:
-						'public; priority 30; 5 path(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
+						'public; priority 30; 5 path(s); default root retention 1,209,600s; grace 86,400s; 1 root retention override(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
 				},
 				{
 					label: 'drained',
-					value: 'private; priority 45; 0 path(s); grace-managed'
+					value:
+						'private; priority 45; 0 path(s); default root retention permanent; grace none; 0 root retention override(s); grace-managed'
 				}
 			]
 		]);
@@ -157,22 +197,22 @@ describe('runCacheList', () => {
 
 	it('lists access independently from the cache name', async () => {
 		const results: ResultRow[][] = [];
-		const response = cacheListResponseSchema.parse({
+		const response = {
 			caches: [
-				{
+				cacheSummary({
 					scope: { kind: 'named', name: 'release' },
 					access: 'private',
 					priority: 30,
 					storePaths: 5
-				},
-				{
+				}),
+				cacheSummary({
 					scope: { kind: 'named', name: 'builds' },
 					access: 'public',
 					priority: 40,
 					storePaths: 1
-				}
+				})
 			]
-		});
+		};
 
 		await runCacheList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -180,8 +220,16 @@ describe('runCacheList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: 'release', value: 'private; priority 30; 5 path(s)' },
-				{ label: 'builds', value: 'public; priority 40; 1 path(s)' }
+				{
+					label: 'release',
+					value:
+						'private; priority 30; 5 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+				},
+				{
+					label: 'builds',
+					value:
+						'public; priority 40; 1 path(s); default root retention permanent; grace none; 0 root retention override(s)'
+				}
 			]
 		]);
 	});
@@ -204,9 +252,9 @@ describe('runCacheList', () => {
 
 describe('runCacheCreate', () => {
 	it('creates the cache and reports the summary', async () => {
-		const calls: { cacheName: string; priority: number }[] = [];
+		const calls: unknown[] = [];
 		const results: ResultRow[][] = [];
-		const summary = cacheSummarySchema.parse({
+		const summary = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
 			access: 'private',
 			priority: 30,
@@ -217,6 +265,8 @@ describe('runCacheCreate', () => {
 			{ kind: 'named', name: cacheName('builds') },
 			'private',
 			cachePrioritySchema.parse(30),
+			ttlSecondsSchema.parse(1_209_600),
+			graceSecondsSchema.parse(86_400),
 			reporter(results),
 			cacheClient({
 				put: {
@@ -230,23 +280,72 @@ describe('runCacheCreate', () => {
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ cacheName: 'builds', access: 'private', priority: 30 }],
+			calls: [
+				{
+					cacheName: 'builds',
+					access: 'private',
+					priority: 30,
+					defaultRootRetention: { kind: 'duration', seconds: 1_209_600 },
+					grace: { kind: 'duration', graceSeconds: 86_400 }
+				}
+			],
 			results: [
 				[
 					{ label: 'Cache', value: 'builds' },
 					{ label: 'Access', value: 'private' },
 					{ label: 'Priority', value: '30' },
-					{ label: 'Store paths', value: '0' }
+					{ label: 'Store paths', value: '0' },
+					{ label: 'Default root retention', value: 'permanent' },
+					{ label: 'Grace', value: 'none' },
+					{ label: 'Root retention overrides', value: 'none' }
 				]
 			]
 		});
+	});
+
+	it('creates a permanent cache without grace when retention options are omitted', async () => {
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheCreate(
+			{ kind: 'named', name: cacheName('builds') },
+			'public',
+			cachePrioritySchema.parse(40),
+			undefined,
+			undefined,
+			reporter([]),
+			cacheClient({
+				put: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([
+			{
+				cacheName: 'builds',
+				access: 'public',
+				priority: 40,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' }
+			}
+		]);
 	});
 });
 
 describe('cache property updates', () => {
 	it('sets only the selected cache access property', async () => {
 		const calls: unknown[] = [];
-		const summary = cacheSummarySchema.parse({
+		const summary = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
 			access: 'private',
 			priority: 40,
@@ -275,7 +374,7 @@ describe('cache property updates', () => {
 
 	it('sets only the selected cache priority property', async () => {
 		const calls: unknown[] = [];
-		const summary = cacheSummarySchema.parse({
+		const summary = cacheSummary({
 			scope: { kind: 'default' },
 			access: 'public',
 			priority: 30,
@@ -298,6 +397,149 @@ describe('cache property updates', () => {
 		);
 
 		expect(calls).toStrictEqual([{ kind: 'priority', priority: 30 }]);
+	});
+
+	it.each([
+		{
+			name: 'the cache default',
+			rootPrefix: undefined,
+			expected: {
+				kind: 'set-default-root-ttl',
+				retention: { kind: 'duration', seconds: 86_400 }
+			}
+		},
+		{
+			name: 'a root-prefix override',
+			rootPrefix: rootNameSchema.parse('github:acme/'),
+			expected: {
+				kind: 'set-root-ttl-override',
+				rootPrefix: 'github:acme/',
+				retention: { kind: 'duration', seconds: 86_400 }
+			}
+		}
+	])('sets the root TTL for $name', async ({ rootPrefix, expected }) => {
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'default' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheSetRootTtl(
+			{ kind: 'default' },
+			rootPrefix,
+			{ kind: 'duration', seconds: ttlSecondsSchema.parse(86_400) },
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					},
+					inNamedCache: () => Promise.resolve(summary)
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([expected]);
+	});
+
+	it.each([
+		{
+			name: 'the cache default',
+			rootPrefix: undefined,
+			expected: {
+				kind: 'set-default-root-ttl',
+				retention: { kind: 'permanent' }
+			}
+		},
+		{
+			name: 'a root-prefix override',
+			rootPrefix: rootNameSchema.parse('github:acme/'),
+			expected: {
+				kind: 'clear-root-ttl-override',
+				rootPrefix: 'github:acme/'
+			}
+		}
+	])('clears the root TTL for $name', async ({ rootPrefix, expected }) => {
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheClearRootTtl(
+			{ kind: 'named', name: cacheName('builds') },
+			rootPrefix,
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([{ cacheName: 'builds', ...expected }]);
+	});
+
+	it('sets the cache grace period', async () => {
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'default' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheSetGrace(
+			{ kind: 'default' },
+			graceSecondsSchema.parse(0),
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					},
+					inNamedCache: () => Promise.resolve(summary)
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([{ kind: 'set-grace', graceSeconds: 0 }]);
+	});
+
+	it('clears the cache grace period', async () => {
+		const calls: unknown[] = [];
+		const summary = cacheSummary({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheClearGrace(
+			{ kind: 'named', name: cacheName('builds') },
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([{ cacheName: 'builds', kind: 'clear-grace' }]);
 	});
 });
 
@@ -357,11 +599,23 @@ describe('runCacheRemove', () => {
 describe('runCacheInspect', () => {
 	it('reports the summary of a named cache', async () => {
 		const results: ResultRow[][] = [];
-		const summary = cacheSummarySchema.parse({
+		const summary = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
 			access: 'public',
 			priority: 30,
-			storePaths: 5
+			storePaths: 5,
+			defaultRootRetention: { kind: 'duration', seconds: 1_209_600 },
+			grace: { kind: 'duration', graceSeconds: 86_400 },
+			rootRetentionOverrides: [
+				{
+					rootPrefix: 'github:acme/',
+					retention: { kind: 'duration', seconds: 604_800 }
+				},
+				{
+					rootPrefix: 'release:',
+					retention: { kind: 'permanent' }
+				}
+			]
 		});
 
 		await runCacheInspect(
@@ -380,14 +634,20 @@ describe('runCacheInspect', () => {
 				{ label: 'Cache', value: 'builds' },
 				{ label: 'Access', value: 'public' },
 				{ label: 'Priority', value: '30' },
-				{ label: 'Store paths', value: '5' }
+				{ label: 'Store paths', value: '5' },
+				{ label: 'Default root retention', value: '1,209,600s' },
+				{ label: 'Grace', value: '86,400s' },
+				{
+					label: 'Root retention overrides',
+					value: 'github:acme/ = 604,800s; release: = permanent'
+				}
 			]
 		]);
 	});
 
 	it('reports the grace state when the server provides it', async () => {
 		const results: ResultRow[][] = [];
-		const summary = cacheSummarySchema.parse({
+		const summary = cacheSummary({
 			scope: { kind: 'named', name: 'builds' },
 			access: 'private',
 			priority: 30,
@@ -413,6 +673,9 @@ describe('runCacheInspect', () => {
 				{ label: 'Access', value: 'private' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' },
+				{ label: 'Default root retention', value: 'permanent' },
+				{ label: 'Grace', value: 'none' },
+				{ label: 'Root retention overrides', value: 'none' },
 				{ label: 'Grace managed', value: 'yes' },
 				{
 					label: 'Earliest grace deadline',

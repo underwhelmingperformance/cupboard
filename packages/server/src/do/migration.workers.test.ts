@@ -3,6 +3,7 @@ import {
 	graceSecondsSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import {
 	authorizationDetailsSchema,
 	storedPermittedGrantsSchema
@@ -19,12 +20,13 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import { cacheScopeFromRow } from '../db/cache.ts';
+import * as schema from '../db/schema.ts';
 import {
 	oidcTrust,
 	refreshTokenFamilies,
-	refreshTokenMembers,
-	retentionGracePolicies
+	refreshTokenMembers
 } from '../db/schema.ts';
+import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import {
 	bootstrap,
 	latestMigrationIndex,
@@ -440,12 +442,19 @@ describe('migrations', () => {
 				await migrateThrough(state, 26);
 				await migrateThrough(state, latestPreContractMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { retentionGracePolicies }
-				});
-				database.insert(retentionGracePolicies).values(policy).run();
+				state.storage.sql.exec(
+					'INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES (?, ?, ?, ?)',
+					policy.id,
+					policy.cachePrefix,
+					policy.graceSeconds,
+					policy.createdAt
+				);
 
-				return database.select().from(retentionGracePolicies).all();
+				return state.storage.sql
+					.exec(
+						'SELECT id, cache_prefix AS cachePrefix, grace_seconds AS graceSeconds, created_at AS createdAt FROM retention_grace_policy'
+					)
+					.toArray();
 			}
 		);
 
@@ -1054,6 +1063,321 @@ describe('migrations', () => {
 				},
 				{ type: 'cupboard_domain', actions: ['cache:list'] }
 			]
+		});
+	});
+
+	it('moves legacy retention settings onto each live cache', async () => {
+		const migrated = await runInDurableObject(
+			testServerFor('migration-cache-retention'),
+			async (_instance, state) => {
+				await migrateThrough(state, 41);
+				state.storage.sql.exec(
+					`INSERT INTO cache (name, priority, grace_managed, created_at) VALUES
+						('', 40, 0, '2026-01-01T00:00:00.000Z'),
+						('builds', 30, 1, '2026-01-01T00:00:00.000Z'),
+						('pr-one', 20, 0, '2026-01-01T00:00:00.000Z'),
+						('private/secret', 10, 0, '2026-01-01T00:00:00.000Z')`
+				);
+
+				await migrateThrough(state, latestPreContractMigrationIndex);
+				state.storage.sql.exec(
+					"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
+				);
+				await migrateThrough(state, 47);
+
+				const identities = state.storage.sql
+					.exec('SELECT id, kind, name FROM cache_identity ORDER BY id')
+					.toArray();
+				const idFor = (name?: string): number => {
+					const row = identities.find((identity) =>
+						name === undefined
+							? identity.kind === 'default'
+							: identity.name === name
+					);
+
+					if (row === undefined || typeof row.id !== 'number') {
+						throw new Error(
+							`The migration fixture cache ${name ?? 'default'} is missing`
+						);
+					}
+
+					return row.id;
+				};
+				const defaultId = idFor();
+				const buildsId = idFor('builds');
+
+				state.storage.sql.exec(
+					"INSERT INTO cache_identity (kind, name, access, priority, grace_managed, created_at, deleted_at) VALUES ('named', 'deleted', 'public', 5, 1, '2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z')"
+				);
+				state.storage.sql.exec(
+					`INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES
+						('default', 'cache', ?, NULL, 3600, '2026-01-01T00:00:00.000Z'),
+						('builds', 'cache', ?, NULL, 7200, '2026-01-01T00:00:00.000Z'),
+						('dangling', 'cache', 999999, NULL, 42, '2026-01-01T00:00:00.000Z'),
+						('ci', 'root-name-prefix', NULL, 'ci/', 100, '2026-01-01T00:00:00.000Z'),
+						('pr', 'root-name-prefix', NULL, 'pr/', 200, '2026-01-01T00:00:00.000Z')`,
+					defaultId,
+					buildsId
+				);
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES (?, ?, NULL, ?, ?, ?)',
+					'inert-long',
+					'root-name-prefix',
+					'a'.repeat(257),
+					300,
+					'2026-01-01T00:00:00.000Z'
+				);
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES (?, ?, NULL, ?, ?, ?)',
+					'inert-control',
+					'root-name-prefix',
+					'bad\n',
+					400,
+					'2026-01-01T00:00:00.000Z'
+				);
+				state.storage.sql.exec(
+					`INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES
+						('all', '', 50, '2026-01-01T00:00:00.000Z'),
+						('pr', 'pr-', 100, '2026-01-01T00:00:00.000Z'),
+						('pr-one', 'pr-one', 200, '2026-01-01T00:00:00.000Z')`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root (cache_id, name, expires_at, created_at, updated_at) VALUES (?, 'keep', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
+					buildsId
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_grace (cache_id, store_path_hash, retain_until) VALUES (?, ?, '2099-02-01T00:00:00.000Z')",
+					buildsId,
+					'a'.repeat(32)
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+				const database = drizzle(state.storage, { schema });
+				let retentionMigration = await advanceCacheRetentionMigration(
+					database,
+					2
+				);
+
+				while (retentionMigration.status === 'pending') {
+					retentionMigration = await advanceCacheRetentionMigration(
+						database,
+						2
+					);
+				}
+
+				expect(await advanceCacheRetentionMigration(database, 2)).toStrictEqual(
+					retentionMigration
+				);
+				state.storage.sql.exec(
+					"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', 'future', 'public', 1, '2026-03-01T00:00:00.000Z')"
+				);
+
+				const overrides = state.storage.sql
+					.exec(
+						'SELECT cache_identity.id AS cache_id, root_retention_rule.root_prefix, root_retention_rule.kind, root_retention_rule.ttl_seconds FROM cache_identity JOIN root_retention_rule ON root_retention_rule.rule_set_id = cache_identity.root_retention_rule_set_id ORDER BY cache_identity.id, root_retention_rule.root_prefix'
+					)
+					.toArray();
+				const summaryRows = state.storage.sql.exec<{
+					id: SqlStorageValue;
+					kind: SqlStorageValue;
+					name: SqlStorageValue;
+					access: SqlStorageValue;
+					priority: SqlStorageValue;
+					default_root_ttl_seconds: SqlStorageValue;
+					grace_seconds: SqlStorageValue;
+					grace_managed: SqlStorageValue;
+				}>(
+					'SELECT id, kind, name, access, priority, default_root_ttl_seconds, grace_seconds, grace_managed FROM cache_identity WHERE deleted_at IS NULL ORDER BY id'
+				);
+				const summaries = Array.from(summaryRows, (row) =>
+					cacheSummarySchema.parse({
+						scope: cacheScopeFromRow({
+							kind: row.kind,
+							name: row.name
+						}),
+						access: row.access,
+						priority: row.priority,
+						storePaths: 0,
+						defaultRootRetention:
+							row.default_root_ttl_seconds === null
+								? { kind: 'permanent' }
+								: {
+										kind: 'duration',
+										seconds: row.default_root_ttl_seconds
+									},
+						grace:
+							row.grace_seconds === null
+								? { kind: 'none' }
+								: {
+										kind: 'duration',
+										graceSeconds: row.grace_seconds
+									},
+						rootRetentionOverrides: overrides
+							.filter((override) => override.cache_id === row.id)
+							.map((override) => ({
+								rootPrefix: override.root_prefix,
+								retention:
+									override.kind === 'permanent'
+										? { kind: 'permanent' }
+										: {
+												kind: 'duration',
+												seconds: override.ttl_seconds
+											}
+							})),
+						graceManaged: Boolean(row.grace_managed)
+					})
+				);
+
+				return {
+					summaries,
+					roots: state.storage.sql
+						.exec(
+							'SELECT cache_id, name, expires_at, created_at, updated_at FROM retention_root'
+						)
+						.toArray(),
+					deadlines: state.storage.sql
+						.exec(
+							'SELECT cache_id, store_path_hash, retain_until FROM retention_grace'
+						)
+						.toArray(),
+					deleted: Array.from(
+						state.storage.sql.exec<{
+							default_root_ttl_seconds: SqlStorageValue;
+							grace_seconds: SqlStorageValue;
+						}>(
+							"SELECT default_root_ttl_seconds, grace_seconds FROM cache_identity WHERE name = 'deleted'"
+						),
+						(row) => ({
+							default_root_ttl_seconds:
+								row.default_root_ttl_seconds ?? undefined,
+							grace_seconds: row.grace_seconds ?? undefined
+						})
+					),
+					legacyTables: state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('retention_policy', 'retention_grace_policy') ORDER BY name"
+						)
+						.toArray(),
+					buildsId,
+					retentionMigration
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			summaries: [
+				{
+					scope: { kind: 'default' },
+					access: 'public',
+					priority: 40,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'duration', seconds: 3600 },
+					grace: { kind: 'duration', graceSeconds: 50 },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'ci/',
+							retention: { kind: 'duration', seconds: 100 }
+						},
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 200 }
+						}
+					],
+					graceManaged: false
+				},
+				{
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 30,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'duration', seconds: 7200 },
+					grace: { kind: 'duration', graceSeconds: 50 },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'ci/',
+							retention: { kind: 'duration', seconds: 100 }
+						},
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 200 }
+						}
+					],
+					graceManaged: true
+				},
+				{
+					scope: { kind: 'named', name: 'pr-one' },
+					access: 'public',
+					priority: 20,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'duration', graceSeconds: 200 },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'ci/',
+							retention: { kind: 'duration', seconds: 100 }
+						},
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 200 }
+						}
+					],
+					graceManaged: false
+				},
+				{
+					scope: { kind: 'named', name: 'secret' },
+					access: 'private',
+					priority: 10,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'ci/',
+							retention: { kind: 'duration', seconds: 100 }
+						},
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 200 }
+						}
+					],
+					graceManaged: false
+				},
+				{
+					scope: { kind: 'named', name: 'future' },
+					access: 'public',
+					priority: 1,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [],
+					graceManaged: false
+				}
+			],
+			roots: [
+				{
+					cache_id: migrated.buildsId,
+					name: 'keep',
+					expires_at: '2099-01-01T00:00:00.000Z',
+					created_at: '2026-01-01T00:00:00.000Z',
+					updated_at: '2026-01-02T00:00:00.000Z'
+				}
+			],
+			deadlines: [
+				{
+					cache_id: migrated.buildsId,
+					store_path_hash: 'a'.repeat(32),
+					retain_until: '2099-02-01T00:00:00.000Z'
+				}
+			],
+			deleted: [
+				{ default_root_ttl_seconds: undefined, grace_seconds: undefined }
+			],
+			legacyTables: [
+				{ name: 'retention_grace_policy' },
+				{ name: 'retention_policy' }
+			],
+			buildsId: migrated.buildsId,
+			retentionMigration: { status: 'complete', discardedRuleCount: 2 }
 		});
 	});
 

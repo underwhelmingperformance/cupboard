@@ -109,7 +109,7 @@ export const ttlSecondsSchema = z
 export type TtlSeconds = z.infer<typeof ttlSecondsSchema>;
 
 // A retention-grace window in seconds: it shares the root TTL's upper bound but
-// admits zero, since a grace policy may configure a zero grace, whereas a root
+// admits zero, since a cache may configure zero grace, whereas a root
 // TTL cannot be zero. Its own brand keeps a grace window from crossing with a
 // root TTL.
 export const graceSecondsSchema = z

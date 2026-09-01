@@ -8,8 +8,7 @@ import {
 import {
 	type RootName,
 	storePathSchema,
-	type StorePathString,
-	type TtlSeconds
+	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
@@ -23,6 +22,7 @@ import {
 	type TargetOutcomeInput,
 	type TerminalBuildFailureInput
 } from '@cupboard/protocol/build';
+import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
 	type UploadAttachRootInput,
 	type UploadDecision,
@@ -97,7 +97,7 @@ export interface ReconcileOptions {
 	>;
 	readonly client: PushClient;
 	readonly runRoot?: UploadAttachRootInput;
-	readonly ttlSeconds?: TtlSeconds;
+	readonly retention?: RootRetentionRequest;
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
 	/**
@@ -614,9 +614,7 @@ async function applyTargetRoots(
 		try {
 			await options.client.setRoot(root, {
 				targets: [...targets],
-				...(options.ttlSeconds !== undefined && {
-					ttlSeconds: options.ttlSeconds
-				})
+				retention: options.retention ?? { kind: 'inherit' }
 			});
 			roots.push({ root, applied: true, targets });
 		} catch (error) {

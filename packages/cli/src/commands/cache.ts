@@ -4,11 +4,16 @@ import {
 	type CacheAccessMode,
 	type CachePriority,
 	cachePrioritySchema,
-	type CacheScope
+	type CacheScope,
+	type GraceSeconds,
+	type RootName,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type {
 	CacheListResponse,
+	CachePutBody,
 	CacheRemoveResponse,
+	CacheRootRetention,
 	CacheSummary,
 	CacheUpdateBody
 } from '@cupboard/protocol/caches';
@@ -29,15 +34,20 @@ import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { parseGrace, parseTtl } from '../duration.ts';
 import {
 	InvalidCachePriorityError,
-	NamedCacheTargetRequiredError
+	NamedCacheTargetRequiredError,
+	RootRetentionOptionError
 } from '../errors.ts';
+import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CacheCreateOptions {
 	readonly access?: CacheAccessMode;
 	readonly priority?: CachePriority;
+	readonly rootTtl?: TtlSeconds;
+	readonly grace?: GraceSeconds;
 }
 
 interface CacheSetAccessOptions {
@@ -48,6 +58,20 @@ interface CacheSetPriorityOptions {
 	readonly priority: CachePriority;
 }
 
+interface CacheSetRootTtlOptions {
+	readonly rootPrefix?: RootName;
+	readonly rootTtl?: TtlSeconds;
+	readonly permanent?: boolean;
+}
+
+interface CacheClearRootTtlOptions {
+	readonly rootPrefix?: RootName;
+}
+
+interface CacheSetGraceOptions {
+	readonly grace: GraceSeconds;
+}
+
 interface CacheRemoveOptions {
 	readonly force?: boolean;
 	readonly yes?: boolean;
@@ -56,13 +80,7 @@ interface CacheRemoveOptions {
 export interface CacheClient {
 	list(): Promise<CacheListResponse>;
 	get: CacheScopedClient<Record<never, never>, CacheSummary>;
-	put: CacheScopedClient<
-		{
-			access: CacheAccessMode;
-			priority: number;
-		},
-		CacheSummary
-	>;
+	put: CacheScopedClient<CachePutBody, CacheSummary>;
 	update: CacheScopedClient<CacheUpdateBody, CacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
@@ -98,7 +116,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('list')
-		.description('List the caches, their priority and their store-path count.')
+		.description('List caches and their properties.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const { tenantUrl } = cacheTargetFromUrl(url);
@@ -118,7 +136,7 @@ export function registerCacheCommands(
 		.description('Create a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'cache name when the URL does not select one')
-		.option(
+		.requiredOption(
 			'--access <mode>',
 			'read access: public or private',
 			parseCacheAccess
@@ -127,6 +145,16 @@ export function registerCacheCommands(
 			'--priority <n>',
 			'Nix substituter priority (lower is preferred)',
 			parsePriority
+		)
+		.option(
+			'--root-ttl <duration>',
+			'default TTL for roots (e.g. 14d, 12h)',
+			parseTtl
+		)
+		.option(
+			'--grace <duration>',
+			'retention grace period (e.g. 24h, 0s)',
+			parseGrace
 		)
 		.action(
 			async (
@@ -154,11 +182,118 @@ export function registerCacheCommands(
 					target.cache,
 					options.access ?? 'public',
 					options.priority ?? CacheInfo.default.priority,
+					options.rootTtl,
+					options.grace,
 					reporter,
 					rpc.caches
 				);
 			}
 		);
+
+	cache
+		.command('set-root-ttl')
+		.description("Set a cache's default root TTL or a root-prefix override.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.option(
+			'--root-prefix <prefix>',
+			'root-name prefix to override',
+			parseRootName
+		)
+		.option('--root-ttl <duration>', 'root TTL (e.g. 14d, 12h)', parseTtl)
+		.option('--permanent', 'retain roots permanently')
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheSetRootTtlOptions
+			) => {
+				const target = cacheCommandTarget(url, name);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = cacheRpc(target.tenantUrl, programOptions);
+
+				const retention = cacheRootRetention(options);
+
+				await runCacheSetRootTtl(
+					target.cache,
+					options.rootPrefix,
+					retention,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
+		.command('clear-root-ttl')
+		.description("Clear a cache's default root TTL or a root-prefix override.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.option(
+			'--root-prefix <prefix>',
+			'root-name prefix override to clear',
+			parseRootName
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheClearRootTtlOptions
+			) => {
+				const target = cacheCommandTarget(url, name);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = cacheRpc(target.tenantUrl, programOptions);
+
+				await runCacheClearRootTtl(
+					target.cache,
+					options.rootPrefix,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
+		.command('set-grace')
+		.description("Set a cache's retention grace period.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.requiredOption(
+			'--grace <duration>',
+			'retention grace period (e.g. 24h, 0s)',
+			parseGrace
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheSetGraceOptions
+			) => {
+				const target = cacheCommandTarget(url, name);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = cacheRpc(target.tenantUrl, programOptions);
+
+				await runCacheSetGrace(
+					target.cache,
+					options.grace,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
+		.command('clear-grace')
+		.description("Clear a cache's retention grace period.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.action(async (url: URL, name: string | undefined) => {
+			const target = cacheCommandTarget(url, name);
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = cacheRpc(target.tenantUrl, programOptions);
+
+			await runCacheClearGrace(target.cache, reporter, rpc.caches);
+		});
 
 	cache
 		.command('set-access')
@@ -274,7 +409,7 @@ export function registerCacheCommands(
 
 	cache
 		.command('inspect')
-		.description("Show one cache's priority and store-path count.")
+		.description("Show one cache's properties and store-path count.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'named cache; omit it for the default cache')
 		.action(async (url: URL, name: string | undefined) => {
@@ -313,13 +448,23 @@ export async function runCacheCreate(
 	cache: Extract<CacheScope, { readonly kind: 'named' }>,
 	access: CacheAccessMode,
 	priority: CachePriority,
+	rootTtl: TtlSeconds | undefined,
+	grace: GraceSeconds | undefined,
 	reporter: Reporter,
 	client: Pick<CacheClient, 'put'>
 ): Promise<void> {
 	const summary = await reporter.phase('Creating cache', () =>
 		callInCache(client.put, cache, {
 			access,
-			priority
+			priority,
+			defaultRootRetention:
+				rootTtl === undefined
+					? { kind: 'permanent' }
+					: { kind: 'duration', seconds: rootTtl },
+			grace:
+				grace === undefined
+					? { kind: 'none' }
+					: { kind: 'duration', graceSeconds: grace }
 		})
 	);
 
@@ -347,6 +492,84 @@ export async function runCacheSetPriority(
 ): Promise<void> {
 	const summary = await reporter.phase('Setting cache priority', () =>
 		callInCache(client.update, cache, { kind: 'priority', priority })
+	);
+
+	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheSetRootTtl(
+	cache: CacheScope,
+	rootPrefix: RootName | undefined,
+	retention: CacheRootRetention,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	const body: CacheUpdateBody =
+		rootPrefix === undefined
+			? { kind: 'set-default-root-ttl', retention }
+			: { kind: 'set-root-ttl-override', rootPrefix, retention };
+
+	await runCacheUpdate(cache, body, 'Setting cache root TTL', reporter, client);
+}
+
+export async function runCacheClearRootTtl(
+	cache: CacheScope,
+	rootPrefix: RootName | undefined,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	const body: CacheUpdateBody =
+		rootPrefix === undefined
+			? { kind: 'set-default-root-ttl', retention: { kind: 'permanent' } }
+			: { kind: 'clear-root-ttl-override', rootPrefix };
+
+	await runCacheUpdate(
+		cache,
+		body,
+		'Clearing cache root TTL',
+		reporter,
+		client
+	);
+}
+
+export async function runCacheSetGrace(
+	cache: CacheScope,
+	graceSeconds: GraceSeconds,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	await runCacheUpdate(
+		cache,
+		{ kind: 'set-grace', graceSeconds },
+		'Setting cache grace',
+		reporter,
+		client
+	);
+}
+
+export async function runCacheClearGrace(
+	cache: CacheScope,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	await runCacheUpdate(
+		cache,
+		{ kind: 'clear-grace' },
+		'Clearing cache grace',
+		reporter,
+		client
+	);
+}
+
+async function runCacheUpdate(
+	cache: CacheScope,
+	body: CacheUpdateBody,
+	phase: string,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	const summary = await reporter.phase(phase, () =>
+		callInCache(client.update, cache, body)
 	);
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
@@ -432,7 +655,10 @@ function cacheRow(summary: CacheSummary): ResultRow {
 	const parts = [
 		summary.access,
 		`priority ${String(summary.priority)}`,
-		`${formatCount(summary.storePaths)} path(s)`
+		`${formatCount(summary.storePaths)} path(s)`,
+		`default root retention ${rootRetentionLabel(summary.defaultRootRetention)}`,
+		`grace ${graceLabel(summary.grace)}`,
+		`${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`
 	];
 
 	if (summary.graceManaged === true) {
@@ -458,7 +684,24 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 		{ label: 'Cache', value: cacheLabel(summary.scope) },
 		{ label: 'Access', value: summary.access },
 		{ label: 'Priority', value: String(summary.priority) },
-		{ label: 'Store paths', value: formatCount(summary.storePaths) }
+		{ label: 'Store paths', value: formatCount(summary.storePaths) },
+		{
+			label: 'Default root retention',
+			value: rootRetentionLabel(summary.defaultRootRetention)
+		},
+		{ label: 'Grace', value: graceLabel(summary.grace) },
+		{
+			label: 'Root retention overrides',
+			value:
+				summary.rootRetentionOverrides.length === 0
+					? 'none'
+					: summary.rootRetentionOverrides
+							.map(
+								({ rootPrefix, retention }) =>
+									`${rootPrefix} = ${rootRetentionLabel(retention)}`
+							)
+							.join('; ')
+		}
 	];
 
 	if (summary.graceManaged !== undefined) {
@@ -476,4 +719,43 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 	}
 
 	return rows;
+}
+
+function rootRetentionLabel(retention: CacheRootRetention): string {
+	return retention.kind === 'permanent'
+		? 'permanent'
+		: `${formatCount(retention.seconds)}s`;
+}
+
+function cacheRootRetention(
+	options: CacheSetRootTtlOptions
+): CacheRootRetention {
+	if (options.rootTtl !== undefined && options.permanent !== true) {
+		return { kind: 'duration', seconds: options.rootTtl };
+	}
+
+	if (options.rootTtl === undefined && options.permanent === true) {
+		return { kind: 'permanent' };
+	}
+
+	throw new RootRetentionOptionError();
+}
+
+function graceLabel(grace: CacheSummary['grace']): string {
+	return grace.kind === 'none' ? 'none' : `${formatCount(grace.graceSeconds)}s`;
+}
+
+function cacheCommandTarget(url: URL, name: string | undefined) {
+	const urlTarget = cacheTargetFromUrl(url);
+
+	return name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
+}
+
+function cacheRpc(tenantUrl: URL, programOptions: ProgramOptions) {
+	return tenantRpc(tenantUrl, {
+		credential: cachedOwnerProvider(tenantUrl, {
+			signal: programOptions.signal
+		}),
+		signal: programOptions.signal
+	});
 }

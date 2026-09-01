@@ -393,7 +393,10 @@ describe('runPush', () => {
 		await runPush(publication([appPath]), reporter([]), {
 			runRoot: {
 				name: rootName('ci/run-1'),
-				ttlSeconds: ttlSecondsSchema.parse(3600)
+				retention: {
+					kind: 'duration',
+					seconds: ttlSecondsSchema.parse(3600)
+				}
 			},
 			client: {
 				preview: unexpectedPreviewCall,
@@ -421,7 +424,10 @@ describe('runPush', () => {
 
 		expect(negotiations).toStrictEqual([
 			{
-				attachRoot: { name: 'ci/run-1', ttlSeconds: 3600 },
+				attachRoot: {
+					name: 'ci/run-1',
+					retention: { kind: 'duration', seconds: 3600 }
+				},
 				paths: [
 					{
 						storePathHash: StorePath.hash(appPath),
@@ -953,7 +959,7 @@ describe('runPush', () => {
 					{ label: 'Already cached', value: '0' },
 					{ label: 'Skipped', value: '1' },
 					{ label: 'Would pin paths', value: '1' },
-					{ label: 'Pin expiry', value: 'permanent' }
+					{ label: 'Pin expiry', value: 'inherits cache retention' }
 				]
 			]
 		});
@@ -1101,6 +1107,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1194,6 +1201,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1202,6 +1210,7 @@ describe('runPush', () => {
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1425,6 +1434,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1495,6 +1505,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1525,6 +1536,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -1763,9 +1775,24 @@ describe('runPush', () => {
 		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
-				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+				{
+					method: 'setRoot',
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
 			],
-			roots: [{ fields: { name: 'main', targets: [appPath] } }],
+			roots: [
+				{
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
+			],
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
@@ -1791,9 +1818,16 @@ describe('runPush', () => {
 		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [] },
-				{ method: 'setRoot', fields: { name: 'main', targets: [] } }
+				{
+					method: 'setRoot',
+					fields: { name: 'main', retention: { kind: 'inherit' }, targets: [] }
+				}
 			],
-			roots: [{ fields: { name: 'main', targets: [] } }]
+			roots: [
+				{
+					fields: { name: 'main', retention: { kind: 'inherit' }, targets: [] }
+				}
+			]
 		});
 	});
 
@@ -1818,9 +1852,24 @@ describe('runPush', () => {
 			nixCalls: [{ method: 'queryValidPathsInfo', paths: [appPath] }],
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
-				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+				{
+					method: 'setRoot',
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
 			],
-			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+			roots: [
+				{
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
+			]
 		});
 	});
 
@@ -1846,9 +1895,24 @@ describe('runPush', () => {
 			nixCalls: [{ method: 'resolveClosure', paths: [appPath] }],
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath, runtimePath] },
-				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+				{
+					method: 'setRoot',
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
 			],
-			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+			roots: [
+				{
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
+			]
 		});
 	});
 
@@ -1869,9 +1933,24 @@ describe('runPush', () => {
 		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath, runtimePath] },
-				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+				{
+					method: 'setRoot',
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
 			],
-			roots: [{ fields: { name: 'main', targets: [appPath] } }],
+			roots: [
+				{
+					fields: {
+						name: 'main',
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
+				}
+			],
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
@@ -1904,13 +1983,18 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
 			],
 			roots: [
 				{
-					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
 				}
 			]
 		});
@@ -2004,7 +2088,11 @@ describe('runPush', () => {
 			narReads: 0,
 			roots: [
 				{
-					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
 				}
 			]
 		});
@@ -2092,7 +2180,14 @@ describe('runPush', () => {
 				errorClass: undefined,
 				clientCalls: [
 					{ method: 'negotiate', paths: [appPath] },
-					{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+					{
+						method: 'setRoot',
+						fields: {
+							name: 'main',
+							retention: { kind: 'inherit' },
+							targets: [appPath]
+						}
+					}
 				],
 				data: {
 					uploadedPaths: 0,
@@ -2184,7 +2279,15 @@ describe('runPush', () => {
 			input: { targets: [appPath], intermediatePaths: [runtimePath] },
 			expected: {
 				errorClass: undefined,
-				roots: [{ fields: { name: 'main', targets: [appPath] } }],
+				roots: [
+					{
+						fields: {
+							name: 'main',
+							retention: { kind: 'inherit' },
+							targets: [appPath]
+						}
+					}
+				],
 				data: {
 					uploadedPaths: 0,
 					reusedBlobs: 0,
@@ -2510,7 +2613,10 @@ describe('runPush', () => {
 		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
-			ttlSeconds: ttlSecondsSchema.parse(1_209_600),
+			retention: {
+				kind: 'duration',
+				seconds: ttlSecondsSchema.parse(1_209_600)
+			},
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
@@ -2519,11 +2625,21 @@ describe('runPush', () => {
 				{ method: 'negotiate', paths: [appPath] },
 				{
 					method: 'setRoot',
-					fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 }
+					fields: {
+						name: 'main',
+						targets: [appPath],
+						retention: { kind: 'duration', seconds: 1_209_600 }
+					}
 				}
 			],
 			roots: [
-				{ fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 } }
+				{
+					fields: {
+						name: 'main',
+						targets: [appPath],
+						retention: { kind: 'duration', seconds: 1_209_600 }
+					}
+				}
 			],
 			results: [
 				[
@@ -2561,6 +2677,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				},
@@ -2568,17 +2685,23 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(runtimePath)}`,
+						retention: { kind: 'inherit' },
 						targets: [runtimePath]
 					}
 				}
 			],
 			roots: [
 				{
-					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
+						targets: [appPath]
+					}
 				},
 				{
 					fields: {
 						name: `pin:${StorePath.hash(runtimePath)}`,
+						retention: { kind: 'inherit' },
 						targets: [runtimePath]
 					}
 				}
@@ -2603,7 +2726,10 @@ describe('runPush', () => {
 
 		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
-			ttlSeconds: ttlSecondsSchema.parse(604_800),
+			retention: {
+				kind: 'duration',
+				seconds: ttlSecondsSchema.parse(604_800)
+			},
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
@@ -2615,7 +2741,7 @@ describe('runPush', () => {
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
 						targets: [appPath],
-						ttlSeconds: 604_800
+						retention: { kind: 'duration', seconds: 604_800 }
 					}
 				}
 			],
@@ -2624,7 +2750,7 @@ describe('runPush', () => {
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
 						targets: [appPath],
-						ttlSeconds: 604_800
+						retention: { kind: 'duration', seconds: 604_800 }
 					}
 				}
 			],
@@ -2654,7 +2780,7 @@ describe('runPush', () => {
 		});
 
 		// Without a root, grace is the only protection from collection. Show the
-		// per-path absence and warn even when no policy matched.
+		// per-path absence and warn even when the cache has no configured grace.
 		expect({ clientCalls, roots, results, warns }).toStrictEqual({
 			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
 			roots: [],
@@ -2667,7 +2793,7 @@ describe('runPush', () => {
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
 						label: StorePath.hash(appPath),
-						value: 'no retention grace policy matched'
+						value: 'no cache retention grace configured'
 					}
 				]
 			],
@@ -2675,7 +2801,7 @@ describe('runPush', () => {
 				{
 					label: 'unretained',
 					value:
-						'no retention grace policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+						'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
 				}
 			]
 		});
@@ -2712,7 +2838,7 @@ describe('runPush', () => {
 				{ label: 'Retention', value: 'none (--no-retain)' },
 				...storePaths.slice(0, 20).map((storePath) => ({
 					label: StorePath.hash(storePath),
-					value: 'no retention grace policy matched'
+					value: 'no cache retention grace configured'
 				})),
 				{
 					label: '…',
@@ -2818,7 +2944,7 @@ describe('runPush', () => {
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
 						label: StorePath.hash(appPath),
-						value: 'no retention grace policy matched'
+						value: 'no cache retention grace configured'
 					}
 				]
 			]
@@ -2861,7 +2987,7 @@ describe('runPush', () => {
 						{ label: 'Retention', value: 'none (--no-retain)' },
 						{
 							label: StorePath.hash(appPath),
-							value: 'no retention grace policy matched'
+							value: 'no cache retention grace configured'
 						}
 					]
 				]
@@ -2887,6 +3013,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				},
@@ -2895,6 +3022,7 @@ describe('runPush', () => {
 					method: 'setRoot',
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -2903,12 +3031,14 @@ describe('runPush', () => {
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				},
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
+						retention: { kind: 'inherit' },
 						targets: [appPath]
 					}
 				}
@@ -3018,7 +3148,10 @@ describe('runPush', () => {
 
 		await runPush(publication([appPath, runtimePath]), reporter(results), {
 			client,
-			ttlSeconds: ttlSecondsSchema.parse(604_800),
+			retention: {
+				kind: 'duration',
+				seconds: ttlSecondsSchema.parse(604_800)
+			},
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -3033,7 +3166,7 @@ describe('runPush', () => {
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
 						targets: [appPath],
-						ttlSeconds: 604_800
+						retention: { kind: 'duration', seconds: 604_800 }
 					}
 				},
 				{
@@ -3041,7 +3174,7 @@ describe('runPush', () => {
 					fields: {
 						name: `pin:${StorePath.hash(runtimePath)}`,
 						targets: [runtimePath],
-						ttlSeconds: 604_800
+						retention: { kind: 'duration', seconds: 604_800 }
 					}
 				}
 			],
@@ -3412,7 +3545,7 @@ describe('runPush', () => {
 					{ label: 'Pinned paths', value: '2' },
 					{ label: 'Pin expiry', value: 'permanent' },
 					{ label: appHash, value: 'kept until 2026-02-01 00:00 UTC' },
-					{ label: runtimeHash, value: 'no retention grace policy matched' }
+					{ label: runtimeHash, value: 'no cache retention grace configured' }
 				]
 			],
 			data: {
@@ -3803,7 +3936,7 @@ describe('runPush', () => {
 		expect(outcome).toStrictEqual({ isWrapped: true });
 	});
 
-	it('with --dry-run --no-retain, reports the policy a skip would extend without the unretained warning', async () => {
+	it('with --dry-run --no-retain, reports the grace a skip would extend without the unretained warning', async () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
@@ -3877,13 +4010,13 @@ describe('runPush', () => {
 				{
 					label: 'unretained',
 					value:
-						'a zero-grace retention policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+						'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
 				}
 			],
 			pathRows: [
 				{
 					label: StorePath.hash(appPath),
-					value: 'matched a zero-grace policy; no grace period applies'
+					value: 'configured zero grace; no grace period applies'
 				}
 			]
 		});
@@ -4511,7 +4644,9 @@ function rootSummary(
 	};
 	const expiresAt =
 		expiresAtOverride ??
-		(fields.ttlSeconds === undefined ? undefined : '2026-01-15T00:00:00.000Z');
+		(fields.retention?.kind === 'duration'
+			? '2026-01-15T00:00:00.000Z'
+			: undefined);
 
 	if (expiresAt === undefined) {
 		return base;

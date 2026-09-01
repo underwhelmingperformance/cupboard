@@ -8,8 +8,7 @@ import {
 	type RootName,
 	type StoreDirectory,
 	storePathSchema,
-	type StorePathString,
-	type TtlSeconds
+	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
@@ -26,6 +25,7 @@ import {
 	buildSummaryResultKind,
 	buildSummarySchema
 } from '@cupboard/protocol/reports';
+import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import type { UploadAttachRootInput } from '@cupboard/protocol/upload';
 import {
 	buildPushPhases,
@@ -136,7 +136,7 @@ export type BuildInvocation =
 export interface BuildPushRunOptions {
 	readonly invocation: BuildInvocation;
 	readonly root?: RootName;
-	readonly ttlSeconds?: TtlSeconds;
+	readonly retention?: RootRetentionRequest;
 	readonly runRoot?: UploadAttachRootInput;
 	readonly closure?: boolean;
 	readonly intermediatePaths?: readonly StorePathString[];
@@ -895,10 +895,9 @@ async function publishRealised(
 			copiedFrom: built.copiedFrom,
 			retain: shouldRetainTargets,
 			...(shouldRetainTargets && { root: options.root }),
-			...(shouldRetainTargets &&
-				options.ttlSeconds !== undefined && {
-					ttlSeconds: options.ttlSeconds
-				}),
+			...(shouldRetainTargets && {
+				retention: options.retention ?? { kind: 'inherit' }
+			}),
 			...(options.runRoot !== undefined && { runRoot: options.runRoot }),
 			...(options.closure !== undefined && { closure: options.closure }),
 			...(options.wait !== undefined && { wait: options.wait }),
@@ -1051,9 +1050,7 @@ async function settleRun(
 					...(options.runRoot !== undefined && {
 						runRoot: options.runRoot
 					}),
-					...(options.ttlSeconds !== undefined && {
-						ttlSeconds: options.ttlSeconds
-					}),
+					retention: options.retention ?? { kind: 'inherit' },
 					...(options.wait !== undefined && { wait: options.wait }),
 					commitOptions: facts.commitOptions,
 					...(facts.session !== undefined && { session: facts.session }),

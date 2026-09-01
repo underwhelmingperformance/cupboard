@@ -1,34 +1,18 @@
 import {
-	type CacheScope,
 	type GraceSeconds,
+	type RootName,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import {
-	type GraceCoverageResponse,
-	type GracePolicyAddBody,
-	type GracePolicyListResponse,
-	type GracePolicyRemoveResponse,
-	type GracePolicySummary,
-	type RetentionPolicyAddBody,
-	type RetentionPolicyListResponse,
-	type RetentionPolicyRemoveResponse,
-	type RetentionPolicySummary
-} from '@cupboard/protocol/retention';
+import type { CacheRootRetention } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
-import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
-import {
-	gracePolicySummaryFromRow,
-	policySummaryFromRow,
-	type SchemaWriter,
-	type ServerContext
-} from './context.ts';
+import { type SchemaWriter, type ServerContext } from './context.ts';
+import { RetentionRuleService } from './retention-rule-service.ts';
 
 // Each extended row binds three columns (cache, storePathHash, retainUntil),
 // so the row count per insert is maxInClauseValues divided by three: the same
@@ -41,7 +25,11 @@ interface GraceTransition {
 }
 
 export class RetentionService {
-	constructor(private readonly context: ServerContext) {}
+	private readonly rules: RetentionRuleService;
+
+	constructor(private readonly context: ServerContext) {
+		this.rules = new RetentionRuleService(context);
+	}
 
 	private narinfoBackedHashes(
 		cache: ResolvedCache,
@@ -101,189 +89,46 @@ export class RetentionService {
 		}
 	}
 
-	listPolicies(): RetentionPolicyListResponse {
-		const policies = this.context.db
-			.select()
-			.from(schema.retentionPolicies)
-			.all()
-			.map((row) =>
-				policySummaryFromRow(
-					row,
-					row.cacheId === null
-						? undefined
-						: this.context.cacheRepository.scopeForId(row.cacheId)
-				)
+	resolveRootRetention(
+		cache: ResolvedCache,
+		name: RootName
+	): CacheRootRetention {
+		const configured = this.context.db
+			.select({ ttlSeconds: schema.caches.defaultRootTtlSeconds })
+			.from(schema.caches)
+			.where(eq(schema.caches.id, cache.id))
+			.get();
+		const override = this.rules
+			.listForCache(cache)
+			.filter(({ rootPrefix }) => name.startsWith(rootPrefix))
+			.toSorted(
+				(left, right) => right.rootPrefix.length - left.rootPrefix.length
 			)
-			.toSorted((left, right) => byCodeUnit(left.id, right.id));
+			.at(0);
 
-		return { policies };
-	}
-
-	addPolicy(body: RetentionPolicyAddBody): RetentionPolicySummary {
-		const id = crypto.randomUUID();
-		const identity =
-			body.scope === 'cache'
-				? {
-						kind: 'cache' as const,
-						cacheId: this.context.cacheRepository.require(body.cache).id,
-						rootNamePrefix: undefined
-					}
-				: {
-						kind: 'root-name-prefix' as const,
-						cacheId: undefined,
-						rootNamePrefix: body.pattern
-					};
-
-		const row = this.context.db
-			.insert(schema.retentionPolicies)
-			.values({
-				id,
-				...identity,
-				defaultTtlSeconds: body.ttlSeconds,
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoUpdate({
-				target:
-					body.scope === 'cache'
-						? schema.retentionPolicies.cacheId
-						: schema.retentionPolicies.rootNamePrefix,
-				targetWhere:
-					body.scope === 'cache'
-						? sql`${schema.retentionPolicies.kind} = 'cache'`
-						: sql`${schema.retentionPolicies.kind} = 'root-name-prefix'`,
-				set: { defaultTtlSeconds: body.ttlSeconds }
-			})
-			.returning()
-			.get();
-
-		return policySummaryFromRow(
-			row,
-			body.scope === 'cache' ? body.cache : undefined
-		);
-	}
-
-	removePolicy(id: string): RetentionPolicyRemoveResponse {
-		const existing = this.context.db
-			.select()
-			.from(schema.retentionPolicies)
-			.where(eq(schema.retentionPolicies.id, id))
-			.get();
-
-		this.context.db
-			.delete(schema.retentionPolicies)
-			.where(eq(schema.retentionPolicies.id, id))
-			.run();
-
-		return {
-			id,
-			removed: existing !== undefined
-		};
-	}
-
-	resolvePolicyTtl(cache: ResolvedCache, name: string): number | undefined {
-		const policies = this.context.db
-			.select()
-			.from(schema.retentionPolicies)
-			.all()
-			.map((row) =>
-				policySummaryFromRow(
-					row,
-					row.cacheId === null
-						? undefined
-						: this.context.cacheRepository.scopeForId(row.cacheId)
-				)
-			);
-
-		return mostSpecificPolicy(policies, { cache: cache.scope, name })
-			?.ttlSeconds;
-	}
-
-	listGracePolicies(): GracePolicyListResponse {
-		const policies = this.context.db
-			.select()
-			.from(schema.retentionGracePolicies)
-			.all()
-			.map((row) => gracePolicySummaryFromRow(row))
-			.toSorted((left, right) =>
-				byCodeUnit(left.cachePrefix, right.cachePrefix)
-			);
-
-		return { policies };
-	}
-
-	addGracePolicy(body: GracePolicyAddBody): GracePolicySummary {
-		const id = crypto.randomUUID();
-
-		const row = this.context.db
-			.insert(schema.retentionGracePolicies)
-			.values({
-				id,
-				cachePrefix: body.cachePrefix,
-				graceSeconds: body.graceSeconds,
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoUpdate({
-				target: schema.retentionGracePolicies.cachePrefix,
-				set: { graceSeconds: body.graceSeconds }
-			})
-			.returning()
-			.get();
-
-		return gracePolicySummaryFromRow(row);
-	}
-
-	removeGracePolicy(id: string): GracePolicyRemoveResponse {
-		const existing = this.context.db
-			.select()
-			.from(schema.retentionGracePolicies)
-			.where(eq(schema.retentionGracePolicies.id, id))
-			.get();
-
-		this.context.db
-			.delete(schema.retentionGracePolicies)
-			.where(eq(schema.retentionGracePolicies.id, id))
-			.run();
-
-		return {
-			id,
-			removed: existing !== undefined
-		};
-	}
-
-	graceCoverage(cacheScope: CacheScope): GraceCoverageResponse {
-		const cache = this.context.cacheRepository.resolve(cacheScope);
-		const graceSeconds =
-			cache === undefined ? undefined : this.resolveGraceSeconds(cache);
-
-		return graceSeconds === undefined
-			? { covered: false }
-			: { covered: true, graceSeconds };
-	}
-
-	// The longest matching cache-name prefix wins. The empty prefix is the
-	// tenant-wide default for public caches. Private caches do not use retention
-	// grace policies, although the empty prefix also matches their names.
-	resolveGraceSeconds(cache: ResolvedCache): GraceSeconds | undefined {
-		if (cache.access === 'private') {
-			return undefined;
+		if (override !== undefined) {
+			return override.retention;
 		}
 
-		return this.context.db
-			.select({
-				cachePrefix: schema.retentionGracePolicies.cachePrefix,
-				graceSeconds: schema.retentionGracePolicies.graceSeconds
-			})
-			.from(schema.retentionGracePolicies)
-			.all()
-			.filter((policy) =>
-				cache.scope.kind === 'default'
-					? policy.cachePrefix === ''
-					: cache.scope.name.startsWith(policy.cachePrefix)
-			)
-			.toSorted(
-				(left, right) => right.cachePrefix.length - left.cachePrefix.length
-			)
-			.at(0)?.graceSeconds;
+		if (configured === undefined) {
+			return { kind: 'permanent' };
+		}
+
+		if (configured.ttlSeconds === null) {
+			return { kind: 'permanent' };
+		}
+
+		return { kind: 'duration', seconds: configured.ttlSeconds };
+	}
+
+	resolveGraceSeconds(cache: ResolvedCache): GraceSeconds | undefined {
+		return (
+			this.context.db
+				.select({ graceSeconds: schema.caches.graceSeconds })
+				.from(schema.caches)
+				.where(eq(schema.caches.id, cache.id))
+				.get()?.graceSeconds ?? undefined
+		);
 	}
 
 	// Extend deadlines monotonically in one statement. ISO-8601 UTC strings compare
@@ -330,7 +175,7 @@ export class RetentionService {
 		);
 	}
 
-	// Mark the cache as grace-managed even when the matching policy grants zero
+	// Mark the cache as grace-managed even when its configured grace is zero
 	// seconds. For several releases of one path, use the latest resulting deadline.
 	// The caller can supply its transaction so removing retention and granting
 	// grace cannot be separated by a crash.

@@ -6,10 +6,13 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { AuthorizationDetails } from '@cupboard/protocol/grants';
 import type {
+	RootEnsureBodyInput,
 	RootEnsureResponse,
 	RootListEntry,
 	RootListResponse,
 	RootRemoveResponse,
+	RootRetentionRequest,
+	RootSetBodyInput,
 	RootSetResponse,
 	RootTarget,
 	RootTargetsPage
@@ -34,11 +37,13 @@ import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
+import { RootRetentionOptionConflictError } from '../errors.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RootSetOptions {
 	readonly ttl?: TtlSeconds;
+	readonly permanent?: boolean;
 }
 
 interface RootEnsureOptions extends RootSetOptions {
@@ -78,19 +83,11 @@ export function rootListingAuthorizationDetails(
  */
 export interface RootClient {
 	set: CacheScopedClient<
-		{
-			name: string;
-			targets: string[];
-			ttlSeconds?: number;
-		},
+		RootSetBodyInput & { readonly name: string },
 		RootSetResponse
 	>;
 	ensure: CacheScopedClient<
-		{
-			name: string;
-			targets: string[];
-			ttlSeconds?: number;
-		},
+		RootEnsureBodyInput & { readonly name: string },
 		RootEnsureResponse
 	>;
 	list: CacheScopedClient<
@@ -138,6 +135,7 @@ export function registerRootCommands(
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--permanent', 'retain the root permanently')
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -180,7 +178,7 @@ export function registerRootCommands(
 					target.cache,
 					name,
 					targets,
-					options.ttl,
+					rootRetentionRequest(options),
 					reporter,
 					rpc.roots
 				);
@@ -198,6 +196,7 @@ export function registerRootCommands(
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--permanent', 'retain the root permanently')
 		.addHelpText(
 			'after',
 			[
@@ -228,7 +227,7 @@ export function registerRootCommands(
 					target.cache,
 					name,
 					targets,
-					options.ttl,
+					rootRetentionRequest(options),
 					reporter,
 					rpc.roots
 				);
@@ -345,7 +344,7 @@ export async function runRootEnsure(
 	cache: CacheScope,
 	name: RootName,
 	targets: readonly string[],
-	ttlSeconds: TtlSeconds | undefined,
+	retention: RootRetentionRequest,
 	reporter: Reporter,
 	client: Pick<RootClient, 'ensure'>
 ): Promise<void> {
@@ -353,7 +352,7 @@ export async function runRootEnsure(
 		callInCache(client.ensure, cache, {
 			name,
 			targets: [...targets],
-			...(ttlSeconds !== undefined && { ttlSeconds })
+			retention
 		})
 	);
 
@@ -382,7 +381,7 @@ export async function runRootSet(
 	cache: CacheScope,
 	name: RootName,
 	targets: readonly string[],
-	ttlSeconds: TtlSeconds | undefined,
+	retention: RootRetentionRequest,
 	reporter: Reporter,
 	client: Pick<RootClient, 'set'>
 ): Promise<void> {
@@ -390,7 +389,7 @@ export async function runRootSet(
 		callInCache(client.set, cache, {
 			name,
 			targets: [...targets],
-			...(ttlSeconds !== undefined && { ttlSeconds })
+			retention
 		})
 	);
 
@@ -403,6 +402,20 @@ export async function runRootSet(
 			{ label: 'Expiry', value: describeExpiry(summary) }
 		]
 	});
+}
+
+function rootRetentionRequest(options: RootSetOptions): RootRetentionRequest {
+	if (options.ttl !== undefined && options.permanent === true) {
+		throw new RootRetentionOptionConflictError();
+	}
+
+	if (options.ttl !== undefined) {
+		return { kind: 'duration', seconds: options.ttl };
+	}
+
+	return options.permanent === true
+		? { kind: 'permanent' }
+		: { kind: 'inherit' };
 }
 
 export async function runRootList(

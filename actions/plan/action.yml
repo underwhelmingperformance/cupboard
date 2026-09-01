@@ -22,6 +22,10 @@ inputs:
   ttl:
     description: TTL applied when retaining an already cached target.
     required: false
+  permanent:
+    description: Retain an already cached target permanently.
+    required: false
+    default: 'false'
   read-user:
     description: Username for cache reads.
     required: false
@@ -142,6 +146,7 @@ runs:
         ROOT_PREFIX: ${{ inputs.root-prefix }}
         CACHE: ${{ inputs.cache }}
         TTL: ${{ inputs.ttl }}
+        PERMANENT: ${{ inputs.permanent }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
         AUDIENCE: ${{ inputs.audience }}
@@ -159,6 +164,7 @@ runs:
           --root-prefix "$ROOT_PREFIX"
           --cache "$CACHE"
           --ttl "$TTL"
+          --permanent "$PERMANENT"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
           --audience "$AUDIENCE"

@@ -5,13 +5,13 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type UploadAttachRootInput,
 	type UploadNegotiateResponseInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,7 +35,10 @@ import {
 	uploadPathNegotiation
 } from '../test-support.ts';
 
-const runRoot: UploadAttachRootInput = { name: 'ci/run-1', ttlSeconds: 3600 };
+const runRoot: UploadAttachRootInput = {
+	name: 'ci/run-1',
+	retention: { kind: 'duration', seconds: 3600 }
+};
 // The Durable Object's SQLite caps bound variables per statement, so seeding
 // inserts in small row batches.
 const seedInsertBatchSize = 20;
@@ -154,17 +157,14 @@ async function seedRunRootTargets(count: number): Promise<void> {
 	});
 }
 
-// A tenant-wide grace policy: released targets receive a deadline under it.
-async function enableGracePolicy(): Promise<void> {
+async function setDefaultCacheGrace(): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
 		instance.context.db
-			.insert(schema.retentionGracePolicies)
-			.values({
-				id: 'policy-under-test',
-				cachePrefix: '',
-				graceSeconds: graceSecondsSchema.parse(3600),
-				createdAt: isoTimestampSchema.parse(testBase.toISOString())
-			})
+			.update(schema.caches)
+			.set({ graceSeconds: graceSecondsSchema.parse(3600) })
+			.where(eq(schema.caches.id, cache.id))
 			.run();
 	});
 }
@@ -286,7 +286,7 @@ describe('run root lifecycle', () => {
 		await pushWithRoot(token, previous);
 		await pushWithRoot(token, next, runRoot);
 		await setRoot(token, { name: 'main', targets: [previous.storePath] });
-		await enableGracePolicy();
+		await setDefaultCacheGrace();
 
 		await setRoot(token, { name: 'main', targets: [next.storePath] });
 
@@ -428,7 +428,7 @@ describe('run root lifecycle', () => {
 		const decision = singleDecision(
 			await negotiateWithRoot(token, [shared], {
 				name: 'ci/run-2',
-				ttlSeconds: 7200
+				retention: { kind: 'duration', seconds: 7200 }
 			})
 		);
 
@@ -506,7 +506,7 @@ describe('run root lifecycle', () => {
 		const decision = singleDecision(
 			await negotiateWithRoot(token, [shared], {
 				name: 'ci/run-2',
-				ttlSeconds: 3600
+				retention: { kind: 'duration', seconds: 3600 }
 			})
 		);
 

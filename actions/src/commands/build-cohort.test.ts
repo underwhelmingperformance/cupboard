@@ -371,6 +371,7 @@ describe('resolveBuildCohortInputs', () => {
 			cache: inputs.cache,
 			reuseView: inputs.reuseView,
 			ttl: inputs.ttl,
+			permanent: inputs.permanent,
 			readUser: inputs.readUser,
 			readPassword: inputs.readPassword,
 			store: inputs.store,
@@ -387,11 +388,38 @@ describe('resolveBuildCohortInputs', () => {
 			cache: defaultCache,
 			reuseView: '',
 			ttl: '',
+			permanent: false,
 			readUser: '',
 			readPassword: '',
 			store: '',
 			allBestEffort: false
 		});
+	});
+
+	it('resolves permanent target and run-root retention', () => {
+		const inputs = resolveBuildCohortInputs(
+			{
+				...baseOptions(),
+				permanent: 'true',
+				runRoot: 'github:owner/repo/_cupboard-run/1',
+				runRootPermanent: 'true'
+			},
+			{ RUNNER_TEMP: '/tmp' }
+		);
+
+		expect({
+			permanent: inputs.permanent,
+			runRootPermanent: inputs.runRootPermanent
+		}).toStrictEqual({ permanent: true, runRootPermanent: true });
+	});
+
+	it('rejects conflicting retention choices', () => {
+		expect(() =>
+			resolveBuildCohortInputs(
+				{ ...baseOptions(), ttl: '7d', permanent: 'true' },
+				{ RUNNER_TEMP: '/tmp' }
+			)
+		).toThrow('ttl cannot be combined with permanent');
 	});
 
 	it.each([
@@ -4342,7 +4370,7 @@ describe('cohortReceiptPushArguments', () => {
 		readonly name: string;
 		readonly inputs: Pick<
 			BuildCohortInputs,
-			'audience' | 'cache' | 'runRoot' | 'runRootTtl'
+			'audience' | 'cache' | 'runRoot' | 'runRootTtl' | 'runRootPermanent'
 		>;
 		readonly alreadyHeld: readonly string[];
 		readonly held: readonly string[];
@@ -4356,7 +4384,8 @@ describe('cohortReceiptPushArguments', () => {
 				audience: '',
 				cache: defaultCache,
 				runRoot: '',
-				runRootTtl: ''
+				runRootTtl: '',
+				runRootPermanent: false
 			},
 			alreadyHeld: [],
 			held: ['--no-already-held'],
@@ -4370,7 +4399,8 @@ describe('cohortReceiptPushArguments', () => {
 				audience: '',
 				cache: defaultCache,
 				runRoot: '',
-				runRootTtl: ''
+				runRootTtl: '',
+				runRootPermanent: false
 			},
 			alreadyHeld: [libraryBuiltPath],
 			held: ['--already-held', libraryBuiltPath],
@@ -4384,7 +4414,8 @@ describe('cohortReceiptPushArguments', () => {
 				audience: 'https://cache.example.test',
 				cache: buildsCache,
 				runRoot: 'github:owner/repo/_cupboard-run/1',
-				runRootTtl: '2d'
+				runRootTtl: '2d',
+				runRootPermanent: false
 			},
 			extra: [
 				'--audience',

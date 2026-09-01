@@ -7,8 +7,7 @@ import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type RootName,
 	type StorePathHash,
-	type StorePathString,
-	type TtlSeconds
+	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
@@ -29,6 +28,7 @@ import {
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import {
+	type RootRetentionRequest,
 	type RootSetBodyInput,
 	rootSetMaxTargets,
 	type RootSetResponseInput,
@@ -120,14 +120,14 @@ export interface PushDependencies {
 	readonly referenceSource?: ReferenceSource;
 	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
 	readonly root?: RootName;
-	readonly ttlSeconds?: TtlSeconds;
+	readonly retention?: RootRetentionRequest;
 	// Attach each committed path to this run root during negotiation. Run-root
 	// retention is independent of target `root` and `retain`, so an unretained
 	// push can still contribute paths to its run root.
 	readonly runRoot?: UploadAttachRootInput;
 	// Unless this is false, retain targets under the named root or under one
 	// implicit pin per path. `--no-retain` makes no root requests, so only the
-	// cache's grace policy can protect a published path from collection.
+	// cache's configured grace can protect a published path from collection.
 	readonly retain?: boolean;
 	// `push` records retention once the server has reserved every path. By
 	// default it then waits for deferred verification; `--no-wait` returns while
@@ -343,7 +343,7 @@ export async function runPush(
 	const retention = planRetention(
 		publication.targetPaths,
 		dependencies.root,
-		dependencies.ttlSeconds,
+		dependencies.retention ?? { kind: 'inherit' },
 		dependencies.retain ?? true
 	);
 	// A reference-only publication reads no local metadata and needs no store
@@ -1303,13 +1303,13 @@ function pushSummaryPathRow(path: PushSummaryPathInput): ResultRow {
 
 	return {
 		label: path.storePathHash,
-		value: 'no retention grace policy matched'
+		value: 'no cache retention grace configured'
 	};
 }
 
 // Rooted and pinned pushes omit these rows unless the server returned at least
 // one grace fact. Otherwise the human report would repeat the absence of a
-// policy for every path. An unretained push always shows the rows because grace
+// configured grace for every path. An unretained push always shows the rows because grace
 // is its only possible retention. JSON output always includes every path fact.
 function pushSummaryPathRows(
 	paths: readonly PushSummaryPathInput[],
@@ -1343,11 +1343,11 @@ function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
 	];
 }
 
-// Distinguish a zero-grace policy from the absence of a matching policy.
-const zeroGraceRow = 'matched a zero-grace policy; no grace period applies';
+// Distinguish zero grace from a cache without configured grace.
+const zeroGraceRow = 'configured zero grace; no grace period applies';
 
 // An unretained push needs a positive grace fact to survive collection. Keep a
-// zero-grace match distinct from the absence of a matching policy in the
+// zero-grace configuration distinct from a cache without configured grace in the
 // warning.
 function unretainedUngracedWarning(
 	reporter: Reporter,
@@ -1375,8 +1375,8 @@ function unretainedUngracedWarning(
 	reporter.warn(
 		'unretained',
 		isZeroMatched
-			? 'a zero-grace retention policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
-			: 'no retention grace policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+			? 'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
+			: 'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
 	);
 }
 
@@ -1416,7 +1416,7 @@ function previewPathRow(decision: UploadPreviewDecision): ResultRow {
 
 	return {
 		label: decision.storePathHash,
-		value: 'no retention grace policy matched'
+		value: 'no cache retention grace configured'
 	};
 }
 
@@ -1472,7 +1472,7 @@ function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
 			{ label: 'Would set root', value: retention.name },
 			{
 				label: 'Root expiry',
-				value: planExpiry(retention.request.body.ttlSeconds)
+				value: planExpiry(retention.request.body.retention)
 			}
 		];
 	}
@@ -1481,15 +1481,21 @@ function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
 		{ label: 'Would pin paths', value: formatCount(retention.requests.length) },
 		{
 			label: 'Pin expiry',
-			value: planExpiry(retention.requests[0]?.body.ttlSeconds)
+			value: planExpiry(retention.requests[0]?.body.retention)
 		}
 	];
 }
 
-function planExpiry(ttlSeconds: number | undefined): string {
-	return ttlSeconds === undefined
+function planExpiry(
+	retention: RootSetBodyInput['retention'] | undefined
+): string {
+	if (retention === undefined || retention.kind === 'inherit') {
+		return 'inherits cache retention';
+	}
+
+	return retention.kind === 'permanent'
 		? 'permanent'
-		: `expires after ${formatCount(ttlSeconds)}s`;
+		: `expires after ${formatCount(retention.seconds)}s`;
 }
 
 interface AttachAttestationsDependencies {
@@ -1593,8 +1599,8 @@ export class RootTargetLimitError extends UsageError {
 	}
 }
 
-// The CLI cannot see whether the cache has a matching retention grace policy,
-// so the `--no-retain` label makes no claim about one.
+// The CLI cannot see the cache's configured retention grace, so the
+// `--no-retain` label makes no claim about it.
 const noRetainLabel = 'none (--no-retain)';
 
 type RetentionPlan =
@@ -1609,7 +1615,7 @@ type RetentionPlan =
 function planRetention(
 	paths: readonly string[],
 	root: RootName | undefined,
-	ttlSeconds: TtlSeconds | undefined,
+	retention: RootRetentionRequest,
 	shouldRetain: boolean
 ): RetentionPlan {
 	if (!shouldRetain) {
@@ -1620,13 +1626,11 @@ function planRetention(
 		throw new RootTargetLimitError(paths.length, rootSetMaxTargets);
 	}
 
-	const ttlFields = ttlSeconds === undefined ? {} : { ttlSeconds };
-
 	if (root !== undefined) {
 		return {
 			kind: 'root',
 			name: root,
-			request: { name: root, body: { targets: [...paths], ...ttlFields } }
+			request: { name: root, body: { targets: [...paths], retention } }
 		};
 	}
 
@@ -1634,7 +1638,7 @@ function planRetention(
 		kind: 'pins',
 		requests: paths.map((path) => ({
 			name: implicitPinName(StorePath.hash(path)),
-			body: { targets: [path], ...ttlFields }
+			body: { targets: [path], retention }
 		}))
 	};
 }
