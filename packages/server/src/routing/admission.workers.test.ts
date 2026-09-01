@@ -16,7 +16,7 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
@@ -34,12 +34,11 @@ import {
 	setCacheReadCredential,
 	setTenantStatus
 } from '../control/tenant-registry.ts';
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	isReadPasswordMatching,
 	readPasswordHashSchema,
@@ -72,7 +71,9 @@ async function admitWithFaults(
 		...env,
 		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
 	};
-	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug), {
+		kind: 'default'
+	});
 	await waitOnExecutionContext(ctx);
 
 	return entry?.entry;
@@ -97,7 +98,9 @@ function createBody(
 
 async function admit(slug: string): Promise<TenantEntry | undefined> {
 	const ctx = createExecutionContext();
-	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug), {
+		kind: 'default'
+	});
 	await waitOnExecutionContext(ctx);
 
 	return entry?.entry;
@@ -579,8 +582,22 @@ describe('cache admission', () => {
 		name: cacheNameSchema.parse('guides')
 	};
 
+	async function insertLiveCache(cache: CacheScope): Promise<void> {
+		await database()
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant: tenantIdSchema.parse('acme'),
+				...cacheIdentityColumns(cache),
+				access: 'private',
+				generation: secondCacheGeneration,
+				updatedAt: now
+			})
+			.run();
+	}
+
 	it("returns the selected cache's verifier from one batch", async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await insertLiveCache(builds);
 		await setCacheReadCredential(
 			database(),
 			tenantIdSchema.parse('acme'),
@@ -594,7 +611,7 @@ describe('cache admission', () => {
 			entry: { status: 'active' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
-			cache: undefined,
+			cache: { access: 'private', isDeleted: false },
 			batches: [3]
 		});
 	});
@@ -614,6 +631,7 @@ describe('cache admission', () => {
 
 	it("does not return a sibling cache's verifier", async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await insertLiveCache(guides);
 		await setCacheReadCredential(
 			database(),
 			tenantIdSchema.parse('acme'),
@@ -634,6 +652,7 @@ describe('cache admission', () => {
 
 	it('reads only the tenant row when no private cache is named', async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await insertLiveCache(builds);
 		await setCacheReadCredential(
 			database(),
 			tenantIdSchema.parse('acme'),
@@ -652,34 +671,38 @@ describe('cache admission', () => {
 		});
 	});
 
-	it('reports a deleted cache and keeps returning its verifier', async () => {
+	it('reports a deleted cache without retaining its verifier', async () => {
+		const tenant = tenantIdSchema.parse('acme');
+
 		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await insertLiveCache(builds);
 		await setCacheReadCredential(
 			database(),
-			tenantIdSchema.parse('acme'),
+			tenant,
 			builds,
 			cacheCredential,
 			now
 		);
 		await refreshTenantMembership(env);
-		await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
-			.insert(migrationSchema.cacheLifecycles)
-			.values({
-				tenant: tenantIdSchema.parse('acme'),
-				...cacheMigrationColumns(builds, 'private'),
-				access: 'private',
-				generation: secondCacheGeneration,
-				deletedAt: now,
-				updatedAt: now
-			})
+		await database()
+			.update(d1Schema.cacheLifecycle)
+			.set({ deletedAt: now, updatedAt: now })
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.cacheLifecycle.cacheKind,
+						d1Schema.cacheLifecycle.cacheName,
+						builds
+					)
+				)
+			)
 			.run();
 
-		// A deletion keeps the cache credential, so the reader still authenticates.
-		// The deleted cache state causes the content request to fail.
 		expect(await admitCache('acme', builds)).toStrictEqual({
 			entry: { status: 'active' },
-			cacheUser: 'reader',
-			cacheAcceptsPassword: true,
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
 			cache: { access: 'private', isDeleted: true },
 			batches: [3]
 		});
@@ -687,6 +710,7 @@ describe('cache admission', () => {
 
 	it('refuses an offboarded tenant for a private cache', async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
+		await insertLiveCache(builds);
 		await setCacheReadCredential(
 			database(),
 			tenantIdSchema.parse('acme'),

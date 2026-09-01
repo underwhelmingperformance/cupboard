@@ -27,24 +27,6 @@ function scopeKey(scope: CacheScope): string {
 	return scope.kind === 'default' ? 'default' : `named:${scope.name}`;
 }
 
-function legacyCacheKey(scope: CacheScope, access: CacheAccessMode): string {
-	if (scope.kind === 'default') {
-		return '';
-	}
-
-	return access === 'private' ? `private/${scope.name}` : scope.name;
-}
-
-export function cacheMigrationColumns(
-	scope: CacheScope,
-	access: CacheAccessMode
-) {
-	return {
-		legacyCache: legacyCacheKey(scope, access),
-		...cacheIdentityColumns(scope)
-	};
-}
-
 export async function revokeCacheLifecycle(
 	context: ServerContext,
 	tenant: TenantId,

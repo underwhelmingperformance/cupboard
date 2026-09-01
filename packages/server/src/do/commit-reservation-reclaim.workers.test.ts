@@ -10,10 +10,10 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
@@ -331,13 +331,16 @@ async function seedEdge(
 		const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
 			schema: d1Schema
 		});
+		const tenant = instance.context.requireTenant();
+		const cache = { kind: 'default' } as const;
 
-		await database.insert(migrationSchema.blobReferences).values({
-			tenant: instance.context.requireTenant(),
-			...cacheMigrationColumns({ kind: 'default' }, 'public'),
+		await database.insert(d1Schema.blobReference).values({
+			tenant,
+			...cacheIdentityColumns(cache),
 			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
 			generation: narInfoGenerationSchema.parse(generation),
-			narHash
+			narHash,
+			cacheGeneration: currentCacheGeneration(tenant, cache)
 		});
 	});
 }

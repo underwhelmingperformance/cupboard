@@ -19,10 +19,11 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -356,26 +357,24 @@ describe('reuse-view lookup hardening', () => {
 		// Use the same tenant, cache, and path hash but older generations. This is
 		// the shape left by an undrained deletion backlog.
 		const staleCount = 20;
-		const d1 = drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReferences: migrationSchema.blobReferences }
-		});
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		const staleReferences = Array.from({ length: staleCount }, (_, index) => ({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(pr1Cache, 'public'),
+			...cacheIdentityColumns(pr1Cache),
 			storePathHash: parsedHash,
 			generation: narInfoGenerationSchema.parse(live.generation + index + 1),
-			narHash: parsedNarHash
+			narHash: parsedNarHash,
+			cacheGeneration: currentCacheGeneration(fixtureTenant, pr1Cache)
 		}));
 
 		const referenceChunks = chunkByStatementParameters(
 			staleReferences,
-			(references) =>
-				d1.insert(migrationSchema.blobReferences).values([...references])
+			(references) => d1.insert(d1Schema.blobReference).values([...references])
 		);
 
 		for (const references of referenceChunks) {
 			await d1
-				.insert(migrationSchema.blobReferences)
+				.insert(d1Schema.blobReference)
 				.values([...references])
 				.run();
 		}

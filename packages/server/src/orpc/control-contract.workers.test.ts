@@ -53,6 +53,19 @@ function controlClient(token?: string): ControlClient {
 	return createORPCClient(link);
 }
 
+async function insertNamedCacheLifecycle(
+	tenant = 'acme',
+	cacheName = 'builds'
+): Promise<void> {
+	await env.CUPBOARD_DB.prepare(
+		`INSERT INTO cache_lifecycle (
+			tenant, cache_kind, cache_name, access, generation, updated_at
+		) VALUES (?, 'named', ?, 'private', 1, '2026-01-01T00:00:00.000Z')`
+	)
+		.bind(tenant, cacheName)
+		.run();
+}
+
 describe('control contract round trip', () => {
 	beforeEach(resetTestServer);
 
@@ -338,6 +351,7 @@ describe('control contract round trip', () => {
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
+		await insertNamedCacheLifecycle();
 		const rotated = await client.tenants.rotateNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds',
@@ -359,6 +373,32 @@ describe('control contract round trip', () => {
 				cache: { kind: 'named', name: 'builds' },
 				hasCredential: false
 			}
+		});
+	});
+
+	it('returns the selected missing cache as a typed contract error', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const [error] = await safe(
+			client.tenants.rotateNamedCacheReadCredential({
+				id: 'acme',
+				cacheName: 'missing',
+				read: { user: 'reader', password: readPassword }
+			})
+		);
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			code: 'CACHE_NOT_FOUND',
+			status: StatusCodes.NOT_FOUND,
+			data: { cache: { kind: 'named', name: 'missing' } }
 		});
 	});
 
@@ -414,6 +454,7 @@ describe('control contract round trip', () => {
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
+		await insertNamedCacheLifecycle();
 		const client = controlClient(
 			await issueControlAdminToken(
 				'operator',

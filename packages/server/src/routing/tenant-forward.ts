@@ -8,7 +8,7 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 import { tenantReadFetch } from './tenant-read-handler.ts';
 
 /**
- * Strips the public tenant prefix and any client-supplied hint token. Upload
+ * Strips the external tenant prefix and any client-supplied hint token. Upload
  * negotiation adds a server-issued token only after this sanitisation.
  */
 export function innerRequest(context: Context<WorkerHonoEnv>): Request {

@@ -136,7 +136,9 @@ export const blobReference = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
-		cacheGeneration: integer('cache_generation').$type<CacheGeneration>()
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull()
 	},
 	(table) => [
 		check(
@@ -248,10 +250,9 @@ export const tenant = sqliteTable(
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// Private caches store the Basic-auth user, salt, and password verifier.
-		// Public caches keep all three columns null. A private cache with an
-		// incomplete verifier rejects every read; the plaintext password is never
-		// stored.
+		// These columns store the tenant fallback read verifier. A cache-specific
+		// verifier takes precedence when one exists. An incomplete verifier rejects
+		// authentication; the plaintext password is never stored.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),

@@ -11,7 +11,7 @@
 const cacheKeyVersion = '2';
 
 /**
- * Creates the request used as the Workers Cache key for a public tenant read.
+ * Creates the request used as the Workers Cache key for a public cache read.
  *
  * Client query parameters, fragments, and read credentials do not select
  * different cache content. Every request passed here has cleared the guard
