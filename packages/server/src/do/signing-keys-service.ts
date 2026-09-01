@@ -12,6 +12,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import {
 	type InstanceName,
 	instanceNameSchema
@@ -565,7 +566,8 @@ export class SigningKeysService {
 							signingKeyId: row.keyId,
 							entriesJson: JSON.stringify(entries),
 							createdAt,
-							expiresAt
+							expiresAt,
+							writerEpoch: cacheWriterEpoch
 						})
 						.run();
 				}

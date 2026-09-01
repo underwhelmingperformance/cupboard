@@ -20,6 +20,7 @@ import {
 	type AttestationNegotiateRequest,
 	type AttestationNegotiateResponseInput
 } from '@cupboard/protocol/attestations';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -65,6 +66,7 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import { readR2CompatibilityState } from '../migration/r2-compatibility.ts';
 
 import {
 	type AttestationCasService,
@@ -658,7 +660,8 @@ export class AttestationsService {
 					digest: bundle.digest,
 					r2Key,
 					createdAt: isoTimestamp(now),
-					expiresAt: isoTimestamp(expiresAt)
+					expiresAt: isoTimestamp(expiresAt),
+					writerEpoch: cacheWriterEpoch
 				})
 				.run();
 
@@ -751,6 +754,7 @@ export class AttestationsService {
 		if (committed === undefined) {
 			return uncachedNotFoundResponse();
 		}
+		const compatibility = await readR2CompatibilityState(this.context.d1);
 
 		return this.serveTenantObject(
 			request,
@@ -763,11 +767,13 @@ export class AttestationsService {
 			'application/json; charset=utf-8',
 			'no-store',
 			(object) => isListOfCommittedGeneration(object, cache, committed),
-			legacyAttestationListObjectKey(
-				this.context.requireTenant(),
-				storePathHash,
-				cache.scope
-			)
+			compatibility.readLegacyObjects
+				? legacyAttestationListObjectKey(
+						this.context.requireTenant(),
+						storePathHash,
+						cache.scope
+					)
+				: undefined
 		);
 	}
 
@@ -821,12 +827,14 @@ export class AttestationsService {
 				? await this.narInfoObjects.committedNarInfoRow(cache, storePathHash)
 				: undefined;
 		const resolvedGeneration = generation ?? committedRow?.generation;
+		const compatibility = await readR2CompatibilityState(this.context.d1);
+		const keys = compatibility.writeLegacyObjects ? [key, legacyKey] : [key];
 
 		// The list object is path-keyed, so its mutations order behind any
 		// abandoned mutation of the same key, exactly as the narinfo objects do.
 		if (resolvedGeneration === undefined) {
-			await this.context.objectWrites.write([key, legacyKey], () =>
-				this.context.env.BLOBS.delete([key, legacyKey])
+			await this.context.objectWrites.write(keys, () =>
+				this.context.env.BLOBS.delete(keys)
 			);
 			return;
 		}
@@ -838,8 +846,8 @@ export class AttestationsService {
 		);
 
 		if (descriptors.length === 0) {
-			await this.context.objectWrites.write([key, legacyKey], () =>
-				this.context.env.BLOBS.delete([key, legacyKey])
+			await this.context.objectWrites.write(keys, () =>
+				this.context.env.BLOBS.delete(keys)
 			);
 			return;
 		}
@@ -858,12 +866,13 @@ export class AttestationsService {
 				[listGenerationMetadataKey]: String(resolvedGeneration)
 			}
 		};
-		await this.context.objectWrites.write([key, legacyKey], () =>
-			Promise.all([
-				this.context.env.BLOBS.put(key, rendered, options),
-				this.context.env.BLOBS.put(legacyKey, rendered, options)
-			])
-		);
+		await this.context.objectWrites.write(keys, async () => {
+			await this.context.env.BLOBS.put(key, rendered, options);
+
+			if (compatibility.writeLegacyObjects) {
+				await this.context.env.BLOBS.put(legacyKey, rendered, options);
+			}
+		});
 	}
 
 	/**

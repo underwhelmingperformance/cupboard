@@ -11,7 +11,7 @@ import {
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -26,6 +26,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
 import {
+	legacyNarInfoObjectKey,
 	narInfoObjectKey,
 	narObjectKey,
 	type NarObjectName
@@ -698,6 +699,36 @@ describe('private narinfo reference gate', () => {
 		}).toStrictEqual({
 			status: StatusCodes.NOT_FOUND,
 			cacheControl: 'no-store'
+		});
+	});
+
+	it('refuses a legacy object after read fallback closes', async () => {
+		await seedOwnedNarReference(privateCache, 'private');
+		await env.BLOBS.put(
+			legacyNarInfoObjectKey(tenant, referencingPath, privateCache),
+			'narinfo-bytes',
+			{ customMetadata: currentObjectMetadata }
+		);
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.deploymentRuntimeControl)
+			.set({ legacyR2ReadFallback: 'disabled' })
+			.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'));
+
+		const response = await serveNarInfo(
+			new Request('https://cache.example/probe.narinfo'),
+			env,
+			tenant,
+			privateRead,
+			referencingPath,
+			true
+		);
+		const missing = await missingStorePathHashes(env, tenant, privateRead, [
+			referencingPath
+		]);
+
+		expect({ status: response.status, missing }).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			missing: [referencingPath]
 		});
 	});
 });

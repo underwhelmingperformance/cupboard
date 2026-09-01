@@ -2,6 +2,10 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	deploymentRuntimeEvidence,
+	deploymentRuntimePath
+} from './deployment-runtime.ts';
+import {
 	WorkersCachePurgeError,
 	WorkersCacheUnavailableError
 } from './errors.ts';
@@ -33,7 +37,13 @@ export default class TenantWorker extends WorkerEntrypoint<TenantEnv> {
 Serves cacheable reads admitted by the control Worker.
 */
 export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
-	override fetch(request: Request): Promise<Response> {
+	override async fetch(request: Request): Promise<Response> {
+		if (new URL(request.url).pathname === deploymentRuntimePath) {
+			return Response.json(await deploymentRuntimeEvidence(this.env), {
+				headers: { 'cache-control': 'no-store' }
+			});
+		}
+
 		return tenantReadFetch(request, this.env, this.ctx);
 	}
 

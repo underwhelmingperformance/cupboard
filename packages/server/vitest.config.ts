@@ -58,6 +58,7 @@ export default defineConfig(async () => {
 									TENANT_CACHE: 'tenant-cache',
 									CRON_STATE: 'cron-state'
 								},
+								r2Buckets: ['BLOBS', 'DEPLOYMENT_RECOVERY'],
 								queueProducers: {
 									MAINTENANCE_QUEUE: 'cupboard-maintenance'
 								},

@@ -30,6 +30,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -47,6 +48,7 @@ import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	RetentionAdministrationFencedError,
 	StoredOidcTrustInvalidError,
 	TenantNotConfiguredError
 } from '../errors.ts';
@@ -253,6 +255,20 @@ export class ServerContext {
 		}
 
 		return row.tenant;
+	}
+
+	async requireRetentionAdministration(): Promise<void> {
+		const control = await this.d1
+			.select({
+				state: d1Schema.deploymentRuntimeControl.retentionAdministration
+			})
+			.from(d1Schema.deploymentRuntimeControl)
+			.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'))
+			.get();
+
+		if (control?.state !== 'open') {
+			throw new RetentionAdministrationFencedError();
+		}
 	}
 }
 

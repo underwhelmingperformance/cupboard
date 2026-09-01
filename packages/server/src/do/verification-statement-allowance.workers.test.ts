@@ -342,7 +342,7 @@ describe('verification claim D1 statement allowance', () => {
 			passRequests: driven.claims.map((claim) => claim.passRequests),
 			pendingRows: driven.pendingRows
 		}).toStrictEqual({
-			claimStatements: [26, 26, 26, 26],
+			claimStatements: [28, 28, 28, 28],
 			overAllowanceClaims: [],
 			statementAllowance: 50,
 			pendingBefore: [reuseRows, 6, 4, 2],
@@ -575,7 +575,7 @@ describe('recorded verdict D1 statement allowance', () => {
 			claims: recordedBatch,
 			verdictsPerInvocation: 1,
 			appliedByRecord: 1,
-			recordStatements: 22,
+			recordStatements: 23,
 			overAllowanceInvocations: [],
 			statementAllowance: 50,
 			heldAfterRecord: recordedBatch - 1
@@ -614,7 +614,7 @@ describe('recorded verdict D1 statement allowance', () => {
 			claims: drainedBatch,
 			appliedByRecord: 1,
 			heldAfterEachInvocation: [7, 6, 5, 4, 3, 2, 1, 0],
-			statementsPerInvocation: [22, 21, 21, 21, 21, 21, 21, 21],
+			statementsPerInvocation: [23, 22, 22, 22, 22, 22, 22, 22],
 			overAllowanceInvocations: [],
 			statementAllowance: 50,
 			heldVerdicts: 0,

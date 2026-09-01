@@ -43,15 +43,15 @@ import m0040 from './0040_dusty_tombstone.sql';
 import m0041 from './0041_pending_upload_recorded_verdict.sql';
 import m0042 from './0042_cache_access_expand.sql';
 import m0043 from './0043_cache_access_backfill.sql';
-import m0044 from './0044_cache_access_assertions.sql';
-import m0045 from './0045_cache_access_contract.sql';
-import m0046 from './0046_cache_access_triggers.sql';
-import m0047 from './0047_cache_grant_json.sql';
-import m0048 from './0048_cache_incarnation_expand.sql';
-import m0049 from './0049_cache_retention_expand.sql';
-import m0050 from './0050_cache_retention_empty_rule_set.sql';
-import m0051 from './0051_cache_retention_migration_state.sql';
-import m0052 from './0052_cache_retention_migration_rules.sql';
+import m0044 from './0044_cache_grant_json.sql';
+import m0045 from './0045_cache_incarnation_expand.sql';
+import m0046 from './0046_cache_retention_expand.sql';
+import m0047 from './0047_cache_retention_empty_rule_set.sql';
+import m0048 from './0048_cache_retention_migration_state.sql';
+import m0049 from './0049_cache_retention_migration_rules.sql';
+import m0050 from './0050_cache_access_assertions.sql';
+import m0051 from './0051_cache_access_contract.sql';
+import m0052 from './0052_cache_access_triggers.sql';
 
 export default {
 	journal,

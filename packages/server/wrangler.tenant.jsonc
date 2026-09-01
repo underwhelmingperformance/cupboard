@@ -17,6 +17,7 @@
 	"preview_urls": false,
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
+	"version_metadata": { "binding": "WORKER_VERSION" },
 	"cache": {
 		"enabled": true,
 		"cross_version_cache": true
@@ -54,6 +55,8 @@
 		]
 	},
 	"vars": {
+		"CUPBOARD_RUNTIME_STAGE": "cache-storage-contract",
+		"CUPBOARD_DEPLOYMENT_ARTIFACT_ID": "0000000000000000000000000000000000000000000000000000000000000000",
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
 		// Local test and development harnesses set this explicitly so their OIDC

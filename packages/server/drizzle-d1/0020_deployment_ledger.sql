@@ -7,6 +7,16 @@ CREATE TABLE `d1_application_mutation_fence` (
 	CONSTRAINT "d1_application_mutation_fence_revision_nonnegative" CHECK("d1_application_mutation_fence"."revision" >= 0)
 );
 --> statement-breakpoint
+CREATE TABLE `d1_application_mutation_admission` (
+	`id` text PRIMARY KEY NOT NULL,
+	`fence_revision` integer NOT NULL,
+	`expires_at` text NOT NULL,
+	`created_at` text NOT NULL,
+	CONSTRAINT "d1_application_mutation_admission_revision_nonnegative" CHECK(`fence_revision` >= 0)
+);
+--> statement-breakpoint
+CREATE INDEX `d1_application_mutation_admission_drain_idx` ON `d1_application_mutation_admission` (`fence_revision`,`expires_at`);
+--> statement-breakpoint
 CREATE TABLE `deployment_head` (
 	`id` text PRIMARY KEY NOT NULL,
 	`manifest_id` text NOT NULL,

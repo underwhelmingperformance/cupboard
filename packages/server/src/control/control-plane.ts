@@ -110,7 +110,11 @@ import {
 	listControlTrust,
 	removeControlTrust
 } from './control-trust.ts';
-import { deploymentAdvance, deploymentStatus } from './deployment.ts';
+import {
+	deploymentAdvance,
+	deploymentServiceDependencies,
+	deploymentStatus
+} from './deployment.ts';
 import { isGlobalAdminPrincipal } from './global-admin.ts';
 import {
 	initialiseInstanceConfig,
@@ -173,7 +177,11 @@ export function controlDeploymentAdvance(
 	env: Env,
 	input: import('@cupboard/protocol/deployment').DeploymentAdvanceInput
 ): Promise<import('@cupboard/protocol/deployment').DeploymentAdvanceResult> {
-	return deploymentAdvance(controlDatabase(env), input);
+	return deploymentAdvance(
+		controlDatabase(env),
+		input,
+		deploymentServiceDependencies(env)
+	);
 }
 
 // RFC 8693 token exchange for the control plane: the unverified claims of an

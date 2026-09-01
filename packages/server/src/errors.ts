@@ -31,6 +31,30 @@ export abstract class ServerHttpError extends Error {
 	readonly retryAfterSeconds?: number;
 }
 
+export class AppWritesFencedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor() {
+		super(
+			'Application writes are temporarily paused for a deployment migration'
+		);
+		this.name = 'AppWritesFencedError';
+	}
+}
+
+export class RetentionAdministrationFencedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor() {
+		super(
+			'Retention administration is temporarily paused for a deployment migration'
+		);
+		this.name = 'RetentionAdministrationFencedError';
+	}
+}
+
 export class DeploymentStateConflictError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

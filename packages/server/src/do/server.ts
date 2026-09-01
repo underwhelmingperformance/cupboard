@@ -4,6 +4,7 @@ import {
 	type CacheScope,
 	cacheScopeSchema,
 	isSameCacheScope,
+	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
@@ -11,6 +12,11 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import {
+	cachePredecessorLocalMigrationCeiling,
+	cacheWriterEpoch
+} from '@cupboard/protocol/cache-deployment-manifest';
+import type { WriterEpoch } from '@cupboard/protocol/deployment-manifest';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
@@ -34,7 +40,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
-import { and, eq, isNull, or } from 'drizzle-orm';
+import { and, asc, eq, gt, isNull, ne, or } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -43,9 +49,14 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { readTenantReadVerifier } from '../control/tenant-membership.ts';
-import { type ResolvedCache } from '../db/cache.ts';
+import {
+	type CacheId,
+	cacheScopeFromRow,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
+import { deploymentManifest } from '../deployment-manifest.generated.ts';
 import {
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
@@ -76,6 +87,8 @@ import {
 	reconcileCacheCatalogue as reconcileStoredCacheCatalogue
 } from '../migration/cache-access.ts';
 import { reconcileLocalCacheIncarnations } from '../migration/cache-incarnation.ts';
+import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
+import { runTenantLocalContractMigration } from '../migration/local-contract.ts';
 import {
 	loggerMiddleware,
 	requestLogger,
@@ -158,7 +171,13 @@ import {
 	maintenancePassStatements,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
-import { applyMigrations, migrationsThrough } from './migrate.ts';
+import {
+	admitMigrationSource,
+	applyMigrations,
+	hasAppliedMigrationAfter,
+	migrationsThrough,
+	migrationsThroughTag
+} from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type NegotiateHints,
@@ -176,6 +195,11 @@ import {
 } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
+import {
+	additiveLocalMigrationCeiling,
+	configuredRuntimeStage,
+	localMigrationCeiling
+} from './runtime-stage.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { enterStatementAllowanceOnDispatch } from './statement-scope.ts';
 import { StatsService } from './stats-service.ts';
@@ -367,6 +391,13 @@ function mergeGarbageCollectionContinuation(
  * the D1 binding enforces the allowance during settlement. Unprocessed rows
  * remain pending, and the pass requests another verification run.
  */
+const durableObjectMigrationDigests = new Map(
+	deploymentManifest.durableObjectMigrations.map((migration) => [
+		migration.id,
+		migration.sha256
+	])
+);
+
 export const verifyBackstopReuseSettleLimit = Math.floor(
 	(maintenancePassStatements - pendingSettlePrefetchStatements) /
 		statementsPerPendingSettleRow
@@ -1483,7 +1514,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		applyMigrations(this.context.db, migrationsThrough(migrations, 43));
+		const runtimeStage = configuredRuntimeStage(this.context.env);
+		admitMigrationSource(
+			this.context.db,
+			migrationsThroughTag(migrations, cachePredecessorLocalMigrationCeiling),
+			migrationsThrough(migrations, localMigrationCeiling(runtimeStage)),
+			durableObjectMigrationDigests,
+			cacheWriterEpoch
+		);
+		applyMigrations(
+			this.context.db,
+			migrationsThrough(migrations, additiveLocalMigrationCeiling),
+			undefined,
+			{ enforceCeiling: false }
+		);
 		await this.assertZstdAvailable();
 
 		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
@@ -1501,12 +1545,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await reconcileStoredCacheCatalogue(this.context, tenant);
 		}
 
-		applyMigrations(this.context.db, migrations);
 		await reconcileLocalCacheIncarnations(this.context, tenant);
 
 		if (!isCatalogueComplete) {
 			await markCacheCatalogueComplete(this.context, tenant);
 		}
+
+		await runTenantLocalContractMigration(
+			this.context,
+			tenant,
+			() =>
+				!hasAppliedMigrationAfter(
+					this.context.db,
+					migrations,
+					additiveLocalMigrationCeiling
+				),
+			() => {
+				applyMigrations(
+					this.context.db,
+					migrationsThrough(migrations, localMigrationCeiling(runtimeStage))
+				);
+			}
+		);
 
 		this.oidcTrust.seedOwnerRule();
 
@@ -2123,6 +2183,74 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return (await this.ctx.storage.get(gcContinuationKey)) !== undefined;
 	}
 
+	private async advanceR2GenerationMetadataMigration(): Promise<{
+		readonly outcome: 'complete' | 'pending';
+	}> {
+		const cursorKey = 'deployment-migration/cache-r2-generation-metadata';
+		const cursor = await this.ctx.storage.get<{
+			readonly cacheId: CacheId;
+			readonly storePathHash: StorePathHash;
+		}>(cursorKey);
+		const afterCursor =
+			cursor === undefined
+				? undefined
+				: or(
+						gt(schema.narInfos.cacheId, cursor.cacheId),
+						and(
+							eq(schema.narInfos.cacheId, cursor.cacheId),
+							gt(schema.narInfos.storePathHash, cursor.storePathHash)
+						)
+					);
+		const rows = this.context.db
+			.select({
+				cacheId: schema.caches.id,
+				kind: schema.caches.kind,
+				name: schema.caches.name,
+				access: schema.caches.access,
+				generation: schema.caches.generation,
+				readRevision: schema.caches.readRevision,
+				storePathHash: schema.narInfos.storePathHash
+			})
+			.from(schema.narInfos)
+			.innerJoin(schema.caches, eq(schema.caches.id, schema.narInfos.cacheId))
+			.where(afterCursor)
+			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
+			.limit(32)
+			.all();
+
+		if (rows.length === 0) {
+			await this.ctx.storage.delete(cursorKey);
+
+			return { outcome: 'complete' };
+		}
+
+		for (const row of rows) {
+			const cache: ResolvedCache = {
+				id: row.cacheId,
+				scope: cacheScopeFromRow(row),
+				access: row.access,
+				generation: row.generation,
+				readRevision: row.readRevision
+			};
+
+			await this.narInfoObjects.ensureNarInfoObject(cache, row.storePathHash);
+			await this.attestations.materialiseList(cache, row.storePathHash);
+		}
+
+		const last = rows.at(-1);
+
+		if (last === undefined) {
+			throw new Error('R2 metadata migration produced an empty batch');
+		}
+
+		await this.ctx.storage.put(cursorKey, {
+			cacheId: last.cacheId,
+			storePathHash: last.storePathHash
+		});
+
+		return { outcome: 'pending' };
+	}
+
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
@@ -2610,6 +2738,80 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise(tenant);
 	}
 
+	async advanceDeploymentMigration(
+		tenant: TenantId,
+		migration:
+			| 'cache-catalogue-reconciliation'
+			| 'cache-r2-generation-metadata'
+			| 'cache-retention-properties'
+			| 'cache-local-storage-contract'
+	): Promise<{ readonly outcome: 'complete' | 'pending' }> {
+		await this.initialise(tenant);
+
+		if (migration === 'cache-catalogue-reconciliation') {
+			return { outcome: 'complete' };
+		}
+
+		if (migration === 'cache-retention-properties') {
+			const outcome = await advanceCacheRetentionMigration(this.context.db);
+
+			return { outcome: outcome.status };
+		}
+
+		if (migration === 'cache-local-storage-contract') {
+			return { outcome: 'complete' };
+		}
+
+		return this.advanceR2GenerationMetadataMigration();
+	}
+
+	async drainWriterEpoch(
+		tenant: TenantId,
+		target: WriterEpoch
+	): Promise<{ readonly outcome: 'complete' }> {
+		await this.initialise(tenant);
+
+		for (const socket of this.ctx.getWebSockets()) {
+			const attachment = readCommitSessionAttachment(socket);
+
+			if (attachment?.writerEpoch === target) {
+				continue;
+			}
+
+			socket.close(1012, 'deployment writer cutover');
+		}
+
+		this.context.db.transaction((transaction) => {
+			transaction
+				.update(schema.pendingUploads)
+				.set({ writerEpoch: target })
+				.where(ne(schema.pendingUploads.writerEpoch, target))
+				.run();
+			transaction
+				.update(schema.pendingAttestations)
+				.set({ writerEpoch: target })
+				.where(ne(schema.pendingAttestations.writerEpoch, target))
+				.run();
+			transaction
+				.update(schema.narInfoDeletions)
+				.set({ writerEpoch: target })
+				.where(ne(schema.narInfoDeletions.writerEpoch, target))
+				.run();
+			transaction
+				.update(schema.cachePurgeContinuations)
+				.set({ writerEpoch: target })
+				.where(ne(schema.cachePurgeContinuations.writerEpoch, target))
+				.run();
+			transaction
+				.update(schema.garbageCollectionScans)
+				.set({ writerEpoch: target })
+				.where(ne(schema.garbageCollectionScans.writerEpoch, target))
+				.run();
+		});
+
+		return { outcome: 'complete' };
+	}
+
 	// The socket attachment preserves cache and session identity across
 	// hibernation. Keepalive pings use the automatic response and never wake the
 	// Durable Object.
@@ -2617,10 +2819,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		socket: WebSocket,
 		message: string | ArrayBuffer
 	): Promise<void> {
+		await this.initialise();
+
 		const attachment = readCommitSessionAttachment(socket);
 
 		if (attachment === undefined) {
 			socket.close(1011, 'missing session');
+			return;
+		}
+
+		if (attachment.writerEpoch !== cacheWriterEpoch) {
+			socket.close(1012, 'deployment writer cutover');
 			return;
 		}
 

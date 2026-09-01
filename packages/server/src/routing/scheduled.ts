@@ -13,6 +13,7 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { withAppMutationAdmission } from '../db/app-mutation-admission.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
@@ -298,78 +299,85 @@ export async function executeMaintenanceQueueMessage(
 	options: ExecuteMaintenanceQueueOptions = {}
 ): Promise<MaintenanceQueueDecision> {
 	try {
-		switch (message.kind) {
-			case 'cache-catalogue-migration': {
-				await (options.migrateCacheCatalogue ?? migrateCacheCatalogue)(
-					env,
-					message.tenant
-				);
-				return { action: 'ack' };
-			}
-			case 'tenant-maintenance': {
-				return await executeTenantMaintenanceMessage(
-					logger,
-					env,
-					message.tenant,
-					options.maintainTenant ?? maintainTenant
-				);
-			}
-			case 'tenant-verify': {
-				// A commit asked for this pass because it stored a blob pending
-				// verification, so it runs regardless of the maintenance cadence.
-				await (options.verifyTenant ?? verifyTenant)(
-					logger,
-					env,
-					message.tenant
-				);
-				return { action: 'ack' };
-			}
-			case 'offboard': {
-				return await executeOffboardMessage(
-					logger,
-					env,
-					message.tenant,
-					options.drainTenant ?? drainTenant
-				);
-			}
-			case 'blob-reaper': {
-				await (options.runBlobReaper ?? runBlobReaperPhase)(
-					logger,
-					env,
-					message.phase ?? 'delete-existing'
-				);
-				return { action: 'ack' };
-			}
-			case 'cas-reaper': {
-				await (options.runCasReaper ?? runCasReaperPhase)(
-					logger,
-					env,
-					message.phase ?? 'delete-existing'
-				);
-				return { action: 'ack' };
-			}
-			case 'blob-demote': {
-				await (options.runReaperDemote ?? runReaperDemote)(logger, env);
-				return { action: 'ack' };
-			}
-			case 'cas-demote': {
-				await (options.runCasReaperDemote ?? runCasReaperDemote)(logger, env);
-				return { action: 'ack' };
-			}
-			case 'control-key-retirement': {
-				await (options.runControlKeyRetirement ?? runControlKeyRetirement)(
-					logger,
-					env
-				);
-				return { action: 'ack' };
-			}
-		}
+		return await withAppMutationAdmission(env.CUPBOARD_DB, () =>
+			executeAdmittedMaintenanceQueueMessage(logger, env, message, options)
+		);
 	} catch (error) {
 		return {
 			action: 'retry',
 			delaySeconds: queueRetryDelaySeconds,
 			reason: errorSummary(error)
 		};
+	}
+}
+
+async function executeAdmittedMaintenanceQueueMessage(
+	logger: Logger,
+	env: Env,
+	message: MaintenanceQueueMessage,
+	options: ExecuteMaintenanceQueueOptions
+): Promise<MaintenanceQueueDecision> {
+	switch (message.kind) {
+		case 'cache-catalogue-migration': {
+			await (options.migrateCacheCatalogue ?? migrateCacheCatalogue)(
+				env,
+				message.tenant
+			);
+			return { action: 'ack' };
+		}
+		case 'tenant-maintenance': {
+			return await executeTenantMaintenanceMessage(
+				logger,
+				env,
+				message.tenant,
+				options.maintainTenant ?? maintainTenant
+			);
+		}
+		case 'tenant-verify': {
+			// A commit asked for this pass because it stored a blob pending
+			// verification, so it runs regardless of the maintenance cadence.
+			await (options.verifyTenant ?? verifyTenant)(logger, env, message.tenant);
+			return { action: 'ack' };
+		}
+		case 'offboard': {
+			return await executeOffboardMessage(
+				logger,
+				env,
+				message.tenant,
+				options.drainTenant ?? drainTenant
+			);
+		}
+		case 'blob-reaper': {
+			await (options.runBlobReaper ?? runBlobReaperPhase)(
+				logger,
+				env,
+				message.phase ?? 'delete-existing'
+			);
+			return { action: 'ack' };
+		}
+		case 'cas-reaper': {
+			await (options.runCasReaper ?? runCasReaperPhase)(
+				logger,
+				env,
+				message.phase ?? 'delete-existing'
+			);
+			return { action: 'ack' };
+		}
+		case 'blob-demote': {
+			await (options.runReaperDemote ?? runReaperDemote)(logger, env);
+			return { action: 'ack' };
+		}
+		case 'cas-demote': {
+			await (options.runCasReaperDemote ?? runCasReaperDemote)(logger, env);
+			return { action: 'ack' };
+		}
+		case 'control-key-retirement': {
+			await (options.runControlKeyRetirement ?? runControlKeyRetirement)(
+				logger,
+				env
+			);
+			return { action: 'ack' };
+		}
 	}
 }
 

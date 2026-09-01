@@ -6,6 +6,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
 import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
@@ -672,14 +673,21 @@ export class DeletionQueueService {
 	): void {
 		handle
 			.insert(schema.narInfoDeletions)
-			.values({ cacheId, storePathHash, narHash, generation, createdAt: now })
+			.values({
+				cacheId,
+				storePathHash,
+				narHash,
+				generation,
+				createdAt: now,
+				writerEpoch: cacheWriterEpoch
+			})
 			.onConflictDoUpdate({
 				target: [
 					schema.narInfoDeletions.cacheId,
 					schema.narInfoDeletions.storePathHash,
 					schema.narInfoDeletions.generation
 				],
-				set: { narHash, createdAt: now }
+				set: { narHash, createdAt: now, writerEpoch: cacheWriterEpoch }
 			})
 			.run();
 	}

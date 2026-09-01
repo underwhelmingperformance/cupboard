@@ -7,11 +7,17 @@ import {
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { CacheId } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	legacyNarInfoObjectKey,
+	narInfoObjectKey,
+	narObjectKey
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
@@ -74,6 +80,17 @@ async function narInfoObjectText(
 	);
 
 	return object === null ? undefined : object.text();
+}
+
+async function disableLegacyR2Compatibility(): Promise<void> {
+	await drizzle(env.CUPBOARD_DB, { schema: d1Schema })
+		.update(d1Schema.deploymentRuntimeControl)
+		.set({
+			legacyR2Writes: 'disabled',
+			legacyR2ReadFallback: 'disabled',
+			legacyR2Deletion: 'eligible'
+		})
+		.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'));
 }
 
 function stallingPutBucket(
@@ -370,5 +387,37 @@ describe('narinfo publication after a concurrent row change', () => {
 			body: await repaired?.text(),
 			narUrl: repaired?.customMetadata?.narUrl
 		}).toStrictEqual({ body: current, narUrl: currentUrl });
+	});
+
+	it('stops writing legacy narinfo objects after compatibility closes', async () => {
+		await disableLegacyR2Compatibility();
+		const token = await initialise();
+		const nar = await verifiableNar('native-narinfo-only');
+		const metadata = uploadMetadata({
+			name: 'native-only',
+			storePathHash: 'f'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, metadata, nar);
+
+		const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
+		const nativeObject = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, storePathHash, cacheScope)
+		);
+		const legacyObject = await env.BLOBS.head(
+			legacyNarInfoObjectKey(fixtureTenant, storePathHash, cacheScope)
+		);
+
+		expect({
+			nativeObjectPresent: nativeObject !== null,
+			legacyObjectPresent: legacyObject !== null
+		}).toStrictEqual({
+			nativeObjectPresent: true,
+			legacyObjectPresent: false
+		});
 	});
 });

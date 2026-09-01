@@ -7,6 +7,11 @@ CREATE TABLE `__new_cache_identity` (
 	`name` text,
 	`access` text NOT NULL,
 	`priority` integer NOT NULL,
+	`generation` integer DEFAULT 1 NOT NULL,
+	`read_revision` integer DEFAULT 1 NOT NULL,
+	`root_retention_rule_set_id` integer DEFAULT 1 NOT NULL,
+	`default_root_ttl_seconds` integer,
+	`grace_seconds` integer,
 	`grace_managed` integer DEFAULT false NOT NULL,
 	`created_at` text NOT NULL,
 	`deleted_at` text,
@@ -14,7 +19,7 @@ CREATE TABLE `__new_cache_identity` (
 	CONSTRAINT "cache_identity_access_check" CHECK("__new_cache_identity"."access" IN ('public', 'private'))
 );
 --> statement-breakpoint
-INSERT INTO `__new_cache_identity`("id", "kind", "name", "access", "priority", "grace_managed", "created_at", "deleted_at") SELECT "id", "kind", "name", "access", "priority", "grace_managed", "created_at", "deleted_at" FROM `cache_identity`;--> statement-breakpoint
+INSERT INTO `__new_cache_identity`("id", "kind", "name", "access", "priority", "generation", "read_revision", "root_retention_rule_set_id", "default_root_ttl_seconds", "grace_seconds", "grace_managed", "created_at", "deleted_at") SELECT "id", "kind", "name", "access", "priority", "generation", "read_revision", "root_retention_rule_set_id", "default_root_ttl_seconds", "grace_seconds", "grace_managed", "created_at", "deleted_at" FROM `cache_identity`;--> statement-breakpoint
 DROP TABLE `cache_identity`;--> statement-breakpoint
 ALTER TABLE `__new_cache_identity` RENAME TO `cache_identity`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
@@ -124,11 +129,12 @@ CREATE TABLE `__new_narinfo_deletion` (
 	`store_path_hash` text NOT NULL,
 	`nar_hash` text NOT NULL,
 	`generation` integer DEFAULT 0 NOT NULL,
+	`writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL,
 	`created_at` text NOT NULL,
 	PRIMARY KEY(`cache_id`, `store_path_hash`, `generation`)
 );
 --> statement-breakpoint
-INSERT INTO `__new_narinfo_deletion`("cache_id", "store_path_hash", "nar_hash", "generation", "created_at") SELECT "cache_id", "store_path_hash", "nar_hash", "generation", "created_at" FROM `narinfo_deletion`;--> statement-breakpoint
+INSERT INTO `__new_narinfo_deletion`("cache_id", "store_path_hash", "nar_hash", "generation", "writer_epoch", "created_at") SELECT "cache_id", "store_path_hash", "nar_hash", "generation", "writer_epoch", "created_at" FROM `narinfo_deletion`;--> statement-breakpoint
 DROP TABLE `narinfo_deletion`;--> statement-breakpoint
 ALTER TABLE `__new_narinfo_deletion` RENAME TO `narinfo_deletion`;--> statement-breakpoint
 CREATE TABLE `__new_retention_grace` (
@@ -168,10 +174,11 @@ CREATE TABLE `__new_garbage_collection_scan` (
 	`cursor` text DEFAULT '' NOT NULL,
 	`mark_store_path_hash` text,
 	`reference_cursor` integer DEFAULT -1 NOT NULL,
-	`allow_empty_collection` integer DEFAULT false NOT NULL
+	`allow_empty_collection` integer DEFAULT false NOT NULL,
+	`writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL
 );
 --> statement-breakpoint
-INSERT INTO `__new_garbage_collection_scan`("cache_id", "revision", "phase", "cursor", "mark_store_path_hash", "reference_cursor", "allow_empty_collection") SELECT "cache_id", "revision", "phase", "cursor", "mark_store_path_hash", "reference_cursor", "allow_empty_collection" FROM `garbage_collection_scan`;--> statement-breakpoint
+INSERT INTO `__new_garbage_collection_scan`("cache_id", "revision", "phase", "cursor", "mark_store_path_hash", "reference_cursor", "allow_empty_collection", "writer_epoch") SELECT "cache_id", "revision", "phase", "cursor", "mark_store_path_hash", "reference_cursor", "allow_empty_collection", "writer_epoch" FROM `garbage_collection_scan`;--> statement-breakpoint
 DROP TABLE `garbage_collection_scan`;--> statement-breakpoint
 ALTER TABLE `__new_garbage_collection_scan` RENAME TO `garbage_collection_scan`;--> statement-breakpoint
 CREATE TABLE `__new_garbage_collection_tenant_run` (
@@ -189,11 +196,12 @@ CREATE TABLE `__new_pending_attestation` (
 	`digest` text NOT NULL,
 	`predicate_type` text,
 	`r2_key` text NOT NULL,
+	`writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL,
 	`created_at` text NOT NULL,
 	`expires_at` text NOT NULL
 );
 --> statement-breakpoint
-INSERT INTO `__new_pending_attestation`("id", "cache_id", "store_path_hash", "digest", "predicate_type", "r2_key", "created_at", "expires_at") SELECT "id", "cache_id", "store_path_hash", "digest", "predicate_type", "r2_key", "created_at", "expires_at" FROM `pending_attestation`;--> statement-breakpoint
+INSERT INTO `__new_pending_attestation`("id", "cache_id", "store_path_hash", "digest", "predicate_type", "r2_key", "writer_epoch", "created_at", "expires_at") SELECT "id", "cache_id", "store_path_hash", "digest", "predicate_type", "r2_key", "writer_epoch", "created_at", "expires_at" FROM `pending_attestation`;--> statement-breakpoint
 DROP TABLE `pending_attestation`;--> statement-breakpoint
 ALTER TABLE `__new_pending_attestation` RENAME TO `pending_attestation`;--> statement-breakpoint
 CREATE INDEX `pending_attestation_expires_at_idx` ON `pending_attestation` (`expires_at`);--> statement-breakpoint
@@ -204,6 +212,7 @@ CREATE TABLE `__new_pending_upload` (
 	`nar_hash` text NOT NULL,
 	`r2_key` text NOT NULL,
 	`metadata_json` text NOT NULL,
+	`writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL,
 	`created_at` text NOT NULL,
 	`expires_at` text NOT NULL,
 	`verdict` text,
@@ -215,7 +224,7 @@ CREATE TABLE `__new_pending_upload` (
 	`recorded_verdict_json` text
 );
 --> statement-breakpoint
-INSERT INTO `__new_pending_upload`("id", "cache_id", "nar_hash", "r2_key", "metadata_json", "created_at", "expires_at", "verdict", "session_id", "claimed_at", "claim_owner", "grace_decision_json", "attach_root_name", "recorded_verdict_json") SELECT "id", "cache_id", "nar_hash", "r2_key", "metadata_json", "created_at", "expires_at", "verdict", "session_id", "claimed_at", "claim_owner", "grace_decision_json", "attach_root_name", "recorded_verdict_json" FROM `pending_upload`;--> statement-breakpoint
+INSERT INTO `__new_pending_upload`("id", "cache_id", "nar_hash", "r2_key", "metadata_json", "writer_epoch", "created_at", "expires_at", "verdict", "session_id", "claimed_at", "claim_owner", "grace_decision_json", "attach_root_name", "recorded_verdict_json") SELECT "id", "cache_id", "nar_hash", "r2_key", "metadata_json", "writer_epoch", "created_at", "expires_at", "verdict", "session_id", "claimed_at", "claim_owner", "grace_decision_json", "attach_root_name", "recorded_verdict_json" FROM `pending_upload`;--> statement-breakpoint
 DROP TABLE `pending_upload`;--> statement-breakpoint
 ALTER TABLE `__new_pending_upload` RENAME TO `pending_upload`;--> statement-breakpoint
 CREATE INDEX `pending_upload_expires_at_idx` ON `pending_upload` (`expires_at`);--> statement-breakpoint

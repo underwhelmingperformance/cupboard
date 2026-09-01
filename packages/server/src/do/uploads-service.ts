@@ -4,6 +4,7 @@ import {
 	type RootName,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type PushCredentialInput,
@@ -182,7 +183,8 @@ export class UploadsService {
 				createdAt: isoTimestamp(now),
 				expiresAt: isoTimestamp(expiresAt),
 				graceDecisionJson: serialiseGraceDecision(graceDecision),
-				attachRootName
+				attachRootName,
+				writerEpoch: cacheWriterEpoch
 			})
 			.run();
 

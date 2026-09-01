@@ -920,11 +920,10 @@ describe('migrations', () => {
 				state.storage.sql.exec(
 					"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, '2026-01-01T00:00:00.000Z'), ('aprivate-builds', 40, '2026-01-01T00:00:00.000Z'), ('private/secrets', 40, '2026-01-01T00:00:00.000Z')"
 				);
-				await migrateThrough(state, latestPreContractMigrationIndex);
+				await migrateThrough(state, 43);
 				state.storage.sql.exec(
 					"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
 				);
-				await migrateThrough(state, 46);
 
 				state.storage.sql.exec(
 					'INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -1078,12 +1077,49 @@ describe('migrations', () => {
 						('pr-one', 20, 0, '2026-01-01T00:00:00.000Z'),
 						('private/secret', 10, 0, '2026-01-01T00:00:00.000Z')`
 				);
+				state.storage.sql.exec(
+					`INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES
+						('default', 'cache', '', 3600, '2026-01-01T00:00:00.000Z'),
+						('builds', 'cache', 'builds', 7200, '2026-01-01T00:00:00.000Z'),
+						('dangling', 'cache', 'missing', 42, '2026-01-01T00:00:00.000Z'),
+						('ci', 'root-name-prefix', 'ci/', 100, '2026-01-01T00:00:00.000Z'),
+						('pr', 'root-name-prefix', 'pr/', 200, '2026-01-01T00:00:00.000Z')`
+				);
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
+					'inert-long',
+					'root-name-prefix',
+					'a'.repeat(257),
+					300,
+					'2026-01-01T00:00:00.000Z'
+				);
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
+					'inert-control',
+					'root-name-prefix',
+					'bad\n',
+					400,
+					'2026-01-01T00:00:00.000Z'
+				);
+				state.storage.sql.exec(
+					`INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES
+						('all', '', 50, '2026-01-01T00:00:00.000Z'),
+						('pr', 'pr-', 100, '2026-01-01T00:00:00.000Z'),
+						('pr-one', 'pr-one', 200, '2026-01-01T00:00:00.000Z')`
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root (cache, name, expires_at, created_at, updated_at) VALUES ('builds', 'keep', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_grace (cache, store_path_hash, retain_until) VALUES ('builds', ?, '2099-02-01T00:00:00.000Z')",
+					'a'.repeat(32)
+				);
 
-				await migrateThrough(state, latestPreContractMigrationIndex);
+				await migrateThrough(state, 43);
 				state.storage.sql.exec(
 					"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
 				);
-				await migrateThrough(state, 47);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const identities = state.storage.sql
 					.exec('SELECT id, kind, name FROM cache_identity ORDER BY id')
@@ -1103,54 +1139,11 @@ describe('migrations', () => {
 
 					return row.id;
 				};
-				const defaultId = idFor();
 				const buildsId = idFor('builds');
 
 				state.storage.sql.exec(
 					"INSERT INTO cache_identity (kind, name, access, priority, grace_managed, created_at, deleted_at) VALUES ('named', 'deleted', 'public', 5, 1, '2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z')"
 				);
-				state.storage.sql.exec(
-					`INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES
-						('default', 'cache', ?, NULL, 3600, '2026-01-01T00:00:00.000Z'),
-						('builds', 'cache', ?, NULL, 7200, '2026-01-01T00:00:00.000Z'),
-						('dangling', 'cache', 999999, NULL, 42, '2026-01-01T00:00:00.000Z'),
-						('ci', 'root-name-prefix', NULL, 'ci/', 100, '2026-01-01T00:00:00.000Z'),
-						('pr', 'root-name-prefix', NULL, 'pr/', 200, '2026-01-01T00:00:00.000Z')`,
-					defaultId,
-					buildsId
-				);
-				state.storage.sql.exec(
-					'INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES (?, ?, NULL, ?, ?, ?)',
-					'inert-long',
-					'root-name-prefix',
-					'a'.repeat(257),
-					300,
-					'2026-01-01T00:00:00.000Z'
-				);
-				state.storage.sql.exec(
-					'INSERT INTO retention_policy (id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at) VALUES (?, ?, NULL, ?, ?, ?)',
-					'inert-control',
-					'root-name-prefix',
-					'bad\n',
-					400,
-					'2026-01-01T00:00:00.000Z'
-				);
-				state.storage.sql.exec(
-					`INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES
-						('all', '', 50, '2026-01-01T00:00:00.000Z'),
-						('pr', 'pr-', 100, '2026-01-01T00:00:00.000Z'),
-						('pr-one', 'pr-one', 200, '2026-01-01T00:00:00.000Z')`
-				);
-				state.storage.sql.exec(
-					"INSERT INTO retention_root (cache_id, name, expires_at, created_at, updated_at) VALUES (?, 'keep', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z')",
-					buildsId
-				);
-				state.storage.sql.exec(
-					"INSERT INTO retention_grace (cache_id, store_path_hash, retain_until) VALUES (?, ?, '2099-02-01T00:00:00.000Z')",
-					buildsId,
-					'a'.repeat(32)
-				);
-
 				await migrateThrough(state, latestMigrationIndex);
 				const database = drizzle(state.storage, { schema });
 				let retentionMigration = await advanceCacheRetentionMigration(
@@ -1381,6 +1374,42 @@ describe('migrations', () => {
 		});
 	});
 
+	it('uses the cache-prefix index for legacy grace lookup', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('migration-cache-retention-grace-plan'),
+			async (_instance, state) => {
+				await migrateThrough(state, latestPreContractMigrationIndex - 1);
+
+				return state.storage.sql
+					.exec(
+						`EXPLAIN QUERY PLAN
+						 SELECT grace_seconds
+						 FROM retention_grace_policy
+						 WHERE cache_prefix IN ('', 'g', 'gh', 'gh-')
+						 ORDER BY length(cache_prefix) DESC
+						 LIMIT 1`
+					)
+					.toArray();
+			}
+		);
+
+		expect(plan).toStrictEqual([
+			{
+				id: 5,
+				parent: 0,
+				notused: 67,
+				detail:
+					'SEARCH retention_grace_policy USING INDEX retention_grace_policy_cache_prefix_unique (cache_prefix=?)'
+			},
+			{
+				id: 41,
+				parent: 0,
+				notused: 0,
+				detail: 'USE TEMP B-TREE FOR ORDER BY'
+			}
+		]);
+	});
+
 	it('rejects a legacy cache template without a fixed scope kind', async () => {
 		await expect(
 			runInDurableObject(
@@ -1390,12 +1419,10 @@ describe('migrations', () => {
 					state.storage.sql.exec(
 						"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, '2026-01-01T00:00:00.000Z')"
 					);
-					await migrateThrough(state, latestPreContractMigrationIndex);
+					await migrateThrough(state, 43);
 					state.storage.sql.exec(
 						"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
 					);
-					await migrateThrough(state, 46);
-
 					state.storage.sql.exec(
 						'INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
 						'ambiguous-rule',
@@ -1425,7 +1452,7 @@ describe('migrations', () => {
 			)
 		).rejects.toMatchObject({
 			name: 'DurableObjectMigrationError',
-			tag: '0047_cache_grant_json'
+			tag: '0044_cache_grant_json'
 		});
 	});
 });

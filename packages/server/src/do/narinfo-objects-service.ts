@@ -35,6 +35,7 @@ import {
 	narObjectKey
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
+import { readR2CompatibilityState } from '../migration/r2-compatibility.ts';
 
 import {
 	batchNonEmpty,
@@ -896,10 +897,15 @@ export class NarInfoObjectsService {
 				cacheControl: narInfoCacheControl
 			}
 		};
+		const compatibility = await readR2CompatibilityState(this.context.d1);
+		const keys = compatibility.writeLegacyObjects ? [key, legacyKey] : [key];
 
-		await this.context.objectWrites.write([key, legacyKey], async () => {
+		await this.context.objectWrites.write(keys, async () => {
 			await this.context.env.BLOBS.put(key, body, options);
-			await this.context.env.BLOBS.put(legacyKey, body, options);
+
+			if (compatibility.writeLegacyObjects) {
+				await this.context.env.BLOBS.put(legacyKey, body, options);
+			}
 		});
 	}
 

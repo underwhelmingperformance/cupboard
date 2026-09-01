@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	createCloudflareApi,
+	D1BookmarkMissingError,
 	maximumCloudflareCollectionPages,
 	QueueConsumerIdMissingError
 } from './cloudflare-api.ts';
@@ -301,6 +302,33 @@ describe('d1QueryBatch', () => {
 				}
 			]
 		});
+	});
+});
+
+describe('getD1Bookmark', () => {
+	const path = '/accounts/acc-1/d1/database/db-1/time_travel/bookmark';
+
+	it('returns the current Time Travel bookmark', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${path}`]: { bookmark: 'bookmark-1' }
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).getD1Bookmark(
+				databaseIdSchema.parse('db-1')
+			)
+		).resolves.toBe('bookmark-1');
+		expect(requests).toStrictEqual([{ method: 'GET', path }]);
+	});
+
+	it('refuses a response without a bookmark', async () => {
+		const { client } = fakeCloudflare({ [`GET ${path}`]: {} });
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).getD1Bookmark(
+				databaseIdSchema.parse('db-1')
+			)
+		).rejects.toBeInstanceOf(D1BookmarkMissingError);
 	});
 });
 
@@ -754,6 +782,57 @@ describe('getScriptConfiguration', () => {
 			cacheEnabled: true,
 			crossVersionCache: true
 		});
+	});
+});
+
+describe('getActiveScriptDeployment', () => {
+	it('returns the version receiving all traffic', async () => {
+		const path = '/accounts/acc-1/workers/scripts/cupboard-tenant/deployments';
+		const { client } = fakeCloudflare({
+			[`GET ${path}`]: {
+				deployments: [
+					{
+						id: 'deployment-1',
+						created_on: '2026-09-01T00:00:00Z',
+						source: 'api',
+						strategy: 'percentage',
+						versions: [{ version_id: 'version-1', percentage: 100 }]
+					}
+				]
+			}
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).getActiveScriptDeployment(
+				scriptName('cupboard-tenant')
+			)
+		).resolves.toStrictEqual({ versionId: 'version-1', trafficPercent: 100 });
+	});
+
+	it('does not report a gradual deployment as fully active', async () => {
+		const path = '/accounts/acc-1/workers/scripts/cupboard-tenant/deployments';
+		const { client } = fakeCloudflare({
+			[`GET ${path}`]: {
+				deployments: [
+					{
+						id: 'deployment-1',
+						created_on: '2026-09-01T00:00:00Z',
+						source: 'api',
+						strategy: 'percentage',
+						versions: [
+							{ version_id: 'version-1', percentage: 90 },
+							{ version_id: 'version-0', percentage: 10 }
+						]
+					}
+				]
+			}
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).getActiveScriptDeployment(
+				scriptName('cupboard-tenant')
+			)
+		).resolves.toBeUndefined();
 	});
 });
 

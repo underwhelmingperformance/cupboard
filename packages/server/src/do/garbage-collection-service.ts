@@ -5,6 +5,7 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
@@ -182,7 +183,8 @@ export class GarbageCollectionService {
 					phase: 'expire-roots',
 					cursor: '',
 					referenceCursor: -1,
-					allowEmptyCollection: false
+					allowEmptyCollection: false,
+					writerEpoch: cacheWriterEpoch
 				})
 				.onConflictDoUpdate({
 					target: schema.garbageCollectionScans.cacheId,

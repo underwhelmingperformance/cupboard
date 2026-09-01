@@ -48,6 +48,7 @@ import {
 	type R2ObjectKey,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
+import { readR2CompatibilityState } from '../migration/r2-compatibility.ts';
 
 import {
 	isReadAuthorised,
@@ -394,6 +395,8 @@ export async function serveNarInfo(
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache.scope, storePathHash);
 	const legacyKey = legacyNarInfoObjectKey(tenant, storePathHash, cache.scope);
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const compatibility = await readR2CompatibilityState(database);
 
 	const versions = await authorisedNarInfoVersions(env, tenant, cache.scope, [
 		storePathHash
@@ -411,7 +414,7 @@ export async function serveNarInfo(
 		headersFor,
 		!isPrivate,
 		(object) => isNarInfoObjectOfCommit(object, current),
-		legacyKey
+		compatibility.readLegacyObjects ? legacyKey : undefined
 	);
 }
 
@@ -434,6 +437,8 @@ export async function missingStorePathHashes(
 		cache.scope,
 		unique
 	);
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const compatibility = await readR2CompatibilityState(database);
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
@@ -450,11 +455,13 @@ export async function missingStorePathHashes(
 				cache.scope,
 				cache.generation
 			);
+			const primary = await env.BLOBS.head(key);
 			const object =
-				(await env.BLOBS.head(key)) ??
-				(await env.BLOBS.head(
-					legacyNarInfoObjectKey(tenant, storePathHash, cache.scope)
-				));
+				primary === null && compatibility.readLegacyObjects
+					? await env.BLOBS.head(
+							legacyNarInfoObjectKey(tenant, storePathHash, cache.scope)
+						)
+					: primary;
 			const isServable =
 				object !== null && isNarInfoObjectOfCommit(object, current);
 

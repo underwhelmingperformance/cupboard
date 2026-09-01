@@ -3933,7 +3933,7 @@ export function uploadExpiryFromNow(): IsoTimestamp {
  * migrations contract the Durable Object schema after application-level
  * reconciliation has supplied each cache's access mode.
  */
-export const latestPreContractMigrationIndex = 43;
+export const latestPreContractMigrationIndex = 49;
 
 export const latestMigrationIndex = Math.max(
 	...migrations.journal.entries.map((entry) => entry.idx)
@@ -3951,7 +3951,9 @@ export function migrateThrough(
 ): Promise<void> {
 	applyMigrations(
 		drizzle(state.storage),
-		migrationsThrough(migrations, throughIndex)
+		migrationsThrough(migrations, throughIndex),
+		undefined,
+		{ enforceCeiling: false }
 	);
 
 	return Promise.resolve();

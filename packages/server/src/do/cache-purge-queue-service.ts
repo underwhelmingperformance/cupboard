@@ -2,6 +2,7 @@ import type {
 	NixSha256HashString,
 	StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { cacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -46,7 +47,8 @@ export class CachePurgeQueueService {
 						kind: 'mutation',
 						entriesJson: JSON.stringify(batch),
 						createdAt,
-						expiresAt
+						expiresAt,
+						writerEpoch: cacheWriterEpoch
 					})
 					.run();
 			}

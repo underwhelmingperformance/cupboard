@@ -1,4 +1,9 @@
 import {
+	cacheDeploymentManifest,
+	d1MigrationId,
+	durableObjectMigrationId
+} from '@cupboard/protocol/cache-deployment-manifest';
+import {
 	deploymentStateIdSchema,
 	deploymentTransitionIdSchema
 } from '@cupboard/protocol/deployment';
@@ -11,19 +16,21 @@ import {
 	deploymentManifestId
 } from './deployment-identity.ts';
 import {
-	type BrandedString,
-	deploymentContentId,
+	bundleSha256Schema,
+	cloudflareWorkerVersionTagSchema,
+	d1SchemaStateIdSchema,
+	deploymentExecutorSha256Schema,
 	type DeploymentManifestBody,
 	type DeploymentState,
+	durableObjectMigrationIdSchema,
 	type ForwardDeploymentTransition,
+	isoDateSchema,
+	runtimeStageIdSchema,
 	type StaticDeploymentArtifacts,
 	validateDeploymentManifest,
-	type WorkerUploadTemplate
+	type WorkerUploadTemplate,
+	writerEpochSchema
 } from './deployment-manifest.ts';
-
-function branded<Name extends string>(value: string): BrandedString<Name> {
-	return value as BrandedString<Name>;
-}
 
 function state(
 	id: string,
@@ -31,14 +38,20 @@ function state(
 ): DeploymentState {
 	return {
 		id: deploymentStateIdSchema.parse(id),
-		d1Schema: branded('expanded'),
-		tenantRuntime: { kind: 'registered', stage: branded('foundation') },
-		controlRuntime: { kind: 'registered', stage: branded('foundation') },
+		d1Schema: d1SchemaStateIdSchema.parse('expanded'),
+		tenantRuntime: {
+			kind: 'registered',
+			stage: runtimeStageIdSchema.parse('foundation')
+		},
+		controlRuntime: {
+			kind: 'registered',
+			stage: runtimeStageIdSchema.parse('foundation')
+		},
 		localSchema: {
-			runtimeCeiling: branded('0040_foundation'),
+			runtimeCeiling: durableObjectMigrationIdSchema.parse('0040_foundation'),
 			fleetState: 'complete'
 		},
-		writerEpoch: branded('cache-lifecycle-v1'),
+		writerEpoch: writerEpochSchema.parse('cache-lifecycle-v1'),
 		representations: {
 			catalogue: 'native',
 			r2Metadata: 'dual',
@@ -62,19 +75,33 @@ function state(
 	};
 }
 
-function transition(
+function verifyTransition(
 	from: string,
 	to: string,
-	overrides: Partial<ForwardDeploymentTransition> = {}
+	id = `${from}-to-${to}`
+): ForwardDeploymentTransition {
+	return {
+		id: deploymentTransitionIdSchema.parse(id),
+		from: deploymentStateIdSchema.parse(from),
+		to: deploymentStateIdSchema.parse(to),
+		kind: 'verify',
+		checks: []
+	};
+}
+
+function closeD1FenceTransition(
+	from: string,
+	to: string
 ): ForwardDeploymentTransition {
 	return {
 		id: deploymentTransitionIdSchema.parse(`${from}-to-${to}`),
 		from: deploymentStateIdSchema.parse(from),
 		to: deploymentStateIdSchema.parse(to),
-		kind: 'verify',
-		checks: [],
-		...overrides
-	} as ForwardDeploymentTransition;
+		kind: 'set-deployment-fence',
+		fence: 'd1-application-writes',
+		value: 'closed',
+		checks: []
+	};
 }
 
 function manifest(
@@ -96,9 +123,21 @@ function manifest(
 		recoveryTransitions: [],
 		bootstrapTransitions: [],
 		legacyRuntimeFingerprints: [],
-		runtimeStages: [],
+		runtimeStages: [
+			{
+				id: runtimeStageIdSchema.parse('foundation'),
+				localMigrationCeiling:
+					durableObjectMigrationIdSchema.parse('0040_foundation'),
+				supportedD1Schemas: [d1SchemaStateIdSchema.parse('expanded')]
+			}
+		],
 		d1Migrations: [],
-		durableObjectMigrations: [],
+		durableObjectMigrations: [
+			{
+				id: durableObjectMigrationIdSchema.parse('0040_foundation'),
+				sha256: 'f'.repeat(64)
+			}
+		],
 		dataMigrations: [],
 		checks: []
 	};
@@ -106,10 +145,12 @@ function manifest(
 
 function uploadTemplate(bundleHash: string): WorkerUploadTemplate {
 	return {
-		bundleHash: deploymentContentId(bundleHash, 'BundleSha256'),
-		versionTag: branded('cache-lifecycle-foundation'),
+		bundleHash: bundleSha256Schema.parse(bundleHash),
+		versionTag: cloudflareWorkerVersionTagSchema.parse(
+			'cache-lifecycle-foundation'
+		),
 		mainModule: 'worker.js',
-		compatibilityDate: branded('2026-09-01'),
+		compatibilityDate: isoDateSchema.parse('2026-09-01'),
 		compatibilityFlags: ['nodejs_compat'],
 		bindings: [{ name: 'CUPBOARD_DB', type: 'd1' }]
 	};
@@ -130,6 +171,39 @@ describe('canonicalJson', () => {
 });
 
 describe('validateDeploymentManifest', () => {
+	it('accepts the checked cache release sequence', () => {
+		const d1 = [
+			'0019_nar_read_authority.sql',
+			'0020_deployment_ledger.sql',
+			'0020a_deployment_runtime_controls.sql',
+			'0021_cache_access_expand.sql',
+			'0022_cache_access_legacy_write_mirror.sql',
+			'0023_cache_access_backfill.sql',
+			'0024_cache_access_contract_assertions.sql',
+			'0025_cache_access_compatible_contract.sql',
+			'0026_cache_incarnation_expand.sql',
+			'0027_cache_generation_contract_assertions.sql',
+			'0028_drop_cache_credential_lifecycle_guard.sql',
+			'0029_cache_identity_contract.sql',
+			'0030_cache_credential_lifecycle_guard.sql',
+			'0031_cache_lifecycle_lookup_index.sql'
+		].map((id) => ({ id: d1MigrationId(id), sha256: '1'.repeat(64) }));
+		const durableObject = [
+			'0041_pending_upload_recorded_verdict',
+			'0049_cache_retention_migration_rules',
+			'0052_cache_access_triggers'
+		].map((id) => ({
+			id: durableObjectMigrationId(id),
+			sha256: '2'.repeat(64)
+		}));
+
+		expect(() => {
+			validateDeploymentManifest(
+				cacheDeploymentManifest({ d1, durableObject })
+			);
+		}).not.toThrow();
+	});
+
 	it('accepts a linear manifest whose transitions have their declared effects', () => {
 		const before = state('before', {
 			fences: {
@@ -145,11 +219,7 @@ describe('validateDeploymentManifest', () => {
 				tenantLocalContractAdmission: 'required'
 			}
 		});
-		const closeFence = transition('before', 'after', {
-			kind: 'set-deployment-fence',
-			fence: 'd1-application-writes',
-			value: 'closed'
-		});
+		const closeFence = closeD1FenceTransition('before', 'after');
 
 		expect(() => {
 			validateDeploymentManifest(manifest([before, after], [closeFence]));
@@ -159,18 +229,14 @@ describe('validateDeploymentManifest', () => {
 	it('rejects a transition which changes an undeclared state fact', () => {
 		const before = state('before');
 		const after = state('after', {
-			d1Schema: branded('contracted'),
+			d1Schema: d1SchemaStateIdSchema.parse('contracted'),
 			fences: {
 				d1ApplicationWrites: 'closed',
 				retentionAdministration: 'open',
 				tenantLocalContractAdmission: 'required'
 			}
 		});
-		const closeFence = transition('before', 'after', {
-			kind: 'set-deployment-fence',
-			fence: 'd1-application-writes',
-			value: 'closed'
-		});
+		const closeFence = closeD1FenceTransition('before', 'after');
 
 		expect(() => {
 			validateDeploymentManifest(manifest([before, after], [closeFence]));
@@ -187,10 +253,8 @@ describe('validateDeploymentManifest', () => {
 				...manifest([before, after]),
 				states: [before, after, other],
 				forwardTransitions: [
-					transition('before', 'after'),
-					transition('before', 'other', {
-						id: deploymentTransitionIdSchema.parse('other-transition')
-					})
+					verifyTransition('before', 'after'),
+					verifyTransition('before', 'other', 'other-transition')
 				]
 			});
 		}).toThrow('has more than one forward successor');
@@ -217,9 +281,8 @@ describe('deployment identities', () => {
 		const manifestId = deploymentManifestId(body);
 		const artifacts: StaticDeploymentArtifacts = {
 			manifestId,
-			deploymentExecutorHash: deploymentContentId(
-				'1'.repeat(64),
-				'DeploymentExecutorSha256'
+			deploymentExecutorHash: deploymentExecutorSha256Schema.parse(
+				'1'.repeat(64)
 			),
 			tenant: uploadTemplate('2'.repeat(64)),
 			control: uploadTemplate('3'.repeat(64))

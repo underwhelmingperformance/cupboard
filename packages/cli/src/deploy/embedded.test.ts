@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { payloadToArtifact } from './artifact.ts';
+import { deploymentManifestId } from './deployment-identity.ts';
+import { testDeploymentManifest } from './deployment-manifest.test-support.ts';
 import { EmbeddedArtifactError, parseEmbeddedPayload } from './embedded.ts';
 
 function thrownBy(run: () => unknown): unknown {
@@ -46,14 +48,17 @@ const payloadJson = JSON.stringify({
 			statements: ['CREATE TABLE a (id);']
 		}
 	],
+	deploymentManifest: testDeploymentManifest,
+	deploymentExecutorHash: 'e'.repeat(64),
 	buildVersion: 'abc123def456'
 });
 
 describe('parseEmbeddedPayload', () => {
 	it('rebuilds the artifact, parsing the embedded wrangler sources', () => {
 		const artifact = payloadToArtifact(parseEmbeddedPayload(payloadJson));
+		const { deploymentArtifactId, ...rest } = artifact;
 
-		expect(artifact).toStrictEqual({
+		expect(rest).toStrictEqual({
 			config: {
 				control: {
 					name: 'cupboard',
@@ -111,8 +116,12 @@ describe('parseEmbeddedPayload', () => {
 					statements: ['CREATE TABLE a (id);']
 				}
 			],
+			deploymentManifest: testDeploymentManifest,
+			deploymentManifestId: deploymentManifestId(testDeploymentManifest),
+			deploymentExecutorHash: 'e'.repeat(64),
 			buildVersion: 'abc123def456'
 		});
+		expect(deploymentArtifactId).toMatch(/^[\da-f]{64}$/);
 	});
 
 	it('rejects a payload of the wrong shape', () => {

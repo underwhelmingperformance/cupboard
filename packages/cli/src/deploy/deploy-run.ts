@@ -1,3 +1,5 @@
+import type { DeploymentIdentity } from '@cupboard/protocol/deployment';
+import type { RuntimeStageId } from '@cupboard/protocol/deployment-manifest';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
@@ -9,8 +11,24 @@ import type { WorkerBundle } from './bundle.ts';
 import { canonicalJson } from './canonical-json.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
+import {
+	bootstrapLegacyDeployment,
+	initialiseFreshDeployment
+} from './deployment-bootstrap.ts';
+import { deploymentInstanceId } from './deployment-identity.ts';
+import {
+	advanceDeployment,
+	cloudflareDeploymentExecutor,
+	type DeploymentRunnerClient,
+	type RuntimeStageObservation
+} from './deployment-runner.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
-import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
+import type {
+	CloudflareAccountId,
+	DatabaseId,
+	KvNamespaceId,
+	ScriptName
+} from './identifiers.ts';
 import { applyD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
 import type { DeploySecrets } from './secrets.ts';
@@ -67,9 +85,79 @@ export interface DeployOptions {
 export interface DeployDependencies {
 	readonly artifact: DeploymentArtifact;
 	readonly api: CloudflareApi;
+	readonly accountId: CloudflareAccountId;
+	readonly deploymentClient?: () => Promise<DeploymentRunnerClient>;
 	readonly reporter: Reporter;
 	readonly options: DeployOptions;
 	readonly signal?: AbortSignal;
+}
+
+interface ReconciledResources extends ResolvedResources {
+	readonly topologyResources: Readonly<Record<string, string>>;
+}
+
+export class RuntimeStageDeploymentIncompleteError extends Error {
+	constructor(public readonly stage: RuntimeStageId) {
+		super(
+			`Cloudflare did not activate both Workers for runtime stage ${stage}`
+		);
+		this.name = 'RuntimeStageDeploymentIncompleteError';
+	}
+}
+
+export class DeploymentOperatorRequiredError extends Error {
+	constructor() {
+		super(
+			'This release requires an authenticated deployment operator before it can migrate an existing deployment'
+		);
+		this.name = 'DeploymentOperatorRequiredError';
+	}
+}
+
+export class DeploymentAdvanceIncompleteError extends Error {
+	constructor(public readonly state: string) {
+		super(
+			`Deployment migration remains in state ${state}; rerun cupboard deploy to resume it`
+		);
+		this.name = 'DeploymentAdvanceIncompleteError';
+	}
+}
+
+function workerForRuntimeStage(
+	worker: DeploymentConfig['tenant'],
+	stage: RuntimeStageId
+): DeploymentConfig['tenant'] {
+	return {
+		...worker,
+		vars: { ...worker.vars, CUPBOARD_RUNTIME_STAGE: stage }
+	};
+}
+
+function withBuildVersion(
+	metadata: ScriptMetadata,
+	buildVersion: string
+): ScriptMetadata {
+	return {
+		...metadata,
+		annotations: {
+			...metadata.annotations,
+			'workers/tag': buildVersion
+		}
+	};
+}
+
+function isWorkerConfigurationCurrent(
+	configuration: Awaited<ReturnType<CloudflareApi['getScriptConfiguration']>>,
+	metadata: ScriptMetadata,
+	config: DeploymentConfig['tenant'],
+	buildVersion: string
+): boolean {
+	return (
+		configuration?.buildVersion === buildVersion &&
+		hasMatchingBindings(metadata.bindings, configuration.bindings) &&
+		configuration.cacheEnabled === config.cacheEnabled &&
+		configuration.crossVersionCache === config.cacheEnabled
+	);
 }
 
 interface ResourcePlan {
@@ -181,28 +269,37 @@ export function choicePlanRows(
 async function reconcileResources(
 	dependencies: DeployDependencies,
 	plan: ResourcePlan
-): Promise<ResolvedResources> {
+): Promise<ReconciledResources> {
 	const { api, reporter } = dependencies;
 
 	return reporter.phase('Reconciling resources', async (context) => {
-		await Promise.all(
-			plan.r2Buckets.map(async (name) => {
-				await api.ensureR2Bucket(name);
-				await api.ensureStagingLifecycleRule(name);
-			})
-		);
-		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
+		const topologyResources: Record<string, string> = {};
+
+		for (const name of plan.r2Buckets) {
+			await api.ensureR2Bucket(name);
+			await api.ensureStagingLifecycleRule(name);
+			topologyResources[`r2:${name}`] = name;
+		}
+
+		for (const name of plan.queues) {
+			const id = await api.ensureQueue(name);
+			topologyResources[`queue:${name}`] = id;
+		}
 
 		const d1 = new Map<string, DatabaseId>();
 
 		for (const name of plan.d1Databases) {
-			d1.set(name, await api.ensureD1Database(name));
+			const id = await api.ensureD1Database(name);
+			d1.set(name, id);
+			topologyResources[`d1:${name}`] = id;
 		}
 
 		const kv = new Map<string, KvNamespaceId>();
 
 		for (const title of plan.kvTitles) {
-			kv.set(title, await api.ensureKvNamespace(title));
+			const id = await api.ensureKvNamespace(title);
+			kv.set(title, id);
+			topologyResources[`kv:${title}`] = id;
 		}
 
 		context.fact(
@@ -213,8 +310,24 @@ async function reconcileResources(
 				plan.queues.length
 		);
 
-		return { d1, kv };
+		return { d1, kv, topologyResources };
 	});
+}
+
+export function deploymentIdentityFor(
+	artifact: DeploymentArtifact,
+	accountId: CloudflareAccountId,
+	resources: ReconciledResources
+): DeploymentIdentity {
+	return {
+		artifactId: artifact.deploymentArtifactId,
+		instanceId: deploymentInstanceId(artifact.deploymentArtifactId, {
+			accountId,
+			tenantScript: artifact.config.tenant.name,
+			controlScript: artifact.config.control.name,
+			resources: resources.topologyResources
+		})
+	};
 }
 
 async function configureTriggers(
@@ -318,6 +431,290 @@ function isSecretBinding(binding: unknown): boolean {
 		.success;
 }
 
+export async function deployRuntimeStage(
+	dependencies: DeployDependencies,
+	resources: ResolvedResources,
+	stage: RuntimeStageId
+): Promise<RuntimeStageObservation> {
+	const { artifact, api, reporter } = dependencies;
+	const tenantConfig = workerForRuntimeStage(artifact.config.tenant, stage);
+	const controlConfig = workerForRuntimeStage(artifact.config.control, stage);
+	const tenantMetadata = withBuildVersion(
+		buildScriptMetadata(tenantConfig, resources),
+		artifact.buildVersion
+	);
+	const controlMetadata = withBuildVersion(
+		buildScriptMetadata(controlConfig, resources),
+		artifact.buildVersion
+	);
+	const [tenantLive, controlLive] = await Promise.all([
+		api.getScriptConfiguration(tenantConfig.name),
+		api.getScriptConfiguration(controlConfig.name)
+	]);
+
+	if (
+		!isWorkerConfigurationCurrent(
+			tenantLive,
+			tenantMetadata,
+			tenantConfig,
+			artifact.buildVersion
+		)
+	) {
+		await reporter.phase(`Deploying tenant runtime ${stage}`, (context) =>
+			uploadScriptForPlan(
+				dependencies,
+				context,
+				tenantConfig.name,
+				tenantMetadata,
+				artifact.tenantBundle
+			)
+		);
+	}
+
+	if (
+		!isWorkerConfigurationCurrent(
+			controlLive,
+			controlMetadata,
+			controlConfig,
+			artifact.buildVersion
+		)
+	) {
+		await reporter.phase(`Deploying control runtime ${stage}`, (context) =>
+			uploadScriptForPlan(
+				dependencies,
+				context,
+				controlConfig.name,
+				controlMetadata,
+				artifact.controlBundle
+			)
+		);
+	}
+
+	const [tenantDeployment, controlDeployment] = await Promise.all([
+		api.getActiveScriptDeployment(tenantConfig.name),
+		api.getActiveScriptDeployment(controlConfig.name)
+	]);
+
+	if (tenantDeployment === undefined || controlDeployment === undefined) {
+		throw new RuntimeStageDeploymentIncompleteError(stage);
+	}
+
+	return {
+		kind: 'runtime-stage',
+		stage,
+		tenantVersionId: tenantDeployment.versionId,
+		controlVersionId: controlDeployment.versionId,
+		tenantTrafficPercent: tenantDeployment.trafficPercent,
+		controlTrafficPercent: controlDeployment.trafficPercent
+	};
+}
+
+async function configureTenantRoutes(
+	dependencies: DeployDependencies
+): Promise<void> {
+	const tenant = dependencies.artifact.config.tenant;
+	const routes = {
+		workersDev: tenant.workersDev,
+		previewUrls: tenant.previewUrls
+	};
+
+	try {
+		await dependencies.api.setWorkersDevRoutes(tenant.name, routes);
+	} catch (error) {
+		if (!isMissingWorkerScriptError(error)) {
+			throw error;
+		}
+	}
+}
+
+async function setDeploymentSecrets(
+	dependencies: DeployDependencies
+): Promise<void> {
+	const work: { scriptName: ScriptName; secret: WorkerSecret }[] = [
+		...dependencies.options.secrets.control.map((secret) => ({
+			scriptName: dependencies.artifact.config.control.name,
+			secret
+		})),
+		...dependencies.options.secrets.tenant.map((secret) => ({
+			scriptName: dependencies.artifact.config.tenant.name,
+			secret
+		}))
+	];
+
+	if (work.length === 0) {
+		dependencies.reporter.step('Setting secrets · no secrets to set');
+
+		return;
+	}
+
+	await dependencies.reporter.phase('Setting secrets', async (context) => {
+		for (const { scriptName, secret } of work) {
+			await dependencies.api.putSecret(scriptName, secret);
+		}
+
+		context.fact('secrets', work.length);
+	});
+}
+
+async function performStagedDeployment(
+	dependencies: DeployDependencies,
+	resources: ReconciledResources,
+	databaseId: DatabaseId
+): Promise<void> {
+	const createClient = dependencies.deploymentClient;
+
+	if (createClient === undefined) {
+		throw new DeploymentOperatorRequiredError();
+	}
+
+	const client = await createClient();
+
+	const deployment = deploymentIdentityFor(
+		dependencies.artifact,
+		dependencies.accountId,
+		resources
+	);
+
+	await configureTenantRoutes(dependencies);
+	await bootstrapLegacyDeployment({
+		api: dependencies.api,
+		databaseId,
+		artifact: dependencies.artifact,
+		deployment,
+		deployRuntime: (transition) =>
+			deployRuntimeStage(dependencies, resources, transition.stage)
+	});
+	await dependencies.api.setWorkersDevRoutes(
+		dependencies.artifact.config.tenant.name,
+		{
+			workersDev: dependencies.artifact.config.tenant.workersDev,
+			previewUrls: dependencies.artifact.config.tenant.previewUrls
+		}
+	);
+	await setDeploymentSecrets(dependencies);
+
+	const executeExternalAction = cloudflareDeploymentExecutor({
+		api: dependencies.api,
+		databaseId,
+		d1Migrations: dependencies.artifact.d1Migrations,
+		deployRuntimeStage: (stage) =>
+			deployRuntimeStage(dependencies, resources, stage)
+	});
+	const transitionLimit =
+		dependencies.artifact.deploymentManifest.forwardTransitions.length + 1;
+
+	for (let index = 0; index < transitionLimit; index += 1) {
+		const status = await client.status({ deployment });
+
+		if (
+			status.state === 'current' &&
+			status.deploymentState ===
+				dependencies.artifact.deploymentManifest.terminalState
+		) {
+			await configureTriggers(dependencies);
+
+			return;
+		}
+
+		const outcome = await advanceDeployment({
+			client,
+			deployment,
+			manifest: dependencies.artifact.deploymentManifest,
+			executeExternalAction
+		});
+
+		if (outcome.state === 'running') {
+			throw new DeploymentAdvanceIncompleteError(outcome.deploymentState);
+		}
+	}
+
+	throw new DeploymentAdvanceIncompleteError(
+		dependencies.artifact.deploymentManifest.terminalState
+	);
+}
+
+async function isExactTerminalHead(
+	dependencies: DeployDependencies,
+	resources: ReconciledResources,
+	databaseId: DatabaseId
+): Promise<boolean> {
+	const bootstrap =
+		dependencies.artifact.deploymentManifest.bootstrapTransitions[0];
+	const ledgerMigration = bootstrap?.migrations[0];
+
+	if (ledgerMigration === undefined) {
+		return false;
+	}
+
+	const applied = await dependencies.api.d1QueryRows(
+		databaseId,
+		'SELECT name FROM d1_migrations ORDER BY id;'
+	);
+
+	if (!applied.includes(ledgerMigration)) {
+		return false;
+	}
+
+	const deployment = deploymentIdentityFor(
+		dependencies.artifact,
+		dependencies.accountId,
+		resources
+	);
+	const expected = [
+		dependencies.artifact.deploymentManifestId,
+		deployment.artifactId,
+		deployment.instanceId,
+		dependencies.artifact.deploymentManifest.terminalState
+	].join(':');
+	const rows = await dependencies.api.d1QueryRows(
+		databaseId,
+		"SELECT manifest_id || ':' || artifact_id || ':' || instance_id || ':' || state_id AS identity FROM deployment_head WHERE id = 'current';"
+	);
+
+	return rows.length === 1 && rows[0] === expected;
+}
+
+function deploymentResult(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId | undefined
+): ResultRow[] {
+	const { artifact, options, reporter } = dependencies;
+	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
+	const d1Database =
+		databaseId === undefined || d1Name === undefined
+			? undefined
+			: { name: d1Name, id: databaseId };
+	const rows: ResultRow[] = [
+		{ label: 'Control worker', value: artifact.config.control.name },
+		{ label: 'Tenant worker', value: artifact.config.tenant.name },
+		...(d1Database === undefined
+			? []
+			: [
+					{
+						label: 'D1 database',
+						value: `${d1Database.name} · ${d1Database.id}`
+					}
+				]),
+		...(options.domain === undefined
+			? []
+			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
+	];
+
+	reporter.result({
+		kind: 'deployment',
+		data: {
+			controlWorker: artifact.config.control.name,
+			tenantWorker: artifact.config.tenant.name,
+			d1Database,
+			cacheUrl:
+				options.domain === undefined ? undefined : `https://${options.domain}`
+		},
+		rows
+	});
+
+	return rows;
+}
+
 /**
  * Provisions, migrates, uploads, and configures a Cupboard deployment after the
  * caller has accepted the plan. The command handles `--dry-run` before it calls
@@ -344,6 +741,10 @@ async function performDeploy(
 	dependencies: DeployDependencies
 ): Promise<ResultRow[]> {
 	const { artifact, api, reporter, options } = dependencies;
+	const isStaged = artifact.deploymentManifest.forwardTransitions.length > 0;
+	const existingControl = isStaged
+		? await api.getScriptConfiguration(artifact.config.control.name)
+		: undefined;
 
 	const resources = await reconcileResources(
 		dependencies,
@@ -353,6 +754,22 @@ async function performDeploy(
 	const databaseId = resources.d1.get(
 		artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
 	);
+
+	const isFreshResume =
+		isStaged &&
+		existingControl !== undefined &&
+		databaseId !== undefined &&
+		(await isExactTerminalHead(dependencies, resources, databaseId));
+
+	if (isStaged && existingControl !== undefined && !isFreshResume) {
+		if (databaseId === undefined) {
+			throw new Error('The deployment manifest requires a D1 database');
+		}
+
+		await performStagedDeployment(dependencies, resources, databaseId);
+
+		return deploymentResult(dependencies, databaseId);
+	}
 
 	if (databaseId !== undefined) {
 		const applied = await applyD1Migrations(
@@ -372,20 +789,28 @@ async function performDeploy(
 		} else {
 			reporter.step('Applying D1 migrations · no migrations to apply');
 		}
+
+		if (isStaged) {
+			await initialiseFreshDeployment({
+				api,
+				databaseId,
+				artifact,
+				deployment: deploymentIdentityFor(
+					artifact,
+					dependencies.accountId,
+					resources
+				)
+			});
+		}
 	}
 
-	const withBuildVersion = (metadata: ScriptMetadata): ScriptMetadata => ({
-		...metadata,
-		annotations: {
-			...metadata.annotations,
-			'workers/tag': artifact.buildVersion
-		}
-	});
 	const tenantMetadata = withBuildVersion(
-		buildScriptMetadata(artifact.config.tenant, resources)
+		buildScriptMetadata(artifact.config.tenant, resources),
+		artifact.buildVersion
 	);
 	const controlMetadata = withBuildVersion(
-		buildScriptMetadata(artifact.config.control, resources)
+		buildScriptMetadata(artifact.config.control, resources),
+		artifact.buildVersion
 	);
 
 	const unchanged = await reporter.phase(
@@ -515,41 +940,7 @@ async function performDeploy(
 
 	await configureTriggers(dependencies);
 
-	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
-	const d1Database =
-		databaseId === undefined || d1Name === undefined
-			? undefined
-			: { name: d1Name, id: databaseId };
-
-	const rows: ResultRow[] = [
-		{ label: 'Control worker', value: artifact.config.control.name },
-		{ label: 'Tenant worker', value: artifact.config.tenant.name },
-		...(d1Database === undefined
-			? []
-			: [
-					{
-						label: 'D1 database',
-						value: `${d1Database.name} · ${d1Database.id}`
-					}
-				]),
-		...(options.domain === undefined
-			? []
-			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
-	];
-
-	reporter.result({
-		kind: 'deployment',
-		data: {
-			controlWorker: artifact.config.control.name,
-			tenantWorker: artifact.config.tenant.name,
-			d1Database,
-			cacheUrl:
-				options.domain === undefined ? undefined : `https://${options.domain}`
-		},
-		rows
-	});
-
-	return rows;
+	return deploymentResult(dependencies, databaseId);
 }
 
 function isMissingWorkerScriptError(error: unknown): boolean {

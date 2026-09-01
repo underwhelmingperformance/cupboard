@@ -1,5 +1,10 @@
 import { getAsset, isSea } from 'node:sea';
 
+import {
+	deploymentExecutorSha256Schema,
+	deploymentManifestBodySchema,
+	validateDeploymentManifest
+} from '@cupboard/protocol/deployment-manifest';
 import { z } from 'zod';
 
 import {
@@ -21,12 +26,27 @@ const d1MigrationSchema = z.object({
 	statements: z.array(z.string())
 });
 
+const deploymentManifestSchema = deploymentManifestBodySchema.superRefine(
+	(manifest, context) => {
+		try {
+			validateDeploymentManifest(manifest);
+		} catch (error) {
+			context.addIssue({
+				code: 'custom',
+				message: error instanceof Error ? error.message : 'Invalid manifest'
+			});
+		}
+	}
+);
+
 const payloadSchema = z.object({
 	controlSource: z.string(),
 	tenantSource: z.string(),
 	controlBundle: workerBundleSchema,
 	tenantBundle: workerBundleSchema,
 	d1Migrations: z.array(d1MigrationSchema),
+	deploymentManifest: deploymentManifestSchema,
+	deploymentExecutorHash: deploymentExecutorSha256Schema,
 	buildVersion: z.string()
 });
 

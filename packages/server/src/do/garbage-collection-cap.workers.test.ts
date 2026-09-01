@@ -63,7 +63,7 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 
 		// Each row binds five parameters, so the insert is chunked under the
 		// driver's bound-parameter limit.
-		for (const batch of chunk(rows, 18)) {
+		for (const batch of chunk(rows, 12)) {
 			database.insert(narInfoDeletions).values(batch).run();
 		}
 	});

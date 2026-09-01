@@ -86,7 +86,7 @@ async function seedQueuedDeletions(
 
 		// Each row binds five parameters. Keep the insert below the driver's
 		// bound-parameter limit.
-		for (const batch of chunk(entries, 18)) {
+		for (const batch of chunk(entries, 12)) {
 			database
 				.insert(narInfoDeletions)
 				.values(

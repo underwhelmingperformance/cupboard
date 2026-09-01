@@ -11,6 +11,7 @@ import { type Context, Hono } from 'hono';
 
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
+import { withAppMutationAdmission } from '../db/app-mutation-admission.ts';
 import {
 	firstCacheGeneration,
 	firstCacheReadRevision
@@ -352,7 +353,9 @@ async function dispatchTenant(
 		throw new TenantWritesStoppedError(tenant, status);
 	}
 
-	return tenantServer(env, tenant).fetch(inner);
+	return withAppMutationAdmission(env.CUPBOARD_DB, () =>
+		tenantServer(env, tenant).fetch(inner)
+	);
 }
 
 // Returns the admitted status only when it came from this request's D1 read.

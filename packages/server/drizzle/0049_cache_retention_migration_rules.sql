@@ -7,3 +7,13 @@ CREATE TABLE `retention_migration_rule` (
 );
 --> statement-breakpoint
 ALTER TABLE `retention_migration_state` ADD `rule_cursor` text;
+--> statement-breakpoint
+ALTER TABLE `pending_upload` ADD `writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE `pending_attestation` ADD `writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE `narinfo_deletion` ADD `writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE `cache_purge_continuation` ADD `writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL;
+--> statement-breakpoint
+ALTER TABLE `garbage_collection_scan` ADD `writer_epoch` text DEFAULT 'legacy-cache-identity' NOT NULL;

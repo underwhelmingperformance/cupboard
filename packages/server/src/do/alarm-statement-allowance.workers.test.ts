@@ -551,7 +551,7 @@ describe('reconcile alarm D1 statement allowance', () => {
 			restoredObjects: driven.restoredObjects
 		}).toStrictEqual({
 			queuedAtFirstAlarm: reconciledPaths,
-			firstAlarmStatements: 49,
+			firstAlarmStatements: 50,
 			overAllowanceAlarms: [],
 			statementAllowance: 50,
 			passes: ['reconcile'],
@@ -577,7 +577,7 @@ describe('reconcile alarm D1 statement allowance', () => {
 			queuedTargets: driven.queuedTargets
 		}).toStrictEqual({
 			pageSize: 38,
-			queueDepths: [100, 64, 26],
+			queueDepths: [100, 66, 30],
 			queuedTargets: 0
 		});
 	}, 240_000);
@@ -778,7 +778,7 @@ describe('verify backstop alarm D1 statement allowance', () => {
 		}).toStrictEqual({
 			pendingAtFirstAlarm: deferredReuseRows,
 			settleLimit: 2,
-			alarmStatements: [26, 26, 26, 26],
+			alarmStatements: [28, 28, 28, 28],
 			overAllowanceAlarms: [],
 			statementAllowance: 50,
 			passes: ['verify-backstop'],
@@ -953,7 +953,7 @@ describe('signing key backfill alarm D1 statement allowance', () => {
 			pendingBackfills: driven.pendingBackfills
 		}).toStrictEqual({
 			entriesPerPass: 9,
-			alarmStatements: [0, 18, 18, 18, 10],
+			alarmStatements: [0, 27, 27, 27, 15],
 			overAllowanceAlarms: [],
 			statementAllowance: 50,
 			passes: ['signing-key-backfill'],

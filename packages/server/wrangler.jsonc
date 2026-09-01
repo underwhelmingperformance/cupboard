@@ -17,6 +17,7 @@
 	"main": "src/worker.ts",
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
+	"version_metadata": { "binding": "WORKER_VERSION" },
 	"services": [
 		{
 			"binding": "CUPBOARD_TENANT",
@@ -37,6 +38,10 @@
 		{
 			"binding": "BLOBS",
 			"bucket_name": "cupboard-blobs"
+		},
+		{
+			"binding": "DEPLOYMENT_RECOVERY",
+			"bucket_name": "cupboard-deployment-recovery"
 		}
 	],
 	"kv_namespaces": [
@@ -82,6 +87,8 @@
 		}
 	],
 	"vars": {
+		"CUPBOARD_RUNTIME_STAGE": "cache-storage-contract",
+		"CUPBOARD_DEPLOYMENT_ARTIFACT_ID": "0000000000000000000000000000000000000000000000000000000000000000",
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
 		// The audience stamped into and verified on control-plane admin tokens. Its

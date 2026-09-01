@@ -637,6 +637,70 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
+	it('holds an application-mutation admission while a queue message runs', async () => {
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		let admissions: number | undefined;
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			{ kind: 'control-key-retirement' },
+			{
+				runControlKeyRetirement: async () => {
+					const rows = await d1
+						.select({ id: d1Schema.d1AppMutationAdmission.id })
+						.from(d1Schema.d1AppMutationAdmission)
+						.all();
+					admissions = rows.length;
+				}
+			}
+		);
+
+		expect({ decision, admissions }).toStrictEqual({
+			decision: { action: 'ack' },
+			admissions: 1
+		});
+	});
+
+	it('retries a queue message without running it while writes are fenced', async () => {
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await d1
+			.update(d1Schema.d1AppMutationFence)
+			.set({ state: 'closed', revision: 1 })
+			.run();
+		let calls = 0;
+		const decision = await (async () => {
+			try {
+				return await executeMaintenanceQueueMessage(
+					rootLogger(),
+					env,
+					{ kind: 'control-key-retirement' },
+					{
+						runControlKeyRetirement: () => {
+							calls += 1;
+
+							return Promise.resolve();
+						}
+					}
+				);
+			} finally {
+				await d1
+					.update(d1Schema.d1AppMutationFence)
+					.set({ state: 'open', revision: 2 })
+					.run();
+			}
+		})();
+
+		expect({ decision, calls }).toStrictEqual({
+			decision: {
+				action: 'retry',
+				delaySeconds: 60,
+				reason:
+					'AppWritesFencedError: Application writes are temporarily paused for a deployment migration'
+			},
+			calls: 0
+		});
+	});
+
 	it('logs the reaper phase when a continuation fails', async () => {
 		const actions: QueueMessageAction[] = [];
 		const batch = queueBatch(

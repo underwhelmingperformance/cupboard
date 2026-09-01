@@ -17,6 +17,24 @@ export interface RawMigrationFile {
 	readonly sql: string;
 }
 
+function checksumMapEntry(entry: string): readonly [string, string] {
+	const separator = entry.indexOf(':');
+
+	if (separator < 1) {
+		throw new D1MigrationSequenceError(
+			`Invalid stored D1 migration checksum ${entry}`
+		);
+	}
+
+	return [entry.slice(0, separator), entry.slice(separator + 1)];
+}
+
+function migrationMapEntry(
+	migration: D1Migration
+): readonly [string, D1Migration] {
+	return [migration.name, migration];
+}
+
 const statementBreakpoint = '--> statement-breakpoint';
 
 /**
@@ -114,20 +132,10 @@ export async function applyDeclaredD1Migrations(
 		"SELECT migration_id || ':' || sha256 AS name FROM structural_migration_checksum WHERE kind = 'd1' ORDER BY migration_id;"
 	);
 	const appliedChecksums = new Map(
-		storedChecksumRows.map((entry) => {
-			const separator = entry.indexOf(':');
-
-			if (separator < 1) {
-				throw new D1MigrationSequenceError(
-					`Invalid stored D1 migration checksum ${entry}`
-				);
-			}
-
-			return [entry.slice(0, separator), entry.slice(separator + 1)] as const;
-		})
+		storedChecksumRows.map((entry) => checksumMapEntry(entry))
 	);
 	const migrationByName = new Map(
-		allMigrations.map((migration) => [migration.name, migration] as const)
+		allMigrations.map((migration) => migrationMapEntry(migration))
 	);
 
 	for (const [index, name] of appliedNames.entries()) {
@@ -138,14 +146,29 @@ export async function applyDeclaredD1Migrations(
 		}
 	}
 
-	const expectedNames = allMigrations
-		.slice(appliedNames.length, appliedNames.length + declaredNames.length)
-		.map((migration) => migration.name);
+	let remainingNames = [...declaredNames];
 
-	if (expectedNames.join('\n') !== declaredNames.join('\n')) {
-		throw new D1MigrationSequenceError(
-			'The manifest does not declare the next contiguous D1 migration set'
+	if (declaredNames.length > 0) {
+		const declaredStart = allMigrations.findIndex(
+			(migration) => migration.name === declaredNames[0]
 		);
+		const expectedNames = allMigrations
+			.slice(declaredStart, declaredStart + declaredNames.length)
+			.map((migration) => migration.name);
+		const declaredEnd = declaredStart + declaredNames.length;
+
+		if (
+			declaredStart === -1 ||
+			expectedNames.join('\n') !== declaredNames.join('\n') ||
+			appliedNames.length < declaredStart ||
+			appliedNames.length > declaredEnd
+		) {
+			throw new D1MigrationSequenceError(
+				'The manifest does not declare the next contiguous D1 migration set'
+			);
+		}
+
+		remainingNames = declaredNames.slice(appliedNames.length - declaredStart);
 	}
 
 	for (const name of appliedNames) {
@@ -159,7 +182,7 @@ export async function applyDeclaredD1Migrations(
 		}
 	}
 
-	for (const name of declaredNames) {
+	for (const name of remainingNames) {
 		const migration = migrationByName.get(name);
 
 		if (migration === undefined) {
@@ -175,5 +198,114 @@ export async function applyDeclaredD1Migrations(
 		]);
 	}
 
-	return [...declaredNames];
+	return remainingNames;
+}
+
+function migrationIndex(
+	migrations: readonly D1Migration[],
+	name: string
+): number {
+	const index = migrations.findIndex((migration) => migration.name === name);
+
+	if (index === -1) {
+		throw new D1MigrationSequenceError(
+			`The artifact does not contain D1 migration ${name}`
+		);
+	}
+
+	return index;
+}
+
+function checksumInsert(migration: D1Migration): string {
+	return `INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', ${quote(migration.name)}, ${quote(migration.sha256)}, CURRENT_TIMESTAMP) ON CONFLICT (kind, migration_id) DO NOTHING;`;
+}
+
+/**
+ * Applies the one manifest-declared legacy bootstrap range. The first
+ * migration creates the checksum table, so the same transaction records a
+ * labelled digest for every migration in the verified legacy prefix.
+ */
+export async function applyLegacyBootstrapD1Migrations(
+	api: D1MigrationApi,
+	databaseId: DatabaseId,
+	allMigrations: readonly D1Migration[],
+	legacyLastMigration: string,
+	declaredNames: readonly string[]
+): Promise<string[]> {
+	if (declaredNames.length === 0) {
+		throw new D1MigrationSequenceError(
+			'The legacy bootstrap declares no D1 migrations'
+		);
+	}
+
+	const legacyEnd = migrationIndex(allMigrations, legacyLastMigration);
+	const bootstrapStart = legacyEnd + 1;
+	const declaredStart = migrationIndex(allMigrations, declaredNames[0] ?? '');
+	const expectedDeclared = allMigrations
+		.slice(declaredStart, declaredStart + declaredNames.length)
+		.map((migration) => migration.name);
+
+	if (
+		declaredStart !== bootstrapStart ||
+		expectedDeclared.join('\n') !== declaredNames.join('\n')
+	) {
+		throw new D1MigrationSequenceError(
+			'The legacy bootstrap is not the contiguous range after its source fingerprint'
+		);
+	}
+
+	let appliedNames = await api.queryRows(
+		databaseId,
+		'SELECT name FROM d1_migrations ORDER BY id;'
+	);
+	const maximumApplied = bootstrapStart + declaredNames.length;
+
+	if (
+		appliedNames.length < bootstrapStart ||
+		appliedNames.length > maximumApplied ||
+		appliedNames.some((name, index) => allMigrations[index]?.name !== name)
+	) {
+		throw new D1MigrationSequenceError(
+			'The D1 migration history does not match the supported legacy bootstrap state'
+		);
+	}
+
+	const newlyApplied: string[] = [];
+
+	if (appliedNames.length === bootstrapStart) {
+		const firstName = declaredNames[0];
+		const first =
+			firstName === undefined
+				? undefined
+				: allMigrations.find((migration) => migration.name === firstName);
+
+		if (first === undefined) {
+			throw new D1MigrationSequenceError(
+				'The artifact does not contain the first bootstrap migration'
+			);
+		}
+
+		await api.queryBatch(databaseId, [
+			...first.statements,
+			`INSERT INTO d1_migrations (name) VALUES (${quote(first.name)});`,
+			...allMigrations
+				.slice(0, bootstrapStart)
+				.map((migration) => checksumInsert(migration)),
+			checksumInsert(first)
+		]);
+		newlyApplied.push(first.name);
+		appliedNames = [...appliedNames, first.name];
+	}
+
+	const remaining = declaredNames.slice(appliedNames.length - bootstrapStart);
+	newlyApplied.push(
+		...(await applyDeclaredD1Migrations(
+			api,
+			databaseId,
+			allMigrations,
+			remaining
+		))
+	);
+
+	return newlyApplied;
 }

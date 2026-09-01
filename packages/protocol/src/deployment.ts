@@ -93,12 +93,35 @@ export const deploymentStatusSchema = z.discriminatedUnion('state', [
 ]);
 export type DeploymentStatus = z.infer<typeof deploymentStatusSchema>;
 
-export const cloudflareDeploymentObservationSchema = z.strictObject({
-	tenantVersionId: identifierSchema,
-	controlVersionId: identifierSchema,
-	tenantTrafficPercent: z.literal(100),
-	controlTrafficPercent: z.literal(100)
+const d1MigrationObservationSchema = z.strictObject({
+	id: identifierSchema,
+	sha256: sha256Schema
 });
+
+const d1RecoveryPointObservationSchema = z.strictObject({
+	kind: z.literal('d1-recovery-point'),
+	databaseId: identifierSchema,
+	bookmark: identifierSchema
+});
+
+export const cloudflareDeploymentObservationSchema = z.discriminatedUnion(
+	'kind',
+	[
+		z.strictObject({
+			kind: z.literal('runtime-stage'),
+			stage: identifierSchema,
+			tenantVersionId: identifierSchema,
+			controlVersionId: identifierSchema,
+			tenantTrafficPercent: z.literal(100),
+			controlTrafficPercent: z.literal(100)
+		}),
+		z.strictObject({
+			kind: z.literal('d1-migrations'),
+			migrations: z.array(d1MigrationObservationSchema)
+		}),
+		d1RecoveryPointObservationSchema
+	]
+);
 export type CloudflareDeploymentObservation = z.infer<
 	typeof cloudflareDeploymentObservationSchema
 >;
@@ -120,6 +143,13 @@ export const deploymentExternalActionSchema = z.discriminatedUnion('kind', [
 		kind: z.literal('deploy-runtime-stage'),
 		stage: identifierSchema,
 		tenantFirst: z.literal(true)
+	}),
+	z.strictObject({
+		kind: z.literal('apply-d1'),
+		migrations: z.array(identifierSchema).min(1)
+	}),
+	z.strictObject({
+		kind: z.literal('capture-d1-recovery-point')
 	})
 ]);
 export type DeploymentExternalAction = z.infer<

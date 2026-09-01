@@ -214,6 +214,26 @@ export const cacheLifecycle = sqliteTable(
 // read this table (D1 is database-wide) still cannot recover a key. `retired_at`
 // is NULL while a key still verifies; the newest non-retired key is the one that
 // issues.
+export const d1AppMutationAdmission = sqliteTable(
+	'd1_application_mutation_admission',
+	{
+		id: text('id').primaryKey(),
+		fenceRevision: integer('fence_revision').notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'd1_application_mutation_admission_revision_nonnegative',
+			sql`${table.fenceRevision} >= 0`
+		),
+		index('d1_application_mutation_admission_drain_idx').on(
+			table.fenceRevision,
+			table.expiresAt
+		)
+	]
+);
+
 export const controlAuthKey = sqliteTable('control_auth_key', {
 	id: text('id').primaryKey(),
 	kid: text('kid').$type<AuthKeyId>().notNull(),
@@ -596,6 +616,142 @@ export const d1AppMutationFence = sqliteTable(
 			'd1_application_mutation_fence_revision_nonnegative',
 			sql`${table.revision} >= 0`
 		)
+	]
+);
+
+// Transition executors update these controls before advancing the manifest
+// head. Tenant and control request paths read them when the transition needs to
+// fence a representation independently of the current head state.
+export const deploymentRuntimeControl = sqliteTable(
+	'deployment_runtime_control',
+	{
+		id: text('id').primaryKey(),
+		retentionAdministration: text('retention_administration', {
+			enum: ['open', 'closed']
+		}).notNull(),
+		retentionRevision: integer('retention_revision').notNull(),
+		legacyR2Writes: text('legacy_r2_writes', {
+			enum: ['enabled', 'disabled']
+		}).notNull(),
+		legacyR2ReadFallback: text('legacy_r2_read_fallback', {
+			enum: ['enabled', 'disabled']
+		}).notNull(),
+		legacyR2Deletion: text('legacy_r2_deletion', {
+			enum: ['forbidden', 'eligible']
+		}).notNull(),
+		tenantLocalContractAdmission: text('tenant_local_contract_admission', {
+			enum: ['not-required', 'required']
+		}).notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check('deployment_runtime_control_singleton', sql`${table.id} = 'current'`),
+		check(
+			'deployment_runtime_control_retention_revision_nonnegative',
+			sql`${table.retentionRevision} >= 0`
+		)
+	]
+);
+
+export const deploymentWriterCutover = sqliteTable(
+	'deployment_writer_cutover',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		writerEpoch: text('writer_epoch').notNull(),
+		cutoverAt: text('cutover_at').$type<IsoTimestamp>().notNull(),
+		cohortCreatedAt: text('cohort_created_at').$type<IsoTimestamp>().notNull(),
+		maximumLegacyDeadline: text('maximum_legacy_deadline')
+			.$type<IsoTimestamp>()
+			.notNull(),
+		afterTenant: text('after_tenant').$type<TenantId>(),
+		scanComplete: integer('scan_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		completedAt: text('completed_at').$type<IsoTimestamp>()
+	},
+	(table) => [primaryKey({ columns: [table.artifactId, table.instanceId] })]
+);
+
+export const deploymentWriterDrainTenant = sqliteTable(
+	'deployment_writer_drain_tenant',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		status: text('status', {
+			enum: ['pending', 'complete', 'not-applicable', 'failed']
+		})
+			.notNull()
+			.default('pending'),
+		attempts: integer('attempts').notNull().default(0),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		lastFailureJson: text('last_failure_json')
+	},
+	(table) => [
+		primaryKey({ columns: [table.artifactId, table.instanceId, table.tenant] }),
+		check(
+			'deployment_writer_drain_tenant_attempts_nonnegative',
+			sql`${table.attempts} >= 0`
+		),
+		index('deployment_writer_drain_tenant_work_idx').on(
+			table.artifactId,
+			table.instanceId,
+			table.status,
+			table.tenant
+		)
+	]
+);
+
+export const projectionRepairIntent = sqliteTable(
+	'projection_repair_intent',
+	{
+		id: text('id').primaryKey(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		writerEpoch: text('writer_epoch').notNull(),
+		fenceRevision: integer('fence_revision').notNull(),
+		status: text('status', {
+			enum: ['pending', 'running', 'complete', 'rolled-back', 'failed']
+		}).notNull(),
+		operation: text('operation').notNull(),
+		payloadJson: text('payload_json').notNull(),
+		claimId: text('claim_id'),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		lastFailureJson: text('last_failure_json')
+	},
+	(table) => [
+		check(
+			'projection_repair_intent_fence_revision_nonnegative',
+			sql`${table.fenceRevision} >= 0`
+		),
+		index('projection_repair_intent_work_idx').on(
+			table.status,
+			table.writerEpoch,
+			table.tenant,
+			table.id
+		)
+	]
+);
+
+export const deploymentD1RecoveryPoint = sqliteTable(
+	'deployment_d1_recovery_point',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		transitionId: text('transition_id').notNull(),
+		attemptId: text('attempt_id').notNull(),
+		databaseId: text('database_id').notNull(),
+		bookmark: text('bookmark').notNull(),
+		envelopeKey: text('envelope_key').notNull(),
+		envelopeSha256: text('envelope_sha256').notNull(),
+		capturedAt: text('captured_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.artifactId, table.instanceId, table.transitionId]
+		})
 	]
 );
 

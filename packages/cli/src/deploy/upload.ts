@@ -41,17 +41,25 @@ function bindingsFor(
 	worker: WorkerConfig,
 	resources: ResolvedResources
 ): Binding[] {
-	const bindings: Binding[] = Array.from(
-		worker.durableObjects,
-		(durableObject) => ({
+	const bindings: Binding[] = [];
+
+	if (worker.versionMetadataBinding !== undefined) {
+		bindings.push({
+			type: 'version_metadata',
+			name: worker.versionMetadataBinding
+		});
+	}
+
+	for (const durableObject of worker.durableObjects) {
+		bindings.push({
 			type: 'durable_object_namespace',
 			name: durableObject.binding,
 			class_name: durableObject.className,
 			...(durableObject.scriptName !== undefined && {
 				script_name: durableObject.scriptName
 			})
-		})
-	);
+		});
+	}
 
 	for (const bucket of worker.r2Buckets) {
 		bindings.push({

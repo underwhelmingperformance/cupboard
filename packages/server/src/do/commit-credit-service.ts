@@ -1,5 +1,10 @@
 import { type CacheScope, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import {
+	cacheWriterEpoch,
+	legacyCacheWriterEpoch
+} from '@cupboard/protocol/cache-deployment-manifest';
+import { writerEpochSchema } from '@cupboard/protocol/deployment-manifest';
+import {
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
@@ -45,6 +50,7 @@ type CommitCreditState = z.infer<typeof commitCreditStateSchema>;
 export const commitSessionAttachmentSchema = z.object({
 	cache: cacheScopeSchema,
 	sessionId: sessionIdSchema,
+	writerEpoch: writerEpochSchema.default(legacyCacheWriterEpoch),
 	authenticatedUntil: epochMillisSchema.optional(),
 	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
@@ -353,7 +359,11 @@ export class CommitCreditService {
 		now: number
 	): number {
 		if (!hasNegotiated) {
-			writeCommitSessionAttachment(socket, { ...session, lastActivityAt: now });
+			writeCommitSessionAttachment(socket, {
+				...session,
+				writerEpoch: cacheWriterEpoch,
+				lastActivityAt: now
+			});
 
 			return 0;
 		}
@@ -362,6 +372,7 @@ export class CommitCreditService {
 		const opening = Math.floor(this.available() / 2);
 		writeCommitSessionAttachment(socket, {
 			...session,
+			writerEpoch: cacheWriterEpoch,
 			credit: { granted: opening, demand: 0, unspentSince: now },
 			lastActivityAt: now
 		});

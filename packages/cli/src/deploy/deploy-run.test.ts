@@ -1,3 +1,9 @@
+import { cacheMigrationFoundationStage } from '@cupboard/protocol/cache-deployment-manifest';
+import {
+	deploymentArtifactIdSchema,
+	deploymentManifestIdSchema
+} from '@cupboard/protocol/deployment';
+import { deploymentExecutorSha256Schema } from '@cupboard/protocol/deployment-manifest';
 import type { Reporter } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
@@ -5,7 +11,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
-import { collectResources, runDeploy } from './deploy-run.ts';
+import {
+	collectResources,
+	deployRuntimeStage,
+	runDeploy
+} from './deploy-run.ts';
+import { testDeploymentManifest } from './deployment-manifest.test-support.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
@@ -20,6 +31,7 @@ const scriptName = (value: string) => scriptNameSchema.parse(value);
 const databaseId = (value: string) => databaseIdSchema.parse(value);
 const queueId = (value: string) => queueIdSchema.parse(value);
 const kvNamespaceId = (value: string) => kvNamespaceIdSchema.parse(value);
+const testAccountId = cloudflareAccountIdSchema.parse('account-1');
 
 function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 	return {
@@ -99,6 +111,10 @@ const artifact: DeploymentArtifact = {
 			statements: ['CREATE TABLE a (id);']
 		}
 	],
+	deploymentManifest: testDeploymentManifest,
+	deploymentManifestId: deploymentManifestIdSchema.parse('d'.repeat(64)),
+	deploymentArtifactId: deploymentArtifactIdSchema.parse('e'.repeat(64)),
+	deploymentExecutorHash: deploymentExecutorSha256Schema.parse('f'.repeat(64)),
 	buildVersion: 'abc123def456'
 };
 
@@ -202,8 +218,13 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`d1qr:${sql.slice(0, 12)}`);
 				return Promise.resolve([]);
 			},
+			getD1Bookmark: () => Promise.resolve('bookmark'),
 			getScriptConfiguration: () => {
 				recordFallbackApiCall(calls, 'getScriptConfiguration');
+				return Promise.resolve(undefined);
+			},
+			getActiveScriptDeployment: () => {
+				recordFallbackApiCall(calls, 'getActiveScriptDeployment');
 				return Promise.resolve(undefined);
 			},
 			uploadScript(scriptName) {
@@ -282,6 +303,61 @@ describe('collectResources', () => {
 	});
 });
 
+describe('deployRuntimeStage', () => {
+	it('deploys tenant before control and reports the active versions', async () => {
+		const { api, calls } = recordingApi();
+		const resolvedD1 = new Map([['cupboard', databaseId('db-id')]]);
+		const resolvedKv = new Map([
+			['cupboard-tenant-cache', kvNamespaceId('kv-tenant-cache')]
+		]);
+		const observedApi: CloudflareApi = {
+			...api,
+			getActiveScriptDeployment: (name) => {
+				calls.push(`active:${name}`);
+
+				return Promise.resolve({
+					versionId: `${name}-version`,
+					trafficPercent: 100
+				});
+			}
+		};
+
+		await expect(
+			deployRuntimeStage(
+				{
+					artifact,
+					accountId: testAccountId,
+					api: observedApi,
+					reporter: silentReporter,
+					options: {
+						domain: undefined,
+						secrets: { control: [], tenant: [] }
+					}
+				},
+				{ d1: resolvedD1, kv: resolvedKv },
+				cacheMigrationFoundationStage
+			)
+		).resolves.toStrictEqual({
+			kind: 'runtime-stage',
+			stage: cacheMigrationFoundationStage,
+			tenantVersionId: 'cupboard-tenant-version',
+			controlVersionId: 'cupboard-version',
+			tenantTrafficPercent: 100,
+			controlTrafficPercent: 100
+		});
+		expect(
+			calls.filter(
+				(call) => call.startsWith('upload:') || call.startsWith('active:')
+			)
+		).toStrictEqual([
+			'upload:cupboard-tenant',
+			'upload:cupboard',
+			'active:cupboard-tenant',
+			'active:cupboard'
+		]);
+	});
+});
+
 describe('runDeploy', () => {
 	it('does not start a deploy after cancellation', async () => {
 		const controller = new AbortController();
@@ -292,6 +368,7 @@ describe('runDeploy', () => {
 		await expect(
 			runDeploy({
 				artifact,
+				accountId: testAccountId,
 				api,
 				reporter: silentReporter,
 				options: {
@@ -320,6 +397,7 @@ describe('runDeploy', () => {
 		await expect(
 			runDeploy({
 				artifact,
+				accountId: testAccountId,
 				api: cancellingApi,
 				reporter: silentReporter,
 				options: {
@@ -336,6 +414,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api,
 			reporter: silentReporter,
 			options: {
@@ -384,6 +463,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact: withoutCrons,
+			accountId: testAccountId,
 			api,
 			reporter: silentReporter,
 			options: {
@@ -424,6 +504,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact: withoutNamedEntrypoint,
+			accountId: testAccountId,
 			api,
 			reporter: silentReporter,
 			options: {
@@ -461,6 +542,7 @@ describe('runDeploy', () => {
 
 			await runDeploy({
 				artifact: configuredArtifact,
+				accountId: testAccountId,
 				api,
 				reporter: silentReporter,
 				options: {
@@ -507,6 +589,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api: missingBeforeUpload,
 			reporter: silentReporter,
 			options: {
@@ -541,6 +624,7 @@ describe('runDeploy', () => {
 		await expect(
 			runDeploy({
 				artifact,
+				accountId: testAccountId,
 				api: failingApi,
 				reporter: silentReporter,
 				options: {
@@ -575,6 +659,7 @@ describe('runDeploy', () => {
 		await expect(
 			runDeploy({
 				artifact,
+				accountId: testAccountId,
 				api: missingAfterUpload,
 				reporter: silentReporter,
 				options: {
@@ -602,6 +687,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api: delegatedApi,
 			reporter: silentReporter,
 			options: {
@@ -637,6 +723,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api: convergedApi,
 			reporter: {
 				...silentReporter,
@@ -695,6 +782,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api: partialApi,
 			reporter: silentReporter,
 			options: { domain: undefined, secrets: { control: [], tenant: [] } }
@@ -720,6 +808,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact,
+			accountId: testAccountId,
 			api: driftedApi,
 			reporter: silentReporter,
 			options: { domain: undefined, secrets: { control: [], tenant: [] } }
@@ -735,6 +824,7 @@ describe('runDeploy', () => {
 
 		await runDeploy({
 			artifact: { ...artifact, buildVersion: 'abc123def456+dirty' },
+			accountId: testAccountId,
 			api,
 			reporter: silentReporter,
 			options: {
@@ -800,6 +890,7 @@ describe('runDeploy', () => {
 					tenant: { ...artifact.config.tenant, cpuMs: undefined }
 				}
 			},
+			accountId: testAccountId,
 			api: planLimitedApi,
 			reporter: {
 				...silentReporter,

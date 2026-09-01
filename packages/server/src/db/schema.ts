@@ -22,6 +22,8 @@ import {
 	type TenantId,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import { legacyCacheWriterEpoch } from '@cupboard/protocol/cache-deployment-manifest';
+import type { WriterEpoch } from '@cupboard/protocol/deployment-manifest';
 import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
 	ReuseViewName,
@@ -322,6 +324,10 @@ export const pendingUploads = sqliteTable(
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
+		writerEpoch: text('writer_epoch')
+			.$type<WriterEpoch>()
+			.notNull()
+			.default(legacyCacheWriterEpoch),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		// This marker survives an interrupted commit so `push --wait` can report the
@@ -376,6 +382,10 @@ export const pendingAttestations = sqliteTable(
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
+		writerEpoch: text('writer_epoch')
+			.$type<WriterEpoch>()
+			.notNull()
+			.default(legacyCacheWriterEpoch),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
@@ -401,6 +411,10 @@ export const narInfoDeletions = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
+		writerEpoch: text('writer_epoch')
+			.$type<WriterEpoch>()
+			.notNull()
+			.default(legacyCacheWriterEpoch),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -560,6 +574,10 @@ export const cachePurgeContinuations = sqliteTable(
 		kind: text('kind', { enum: ['backfill', 'mutation'] }).notNull(),
 		signingKeyId: text('signing_key_id'),
 		entriesJson: text('entries_json').notNull(),
+		writerEpoch: text('writer_epoch')
+			.$type<WriterEpoch>()
+			.notNull()
+			.default(legacyCacheWriterEpoch),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		lastAttemptAt: text('last_attempt_at').$type<IsoTimestamp>(),
@@ -638,6 +656,10 @@ export const garbageCollectionRevisions = sqliteTable(
 
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+	writerEpoch: text('writer_epoch')
+		.$type<WriterEpoch>()
+		.notNull()
+		.default(legacyCacheWriterEpoch),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']

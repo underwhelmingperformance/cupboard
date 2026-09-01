@@ -349,9 +349,14 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'd1QueryRows');
 			return Promise.resolve([]);
 		},
+		getD1Bookmark: () => Promise.resolve('bookmark'),
 		getScriptConfiguration: () => {
 			recordApiCall(apiCalls, 'getScriptConfiguration');
 			return Promise.resolve(absentScriptConfiguration);
+		},
+		getActiveScriptDeployment: () => {
+			recordApiCall(apiCalls, 'getActiveScriptDeployment');
+			return Promise.resolve(undefined);
 		},
 		uploadScript: () => {
 			recordApiCall(apiCalls, 'uploadScript');

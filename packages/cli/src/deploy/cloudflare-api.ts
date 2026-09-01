@@ -70,6 +70,20 @@ export interface ScriptConfiguration {
 	readonly crossVersionCache: boolean;
 }
 
+export interface ActiveScriptDeployment {
+	readonly versionId: string;
+	readonly trafficPercent: 100;
+}
+
+export class D1BookmarkMissingError extends CliError {
+	constructor(public readonly databaseId: DatabaseId) {
+		super(
+			`Cloudflare returned no Time Travel bookmark for D1 database ${databaseId}`
+		);
+		this.name = 'D1BookmarkMissingError';
+	}
+}
+
 export interface WorkersDevelopmentRoutes {
 	readonly workersDev: boolean;
 	readonly previewUrls: boolean;
@@ -136,6 +150,7 @@ export interface CloudflareApi {
 		statements: readonly string[]
 	): Promise<void>;
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
+	getD1Bookmark(databaseId: DatabaseId): Promise<string>;
 
 	/**
 	 * The live bindings and cache settings needed for deployment convergence.
@@ -144,6 +159,9 @@ export interface CloudflareApi {
 	getScriptConfiguration(
 		scriptName: ScriptName
 	): Promise<ScriptConfiguration | undefined>;
+	getActiveScriptDeployment(
+		scriptName: ScriptName
+	): Promise<ActiveScriptDeployment | undefined>;
 	uploadScript(
 		scriptName: ScriptName,
 		metadata: ScriptMetadata,
@@ -519,6 +537,19 @@ export function createCloudflareApi(
 			return rows;
 		},
 
+		async getD1Bookmark(databaseId) {
+			const response = await client.d1.database.timeTravel.getBookmark(
+				databaseId,
+				account
+			);
+
+			if (response.bookmark === undefined) {
+				throw new D1BookmarkMissingError(databaseId);
+			}
+
+			return response.bookmark;
+		},
+
 		async getScriptConfiguration(scriptName) {
 			try {
 				const settings =
@@ -558,6 +589,21 @@ export function createCloudflareApi(
 
 				throw error;
 			}
+		},
+
+		async getActiveScriptDeployment(scriptName) {
+			const response = await client.workers.scripts.deployments.list(
+				scriptName,
+				account
+			);
+			const current = response.deployments[0];
+			const version = current?.versions[0];
+
+			if (current?.versions.length !== 1 || version?.percentage !== 100) {
+				return;
+			}
+
+			return { versionId: version.version_id, trafficPercent: 100 };
 		},
 
 		async uploadScript(scriptName, metadata, bundle) {

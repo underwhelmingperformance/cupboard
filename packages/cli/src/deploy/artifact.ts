@@ -1,9 +1,36 @@
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+
+import {
+	cacheDeploymentManifest,
+	d1MigrationId,
+	durableObjectMigrationId
+} from '@cupboard/protocol/cache-deployment-manifest';
+import type {
+	DeploymentArtifactId,
+	DeploymentExecutorSha256,
+	DeploymentManifestBody,
+	DeploymentManifestId,
+	StaticDeploymentArtifacts,
+	WorkerUploadTemplate
+} from '@cupboard/protocol/deployment-manifest';
+import {
+	bundleSha256Schema,
+	cloudflareWorkerVersionTagSchema,
+	deploymentExecutorSha256Schema,
+	isoDateSchema,
+	validateDeploymentManifest
+} from '@cupboard/protocol/deployment-manifest';
+import { z } from 'zod';
 
 import { resolveBuildVersion } from './build-version.ts';
 import type { Bundler, WorkerBundle } from './bundle.ts';
 import { type DeploymentConfig, parseDeploymentConfig } from './config.ts';
+import {
+	deploymentArtifactId,
+	deploymentManifestId
+} from './deployment-identity.ts';
 import { type D1Migration, parseD1Migrations } from './migrations.ts';
 import { controlWorker, tenantWorker } from './source.ts';
 
@@ -17,6 +44,10 @@ export interface DeploymentArtifact {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	readonly deploymentManifest: DeploymentManifestBody;
+	readonly deploymentManifestId: DeploymentManifestId;
+	readonly deploymentArtifactId: DeploymentArtifactId;
+	readonly deploymentExecutorHash: DeploymentExecutorSha256;
 	/**
 	The version the bundled Workers return from `/_version`.
 	*/
@@ -35,17 +66,122 @@ export interface EmbeddedPayload {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	readonly deploymentManifest: DeploymentManifestBody;
+	readonly deploymentExecutorHash: DeploymentExecutorSha256;
 	readonly buildVersion: string;
+}
+
+function bindingTemplates(
+	worker: DeploymentConfig['tenant']
+): WorkerUploadTemplate['bindings'] {
+	return [
+		...(worker.versionMetadataBinding === undefined
+			? []
+			: [{ name: worker.versionMetadataBinding, type: 'version_metadata' }]),
+		...worker.durableObjects.map(({ binding }) => ({
+			name: binding,
+			type: 'durable_object_namespace'
+		})),
+		...worker.r2Buckets.map(({ binding }) => ({
+			name: binding,
+			type: 'r2_bucket'
+		})),
+		...worker.kvNamespaces.map(({ binding }) => ({
+			name: binding,
+			type: 'kv_namespace'
+		})),
+		...worker.d1Databases.map(({ binding }) => ({
+			name: binding,
+			type: 'd1'
+		})),
+		...worker.queueProducers.map(({ binding }) => ({
+			name: binding,
+			type: 'queue'
+		})),
+		...worker.services.map(({ binding }) => ({
+			name: binding,
+			type: 'service'
+		})),
+		...Object.keys(worker.vars).map((name) => ({ name, type: 'plain_text' }))
+	].toSorted((left, right) =>
+		`${left.type}:${left.name}`.localeCompare(`${right.type}:${right.name}`)
+	);
+}
+
+function workerUploadTemplate(
+	worker: DeploymentConfig['tenant'],
+	bundle: WorkerBundle,
+	buildVersion: string
+): WorkerUploadTemplate {
+	return {
+		bundleHash: bundleSha256Schema.parse(
+			createHash('sha256').update(bundle.code).digest('hex')
+		),
+		versionTag: cloudflareWorkerVersionTagSchema.parse(buildVersion),
+		mainModule: bundle.mainModule,
+		compatibilityDate: isoDateSchema.parse(worker.compatibilityDate),
+		compatibilityFlags: [...worker.compatibilityFlags],
+		bindings: bindingTemplates(worker)
+	};
+}
+
+function deploymentArtifacts(
+	payload: Pick<
+		EmbeddedPayload,
+		| 'controlSource'
+		| 'tenantSource'
+		| 'controlBundle'
+		| 'tenantBundle'
+		| 'deploymentManifest'
+		| 'deploymentExecutorHash'
+		| 'buildVersion'
+	>
+): {
+	readonly config: DeploymentConfig;
+	readonly manifestId: DeploymentManifestId;
+	readonly artifactId: DeploymentArtifactId;
+} {
+	const config = parseDeploymentConfig(
+		payload.controlSource,
+		payload.tenantSource
+	);
+	const manifestId = deploymentManifestId(payload.deploymentManifest);
+	const artifacts: StaticDeploymentArtifacts = {
+		manifestId,
+		deploymentExecutorHash: payload.deploymentExecutorHash,
+		tenant: workerUploadTemplate(
+			config.tenant,
+			payload.tenantBundle,
+			payload.buildVersion
+		),
+		control: workerUploadTemplate(
+			config.control,
+			payload.controlBundle,
+			payload.buildVersion
+		)
+	};
+
+	return {
+		config,
+		manifestId,
+		artifactId: deploymentArtifactId(artifacts)
+	};
 }
 
 export function payloadToArtifact(
 	payload: EmbeddedPayload
 ): DeploymentArtifact {
+	const identity = deploymentArtifacts(payload);
+
 	return {
-		config: parseDeploymentConfig(payload.controlSource, payload.tenantSource),
+		config: identity.config,
 		controlBundle: payload.controlBundle,
 		tenantBundle: payload.tenantBundle,
 		d1Migrations: payload.d1Migrations,
+		deploymentManifest: payload.deploymentManifest,
+		deploymentManifestId: identity.manifestId,
+		deploymentArtifactId: identity.artifactId,
+		deploymentExecutorHash: payload.deploymentExecutorHash,
 		buildVersion: payload.buildVersion
 	};
 }
@@ -53,6 +189,65 @@ export function payloadToArtifact(
 const serverDirectory = 'packages/server';
 const buildInfoPath = `${serverDirectory}/src/build-info.generated.ts`;
 const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
+const durableObjectMigrationsDirectory = `${serverDirectory}/drizzle`;
+const deploymentManifestOutputPath = `${serverDirectory}/src/deployment-manifest.generated.ts`;
+const executorSourceRoots = [
+	'packages/cli/src',
+	'packages/protocol/src',
+	'packages/shared/src',
+	'packages/reporter/src',
+	'packages/cli-ui/src'
+];
+
+async function sourceFiles(directory: string): Promise<string[]> {
+	const entries = await readdir(directory, { withFileTypes: true });
+	const nested = await Promise.all(
+		entries.map(async (entry) => {
+			const entryPath = path.join(directory, entry.name);
+
+			if (entry.isDirectory()) {
+				return sourceFiles(entryPath);
+			}
+
+			return entry.isFile() && !entry.name.endsWith('.test.ts')
+				? [entryPath]
+				: [];
+		})
+	);
+
+	return nested.flat();
+}
+
+async function deploymentExecutorHash(
+	checkoutRoot: string
+): Promise<DeploymentExecutorSha256> {
+	const roots = executorSourceRoots.map((root) =>
+		path.join(checkoutRoot, root)
+	);
+	const filesByRoot = await Promise.all(
+		roots.map(async (root) => sourceFiles(root))
+	);
+	const files = filesByRoot
+		.flat()
+		.toSorted((left, right) => left.localeCompare(right));
+	const hash = createHash('sha256');
+
+	for (const file of files) {
+		hash.update(path.relative(checkoutRoot, file));
+		hash.update('\0');
+		hash.update(await readFile(file));
+		hash.update('\0');
+	}
+
+	for (const file of ['package.json', 'pnpm-lock.yaml']) {
+		hash.update(file);
+		hash.update('\0');
+		hash.update(await readFile(path.join(checkoutRoot, file)));
+		hash.update('\0');
+	}
+
+	return deploymentExecutorSha256Schema.parse(hash.digest('hex'));
+}
 
 // The server entrypoints import an uncommitted generated build version.
 // Regenerate it before bundling because onboarding waits for `/_version` to
@@ -84,6 +279,95 @@ async function readMigrations(checkoutRoot: string): Promise<D1Migration[]> {
 	return parseD1Migrations(files);
 }
 
+const durableObjectJournalEntrySchema = z.object({ tag: z.string() });
+const durableObjectJournalSchema = z.object({
+	entries: z.array(durableObjectJournalEntrySchema)
+});
+
+async function readDurableObjectMigrations(checkoutRoot: string) {
+	const directory = path.join(checkoutRoot, durableObjectMigrationsDirectory);
+	const journalPath = path.join(directory, 'meta/_journal.json');
+	const journalSource = await readFile(journalPath, 'utf8');
+	const journal = durableObjectJournalSchema.parse(JSON.parse(journalSource));
+
+	return Promise.all(
+		journal.entries.map(async ({ tag }) => {
+			const source = await readFile(path.join(directory, `${tag}.sql`), 'utf8');
+
+			return {
+				id: durableObjectMigrationId(tag),
+				sha256: createHash('sha256').update(source).digest('hex')
+			};
+		})
+	);
+}
+
+function deploymentManifestSource(manifest: DeploymentManifestBody): string {
+	const migrationSource = (
+		migrations: DeploymentManifestBody['d1Migrations'],
+		factory: 'd1MigrationId' | 'durableObjectMigrationId'
+	) =>
+		migrations
+			.map(
+				(migration) =>
+					`\t\t{ id: ${factory}(${JSON.stringify(migration.id)}), sha256: ${JSON.stringify(migration.sha256)} }`
+			)
+			.join(',\n');
+
+	return [
+		"import { cacheDeploymentManifest, d1MigrationId, durableObjectMigrationId } from '@cupboard/protocol/cache-deployment-manifest';",
+		"import type { ForwardDeploymentTransition } from '@cupboard/protocol/deployment-manifest';",
+		'',
+		'export const deploymentManifest = cacheDeploymentManifest({',
+		'\td1: [',
+		migrationSource(manifest.d1Migrations, 'd1MigrationId'),
+		'\t],',
+		'\tdurableObject: [',
+		migrationSource(
+			manifest.durableObjectMigrations,
+			'durableObjectMigrationId'
+		),
+		'\t]',
+		'});',
+		'',
+		'export const deploymentForwardTransitions: readonly ForwardDeploymentTransition[] =',
+		'\tdeploymentManifest.forwardTransitions;',
+		''
+	].join('\n');
+}
+
+async function writeDeploymentManifest(
+	checkoutRoot: string,
+	manifest: DeploymentManifestBody
+): Promise<void> {
+	const outputPath = path.join(checkoutRoot, deploymentManifestOutputPath);
+	const temporaryPath = `${outputPath}.${String(process.pid)}.tmp`;
+
+	await writeFile(temporaryPath, deploymentManifestSource(manifest));
+	await rename(temporaryPath, outputPath);
+}
+
+export async function generateDeploymentManifest(
+	checkoutRoot: string
+): Promise<DeploymentManifestBody> {
+	const [d1Migrations, durableObjectMigrations] = await Promise.all([
+		readMigrations(checkoutRoot),
+		readDurableObjectMigrations(checkoutRoot)
+	]);
+	const manifest = cacheDeploymentManifest({
+		d1: d1Migrations.map((migration) => ({
+			id: d1MigrationId(migration.name),
+			sha256: migration.sha256
+		})),
+		durableObject: durableObjectMigrations
+	});
+
+	validateDeploymentManifest(manifest);
+	await writeDeploymentManifest(checkoutRoot, manifest);
+
+	return manifest;
+}
+
 /**
  * Read both wrangler sources, bundle each Worker from live source, and read the
  * D1 migrations from a checkout. This is the serializable payload the release
@@ -95,7 +379,13 @@ export async function buildEmbeddedPayload(
 ): Promise<EmbeddedPayload> {
 	const buildVersion = await ensureBuildInfo(checkoutRoot);
 
-	const [controlSource, tenantSource] = await Promise.all([
+	const [
+		controlSource,
+		tenantSource,
+		d1Migrations,
+		deploymentManifest,
+		executorHash
+	] = await Promise.all([
 		readFile(
 			path.join(checkoutRoot, serverDirectory, 'wrangler.jsonc'),
 			'utf8'
@@ -103,10 +393,13 @@ export async function buildEmbeddedPayload(
 		readFile(
 			path.join(checkoutRoot, serverDirectory, 'wrangler.tenant.jsonc'),
 			'utf8'
-		)
+		),
+		readMigrations(checkoutRoot),
+		generateDeploymentManifest(checkoutRoot),
+		deploymentExecutorHash(checkoutRoot)
 	]);
 
-	const [controlBundle, tenantBundle, d1Migrations] = await Promise.all([
+	const [controlBundle, tenantBundle] = await Promise.all([
 		bundler.bundle(
 			path.join(checkoutRoot, controlWorker.entryFile),
 			controlWorker.mainModule
@@ -114,8 +407,7 @@ export async function buildEmbeddedPayload(
 		bundler.bundle(
 			path.join(checkoutRoot, tenantWorker.entryFile),
 			tenantWorker.mainModule
-		),
-		readMigrations(checkoutRoot)
+		)
 	]);
 
 	return {
@@ -124,6 +416,8 @@ export async function buildEmbeddedPayload(
 		controlBundle,
 		tenantBundle,
 		d1Migrations,
+		deploymentManifest,
+		deploymentExecutorHash: executorHash,
 		buildVersion
 	};
 }

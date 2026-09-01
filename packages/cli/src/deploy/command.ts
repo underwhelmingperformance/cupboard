@@ -42,6 +42,11 @@ import {
 	derivedPlanRows,
 	runDeploy
 } from './deploy-run.ts';
+import {
+	deploymentOperatorClient,
+	DeploymentOperatorIdentityRequiredError,
+	DeploymentOperatorUrlUnavailableError
+} from './deployment-operator.ts';
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
@@ -52,6 +57,7 @@ import {
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
+	deploymentUrl,
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
@@ -1369,10 +1375,41 @@ async function deployFlow(
 		agreed.config,
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
 	);
+	const deploymentApi = apiFor(agreed.accountId);
+	const existingControl = await deploymentApi.getScriptConfiguration(
+		deployedConfig.control.name
+	);
+	let deploymentClient:
+		(() => ReturnType<typeof deploymentOperatorClient>) | undefined;
+
+	if (
+		existingControl !== undefined &&
+		artifact.deploymentManifest.forwardTransitions.length > 0
+	) {
+		deploymentClient = async () => {
+			if (idToken === undefined) {
+				throw new DeploymentOperatorIdentityRequiredError();
+			}
+
+			const url = await deploymentUrl(
+				deploymentApi,
+				deployedConfig.control.name,
+				agreed.domain
+			);
+
+			if (url === undefined) {
+				throw new DeploymentOperatorUrlUnavailableError();
+			}
+
+			return deploymentOperatorClient(url, idToken, runtimeOptions.signal);
+		};
+	}
 
 	await runDeploy({
 		artifact: { ...artifact, config: deployedConfig },
-		api: apiFor(agreed.accountId),
+		api: deploymentApi,
+		accountId: agreed.accountId,
+		...(deploymentClient !== undefined && { deploymentClient }),
 		reporter: ui.reporter(),
 		options,
 		signal: runtimeOptions.signal

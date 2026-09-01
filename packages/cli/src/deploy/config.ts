@@ -94,6 +94,7 @@ export interface WorkerConfig {
 	readonly observability: boolean;
 	readonly tracing: boolean;
 	readonly vars: Readonly<Record<string, string>>;
+	readonly versionMetadataBinding?: string;
 	readonly durableObjects: readonly DurableObjectBinding[];
 	readonly r2Buckets: readonly R2Binding[];
 	readonly kvNamespaces: readonly KvBinding[];
@@ -271,6 +272,7 @@ const rawWranglerSchema = z
 		vars: z.record(z.string(), z.string()).default({}),
 		limits: z.object({ cpu_ms: z.number() }).partial().optional(),
 		observability: observability.optional(),
+		version_metadata: z.object({ binding: z.string().min(1) }).optional(),
 		durable_objects: z
 			.object({ bindings: z.array(durableObjectBinding) })
 			.optional(),
@@ -342,6 +344,9 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		observability: raw.observability?.enabled ?? false,
 		tracing: raw.observability?.traces?.enabled ?? false,
 		vars: raw.vars,
+		...(raw.version_metadata !== undefined && {
+			versionMetadataBinding: raw.version_metadata.binding
+		}),
 		durableObjects: (raw.durable_objects?.bindings ?? []).map((binding) => ({
 			binding: binding.name,
 			className: binding.class_name,
