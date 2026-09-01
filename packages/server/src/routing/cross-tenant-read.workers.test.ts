@@ -38,8 +38,9 @@ describe('cross-tenant NAR read isolation', () => {
 			ownerIssuer,
 			cacheWriteGrants()
 		);
-		// A second public tenant that never uploads the hash; it must not be able to
-		// read acme's bytes by naming the content hash under its own prefix.
+		// A second tenant with a public default cache never uploads the hash. It must
+		// not be able to read acme's bytes by naming the content hash under its own
+		// prefix.
 		await provisionNamedTenant('mallory');
 
 		const nar = await verifiableNar('acme-private-bytes');

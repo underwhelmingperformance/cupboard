@@ -114,8 +114,6 @@ function pullRequestView(
 }
 
 function checkClient(overrides: {
-	graceSeconds?: number | undefined;
-	extraPolicies?: { cachePrefix: string; graceSeconds: number }[];
 	rules?: OidcTrustSummaryInput[];
 	views?: ReuseViewSummaryInput[];
 }): GithubCheckClient {
@@ -174,7 +172,7 @@ describe('runGithubCheck', () => {
 			url,
 			options,
 			reporter([]),
-			checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+			checkClient({ rules: [prRule, branchRule] }),
 			{
 				...checkDependencies({}),
 				signal: controller.signal,
@@ -229,7 +227,6 @@ describe('runGithubCheck', () => {
 				options,
 				reporter([]),
 				checkClient({
-					graceSeconds: 86_400,
 					rules: [previousPrRule, previousBranchRule, prRule, branchRule]
 				}),
 				checkDependencies({})
@@ -245,7 +242,7 @@ describe('runGithubCheck', () => {
 				url,
 				{ ...options, workflowRef: 'acme/app/.github/workflows/publish.yml' },
 				reporter(results),
-				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+				checkClient({ rules: [prRule, branchRule] }),
 				checkDependencies({})
 			)
 		).rejects.toBeInstanceOf(WorkflowReferenceUnpinnedError);
@@ -256,7 +253,6 @@ describe('runGithubCheck', () => {
 		const results: ResultRow[][] = [];
 		let hasListed = false;
 		const client = checkClient({
-			graceSeconds: 86_400,
 			rules: [prRule, branchRule]
 		});
 		client.oidcTrust.list = () => {
@@ -287,7 +283,7 @@ describe('runGithubCheck', () => {
 			url,
 			options,
 			reporter(results),
-			checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+			checkClient({ rules: [prRule, branchRule] }),
 			checkDependencies({})
 		);
 
@@ -307,7 +303,7 @@ describe('runGithubCheck', () => {
 				url,
 				options,
 				reporter([]),
-				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+				checkClient({ rules: [prRule, branchRule] }),
 				{
 					...checkDependencies({}),
 					fetchCacheInfo: (target) =>
@@ -360,7 +356,6 @@ describe('runGithubCheck', () => {
 					options,
 					reporter(results),
 					checkClient({
-						graceSeconds: 86_400,
 						rules: [prRule, branchRule],
 						views
 					}),
@@ -458,7 +453,6 @@ describe('runGithubCheck', () => {
 				options,
 				reporter(results),
 				checkClient({
-					graceSeconds: 86_400,
 					rules: [misSpelledPr, branchRule]
 				}),
 				checkDependencies({})
@@ -508,7 +502,7 @@ describe('runGithubCheck', () => {
 				url,
 				options,
 				reporter(results),
-				checkClient({ graceSeconds: 86_400, rules: [patternPinned] }),
+				checkClient({ rules: [patternPinned] }),
 				checkDependencies({})
 			);
 		} catch (error) {
@@ -535,7 +529,7 @@ describe('runGithubCheck', () => {
 				url,
 				{ ...options, rootPrefix: undefined },
 				reporter(results),
-				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+				checkClient({ rules: [prRule, branchRule] }),
 				checkDependencies({})
 			);
 		} catch (error) {
@@ -570,7 +564,6 @@ describe('runGithubCheck', () => {
 				options,
 				reporter(results),
 				checkClient({
-					graceSeconds: 86_400,
 					rules: [ownerRule, prRule, branchRule]
 				}),
 				checkDependencies({})
@@ -619,7 +612,6 @@ describe('runGithubCheck', () => {
 				options,
 				reporter(results),
 				checkClient({
-					graceSeconds: 86_400,
 					rules: [prRule, grantDrifted]
 				}),
 				checkDependencies({})
@@ -695,7 +687,7 @@ describe('runGithubCheck', () => {
 					url,
 					options,
 					reporter(results),
-					checkClient({ graceSeconds: 86_400, rules: [...rules] }),
+					checkClient({ rules: [...rules] }),
 					checkDependencies({})
 				);
 			} catch (error) {
@@ -730,7 +722,7 @@ describe('runGithubCheck', () => {
 				url,
 				{ ...options, workflowRef: patternReference },
 				reporter([]),
-				checkClient({ graceSeconds: 86_400 }),
+				checkClient({}),
 				checkDependencies({})
 			)
 		).rejects.toStrictEqual(
@@ -764,7 +756,7 @@ describe('runGithubCheck', () => {
 			url,
 			options,
 			reporter(results),
-			checkClient({ graceSeconds: 86_400, rules: patternRules }),
+			checkClient({ rules: patternRules }),
 			checkDependencies({})
 		);
 

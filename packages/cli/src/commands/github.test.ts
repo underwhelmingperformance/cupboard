@@ -108,7 +108,6 @@ interface Recorded {
 }
 
 interface Stored {
-	readonly gracePolicies?: { cachePrefix: string; graceSeconds: number }[];
 	readonly views?: {
 		name: string;
 		priority: number;
@@ -285,7 +284,6 @@ describe('runGithubSetup', () => {
 	it('derives the audience from the tenant URL without its trailing slash', async () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -361,7 +359,6 @@ describe('runGithubSetup', () => {
 	it('performs no writes against converged state', async () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -402,7 +399,6 @@ describe('runGithubSetup', () => {
 			permittedGrants: previousBranchBody.permittedGrants
 		};
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -488,7 +484,6 @@ describe('runGithubSetup', () => {
 			multiSelects: [['previous-pr', 'previous-branch']]
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -639,7 +634,6 @@ describe('runGithubSetup', () => {
 			permittedGrants: prBody.permittedGrants
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -692,7 +686,6 @@ describe('runGithubSetup', () => {
 			multiSelects: [['dispatch']]
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -810,7 +803,6 @@ describe('runGithubSetup', () => {
 			multiSelects: [['owner']]
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -845,7 +837,6 @@ describe('runGithubSetup', () => {
 			confirm: 'yes'
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -931,7 +922,6 @@ describe('runGithubSetup', () => {
 			permittedGrants: previousPrBody.permittedGrants
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1001,7 +991,6 @@ describe('runGithubSetup', () => {
 			multiSelects: [[]]
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1081,7 +1070,6 @@ describe('runGithubSetup', () => {
 			disabled: false
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1134,7 +1122,6 @@ describe('runGithubSetup', () => {
 			multiSelects: [['previous-branch', 'previous-pr']]
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1260,7 +1247,6 @@ describe('runGithubSetup', () => {
 			permittedGrants: branchBody.permittedGrants
 		});
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 3600 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1337,7 +1323,6 @@ describe('runGithubSetup', () => {
 		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1410,7 +1395,6 @@ describe('runGithubSetup', () => {
 				permittedGrants: [{ type: 'cupboard_wildcard' }]
 			});
 			const { client, recorded } = setupClient({
-				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 				views: [
 					{
 						name: 'pull-requests',
@@ -1457,7 +1441,6 @@ describe('runGithubSetup', () => {
 		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',
@@ -1511,7 +1494,6 @@ describe('runGithubSetup', () => {
 		});
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
 					name: 'pull-requests',

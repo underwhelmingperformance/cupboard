@@ -188,11 +188,9 @@ function guardRead(
  * Authenticates a read of cache content and refuses it while the addressed
  * cache is deleted.
  *
- * Cache deletion retains the read credential and removes narinfo and
- * attestation objects asynchronously. Authentication can therefore succeed
- * while those objects remain. Return 404 after authentication so the objects
- * are inaccessible without revealing the cache state to an unauthenticated
- * reader.
+ * Cache deletion removes narinfo and attestation objects asynchronously. Return
+ * 404 after authenticating a private cache so those objects are inaccessible
+ * without revealing the cache state to an unauthenticated reader.
  */
 async function guardContentRead(
 	context: Context<WorkerHonoEnv>

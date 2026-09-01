@@ -82,7 +82,7 @@ describe('resultTitle', () => {
 	it.each([
 		['tenants', 'Tenants'],
 		['auth-keys', 'Auth keys'],
-		['retention-policies', 'Retention policies'],
+		['cache-properties', 'Cache properties'],
 		['oidc-trust-rules', 'OIDC trust rules'],
 		['push-summary', 'Push summary'],
 		['', 'Result']
