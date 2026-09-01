@@ -31,6 +31,27 @@ export interface BundleEvidence {
 	readonly timestampCount: number;
 }
 
+const serialisedEvidenceEntriesSchema = z.array(z.unknown());
+
+const serialisedBundleEvidenceSchema = z.object({
+	tlogEntries: serialisedEvidenceEntriesSchema.default([]),
+	timestampVerificationData: z
+		.object({
+			rfc3161Timestamps: serialisedEvidenceEntriesSchema.default([])
+		})
+		.optional()
+});
+
+function serialisedBundleEvidence(material: unknown): BundleEvidence {
+	const evidence = serialisedBundleEvidenceSchema.parse(material);
+
+	return {
+		tlogEntryCount: evidence.tlogEntries.length,
+		timestampCount:
+			evidence.timestampVerificationData?.rfc3161Timestamps.length ?? 0
+	};
+}
+
 export interface SignedAttestation {
 	readonly bundle: string;
 	readonly evidence: BundleEvidence;
@@ -461,15 +482,12 @@ export function githubStatementSigner(
 			token: options.githubToken,
 			skipWrite: !options.policy.uploadToGithub
 		});
-		const material = attestation.bundle.verificationMaterial;
 
 		return {
 			bundle: `${JSON.stringify(attestation.bundle)}\n`,
-			evidence: {
-				tlogEntryCount: material.tlogEntries.length,
-				timestampCount:
-					material.timestampVerificationData?.rfc3161Timestamps.length ?? 0
-			},
+			evidence: serialisedBundleEvidence(
+				attestation.bundle.verificationMaterial
+			),
 			...(attestation.attestationID !== undefined && {
 				attestationId: attestation.attestationID
 			})
