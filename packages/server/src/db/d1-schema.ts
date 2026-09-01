@@ -14,7 +14,7 @@ import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { ReadUser } from '@cupboard/shared/http';
-import { sql } from 'drizzle-orm';
+import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
 	check,
 	index,
@@ -29,6 +29,10 @@ import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
 } from '../read/read-auth.ts';
+
+function cacheNameConstraint(column: SQLWrapper): SQL {
+	return sql`length(${column}) BETWEEN 1 AND 63 AND substr(${column}, 1, 1) GLOB '[a-z0-9]' AND ${column} NOT GLOB '*[^a-z0-9._-]*'`;
+}
 
 export const instanceConfig = sqliteTable('instance_config', {
 	id: text('id').primaryKey(),
@@ -137,7 +141,7 @@ export const blobReference = sqliteTable(
 	(table) => [
 		check(
 			'blob_ref_cache_identity_check',
-			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)})`
 		),
 		uniqueIndex('blob_ref_default_identity_idx')
 			.on(table.tenant, table.storePathHash, table.generation)
@@ -146,7 +150,7 @@ export const blobReference = sqliteTable(
 			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
 			.where(sql`${table.cacheKind} = 'named'`),
 		index('blob_ref_nar_hash_idx').on(table.narHash),
-		index('blob_ref_tenant_nar_hash_cache_idx').on(
+		index('blob_ref_tenant_nar_hash_native_idx').on(
 			table.tenant,
 			table.narHash,
 			table.cacheKind,
@@ -174,7 +178,11 @@ export const cacheLifecycle = sqliteTable(
 	(table) => [
 		check(
 			'cache_lifecycle_identity_check',
-			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)})`
+		),
+		check(
+			'cache_lifecycle_access_check',
+			sql`${table.access} IN ('public', 'private')`
 		),
 		uniqueIndex('cache_lifecycle_default_identity_idx')
 			.on(table.tenant)
@@ -276,7 +284,7 @@ export const tenantCacheReadCredential = sqliteTable(
 	(table) => [
 		check(
 			'tenant_cache_read_credential_identity_check',
-			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)})`
 		),
 		uniqueIndex('tenant_cache_read_credential_default_identity_idx')
 			.on(table.tenant)
@@ -700,7 +708,7 @@ export const attestationReference = sqliteTable(
 	(table) => [
 		check(
 			'attestation_ref_cache_identity_check',
-			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)})`
 		),
 		uniqueIndex('attestation_ref_default_identity_idx')
 			.on(
