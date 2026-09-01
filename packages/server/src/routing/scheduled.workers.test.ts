@@ -155,7 +155,7 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('plans catalogue migration for active and suspended tenants', async () => {
+	it('does not enqueue catalogue migration for unmarked tenants', async () => {
 		await provisionNamedTenant('active-migration', { configure: false });
 		await provisionNamedTenant('suspended-migration', { configure: false });
 		await provisionNamedTenant('offboarding-migration', { configure: false });
@@ -178,34 +178,16 @@ describe('scheduled tenant pass failure records', () => {
 			(message) => message.kind === 'cache-catalogue-migration'
 		);
 
-		expect(catalogueMessages).toStrictEqual([
-			{ kind: 'cache-catalogue-migration', tenant: 'active-migration' },
-			{ kind: 'cache-catalogue-migration', tenant: 'suspended-migration' }
-		]);
+		expect(catalogueMessages).toStrictEqual([]);
 	});
 
-	it('executes a catalogue migration message regardless of tenant status', async () => {
-		const seen: string[] = [];
-		const decision = await executeMaintenanceQueueMessage(
-			rootLogger(),
-			env,
-			{
-				kind: 'cache-catalogue-migration',
-				tenant: tenantIdSchema.parse('suspended-migration')
-			},
-			{
-				migrateCacheCatalogue: (_env, tenant) => {
-					seen.push(tenant);
-
-					return Promise.resolve();
-				}
-			}
-		);
-
-		expect({ decision, seen }).toStrictEqual({
-			decision: { action: 'ack' },
-			seen: ['suspended-migration']
+	it('acknowledges a stale catalogue migration message without dispatching it', async () => {
+		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
+			kind: 'cache-catalogue-migration',
+			tenant: tenantIdSchema.parse('stale-catalogue')
 		});
+
+		expect(decision).toStrictEqual({ action: 'ack' });
 	});
 
 	it('attempts every batch when an earlier one fails, surfacing a typed error', async () => {

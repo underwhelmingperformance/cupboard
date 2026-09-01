@@ -176,6 +176,13 @@
 			"when": 1788235790821,
 			"tag": "0024_cache_access_compatible_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "6",
+			"when": 1788237934367,
+			"tag": "0025_retire_tenant_read_mode",
+			"breakpoints": true
 		}
 	]
 }

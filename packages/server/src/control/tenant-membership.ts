@@ -13,12 +13,10 @@ import { cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
-import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
 } from '../read/read-auth.ts';
-import { tenantServer } from '../routing/durable-object.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
@@ -169,7 +167,6 @@ async function loadMembershipFilter(
 
 const tenantAdmissionColumns = {
 	status: d1Schema.tenant.status,
-	cacheCatalogueVersion: d1Schema.tenant.cacheCatalogueVersion,
 	readUser: d1Schema.tenant.readUser,
 	readPasswordHash: d1Schema.tenant.readPasswordHash,
 	readPasswordSalt: d1Schema.tenant.readPasswordSalt
@@ -260,7 +257,6 @@ async function readTenantAndCacheRows(
 
 interface TenantAdmissionRow {
 	status: TenantEntry['status'];
-	cacheCatalogueVersion: number | null;
 	readUser: ReadUser | null;
 	readPasswordHash: ReadPasswordHash | null;
 	readPasswordSalt: ReadPasswordSalt | null;
@@ -309,24 +305,10 @@ async function readTenantEntry(
 	cache: CacheScope
 ): Promise<TenantAdmission | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	let rows = await readTenantAndCacheRows(database, slug, cache);
+	const rows = await readTenantAndCacheRows(database, slug, cache);
 
 	if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
 		return undefined;
-	}
-
-	if (rows.tenant.cacheCatalogueVersion !== cacheCatalogueVersion) {
-		try {
-			await tenantServer(env, slug).migrateCacheCatalogue(slug);
-		} catch (error) {
-			throw new TenantAdmissionUnavailableError(error);
-		}
-
-		rows = await readTenantAndCacheRows(database, slug, cache);
-
-		if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
-			return undefined;
-		}
 	}
 
 	const entry = entryFromRow(rows.tenant);

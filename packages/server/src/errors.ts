@@ -58,25 +58,23 @@ export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 	}
 }
 
-export type CacheCatalogueMigrationProblem =
-	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
+export type CacheAccessMigrationProblem =
+	'missing-default-lifecycle' | 'invalid-lifecycle';
 
-export class CacheCatalogueMigrationError extends ServerHttpError {
+export class CacheAccessMigrationError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(
 		public readonly tenant: TenantId,
-		public readonly problem: CacheCatalogueMigrationProblem,
+		public readonly problem: CacheAccessMigrationProblem,
 		public override readonly cause?: Error
 	) {
 		super(
-			problem === 'tenant-missing'
-				? 'The tenant registry row is missing during cache catalogue migration'
-				: problem === 'lifecycle-incomplete'
-					? 'A cache lifecycle is incomplete during cache catalogue migration'
-					: 'A cache lifecycle is invalid during cache catalogue migration'
+			problem === 'missing-default-lifecycle'
+				? 'The default cache lifecycle is missing during cache access migration'
+				: 'A cache lifecycle is invalid during cache access migration'
 		);
-		this.name = 'CacheCatalogueMigrationError';
+		this.name = 'CacheAccessMigrationError';
 	}
 }
 
