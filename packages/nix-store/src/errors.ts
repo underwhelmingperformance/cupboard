@@ -64,6 +64,19 @@ export class InvalidCacheUrlBaseError extends ProtocolError {
 	}
 }
 
+export class InvalidTenantCacheUrlError extends ProtocolError {
+	constructor(
+		public readonly url: string,
+		options?: { readonly cause?: unknown }
+	) {
+		super(
+			'Tenant cache URL must end with /t/<tenant> or /t/<tenant>/cache/<name>',
+			options
+		);
+		this.name = 'InvalidTenantCacheUrlError';
+	}
+}
+
 // A rendered Nix public key that is not `<name>:<base64>`. Both halves are
 // required: the name identifies the signer, and the decoded material contains
 // the public key used for verification.

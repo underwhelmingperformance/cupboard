@@ -1,10 +1,8 @@
 import {
-	type CacheSelector,
-	cacheSelectorSchema,
+	cacheNameSchema,
+	type CacheScope,
 	type RootName,
 	rootNameSchema,
-	selectorForCache,
-	type StoredCache,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -25,7 +23,14 @@ import { InsufficientScopeError } from '../errors.ts';
  */
 export type PendingCacheResolver = (
 	id: string
-) => Promise<StoredCache | undefined>;
+) => Promise<CacheScope | undefined>;
+
+/**
+ * A resolver for callers with no pending rows to consult, such as the control
+ * plane and the commit-session guard. It always reports absence.
+ */
+export const noPendingCache: PendingCacheResolver = () =>
+	Promise.resolve(undefined);
 
 function inputField(input: unknown, name: string): string | undefined {
 	const direct = z.looseObject({ [name]: z.string() }).safeParse(input);
@@ -53,6 +58,7 @@ interface ResolvedResource {
 async function resolveResource(
 	spec: ResourceSpec | undefined,
 	input: unknown,
+	pathCache: CacheScope,
 	pendingCache: PendingCacheResolver
 ): Promise<ResolvedResource> {
 	if (spec === undefined) {
@@ -60,7 +66,7 @@ async function resolveResource(
 	}
 
 	const resource: {
-		cache?: CacheSelector;
+		cache?: CacheScope;
 		root?: RootName;
 		tenant?: TenantId;
 	} = {};
@@ -68,28 +74,29 @@ async function resolveResource(
 	let pendingMissing: ResolvedResource['pendingMissing'] = false;
 
 	if (spec.cache !== undefined) {
-		if ('pending' in spec.cache) {
+		if ('fromPath' in spec.cache) {
+			resource.cache = pathCache;
+		} else if ('pending' in spec.cache) {
 			const id = inputField(input, 'id');
 			const cache = id === undefined ? undefined : await pendingCache(id);
 
 			if (cache === undefined) {
 				pendingMissing = { missingDenies: spec.cache.missingDenies !== false };
 			} else {
-				resource.cache = selectorForCache(cache);
+				resource.cache = cache;
 			}
 		} else {
-			// A scoped grant cannot cover an invalid selector. A wildcard can,
+			// A scoped grant cannot cover an invalid cache name. A wildcard can,
 			// although route validation will still return 400 for the input.
-			const selector = inputField(input, spec.cache.field);
+			const name = inputField(input, spec.cache.field);
 			const parsed =
-				selector === undefined
-					? undefined
-					: cacheSelectorSchema.safeParse(selector).data;
+				name === undefined ? undefined : cacheNameSchema.safeParse(name).data;
 
-			if (selector !== undefined && parsed === undefined) {
+			if (name !== undefined && parsed === undefined) {
 				isUnresolved = true;
 			} else {
-				resource.cache = parsed;
+				resource.cache =
+					parsed === undefined ? undefined : { kind: 'named', name: parsed };
 			}
 		}
 	}
@@ -147,6 +154,7 @@ export async function authoriseRequest(
 	claims: AccessClaims,
 	meta: AuthzMeta,
 	input: unknown,
+	pathCache: CacheScope,
 	pendingCache: PendingCacheResolver
 ): Promise<void> {
 	if (meta.requires === undefined) {
@@ -156,6 +164,7 @@ export async function authoriseRequest(
 	const { resource, unresolved, pendingMissing } = await resolveResource(
 		meta.resource,
 		input,
+		pathCache,
 		pendingCache
 	);
 
@@ -190,7 +199,7 @@ export async function authoriseRequest(
  */
 export function authoriseAttachRoot(
 	claims: AccessClaims,
-	cache: CacheSelector,
+	cache: CacheScope,
 	root: RootName
 ): void {
 	if (!isCoveredByToken(claims.grants, 'root:attach', { cache, root })) {

@@ -7,7 +7,7 @@ import {
 	keyListResponseSchema,
 	keyRetireResponseSchema,
 	keyRotateResponseSchema,
-	type ParsedSigningKeyEntry
+	type SigningKeyEntry
 } from '@cupboard/protocol/keys';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -33,9 +33,9 @@ const runningBackfill = {
 
 function entry(
 	id = 'active',
-	state: ParsedSigningKeyEntry['state'] = 'signing',
+	state: SigningKeyEntry['state'] = 'signing',
 	publicKey = 'cupboard-acme-1:cHVi'
-): ParsedSigningKeyEntry {
+): SigningKeyEntry {
 	const [parsed] = keyListResponseSchema.parse({
 		keys: [
 			{

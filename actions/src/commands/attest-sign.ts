@@ -3,9 +3,9 @@ import path from 'node:path';
 
 import { setOutput as setGithubOutput } from '@actions/core';
 import {
+	type BuildOriginPredicate,
 	buildOriginPredicateSchema,
-	buildOriginPredicateType,
-	type ParsedBuildOriginPredicate
+	buildOriginPredicateType
 } from '@cupboard/protocol/build-origin';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { chunk } from '@cupboard/shared/collections';
@@ -218,7 +218,7 @@ export function resolveAttestSignInputs(
  *
  * An absent visibility uses the private defaults, which do not publish a
  * bundle. If it used the public defaults, an omitted value could publish a
- * private cache's NAR hashes. No later step can retract them.
+ * destination cache's NAR hashes. No later step can retract them.
  */
 function resolveSigningPolicy(options: AttestSignOptions): SigningPolicy {
 	const defaults = defaultSigningPolicy(
@@ -458,9 +458,9 @@ function originStatementFor(
 }
 
 function soleSubjectPredicate(
-	predicate: ParsedBuildOriginPredicate,
+	predicate: BuildOriginPredicate,
 	subjects: readonly AttestationSubject[]
-): ParsedBuildOriginPredicate {
+): BuildOriginPredicate {
 	const kept = predicate.subjects.filter((predicateSubject) =>
 		subjects.some(
 			(subject) =>

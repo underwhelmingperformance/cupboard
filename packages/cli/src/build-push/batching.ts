@@ -6,8 +6,8 @@ import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	commitBatchMaxEntries,
-	type ParsedUploadDecision,
-	type UploadAttachRoot
+	type UploadAttachRootInput,
+	type UploadDecision
 } from '@cupboard/protocol/upload';
 
 import type { CommitOptions } from '../client/client.ts';
@@ -61,7 +61,7 @@ export interface BatchPathFailure {
 export interface BuildOutputBatcherOptions {
 	readonly store: BatchStore;
 	readonly client: PushClient;
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	readonly commitOptions?: CommitOptions;
 	/**
 	 * The run's shared commit session. When it is present, every flush commits
@@ -77,7 +77,7 @@ export interface BuildOutputBatcherOptions {
 }
 
 type PublishableDecision = Extract<
-	ParsedUploadDecision,
+	UploadDecision,
 	{ action: 'upload' | 'commit' }
 >;
 

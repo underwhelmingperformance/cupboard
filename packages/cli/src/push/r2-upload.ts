@@ -1,20 +1,20 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { type ParsedPushCredential } from '@cupboard/protocol/upload';
+import { type PushCredential } from '@cupboard/protocol/upload';
 
 // 8 MiB parts, above R2's 5 MiB multipart minimum: a NAR that compresses smaller
 // goes in one PutObject, a larger one streams as multipart, bounding memory to
 // a few parts at a time.
 const partBytes = 8 * 1024 * 1024;
 
-export type CredentialProvider = () => Promise<ParsedPushCredential>;
+export type CredentialProvider = () => Promise<PushCredential>;
 
 export type BlobUploader = (
 	r2Key: string,
 	body: ReadableStream<Uint8Array>
 ) => Promise<void>;
 
-export function awsCredentials(credential: ParsedPushCredential): {
+export function awsCredentials(credential: PushCredential): {
 	readonly accessKeyId: string;
 	readonly secretAccessKey: string;
 	readonly sessionToken: string;

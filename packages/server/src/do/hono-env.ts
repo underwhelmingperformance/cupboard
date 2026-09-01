@@ -1,5 +1,5 @@
 import type { Logger } from '@cupboard/logger';
-import type { StoredCache } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 
 import type { AccessClaims } from '../auth/auth.ts';
 
@@ -15,6 +15,6 @@ export interface TenantHonoEnv {
 	Variables: {
 		logger: Logger;
 		claims: AccessClaims;
-		cache: StoredCache;
+		cache: CacheScope;
 	};
 }

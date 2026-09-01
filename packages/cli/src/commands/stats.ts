@@ -1,19 +1,13 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { callInCache } from '../client/cache-scoped.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
-
-type StatsOptions = CacheSelectionOptions;
 
 export function registerStatsCommand(
 	program: Command,
@@ -23,19 +17,21 @@ export function registerStatsCommand(
 		.command('stats')
 		.description('Show objects referenced by a cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.option('--cache <name>', 'report on a named cache rather than the default')
-		.addOption(privateCacheOption('report on'))
-		.action(async (url: URL, options: StatsOptions) => {
+		.argument('[cache]', 'named cache when the URL does not select one')
+		.action(async (url: URL, cache: string | undefined) => {
+			const urlTarget = cacheTargetFromUrl(url);
+			const target =
+				cache === undefined ? urlTarget : cacheTargetWithName(urlTarget, cache);
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(target.tenantUrl, {
+				credential: cachedOwnerProvider(target.tenantUrl, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 
 			const stats = await reporter.phase('Querying cupboard', () =>
-				rpc.stats.cache({
-					cacheName: selectorForCache(resolveCacheSelection(options))
-				})
+				callInCache(rpc.stats.cache, target.cache, {})
 			);
 
 			reporter.result({
@@ -73,9 +69,12 @@ export function registerStatsCommand(
 		.description('Show tenant-wide charged storage usage.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
+			const { tenantUrl } = cacheTargetFromUrl(url);
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(tenantUrl, {
+				credential: cachedOwnerProvider(tenantUrl, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 

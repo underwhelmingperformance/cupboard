@@ -1,23 +1,24 @@
-import {
-	DEFAULT_CACHE,
-	narInfoGenerationSchema
-} from '@cupboard/nix-store/scalars';
+import { narInfoGenerationSchema } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import * as d1Schema from '../db/d1-schema.ts';
+import { cacheIdentityCondition } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	clearBlobStorage,
 	commitPath,
 	currentServer,
+	defaultCache,
 	initialise,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -54,21 +55,24 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 			currentServer(),
 			(instance) => {
 				const service = new NarInfoObjectsService(instance.context);
-				return service.committedReferenceEdges(DEFAULT_CACHE, [
-					metadata.storePathHash
-				]);
+				return service.committedReferenceEdges(
+					resolvedCache(instance.context),
+					[metadata.storePathHash]
+				);
 			}
 		);
 
 		// Advance the row and edge without the normal commit pipeline, which would
 		// also republish the narinfo object.
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			instance.context.db
 				.update(schema.narInfos)
 				.set({ generation: narInfoGenerationSchema.parse(1) })
 				.where(
 					and(
-						eq(schema.narInfos.cache, DEFAULT_CACHE),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, metadata.storePathHash)
 					)
 				)
@@ -79,7 +83,11 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 				.set({ nextGeneration: narInfoGenerationSchema.parse(2) })
 				.where(
 					and(
-						eq(schema.generationSeq.cache, DEFAULT_CACHE),
+						cacheIdentityCondition(
+							schema.generationSeq.cacheKind,
+							schema.generationSeq.cacheName,
+							cache.scope
+						),
 						eq(schema.generationSeq.storePathHash, metadata.storePathHash)
 					)
 				)
@@ -87,12 +95,12 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 		});
 
 		await drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReference: d1Schema.blobReference }
+			schema: { blobReferences: migrationSchema.blobReferences }
 		})
-			.insert(d1Schema.blobReference)
+			.insert(migrationSchema.blobReferences)
 			.values({
 				tenant: fixtureTenant,
-				cache: DEFAULT_CACHE,
+				...cacheMigrationColumns(defaultCache(), 'public'),
 				storePathHash: metadata.storePathHash,
 				generation: narInfoGenerationSchema.parse(1),
 				narHash: metadata.narHash
@@ -101,7 +109,9 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 			.run();
 
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		const isServableResult = await runInDurableObject(
@@ -109,7 +119,7 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 			(instance) => {
 				const service = new NarInfoObjectsService(instance.context);
 				return service.isServable(
-					DEFAULT_CACHE,
+					resolvedCache(instance.context),
 					metadata.storePathHash,
 					staleSnapshot
 				);
@@ -118,7 +128,9 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 
 		const isObjectPresent =
 			(await env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+				narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+					kind: 'default'
+				})
 			)) !== null;
 
 		expect({ isServableResult, isObjectPresent }).toStrictEqual({

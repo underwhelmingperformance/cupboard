@@ -1,4 +1,3 @@
-import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
@@ -78,20 +77,18 @@ const badGateway = (): Response =>
 const nonIdempotentNegotiations = [
 	{
 		name: 'upload negotiation',
-		url: 'https://cupboard.test/t/acme/cache/_default/uploads',
+		url: 'https://cupboard.test/t/acme/uploads',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.uploads.negotiate({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.uploads.negotiate.inDefaultCache({
 				pushId: pushIdSchema.parse('push'),
 				paths: []
 			})
 	},
 	{
 		name: 'attestation negotiation',
-		url: 'https://cupboard.test/t/acme/cache/_default/attestations',
+		url: 'https://cupboard.test/t/acme/attestations',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.attestations.negotiate({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.attestations.negotiate.inDefaultCache({
 				pushId: pushIdSchema.parse('push'),
 				bundles: []
 			})
@@ -370,8 +367,7 @@ describe('tenantRpc', () => {
 			const pending = (async () => {
 				try {
 					return {
-						value: await rpc.attestations.attach({
-							cacheName: cacheSelectorSchema.parse('_default'),
+						value: await rpc.attestations.attach.inDefaultCache({
 							id: '1f0d5a2a-35d4-4c7f-9ff0-dfb432eca408'
 						})
 					};
@@ -546,7 +542,7 @@ describe('tenantRpc', () => {
 
 	it('rejects a response that does not satisfy the contract', async () => {
 		const { fetcher } = capturingFetcher([
-			() => Response.json({ caches: [{ name: 'builds' }] })
+			() => Response.json({ caches: [{}] })
 		]);
 		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'admin-token',
@@ -562,8 +558,10 @@ describe('tenantRpc', () => {
 				data: rejected.data,
 				issuePaths: rejected.issues.map((issue) => issue.path)
 			}).toStrictEqual({
-				data: { caches: [{ name: 'builds' }] },
+				data: { caches: [{}] },
 				issuePaths: [
+					['caches', 0, 'scope'],
+					['caches', 0, 'access'],
 					['caches', 0, 'priority'],
 					['caches', 0, 'storePaths']
 				]

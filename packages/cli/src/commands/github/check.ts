@@ -1,6 +1,10 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import {
+	type CacheName,
+	cacheNameSchema,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
@@ -12,7 +16,7 @@ import {
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
-import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
+import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { type ReadUser } from '@cupboard/shared/http';
 
@@ -192,10 +196,15 @@ function checkTrustRule(
 // and the empty prefix supplies the tenant default.
 function effectiveGraceSeconds(
 	policies: readonly { cachePrefix: string; graceSeconds: number }[],
-	cache: string
+	cache: CacheScope
 ): number | undefined {
+	if (cache.kind === 'default') {
+		return policies.find((policy) => policy.cachePrefix.length === 0)
+			?.graceSeconds;
+	}
+
 	return policies
-		.filter((policy) => cache.startsWith(policy.cachePrefix))
+		.filter((policy) => cache.name.startsWith(policy.cachePrefix))
 		.toSorted(
 			(left, right) => right.cachePrefix.length - left.cachePrefix.length
 		)
@@ -204,8 +213,8 @@ function effectiveGraceSeconds(
 
 function gracePolicyCaches(
 	policies: readonly { cachePrefix: string }[]
-): readonly string[] {
-	const caches = new Set<string>([DEFAULT_CACHE, `${pullRequestPrefix}1`]);
+): readonly CacheScope[] {
+	const cacheNames = new Set<string>([`${pullRequestPrefix}1`]);
 	const pullRequestNumberPattern = /^[1-9][0-9]*$/u;
 	const firstDigits = '123456789';
 	const laterDigits = '0123456789';
@@ -217,8 +226,8 @@ function gracePolicyCaches(
 			cachePrefix.startsWith(pullRequestPrefix) &&
 			pullRequestNumberPattern.test(pullRequestNumber)
 		) {
-			caches.add(cachePrefix);
-			caches.add(`${cachePrefix}0`);
+			cacheNames.add(cachePrefix);
+			cacheNames.add(`${cachePrefix}0`);
 
 			let index = 0;
 			for (const digit of pullRequestNumber) {
@@ -227,7 +236,7 @@ function gracePolicyCaches(
 
 				for (const alternative of alternatives) {
 					if (alternative !== digit) {
-						caches.add(`${pullRequestPrefix}${prefix}${alternative}`);
+						cacheNames.add(`${pullRequestPrefix}${prefix}${alternative}`);
 					}
 				}
 
@@ -236,7 +245,13 @@ function gracePolicyCaches(
 		}
 	}
 
-	return [...caches];
+	return [
+		{ kind: 'default' },
+		...[...cacheNames].map((name) => ({
+			kind: 'named' as const,
+			name: cacheNameSchema.parse(name)
+		}))
+	];
 }
 
 // A covering policy can be shadowed by any longer prefix that names a real PR
@@ -250,16 +265,16 @@ async function checkGracePolicy(
 
 	for (const cache of gracePolicyCaches(policies)) {
 		const graceSeconds = effectiveGraceSeconds(policies, cache);
-		const cacheLabel = cache === DEFAULT_CACHE ? 'default' : cache;
+		const label = cache.kind === 'default' ? 'default' : cache.name;
 
 		if (graceSeconds === undefined) {
-			return new GracePolicyMissingFinding(check, cacheLabel);
+			return new GracePolicyMissingFinding(check, label);
 		}
 
 		if (graceSeconds < minimumGraceSeconds) {
 			return new GracePolicyTooShortFinding(
 				check,
-				cacheLabel,
+				label,
 				graceSeconds,
 				minimumGraceSeconds
 			);
@@ -270,12 +285,12 @@ async function checkGracePolicy(
 }
 
 function hasPullRequestViewSelectors(
-	selectors: readonly ReuseViewSelector[]
+	selectors: readonly ReuseViewSelectorInput[]
 ): boolean {
 	return (
 		selectors.length === 1 &&
 		selectors[0]?.kind === 'prefix' &&
-		selectors[0].pattern === pullRequestPrefix
+		selectors[0].prefix === pullRequestPrefix
 	);
 }
 
@@ -393,40 +408,45 @@ export async function runGithubCheck(
 	);
 	const branchRoot = parseRootName(`${branchRootPrefix}/target`);
 	const branchRunRoot = parseRootName(`${branchRootPrefix}/_cupboard-run/1`);
-	const defaultSelector = selectorForCache(DEFAULT_CACHE);
+	const pullRequestCache: CacheName = cacheNameSchema.parse('pr-1');
+	const pullRequestCacheScope: CacheScope = {
+		kind: 'named',
+		name: pullRequestCache
+	};
+	const branchCacheScope: CacheScope = { kind: 'default' };
 	const pullRequestRequests = [
 		pushAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCacheScope,
 			attest: true,
 			root: pullRequestRoot,
 			runRoot: pullRequestRunRoot
 		}),
 		rootListAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCacheScope,
 			root: pullRequestRoot
 		}),
 		rootEnsureAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCacheScope,
 			root: pullRequestRoot
 		}),
-		confirmAuthorizationDetails({ cacheSelector: 'pr-1' })
+		confirmAuthorizationDetails({ cache: pullRequestCacheScope })
 	];
 	const branchRequests = [
 		pushAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: branchCacheScope,
 			attest: true,
 			root: branchRoot,
 			runRoot: branchRunRoot
 		}),
 		rootListAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: branchCacheScope,
 			root: branchRoot
 		}),
 		rootEnsureAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: branchCacheScope,
 			root: branchRoot
 		}),
-		confirmAuthorizationDetails({ cacheSelector: defaultSelector })
+		confirmAuthorizationDetails({ cache: branchCacheScope })
 	];
 
 	const findings = await reporter.phase(

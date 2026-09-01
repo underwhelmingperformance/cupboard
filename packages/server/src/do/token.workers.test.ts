@@ -1,6 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -10,7 +10,7 @@ import {
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
-	type TokenResponse,
+	type TokenResponseInput,
 	tokenResponseSchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
@@ -51,9 +51,10 @@ import {
 	currentServer,
 	fetchPath,
 	issueServerSignedToken,
-	latestMigrationIndex,
+	latestPreContractMigrationIndex,
 	migrateThrough,
 	provisionNamedTenant,
+	putTestCache,
 	readFetch,
 	resetTestServer,
 	testPushId,
@@ -471,7 +472,7 @@ describe('POST /token', () => {
 			.sign(idp.privateKey);
 
 		await runInDurableObject(currentServer(), async (_instance, state) => {
-			await migrateThrough(state, latestMigrationIndex);
+			await migrateThrough(state, latestPreContractMigrationIndex);
 			drizzle(state.storage, { schema: { oidcTrust } })
 				.insert(oidcTrust)
 				.values({
@@ -502,11 +503,15 @@ describe('POST /token', () => {
 		});
 	});
 
-	it('refuses an existing loopback HTTP trust row in production', async () => {
-		const error = await runInDurableObject(
+	// A rule the server cannot read is left out of the enumeration a token
+	// exchange selects from, so it can never authorise anything, and the
+	// exchange still answers with its ordinary refusal. The administrative read
+	// reports the fault so the row can be found and corrected.
+	it('leaves an existing loopback HTTP trust row out of issuance', async () => {
+		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 				drizzle(state.storage, { schema: { oidcTrust } })
 					.insert(oidcTrust)
 					.values({
@@ -521,16 +526,42 @@ describe('POST /token', () => {
 
 				const tenantIdentity = new TenantIdentityService(instance.context);
 				const service = new OidcTrustService(instance.context, tenantIdentity);
+				const capture = startCapture();
+				let enabled: readonly { readonly id: string }[];
 
 				try {
-					service.enabledOidcTrustRules();
-				} catch (error_) {
-					return error_;
+					enabled = service
+						.enabledOidcTrustRules(rootLogger())
+						.map((rule) => ({ id: rule.id }));
+				} finally {
+					capture.stop();
 				}
+
+				let readError: unknown;
+				try {
+					service.getRule(trustRuleIdSchema.parse('legacy-http'));
+				} catch (error_: unknown) {
+					readError = error_;
+				}
+
+				return {
+					enabled,
+					skipped: capture.logs
+						.filter(
+							(entry) => entry.message === 'stored OIDC trust rule skipped'
+						)
+						.map((entry) => entry.level),
+					readRefused: readError instanceof StoredOidcTrustInvalidError
+				};
 			}
 		);
 
-		expect(error).toBeInstanceOf(StoredOidcTrustInvalidError);
+		expect(outcome).toStrictEqual({
+			// The tenant's own owner rule remains; only the unreadable row is left out.
+			enabled: [{ id: 'owner' }],
+			skipped: ['error'],
+			readRefused: true
+		});
 	});
 
 	it('retries one issuer fetch failure and completes the exchange', async () => {
@@ -572,20 +603,24 @@ const trustClassGrants = {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+			resources: {
+				cache: { exact: 'ci', kind: 'named', validate: 'cacheName' }
+			}
 		}
 	],
-	'private-write': [
+	'release-write': [
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
+			resources: {
+				cache: { exact: 'release', kind: 'named', validate: 'cacheName' }
+			}
 		}
 	]
 } as const;
 
 async function installTrustedIdp(
-	scope: 'admin' | 'write' | 'private-write',
+	scope: 'admin' | 'write' | 'release-write',
 	options: {
 		failFirstFetches?: number;
 		protectedType?: string;
@@ -616,7 +651,7 @@ async function installTrustedIdp(
 	let remainingFailures = options.failFirstFetches ?? 0;
 
 	await runInDurableObject(currentServer(), async (_instance, state) => {
-		await migrateThrough(state, latestMigrationIndex);
+		await migrateThrough(state, latestPreContractMigrationIndex);
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
 			.values({
@@ -704,7 +739,7 @@ async function installTrustedOwner(): Promise<string> {
 	return subjectToken;
 }
 
-type SuccessfulTokenExchange = TokenResponse & { readonly status: number };
+type SuccessfulTokenExchange = TokenResponseInput & { readonly status: number };
 
 async function exchange(
 	subjectToken: string,
@@ -724,14 +759,18 @@ async function exchange(
 }
 
 const ciRequest = [
-	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
+	{
+		type: 'cupboard_cache',
+		actions: ['upload:commit'],
+		cache: { kind: 'named', name: 'ci' }
+	}
 ];
 
-const privateCiRequest = [
+const releaseRequest = [
 	{
 		type: 'cupboard_cache',
 		actions: ['upload:negotiate'],
-		cache: '_private-ci'
+		cache: { kind: 'named', name: 'release' }
 	}
 ];
 
@@ -839,6 +878,28 @@ describe('refresh grant', () => {
 			rotated: true,
 			subject: 'alice',
 			grantsClaim: [{ type: 'cupboard_wildcard' }]
+		});
+	});
+
+	// The cache-scope migration discards every refresh-token family, because a
+	// stored family carries the grants it was issued with and those name their
+	// cache in the retired grammar. A client presenting a token from before the
+	// cutover must therefore be told its grant is invalid, which is the signal
+	// that sends it back to the identity-token exchange.
+	it('refuses a refresh token whose family the cutover discarded', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const refreshToken = exchanged.refresh_token ?? '';
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec('DELETE FROM refresh_token_member');
+			state.storage.sql.exec('DELETE FROM refresh_token_family');
+		});
+
+		expect(await staleRefreshOutcome(refreshToken)).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token'
 		});
 	});
 
@@ -1127,7 +1188,7 @@ describe('refresh grant', () => {
 		const secretHash = await sha256Hex(secret);
 
 		await runInDurableObject(currentServer(), async (_instance, state) => {
-			await migrateThrough(state, latestMigrationIndex);
+			await migrateThrough(state, latestPreContractMigrationIndex);
 			state.storage.sql.exec(
 				"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, created_at, expires_at) VALUES (?, ?, 0, 'admin-rule', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')",
 				familyId,
@@ -2055,12 +2116,16 @@ describe('requested grants', () => {
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
 			resources: {
-				cache: { exact: 'private', validate: 'cacheName' }
+				cache: { exact: 'private', kind: 'named', validate: 'cacheName' }
 			}
 		};
 		await installAdditionalTrustRule('private-rule', [privateGrant]);
 		const requested = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'private' }
+			}
 		];
 
 		const exchanged = await exchange(subjectToken, requested);
@@ -2082,7 +2147,9 @@ describe('requested grants', () => {
 		const overlappingGrant: PermittedGrant = {
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+			resources: {
+				cache: { exact: 'ci', kind: 'named', validate: 'cacheName' }
+			}
 		};
 		await installAdditionalTrustRule('overlapping-rule', [overlappingGrant]);
 
@@ -2111,13 +2178,17 @@ describe('requested grants', () => {
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
 			resources: {
-				cache: { exact: 'private', validate: 'cacheName' }
+				cache: { exact: 'private', kind: 'named', validate: 'cacheName' }
 			}
 		};
 		await installAdditionalTrustRule('private-rule', [privateGrant]);
 		const requested = [
 			...ciRequest,
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'private' }
+			}
 		];
 
 		const response = await postToken({
@@ -2139,9 +2210,14 @@ describe('requested grants', () => {
 		});
 	});
 
-	it('confines a grant for a private selector to that private cache', async () => {
-		const subjectToken = await installTrustedIdp('private-write');
-		const issued = await exchange(subjectToken, privateCiRequest);
+	it('confines a grant for a named selector to that cache', async () => {
+		await putTestCache(
+			await issueServerSignedToken(adminGrants()),
+			{ kind: 'named', name: cacheNameSchema.parse('release') },
+			'public'
+		);
+		const subjectToken = await installTrustedIdp('release-write');
+		const issued = await exchange(subjectToken, releaseRequest);
 		const refused = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
@@ -2149,7 +2225,7 @@ describe('requested grants', () => {
 			authorization_details: JSON.stringify(ciRequest)
 		});
 		const refusedBody = oauthErrorShape(await refused.json());
-		const negotiated = await negotiateFor(issued.access_token, '_private-ci');
+		const negotiated = await negotiateFor(issued.access_token, 'release');
 		const denied = await negotiateFor(issued.access_token, 'ci');
 
 		expect({
@@ -2159,7 +2235,7 @@ describe('requested grants', () => {
 			negotiated: negotiated.status,
 			denied: denied.status
 		}).toStrictEqual({
-			granted: privateCiRequest,
+			granted: releaseRequest,
 			refusedStatus: StatusCodes.BAD_REQUEST,
 			refusedProblem: 'not-permitted',
 			negotiated: StatusCodes.OK,
@@ -2172,7 +2248,11 @@ describe('requested grants', () => {
 	// not imply confirm permission.
 	it('refuses upload:confirm when the rule permits only upload:commit', async () => {
 		const confirmRequest = [
-			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'ci' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: { kind: 'named', name: 'ci' }
+			}
 		];
 		const { status, body } = await exchangeWith(JSON.stringify(confirmRequest));
 
@@ -2226,14 +2306,22 @@ describe('requested grants', () => {
 		{
 			name: "a grant outside the rule's permitted caches",
 			details: JSON.stringify([
-				{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'other' }
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: { kind: 'named', name: 'other' }
+				}
 			]),
 			problem: 'not-permitted'
 		},
 		{
 			name: "an operation outside the rule's permissions",
 			details: JSON.stringify([
-				{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'ci' }
+				{
+					type: 'cupboard_cache',
+					actions: ['gc:run'],
+					cache: { kind: 'named', name: 'ci' }
+				}
 			]),
 			problem: 'not-permitted'
 		}
@@ -2307,7 +2395,11 @@ describe('attenuation', () => {
 	it('narrows a self-issued token to a requested subset, with no refresh', async () => {
 		const owner = await ownerToken();
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		];
 
 		const response = await attenuate(owner, subset);
@@ -2327,15 +2419,27 @@ describe('attenuation', () => {
 	it('refuses a request that exceeds the presented token', async () => {
 		const owner = await ownerToken();
 		const narrowResponse = await attenuate(owner, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		]);
 		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
 
 		const otherCache = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-2' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-2' }
+			}
 		]);
 		const otherOp = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['gc:run'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		]);
 
 		expect({
@@ -2352,12 +2456,20 @@ describe('attenuation', () => {
 	it('refuses to narrow a commit-only token into confirm authority', async () => {
 		const owner = await ownerToken();
 		const narrowResponse = await attenuate(owner, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		]);
 		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
 
 		const confirmAttempt = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		]);
 
 		expect({
@@ -2400,7 +2512,11 @@ describe('attenuation', () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		];
 
 		const refreshed = await postToken({
@@ -2422,7 +2538,11 @@ describe('attenuation', () => {
 	it('keeps the original grant ceiling across refresh rotations', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		];
 		const exchanged = await exchange(subjectToken, subset);
 
@@ -2458,11 +2578,15 @@ describe('attenuation', () => {
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate', 'upload:commit'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		];
 		const narrower = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: { kind: 'named', name: 'pr-1' }
+			}
 		];
 		const exchanged = await exchange(subjectToken, initial);
 
@@ -2682,7 +2806,7 @@ async function installGithubBranchRule(): Promise<{
 	const jwk = await exportJWK(idp.publicKey);
 
 	await runInDurableObject(currentServer(), async (_instance, state) => {
-		await migrateThrough(state, latestMigrationIndex);
+		await migrateThrough(state, latestPreContractMigrationIndex);
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
 			.values({
@@ -2844,7 +2968,9 @@ describe('multi-audience subject tokens', () => {
 	const secondAudienceGrant: PermittedGrant = {
 		type: 'cupboard_cache',
 		actions: ['upload:commit'],
-		resources: { cache: { exact: 'other', validate: 'cacheName' } }
+		resources: {
+			cache: { exact: 'other', kind: 'named', validate: 'cacheName' }
+		}
 	};
 
 	it('exchanges a token whose audiences are all configured', async () => {

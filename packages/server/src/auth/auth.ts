@@ -41,7 +41,7 @@ export interface AccessPrincipal {
 
 // Keep Cupboard access tokens distinct from both OIDC ID tokens and the RFC
 // 9068 profile, whose required claims and algorithm contract differ.
-const accessTokenType = 'cupboard-access+jwt';
+export const accessTokenType = 'cupboard-access+jwt';
 const authorizationDetailsClaim = 'authorization_details';
 const principalClaim = 'cupboard_principal';
 

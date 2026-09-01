@@ -1,7 +1,4 @@
-import {
-	DEFAULT_CACHE,
-	storePathHashSchema
-} from '@cupboard/nix-store/scalars';
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
@@ -11,6 +8,7 @@ import * as schema from '../db/schema.ts';
 import {
 	currentServer,
 	resetTestServer,
+	resolvedCache,
 	useTestServer
 } from '../test-support.ts';
 
@@ -48,23 +46,27 @@ describe('retention grace bounds', () => {
 		await useTestServer('grace-bounds-extend');
 
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			new RetentionService(instance.context).extendGraceDeadlines(
-				DEFAULT_CACHE,
+				cache,
 				hashes,
 				retainUntil
 			);
 		});
 
-		const stored = await runInDurableObject(currentServer(), (instance) =>
-			instance.context.db
+		const stored = await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
+			return instance.context.db
 				.select({
 					storePathHash: schema.retentionGrace.storePathHash,
 					retainUntil: schema.retentionGrace.retainUntil
 				})
 				.from(schema.retentionGrace)
-				.where(eq(schema.retentionGrace.cache, DEFAULT_CACHE))
-				.all()
-		);
+				.where(eq(schema.retentionGrace.cacheId, cache.id))
+				.all();
+		});
 
 		expect({
 			count: stored.length,
@@ -76,15 +78,21 @@ describe('retention grace bounds', () => {
 		await useTestServer('grace-bounds-read');
 
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			new RetentionService(instance.context).extendGraceDeadlines(
-				DEFAULT_CACHE,
+				cache,
 				hashes,
 				retainUntil
 			);
 		});
 
 		const storedValues = await runInDurableObject(currentServer(), (instance) =>
-			storedGraceDeadlines(instance.context.db, DEFAULT_CACHE, hashes)
+			storedGraceDeadlines(
+				instance.context.db,
+				resolvedCache(instance.context),
+				hashes
+			)
 				.values()
 				.toArray()
 		);

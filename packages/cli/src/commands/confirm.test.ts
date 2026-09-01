@@ -1,16 +1,16 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedUploadConfirmResponse,
-	type UploadConfirmedPath,
+	type UploadConfirmedPathInput,
 	uploadConfirmMaxPaths,
+	type UploadConfirmResponse,
 	uploadConfirmResponseSchema
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import { storedCacheFor } from '../client/client.ts';
+import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
 import {
 	CliAbortError,
 	ConfirmIncompleteError,
@@ -29,39 +29,48 @@ const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 const appHash = StorePath.hash(appPath);
 const runtimeHash = StorePath.hash(runtimePath);
+const defaultCache: CacheScope = { kind: 'default' };
+const namedCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('pr-1')
+};
 
-function confirmClient(response: ParsedUploadConfirmResponse): ConfirmClient {
-	return { confirm: () => Promise.resolve(response) };
+function confirmClient(response: UploadConfirmResponse): ConfirmClient {
+	return {
+		confirm: recordingCacheScopedClient(() => Promise.resolve(response))
+	};
 }
 
 describe('runConfirm', () => {
 	it('resolves store paths to hashes and calls confirm against the exact cache', async () => {
-		const calls: { cacheName: string; storePathHashes: string[] }[] = [];
 		const { ui } = fakeCliUi();
+		const confirm = recordingCacheScopedClient(() =>
+			Promise.resolve({
+				paths: [
+					{ storePathHash: appHash, confirmed: true, grace: {} },
+					{ storePathHash: runtimeHash, confirmed: true, grace: {} }
+				]
+			})
+		);
 
-		const cacheName = selectorForCache(storedCacheFor('pr-1'));
-
-		await runConfirm(cacheName, [appPath, runtimePath], ui.reporter(), {
-			confirm(input) {
-				calls.push(input);
-
-				return Promise.resolve({
-					paths: [
-						{ storePathHash: appHash, confirmed: true, grace: {} },
-						{ storePathHash: runtimeHash, confirmed: true, grace: {} }
-					]
-				});
-			}
+		await runConfirm(namedCache, [appPath, runtimePath], ui.reporter(), {
+			confirm
 		});
 
-		expect(calls).toStrictEqual([
-			{ cacheName: 'pr-1', storePathHashes: [appHash, runtimeHash] }
+		expect(confirm.calls).toStrictEqual([
+			{
+				cache: namedCache,
+				input: {
+					cacheName: 'pr-1',
+					storePathHashes: [appHash, runtimeHash]
+				}
+			}
 		]);
 	});
 
 	it.each<{
 		name: string;
-		path: UploadConfirmedPath;
+		path: UploadConfirmedPathInput;
 		row: ResultRow;
 	}>([
 		{
@@ -89,7 +98,7 @@ describe('runConfirm', () => {
 
 		try {
 			await runConfirm(
-				'_default',
+				defaultCache,
 				[appPath],
 				ui.reporter(),
 				confirmClient(response)
@@ -118,7 +127,7 @@ describe('runConfirm', () => {
 
 		try {
 			await runConfirm(
-				'_default',
+				defaultCache,
 				[appPath, runtimePath],
 				ui.reporter(),
 				confirmClient(response)
@@ -141,7 +150,12 @@ describe('runConfirm', () => {
 		});
 
 		await expect(
-			runConfirm('_default', [appPath], ui.reporter(), confirmClient(response))
+			runConfirm(
+				defaultCache,
+				[appPath],
+				ui.reporter(),
+				confirmClient(response)
+			)
 		).resolves.toBeUndefined();
 	});
 
@@ -158,8 +172,8 @@ describe('runConfirm', () => {
 		let error: unknown;
 
 		try {
-			await runConfirm('_default', storePaths, ui.reporter(), {
-				confirm(input) {
+			await runConfirm(defaultCache, storePaths, ui.reporter(), {
+				confirm: recordingCacheScopedClient((input) => {
 					requests += 1;
 
 					if (requests > 1) {
@@ -175,7 +189,7 @@ describe('runConfirm', () => {
 							}))
 						})
 					);
-				}
+				})
 			});
 		} catch (error_: unknown) {
 			error = error_;
@@ -205,8 +219,8 @@ describe('runConfirm', () => {
 		const abort = new CliAbortError();
 		let requests = 0;
 
-		const pending = runConfirm('_default', storePaths, ui.reporter(), {
-			confirm(input) {
+		const pending = runConfirm(defaultCache, storePaths, ui.reporter(), {
+			confirm: recordingCacheScopedClient((input) => {
 				requests += 1;
 
 				if (requests > 1) {
@@ -222,7 +236,7 @@ describe('runConfirm', () => {
 						}))
 					})
 				);
-			}
+			})
 		});
 
 		await expect(pending).rejects.toBe(abort);
@@ -243,8 +257,8 @@ describe('runConfirm', () => {
 		const hashes = storePaths.map((storePath) => StorePath.hash(storePath));
 		const calls: string[][] = [];
 
-		await runConfirm('_default', storePaths, ui.reporter(), {
-			confirm(input) {
+		await runConfirm(defaultCache, storePaths, ui.reporter(), {
+			confirm: recordingCacheScopedClient((input) => {
 				calls.push(input.storePathHashes);
 
 				return Promise.resolve(
@@ -256,7 +270,7 @@ describe('runConfirm', () => {
 						}))
 					})
 				);
-			}
+			})
 		});
 
 		expect({

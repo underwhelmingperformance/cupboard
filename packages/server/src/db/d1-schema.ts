@@ -1,12 +1,12 @@
 import {
 	type AuthKeyId,
+	type CacheAccessMode,
 	type CacheGeneration,
+	type CacheName,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
-	type PrivateStoredCache,
 	type Sha256HexDigest,
-	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -21,7 +21,8 @@ import {
 	integer,
 	primaryKey,
 	sqliteTable,
-	text
+	text,
+	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
 import {
@@ -122,84 +123,66 @@ export const blobState = sqliteTable(
 // targets a captured `(tenant, cache, store_path_hash, generation)` and so can
 // never remove a newer recommitted edge. The `nar_hash` index backs the reaper's
 // "is this hash referenced anywhere" probe, which is on a non-key column.
-//
-// These rows also authorise NAR reads. The
-// `(tenant, nar_hash, cache, cache_generation)` index answers that check in one
-// seek and supplies every `blob_ref` column needed by the check. The same index
-// supports a single cache and the half-open range for a namespace.
 export const blobReference = sqliteTable(
 	'blob_ref',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
-		cacheName: text('cache_name'),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
-		// The generation of the cache name when this edge was committed. Null
-		// represents the first generation and preserves edges written before this
-		// column existed.
 		cacheGeneration: integer('cache_generation').$type<CacheGeneration>()
 	},
 	(table) => [
-		primaryKey({
-			columns: [
-				table.tenant,
-				table.cache,
-				table.storePathHash,
-				table.generation
-			]
-		}),
+		check(
+			'blob_ref_cache_identity_check',
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+		),
+		uniqueIndex('blob_ref_default_identity_idx')
+			.on(table.tenant, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('blob_ref_named_identity_idx')
+			.on(table.tenant, table.cacheName, table.storePathHash, table.generation)
+			.where(sql`${table.cacheKind} = 'named'`),
 		index('blob_ref_nar_hash_idx').on(table.narHash),
 		index('blob_ref_tenant_nar_hash_cache_idx').on(
 			table.tenant,
 			table.narHash,
-			table.cache,
+			table.cacheKind,
+			table.cacheName,
 			table.cacheGeneration
 		)
 	]
 );
 
-// The current generation of one cache name. Only reference edges from this
-// generation authorise a read. Deleting a cache advances the generation in one
-// write, which revokes all of the cache's existing edges before physical
-// cleanup begins. A later cache with the same name uses the advanced generation
-// and cannot reach the previous cache's edges.
-//
-// A missing lifecycle row represents generation 1. A null
-// `blob_ref.cache_generation` also represents generation 1. The first deletion
-// writes generation 2 and immediately revokes those edges.
+// Deleting a cache advances its generation. Existing D1 reference edges then
+// stop authorising reads before their asynchronous physical cleanup finishes.
 export const cacheLifecycle = sqliteTable(
 	'cache_lifecycle',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
-		cacheName: text('cache_name'),
-		access: text('access', { enum: ['public', 'private'] }),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
+		access: text('access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
-		// When the cache was last deleted, and null while it is live. Deletion sets
-		// it in the same statement that advances the generation, and registering
-		// the cache name again clears it.
-		//
-		// Private-cache reads consult this column. A deleted cache retains its
-		// published narinfo and attestation state until the teardown drain removes
-		// them, and it retains its read credential indefinitely.
-		//
-		// The NAR reference query does not inspect this column. Deletion advances
-		// the lifecycle generation, which invalidates every existing reference
-		// edge. Before a recreated named cache can commit an edge,
-		// `loadOrCreateCache` registers the cache and clears this column. The new
-		// edge then records the advanced generation. A generation-authorised edge
-		// for a named cache therefore belongs to its live incarnation.
-		//
-		// The default cache is never registered. Its public reads use the lifecycle
-		// generation alone.
 		deletedAt: text('deleted_at').$type<IsoTimestamp>(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.tenant, table.cache] })]
+	(table) => [
+		check(
+			'cache_lifecycle_identity_check',
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+		),
+		uniqueIndex('cache_lifecycle_default_identity_idx')
+			.on(table.tenant)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('cache_lifecycle_named_identity_idx')
+			.on(table.tenant, table.cacheName)
+			.where(sql`${table.cacheKind} = 'named'`)
+	]
 );
 
 // The control-plane signing key set, held in D1 so the stateless Worker can issue
@@ -252,17 +235,16 @@ export const tenant = sqliteTable(
 		status: text('status', {
 			enum: ['active', 'suspended', 'offboarding', 'offboarded']
 		}).notNull(),
-		readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
 		ownerIssuer: text('owner_issuer').notNull(),
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
 		cacheCatalogueVersion: integer('cache_catalogue_version'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// For private tenants, these columns store the Basic-auth user, salt, and
-		// password verifier. Public tenants keep all three null. A private tenant
-		// with an incomplete verifier rejects every read; the plaintext password
-		// is never stored.
+		// Private caches store the Basic-auth user, salt, and password verifier.
+		// Public caches keep all three columns null. A private cache with an
+		// incomplete verifier rejects every read; the plaintext password is never
+		// stored.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
@@ -275,18 +257,13 @@ export const tenant = sqliteTable(
 	]
 );
 
-// One private cache's own read verifier, keyed by the cache's stored name.
-// While this row exists, only credentials that match its verifier can open the
-// cache. Deleting a cache leaves the row in place, so re-creating the cache with
-// the same stored name preserves the verifier. Finalising an offboarded tenant
-// deletes all of its cache-verifier rows.
+// A cache can replace the tenant's fallback read verifier with one of its own.
 export const tenantCacheReadCredential = sqliteTable(
 	'tenant_cache_read_credential',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').$type<PrivateStoredCache>().notNull(),
-		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
-		cacheName: text('cache_name'),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
 		readUser: text('read_user').$type<ReadUser>().notNull(),
 		readPasswordHash: text('read_password_hash')
 			.$type<ReadPasswordHash>()
@@ -296,7 +273,18 @@ export const tenantCacheReadCredential = sqliteTable(
 			.notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.tenant, table.cache] })]
+	(table) => [
+		check(
+			'tenant_cache_read_credential_identity_check',
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+		),
+		uniqueIndex('tenant_cache_read_credential_default_identity_idx')
+			.on(table.tenant)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('tenant_cache_read_credential_named_identity_idx')
+			.on(table.tenant, table.cacheName)
+			.where(sql`${table.cacheKind} = 'named'`)
+	]
 );
 
 // Keep the latest maintenance success and failure for each tenant and pass. A
@@ -702,25 +690,37 @@ export const attestationReference = sqliteTable(
 	'attestation_ref',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
-		cacheName: text('cache_name'),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
+		cacheName: text('cache_name').$type<CacheName>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull()
 	},
 	(table) => [
-		primaryKey({
-			columns: [
+		check(
+			'attestation_ref_cache_identity_check',
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL)`
+		),
+		uniqueIndex('attestation_ref_default_identity_idx')
+			.on(
 				table.tenant,
-				table.cache,
 				table.storePathHash,
 				table.generation,
 				table.predicateType,
 				table.digest
-			]
-		}),
+			)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('attestation_ref_named_identity_idx')
+			.on(
+				table.tenant,
+				table.cacheName,
+				table.storePathHash,
+				table.generation,
+				table.predicateType,
+				table.digest
+			)
+			.where(sql`${table.cacheKind} = 'named'`),
 		index('attestation_ref_digest_idx').on(table.digest)
 	]
 );

@@ -13,20 +13,20 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
+	type BuildReceiptV3,
 	buildReceiptV3Schema,
-	type BuildSubjectV3,
+	type BuildSubjectV3Input,
 	type InvocationId,
 	type NixStoreUri,
 	nixStoreUriSchema,
-	type ParsedBuildReceiptV3,
-	type TerminalBuildFailure
+	type TerminalBuildFailureInput
 } from '@cupboard/protocol/build';
 import {
-	type BuildSummary,
+	type BuildSummaryInput,
 	buildSummaryResultKind,
 	buildSummarySchema
 } from '@cupboard/protocol/reports';
-import type { UploadAttachRoot } from '@cupboard/protocol/upload';
+import type { UploadAttachRootInput } from '@cupboard/protocol/upload';
 import {
 	buildPushPhases,
 	formatCount,
@@ -137,7 +137,7 @@ export interface BuildPushRunOptions {
 	readonly invocation: BuildInvocation;
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	readonly closure?: boolean;
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly receiptFile?: string;
@@ -206,7 +206,7 @@ export async function runBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	const mode = await selectBuildPushMode(dependencies.preflight);
 
 	reporter.info(buildPushModeDescription(mode));
@@ -270,7 +270,7 @@ async function runStreamedBuildPush(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
 	preflight: BuildPushPreflight
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	if (preflight.outputProtection.kind === 'daemon-temporary-roots') {
 		return dependencies.batchStore.withProtectedPaths((session) =>
 			runProtectedStreamedBuildPush(
@@ -312,7 +312,7 @@ async function runProtectedStreamedBuildPush(
 		storePaths: readonly StorePathString[],
 		signal: AbortSignal
 	) => Promise<void>
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	const plan = preflight.runtimePlan;
 	const targetLinkDirectory = `${plan.directory}-targets`;
 	const childRuntimeDirectory = path.join(plan.directory, 'child');
@@ -596,7 +596,7 @@ async function attributeSubjects(
 	dependencies: BuildPushDependencies,
 	attempts: readonly SupervisedAttempt[],
 	eventPaths: readonly StorePathString[]
-): Promise<readonly BuildSubjectV3[]> {
+): Promise<readonly BuildSubjectV3Input[]> {
 	if (invocation.kind !== 'constructed' || eventPaths.length === 0) {
 		return [];
 	}
@@ -624,7 +624,7 @@ function terminalFailureFor(
 	invocation: BuildInvocation,
 	attempts: readonly SupervisedAttempt[],
 	exit: ChildExit
-): TerminalBuildFailure | undefined {
+): TerminalBuildFailureInput | undefined {
 	if (exit.status === 0) {
 		return undefined;
 	}
@@ -659,7 +659,7 @@ async function runReconciledLocalBuildPush(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
 	reason: UntrustedDaemonError
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	const { invocation } = options;
 
 	if (invocation.kind !== 'constructed') {
@@ -847,7 +847,7 @@ interface RealisedBuild {
 	readonly delegated: ReadonlyMap<string, string>;
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly exit: ChildExit;
-	readonly terminalFailure?: TerminalBuildFailure;
+	readonly terminalFailure?: TerminalBuildFailureInput;
 }
 
 // Publish the reconciled outputs together. A publication failure after a
@@ -858,7 +858,7 @@ async function publishRealised(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	const { exit } = built;
 	const publication = PublicationCollection.of({
 		targets: [...built.realised],
@@ -880,7 +880,7 @@ async function publishRealised(
 		});
 	}
 
-	let published: ParsedBuildReceiptV3 | undefined;
+	let published: BuildReceiptV3 | undefined;
 
 	try {
 		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
@@ -953,23 +953,23 @@ function publicationFailure(cause: unknown): BuildPublicationFailedError {
 }
 
 interface RunFacts {
-	readonly mode: BuildSummary['mode'];
+	readonly mode: BuildSummaryInput['mode'];
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
 	readonly commitOptions: CommitOptions;
 	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
-	readonly subjects: readonly BuildSubjectV3[];
+	readonly subjects: readonly BuildSubjectV3Input[];
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly selectedTargetPaths?: readonly StorePathString[];
-	readonly terminalFailure?: TerminalBuildFailure;
+	readonly terminalFailure?: TerminalBuildFailureInput;
 }
 
 function requireCompleteProvenance(
 	invocation: BuildInvocation,
 	targetPaths: readonly string[],
-	subjects: readonly BuildSubjectV3[]
+	subjects: readonly BuildSubjectV3Input[]
 ): void {
 	if (
 		invocation.kind !== 'constructed' ||
@@ -997,7 +997,7 @@ async function settleRun(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
 	facts: RunFacts
-): Promise<ParsedBuildReceiptV3> {
+): Promise<BuildReceiptV3> {
 	const { exit, batcher } = facts;
 
 	try {
@@ -1138,7 +1138,7 @@ async function closureExpansion(
 
 async function writeReceiptFile(
 	receiptFile: string | undefined,
-	receipt: ParsedBuildReceiptV3
+	receipt: BuildReceiptV3
 ): Promise<void> {
 	if (receiptFile === undefined) {
 		return;
@@ -1170,7 +1170,10 @@ function reportSummary(
 	});
 }
 
-function reportBuildSummary(reporter: Reporter, summary: BuildSummary): void {
+function reportBuildSummary(
+	reporter: Reporter,
+	summary: BuildSummaryInput
+): void {
 	const rows: ResultRow[] = [
 		{ label: 'Store', value: summary.store },
 		{ label: 'Targets', value: formatCount(summary.targetPaths) },

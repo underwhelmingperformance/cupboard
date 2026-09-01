@@ -2,23 +2,32 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	rootNameSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedRootListResponse,
-	type ParsedRootRemoveResponse,
-	type ParsedRootSetResponse,
 	rootEnsureResponseSchema,
 	rootListEntrySchema,
+	type RootListResponse,
 	rootListResponseSchema,
+	type RootRemoveResponse,
 	rootRemoveResponseSchema,
-	type RootSummary,
+	type RootSummaryInput,
 	rootSummarySchema,
 	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+
+import {
+	type RecordedCall,
+	recordingCacheScopedClient
+} from '../client/cache-scoped.test-support.ts';
 
 import {
 	describeExpiry,
@@ -32,9 +41,21 @@ import {
 } from './root.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+const namedCache = (value: string): CacheScope => ({
+	kind: 'named',
+	name: cacheNameSchema.parse(value)
+});
+const defaultCache: CacheScope = { kind: 'default' };
 
-type SetRootInput = Parameters<RootClient['set']>[0];
-type EnsureRootInput = Parameters<RootClient['ensure']>[0];
+interface RootBody {
+	name: string;
+	targets: string[];
+	ttlSeconds?: number;
+}
+interface ListPage {
+	cursor?: string;
+	limit?: number;
+}
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
@@ -68,11 +89,11 @@ describe('describeExpiry', () => {
 
 describe('rootListingAuthorizationDetails', () => {
 	it('requests a cache-wide root:list grant when no root is named', () => {
-		expect(rootListingAuthorizationDetails('pr-1')).toStrictEqual([
+		expect(rootListingAuthorizationDetails(namedCache('pr-1'))).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
@@ -80,14 +101,14 @@ describe('rootListingAuthorizationDetails', () => {
 	it('narrows the grant to the named root for a single root listing', () => {
 		expect(
 			rootListingAuthorizationDetails(
-				'pr-1',
+				namedCache('pr-1'),
 				rootName('github:owner/repo/main')
 			)
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('github:owner/repo/main')
 			}
 		]);
@@ -96,7 +117,6 @@ describe('rootListingAuthorizationDetails', () => {
 
 describe('runRootSet', () => {
 	it('addresses the cache, sends the fields, and reports', async () => {
-		const calls: SetRootInput[] = [];
 		const results: ResultRow[][] = [];
 		const response = summary({
 			name: 'github:owner/repo/main',
@@ -110,21 +130,27 @@ describe('runRootSet', () => {
 			]
 		});
 
+		const set = recordingCacheScopedClient((_input: RootBody) =>
+			Promise.resolve(response)
+		);
+
 		await runRootSet(
-			'_default',
+			defaultCache,
 			rootName('github:owner/repo/main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
 			reporter(results),
-			setRootClient(response, calls)
+			{ set }
 		);
 
-		expect(calls).toStrictEqual([
+		expect(set.calls).toStrictEqual([
 			{
-				cacheName: '_default',
-				name: 'github:owner/repo/main',
-				targets: [target],
-				ttlSeconds: 604_800
+				cache: defaultCache,
+				input: {
+					name: 'github:owner/repo/main',
+					targets: [target],
+					ttlSeconds: 604_800
+				}
 			}
 		]);
 		expect(results).toStrictEqual([
@@ -138,39 +164,36 @@ describe('runRootSet', () => {
 
 	it('rejects a target the client refuses', async () => {
 		const rejection = new RootClientRefusal('/tmp/nope');
-		const calls: SetRootInput[] = [];
+		const set = recordingCacheScopedClient((_input: RootBody) =>
+			Promise.reject(rejection)
+		);
 
 		let error: unknown;
 		try {
 			await runRootSet(
-				'_default',
+				defaultCache,
 				rootName('main'),
 				['/tmp/nope'],
 				undefined,
 				reporter([]),
-				{
-					set(input) {
-						calls.push(input);
-
-						return Promise.reject(rejection);
-					}
-				}
+				{ set }
 			);
 		} catch (error_: unknown) {
 			error = error_;
 		}
 
 		expectRootClientRefusal(error);
-		expect({ error: { target: error.target }, calls }).toStrictEqual({
-			error: { target: '/tmp/nope' },
-			calls: [
-				{
-					cacheName: '_default',
-					name: 'main',
-					targets: ['/tmp/nope']
-				}
-			]
-		});
+		expect({ error: { target: error.target }, calls: set.calls }).toStrictEqual(
+			{
+				error: { target: '/tmp/nope' },
+				calls: [
+					{
+						cache: defaultCache,
+						input: { name: 'main', targets: ['/tmp/nope'] }
+					}
+				]
+			}
+		);
 	});
 });
 
@@ -203,31 +226,25 @@ describe('runRootEnsure', () => {
 			]
 		}
 	])('reports $name', async ({ response, expectedRows }) => {
-		const calls: EnsureRootInput[] = [];
 		const results: ResultRow[][] = [];
+		const ensure = recordingCacheScopedClient((_input: RootBody) =>
+			Promise.resolve(response)
+		);
 
 		await runRootEnsure(
-			'_default',
+			defaultCache,
 			rootName('main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
 			reporter(results),
-			{
-				ensure(input) {
-					calls.push(input);
-
-					return Promise.resolve(response);
-				}
-			}
+			{ ensure }
 		);
 
-		expect({ calls, results }).toStrictEqual({
+		expect({ calls: ensure.calls, results }).toStrictEqual({
 			calls: [
 				{
-					cacheName: '_default',
-					name: 'main',
-					targets: [target],
-					ttlSeconds: 604_800
+					cache: defaultCache,
+					input: { name: 'main', targets: [target], ttlSeconds: 604_800 }
 				}
 			],
 			results: [expectedRows]
@@ -237,7 +254,6 @@ describe('runRootEnsure', () => {
 
 describe('runRootList', () => {
 	it('follows the cursor to exhaustion and reports a row per root', async () => {
-		const calls: Parameters<RootClient['list']>[0][] = [];
 		const results: ResultRow[][] = [];
 		const pages = [
 			rootListResponseSchema.parse({
@@ -255,24 +271,22 @@ describe('runRootList', () => {
 			})
 		];
 
-		await runRootList('_default', reporter(results), {
-			list(input) {
-				calls.push(input);
+		const list = recordingCacheScopedClient((_input: ListPage) => {
+			const page = pages.shift();
 
-				const page = pages.shift();
-
-				if (page === undefined) {
-					throw new Error('listed past the final page');
-				}
-
-				return Promise.resolve(page);
+			if (page === undefined) {
+				throw new Error('listed past the final page');
 			}
+
+			return Promise.resolve(page);
 		});
 
-		expect({ calls, results }).toStrictEqual({
+		await runRootList(defaultCache, reporter(results), { list });
+
+		expect({ calls: list.calls, results }).toStrictEqual({
 			calls: [
-				{ params: { cacheName: '_default' } },
-				{ params: { cacheName: '_default' }, query: { cursor: 'main' } }
+				{ cache: defaultCache, input: {} },
+				{ cache: defaultCache, input: { cursor: 'main' } }
 			],
 			results: [
 				[
@@ -291,7 +305,7 @@ describe('runRootList', () => {
 		const infos: string[] = [];
 
 		await runRootList(
-			'_default',
+			defaultCache,
 			reporter(results, infos),
 			listClient({ roots: [] })
 		);
@@ -305,7 +319,6 @@ describe('runRootList', () => {
 
 describe('runRootTargets', () => {
 	it('follows the cursor to exhaustion and reports each target', async () => {
-		const calls: Parameters<RootClient['targets']>[0][] = [];
 		const results: ResultRow[][] = [];
 		const missingTarget = `/nix/store/${'b'.repeat(32)}-tool`;
 		const pages = [
@@ -324,10 +337,8 @@ describe('runRootTargets', () => {
 			})
 		];
 
-		await runRootTargets('_default', rootName('main'), reporter(results), {
-			targets(input) {
-				calls.push(input);
-
+		const targets = recordingCacheScopedClient(
+			(_input: ListPage & { name: string }) => {
 				const page = pages.shift();
 
 				if (page === undefined) {
@@ -336,14 +347,18 @@ describe('runRootTargets', () => {
 
 				return Promise.resolve(page);
 			}
+		);
+
+		await runRootTargets(defaultCache, rootName('main'), reporter(results), {
+			targets
 		});
 
-		expect({ calls, results }).toStrictEqual({
+		expect({ calls: targets.calls, results }).toStrictEqual({
 			calls: [
-				{ params: { cacheName: '_default', name: 'main' } },
+				{ cache: defaultCache, input: { name: 'main' } },
 				{
-					params: { cacheName: '_default', name: 'main' },
-					query: { cursor: presentTarget().storePathHash }
+					cache: defaultCache,
+					input: { name: 'main', cursor: presentTarget().storePathHash }
 				}
 			],
 			results: [
@@ -358,22 +373,25 @@ describe('runRootTargets', () => {
 
 describe('runRootRemove', () => {
 	it('removes the root and reports the outcome once confirmed', async () => {
-		const calls: { cacheName: string; name: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 		const response = rootRemoveResponseSchema.parse({
 			name: 'pr-123',
 			removed: true
 		});
+		const client = removeClient(response);
 
-		await runRootRemove(
-			'builds',
-			rootName('pr-123'),
-			ui,
-			removeClient(response, calls)
-		);
+		await runRootRemove(namedCache('builds'), rootName('pr-123'), ui, client);
 
-		expect({ calls, results: captured.results }).toStrictEqual({
-			calls: [{ cacheName: 'builds', name: 'pr-123' }],
+		expect({
+			calls: client.remove.calls,
+			results: captured.results
+		}).toStrictEqual({
+			calls: [
+				{
+					cache: namedCache('builds'),
+					input: { cacheName: 'builds', name: 'pr-123' }
+				}
+			],
 			results: [
 				{
 					kind: 'root',
@@ -391,12 +409,11 @@ describe('runRootRemove', () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
 		await runRootRemove(
-			'builds',
+			namedCache('builds'),
 			rootName('pr-123'),
 			ui,
 			removeClient(
-				rootRemoveResponseSchema.parse({ name: 'pr-123', removed: true }),
-				[]
+				rootRemoveResponseSchema.parse({ name: 'pr-123', removed: true })
 			)
 		);
 
@@ -410,7 +427,7 @@ describe('runRootRemove', () => {
 	});
 });
 
-function presentTarget(): RootSummary['targets'][number] {
+function presentTarget(): RootSummaryInput['targets'][number] {
 	return {
 		storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
 		storePath: target,
@@ -418,7 +435,7 @@ function presentTarget(): RootSummary['targets'][number] {
 	};
 }
 
-function summary(overrides: Partial<RootSummary>) {
+function summary(overrides: Partial<RootSummaryInput>) {
 	return rootSummarySchema.parse({
 		name: 'root',
 		expired: false,
@@ -442,34 +459,20 @@ function entry(
 	});
 }
 
-function setRootClient(
-	response: ParsedRootSetResponse,
-	calls: SetRootInput[]
-): Pick<RootClient, 'set'> {
+function listClient(response: RootListResponse): Pick<RootClient, 'list'> {
 	return {
-		set(input) {
-			calls.push(input);
-
-			return Promise.resolve(response);
-		}
+		list: recordingCacheScopedClient(() => Promise.resolve(response))
 	};
 }
 
-function listClient(
-	response: ParsedRootListResponse
-): Pick<RootClient, 'list'> {
-	return {
-		list: () => Promise.resolve(response)
+function removeClient(response: RootRemoveResponse): RootClient & {
+	readonly remove: {
+		readonly calls: readonly RecordedCall<{ name: string }>[];
 	};
-}
-
-function removeClient(
-	response: ParsedRootRemoveResponse,
-	calls: { cacheName: string; name: string }[]
-): RootClient {
+} {
 	return {
-		ensure: (input) =>
-			Promise.resolve({
+		ensure: recordingCacheScopedClient((input: RootBody) => {
+			const response = rootEnsureResponseSchema.parse({
 				status: 'retained',
 				root: summary({
 					name: input.name,
@@ -479,8 +482,11 @@ function removeClient(
 						storePath
 					}))
 				})
-			}),
-		set: (input) =>
+			});
+
+			return Promise.resolve(response);
+		}),
+		set: recordingCacheScopedClient((input: RootBody) =>
 			Promise.resolve(
 				summary({
 					name: input.name,
@@ -490,13 +496,12 @@ function removeClient(
 						storePath
 					}))
 				})
-			),
-		list: () => Promise.resolve({ roots: [] }),
-		targets: () => Promise.resolve({ targets: [] }),
-		remove(input) {
-			calls.push(input);
-
-			return Promise.resolve(response);
-		}
+			)
+		),
+		list: recordingCacheScopedClient(() => Promise.resolve({ roots: [] })),
+		targets: recordingCacheScopedClient(() => Promise.resolve({ targets: [] })),
+		remove: recordingCacheScopedClient((_input: { name: string }) =>
+			Promise.resolve(response)
+		)
 	};
 }

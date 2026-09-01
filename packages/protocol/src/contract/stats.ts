@@ -4,7 +4,6 @@ import { baseProcedure } from './base.ts';
 import { cacheScopedProcedure } from './cache-scoped.ts';
 
 export const statsContract = {
-	// Use `_default` to request counts and sizes for the default cache.
 	cache: cacheScopedProcedure(
 		{ method: 'GET', suffix: '/stats', requires: 'stats:read' },
 		{},

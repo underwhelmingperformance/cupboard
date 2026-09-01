@@ -10,8 +10,8 @@ import {
 	type ReadKeyFile
 } from '@cupboard/nix';
 import {
+	type CacheScope,
 	type RootName,
-	selectorForCache,
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
@@ -20,7 +20,7 @@ import {
 	type PlanStore,
 	type UnknownPathDetail
 } from '@cupboard/protocol/plan';
-import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -29,13 +29,10 @@ import { type Command, InvalidArgumentError } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { callInCache } from '../client/cache-scoped.ts';
+import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
@@ -66,10 +63,10 @@ import {
 	type StoreCapacityProbe
 } from '../plan/capacity.ts';
 import {
+	type CohortPlanInput,
 	cohortPlanInputSchema,
-	type ParsedCohortPlanInput,
-	type ParsedCohortTarget,
-	type ParsedPlannedLocalOutput
+	type CohortTarget,
+	type PlannedLocalOutput
 } from '../plan/cohort-target.ts';
 import { tenantProbesFor } from '../plan/destination-probe.ts';
 import {
@@ -167,7 +164,7 @@ export async function resolvePlannedSubstitutionPolicy(
 	};
 }
 
-export interface PlanCohortOptions extends CacheSelectionOptions {
+export interface PlanCohortOptions {
 	readonly targetsFile: string;
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
@@ -249,13 +246,13 @@ export interface PlanCohortDependencies {
 }
 
 export interface PlanCohortRunOptions {
-	readonly targets: readonly ParsedCohortTarget[];
+	readonly targets: readonly CohortTarget[];
 	readonly plannedLocalClosure?: readonly StorePathString[];
 	readonly plannedSubstitutableDerivations?: readonly StorePathString[];
 	readonly plannedFloatingOutputs?: readonly NixDerivedPathString[];
 	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
-	readonly plannedLocalOutputs?: readonly ParsedPlannedLocalOutput[];
-	readonly cacheName: string;
+	readonly plannedLocalOutputs?: readonly PlannedLocalOutput[];
+	readonly cache: CacheScope;
 	readonly ttlSeconds?: TtlSeconds;
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
@@ -295,12 +292,11 @@ export function registerPlanCommands(
 				'whether this store has room to build it.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[cache]', 'named cache when the URL does not select one')
 		.requiredOption(
 			'--targets-file <path>',
 			"JSON file describing the cohort's targets"
 		)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to probe for substitutable paths'
@@ -374,143 +370,155 @@ export function registerPlanCommands(
 			'--component-publication-applicable',
 			'record that component publication applies to this cohort'
 		)
-		.action(async (url: URL, options: PlanCohortOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const input = await readCohortPlanInput(options.targetsFile);
-			const { targets } = input;
-			const cache = resolveCacheSelection(options);
-			const cacheName = selectorForCache(cache);
-			const uniqueRoots = [...new Set(targets.map((target) => target.root))];
-			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(url, {
-					cache,
+		.action(
+			async (
+				url: URL,
+				cacheName: string | undefined,
+				options: PlanCohortOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const input = await readCohortPlanInput(options.targetsFile);
+				const { targets } = input;
+				const uniqueRoots = [...new Set(targets.map((target) => target.root))];
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					cacheName === undefined
+						? urlTarget
+						: cacheTargetWithName(urlTarget, cacheName);
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: uniqueRoots.flatMap((root) =>
+							rootEnsureAuthorizationDetails({ cache: target.cache, root })
+						)
+					}
+				);
+				const cache = target.cache;
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
 					signal: programOptions.signal
-				}),
-				{
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: uniqueRoots.flatMap((root) =>
-						rootEnsureAuthorizationDetails({ cacheSelector: cacheName, root })
-					)
-				}
-			);
-			const rpc = tenantRpc(url, {
-				credential,
-				signal: programOptions.signal
-			});
-			const credentials = readCredentials(options);
-			// Pass the run's abort signal to every store. Aborting the plan then
-			// cancels any substituter query still in progress.
-			const storeSelection = {
-				...(options.store !== undefined && { storeUri: options.store }),
-				...(programOptions.signal !== undefined && {
-					signal: programOptions.signal
-				})
-			};
-			const nix = Nix.openForAvailability(undefined, storeSelection);
-
-			reportUnknownSettings(reporter, nix.unknownSettings);
-			const probes = tenantProbesFor({
-				baseUrl: url,
-				cache,
-				...(options.reuseView !== undefined && { view: options.reuseView }),
-				...(credentials !== undefined && { credentials })
-			});
-			const { substitution, signatures } = discoverNixStoreConfig();
-			const plannedSubstitutionPolicy = await resolvePlannedSubstitutionPolicy(
-				nix,
-				substitution
-			);
-			// Confirm upstream availability through a separate store. Its override
-			// includes only externally usable, non-tenant substituters and disables
-			// positive narinfo caching, so each check uses their current offer.
-			const permittedStore = Nix.openForAvailability(undefined, {
-				...storeSelection,
-				overrides: upstreamConfirmationOverrides(substitution, url)
-			});
-
-			await runPlanCohort(
-				{
-					targets,
-					cacheName,
-					plannedSubstitutionPolicy,
-					...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
-					storeIdentity: {
-						kind: nix.storeKind,
-						...(options.store !== undefined && { uri: options.store })
-					},
-					storePath: options.storePath ?? defaultStorePath,
-					planFile: options.planFile ?? defaultPlanFile(),
-					...(input.plannedLocalClosure !== undefined && {
-						plannedLocalClosure: input.plannedLocalClosure
-					}),
-					...(input.plannedSubstitutableDerivations !== undefined && {
-						plannedSubstitutableDerivations:
-							input.plannedSubstitutableDerivations
-					}),
-					...(input.plannedFloatingOutputs !== undefined && {
-						plannedFloatingOutputs: input.plannedFloatingOutputs
-					}),
-					...(input.plannedLocalOutputs !== undefined && {
-						plannedLocalOutputs: input.plannedLocalOutputs
-					}),
-					...(options.requireAttested === true && { requireAttested: true }),
-					ceiling: {
-						value: options.unknownCeiling ?? defaultUnknownCeiling,
-						untrustedFallback:
-							options.unknownCeilingUntrustedFallback ??
-							defaultUnknownCeilingUntrustedFallback
-					},
-					detected: {
-						cohortSplitPossible: options.cohortSplitPossible === true,
-						remoteStoreConfigured: options.remoteStoreConfigured === true,
-						componentPublicationApplicable:
-							options.componentPublicationApplicable === true
-					},
-					...((options.headroomAbsoluteMinimum !== undefined ||
-						options.headroomFraction !== undefined) && {
-						headroom: {
-							...(options.headroomAbsoluteMinimum !== undefined && {
-								absoluteMinimum: options.headroomAbsoluteMinimum
-							}),
-							...(options.headroomFraction !== undefined && {
-								fraction: options.headroomFraction
-							})
-						}
+				});
+				const credentials = readCredentials(options);
+				// Pass the run's abort signal to every store. Aborting the plan then
+				// cancels any substituter query still in progress.
+				const storeSelection = {
+					...(options.store !== undefined && { storeUri: options.store }),
+					...(programOptions.signal !== undefined && {
+						signal: programOptions.signal
 					})
-				},
-				reporter,
-				{
-					rootClient: rpc.roots,
-					store: nix,
-					requeryUnknown: (storePaths) =>
-						requeryUnknownWith(
-							nix,
-							() =>
-								Nix.openForAvailability(undefined, {
-									...storeSelection,
-									overrides: negativeNarinfoCacheBypass
-								}),
-							storePaths
-						),
-					confirmUpstreamAvailability: confirmUpstreamAvailabilityWith({
+				};
+				const nix = Nix.openForAvailability(undefined, storeSelection);
+
+				reportUnknownSettings(reporter, nix.unknownSettings);
+				const probes = tenantProbesFor({
+					baseUrl: target.tenantUrl,
+					cache,
+					...(options.reuseView !== undefined && { view: options.reuseView }),
+					...(credentials !== undefined && { credentials })
+				});
+				const { substitution, signatures } = discoverNixStoreConfig();
+				const plannedSubstitutionPolicy =
+					await resolvePlannedSubstitutionPolicy(nix, substitution);
+				// Confirm upstream availability through a separate store. Its override
+				// includes only externally usable, non-tenant substituters and disables
+				// positive narinfo caching, so each check uses their current offer.
+				const permittedStore = Nix.openForAvailability(undefined, {
+					...storeSelection,
+					overrides: upstreamConfirmationOverrides(
 						substitution,
-						store: permittedStore,
-						// Exclude a target from publication only when the consumer's
-						// signature policy accepts each source narinfo in its closure.
-						accepts: offerAcceptance(signatures, readKeyFile),
-						closure:
-							programOptions.signal === undefined
-								? {}
-								: { signal: programOptions.signal }
-					}),
-					destinationServed: probes.destinationServed,
-					viewServed: probes.viewServed,
-					attestedServed: probes.attestedServed,
-					capacityProbe: defaultCapacityProbe
-				}
-			);
-		});
+						target.tenantUrl
+					)
+				});
+
+				await runPlanCohort(
+					{
+						targets,
+						cache,
+						plannedSubstitutionPolicy,
+						...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+						storeIdentity: {
+							kind: nix.storeKind,
+							...(options.store !== undefined && { uri: options.store })
+						},
+						storePath: options.storePath ?? defaultStorePath,
+						planFile: options.planFile ?? defaultPlanFile(),
+						...(input.plannedLocalClosure !== undefined && {
+							plannedLocalClosure: input.plannedLocalClosure
+						}),
+						...(input.plannedSubstitutableDerivations !== undefined && {
+							plannedSubstitutableDerivations:
+								input.plannedSubstitutableDerivations
+						}),
+						...(input.plannedFloatingOutputs !== undefined && {
+							plannedFloatingOutputs: input.plannedFloatingOutputs
+						}),
+						...(input.plannedLocalOutputs !== undefined && {
+							plannedLocalOutputs: input.plannedLocalOutputs
+						}),
+						...(options.requireAttested === true && { requireAttested: true }),
+						ceiling: {
+							value: options.unknownCeiling ?? defaultUnknownCeiling,
+							untrustedFallback:
+								options.unknownCeilingUntrustedFallback ??
+								defaultUnknownCeilingUntrustedFallback
+						},
+						detected: {
+							cohortSplitPossible: options.cohortSplitPossible === true,
+							remoteStoreConfigured: options.remoteStoreConfigured === true,
+							componentPublicationApplicable:
+								options.componentPublicationApplicable === true
+						},
+						...((options.headroomAbsoluteMinimum !== undefined ||
+							options.headroomFraction !== undefined) && {
+							headroom: {
+								...(options.headroomAbsoluteMinimum !== undefined && {
+									absoluteMinimum: options.headroomAbsoluteMinimum
+								}),
+								...(options.headroomFraction !== undefined && {
+									fraction: options.headroomFraction
+								})
+							}
+						})
+					},
+					reporter,
+					{
+						rootClient: rpc.roots,
+						store: nix,
+						requeryUnknown: (storePaths) =>
+							requeryUnknownWith(
+								nix,
+								() =>
+									Nix.openForAvailability(undefined, {
+										...storeSelection,
+										overrides: negativeNarinfoCacheBypass
+									}),
+								storePaths
+							),
+						confirmUpstreamAvailability: confirmUpstreamAvailabilityWith({
+							substitution,
+							store: permittedStore,
+							// Exclude a target from publication only when the consumer's
+							// signature policy accepts each source narinfo in its closure.
+							accepts: offerAcceptance(signatures, readKeyFile),
+							closure:
+								programOptions.signal === undefined
+									? {}
+									: { signal: programOptions.signal }
+						}),
+						destinationServed: probes.destinationServed,
+						viewServed: probes.viewServed,
+						attestedServed: probes.attestedServed,
+						capacityProbe: defaultCapacityProbe
+					}
+				);
+			}
+		);
 
 	registerPlanMeasureCommand(plan, program, programOptions);
 	registerPlanReprobeCommand(plan, program, programOptions);
@@ -526,7 +534,7 @@ export async function runPlanCohort(
 		() =>
 			ensureCohortRoots(
 				options.targets,
-				options.cacheName,
+				options.cache,
 				options.ttlSeconds,
 				dependencies.rootClient
 			)
@@ -756,11 +764,11 @@ async function checkLocalCapacity(
 // target must remain untouched until publication knows all of that target's
 // outputs.
 async function ensureCohortRoots(
-	targets: readonly ParsedCohortTarget[],
-	cacheName: string,
+	targets: readonly CohortTarget[],
+	cache: CacheScope,
 	ttlSeconds: TtlSeconds | undefined,
 	client: Pick<RootClient, 'ensure'>
-): Promise<ReadonlyMap<RootName, ParsedRootEnsureResponse>> {
+): Promise<ReadonlyMap<RootName, RootEnsureResponse>> {
 	const targetsByRoot = new Map<RootName, StorePathString[]>();
 	const incompleteRoots = new Set<RootName>();
 
@@ -789,10 +797,9 @@ async function ensureCohortRoots(
 	const entries = await mapWithConcurrency(
 		roots,
 		maximumConcurrentRootEnsures,
-		async (root): Promise<readonly [RootName, ParsedRootEnsureResponse]> => {
+		async (root): Promise<readonly [RootName, RootEnsureResponse]> => {
 			const storePaths = targetsByRoot.get(root) ?? [];
-			const response = await client.ensure({
-				cacheName,
+			const response = await callInCache(client.ensure, cache, {
 				name: root,
 				targets: [...storePaths],
 				...(ttlSeconds !== undefined && { ttlSeconds })
@@ -807,7 +814,7 @@ async function ensureCohortRoots(
 
 export async function readCohortPlanInput(
 	targetsFile: string
-): Promise<ParsedCohortPlanInput> {
+): Promise<CohortPlanInput> {
 	let json: unknown;
 
 	try {
@@ -830,7 +837,7 @@ export async function readCohortPlanInput(
 
 export async function readCohortTargets(
 	targetsFile: string
-): Promise<readonly ParsedCohortTarget[]> {
+): Promise<readonly CohortTarget[]> {
 	const input = await readCohortPlanInput(targetsFile);
 
 	return input.targets;
@@ -841,8 +848,8 @@ export interface ReadCredentialOptions {
 	readonly readPassword?: string;
 }
 
-// Reject an incomplete pair before a private-cache probe makes an
-// unauthenticated request and receives a 401 response.
+// Reject an incomplete pair before a cache read makes an unauthenticated
+// request and receives a 401 response.
 export function readCredentials(
 	options: ReadCredentialOptions
 ): { readonly user: ReadUser; readonly password: string } | undefined {

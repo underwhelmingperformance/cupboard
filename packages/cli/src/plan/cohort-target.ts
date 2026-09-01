@@ -96,7 +96,7 @@ export const cohortTargetSchema = z
 			});
 		}
 	});
-export type ParsedCohortTarget = z.output<typeof cohortTargetSchema>;
+export type CohortTarget = z.output<typeof cohortTargetSchema>;
 
 function isSingleDerivationOutput(installable: string): boolean {
 	const selection = installable.indexOf('^');
@@ -125,9 +125,7 @@ const plannedFloatingOutputSchema = cohortInstallableSchema.refine(
 	'floating output installable must select one derivation output'
 );
 
-export type ParsedPlannedLocalOutput = z.output<
-	typeof plannedLocalOutputSchema
->;
+export type PlannedLocalOutput = z.output<typeof plannedLocalOutputSchema>;
 
 export const cohortPlanInputSchema = z
 	.strictObject({
@@ -201,7 +199,7 @@ export const cohortPlanInputSchema = z
 			}
 		}
 	});
-export type ParsedCohortPlanInput = z.output<typeof cohortPlanInputSchema>;
+export type CohortPlanInput = z.output<typeof cohortPlanInputSchema>;
 
 // Measurement asks the selected store for every missing substitutable path
 // needed to realise the installable. It does not need destination or retention
@@ -210,7 +208,7 @@ export const measureTargetSchema = z.strictObject({
 	attr: attributeSchema,
 	installable: cohortInstallableSchema
 });
-export type ParsedMeasureTarget = z.output<typeof measureTargetSchema>;
+export type MeasureTarget = z.output<typeof measureTargetSchema>;
 
 export const measurePlanInputSchema = z.strictObject({
 	targets: z.array(measureTargetSchema).min(1)

@@ -1,18 +1,18 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
+	type CacheScope,
 	type RootName,
-	selectorForCache,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type { AuthorizationDetails } from '@cupboard/protocol/grants';
 import type {
-	ParsedRootEnsureResponse,
-	ParsedRootListEntry,
-	ParsedRootListResponse,
-	ParsedRootRemoveResponse,
-	ParsedRootSetResponse,
-	ParsedRootTarget,
-	ParsedRootTargetsPage
+	RootEnsureResponse,
+	RootListEntry,
+	RootListResponse,
+	RootRemoveResponse,
+	RootSetResponse,
+	RootTarget,
+	RootTargetsPage
 } from '@cupboard/protocol/retention';
 import {
 	formatTimestamp,
@@ -27,20 +27,17 @@ import {
 	rootListAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
+import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface RootSetOptions extends CacheSelectionOptions {
+interface RootSetOptions {
 	readonly ttl?: TtlSeconds;
 }
 
@@ -49,7 +46,7 @@ interface RootEnsureOptions extends RootSetOptions {
 	readonly audience?: Audience;
 }
 
-interface RootOptions extends CacheSelectionOptions {
+interface RootOptions {
 	readonly yes?: boolean;
 }
 
@@ -65,11 +62,11 @@ interface RootListingOptions extends RootOptions {
  * command.
  */
 export function rootListingAuthorizationDetails(
-	cacheSelector: string,
+	cache: CacheScope,
 	root?: RootName
 ): AuthorizationDetails {
 	return rootListAuthorizationDetails({
-		cacheSelector,
+		cache,
 		...(root !== undefined && { root })
 	});
 }
@@ -80,30 +77,43 @@ export function rootListingAuthorizationDetails(
  * interface by construction.
  */
 export interface RootClient {
-	set(input: {
-		cacheName: string;
-		name: string;
-		targets: string[];
-		ttlSeconds?: number;
-	}): Promise<ParsedRootSetResponse>;
-	ensure(input: {
-		cacheName: string;
-		name: string;
-		targets: string[];
-		ttlSeconds?: number;
-	}): Promise<ParsedRootEnsureResponse>;
-	list(input: {
-		params: { cacheName: string };
-		query?: { cursor?: string; limit?: number };
-	}): Promise<ParsedRootListResponse>;
-	targets(input: {
-		params: { cacheName: string; name: string };
-		query?: { cursor?: string; limit?: number };
-	}): Promise<ParsedRootTargetsPage>;
-	remove(input: {
-		cacheName: string;
-		name: string;
-	}): Promise<ParsedRootRemoveResponse>;
+	set: CacheScopedClient<
+		{
+			name: string;
+			targets: string[];
+			ttlSeconds?: number;
+		},
+		RootSetResponse
+	>;
+	ensure: CacheScopedClient<
+		{
+			name: string;
+			targets: string[];
+			ttlSeconds?: number;
+		},
+		RootEnsureResponse
+	>;
+	list: CacheScopedClient<
+		{
+			cursor?: string;
+			limit?: number;
+		},
+		RootListResponse
+	>;
+	targets: CacheScopedClient<
+		{
+			name: string;
+			cursor?: string;
+			limit?: number;
+		},
+		RootTargetsPage
+	>;
+	remove: CacheScopedClient<
+		{
+			name: string;
+		},
+		RootRemoveResponse
+	>;
 }
 
 export function registerRootCommands(
@@ -128,8 +138,6 @@ export function registerRootCommands(
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -146,26 +154,30 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootEnsureOptions
 			) => {
+				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
-				const cacheName = selectorForCache(resolveCacheSelection(options));
 				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
 					{
 						githubOidc: options.githubOidc,
-						audience: options.audience ?? audienceSchema.parse(url),
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
 						authorizationDetails: rootEnsureAuthorizationDetails({
-							cacheSelector: cacheName,
+							cache: target.cache,
 							root: name
 						})
 					}
 				);
-				const rpc = tenantRpc(url, {
+				const rpc = tenantRpc(target.tenantUrl, {
 					credential,
 					signal: programOptions.signal
 				});
 
 				await runRootEnsure(
-					cacheName,
+					target.cache,
 					name,
 					targets,
 					options.ttl,
@@ -186,8 +198,6 @@ export function registerRootCommands(
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.addHelpText(
 			'after',
 			[
@@ -205,16 +215,17 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootSetOptions
 			) => {
+				const target = cacheTargetFromUrl(url);
 				const reporter = commandUi(program, programOptions).reporter();
-				const rpc = tenantRpc(url, {
-					credential: cachedOwnerProvider(url, {
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential: cachedOwnerProvider(target.tenantUrl, {
 						signal: programOptions.signal
 					}),
 					signal: programOptions.signal
 				});
 
 				await runRootSet(
-					selectorForCache(resolveCacheSelection(options)),
+					target.cache,
 					name,
 					targets,
 					options.ttl,
@@ -228,8 +239,7 @@ export function registerRootCommands(
 		.command('list')
 		.description('List retention roots.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
+		.argument('[cache]', 'named cache when the URL does not select one')
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -239,32 +249,44 @@ export function registerRootCommands(
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
 		)
-		.action(async (url: URL, options: RootListingOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
-			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
-				{
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: rootListingAuthorizationDetails(cacheName)
-				}
-			);
-			const rpc = tenantRpc(url, {
-				credential,
-				signal: programOptions.signal
-			});
+		.action(
+			async (
+				url: URL,
+				cacheName: string | undefined,
+				options: RootListingOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					cacheName === undefined
+						? urlTarget
+						: cacheTargetWithName(urlTarget, cacheName);
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: rootListingAuthorizationDetails(target.cache)
+					}
+				);
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
+					signal: programOptions.signal
+				});
 
-			await runRootList(cacheName, reporter, rpc.roots);
-		});
+				await runRootList(target.cache, reporter, rpc.roots);
+			}
+		);
 
 	root
 		.command('targets')
 		.description("List a retention root's targets and whether each is served.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -275,22 +297,28 @@ export function registerRootCommands(
 			parseAudience
 		)
 		.action(async (url: URL, name: RootName, options: RootListingOptions) => {
+			const target = cacheTargetFromUrl(url);
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
 			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+				CupboardClient.fromUrl(target.tenantUrl, {
+					cache: target.cache,
+					signal: programOptions.signal
+				}),
 				{
 					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: rootListingAuthorizationDetails(cacheName, name)
+					audience: options.audience ?? audienceSchema.parse(target.tenantUrl),
+					authorizationDetails: rootListingAuthorizationDetails(
+						target.cache,
+						name
+					)
 				}
 			);
-			const rpc = tenantRpc(url, {
+			const rpc = tenantRpc(target.tenantUrl, {
 				credential,
 				signal: programOptions.signal
 			});
 
-			await runRootTargets(cacheName, name, reporter, rpc.roots);
+			await runRootTargets(target.cache, name, reporter, rpc.roots);
 		});
 
 	root
@@ -298,27 +326,23 @@ export function registerRootCommands(
 		.description('Remove a retention root.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name to remove', parseRootName)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, name: RootName, options: RootOptions) => {
+			const target = cacheTargetFromUrl(url);
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(target.tenantUrl, {
+				credential: cachedOwnerProvider(target.tenantUrl, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 
-			await runRootRemove(
-				selectorForCache(resolveCacheSelection(options)),
-				name,
-				ui,
-				rpc.roots
-			);
+			await runRootRemove(target.cache, name, ui, rpc.roots);
 		});
 }
 
 export async function runRootEnsure(
-	cacheName: string,
+	cache: CacheScope,
 	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
@@ -326,8 +350,7 @@ export async function runRootEnsure(
 	client: Pick<RootClient, 'ensure'>
 ): Promise<void> {
 	const result = await reporter.phase('Checking retention root', () =>
-		client.ensure({
-			cacheName,
+		callInCache(client.ensure, cache, {
 			name,
 			targets: [...targets],
 			...(ttlSeconds !== undefined && { ttlSeconds })
@@ -356,7 +379,7 @@ export async function runRootEnsure(
 }
 
 export async function runRootSet(
-	cacheName: string,
+	cache: CacheScope,
 	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
@@ -364,8 +387,7 @@ export async function runRootSet(
 	client: Pick<RootClient, 'set'>
 ): Promise<void> {
 	const summary = await reporter.phase('Setting retention root', () =>
-		client.set({
-			cacheName,
+		callInCache(client.set, cache, {
 			name,
 			targets: [...targets],
 			...(ttlSeconds !== undefined && { ttlSeconds })
@@ -384,18 +406,17 @@ export async function runRootSet(
 }
 
 export async function runRootList(
-	cacheName: string,
+	cache: CacheScope,
 	reporter: Reporter,
 	client: Pick<RootClient, 'list'>
 ): Promise<void> {
 	const roots = await reporter.phase('Listing retention roots', async () => {
-		const entries: ParsedRootListEntry[] = [];
+		const entries: RootListEntry[] = [];
 		let cursor: string | undefined;
 
 		do {
-			const page = await client.list({
-				params: { cacheName },
-				...(cursor !== undefined && { query: { cursor } })
+			const page = await callInCache(client.list, cache, {
+				...(cursor !== undefined && { cursor })
 			});
 
 			entries.push(...page.roots);
@@ -414,7 +435,7 @@ export async function runRootList(
 }
 
 export async function runRootTargets(
-	cacheName: string,
+	cache: CacheScope,
 	name: RootName,
 	reporter: Reporter,
 	client: Pick<RootClient, 'targets'>
@@ -422,13 +443,13 @@ export async function runRootTargets(
 	// A run root can accumulate attached paths without bound, so the targets are
 	// read page by page.
 	const targets = await reporter.phase('Listing root targets', async () => {
-		const collected: ParsedRootTarget[] = [];
+		const collected: RootTarget[] = [];
 		let cursor: string | undefined;
 
 		do {
-			const page = await client.targets({
-				params: { cacheName, name },
-				...(cursor !== undefined && { query: { cursor } })
+			const page = await callInCache(client.targets, cache, {
+				name,
+				...(cursor !== undefined && { cursor })
 			});
 
 			collected.push(...page.targets);
@@ -450,7 +471,7 @@ export async function runRootTargets(
 }
 
 export async function runRootRemove(
-	cacheName: string,
+	cache: CacheScope,
 	name: RootName,
 	ui: CliUi,
 	client: RootClient
@@ -467,7 +488,7 @@ export async function runRootRemove(
 
 	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing retention root', () =>
-		client.remove({ cacheName, name })
+		callInCache(client.remove, cache, { name })
 	);
 
 	reporter.result({
@@ -480,7 +501,7 @@ export async function runRootRemove(
 	});
 }
 
-function rootListRow(root: ParsedRootListEntry): ResultRow {
+function rootListRow(root: RootListEntry): ResultRow {
 	return {
 		label: root.name,
 		value: `${String(root.targetCount)} target(s); ${describeExpiry(root)}`

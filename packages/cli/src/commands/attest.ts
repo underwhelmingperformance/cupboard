@@ -1,6 +1,6 @@
 import { env } from 'node:process';
 
-import { selectorForCache, storePathSchema } from '@cupboard/nix-store/scalars';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
@@ -23,13 +23,12 @@ import {
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { attestAttachAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
-import { commandUi, type ProgramOptions } from '../cli.ts';
 import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+	cacheTargetFromUrl,
+	resolveAuthorisedCachePositionals
+} from '../cache-target.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { AttestAttachBundleRequiredError, CliUsageError } from '../errors.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -38,7 +37,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { resolvePushPath } from './push.ts';
 
-interface VerifyOptions extends CacheSelectionOptions {
+interface VerifyOptions {
 	readonly narHash?: string;
 	readonly url?: URL;
 	readonly storePathHash?: string;
@@ -94,7 +93,7 @@ export function parseVerifierThreshold(option: string) {
 	};
 }
 
-interface AttachOptions extends CacheSelectionOptions {
+interface AttachOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly readUser?: ReadUser;
@@ -135,8 +134,6 @@ export function registerAttestCommands(
 			'Request this OIDC audience with --github-oidc. Defaults to the tenant URL.',
 			parseAudience
 		)
-		.option('--cache <name>', 'Attach on a named public cache.')
-		.addOption(privateCacheOption('attach on'))
 		.option(
 			'--read-user <user>',
 			'Username for reading a private cache. Defaults to CUPBOARD_READ_USER.',
@@ -167,14 +164,29 @@ export function registerAttestCommands(
 				throw new AttestAttachBundleRequiredError();
 			}
 
-			const reporter = commandUi(program, programOptions).reporter();
-			const cache = resolveCacheSelection(options);
-			const raw = CupboardClient.fromUrl(url, {
-				cache,
+			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
+				minimumPayload: 1,
+				payloadDescription: 'a published store path',
+				authorise: (target) =>
+					authenticateForPush(
+						CupboardClient.fromUrl(target.tenantUrl, {
+							cache: target.cache,
+							signal: programOptions.signal
+						}),
+						{
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							authorizationDetails: attestAttachAuthorizationDetails({
+								cache: target.cache
+							})
+						}
+					),
 				signal: programOptions.signal
 			});
-			const cacheSelector = selectorForCache(cache);
-			const resolvedPaths = paths.map((path) =>
+			const reporter = commandUi(program, programOptions).reporter();
+			const cache = resolved.target.cache;
+			const resolvedPaths = resolved.payload.map((path) =>
 				storePathSchema.parse(resolvePushPath(path))
 			);
 			const readUser =
@@ -183,7 +195,7 @@ export function registerAttestCommands(
 			const pathInfos = await readCommittedAttestationPathInfos(
 				resolvedPaths,
 				{
-					url,
+					url: resolved.target.tenantUrl,
 					cache,
 					...(readUser !== undefined && { readUser }),
 					...(readPassword !== undefined && { readPassword })
@@ -194,17 +206,9 @@ export function registerAttestCommands(
 					})
 				}
 			);
-			const token = await authenticateForPush(raw, {
-				githubOidc: options.githubOidc,
-				audience: options.audience ?? audienceSchema.parse(url),
-				authorizationDetails: attestAttachAuthorizationDetails({
-					cacheSelector
-				})
-			});
-
 			await runAttestAttach(resolvedPaths, reporter, {
 				client: requireAttestationAttachClient(
-					pushClientFor(url, token, {
+					pushClientFor(resolved.target.tenantUrl, resolved.credential, {
 						cache,
 						signal: programOptions.signal
 					})
@@ -233,8 +237,6 @@ export function registerAttestCommands(
 			'--store-path-hash <hash>',
 			'Inspect this store-path hash at the tenant. Remote verification requires it together with --url.'
 		)
-		.option('--cache <name>', 'Verify against a named public cache.')
-		.addOption(privateCacheOption('verify against'))
 		.option(
 			'--bundle-digest <digest>',
 			'Verify only the remote bundle with this digest. Pass it when the cache holds several bundles of the predicate type.'
@@ -351,12 +353,13 @@ export function registerAttestCommands(
 							'Remote verification requires --url and --store-path-hash'
 						);
 					}
+					const target = cacheTargetFromUrl(options.url);
 
 					return verifyRemoteAttestations({
 						...common,
-						url: options.url,
+						url: target.tenantUrl,
 						storePathHash: options.storePathHash,
-						cache: resolveCacheSelection(options),
+						cache: target.cache,
 						bundleDigest: options.bundleDigest,
 						readUser,
 						readPassword,

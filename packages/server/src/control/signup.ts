@@ -9,7 +9,7 @@ import { type VerifiedOidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
-	type SignupResponse
+	type SignupResponseInput
 } from '@cupboard/protocol/signup';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -84,7 +84,7 @@ export async function handleSignup(
 	);
 
 	return Response.json(
-		{ issuer, subject, claimed: isClaimed } satisfies SignupResponse,
+		{ issuer, subject, claimed: isClaimed } satisfies SignupResponseInput,
 		{
 			headers: { 'cache-control': 'no-store' }
 		}

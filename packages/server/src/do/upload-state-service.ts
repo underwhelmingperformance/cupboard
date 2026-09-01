@@ -4,9 +4,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type ParsedUploadPathNegotiation,
 	type SessionId,
-	type UploadId
+	type UploadId,
+	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
@@ -300,7 +300,7 @@ export class UploadStateService {
 	// promotion only while it still owns the upload claim.
 	stageStagingBlob(
 		stagingKey: R2ObjectKey,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		blob: CanonicalBlob | undefined,
 		reservationOwner: string,
 		isStillOwned: () => boolean

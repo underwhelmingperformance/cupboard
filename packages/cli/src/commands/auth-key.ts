@@ -1,10 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	AuthKeySummary,
-	ParsedAuthKeyListResponse,
-	ParsedAuthKeyRetireResponse,
-	ParsedAuthKeyRotateResponse
+	AuthKeyListResponse,
+	AuthKeyRetireResponse,
+	AuthKeyRotateResponse,
+	AuthKeySummaryInput
 } from '@cupboard/protocol/keys';
 import {
 	formatTimestamp,
@@ -24,9 +24,9 @@ interface RetireOptions {
 }
 
 export interface AuthKeyClient {
-	list(): Promise<ParsedAuthKeyListResponse>;
-	rotate(): Promise<ParsedAuthKeyRotateResponse>;
-	retire(input: { kid: AuthKeyId }): Promise<ParsedAuthKeyRetireResponse>;
+	list(): Promise<AuthKeyListResponse>;
+	rotate(): Promise<AuthKeyRotateResponse>;
+	retire(input: { kid: AuthKeyId }): Promise<AuthKeyRetireResponse>;
 }
 
 export function registerAuthKeyCommands(
@@ -159,7 +159,7 @@ export async function runAuthKeyRetire(
 	});
 }
 
-function authKeyRow(key: AuthKeySummary): ResultRow {
+function authKeyRow(key: AuthKeySummaryInput): ResultRow {
 	const retirement =
 		key.scheduledRetireAt === undefined
 			? ''

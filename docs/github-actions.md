@@ -269,7 +269,7 @@ cupboard's reusable workflow:
 cupboard policy add-grace "$tenant" --cache-prefix '' --grace 24h
 
 cupboard reuse-view set "$tenant" pull-requests \
-  --prefix pr- --priority 50
+  --select prefix:pr- --priority 50
 
 cupboard oidc-trust add-github-pr "$tenant" \
   --repo "$repo" \
@@ -344,20 +344,16 @@ For private reads, provide `read-user` and `read-password`. The action writes a
 private netrc file under `$RUNNER_TEMP`, sets mode `0600`, appends
 `netrc-file = ...` to the generated Nix config, and never echoes the password.
 
-`cache` and `private-cache` each take a list, written one entry per line or
-separated by commas, and may be used together: setup writes one substituter set
-covering every selected cache. If both lists are empty, setup selects the
-tenant's default cache. Every read of a private cache requires authentication.
-Because netrc entries are keyed only by host, each private-cache substituter URL
-contains the credential for that cache. Setup writes that URL only to the
-protected generated config file.
+`cache` takes a list of named caches, written one entry per line or separated by
+commas. Setup writes one substituter set covering every selected cache. An empty
+list selects the tenant's default cache. The same input selects public and
+private caches because access is a property of each stable cache identity.
 
-`private-cache-credentials` is a JSON object that maps each private cache's
-local name to its user and password. A private cache that has no entry in this
-object uses `read-user` and `read-password`. The run fails if neither source
-provides a credential.
+`cache-credentials` is a JSON array. Each entry pairs an explicit default or
+named cache scope with its user and password. A private cache that has no entry
+uses `read-user` and `read-password` as the tenant-wide fallback credential.
 
-Before it fetches or writes anything, setup registers each private-cache
+Before it fetches or writes anything, setup registers each cache-specific
 password and each credential-bearing substituter URL as a run secret. The runner
 replaces those values with `***` in the log. Setup registers the raw password
 and the URL because percent-encoding can change the password when it is placed
@@ -370,9 +366,8 @@ file.
 - uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
   with:
     cache-url: https://cupboard.example.workers.dev/t/<slug>
-    cache: builds
-    private-cache: release
-    private-cache-credentials: ${{ secrets.CUPBOARD_PRIVATE_CACHE_CREDENTIALS }}
+    cache: release
+    cache-credentials: ${{ secrets.CUPBOARD_CACHE_CREDENTIALS }}
 ```
 
 `reuse-view` adds a named tenant reuse view as a second substituter, after the
@@ -415,11 +410,11 @@ The default OIDC audience is the `url` input. The default retention root is
 `github:${{ github.repository }}/${{ github.ref_name }}`. `wait` defaults to
 `true` and `wait-timeout` defaults to `10m`.
 
-A push addresses one cache. `cache` selects a public cache and `private-cache`
-selects a private cache; setting both fails the run. `actions/plan`,
+A push addresses one cache. `cache` selects a named cache regardless of its
+access property; omitting it selects the default cache. `actions/plan`,
 `actions/attest`, `actions/attest-attach` and `actions/build-cohort` take the
-same pair. The reusable flake publish workflow described below takes the pair
-too and passes the selection to every one of those actions.
+same input. The reusable flake publish workflow described below passes that
+selection to every one of those actions.
 
 Attestation bundle paths are also newline-delimited. They attach a bundle that
 already exists; `actions/attest` below produces one with the right subjects:
@@ -586,10 +581,9 @@ defaults because publication cannot be undone.
 Those defaults prevent automatic publication and keep each bundle to one
 subject; they do not make the bundle non-disclosing. Every subject digest in
 either bundle is the destination's NAR hash for that path. Publishing that
-digest does not bypass private-cache authorisation, so a reader with only the
-digest cannot fetch the NAR through that cache. The digest still discloses that
-the path exists and identifies its contents to anyone holding a copy from
-elsewhere.
+digest does not bypass cache authorisation, so a reader with only the digest
+cannot fetch the NAR through that cache. The digest still discloses that the
+path exists and identifies its contents to anyone holding a copy from elsewhere.
 
 `tsa-only` requires at least one RFC 3161 timestamp and forbids a Rekor entry.
 `rekor-and-tsa` requires at least one of each. The action constructs a Sigstore
@@ -891,14 +885,15 @@ same credentials separately: `actions/plan` accepts them as
 `read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
 header on every narinfo probe.
 
-To publish to a private cache, set `private-cache` instead of `cache`; setting
-both fails the run, as does combining either with `preset`. The workflow passes
-the selection to `actions/setup`, `actions/plan`, `actions/build-cohort`,
-`actions/attest` and `actions/attest-attach`, so every job reads and writes the
-same destination. The workflow supplies one `read_user` and `read_password` pair
-for all authenticated reads, so supply the credential that the selected private
-cache accepts. If the cache has its own verifier, the tenant credential is
-rejected by setup's initial cache-info probe, before publication starts.
+To publish to a named cache, set `cache`; omitting it selects the default cache.
+The cache can be public or private. Combining `cache` with `preset` fails
+because a preset chooses the destination. The workflow passes the selection to
+`actions/setup`, `actions/plan`, `actions/build-cohort`, `actions/attest` and
+`actions/attest-attach`, so every job reads and writes the same destination. The
+workflow supplies one `read_user` and `read_password` pair for all authenticated
+reads, so supply the credential that the selected private cache accepts. If the
+cache has its own verifier, the tenant-wide fallback credential is rejected by
+setup's initial cache-info probe, before publication starts.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter

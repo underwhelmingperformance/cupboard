@@ -1,5 +1,4 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
-import type { CheckReport } from '@cupboard/protocol/reports';
+import type { CheckReportInput } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
@@ -19,6 +18,7 @@ import {
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	currentNarObjectKey,
+	defaultCache,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -30,7 +30,10 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-async function runCheck(token: string, isDeep = false): Promise<CheckReport> {
+async function runCheck(
+	token: string,
+	isDeep = false
+): Promise<CheckReportInput> {
 	const response = await authorisedFetch(
 		isDeep ? '/check?deep=true' : '/check',
 		token
@@ -57,8 +60,8 @@ describe('storage check', () => {
 				name: 'beta'
 			});
 
-			await pushPath(token, alpha, DEFAULT_CACHE, alphaNar);
-			await pushPath(token, beta, DEFAULT_CACHE, betaNar);
+			await pushPath(token, alpha, defaultCache(), alphaNar);
+			await pushPath(token, beta, defaultCache(), betaNar);
 
 			expect(await runCheck(token, deep)).toStrictEqual({
 				narInfosChecked: 2,
@@ -75,7 +78,9 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect(await runCheck(token)).toStrictEqual({
@@ -85,7 +90,7 @@ describe('storage check', () => {
 			discrepancies: [
 				{
 					kind: 'missing-narinfo-object',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash
 				}
@@ -117,13 +122,13 @@ describe('storage check', () => {
 			discrepancies: [
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: alpha.storePathHash,
 					narHash
 				},
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: beta.storePathHash,
 					narHash
 				}
@@ -159,7 +164,7 @@ describe('storage check', () => {
 				discrepancies: [
 					{
 						kind: 'file-hash-mismatch',
-						cache: '',
+						cache: { kind: 'default' },
 						storePathHash: metadata.storePathHash,
 						narHash: metadata.narHash
 					}
@@ -176,7 +181,7 @@ describe('storage check', () => {
 			name: 'stored'
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 
 		// Store `nar` under the hash for `claimed`, then make the compressed-file
 		// metadata consistent with that substitution. Only decompression exposes
@@ -231,7 +236,7 @@ describe('storage check', () => {
 		expect(report.discrepancies).toStrictEqual([
 			{
 				kind: 'nar-hash-mismatch',
-				cache: '',
+				cache: { kind: 'default' },
 				storePathHash: metadata.storePathHash,
 				narHash: claimed.narHash
 			}
@@ -245,7 +250,7 @@ describe('storage check', () => {
 			name: 'sized'
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 		await corruptCommittedNarInfo(metadata.storePathHash, {
 			narSize: nar.narSize + 4096
 		});
@@ -255,7 +260,7 @@ describe('storage check', () => {
 		expect(report.discrepancies).toStrictEqual([
 			{
 				kind: 'nar-size-mismatch',
-				cache: '',
+				cache: { kind: 'default' },
 				storePathHash: metadata.storePathHash,
 				narHash: nar.narHash
 			}

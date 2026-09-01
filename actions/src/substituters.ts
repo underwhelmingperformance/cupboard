@@ -3,7 +3,7 @@ import {
 	reuseViewUrl,
 	urlWithCredential
 } from '@cupboard/nix-store/cache-url';
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { type BasicCredential } from '@cupboard/shared/http';
 
 const cacheHeaders: Readonly<Record<string, string>> = {
@@ -12,22 +12,20 @@ const cacheHeaders: Readonly<Record<string, string>> = {
 };
 
 /**
- * A configured cache and its optional read credential. Private caches provide
- * a cache-specific credential. Public caches omit it and can use the tenant
- * credential from netrc when the tenant requires authentication.
+ * A configured cache and its optional cache-specific read credential.
  */
 export interface CacheSelection {
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly credential?: BasicCredential;
 }
 
-export function cacheUrlFor(baseUrl: URL, cache: StoredCache): URL {
+export function cacheUrlFor(baseUrl: URL, cache: CacheScope): URL {
 	return cacheUrl(baseUrl, cache);
 }
 
 /**
- * Returns the substituter URL for one cache. A private-cache URL contains its
- * read credential because netrc is keyed by host and cannot select one cache.
+ * Returns the substituter URL for one cache. A cache-specific read credential
+ * is placed in the URL because netrc is keyed by host and cannot select a cache.
  * A `nix-cache-info` probe uses `cacheUrlFor` instead and sends the credential
  * in an `authorization` header because fetch ignores URL credentials.
  */

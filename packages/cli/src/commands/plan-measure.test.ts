@@ -13,7 +13,7 @@ import {
 	InvalidMeasureTargetsFileError,
 	InvalidStoreUriError
 } from '../errors.ts';
-import type { ParsedMeasureTarget } from '../plan/cohort-target.ts';
+import type { MeasureTarget } from '../plan/cohort-target.ts';
 
 import { registerPlanCommands } from './plan-cohort.ts';
 import { type PlanMeasureResult, runPlanMeasure } from './plan-measure.ts';
@@ -29,11 +29,11 @@ const otherPath = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-other'
 );
 
-const appTarget: ParsedMeasureTarget = {
+const appTarget: MeasureTarget = {
 	attr: 'packages.x86_64-linux.app',
 	installable: appPath
 };
-const otherTarget: ParsedMeasureTarget = {
+const otherTarget: MeasureTarget = {
 	attr: 'packages.x86_64-linux.other',
 	installable: `${otherPath}^out`
 };

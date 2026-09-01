@@ -1,14 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
+	type CacheScope,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
-	privateStoredCache,
 	rootNameSchema,
-	type StoredCache,
-	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -27,14 +22,14 @@ import {
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
 	uploadConfirmMaxPaths,
-	type UploadConfirmResponse,
+	type UploadConfirmResponseInput,
 	uploadConfirmResponseSchema,
 	uploadGraceFactsCapability,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -47,6 +42,8 @@ import {
 	r2ObjectKeySchema,
 	requestOriginSchema
 } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -59,6 +56,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	currentServerTenant,
+	defaultCache,
 	deletePath,
 	drivenDirectly,
 	expectSingleUploadDecision,
@@ -67,6 +65,7 @@ import {
 	listRoots,
 	listRootTargets,
 	markUploadPendingVerification,
+	namedCache,
 	narBytes,
 	narInfoGeneration,
 	negotiateUploads,
@@ -76,6 +75,7 @@ import {
 	putNarBytes,
 	removeRoot,
 	resetTestServer,
+	resolvedCache,
 	setRoot,
 	singleDecision,
 	testPushId,
@@ -88,7 +88,6 @@ import {
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
-import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
@@ -120,22 +119,9 @@ const tenantWideContinuation = {
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
-	const attestationCas = new AttestationCasService(context);
-	const attestations = new AttestationsService(
-		context,
-		attestationCas,
-		narInfoObjects
-	);
-	const deletionQueue = new DeletionQueueService(
-		context,
-		attestationCas,
-		attestations,
-		narInfoObjects
-	);
 
 	return new CommitPipelineService(
 		context,
-		new CacheAdminService(context, deletionQueue),
 		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
@@ -167,33 +153,29 @@ function uploadsServiceFor(context: ServerContext): UploadsService {
 		deletionQueue,
 		new ReconcileQueueService(context),
 		retention,
-		new RootsService(
-			context,
-			new CacheAdminService(context, deletionQueue),
-			retention,
-			narInfoObjects
-		)
+		new RootsService(context, retention, narInfoObjects)
 	);
 }
 
-const defaultCache: StoredCache = DEFAULT_CACHE;
-const buildsCache = cacheNameSchema.parse('builds');
-const pr5Cache = cacheNameSchema.parse('pr-5');
+const buildsCache = namedCache('builds');
+const pr5Cache = namedCache('pr-5');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const liveDeadline = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
 const expiredDeadline = isoTimestampSchema.parse('2025-12-01T00:00:00.000Z');
 
 async function seedGraceDeadline(
-	cache: string,
+	cache: CacheScope,
 	storePathHash: string,
 	retainUntil: IsoTimestamp
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const resolved = resolvedCache(instance.context, cache);
+
 		instance.context.db
 			.insert(schema.retentionGrace)
 			.values({
-				cache: storedCacheSchema.parse(cache),
+				cacheId: resolved.id,
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				retainUntil
 			})
@@ -201,25 +183,33 @@ async function seedGraceDeadline(
 	});
 }
 
-async function markGraceManaged(cache: string): Promise<void> {
+async function markGraceManaged(cache: CacheScope): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const resolved = resolvedCache(instance.context, cache);
+
 		instance.context.db
 			.update(schema.caches)
 			.set({ graceManaged: true })
-			.where(eq(schema.caches.name, storedCacheSchema.parse(cache)))
+			.where(eq(schema.caches.id, resolved.id))
 			.run();
 	});
 }
 
-async function graceDeadlines(cache: string): Promise<readonly string[]> {
-	return runInDurableObject(currentServer(), (instance) =>
-		instance.context.db
+async function graceDeadlines(cache: CacheScope): Promise<readonly string[]> {
+	return runInDurableObject(currentServer(), (instance) => {
+		const resolved = instance.context.cacheRepository.resolve(cache);
+
+		if (resolved === undefined) {
+			return [];
+		}
+
+		return instance.context.db
 			.select({ storePathHash: schema.retentionGrace.storePathHash })
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, storedCacheSchema.parse(cache)))
+			.where(eq(schema.retentionGrace.cacheId, resolved.id))
 			.all()
-			.map((row) => row.storePathHash)
-	);
+			.map((row) => row.storePathHash);
+	});
 }
 
 async function runGc(): Promise<void> {
@@ -256,7 +246,7 @@ describe('retention grace deadlines in garbage collection', () => {
 		await pushPath(token, dependency);
 		await pushPath(token, kept);
 		await pushPath(token, collectable);
-		await seedGraceDeadline(DEFAULT_CACHE, kept.storePathHash, liveDeadline);
+		await seedGraceDeadline(defaultCache(), kept.storePathHash, liveDeadline);
 
 		await runGc();
 
@@ -266,7 +256,7 @@ describe('retention grace deadlines in garbage collection', () => {
 				(await narInfoGeneration(dependency.storePathHash)) !== undefined,
 			collectable:
 				(await narInfoGeneration(collectable.storePathHash)) !== undefined,
-			deadlines: await graceDeadlines(DEFAULT_CACHE)
+			deadlines: await graceDeadlines(defaultCache())
 		}).toStrictEqual({
 			kept: true,
 			dependency: true,
@@ -286,14 +276,18 @@ describe('retention grace deadlines in garbage collection', () => {
 		});
 
 		await pushPath(token, path);
-		await seedGraceDeadline(DEFAULT_CACHE, path.storePathHash, expiredDeadline);
-		await markGraceManaged(DEFAULT_CACHE);
+		await seedGraceDeadline(
+			defaultCache(),
+			path.storePathHash,
+			expiredDeadline
+		);
+		await markGraceManaged(defaultCache());
 
 		await runGc();
 
 		expect({
 			path: await narInfoGeneration(path.storePathHash),
-			deadlines: await graceDeadlines(DEFAULT_CACHE)
+			deadlines: await graceDeadlines(defaultCache())
 		}).toStrictEqual({ path: undefined, deadlines: [] });
 	});
 
@@ -308,7 +302,7 @@ describe('retention grace deadlines in garbage collection', () => {
 		});
 
 		await pushPath(token, path);
-		await markGraceManaged(DEFAULT_CACHE);
+		await markGraceManaged(defaultCache());
 
 		await runGc();
 
@@ -350,16 +344,16 @@ describe('retention grace deadlines in garbage collection', () => {
 		await pushPath(token, first);
 		await pushPath(token, second);
 		await seedGraceDeadline(
-			DEFAULT_CACHE,
+			defaultCache(),
 			first.storePathHash,
 			expiredDeadline
 		);
 		await seedGraceDeadline(
-			DEFAULT_CACHE,
+			defaultCache(),
 			second.storePathHash,
 			expiredDeadline
 		);
-		await markGraceManaged(DEFAULT_CACHE);
+		await markGraceManaged(defaultCache());
 
 		await currentServer().runGarbageCollection(1);
 
@@ -395,7 +389,7 @@ describe('retention grace deadlines in garbage collection', () => {
 		});
 
 		await pushPath(token, path);
-		await seedGraceDeadline(DEFAULT_CACHE, path.storePathHash, liveDeadline);
+		await seedGraceDeadline(defaultCache(), path.storePathHash, liveDeadline);
 
 		const outcome = await deletePath(
 			token,
@@ -404,13 +398,13 @@ describe('retention grace deadlines in garbage collection', () => {
 
 		expect({
 			deleted: outcome.deleted,
-			deadlines: await graceDeadlines(DEFAULT_CACHE)
+			deadlines: await graceDeadlines(defaultCache())
 		}).toStrictEqual({ deleted: true, deadlines: [] });
 	});
 
 	it('cache deletion removes its deadlines and grace-managed marker', async () => {
 		await useTestServer('grace-cache-deletion');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -418,9 +412,9 @@ describe('retention grace deadlines in garbage collection', () => {
 			name: 'torn-down'
 		});
 
-		await pushPath(token, path, 'builds');
-		await seedGraceDeadline('builds', path.storePathHash, liveDeadline);
-		await markGraceManaged('builds');
+		await pushPath(token, path, buildsCache);
+		await seedGraceDeadline(buildsCache, path.storePathHash, liveDeadline);
+		await markGraceManaged(buildsCache);
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
 			method: 'DELETE'
@@ -429,13 +423,18 @@ describe('retention grace deadlines in garbage collection', () => {
 			instance.context.db
 				.select({ name: schema.caches.name })
 				.from(schema.caches)
-				.where(eq(schema.caches.name, buildsCache))
+				.where(
+					and(
+						eq(schema.caches.name, buildsCache.name),
+						isNull(schema.caches.deletedAt)
+					)
+				)
 				.get()
 		);
 
 		expect({
 			status: response.status,
-			deadlines: await graceDeadlines('builds'),
+			deadlines: await graceDeadlines(buildsCache),
 			registryRow
 		}).toStrictEqual({
 			status: StatusCodes.OK,
@@ -466,31 +465,39 @@ async function removeGracePolicy(id: string): Promise<void> {
 }
 
 async function graceDeadlineRows(
-	cache: string
+	cache: CacheScope
 ): Promise<readonly { storePathHash: string; retainUntil: string }[]> {
-	return runInDurableObject(currentServer(), (instance) =>
-		instance.context.db
+	return runInDurableObject(currentServer(), (instance) => {
+		const resolved = resolvedCache(instance.context, cache);
+
+		return instance.context.db
 			.select({
 				storePathHash: schema.retentionGrace.storePathHash,
 				retainUntil: schema.retentionGrace.retainUntil
 			})
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, storedCacheSchema.parse(cache)))
+			.where(eq(schema.retentionGrace.cacheId, resolved.id))
 			.orderBy(schema.retentionGrace.storePathHash)
-			.all()
-	);
+			.all();
+	});
 }
 
-async function hasGraceManagedMarker(cache: string): Promise<boolean> {
-	return runInDurableObject(
-		currentServer(),
-		(instance) =>
+async function hasGraceManagedMarker(cache: CacheScope): Promise<boolean> {
+	return runInDurableObject(currentServer(), (instance) => {
+		const resolved = instance.context.cacheRepository.resolve(cache);
+
+		if (resolved === undefined) {
+			return false;
+		}
+
+		return (
 			instance.context.db
 				.select({ graceManaged: schema.caches.graceManaged })
 				.from(schema.caches)
-				.where(eq(schema.caches.name, storedCacheSchema.parse(cache)))
+				.where(eq(schema.caches.id, resolved.id))
 				.get()?.graceManaged ?? false
-	);
+		);
+	});
 }
 
 describe('retention grace transitions', () => {
@@ -528,8 +535,8 @@ describe('retention grace transitions', () => {
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({
 			deadlines: [
 				{ storePathHash: released.storePathHash, retainUntil: dayAfterStart }
@@ -557,7 +564,7 @@ describe('retention grace transitions', () => {
 		const settled = await setRoot(token, { name: 'channel', targets: [] });
 		const { roots } = await listRoots(token);
 		const remaining = await listRootTargets(token, 'channel');
-		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
+		const deadlines = await graceDeadlineRows(defaultCache());
 
 		await runGc();
 		const wasHeldDuringGrace =
@@ -627,7 +634,7 @@ describe('retention grace transitions', () => {
 		await deletePath(token, deleted.storePathHash);
 		await removeRoot(token, 'channel');
 
-		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
+		expect(await graceDeadlineRows(defaultCache())).toStrictEqual([
 			{ storePathHash: kept.storePathHash, retainUntil: dayAfterStart }
 		]);
 	});
@@ -660,7 +667,7 @@ describe('retention grace transitions', () => {
 		await runGc();
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(defaultCache()),
 			first: (await narInfoGeneration(first.storePathHash)) !== undefined,
 			second: (await narInfoGeneration(second.storePathHash)) !== undefined
 		}).toStrictEqual({
@@ -697,9 +704,9 @@ describe('retention grace transitions', () => {
 		await runGc();
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(defaultCache()),
 			path: (await narInfoGeneration(path.storePathHash)) !== undefined,
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({
 			deadlines: [
 				{
@@ -731,6 +738,8 @@ describe('retention grace transitions', () => {
 		).toISOString();
 
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			for (let index = 0; index < rootCount; index += 1) {
 				const name = rootNameSchema.parse(
 					`expired-${String(index).padStart(2, '0')}`
@@ -740,7 +749,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRoots)
 					.values({
-						cache: defaultCache,
+						cacheId: cache.id,
 						name,
 						expiresAt,
 						createdAt: expiresAt,
@@ -750,7 +759,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRootTargets)
 					.values({
-						cache: defaultCache,
+						cacheId: cache.id,
 						rootName: name,
 						storePathHash: path.storePathHash,
 						storePath: path.storePath
@@ -838,10 +847,12 @@ describe('retention grace transitions', () => {
 		const observed = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
+
 				instance.context.db
 					.insert(schema.retentionRoots)
 					.values({
-						cache: defaultCache,
+						cacheId: cache.id,
 						name: rootName,
 						expiresAt,
 						createdAt: expiresAt,
@@ -851,7 +862,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRootTargets)
 					.values({
-						cache: defaultCache,
+						cacheId: cache.id,
 						rootName,
 						storePathHash: path.storePathHash,
 						storePath: path.storePath
@@ -864,13 +875,13 @@ describe('retention grace transitions', () => {
 						SELECT value + 1 FROM numbers WHERE value < ?
 					)
 					INSERT INTO retention_root_target (
-						cache, root_name, store_path_hash, store_path
+						cache_id, root_name, store_path_hash, store_path
 					)
 					SELECT ?, ?, printf('%032d', value),
 						'/nix/store/' || printf('%032d', value) || '-target'
 					FROM numbers`,
 					targetCount - 1,
-					DEFAULT_CACHE,
+					cache.id,
 					rootName
 				);
 
@@ -949,19 +960,20 @@ describe('retention grace transitions', () => {
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
+			const cache = resolvedCache(instance.context);
 			service.extendGraceDeadlines(
-				'',
+				cache,
 				[hash],
 				isoTimestampSchema.parse('2026-03-01T00:00:00.000Z')
 			);
 			service.extendGraceDeadlines(
-				'',
+				cache,
 				[hash],
 				isoTimestampSchema.parse('2026-02-01T00:00:00.000Z')
 			);
 		});
 
-		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
+		expect(await graceDeadlineRows(defaultCache())).toStrictEqual([
 			{ storePathHash: hash, retainUntil: '2026-03-01T00:00:00.000Z' }
 		]);
 	});
@@ -982,8 +994,8 @@ describe('retention grace transitions', () => {
 		await removeRoot(token, 'channel');
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({ deadlines: [], graceManaged: true });
 	});
 
@@ -1002,8 +1014,8 @@ describe('retention grace transitions', () => {
 		await removeRoot(token, 'channel');
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1013,7 +1025,15 @@ describe('retention grace transitions', () => {
 
 		const resolved = await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
-			const withoutPolicies = service.resolveGraceSeconds(pr5Cache);
+			const pr5 = instance.context.cacheRepository.resolveOrCreate(
+				pr5Cache,
+				'public'
+			);
+			const builds = instance.context.cacheRepository.resolveOrCreate(
+				buildsCache,
+				'public'
+			);
+			const withoutPolicies = service.resolveGraceSeconds(pr5);
 
 			service.addGracePolicy({
 				cachePrefix: '',
@@ -1026,8 +1046,8 @@ describe('retention grace transitions', () => {
 
 			return {
 				withoutPolicies,
-				prCache: service.resolveGraceSeconds(pr5Cache),
-				otherCache: service.resolveGraceSeconds(buildsCache)
+				prCache: service.resolveGraceSeconds(pr5),
+				otherCache: service.resolveGraceSeconds(builds)
 			};
 		});
 
@@ -1039,11 +1059,20 @@ describe('retention grace transitions', () => {
 	});
 
 	it('does not apply retention grace policies to a private cache', async () => {
-		await useTestServer('transition-private-cache');
+		await useTestServer('transition-cache-access');
 		await bootstrap();
 
 		const resolved = await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
+			const privateCache = instance.context.cacheRepository.resolveOrCreate(
+				buildsCache,
+				'private'
+			);
+			const tenantCacheCalledPrivate =
+				instance.context.cacheRepository.resolveOrCreate(
+					namedCache('private'),
+					'public'
+				);
 
 			service.addGracePolicy({
 				cachePrefix: '',
@@ -1055,12 +1084,10 @@ describe('retention grace transitions', () => {
 			});
 
 			return {
-				privateCache: service.resolveGraceSeconds(
-					privateStoredCache(buildsCache)
-				),
-				privateCoverage: service.graceCoverage(privateStoredCache(buildsCache)),
-				publicCacheCalledPrivate: service.resolveGraceSeconds(
-					storedCacheSchema.parse('private')
+				privateCache: service.resolveGraceSeconds(privateCache),
+				privateCoverage: service.graceCoverage(buildsCache),
+				tenantCacheCalledPrivate: service.resolveGraceSeconds(
+					tenantCacheCalledPrivate
 				)
 			};
 		});
@@ -1068,7 +1095,7 @@ describe('retention grace transitions', () => {
 		expect(resolved).toStrictEqual({
 			privateCache: undefined,
 			privateCoverage: { covered: false },
-			publicCacheCalledPrivate: 3600
+			tenantCacheCalledPrivate: 3600
 		});
 	});
 });
@@ -1113,8 +1140,8 @@ describe('retention grace at publication', () => {
 		await runGc();
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
 			path: (await narInfoGeneration(path.storePathHash)) !== undefined
 		}).toStrictEqual({
 			deadlines: [
@@ -1139,7 +1166,7 @@ describe('retention grace at publication', () => {
 		await pushPath(token, path);
 		await setRoot(token, { name: 'channel', targets: [path.storePath] });
 
-		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
+		expect(await graceDeadlineRows(defaultCache())).toStrictEqual([
 			{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
 		]);
 	});
@@ -1180,7 +1207,7 @@ describe('retention grace at publication', () => {
 						.get()?.graceDecisionJson
 				)
 		);
-		const beforeVerification = await graceDeadlineRows(DEFAULT_CACHE);
+		const beforeVerification = await graceDeadlineRows(defaultCache());
 
 		await removeGracePolicy(policyId);
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
@@ -1188,7 +1215,7 @@ describe('retention grace at publication', () => {
 		expect({
 			pendingDecision,
 			beforeVerification,
-			afterVerification: await graceDeadlineRows(DEFAULT_CACHE)
+			afterVerification: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			pendingDecision: { reportsGrace: false, graceSeconds: dayGraceSeconds },
 			beforeVerification: [],
@@ -1234,8 +1261,8 @@ describe('retention grace at publication', () => {
 		expect({
 			materialised:
 				(await narInfoGeneration(metadata.storePathHash)) !== undefined,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({
 			materialised: true,
 			deadlines: [],
@@ -1270,8 +1297,8 @@ describe('retention grace at publication', () => {
 		await verifyCurrentTenant();
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1289,8 +1316,8 @@ describe('retention grace at publication', () => {
 		await pushPath(token, path);
 
 		const beforeCollection = {
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		};
 
 		await runGc();
@@ -1318,8 +1345,8 @@ describe('retention grace at publication', () => {
 		await pushPath(token, path);
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1340,7 +1367,7 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPath(token, seed, DEFAULT_CACHE, nar);
+		await pushPath(token, seed, defaultCache(), nar);
 
 		const reused = uploadMetadata({
 			storePathHash: repeated('i'),
@@ -1353,12 +1380,12 @@ describe('retention grace at publication', () => {
 		});
 
 		// Seed a later deadline than this commit would calculate.
-		await seedGraceDeadline(DEFAULT_CACHE, reused.storePathHash, liveDeadline);
+		await seedGraceDeadline(defaultCache(), reused.storePathHash, liveDeadline);
 
 		const negotiated = await negotiateUploads(
 			token,
 			[reused],
-			DEFAULT_CACHE,
+			defaultCache(),
 			true
 		);
 		const decision = negotiated.uploads[0];
@@ -1379,7 +1406,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			frameGrace: frame.grace,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			frameGrace: { retainUntil: liveDeadline },
 			deadlines: [
@@ -1448,13 +1475,13 @@ describe('retention grace at publication', () => {
 			const first = await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			);
 			const second = await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			);
 			const winnerDecision = first.uploads[0];
@@ -1488,8 +1515,8 @@ describe('retention grace at publication', () => {
 				status: loserFrame.response.status,
 				hasGraceKey: 'grace' in loserFrame,
 				grace: loserFrame.grace,
-				graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-				deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+				graceManaged: await hasGraceManagedMarker(defaultCache()),
+				deadlines: await graceDeadlineRows(defaultCache())
 			}).toStrictEqual({
 				status: 'already-present',
 				hasGraceKey: shouldReportGrace,
@@ -1527,25 +1554,28 @@ describe('retention grace at publication', () => {
 		// Commit the winning generation before exercising a losing reservation for
 		// the same store path. This branch does not read the loser's pending row, so
 		// the test can use a synthetic upload ID.
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 
 		const outcome = await runInDurableObject(
 			currentServer(),
-			async (instance) =>
-				pipelineFor(instance.context).concedeToWinner(
+			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
+				return pipelineFor(instance.context).concedeToWinner(
 					rootLogger(),
-					DEFAULT_CACHE,
+					cache,
 					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					await currentNarObjectKey(metadata.narHash),
 					{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
-				)
+				);
+			}
 		);
 
 		expect({
 			outcome,
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			outcome: {
 				kind: 'settled',
@@ -1606,6 +1636,8 @@ describe('retention grace at publication', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
 				instance.context.env = {
 					...instance.context.env,
 					BLOBS: failingDeleteBucket(instance.context.env.BLOBS)
@@ -1614,7 +1646,7 @@ describe('retention grace at publication', () => {
 				try {
 					await pipelineFor(instance.context).concedeToWinner(
 						rootLogger(),
-						DEFAULT_CACHE,
+						cache,
 						uploadIdSchema.parse('loser-upload'),
 						uploadPathNegotiation(metadata),
 						r2ObjectKeySchema.parse('staging/loser-upload'),
@@ -1630,7 +1662,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			outcome,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			outcome: 'failed',
 			deadlines: [
@@ -1674,14 +1706,16 @@ describe('retention grace at publication', () => {
 		// Restore the pending row but remove the applied grace state to reproduce
 		// that crash boundary.
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			instance.context.db
 				.delete(schema.retentionGrace)
-				.where(eq(schema.retentionGrace.cache, DEFAULT_CACHE))
+				.where(eq(schema.retentionGrace.cacheId, cache.id))
 				.run();
 			instance.context.db
 				.update(schema.caches)
 				.set({ graceManaged: false })
-				.where(eq(schema.caches.name, DEFAULT_CACHE))
+				.where(eq(schema.caches.id, cache.id))
 				.run();
 			instance.context.db
 				.insert(schema.pendingUploads)
@@ -1697,8 +1731,8 @@ describe('retention grace at publication', () => {
 		await verifyCurrentTenant();
 
 		expect({
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(defaultCache()),
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
 			verdict: await pendingUploadVerdict(upload.uploadId)
 		}).toStrictEqual({
 			deadlines: [
@@ -1727,12 +1761,14 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 
 		const hash = storePathHashSchema.parse(metadata.storePathHash);
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
+
 				// Change the generation during the first object-repair probe.
 				let hasMoved = false;
 				const moveWinner = (): void => {
@@ -1746,7 +1782,7 @@ describe('retention grace at publication', () => {
 						.set({ generation: sql`${schema.narInfos.generation} + 1` })
 						.where(
 							and(
-								eq(schema.narInfos.cache, DEFAULT_CACHE),
+								eq(schema.narInfos.cacheId, cache.id),
 								eq(schema.narInfos.storePathHash, hash)
 							)
 						)
@@ -1756,11 +1792,9 @@ describe('retention grace at publication', () => {
 					...instance.context.env,
 					BLOBS: headTappingBucket(instance.context.env.BLOBS, moveWinner)
 				});
-				const outcome = await drivenDirectly(
-					pipelineFor(context)
-				).concedeToWinner(
+				const outcome = await pipelineFor(context).concedeToWinner(
 					rootLogger(),
-					DEFAULT_CACHE,
+					cache,
 					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
@@ -1775,7 +1809,7 @@ describe('retention grace at publication', () => {
 		// must remain pending for verification.
 		expect({
 			...result,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			outcome: {
 				kind: 'deferred',
@@ -1805,16 +1839,18 @@ describe('retention grace at publication', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 
 		const hash = storePathHashSchema.parse(metadata.storePathHash);
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
+
 				// Pre-seed reference edges and advance the generation on every probe so
 				// each retry finds another committed winner.
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
-					schema: d1Schema
+					schema: { blobReferences: migrationSchema.blobReferences }
 				});
 				const live = instance.context.db
 					.select({
@@ -1824,7 +1860,7 @@ describe('retention grace at publication', () => {
 					.from(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, DEFAULT_CACHE),
+							eq(schema.narInfos.cacheId, cache.id),
 							eq(schema.narInfos.storePathHash, hash)
 						)
 					)
@@ -1834,10 +1870,10 @@ describe('retention grace at publication', () => {
 					throw new Error('the churned path must be committed');
 				}
 
-				await database.insert(d1Schema.blobReference).values(
+				await database.insert(migrationSchema.blobReferences).values(
 					Array.from({ length: 8 }, (_, index) => ({
 						tenant: instance.context.requireTenant(),
-						cache: defaultCache,
+						...cacheMigrationColumns(cache.scope, cache.access),
 						storePathHash: hash,
 						generation: narInfoGenerationSchema.parse(
 							live.generation + index + 1
@@ -1854,7 +1890,7 @@ describe('retention grace at publication', () => {
 						.set({ generation: sql`${schema.narInfos.generation} + 1` })
 						.where(
 							and(
-								eq(schema.narInfos.cache, DEFAULT_CACHE),
+								eq(schema.narInfos.cacheId, cache.id),
 								eq(schema.narInfos.storePathHash, hash)
 							)
 						)
@@ -1864,11 +1900,9 @@ describe('retention grace at publication', () => {
 					...instance.context.env,
 					BLOBS: headTappingBucket(instance.context.env.BLOBS, churn)
 				});
-				const outcome = await drivenDirectly(
-					pipelineFor(context)
-				).concedeToWinner(
+				const outcome = await pipelineFor(context).concedeToWinner(
 					rootLogger(),
-					DEFAULT_CACHE,
+					cache,
 					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
@@ -1882,7 +1916,7 @@ describe('retention grace at publication', () => {
 		expect({
 			outcome: result.outcome,
 			boundedBumps: result.bumpCount <= 6,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			outcome: {
 				kind: 'deferred',
@@ -1927,9 +1961,11 @@ describe('retention grace at publication', () => {
 		// Restore the pending row so the next pass takes the recovery path.
 		const hash = storePathHashSchema.parse(metadata.storePathHash);
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			instance.context.db
 				.delete(schema.retentionGrace)
-				.where(eq(schema.retentionGrace.cache, DEFAULT_CACHE))
+				.where(eq(schema.retentionGrace.cacheId, cache.id))
 				.run();
 			instance.context.db
 				.insert(schema.pendingUploads)
@@ -1941,6 +1977,8 @@ describe('retention grace at publication', () => {
 		const hasMoved = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
+
 				let hasMoved = false;
 				const context = new ServerContext(state, {
 					...instance.context.env,
@@ -1958,7 +1996,7 @@ describe('retention grace at publication', () => {
 								.set({ generation: sql`${schema.narInfos.generation} + 1` })
 								.where(
 									and(
-										eq(schema.narInfos.cache, DEFAULT_CACHE),
+										eq(schema.narInfos.cacheId, cache.id),
 										eq(schema.narInfos.storePathHash, hash)
 									)
 								)
@@ -1981,7 +2019,7 @@ describe('retention grace at publication', () => {
 		expect({
 			hasMoved,
 			verdict: await pendingUploadVerdict(upload.uploadId),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			hasMoved: true,
 			verdict: 'mismatch',
@@ -2050,7 +2088,6 @@ function verificationFor(context: ServerContext): VerificationService {
 		context,
 		new CommitPipelineService(
 			context,
-			new CacheAdminService(context, deletionQueue),
 			new SigningKeysService(context, narInfoObjects),
 			uploadState,
 			narInfoObjects,
@@ -2125,20 +2162,16 @@ describe('retention grace facts reported to clients', () => {
 		'acknowledges grace facts only when requested ($reportsGrace)',
 		async ({ reportsGrace: shouldAcceptGraceFacts, capabilities }) => {
 			const { token } = await bootstrap();
-			const response = await authorisedFetch(
-				`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-				token,
-				{
-					method: 'POST',
-					headers: {
-						'content-type': 'application/json',
-						...(shouldAcceptGraceFacts && {
-							[acceptCapabilitiesHeader]: uploadGraceFactsCapability
-						})
-					},
-					body: JSON.stringify({ pushId: testPushId, paths: [] })
-				}
-			);
+			const response = await authorisedFetch('/uploads', token, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					...(shouldAcceptGraceFacts && {
+						[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+					})
+				},
+				body: JSON.stringify({ pushId: testPushId, paths: [] })
+			});
 
 			expect({
 				status: response.status,
@@ -2174,11 +2207,11 @@ describe('retention grace facts reported to clients', () => {
 		const legacy = await negotiateUploads(token, [committed, fresh]);
 		// The legacy already-present decision still extended the deadline; only
 		// the reported fact is capability-gated.
-		const afterLegacy = await graceDeadlineRows(DEFAULT_CACHE);
+		const afterLegacy = await graceDeadlineRows(defaultCache());
 		const capable = await negotiateUploads(
 			token,
 			[committed, fresh],
-			DEFAULT_CACHE,
+			defaultCache(),
 			shouldReportGrace
 		);
 
@@ -2214,7 +2247,7 @@ describe('retention grace facts reported to clients', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPath(token, seed, DEFAULT_CACHE, nar);
+		await pushPath(token, seed, defaultCache(), nar);
 
 		const settledFrameFor = async (
 			storePathHash: string,
@@ -2232,7 +2265,7 @@ describe('retention grace facts reported to clients', () => {
 			const response = await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldAcceptGraceFacts
 			);
 			const decision = response.uploads[0];
@@ -2284,7 +2317,7 @@ describe('retention grace facts reported to clients', () => {
 		const decision = await negotiateUploads(
 			token,
 			[metadata],
-			DEFAULT_CACHE,
+			defaultCache(),
 			shouldReportGrace
 		);
 		const upload = decision.uploads[0];
@@ -2335,7 +2368,7 @@ describe('retention grace facts reported to clients', () => {
 			const response = await negotiateUploads(
 				token,
 				[path],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			);
 
@@ -2384,7 +2417,7 @@ describe('retention grace facts reported to clients', () => {
 		const response = await negotiateUploads(
 			token,
 			paths,
-			DEFAULT_CACHE,
+			defaultCache(),
 			shouldReportGrace
 		);
 
@@ -2433,6 +2466,7 @@ describe('retention grace facts reported to clients', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
+				const cache = resolvedCache(instance.context);
 				let hasMoved = false;
 				const context = new ServerContext(state, {
 					...instance.context.env,
@@ -2451,7 +2485,7 @@ describe('retention grace facts reported to clients', () => {
 								.set({ generation: sql`${schema.narInfos.generation} + 1` })
 								.where(
 									and(
-										eq(schema.narInfos.cache, DEFAULT_CACHE),
+										eq(schema.narInfos.cacheId, cache.id),
 										eq(schema.narInfos.storePathHash, hash)
 									)
 								)
@@ -2461,7 +2495,7 @@ describe('retention grace facts reported to clients', () => {
 				});
 
 				return uploadsServiceFor(context).negotiate(
-					DEFAULT_CACHE,
+					defaultCache(),
 					{
 						pushId: testPushId,
 						paths: [uploadPathNegotiation(path)]
@@ -2504,7 +2538,7 @@ describe('retention grace facts reported to clients', () => {
 			fileSize: seed.narBytes.byteLength
 		});
 
-		await pushPath(token, seeded, DEFAULT_CACHE, seed);
+		await pushPath(token, seeded, defaultCache(), seed);
 
 		const contested = uploadMetadata({
 			storePathHash: repeated('5'),
@@ -2519,7 +2553,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[contested],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2544,7 +2578,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[parkedPath],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2581,6 +2615,7 @@ describe('retention grace facts reported to clients', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
 				let hasAttached = false;
 				const context = new ServerContext(state, {
 					...instance.context.env,
@@ -2604,7 +2639,7 @@ describe('retention grace facts reported to clients', () => {
 
 				const settled = await drivenDirectly(pipelineFor(context)).commit(
 					rootLogger(),
-					DEFAULT_CACHE,
+					cache,
 					reuse.uploadId
 				);
 
@@ -2661,7 +2696,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2710,7 +2745,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2781,7 +2816,7 @@ describe('retention grace facts reported to clients', () => {
 
 		expect({
 			frame,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			frame: {
 				ev: 'settled',
@@ -2813,7 +2848,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2861,7 +2896,7 @@ describe('retention grace facts reported to clients', () => {
 			await negotiateUploads(
 				token,
 				[metadata],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			)
 		);
@@ -2899,13 +2934,13 @@ describe('retention grace facts reported to clients', () => {
 });
 
 function confirmOnlyGrants(
-	cacheSelector: string = DEFAULT_CACHE_SELECTOR
+	cache: CacheScope = defaultCache()
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:confirm'],
-			cache: cacheSelector
+			cache
 		}
 	]);
 }
@@ -2913,16 +2948,15 @@ function confirmOnlyGrants(
 async function confirmPaths(
 	token: string,
 	storePathHashes: readonly string[]
-): Promise<{ readonly status: number; readonly body: UploadConfirmResponse }> {
-	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
-		token,
-		{
-			body: JSON.stringify({ storePathHashes }),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+): Promise<{
+	readonly status: number;
+	readonly body: UploadConfirmResponseInput;
+}> {
+	const response = await authorisedFetch('/uploads/confirm', token, {
+		body: JSON.stringify({ storePathHashes }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 
 	return {
 		status: response.status,
@@ -2941,16 +2975,17 @@ describe('grace transition atomicity', () => {
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const retention = new RetentionService(instance.context);
+			const cache = resolvedCache(instance.context);
 
 			instance.context.db.transaction((tx) => {
-				retention.markCacheGraceManaged(DEFAULT_CACHE, tx);
-				retention.extendGraceDeadlines(DEFAULT_CACHE, [hash], liveDeadline, tx);
+				retention.markCacheGraceManaged(cache, tx);
+				retention.extendGraceDeadlines(cache, [hash], liveDeadline, tx);
 			});
 		});
 
 		expect({
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			graceManaged: true,
 			deadlines: [{ storePathHash: hash, retainUntil: liveDeadline }]
@@ -2963,24 +2998,20 @@ describe('grace transition atomicity', () => {
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const retention = new RetentionService(instance.context);
+			const cache = resolvedCache(instance.context);
 
 			expect(() => {
 				instance.context.db.transaction((tx) => {
-					retention.markCacheGraceManaged(DEFAULT_CACHE, tx);
-					retention.extendGraceDeadlines(
-						DEFAULT_CACHE,
-						[hash],
-						liveDeadline,
-						tx
-					);
+					retention.markCacheGraceManaged(cache, tx);
+					retention.extendGraceDeadlines(cache, [hash], liveDeadline, tx);
 					throw new ForcedRollbackError();
 				});
 			}).toThrow(ForcedRollbackError);
 		});
 
 		expect({
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({ graceManaged: false, deadlines: [] });
 	});
 
@@ -2988,7 +3019,7 @@ describe('grace transition atomicity', () => {
 		await useTestServer('grace-atomic-root-delete');
 		await addGracePolicy('', 3600);
 
-		const cache = DEFAULT_CACHE;
+		const cacheScope = defaultCache();
 		const name = rootNameSchema.parse('channel');
 		const hash = storePathHashSchema.parse(repeated('m'));
 		const storePath = storePathSchema.parse(`/nix/store/${repeated('m')}-x`);
@@ -2996,14 +3027,25 @@ describe('grace transition atomicity', () => {
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const retention = new RetentionService(instance.context);
+			const cache = resolvedCache(instance.context, cacheScope);
 
 			instance.context.db
 				.insert(schema.retentionRoots)
-				.values({ cache, name, createdAt: nowIso, updatedAt: nowIso })
+				.values({
+					cacheId: cache.id,
+					name,
+					createdAt: nowIso,
+					updatedAt: nowIso
+				})
 				.run();
 			instance.context.db
 				.insert(schema.retentionRootTargets)
-				.values({ cache, rootName: name, storePathHash: hash, storePath })
+				.values({
+					cacheId: cache.id,
+					rootName: name,
+					storePathHash: hash,
+					storePath
+				})
 				.run();
 
 			expect(() => {
@@ -3011,7 +3053,7 @@ describe('grace transition atomicity', () => {
 					tx.delete(schema.retentionRootTargets)
 						.where(
 							and(
-								eq(schema.retentionRootTargets.cache, cache),
+								eq(schema.retentionRootTargets.cacheId, cache.id),
 								eq(schema.retentionRootTargets.rootName, name)
 							)
 						)
@@ -3019,7 +3061,7 @@ describe('grace transition atomicity', () => {
 					tx.delete(schema.retentionRoots)
 						.where(
 							and(
-								eq(schema.retentionRoots.cache, cache),
+								eq(schema.retentionRoots.cacheId, cache.id),
 								eq(schema.retentionRoots.name, name)
 							)
 						)
@@ -3030,23 +3072,27 @@ describe('grace transition atomicity', () => {
 			}).toThrow(ForcedRollbackError);
 		});
 
-		const survivors = await runInDurableObject(currentServer(), (instance) => ({
-			root: instance.context.db
-				.select({ name: schema.retentionRoots.name })
-				.from(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.cache, cache))
-				.all(),
-			targets: instance.context.db
-				.select({ storePathHash: schema.retentionRootTargets.storePathHash })
-				.from(schema.retentionRootTargets)
-				.where(eq(schema.retentionRootTargets.cache, cache))
-				.all()
-		}));
+		const survivors = await runInDurableObject(currentServer(), (instance) => {
+			const cacheId = resolvedCache(instance.context, cacheScope).id;
+
+			return {
+				root: instance.context.db
+					.select({ name: schema.retentionRoots.name })
+					.from(schema.retentionRoots)
+					.where(eq(schema.retentionRoots.cacheId, cacheId))
+					.all(),
+				targets: instance.context.db
+					.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+					.from(schema.retentionRootTargets)
+					.where(eq(schema.retentionRootTargets.cacheId, cacheId))
+					.all()
+			};
+		});
 
 		expect({
 			survivors,
-			graceManaged: await hasGraceManagedMarker(cache),
-			deadlines: await graceDeadlineRows(cache)
+			graceManaged: await hasGraceManagedMarker(cacheScope),
+			deadlines: await graceDeadlineRows(cacheScope)
 		}).toStrictEqual({
 			survivors: {
 				root: [{ name }],
@@ -3122,7 +3168,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			confirmed,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			confirmed: {
 				status: StatusCodes.OK,
@@ -3155,7 +3201,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			confirmed,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			confirmed: {
 				status: StatusCodes.OK,
@@ -3181,7 +3227,11 @@ describe('confirming an unretained publication', () => {
 		});
 
 		await pushPath(token, path);
-		const key = narInfoObjectKey(fixtureTenant, path.storePathHash);
+		const key = narInfoObjectKey(
+			fixtureTenant,
+			path.storePathHash,
+			defaultCache()
+		);
 		await env.BLOBS.delete(key);
 
 		const confirmed = await confirmPaths(token, [path.storePathHash]);
@@ -3261,8 +3311,8 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			paths: [
 				{
@@ -3292,7 +3342,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache())
 		}).toStrictEqual({
 			paths: [
 				{ storePathHash: path.storePathHash, confirmed: true, grace: {} }
@@ -3328,8 +3378,8 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(defaultCache()),
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			paths: [
 				{ storePathHash: untouched.storePathHash, confirmed: false },
@@ -3367,13 +3417,14 @@ describe('confirming an unretained publication', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
+				const cache = resolvedCache(instance.context);
 				const moveRow = (): void => {
 					instance.context.db
 						.update(schema.narInfos)
 						.set({ generation: sql`${schema.narInfos.generation} + 1` })
 						.where(
 							and(
-								eq(schema.narInfos.cache, DEFAULT_CACHE),
+								eq(schema.narInfos.cacheId, cache.id),
 								eq(schema.narInfos.storePathHash, hash)
 							)
 						)
@@ -3388,13 +3439,13 @@ describe('confirming an unretained publication', () => {
 					})
 				});
 
-				return uploadsServiceFor(context).confirmPaths(DEFAULT_CACHE, [hash]);
+				return uploadsServiceFor(context).confirmPaths(defaultCache(), [hash]);
 			}
 		);
 
 		expect({
 			paths: response.paths,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			paths: [{ storePathHash: path.storePathHash, confirmed: false }],
 			deadlines: [
@@ -3423,7 +3474,7 @@ describe('confirming an unretained publication', () => {
 			async (instance) => {
 				const transactions = vi.spyOn(instance.context.db, 'transaction');
 				const uploads = uploadsServiceFor(instance.context);
-				const response = await uploads.confirmPaths(DEFAULT_CACHE, [
+				const response = await uploads.confirmPaths(defaultCache(), [
 					hash,
 					hash,
 					hash
@@ -3444,7 +3495,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			...result,
-			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			deadlines: await graceDeadlineRows(defaultCache())
 		}).toStrictEqual({
 			response: { paths: [confirmedEntry, confirmedEntry, confirmedEntry] },
 			transactionCount: 1,
@@ -3470,12 +3521,14 @@ describe('confirming an unretained publication', () => {
 		);
 
 		const result = await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			for (let start = 0; start < hashes.length; start += 10) {
 				instance.context.db
 					.insert(schema.narInfos)
 					.values(
 						hashes.slice(start, start + 10).map((storePathHash) => ({
-							cache: defaultCache,
+							cacheId: cache.id,
 							storePathHash,
 							storePath: storePathSchema.parse(
 								`/nix/store/${storePathHash}-seeded`
@@ -3494,7 +3547,7 @@ describe('confirming an unretained publication', () => {
 			const facts = confirmGraceBatch(
 				instance.context,
 				new RetentionService(instance.context),
-				DEFAULT_CACHE,
+				cache,
 				hashes.map((storePathHash) => ({
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(1),
@@ -3509,7 +3562,7 @@ describe('confirming an unretained publication', () => {
 			return { matched: facts.size, transactionCount };
 		});
 
-		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
+		const deadlines = await graceDeadlineRows(defaultCache());
 
 		expect({
 			...result,
@@ -3537,7 +3590,7 @@ describe('confirming an unretained publication', () => {
 		const commitToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const negotiateResponse = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
+			'/uploads',
 			confirmOnlyToken,
 			{
 				body: JSON.stringify({
@@ -3548,17 +3601,15 @@ describe('confirming an unretained publication', () => {
 				method: 'POST'
 			}
 		);
-		const commitResponse = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/commit`,
-			confirmOnlyToken,
-			{ headers: { upgrade: 'websocket' } }
-		);
+		const commitResponse = await authorisedFetch('/commit', confirmOnlyToken, {
+			headers: { upgrade: 'websocket' }
+		});
 		// upload:commit is runtime authority over upload-specific state only; the
 		// implication to upload:confirm (a refresh reaching any already-committed
 		// path in the cache) is issuance-only, so a presented commit-only token
 		// must not reach confirm.
 		const confirmByCommitTokenResponse = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
+			'/uploads/confirm',
 			commitToken,
 			{
 				body: JSON.stringify({ storePathHashes: [path.storePathHash] }),

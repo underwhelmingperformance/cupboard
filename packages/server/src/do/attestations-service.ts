@@ -1,6 +1,7 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
-	isPrivateCache,
+	type CacheScope,
+	isSameCacheScope,
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
@@ -8,18 +9,16 @@ import {
 	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	type StoredCache,
-	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
-	type AttestationAttachResponse,
-	type AttestationDecision,
-	type AttestationDescriptor,
-	type AttestationList,
-	type AttestationNegotiateResponse,
-	type ParsedAttestationNegotiateRequest
+	type AttestationAttachResponseInput,
+	type AttestationDecisionInput,
+	type AttestationDescriptorInput,
+	type AttestationListInput,
+	type AttestationNegotiateRequest,
+	type AttestationNegotiateResponseInput
 } from '@cupboard/protocol/attestations';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -32,6 +31,11 @@ import {
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 
+import {
+	cacheIdentityCondition,
+	cacheScopeFromRow,
+	type ResolvedCache
+} from '../db/cache.ts';
 import {
 	authorisedByCacheGeneration,
 	referencedCacheLifecycle
@@ -76,9 +80,14 @@ import {
 import { type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
-interface ParsedAttestationBundle {
+interface AttestationBundle {
 	readonly predicateType: PredicateType;
 	readonly subjectDigests: readonly Sha256HexDigest[];
+}
+
+interface PendingAttestationUpload {
+	readonly cache: ResolvedCache;
+	readonly row: typeof schema.pendingAttestations.$inferSelect;
 }
 
 export class AttestationsService {
@@ -89,14 +98,14 @@ export class AttestationsService {
 	) {}
 
 	private async finaliseAttach(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		pending: typeof schema.pendingAttestations.$inferSelect,
 		measured: MeasuredAttestationBundle,
-		parsed: ParsedAttestationBundle
-	): Promise<AttestationAttachResponse> {
+		parsed: AttestationBundle
+	): Promise<AttestationAttachResponseInput> {
 		const tenant = this.context.requireTenant();
 		const narInfoFilter = and(
-			eq(schema.narInfos.cache, cache),
+			eq(schema.narInfos.cacheId, cache.id),
 			eq(schema.narInfos.storePathHash, pending.storePathHash)
 		);
 		const narInfoRow = this.context.db
@@ -116,7 +125,11 @@ export class AttestationsService {
 		// consults before a CAS object is promoted.
 		const committedReferenceFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
-			eq(d1Schema.blobReference.cache, cache),
+			cacheIdentityCondition(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.blobReference.cacheName,
+				cache.scope
+			),
 			eq(d1Schema.blobReference.storePathHash, narInfoRow.storePathHash),
 			eq(d1Schema.blobReference.generation, narInfoRow.generation),
 			eq(d1Schema.blobReference.narHash, narInfoRow.narHash)
@@ -188,7 +201,7 @@ export class AttestationsService {
 		await this.attestationCas.promoteMeasuredBundle(pending.r2Key, measured);
 
 		const reference: AttestationReference = {
-			cache,
+			cache: cache.scope,
 			storePathHash: narInfoRow.storePathHash,
 			generation: narInfoRow.generation,
 			predicateType: parsed.predicateType,
@@ -224,9 +237,9 @@ export class AttestationsService {
 	}
 
 	private async pendingUpload(
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		uploadId: UploadId
-	): Promise<typeof schema.pendingAttestations.$inferSelect> {
+	): Promise<PendingAttestationUpload> {
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingAttestations)
@@ -237,11 +250,13 @@ export class AttestationsService {
 			throw new AttestationUploadNotFoundError(uploadId);
 		}
 
-		if (pending.cache !== cache) {
+		const cache = this.context.cacheRepository.resolvedForId(pending.cacheId);
+
+		if (!isSameCacheScope(cache.scope, cacheScope)) {
 			throw new AttestationUploadCacheMismatchError(
 				uploadId,
-				pending.cache,
-				cache
+				cache.scope,
+				cacheScope
 			);
 		}
 
@@ -252,7 +267,7 @@ export class AttestationsService {
 			throw new AttestationUploadExpiredError(uploadId);
 		}
 
-		return pending;
+		return { cache, row: pending };
 	}
 
 	private async clearPendingUploadAndStaging(
@@ -269,9 +284,9 @@ export class AttestationsService {
 	 * Whether the cache holds a live attestation reference to the bundle.
 	 *
 	 * An `attestation_ref` row records the narinfo generation but not the cache
-	 * generation. Join it to `blob_ref` on the tenant, stored name, path and
+	 * generation. Join it to `blob_ref` on the tenant, cache identity, path and
 	 * narinfo generation, then apply the lifecycle-generation predicate. This
-	 * excludes references from an earlier cache incarnation after the stored name
+	 * excludes references from an earlier cache incarnation after the cache name
 	 * is reused.
 	 *
 	 * The inner join also excludes a reference after path retirement has removed
@@ -279,7 +294,7 @@ export class AttestationsService {
 	 * reference.
 	 */
 	private async hasOwnBundleReferenceInCache(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		digest: Sha256HexDigest
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
@@ -293,7 +308,6 @@ export class AttestationsService {
 						d1Schema.blobReference.tenant,
 						d1Schema.attestationReference.tenant
 					),
-					eq(d1Schema.blobReference.cache, d1Schema.attestationReference.cache),
 					eq(
 						d1Schema.blobReference.storePathHash,
 						d1Schema.attestationReference.storePathHash
@@ -308,7 +322,16 @@ export class AttestationsService {
 			.where(
 				and(
 					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.attestationReference.cacheKind,
+						d1Schema.attestationReference.cacheName,
+						cache.scope
+					),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
 					eq(d1Schema.attestationReference.digest, digest),
 					authorisedByCacheGeneration()
 				)
@@ -320,7 +343,7 @@ export class AttestationsService {
 
 	/**
 	 * Returns the greatest narinfo generation among the reference edges for this
-	 * tenant, stored name and path that the current cache generation authorises,
+	 * tenant, cache identity and path that the current cache generation authorises,
 	 * or `undefined` when it authorises none.
 	 *
 	 * A recommit can leave an earlier edge behind until the drain retires it.
@@ -330,7 +353,7 @@ export class AttestationsService {
 	 * incarnation.
 	 */
 	private async authorisedNarInfoGeneration(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): Promise<NarInfoGeneration | undefined> {
 		const tenant = this.context.requireTenant();
@@ -341,7 +364,11 @@ export class AttestationsService {
 			.where(
 				and(
 					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
 					eq(d1Schema.blobReference.storePathHash, storePathHash),
 					authorisedByCacheGeneration()
 				)
@@ -374,10 +401,10 @@ export class AttestationsService {
 	}
 
 	private async descriptorsFor(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
-	): Promise<AttestationDescriptor[]> {
+	): Promise<AttestationDescriptorInput[]> {
 		const tenant = this.context.requireTenant();
 		const rows = await this.context.d1
 			.select({
@@ -393,7 +420,11 @@ export class AttestationsService {
 			.where(
 				and(
 					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.attestationReference.cacheKind,
+						d1Schema.attestationReference.cacheName,
+						cache.scope
+					),
 					eq(d1Schema.attestationReference.storePathHash, storePathHash),
 					eq(d1Schema.attestationReference.generation, generation)
 				)
@@ -452,7 +483,7 @@ export class AttestationsService {
 	}
 
 	private async filedReferenceKeys(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		digests: readonly Sha256HexDigest[]
 	): Promise<Set<string>> {
 		if (digests.length === 0) {
@@ -464,7 +495,11 @@ export class AttestationsService {
 			(digestBatch) => {
 				const filter = and(
 					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.attestationReference.cacheKind,
+						d1Schema.attestationReference.cacheName,
+						cache.scope
+					),
 					inArray(d1Schema.attestationReference.digest, digestBatch)
 				);
 
@@ -533,13 +568,18 @@ export class AttestationsService {
 	}
 
 	async negotiate(
-		cache: StoredCache,
-		body: ParsedAttestationNegotiateRequest
-	): Promise<AttestationNegotiateResponse> {
+		cacheScope: CacheScope,
+		body: AttestationNegotiateRequest
+	): Promise<AttestationNegotiateResponseInput> {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
 			throw new InvalidPushIdError();
 		}
 
+		if (body.bundles.length === 0) {
+			return { bundles: [] };
+		}
+
+		const cache = this.context.cacheRepository.require(cacheScope);
 		const storePathHashes = [
 			...new Set(body.bundles.map((bundle) => bundle.storePathHash))
 		];
@@ -572,7 +612,7 @@ export class AttestationsService {
 			this.availableDigests(candidateDigests)
 		]);
 
-		const bundles: AttestationDecision[] = [];
+		const bundles: AttestationDecisionInput[] = [];
 
 		for (const bundle of body.bundles) {
 			const row = committed.has(bundle.storePathHash)
@@ -607,7 +647,7 @@ export class AttestationsService {
 				.insert(schema.pendingAttestations)
 				.values({
 					id: uploadId,
-					cache,
+					cacheId: cache.id,
 					storePathHash: bundle.storePathHash,
 					digest: bundle.digest,
 					r2Key,
@@ -630,10 +670,13 @@ export class AttestationsService {
 	}
 
 	async attach(
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		uploadId: UploadId
-	): Promise<AttestationAttachResponse> {
-		const pending = await this.pendingUpload(cache, uploadId);
+	): Promise<AttestationAttachResponseInput> {
+		const { cache, row: pending } = await this.pendingUpload(
+			cacheScope,
+			uploadId
+		);
 
 		if (pending.predicateType !== null) {
 			return {
@@ -689,10 +732,11 @@ export class AttestationsService {
 
 	async handleServeList(
 		request: Request,
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		hash: string
 	): Promise<Response> {
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
+		const cache = this.context.cacheRepository.require(cacheScope);
 		const committed = await this.authorisedNarInfoGeneration(
 			cache,
 			storePathHash
@@ -707,7 +751,7 @@ export class AttestationsService {
 			attestationListObjectKey(
 				this.context.requireTenant(),
 				storePathHash,
-				cache
+				cache.scope
 			),
 			'application/json; charset=utf-8',
 			'no-store',
@@ -717,13 +761,14 @@ export class AttestationsService {
 
 	async handleServeBundle(
 		request: Request,
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		digestParameter: string
 	): Promise<Response> {
 		const digest = parseRequestValue(
 			sha256HexDigestSchema,
 			parseAttestationDigestName(digestParameter)
 		);
+		const cache = this.context.cacheRepository.require(cacheScope);
 
 		if (!(await this.hasOwnBundleReferenceInCache(cache, digest))) {
 			return uncachedNotFoundResponse();
@@ -744,14 +789,14 @@ export class AttestationsService {
 	}
 
 	async materialiseList(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation?: NarInfoGeneration
 	): Promise<void> {
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
-			cache
+			cache.scope
 		);
 		const committedRow =
 			generation === undefined
@@ -781,7 +826,7 @@ export class AttestationsService {
 			return;
 		}
 
-		const body: AttestationList = { attestations: descriptors };
+		const body: AttestationListInput = { attestations: descriptors };
 		await this.context.objectWrites.write([key], () =>
 			this.context.env.BLOBS.put(key, `${JSON.stringify(body)}\n`, {
 				httpMetadata: {
@@ -804,7 +849,7 @@ export class AttestationsService {
 	 * objects because no later generation uses them.
 	 */
 	async discardLists(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<void> {
 		if (storePathHashes.length === 0) {
@@ -813,7 +858,7 @@ export class AttestationsService {
 
 		const tenant = this.context.requireTenant();
 		const keys = [...new Set(storePathHashes)].map((storePathHash) =>
-			attestationListObjectKey(tenant, storePathHash, cache)
+			attestationListObjectKey(tenant, storePathHash, cache.scope)
 		);
 
 		await this.context.objectWrites.write(keys, () =>
@@ -835,14 +880,14 @@ export class AttestationsService {
 	 * based on that observation would remove the newly published list.
 	 */
 	async discardListOfGeneration(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<void> {
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
-			cache
+			cache.scope
 		);
 
 		await this.context.objectWrites.write([key], async () => {
@@ -882,7 +927,8 @@ export class AttestationsService {
 		const tenant = this.context.requireTenant();
 		const references = await this.context.d1
 			.select({
-				cache: d1Schema.attestationReference.cache,
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				cacheName: d1Schema.attestationReference.cacheName,
 				storePathHash: d1Schema.attestationReference.storePathHash,
 				generation: d1Schema.attestationReference.generation,
 				predicateType: d1Schema.attestationReference.predicateType,
@@ -896,27 +942,29 @@ export class AttestationsService {
 				)
 			)
 			.all();
-		const touchedPaths = new Set<string>();
+		const touchedPaths = new Map<ResolvedCache['id'], Set<StorePathHash>>();
 
 		for (const reference of references) {
+			const cache = this.context.cacheRepository.require(
+				cacheScopeFromRow({
+					kind: reference.cacheKind,
+					name: reference.cacheName
+				})
+			);
 			await this.attestationCas.removeCapturedReference(
-				reference,
+				{ ...reference, cache: cache.scope },
 				fenceIncarnation
 			);
-			touchedPaths.add(`${reference.cache}\0${reference.storePathHash}`);
+			const paths = touchedPaths.get(cache.id) ?? new Set<StorePathHash>();
+			paths.add(reference.storePathHash);
+			touchedPaths.set(cache.id, paths);
 		}
 
-		for (const path of touchedPaths) {
-			const [cache, storePathHash] = path.split('\0', 2);
-
-			if (cache === undefined || storePathHash === undefined) {
-				continue;
+		for (const [cacheId, storePathHashes] of touchedPaths) {
+			const cache = this.context.cacheRepository.resolvedForId(cacheId);
+			for (const storePathHash of storePathHashes) {
+				await this.materialiseList(cache, storePathHash);
 			}
-
-			await this.materialiseList(
-				storedCacheSchema.parse(cache),
-				storePathHashSchema.parse(storePathHash)
-			);
 		}
 	}
 }
@@ -947,19 +995,18 @@ function recordedListGeneration(
  * generation in the object metadata identifies which commit produced the list,
  * including after another cache reuses the stored name.
  *
- * Generation metadata and private caches were introduced together, so a private
- * list without this metadata cannot be valid. Public list objects can predate
- * the metadata; their contents are already public, so continue serving them.
+ * Generation metadata was introduced after public-cache list objects. A
+ * private cache therefore cannot accept an object without it.
  */
 function isListOfCommittedGeneration(
 	object: R2Object,
-	cache: StoredCache,
+	cache: ResolvedCache,
 	committed: NarInfoGeneration
 ): boolean {
 	const recorded = recordedListGeneration(object);
 
 	if (recorded === undefined) {
-		return !isPrivateCache(cache);
+		return cache.access === 'public';
 	}
 
 	return recorded === committed;
@@ -973,7 +1020,7 @@ const attestationStatementSchema = inTotoStatementSchema({
 	subjectDigests: statement.subject.map((subject) => subject.digest.sha256)
 }));
 
-function parseAttestationBundle(bytes: Uint8Array): ParsedAttestationBundle {
+function parseAttestationBundle(bytes: Uint8Array): AttestationBundle {
 	try {
 		return decodeDsseStatement(bytes, attestationStatementSchema).statement;
 	} catch (error) {

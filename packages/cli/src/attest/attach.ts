@@ -4,22 +4,22 @@ import { readFile } from 'node:fs/promises';
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	type CacheScope,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	type StoredCache,
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
-	AttestationAttachResponse,
-	AttestationDecision,
-	AttestationNegotiateRequest,
-	AttestationNegotiateResponse
+	AttestationAttachResponseInput,
+	AttestationDecisionInput,
+	AttestationNegotiateRequestInput,
+	AttestationNegotiateResponseInput
 } from '@cupboard/protocol/attestations';
 import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
 import {
-	type AttestationAttachPath,
+	type AttestationAttachPathInput,
 	attestationAttachSummaryResultKind,
 	attestationAttachSummarySchema
 } from '@cupboard/protocol/reports';
@@ -60,10 +60,10 @@ export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
 export interface AttestationAttachClient {
 	negotiateAttestations(
-		body: Omit<AttestationNegotiateRequest, 'pushId'>
-	): Promise<AttestationNegotiateResponse>;
+		body: Omit<AttestationNegotiateRequestInput, 'pushId'>
+	): Promise<AttestationNegotiateResponseInput>;
 	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
-	attachAttestation(uploadId: string): Promise<AttestationAttachResponse>;
+	attachAttestation(uploadId: string): Promise<AttestationAttachResponseInput>;
 }
 
 export function requireAttestationAttachClient(client: {
@@ -125,7 +125,7 @@ const bundleConcurrency = 6;
 
 export interface CommittedAttestationSource {
 	readonly url: URL;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 }
@@ -306,8 +306,8 @@ function attestationBundleIdentityKey(
 // Missing, duplicate, and unexpected identities are protocol failures.
 function exactAttestationDecisions(
 	requested: readonly AttestationBundleIdentity[],
-	decisions: readonly AttestationDecision[]
-): readonly AttestationDecision[] {
+	decisions: readonly AttestationDecisionInput[]
+): readonly AttestationDecisionInput[] {
 	const requestedByKey = new Map(
 		requested.map((identity) => [
 			attestationBundleIdentityKey(identity),
@@ -355,9 +355,9 @@ function exactAttestationDecisions(
 }
 
 function requireMatchingAttachResponse(
-	decision: Extract<AttestationDecision, { action: 'upload' }>,
-	response: AttestationAttachResponse
-): AttestationAttachResponse {
+	decision: Extract<AttestationDecisionInput, { action: 'upload' }>,
+	response: AttestationAttachResponseInput
+): AttestationAttachResponseInput {
 	if (
 		response.storePathHash === decision.storePathHash &&
 		response.digest === decision.digest
@@ -385,7 +385,7 @@ export async function runAttestationAttachment(
 	options: AttestationAttachmentOptions
 ): Promise<AttestationAttachOutcome> {
 	const negotiateStep = log.group('negotiate');
-	const decisions: AttestationDecision[] = [];
+	const decisions: AttestationDecisionInput[] = [];
 
 	for (const batch of chunk(prepared, attestationNegotiateMaxBundles)) {
 		const negotiation = await options.client.negotiateAttestations({
@@ -504,7 +504,7 @@ export async function runAttestationAttachment(
 
 function requirePreparedAttestationBundle(
 	preparedByIdentity: ReadonlyMap<string, PreparedAttestationBundle>,
-	decision: Extract<AttestationDecision, { action: 'upload' }>
+	decision: Extract<AttestationDecisionInput, { action: 'upload' }>
 ): PreparedAttestationBundle {
 	const bundle = preparedByIdentity.get(attestationBundleIdentityKey(decision));
 
@@ -622,7 +622,7 @@ export async function runAttestAttach(
 	});
 }
 
-function attachPathRow(outcome: AttestationAttachPath['outcome']): string {
+function attachPathRow(outcome: AttestationAttachPathInput['outcome']): string {
 	switch (outcome) {
 		case 'attached': {
 			return 'attached';
@@ -645,7 +645,7 @@ function attachSummaryPaths(
 	prepared: readonly PreparedAttestationBundle[],
 	outcome: AttestationAttachOutcome,
 	storePathByHash: ReadonlyMap<StorePathHash, StorePathString>
-): readonly AttestationAttachPath[] {
+): readonly AttestationAttachPathInput[] {
 	const rank = { reused: 0, attached: 1, unservable: 2 } as const;
 	const outcomeByBundle = new Map(
 		outcome.bundles.map((bundle) => [
@@ -653,7 +653,10 @@ function attachSummaryPaths(
 			bundle.outcome
 		])
 	);
-	const byPath = new Map<StorePathHash, AttestationAttachPath['outcome']>();
+	const byPath = new Map<
+		StorePathHash,
+		AttestationAttachPathInput['outcome']
+	>();
 
 	for (const bundle of prepared) {
 		const bundleOutcome = outcomeByBundle.get(
@@ -683,20 +686,20 @@ function attachSummaryPaths(
 }
 
 export function isAttestationUpload(
-	decision: AttestationDecision
-): decision is Extract<AttestationDecision, { action: 'upload' }> {
+	decision: AttestationDecisionInput
+): decision is Extract<AttestationDecisionInput, { action: 'upload' }> {
 	return decision.action === 'upload';
 }
 
 export function isAttestationSkip(
-	decision: AttestationDecision
-): decision is Extract<AttestationDecision, { action: 'skip' }> {
+	decision: AttestationDecisionInput
+): decision is Extract<AttestationDecisionInput, { action: 'skip' }> {
 	return decision.action === 'skip';
 }
 
 export function findAttestationBundle(
 	bundles: readonly PreparedAttestationBundle[],
-	decision: Extract<AttestationDecision, { action: 'upload' }>
+	decision: Extract<AttestationDecisionInput, { action: 'upload' }>
 ): PreparedAttestationBundle {
 	const bundle = bundles.find(
 		(item) =>

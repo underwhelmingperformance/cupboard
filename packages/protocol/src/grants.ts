@@ -1,6 +1,7 @@
 import {
-	type CacheSelector,
-	cacheSelectorSchema,
+	type CacheScope,
+	cacheScopeSchema,
+	isSameCacheScope,
 	type RootName,
 	rootNameSchema,
 	type TenantId,
@@ -11,12 +12,12 @@ import { z } from 'zod';
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
 // `isCoveredByToken` checks the route's required operation against the concrete
 // request resource. Stored trust rules use templates and captures that resolve
-// to concrete selectors when the server issues a token.
+// to concrete resources when the server issues a token.
 
 // Cache-scoped tenant operations. `gc:run` and `stats:read` also appear as
 // domain operations: the per-cache form carries a cache, the deployment-wide
 // form carries none, and the procedure's declared resource picks which.
-export const cacheOperations = [
+export const cacheOperationSchema = z.enum([
 	'upload:negotiate',
 	'upload:preview',
 	'upload:status',
@@ -28,16 +29,21 @@ export const cacheOperations = [
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read'
-] as const;
+]);
+export type CacheOperation = z.infer<typeof cacheOperationSchema>;
+export const cacheOperations: readonly CacheOperation[] =
+	cacheOperationSchema.options;
 
 // Tenant-domain operations use authority over the tenant established by the
 // issuer. They have no separate resource selector.
-export const domainOperations = [
+const domainOperationSchema = z.enum([
 	'cache:list',
 	'stats:read',
 	'check:run',
@@ -59,23 +65,24 @@ export const domainOperations = [
 	'reuse-view:list',
 	'reuse-view:set',
 	'reuse-view:remove'
-] as const;
+]);
+export const domainOperations = domainOperationSchema.options;
 
 // These control operations require an exact tenant slug as their resource.
-export const tenantOperations = [
+const tenantOperationSchema = z.enum([
 	'tenant:create',
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
 	'tenant:clear-cache-read-credential'
-] as const;
+]);
+export const tenantOperations = tenantOperationSchema.options;
 
 // These control operations do not select a resource.
-export const controlOperations = [
+const controlOperationSchema = z.enum([
 	'control:check',
 	'instance:read',
 	'instance:initialise',
@@ -90,7 +97,8 @@ export const controlOperations = [
 	'control-oidc-trust:remove',
 	'deployment:read',
 	'deployment:advance'
-] as const;
+]);
+export const controlOperations = controlOperationSchema.options;
 
 // `gc:run` and `stats:read` occur in two grant types but appear once in this
 // combined schema.
@@ -106,7 +114,9 @@ export const operationSchema = z.enum([
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'cache:list',
 	'narinfo:delete',
@@ -141,7 +151,6 @@ export const operationSchema = z.enum([
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
@@ -157,33 +166,35 @@ export const operationSchema = z.enum([
 export type Operation = z.infer<typeof operationSchema>;
 
 export interface ResourceRequest {
-	readonly cache?: CacheSelector;
+	readonly cache?: CacheScope;
 	readonly root?: RootName;
 	readonly tenant?: TenantId;
 }
 
-// Issued grants carry only concrete selectors. Cache and tenant selectors are
-// exact; a root selector is an exact name or a trailing-slash prefix. The
-// wildcard is the only non-concrete grant and covers its whole domain.
+// Issued grants carry only concrete resources. A cache scope names one cache
+// and a tenant selector one tenant; a root selector is an exact name or a
+// trailing-slash prefix. The wildcard is the only non-concrete grant and covers
+// its whole domain.
 
-export const grantTypes = [
+const grantTypeSchema = z.enum([
 	'cupboard_cache',
 	'cupboard_domain',
 	'cupboard_tenant',
 	'cupboard_control',
 	'cupboard_wildcard'
-] as const;
+]);
+export const grantTypes = grantTypeSchema.options;
 
-const cacheActionsSchema = z.array(z.enum(cacheOperations)).min(1);
-const domainActionsSchema = z.array(z.enum(domainOperations)).min(1);
-const tenantActionsSchema = z.array(z.enum(tenantOperations)).min(1);
-const controlActionsSchema = z.array(z.enum(controlOperations)).min(1);
+const cacheActionsSchema = z.array(cacheOperationSchema).min(1);
+const domainActionsSchema = z.array(domainOperationSchema).min(1);
+const tenantActionsSchema = z.array(tenantOperationSchema).min(1);
+const controlActionsSchema = z.array(controlOperationSchema).min(1);
 
 export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
-		cache: cacheSelectorSchema,
+		cache: cacheScopeSchema,
 		root: rootNameSchema.optional()
 	}),
 	z.strictObject({
@@ -224,6 +235,7 @@ const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
+const cacheOperationSet: ReadonlySet<Operation> = new Set(cacheOperations);
 
 function isOperationImplied(
 	actions: readonly Operation[],
@@ -231,6 +243,13 @@ function isOperationImplied(
 	impliedBy: Partial<Record<Operation, Operation>>
 ): boolean {
 	if (actions.includes(operation)) {
+		return true;
+	}
+
+	if (
+		operation === 'cache:read' &&
+		actions.some((action) => cacheOperationSet.has(action))
+	) {
 		return true;
 	}
 
@@ -282,7 +301,7 @@ function isCoveredByGrant(
 		case 'cupboard_cache': {
 			return (
 				resource.cache !== undefined &&
-				resource.cache === grant.cache &&
+				isSameCacheScope(resource.cache, grant.cache) &&
 				(resource.root === undefined ||
 					(grant.root !== undefined && isRootWithin(resource.root, grant.root)))
 			);
@@ -406,23 +425,18 @@ function refineBinding(
 		readonly equalsTemplate?: string;
 		readonly exact?: string;
 		readonly substitutions?: Record<string, Substitution>;
-		readonly equalsResource?: 'cache';
 	},
-	ctx: z.RefinementCtx,
-	canUseResource: boolean
+	ctx: z.RefinementCtx
 ): void {
 	const choices = [
 		value.equalsTemplate !== undefined,
-		value.exact !== undefined,
-		value.equalsResource !== undefined
+		value.exact !== undefined
 	].filter(Boolean).length;
 
 	if (choices !== 1) {
 		ctx.addIssue({
 			code: 'custom',
-			message: canUseResource
-				? 'Set exactly one of equalsTemplate, exact, and equalsResource'
-				: 'Set exactly one of equalsTemplate and exact'
+			message: 'Set exactly one of equalsTemplate and exact'
 		});
 	}
 
@@ -442,24 +456,35 @@ function refineBinding(
 	}
 }
 
-export const cacheBindingSchema = z
-	.strictObject({ ...bindingShape, validate: z.literal('cacheName') })
-	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
-	});
+/**
+ * How a rule binds the cache it grants authority over. A rule that binds the
+ * default cache has nothing to render, so that choice is its own scope; the
+ * `named` scope renders a plain cache name from an exact value or a template.
+ */
+export const cacheBindingSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z
+		.strictObject({
+			kind: z.literal('named'),
+			...bindingShape,
+			validate: z.literal('cacheName')
+		})
+		.superRefine((value, ctx) => {
+			refineBinding(value, ctx);
+		})
+]);
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
-		validate: z.literal('rootName'),
-		equalsResource: z.literal('cache').optional()
+		validate: z.literal('rootName')
 	})
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, true);
+		refineBinding(value, ctx);
 	});
 export const tenantBindingSchema = z
 	.strictObject({ ...bindingShape, validate: z.literal('tenant') })
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
+		refineBinding(value, ctx);
 	});
 
 export const oidcTrustDisplaySchema = z.strictObject({

@@ -1,9 +1,9 @@
 import { NixSignature } from '@cupboard/nix-store/signature';
 import {
+	type BuildOriginPredicate,
 	buildOriginPredicateSchema,
 	buildOriginPredicateType,
-	type ParsedBuildOriginPredicate,
-	type ParsedBuildOriginSubject
+	type BuildOriginSubject
 } from '@cupboard/protocol/build-origin';
 import type { VerifyResult } from '@cupboard/shared/sigstore';
 import { z } from 'zod';
@@ -40,7 +40,7 @@ export class BuildOriginStatementInvalidError extends CliError {
  */
 export function buildOriginStatement(
 	result: Pick<VerifyResult, 'bundle' | 'predicateType' | 'predicate'>
-): ParsedBuildOriginPredicate | undefined {
+): BuildOriginPredicate | undefined {
 	if (result.predicateType !== buildOriginPredicateType) {
 		return undefined;
 	}
@@ -58,7 +58,7 @@ export function buildOriginStatement(
 	return parsed.data;
 }
 
-export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
+export function describeBuildOrigin(subject: BuildOriginSubject): string {
 	if (subject.origin === 'store-held') {
 		return `${subject.buildStore} reported the path as locally built, but the receipt does not record when it was built`;
 	}
@@ -89,7 +89,7 @@ export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 // prove which source supplied the path because an earlier attempt may have
 // failed before Nix tried the next source.
 function describeCopied(
-	subject: Extract<ParsedBuildOriginSubject, { origin: 'copied' }>
+	subject: Extract<BuildOriginSubject, { origin: 'copied' }>
 ): string {
 	const source =
 		subject.copiedFrom === undefined

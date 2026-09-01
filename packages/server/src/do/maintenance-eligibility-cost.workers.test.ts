@@ -21,7 +21,8 @@ import {
 	currentServer,
 	initialise,
 	negotiateViaInstance,
-	resetTestServer
+	resetTestServer,
+	resolvedCache
 } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
@@ -76,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 15,
-			largeBacklogCost: 15
+			emptyBacklogCost: 16,
+			largeBacklogCost: 16
 		});
 	});
 
@@ -134,11 +135,13 @@ async function seedNarInfoDeletions(
 	generationOffset: number
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
 		for (let index = 0; index < count; index += 1) {
 			instance.context.db
 				.insert(schema.narInfoDeletions)
 				.values({
-					cache: '',
+					cacheId,
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					generation: narInfoGenerationSchema.parse(generationOffset + index),
@@ -213,8 +216,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 45,
-			largeBacklogCost: 45
+			smallBacklogCost: 59,
+			largeBacklogCost: 59
 		});
 	});
 
@@ -224,12 +227,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 41,
+				rowsRead: 55,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 41,
+				rowsRead: 55,
 				usesIndex: true,
 				sorts: false
 			}
@@ -267,8 +270,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 54,
-			largeBacklogCost: 54
+			smallBacklogCost: 68,
+			largeBacklogCost: 68
 		});
 	});
 
@@ -302,8 +305,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 5046, rowsWritten: 1011 },
-			largeBacklog: { rowsRead: 5046, rowsWritten: 1011 }
+			smallBacklog: { rowsRead: 5060, rowsWritten: 1009 },
+			largeBacklog: { rowsRead: 5060, rowsWritten: 1009 }
 		});
 	});
 
@@ -326,8 +329,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 50,
-			largeBacklogCost: 50
+			smallBacklogCost: 65,
+			largeBacklogCost: 65
 		});
 	});
 });
@@ -339,7 +342,9 @@ async function terminalUploadCollectionCost(
 	await resetTestServer();
 	await initialise();
 
-	const plan = await runInDurableObject(currentServer(), (_instance, state) => {
+	const plan = await runInDurableObject(currentServer(), (instance, state) => {
+		const cache = resolvedCache(instance.context);
+
 		state.storage.sql.exec(
 			`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
 			 rows(value) AS (
@@ -350,21 +355,23 @@ async function terminalUploadCollectionCost(
 			   CROSS JOIN digits AS thousands
 			 )
 			 INSERT INTO pending_upload
-			   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
-			 SELECT printf('%s-live-%d', ?, value), '', ?,
+			   (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
+			 SELECT printf('%s-live-%d', ?, value), ?, ?,
 			        printf('staging/%s/live-%d', ?, value), '{}',
 			        '2019-01-01T00:00:00.000Z', '2019-01-01T00:00:00.000Z', 'pending'
 			 FROM rows WHERE value < ?`,
 			label,
+			cache.id,
 			nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 			label,
 			liveCount
 		);
 		state.storage.sql.exec(
 			`INSERT INTO pending_upload
-				   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
-				 VALUES (?, '', ?, ?, '{}', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z', 'servable')`,
+				   (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
+				 VALUES (?, ?, ?, ?, '{}', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z', 'servable')`,
 			`${label}-terminal`,
+			cache.id,
 			nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`),
 			`staging/${label}/terminal`
 		);
@@ -504,13 +511,15 @@ async function reconcileCost(): Promise<number> {
 
 async function seedLiveRoots(count: number, label: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
 		for (let index = 0; index < count; index += 1) {
 			const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
-					cache: '',
+					cacheId,
 					name: rootNameSchema.parse(`${label}-${String(index)}`),
 					expiresAt: isoTimestampSchema.parse('2999-01-01T00:00:00.000Z'),
 					createdAt: now,
@@ -523,12 +532,13 @@ async function seedLiveRoots(count: number, label: string): Promise<void> {
 
 async function seedExpiredRoot(name: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 		instance.context.db
 			.insert(schema.retentionRoots)
 			.values({
-				cache: '',
+				cacheId,
 				name: rootNameSchema.parse(name),
 				expiresAt: now,
 				createdAt: now,
@@ -562,12 +572,14 @@ async function seedPendingUploads(
 	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
 		for (let index = 0; index < count; index += 1) {
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values({
 					id: uploadIdSchema.parse(`${label}-${String(index)}`),
-					cache: '',
+					cacheId,
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					r2Key: r2ObjectKeySchema.parse(`staging/backlog-${String(index)}`),
 					metadataJson: '{}',
@@ -608,6 +620,8 @@ async function seedReconcileBacklog(
 ): Promise<void> {
 	await seedPendingUploads(count, label);
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
 		for (let index = 0; index < count; index += 1) {
 			const id = `${label}-${String(index)}`;
 
@@ -615,7 +629,7 @@ async function seedReconcileBacklog(
 				.insert(schema.pendingAttestations)
 				.values({
 					id: uploadIdSchema.parse(id),
-					cache: '',
+					cacheId,
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					digest: sha256HexDigestSchema.parse('b'.repeat(64)),
 					r2Key: r2ObjectKeySchema.parse(`staging/attestation/${id}`),
@@ -626,7 +640,7 @@ async function seedReconcileBacklog(
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
-					cache: '',
+					cacheId,
 					name: rootNameSchema.parse(id),
 					expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
@@ -636,7 +650,7 @@ async function seedReconcileBacklog(
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values({
-					cache: '',
+					cacheId,
 					storePathHash: syntheticStorePathHash(),
 					retainUntil: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 				})

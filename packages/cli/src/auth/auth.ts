@@ -1,8 +1,8 @@
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
-	type ParsedTokenResponse,
 	subjectTokenProblemSchema,
-	subjectTokenTypeIdToken
+	subjectTokenTypeIdToken,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 
@@ -35,11 +35,11 @@ import {
 } from './token-store.ts';
 
 interface SessionTokenClient {
-	tokenRefresh(refreshToken: string): Promise<ParsedTokenResponse>;
+	tokenRefresh(refreshToken: string): Promise<TokenResponse>;
 	tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string
-	): Promise<ParsedTokenResponse>;
+	): Promise<TokenResponse>;
 }
 
 type GrantChain = Pick<
@@ -101,7 +101,11 @@ export function cachedOwnerProvider(
 			async (lockSignal) => {
 				const signal = lockSignal ?? dependencies.signal;
 				const client =
-					dependencies.client ?? CupboardClient.fromUrl(target, { signal });
+					dependencies.client ??
+					CupboardClient.fromUrl(target, {
+						cache: { kind: 'default' },
+						signal
+					});
 				const session = await readSession(target);
 				throwIfAborted(signal);
 

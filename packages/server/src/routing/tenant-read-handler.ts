@@ -1,8 +1,6 @@
 import {
-	cacheFromSelector,
-	DEFAULT_CACHE,
-	publicCacheSelectorSchema,
-	type StoredCache,
+	cacheNameSchema,
+	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type Context, Hono } from 'hono';
@@ -15,12 +13,7 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import {
-	cacheInfoResponse,
-	publicNarAuthority,
-	serveNar,
-	serveNarInfo
-} from '../read/read.ts';
+import { narAuthorityForScope, serveNar, serveNarInfo } from '../read/read.ts';
 
 import { tenantServer } from './durable-object.ts';
 import { isLiteralNamespacePath, parseTenantPath } from './tenant-routing.ts';
@@ -29,7 +22,7 @@ interface TenantReadHonoEnv {
 	Bindings: TenantEnv;
 	Variables: {
 		tenant: TenantId;
-		cache: StoredCache;
+		cache: CacheScope;
 		tenantRest: string;
 	};
 }
@@ -53,26 +46,13 @@ function innerRequest(context: Context<TenantReadHonoEnv>): Request {
 /**
  * The reads this Worker serves through Workers Cache, relative to the cache
  * each one addresses. The control Worker forwards a read here only after it has
- * admitted the tenant and found the read needs no credential.
+ * admitted the tenant and resolved the selected cache as public.
  *
  * Hono answers HEAD by re-dispatching the request to the GET handler with the
  * body stripped, so a separate HEAD registration would never match.
  */
 function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 	const app = new Hono<TenantReadHonoEnv>();
-
-	app.get('/nix-cache-info', async (context) => {
-		const cache = context.get('cache');
-		const response = await cacheInfoResponse(
-			innerRequest(context),
-			context.env,
-			context.get('tenant'),
-			cache,
-			false
-		);
-
-		return cache === DEFAULT_CACHE ? response : noStore(response);
-	});
 
 	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, (context) => {
 		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
@@ -85,7 +65,7 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			context.get('cache'),
+			{ scope: context.get('cache'), access: 'public' },
 			storePathHash,
 			false
 		);
@@ -98,14 +78,15 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
-		// Only public caches are mounted here, so a reference from any of them
-		// authorises the read.
 		return serveNar(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
 			nar,
-			publicNarAuthority,
+			narAuthorityForScope({
+				scope: context.get('cache'),
+				access: 'public'
+			}),
 			false
 		);
 	});
@@ -147,30 +128,29 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 		}
 
 		context.set('tenant', route.tenant);
-		context.set('cache', DEFAULT_CACHE);
+		context.set('cache', { kind: 'default' });
 		context.set('tenantRest', route.rest);
 		await next();
 	});
 
-	// Only the public namespace is mounted here, and deliberately so: every read
-	// in the private namespace must stay on the control Worker, where the reader
-	// is authenticated and the response is marked `no-store`. Giving this Worker
-	// a private mount would put private content behind Workers Cache.
+	// The control Worker sends only public cache reads here. Private reads remain
+	// on the control Worker, where the reader is authenticated and the response
+	// is marked `no-store`.
 	app.use('/t/:tenant/cache/:cacheName/*', async (context, next) => {
 		const cacheName = context.req.param('cacheName');
-		const selector = publicCacheSelectorSchema.safeParse(cacheName);
+		const name = cacheNameSchema.safeParse(cacheName);
 
 		// The Workers Cache key retains the raw pathname. Hono decodes the matched
 		// path and the cache parameter used for R2 keys and cache tags. Refuse the
 		// request if the raw and decoded paths identify different caches.
 		if (
-			!selector.success ||
+			!name.success ||
 			!isLiteralNamespacePath(context.get('tenantRest'), 'cache', cacheName)
 		) {
 			return noStore(notFoundResponse());
 		}
 
-		context.set('cache', cacheFromSelector(selector.data));
+		context.set('cache', { kind: 'named', name: name.data });
 		await next();
 	});
 

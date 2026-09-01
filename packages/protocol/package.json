@@ -34,7 +34,7 @@
 		"./oidc-trust-diagnostics": "./src/oidc-trust-diagnostics.ts",
 		"./oidc-trust-selection": "./src/oidc-trust-selection.ts",
 		"./plan": "./src/plan.ts",
-		"./private-cache-credentials": "./src/private-cache-credentials.ts",
+		"./cache-credentials": "./src/cache-credentials.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
 		"./reuse-views": "./src/reuse-views.ts",

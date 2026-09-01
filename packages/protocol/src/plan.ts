@@ -80,9 +80,7 @@ export const availabilityCeilingSchema = z.object({
 	source: z.enum(['configured', 'untrusted-fallback']),
 	fallbackReason: z.string().optional()
 });
-export type ParsedAvailabilityCeiling = z.output<
-	typeof availabilityCeilingSchema
->;
+export type AvailabilityCeiling = z.output<typeof availabilityCeilingSchema>;
 
 /**
  * An older cupboard reports only the count, the ceiling and the byte totals.
@@ -98,7 +96,7 @@ export const unknownPathsCeilingRefusalSchema = z.object({
 	downloadSize: z.number(),
 	narSize: z.number()
 });
-export type ParsedUnknownPathsCeilingRefusal = z.output<
+export type UnknownPathsCeilingRefusal = z.output<
 	typeof unknownPathsCeilingRefusalSchema
 >;
 

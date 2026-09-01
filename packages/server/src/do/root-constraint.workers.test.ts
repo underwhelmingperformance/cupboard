@@ -41,27 +41,19 @@ function orpcErrorBodyShape(body: unknown): {
 }
 
 function putRoot(token: string, name: string): Promise<Response> {
-	return authorisedFetch(
-		`/cache/_default/roots/${encodeURIComponent(name)}`,
-		token,
-		{
-			body: JSON.stringify({ targets: [target] }),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		}
-	);
+	return authorisedFetch(`/roots/${encodeURIComponent(name)}`, token, {
+		body: JSON.stringify({ targets: [target] }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
 }
 
 function ensureRoot(token: string, name: string): Promise<Response> {
-	return authorisedFetch(
-		`/cache/_default/roots/${encodeURIComponent(name)}/ensure`,
-		token,
-		{
-			body: JSON.stringify({ targets: [target] }),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	return authorisedFetch(`/roots/${encodeURIComponent(name)}/ensure`, token, {
+		body: JSON.stringify({ targets: [target] }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 }
 
 describe('cb_roots enforcement at PUT /roots', () => {

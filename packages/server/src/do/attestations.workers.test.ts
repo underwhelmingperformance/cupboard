@@ -1,16 +1,15 @@
 import {
 	narInfoGenerationSchema,
 	type Sha256HexDigest,
-	sha256HexDigestSchema,
-	type StorePathHash
+	sha256HexDigestSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	attestationAttachResponseSchema,
+	type AttestationDecision,
 	attestationDecisionSchema,
 	attestationListSchema,
 	attestationNegotiateResponseSchema,
-	attestationUploadDecisionSchema,
-	type ParsedAttestationDecision
+	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
 import {
 	uploadActionDecisionSchema,
@@ -53,6 +52,7 @@ import {
 	putNarBytes,
 	readFetch,
 	resetTestServer,
+	resolvedCache,
 	sigstoreBundleBytes,
 	tenantCasBlobRows,
 	tenantUsageRow,
@@ -214,7 +214,7 @@ describe('attestation attach and reads', () => {
 		);
 
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
-		const path = `/cache/_default/attestations/${decision.uploadId}/attach`;
+		const path = `/attestations/${decision.uploadId}/attach`;
 		const first = await authorisedWorkerFetch(path, token, { method: 'POST' });
 		const repeated = await authorisedWorkerFetch(path, token, {
 			method: 'POST'
@@ -284,7 +284,11 @@ describe('attestation attach and reads', () => {
 	it('does not materialise a missing descriptor list during a read', async () => {
 		const { token, metadata, bundle } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
-		const key = attestationListObjectKey(fixtureTenant, metadata.storePathHash);
+		const key = attestationListObjectKey(
+			fixtureTenant,
+			metadata.storePathHash,
+			{ kind: 'default' }
+		);
 		await env.BLOBS.delete(key);
 		const beforeRead = {
 			refs: await attestationReferenceRows(),
@@ -318,7 +322,7 @@ describe('attestation attach and reads', () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
 		await provisionFixtureTenant({
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
 		const authorised = {
@@ -472,6 +476,8 @@ describe('attestation attach and reads', () => {
 		const error = await runInDurableObject(
 			fixtureWorkerServer(),
 			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
 				class RacingAttestationCasService extends AttestationCasService {
 					override async measureStagedBundle(
 						key: R2ObjectKey
@@ -483,7 +489,12 @@ describe('attestation attach and reads', () => {
 								narHash: replacement.narHash,
 								generation: narInfoGenerationSchema.parse(1)
 							})
-							.where(eqStorePath(metadata.storePathHash))
+							.where(
+								and(
+									eq(schema.narInfos.cacheId, cache.id),
+									eq(schema.narInfos.storePathHash, metadata.storePathHash)
+								)
+							)
 							.run();
 
 						return measured;
@@ -496,7 +507,7 @@ describe('attestation attach and reads', () => {
 				);
 
 				try {
-					return await attestations.attach('', decision.uploadId);
+					return await attestations.attach(cache.scope, decision.uploadId);
 				} catch (error: unknown) {
 					return error;
 				}
@@ -566,7 +577,7 @@ describe('attestation attach and reads', () => {
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const response = await authorisedWorkerFetch(
-			`/cache/_default/attestations/${decision.uploadId}/attach`,
+			`/attestations/${decision.uploadId}/attach`,
 			token,
 			{ method: 'POST' }
 		);
@@ -615,15 +626,11 @@ describe('attestation attach and reads', () => {
 			}))
 		];
 
-		const response = await authorisedWorkerFetch(
-			'/cache/_default/attestations',
-			token,
-			{
-				body: JSON.stringify({ pushId: testPushId, bundles }),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			}
-		);
+		const response = await authorisedWorkerFetch('/attestations', token, {
+			body: JSON.stringify({ pushId: testPushId, bundles }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
 		expect(response.status).toBe(StatusCodes.OK);
 		const body = attestationNegotiateResponseSchema.parse(
 			await response.json()
@@ -705,7 +712,7 @@ async function attachBundleResponse(
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	return authorisedWorkerFetch(
-		`/cache/_default/attestations/${decision.uploadId}/attach`,
+		`/attestations/${decision.uploadId}/attach`,
 		token,
 		{ method: 'POST' }
 	);
@@ -715,19 +722,15 @@ async function negotiate(
 	token: string,
 	pathHash: string,
 	digest: Sha256HexDigest
-): Promise<ParsedAttestationDecision> {
-	const response = await authorisedWorkerFetch(
-		'/cache/_default/attestations',
-		token,
-		{
-			body: JSON.stringify({
-				pushId: testPushId,
-				bundles: [{ storePathHash: pathHash, digest }]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+): Promise<AttestationDecision> {
+	const response = await authorisedWorkerFetch('/attestations', token, {
+		body: JSON.stringify({
+			pushId: testPushId,
+			bundles: [{ storePathHash: pathHash, digest }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = attestationNegotiateResponseSchema.parse(await response.json());
 	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
@@ -740,21 +743,16 @@ async function negotiateTenant(
 	token: string,
 	pathHash: string,
 	digest: Sha256HexDigest
-): Promise<ParsedAttestationDecision> {
+): Promise<AttestationDecision> {
 	const pushId = await testPushIdFor(tenant);
-	const response = await tenantFetch(
-		tenant,
-		'/cache/_default/attestations',
-		token,
-		{
-			body: JSON.stringify({
-				pushId,
-				bundles: [{ storePathHash: pathHash, digest }]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const response = await tenantFetch(tenant, '/attestations', token, {
+		body: JSON.stringify({
+			pushId,
+			bundles: [{ storePathHash: pathHash, digest }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = attestationNegotiateResponseSchema.parse(await response.json());
 	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
@@ -790,19 +788,14 @@ async function pushPathThroughTenant(
 	nar: Awaited<ReturnType<typeof verifiableNar>>
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantFetch(
-		tenant,
-		'/cache/_default/uploads',
-		token,
-		{
-			body: JSON.stringify({
-				pushId,
-				paths: [uploadPathNegotiation(metadata)]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const negotiated = await tenantFetch(tenant, '/uploads', token, {
+		body: JSON.stringify({
+			pushId,
+			paths: [uploadPathNegotiation(metadata)]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const body = uploadNegotiateResponseSchema.parse(await negotiated.json());
 	const [decision] = z.tuple([uploadActionDecisionSchema]).parse(body.uploads);
@@ -825,11 +818,4 @@ function tenantFetch(
 	headers.set('authorization', `Bearer ${token}`);
 
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
-}
-
-function eqStorePath(storePathHash: StorePathHash) {
-	return and(
-		eq(schema.narInfos.cache, ''),
-		eq(schema.narInfos.storePathHash, storePathHash)
-	);
 }

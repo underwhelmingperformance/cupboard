@@ -1,6 +1,6 @@
 import {
 	type AuthKeyId,
-	type CacheName,
+	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
@@ -40,11 +40,11 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CacheReadCredentialResponse,
 	type MembershipRebuildResponse,
-	type ParsedTenantCreateBody,
-	type ParsedTenantReadCredential,
+	type TenantCreateBody,
 	type TenantListResponse,
 	type TenantMutateResponse,
-	type TenantReadModeResponse,
+	type TenantReadCredential,
+	type TenantReadCredentialResponse,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -130,7 +130,6 @@ import {
 	resumeTenant,
 	setCacheReadCredential,
 	setTenantReadCredential,
-	setTenantReadMode,
 	setTenantStatus
 } from './tenant-registry.ts';
 
@@ -602,7 +601,7 @@ export function controlOidcTrustRemove(
 
 export async function controlTenantCreate(
 	env: Env,
-	body: ParsedTenantCreateBody,
+	body: TenantCreateBody,
 	origin: string,
 	rebuildFilter: (env: Env) => Promise<void> = rebuildMembershipFilter
 ): Promise<TenantSummary> {
@@ -665,63 +664,52 @@ export async function controlTenantResume(
 	return { id: summary.id, status: summary.status };
 }
 
-export async function controlTenantSetReadMode(
-	env: Env,
-	id: TenantId,
-	readMode: 'public' | 'private'
-): Promise<TenantReadModeResponse> {
-	const summary = await setTenantReadMode(controlDatabase(env), id, readMode);
-	await invalidateTenantRow(id);
-
-	return { id: summary.id, readMode: summary.readMode };
-}
-
 export async function controlTenantRotateReadCredential(
 	env: Env,
 	id: TenantId,
-	read: ParsedTenantReadCredential
-): Promise<TenantReadModeResponse> {
+	read: TenantReadCredential
+): Promise<TenantReadCredentialResponse> {
 	const summary = await setTenantReadCredential(controlDatabase(env), id, read);
 	await invalidateTenantRow(id);
 
-	return { id: summary.id, readMode: summary.readMode };
+	return { id: summary.id, hasCredential: true };
 }
 
 export async function controlTenantClearReadCredential(
 	env: Env,
 	id: TenantId
-): Promise<TenantReadModeResponse> {
+): Promise<TenantReadCredentialResponse> {
 	const summary = await clearTenantReadCredential(controlDatabase(env), id);
 	await invalidateTenantRow(id);
 
-	return { id: summary.id, readMode: summary.readMode };
+	return { id: summary.id, hasCredential: false };
 }
 
 export async function controlTenantRotateCacheReadCredential(
 	env: Env,
 	id: TenantId,
-	cacheName: CacheName,
-	read: ParsedTenantReadCredential
+	cache: CacheScope,
+	read: TenantReadCredential
 ): Promise<CacheReadCredentialResponse> {
 	await setCacheReadCredential(
 		controlDatabase(env),
 		id,
-		cacheName,
+		cache,
 		read,
 		isoTimestamp(new Date())
 	);
 
-	return { id, cacheName, hasCredential: true };
+	return { id, cache, hasCredential: true };
 }
 
 export async function controlTenantClearCacheReadCredential(
 	env: Env,
 	id: TenantId,
-	cacheName: CacheName
+	cache: CacheScope
 ): Promise<CacheReadCredentialResponse> {
-	await clearCacheReadCredential(controlDatabase(env), id, cacheName);
+	await clearCacheReadCredential(controlDatabase(env), id, cache);
 
-	return { id, cacheName, hasCredential: false };
+	return { id, cache, hasCredential: false };
 }
 
 export async function controlTenantOffboard(

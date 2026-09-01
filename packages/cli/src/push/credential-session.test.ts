@@ -1,6 +1,6 @@
 import {
-	type ParsedPushCredential,
 	type PushCredential,
+	type PushCredentialInput,
 	pushCredentialSchema
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { credentialSession } from './credential-session.ts';
 
 function credential(
-	overrides: Partial<PushCredential> & { expiresAt: string }
+	overrides: Partial<PushCredentialInput> & { expiresAt: string }
 ) {
 	return pushCredentialSchema.parse({
 		pushId: 'push-1',
@@ -86,7 +86,7 @@ describe('credentialSession', () => {
 	it('shares one in-flight issue across concurrent callers', async () => {
 		let calls = 0;
 		const { promise: issued, resolve: resolveIssue } =
-			Promise.withResolvers<ParsedPushCredential>();
+			Promise.withResolvers<PushCredential>();
 		const session = credentialSession(
 			() => {
 				calls += 1;
