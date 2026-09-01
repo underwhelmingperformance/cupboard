@@ -58,8 +58,6 @@ import {
 	type R2ObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
@@ -613,7 +611,34 @@ export class CommitPipelineService {
 			eq(d1Schema.blobState.narHash, metadata.narHash),
 			tenantActive
 		);
-		const cacheIdentity = cacheMigrationColumns(cache.scope, cache.access);
+		const cacheIdentity = cacheIdentityColumns(cache.scope);
+		const edgeStatement = this.context.d1
+			.insert(d1Schema.blobReference)
+			.select((qb) =>
+				qb
+					.select({
+						tenant: sql<TenantId>`${tenant}`.as('tenant'),
+						cacheKind: sql<
+							typeof cacheIdentity.cacheKind
+						>`${cacheIdentity.cacheKind}`.as('cache_kind'),
+						cacheName: sql<
+							typeof cacheIdentity.cacheName
+						>`${cacheIdentity.cacheName}`.as('cache_name'),
+						storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
+							'store_path_hash'
+						),
+						generation: sql<number>`${generation}`.as('generation'),
+						narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+							'nar_hash'
+						),
+						cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
+							'cache_generation'
+						)
+					})
+					.from(d1Schema.tenant)
+					.where(activeTenantFilter)
+			)
+			.onConflictDoNothing();
 
 		return [
 			this.context.d1
@@ -631,36 +656,7 @@ export class CommitPipelineService {
 					updatedAt: now
 				})
 				.where(creditBytesFilter),
-			this.context.d1
-				.insert(migrationSchema.blobReferences)
-				.select((qb) =>
-					qb
-						.select({
-							tenant: sql<TenantId>`${tenant}`.as('tenant'),
-							legacyCache: sql<string>`${cacheIdentity.legacyCache}`.as(
-								'cache'
-							),
-							cacheKind: sql<
-								typeof cacheIdentity.cacheKind
-							>`${cacheIdentity.cacheKind}`.as('cache_kind'),
-							cacheName: sql<
-								typeof cacheIdentity.cacheName
-							>`${cacheIdentity.cacheName}`.as('cache_name'),
-							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
-								'store_path_hash'
-							),
-							generation: sql<number>`${generation}`.as('generation'),
-							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
-								'nar_hash'
-							),
-							cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
-								'cache_generation'
-							)
-						})
-						.from(d1Schema.tenant)
-						.where(activeTenantFilter)
-				)
-				.onConflictDoNothing(),
+			edgeStatement,
 			this.context.d1
 				.insert(d1Schema.tenantBlob)
 				.select((qb) =>

@@ -348,7 +348,7 @@ describe('cache access migration', () => {
 		}
 	);
 
-	it('reconciles every cache of a legacy private tenant before contraction', async () => {
+	it('uses the default lifecycle when legacy cache access is unspecified', async () => {
 		const tenant = tenantIdSchema.parse('migration-private-tenant');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -356,12 +356,19 @@ describe('cache access migration', () => {
 		await d1.insert(migrationSchema.tenants).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'private',
+			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
 			configVersion: 1,
 			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			access: 'private',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
 		});
 
 		const server = testServerFor(tenant);
@@ -417,6 +424,10 @@ describe('cache access migration', () => {
 			})
 			.from(d1Schema.cacheLifecycle)
 			.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
+			.orderBy(
+				d1Schema.cacheLifecycle.cacheKind,
+				d1Schema.cacheLifecycle.cacheName
+			)
 			.all();
 		const lifecycles = lifecycleRows.map((row) => ({
 			cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
@@ -444,15 +455,11 @@ describe('cache access migration', () => {
 				]
 			},
 			tenantRow: { version: 1 },
-			lifecycles: [
-				{ cache: { kind: 'default' }, access: 'private' },
-				{ cache: { kind: 'named', name: 'builds' }, access: 'private' },
-				{ cache: { kind: 'named', name: 'releases' }, access: 'private' }
-			]
+			lifecycles: [{ cache: { kind: 'default' }, access: 'private' }]
 		});
 	});
 
-	it('revokes a live D1 cache absent from the Durable Object catalogue', async () => {
+	it('does not revoke a D1 cache absent from the Durable Object catalogue', async () => {
 		const tenant = tenantIdSchema.parse('migration-phantom-cache');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -467,15 +474,23 @@ describe('cache access migration', () => {
 			configVersion: 1,
 			createdAt: now
 		});
-		await d1.insert(migrationSchema.cacheLifecycles).values({
-			tenant,
-			legacyCache: 'phantom',
-			cacheKind: 'named',
-			cacheName: cacheNameSchema.parse('phantom'),
-			access: 'public',
-			generation: cacheGenerationSchema.parse(4),
-			updatedAt: now
-		});
+		await d1.insert(d1Schema.cacheLifecycle).values([
+			{
+				tenant,
+				cacheKind: 'default',
+				access: 'public',
+				generation: cacheGenerationSchema.parse(1),
+				updatedAt: now
+			},
+			{
+				tenant,
+				cacheKind: 'named',
+				cacheName: cacheNameSchema.parse('phantom'),
+				access: 'public',
+				generation: cacheGenerationSchema.parse(4),
+				updatedAt: now
+			}
+		]);
 
 		const server = testServerFor(tenant);
 		await runInDurableObject(server, async (_instance, state) => {
@@ -497,6 +512,10 @@ describe('cache access migration', () => {
 			})
 			.from(d1Schema.cacheLifecycle)
 			.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
+			.orderBy(
+				d1Schema.cacheLifecycle.cacheKind,
+				d1Schema.cacheLifecycle.cacheName
+			)
 			.all();
 
 		expect(
@@ -509,8 +528,8 @@ describe('cache access migration', () => {
 			{ cache: { kind: 'default' }, generation: 1, isDeleted: false },
 			{
 				cache: { kind: 'named', name: cacheNameSchema.parse('phantom') },
-				generation: 5,
-				isDeleted: true
+				generation: 4,
+				isDeleted: false
 			}
 		]);
 	});

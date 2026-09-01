@@ -25,7 +25,7 @@ import {
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
-import { cacheIdentityCondition } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -35,10 +35,7 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import {
-	cacheCatalogueVersion,
-	cacheMigrationColumns
-} from '../migration/cache-access.ts';
+import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
@@ -188,12 +185,8 @@ export async function ensureTenant(
 	now: IsoTimestamp
 ): Promise<TenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
-	const identity = cacheMigrationColumns(
-		{ kind: 'default' },
-		body.defaultCacheAccess
-	);
+	const identity = cacheIdentityColumns({ kind: 'default' });
 	const tenantFilter = liveTenantFilter(body.id);
-	const legacyCache = sql<string>`${identity.legacyCache}`.as('cache');
 	const cacheKind = sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
 		'cache_kind'
 	);
@@ -212,7 +205,6 @@ export async function ensureTenant(
 	const cacheRow = database
 		.select({
 			tenant: d1Schema.tenant.id,
-			legacyCache,
 			cacheKind,
 			cacheName,
 			access: cacheAccess,
@@ -255,7 +247,7 @@ export async function ensureTenant(
 			})
 			.onConflictDoNothing(),
 		database
-			.insert(migrationSchema.cacheLifecycles)
+			.insert(d1Schema.cacheLifecycle)
 			.select(cacheRow)
 			.onConflictDoNothing(),
 		database.insert(d1Schema.tenantUsage).select(usageRow).onConflictDoNothing()
@@ -460,7 +452,7 @@ export async function setCacheReadCredential(
 	// Select from a live tenant in the same statement as the upsert. If
 	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
 	// recreate the credential that cleanup deleted.
-	const identity = cacheMigrationColumns(cache, 'private');
+	const identity = cacheIdentityColumns(cache);
 	const lifecycleIdentity = cacheIdentityCondition(
 		d1Schema.cacheLifecycle.cacheKind,
 		d1Schema.cacheLifecycle.cacheName,
@@ -471,11 +463,10 @@ export async function setCacheReadCredential(
 		lifecycleIdentity,
 		isNull(d1Schema.cacheLifecycle.deletedAt)
 	);
-	const insert = database.insert(migrationSchema.cacheReadCredentials).select(
+	const insert = database.insert(d1Schema.tenantCacheReadCredential).select(
 		database
 			.select({
 				tenant: d1Schema.tenant.id,
-				legacyCache: sql<string>`${identity.legacyCache}`.as('cache'),
 				cacheKind: sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
 					'cache_kind'
 				),
@@ -505,18 +496,18 @@ export async function setCacheReadCredential(
 		cache.kind === 'default'
 			? await insert
 					.onConflictDoUpdate({
-						target: [migrationSchema.cacheReadCredentials.tenant],
-						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'default'`,
+						target: [d1Schema.tenantCacheReadCredential.tenant],
+						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'default'`,
 						set
 					})
 					.run()
 			: await insert
 					.onConflictDoUpdate({
 						target: [
-							migrationSchema.cacheReadCredentials.tenant,
-							migrationSchema.cacheReadCredentials.cacheName
+							d1Schema.tenantCacheReadCredential.tenant,
+							d1Schema.tenantCacheReadCredential.cacheName
 						],
-						targetWhere: sql`${migrationSchema.cacheReadCredentials.cacheKind} = 'named'`,
+						targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'named'`,
 						set
 					})
 					.run();
