@@ -34,6 +34,8 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -42,8 +44,6 @@ import {
 	r2ObjectKeySchema,
 	requestOriginSchema
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -1853,7 +1853,7 @@ describe('retention grace at publication', () => {
 				// Pre-seed reference edges and advance the generation on every probe so
 				// each retry finds another committed winner.
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
-					schema: { blobReferences: migrationSchema.blobReferences }
+					schema: d1Schema
 				});
 				const live = instance.context.db
 					.select({
@@ -1872,16 +1872,18 @@ describe('retention grace at publication', () => {
 				if (live === undefined) {
 					throw new Error('the churned path must be committed');
 				}
+				const tenant = instance.context.requireTenant();
 
-				await database.insert(migrationSchema.blobReferences).values(
+				await database.insert(d1Schema.blobReference).values(
 					Array.from({ length: 8 }, (_, index) => ({
-						tenant: instance.context.requireTenant(),
-						...cacheMigrationColumns(cache.scope, cache.access),
+						tenant,
+						...cacheIdentityColumns(cache.scope),
 						storePathHash: hash,
 						generation: narInfoGenerationSchema.parse(
 							live.generation + index + 1
 						),
-						narHash: live.narHash
+						narHash: live.narHash,
+						cacheGeneration: currentCacheGeneration(tenant, cache.scope)
 					}))
 				);
 

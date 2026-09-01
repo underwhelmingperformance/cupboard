@@ -5,6 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
+	CacheNotFoundError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -56,6 +57,14 @@ export function bridgedError(
 
 	if (error instanceof CacheAlreadyExistsError) {
 		return new ORPCError('CACHE_ALREADY_EXISTS', {
+			status: error.status,
+			message: error.message,
+			data: { cache: error.cache }
+		});
+	}
+
+	if (error instanceof CacheNotFoundError) {
+		return new ORPCError('CACHE_NOT_FOUND', {
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache }

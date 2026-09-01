@@ -1,5 +1,7 @@
+import { cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { type ReplaySafety } from '@cupboard/shared/retry';
 import { oc } from '@orpc/contract';
+import { z } from 'zod';
 
 import { type Operation } from '../grants.ts';
 
@@ -37,6 +39,13 @@ export interface AuthzMeta {
 	readonly maintenance?: boolean;
 	readonly replaySafety?: ReplaySafety;
 }
+
+export const cacheNotFoundError = {
+	CACHE_NOT_FOUND: {
+		status: 404,
+		data: z.strictObject({ cache: cacheScopeSchema })
+	}
+};
 
 /**
  * The base contract for authenticated procedures. It declares the shared

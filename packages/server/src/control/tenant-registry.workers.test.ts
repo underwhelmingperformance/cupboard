@@ -28,7 +28,6 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	hashReadPassword,
 	isReadPasswordMatching,
@@ -445,11 +444,10 @@ describe('tenant registry', () => {
 
 	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: acme,
 				status: 'active',
-				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -483,11 +481,10 @@ describe('tenant registry', () => {
 		const body = quotaBody(acme, 1000);
 
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,

@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	type CacheScope,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
 	storePathHashSchema
@@ -10,10 +11,10 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
@@ -331,13 +332,16 @@ async function seedEdge(
 		const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
 			schema: d1Schema
 		});
+		const tenant = instance.context.requireTenant();
+		const cache: CacheScope = { kind: 'default' };
 
-		await database.insert(migrationSchema.blobReferences).values({
-			tenant: instance.context.requireTenant(),
-			...cacheMigrationColumns({ kind: 'default' }, 'public'),
+		await database.insert(d1Schema.blobReference).values({
+			tenant,
+			...cacheIdentityColumns(cache),
 			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
 			generation: narInfoGenerationSchema.parse(generation),
-			narHash
+			narHash,
+			cacheGeneration: currentCacheGeneration(tenant, cache)
 		});
 	});
 }
@@ -345,7 +349,14 @@ async function seedEdge(
 describe('when reclaiming a row after failed verification', () => {
 	beforeEach(resetTestServer);
 
-	it.each([
+	const reclaimCases: {
+		readonly name: string;
+		readonly liveGeneration: number;
+		readonly edgeGeneration: number | undefined;
+		readonly outcome: 'reclaimed' | 'committed-current' | 'superseded';
+		readonly survivingGeneration: number | undefined;
+		readonly graceSurvives: boolean;
+	}[] = [
 		{
 			name: 'preserves a current row with a matching committed edge',
 			liveGeneration: 7,
@@ -370,7 +381,9 @@ describe('when reclaiming a row after failed verification', () => {
 			survivingGeneration: 8,
 			graceSurvives: true
 		}
-	] as const)(
+	];
+
+	it.each(reclaimCases)(
 		'$name',
 		async ({
 			liveGeneration,

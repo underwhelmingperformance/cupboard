@@ -99,7 +99,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			const admission = await admitTenant(
 				context.env,
 				context.executionCtx,
-				tenant.data
+				tenant.data,
+				{ kind: 'default' }
 			);
 
 			if (admission?.entry.status !== 'active') {

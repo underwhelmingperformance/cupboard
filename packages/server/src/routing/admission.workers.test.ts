@@ -72,7 +72,12 @@ async function admitWithFaults(
 		...env,
 		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
 	};
-	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(
+		faultyEnv,
+		ctx,
+		tenantIdSchema.parse(slug),
+		defaultCache()
+	);
 	await waitOnExecutionContext(ctx);
 
 	return entry?.entry;
@@ -97,7 +102,12 @@ function createBody(
 
 async function admit(slug: string): Promise<TenantEntry | undefined> {
 	const ctx = createExecutionContext();
-	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(
+		env,
+		ctx,
+		tenantIdSchema.parse(slug),
+		defaultCache()
+	);
 	await waitOnExecutionContext(ctx);
 
 	return entry?.entry;
@@ -683,7 +693,7 @@ describe('cache admission', () => {
 		});
 	});
 
-	it('reports a deleted cache and keeps returning its verifier', async () => {
+	it('reports a deleted cache without retaining its verifier', async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
 		await provisionCacheLifecycle('acme', builds);
 		await setCacheReadCredential(
@@ -712,12 +722,10 @@ describe('cache admission', () => {
 			)
 			.run();
 
-		// A deletion keeps the cache credential, so the reader still authenticates.
-		// The deleted cache state causes the content request to fail.
 		expect(await admitCache('acme', builds)).toStrictEqual({
 			entry: { status: 'active' },
-			cacheUser: 'reader',
-			cacheAcceptsPassword: true,
+			cacheUser: undefined,
+			cacheAcceptsPassword: false,
 			cache: {
 				access: 'private',
 				generation: 2,

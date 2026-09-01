@@ -39,7 +39,6 @@ import {
 	TenantRetiredError
 } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -237,11 +236,10 @@ export async function ensureTenant(
 
 	await database.batch([
 		database
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,

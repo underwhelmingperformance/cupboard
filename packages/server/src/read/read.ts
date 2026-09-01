@@ -195,8 +195,8 @@ export async function serveNar(
 
 /**
  * Builds the lookup that authorises one NAR read: one seek into `blob_ref` over
- * `(tenant, nar_hash, cache, cache_generation)`, joined to the blob's verified
- * state and to the lifecycle row of the referencing cache.
+ * `(tenant, nar_hash, cache_kind, cache_name, cache_generation)`, joined to the
+ * blob's verified state and to the lifecycle row of the referencing cache.
  *
  * Advancing the cache generation makes every edge from an earlier generation
  * stop authorising reads, so cache deletion does not need to retire those edges
@@ -277,10 +277,10 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
  * Builds the reference-edge lookup that authorises narinfo reads.
  *
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
- * `blob_ref` through its existing `(tenant, cache, store_path_hash,
- * generation)` primary key, joined to the cache lifecycle row. Availability
- * splits larger hash sets at D1's parameter limit and sends all resulting
- * lookups in one batch.
+ * `blob_ref` through the native partial identity index for the selected cache,
+ * store path and generation. The query joins that edge to the cache lifecycle
+ * row. Availability splits larger hash sets at D1's parameter limit and sends
+ * all resulting lookups in one batch.
  *
  * A deleted cache keeps its path-keyed narinfo objects until the teardown drain
  * removes them. The same stored name can be registered again before that drain
@@ -305,7 +305,7 @@ export function narInfoReferenceQuery(
 			narHash: d1Schema.blobReference.narHash
 		})
 		.from(d1Schema.blobReference)
-		.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),

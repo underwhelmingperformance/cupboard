@@ -676,7 +676,7 @@ describe('private cache access', () => {
 		}
 	);
 
-	it("creates and removes a private cache without removing another cache or the private cache's read credential", async () => {
+	it("removes a private cache's read credential without removing another cache", async () => {
 		const published = await publishToPrivateCache();
 		const retained = cacheNameSchema.parse('retained');
 		await authorisedWorkerFetch(`/caches/${retained}`, published.token, {
@@ -745,7 +745,7 @@ describe('private cache access', () => {
 					graceManaged: false
 				}
 			],
-			credentials: [{ tenant, cache: privateCache }]
+			credentials: []
 		});
 	});
 

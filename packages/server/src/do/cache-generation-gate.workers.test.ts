@@ -1,5 +1,4 @@
 import {
-	type CacheAccessMode,
 	cacheNameSchema,
 	type CacheScope,
 	narInfoGenerationSchema,
@@ -22,8 +21,15 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
-import { secondCacheGeneration } from '../db/cache-generation.ts';
+import {
+	type CacheId,
+	cacheIdentityColumns,
+	cacheScopeFromRow
+} from '../db/cache.ts';
+import {
+	firstCacheGeneration,
+	secondCacheGeneration
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -33,8 +39,6 @@ import {
 	narObjectKey,
 	requestOriginSchema
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -181,8 +185,7 @@ async function cacheCredentialCaches(): Promise<{ cache: CacheScope }[]> {
 async function seedUnstampedEdge(
 	cache: CacheScope,
 	storePathHash: StorePathHash,
-	nar: VerifiableNar,
-	access: CacheAccessMode = 'public'
+	nar: VerifiableNar
 ): Promise<void> {
 	const fileSize = nar.narBytes.byteLength;
 	const insertBlob = database()
@@ -197,13 +200,14 @@ async function seedUnstampedEdge(
 		})
 		.onConflictDoNothing();
 	const insertEdge = database()
-		.insert(migrationSchema.blobReferences)
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
-			narHash: nar.narHash
+			narHash: nar.narHash,
+			cacheGeneration: firstCacheGeneration
 		})
 		.onConflictDoNothing();
 	const insertPresence = database()
@@ -509,10 +513,11 @@ async function publishPrivatePath(server: string): Promise<{
 }
 
 // Reads the narinfo, NAR, attestation-list and availability routes with the
-// cache's own credential.
+// supplied cache or tenant credential.
 async function readPrivateSurfaces(
 	metadata: UploadPathMetadata,
-	nar: VerifiableNar
+	nar: VerifiableNar,
+	credential: { readonly user: string; readonly password: string }
 ): Promise<{
 	narinfo: number;
 	nar: number;
@@ -521,11 +526,11 @@ async function readPrivateSurfaces(
 }> {
 	const narinfo = await readFetch(
 		`/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`,
-		basic(cacheReader)
+		basic(credential)
 	);
 	const narRead = await readFetch(
 		await pushedNarPath(nar, `/cache/${privateBuildsName}`),
-		basic(cacheReader)
+		basic(credential)
 	);
 	const attestationList = await fetchPath(
 		`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
@@ -535,7 +540,7 @@ async function readPrivateSurfaces(
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(credential),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
@@ -554,21 +559,24 @@ async function readPrivateSurfaces(
 }
 
 // Reads one path's narinfo by GET and by HEAD, and asks availability about it,
-// all with the cache's own credential.
+// all with the tenant fallback credential.
 async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
 	narinfo: number;
 	head: number;
 	missing: readonly string[];
 }> {
 	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
-	const narinfo = await readFetch(path, basic(cacheReader));
-	const head = await readFetch(path, { method: 'HEAD', ...basic(cacheReader) });
+	const narinfo = await readFetch(path, basic(tenantReader));
+	const head = await readFetch(path, {
+		method: 'HEAD',
+		...basic(tenantReader)
+	});
 	const availability = await readFetch(
 		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(tenantReader),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [storePathHash] })
@@ -591,15 +599,18 @@ describe('deleted private cache', () => {
 	it('refuses published reads and reports every path missing before teardown drains the objects', async () => {
 		const { metadata, nar } = await publishPrivatePath('gen-deleted-surfaces');
 
-		const beforeDeletion = await readPrivateSurfaces(metadata, nar);
+		const beforeDeletion = await readPrivateSurfaces(
+			metadata,
+			nar,
+			cacheReader
+		);
 
 		await deleteAndParkTeardown(privateBuilds);
 
 		expect({
 			beforeDeletion,
-			afterDeletion: await readPrivateSurfaces(metadata, nar),
-			// The credential a deletion deliberately keeps, and the objects the
-			// parked drain has not removed.
+			afterDeletion: await readPrivateSurfaces(metadata, nar, tenantReader),
+			// The objects the parked drain has not removed.
 			credentials: await cacheCredentialCaches(),
 			narInfoObject:
 				(await env.BLOBS.head(
@@ -618,7 +629,7 @@ describe('deleted private cache', () => {
 				attestationList: StatusCodes.NOT_FOUND,
 				missing: [metadata.storePathHash]
 			},
-			credentials: [{ cache: privateBuilds }],
+			credentials: [],
 			narInfoObject: true
 		});
 	});
@@ -637,21 +648,21 @@ describe('deleted private cache', () => {
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const previousPath = `/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`;
-		const previous = await readFetch(previousPath, basic(cacheReader));
+		const previous = await readFetch(previousPath, basic(tenantReader));
 		const previousHead = await readFetch(previousPath, {
 			method: 'HEAD',
-			...basic(cacheReader)
+			...basic(tenantReader)
 		});
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const availability = await readFetch(
 			`/cache/${privateBuildsName}/api/v1/missing-paths`,
 			{
 				method: 'POST',
 				headers: {
-					...credentialHeaders(cacheReader),
+					...credentialHeaders(tenantReader),
 					'content-type': 'application/json'
 				},
 				body: JSON.stringify({
@@ -793,7 +804,7 @@ describe('deleted private cache', () => {
 
 		const whileDeleted = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		await putTestCache(token, privateBuilds, 'private');
@@ -801,11 +812,11 @@ describe('deleted private cache', () => {
 
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const freshNarRead = await readFetch(
 			await pushedNarPath(freshNar, `/cache/${privateBuildsName}`),
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		expect({
@@ -1160,7 +1171,7 @@ describe('cache generation gate', () => {
 				return blobReferenceRows();
 			}
 		);
-		const afterDeletion = await readFetch(narUrl, basic(cacheReader));
+		const afterDeletion = await readFetch(narUrl, basic(tenantReader));
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
@@ -1184,7 +1195,7 @@ describe('cache generation gate', () => {
 				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
 			],
-			credentials: [{ cache: privateBuilds }]
+			credentials: []
 		});
 	});
 

@@ -17,11 +17,11 @@ import { and, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { type ResolvedCache } from '../db/cache.ts';
+import { cacheIdentityColumns, type ResolvedCache } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
@@ -338,7 +338,7 @@ describe('root ensure hardening', () => {
 					throw new Error('missing source narinfo row');
 				}
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
-					schema: { blobReferences: migrationSchema.blobReferences }
+					schema: d1Schema
 				});
 
 				for (const rows of chunk(targets, 4)) {
@@ -354,16 +354,20 @@ describe('root ensure hardening', () => {
 						.run();
 				}
 
-				for (const references of chunk(targets, 16)) {
+				for (const references of chunk(targets, 12)) {
 					await database
-						.insert(migrationSchema.blobReferences)
+						.insert(d1Schema.blobReference)
 						.values(
 							references.map(({ storePathHash }) => ({
 								tenant: fixtureTenant,
-								...cacheMigrationColumns(cache.scope, cache.access),
+								...cacheIdentityColumns(cache.scope),
 								storePathHash,
 								generation: source.generation,
-								narHash: source.narHash
+								narHash: source.narHash,
+								cacheGeneration: currentCacheGeneration(
+									fixtureTenant,
+									cache.scope
+								)
 							}))
 						)
 						.run();

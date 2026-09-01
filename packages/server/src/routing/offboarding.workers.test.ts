@@ -8,6 +8,7 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	createExecutionContext,
 	waitOnExecutionContext
@@ -22,9 +23,9 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
+import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	afterGrace,
 	attemptPushToTenant,
@@ -65,7 +66,9 @@ const tenantCounter = { next: 0 };
 
 async function isAdmittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
-	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
+	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug), {
+		kind: 'default'
+	});
 	await waitOnExecutionContext(ctx);
 
 	return entry !== undefined;
@@ -274,39 +277,59 @@ describe('offboarding drain', () => {
 	it('bounds NAR edge deletion by exact captured rows', async () => {
 		const { id } = await provisionedWritingTenant();
 		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
-		const database = drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReferences: migrationSchema.blobReferences }
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const defaultScope = defaultCache();
+		const builds = namedCache('builds');
+		const tests = namedCache('tests');
+
+		const cacheLifecycles: (typeof d1Schema.cacheLifecycle.$inferInsert)[] = [
+			builds,
+			tests
+		].map((cache) => {
+			return {
+				tenant: id,
+				cacheKind: 'named',
+				cacheName: cache.name,
+				access: 'public',
+				generation: firstCacheGeneration,
+				updatedAt: isoTimestamp(new Date())
+			};
 		});
 
+		await database.insert(d1Schema.cacheLifecycle).values(cacheLifecycles);
+
 		await database
-			.insert(migrationSchema.blobReferences)
+			.insert(d1Schema.blobReference)
 			.values([
 				{
 					tenant: id,
-					...cacheMigrationColumns(defaultCache(), 'public'),
+					...cacheIdentityColumns(defaultScope),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(0),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				},
 				{
 					tenant: id,
-					...cacheMigrationColumns(namedCache('builds'), 'public'),
+					...cacheIdentityColumns(builds),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(1),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				},
 				{
 					tenant: id,
-					...cacheMigrationColumns(namedCache('tests'), 'public'),
+					...cacheIdentityColumns(tests),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(2),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				}
 			])
 			.run();

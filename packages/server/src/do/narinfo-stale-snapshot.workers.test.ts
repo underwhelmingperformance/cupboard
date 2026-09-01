@@ -5,11 +5,11 @@ import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { cacheIdentityCondition } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
+import { currentCacheGeneration } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	clearBlobStorage,
@@ -94,16 +94,15 @@ describe('servability after a committed-edge snapshot becomes stale', () => {
 				.run();
 		});
 
-		await drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReferences: migrationSchema.blobReferences }
-		})
-			.insert(migrationSchema.blobReferences)
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.insert(d1Schema.blobReference)
 			.values({
 				tenant: fixtureTenant,
-				...cacheMigrationColumns(defaultCache(), 'public'),
+				...cacheIdentityColumns(defaultCache()),
 				storePathHash: metadata.storePathHash,
 				generation: narInfoGenerationSchema.parse(1),
-				narHash: metadata.narHash
+				narHash: metadata.narHash,
+				cacheGeneration: currentCacheGeneration(fixtureTenant, defaultCache())
 			})
 			.onConflictDoNothing()
 			.run();

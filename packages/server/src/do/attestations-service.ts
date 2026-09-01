@@ -319,7 +319,7 @@ export class AttestationsService {
 					)
 				)
 			)
-			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+			.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 			.where(
 				and(
 					eq(d1Schema.attestationReference.tenant, tenant),
@@ -361,7 +361,7 @@ export class AttestationsService {
 		const edge = await this.context.d1
 			.select({ generation: d1Schema.blobReference.generation })
 			.from(d1Schema.blobReference)
-			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+			.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 			.where(
 				and(
 					eq(d1Schema.blobReference.tenant, tenant),

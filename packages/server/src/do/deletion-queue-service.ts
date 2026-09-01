@@ -977,7 +977,7 @@ export class DeletionQueueService {
 				narHash: d1Schema.blobReference.narHash
 			})
 			.from(d1Schema.blobReference)
-			.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+			.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 			.where(
 				and(
 					eq(d1Schema.blobReference.tenant, tenant),

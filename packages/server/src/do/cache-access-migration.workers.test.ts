@@ -14,7 +14,6 @@ import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { CacheIncarnationMigrationError } from '../errors.ts';
 import { reconcileCacheCatalogue } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { reconcileLocalCacheIncarnations } from '../migration/cache-incarnation.ts';
 import {
 	latestMigrationIndex,
@@ -356,10 +355,9 @@ describe('cache access migration', () => {
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
@@ -477,10 +475,9 @@ describe('cache access migration', () => {
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',

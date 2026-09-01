@@ -138,7 +138,9 @@ export const blobReference = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
-		cacheGeneration: integer('cache_generation').$type<CacheGeneration>()
+		cacheGeneration: integer('cache_generation')
+			.$type<CacheGeneration>()
+			.notNull()
 	},
 	(table) => [
 		check(
@@ -195,7 +197,12 @@ export const cacheLifecycle = sqliteTable(
 			.where(sql`${table.cacheKind} = 'default'`),
 		uniqueIndex('cache_lifecycle_named_identity_idx')
 			.on(table.tenant, table.cacheName)
-			.where(sql`${table.cacheKind} = 'named'`)
+			.where(sql`${table.cacheKind} = 'named'`),
+		index('cache_lifecycle_native_identity_idx').on(
+			table.tenant,
+			table.cacheKind,
+			table.cacheName
+		)
 	]
 );
 
@@ -255,10 +262,9 @@ export const tenant = sqliteTable(
 		configVersion: integer('config_version').notNull(),
 		cacheCatalogueVersion: integer('cache_catalogue_version'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// Private caches store the Basic-auth user, salt, and password verifier.
-		// Public caches keep all three columns null. A private cache with an
-		// incomplete verifier rejects every read; the plaintext password is never
-		// stored.
+		// These columns store the tenant fallback read verifier. A cache-specific
+		// verifier takes precedence when one exists. An incomplete verifier rejects
+		// authentication; the plaintext password is never stored.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),

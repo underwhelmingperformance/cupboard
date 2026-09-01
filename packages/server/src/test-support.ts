@@ -161,8 +161,6 @@ import {
 	type R2ObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
-import { cacheMigrationColumns } from './migration/cache-access.ts';
-import * as migrationSchema from './migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -320,11 +318,10 @@ export async function provisionFixtureTenant(
 	const now = isoTimestamp(testBase);
 
 	await database
-		.insert(migrationSchema.tenants)
+		.insert(d1Schema.tenant)
 		.values({
 			id: fixtureTenant,
 			status: 'active',
-			readMode: defaultCacheAccess,
 			ownerIssuer: fixtureOwner.issuer,
 			ownerSubject: fixtureOwner.subject,
 			ownerAudience: fixtureOwner.audience,
@@ -335,9 +332,8 @@ export async function provisionFixtureTenant(
 			readPasswordSalt
 		})
 		.onConflictDoUpdate({
-			target: migrationSchema.tenants.id,
+			target: d1Schema.tenant.id,
 			set: {
-				readMode: defaultCacheAccess,
 				readUser,
 				readPasswordHash,
 				readPasswordSalt
@@ -347,8 +343,8 @@ export async function provisionFixtureTenant(
 
 	await provisionD1Cache(database, fixtureTenant, defaultCacheAccess, now);
 
-	// The usage row is created with the tenant; a later call (e.g. switching read
-	// mode) updates only the quota, leaving the accumulated counters intact.
+	// The usage row is created with the tenant; a later call that changes the
+	// default cache access updates only the quota and keeps the usage counters.
 	await database
 		.insert(d1Schema.tenantUsage)
 		.values({
@@ -396,11 +392,10 @@ export async function provisionNamedTenant(
 	await stub.purgeStorage();
 
 	await database
-		.insert(migrationSchema.tenants)
+		.insert(d1Schema.tenant)
 		.values({
 			id,
 			status: 'active',
-			readMode: defaultCacheAccess,
 			ownerIssuer: '',
 			ownerSubject: '',
 			ownerAudience: '',
@@ -408,12 +403,10 @@ export async function provisionNamedTenant(
 			createdAt: isoTimestamp(testBase)
 		})
 		.onConflictDoUpdate({
-			target: migrationSchema.tenants.id,
+			target: d1Schema.tenant.id,
 			set: {
 				status: 'active',
-				readMode: defaultCacheAccess,
-				configVersion,
-				cacheCatalogueVersion: sql`null`
+				configVersion
 			}
 		})
 		.run();
@@ -460,21 +453,18 @@ async function provisionD1Cache(
 	updatedAt: IsoTimestamp
 ): Promise<void> {
 	await database
-		.insert(migrationSchema.cacheLifecycles)
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns({ kind: 'default' }, access),
+			...cacheIdentityColumns({ kind: 'default' }),
 			access,
 			generation: cacheGenerationSchema.parse(1),
 			updatedAt
 		})
 		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheLifecycles.tenant,
-				migrationSchema.cacheLifecycles.legacyCache
-			],
+			target: [d1Schema.cacheLifecycle.tenant],
+			targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
 			set: {
-				...cacheMigrationColumns({ kind: 'default' }, access),
 				access,
 				deletedAt: sql`null`,
 				updatedAt
