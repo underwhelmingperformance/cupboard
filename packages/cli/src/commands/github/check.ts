@@ -6,6 +6,7 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import { type ManagedPolicySummary } from '@cupboard/protocol/managed-caches';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { selectModelledOidcTrust } from '@cupboard/protocol/oidc-trust-diagnostics';
@@ -23,6 +24,7 @@ import { type ReadUser } from '@cupboard/shared/http';
 import { isAbortError } from '../../abort.ts';
 import {
 	confirmAuthorizationDetails,
+	managedCacheProvisionAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails
@@ -41,12 +43,14 @@ import { type ReuseViewClient } from '../reuse-view.ts';
 import { githubBranchClaims, githubPullRequestClaims } from './claims.ts';
 import {
 	parseExactWorkflowReference,
-	pullRequestPrefix,
 	pullRequestViewName
 } from './convention.ts';
 import {
 	CheckFinding,
+	ManagedPolicyMissingFinding,
+	ManagedPolicyStatusFinding,
 	PassedCheckFinding,
+	ReuseViewAccessMismatchFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	ReuseViewSelectorsMismatchFinding,
@@ -69,8 +73,10 @@ export interface GithubCheckOptions {
 	readonly branch: string;
 	readonly workflowRef: string;
 	readonly rootPrefix?: string;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly destinationReadUser?: ReadUser;
+	readonly destinationReadPassword?: string;
+	readonly fallbackReadUser?: ReadUser;
+	readonly fallbackReadPassword?: string;
 }
 
 export interface GithubCheckClient {
@@ -78,11 +84,17 @@ export interface GithubCheckClient {
 	readonly oidcTrust: {
 		list(): Promise<{ rules: OidcTrustSummary[] }>;
 	};
+	readonly managedCaches: {
+		readonly policies: {
+			list(): Promise<{ policies: ManagedPolicySummary[] }>;
+		};
+	};
 }
 
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
-	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
+	readonly fetchDestinationCacheInfo: (url: URL) => Promise<CacheInfo>;
+	readonly fetchReuseViewCacheInfo: (url: URL) => Promise<CacheInfo>;
 	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly signal?: AbortSignal;
 }
@@ -188,19 +200,22 @@ function checkTrustRule(
 }
 
 function hasPullRequestViewSelectors(
-	selectors: readonly ReuseViewSelectorInput[]
+	selectors: readonly ReuseViewSelectorInput[],
+	policy: ManagedPolicySummary
 ): boolean {
 	return (
 		selectors.length === 1 &&
-		selectors[0]?.kind === 'prefix' &&
-		selectors[0].prefix === pullRequestPrefix
+		selectors[0]?.kind === 'managed-group' &&
+		selectors[0].groupId === policy.configuration.groupId
 	);
 }
 
 async function checkReuseView(
 	url: URL,
+	policy: ManagedPolicySummary,
 	client: GithubCheckClient,
-	fetchCacheInfo: (url: URL) => Promise<CacheInfo>
+	fetchDestinationCacheInfo: (url: URL) => Promise<CacheInfo>,
+	fetchReuseViewCacheInfo: (url: URL) => Promise<CacheInfo>
 ): Promise<CheckFinding> {
 	const check = 'reuse view';
 	const { views } = await client.reuseViews.list();
@@ -210,15 +225,28 @@ async function checkReuseView(
 		return new ReuseViewMissingFinding(check, pullRequestViewName);
 	}
 
-	if (!hasPullRequestViewSelectors(definition.selectors)) {
-		return new ReuseViewSelectorsMismatchFinding(check, pullRequestPrefix);
+	if (definition.access !== policy.configuration.access) {
+		return new ReuseViewAccessMismatchFinding(
+			check,
+			definition.access,
+			policy.configuration.access
+		);
 	}
 
-	const destination = await fetchCacheInfo(url);
+	if (!hasPullRequestViewSelectors(definition.selectors, policy)) {
+		return new ReuseViewSelectorsMismatchFinding(
+			check,
+			`managed-group:${policy.configuration.groupId}`
+		);
+	}
+
+	const destination = await fetchDestinationCacheInfo(url);
 	let view: CacheInfo;
 
 	try {
-		view = await fetchCacheInfo(reuseViewUrl(url, pullRequestViewName));
+		view = await fetchReuseViewCacheInfo(
+			reuseViewUrl(url, pullRequestViewName)
+		);
 	} catch (error) {
 		if (isAbortError(error)) {
 			throw error;
@@ -291,6 +319,13 @@ export async function runGithubCheck(
 		'Reading repository identity from GitHub',
 		() => resolveRepository(options.repo, lookupOptions)
 	);
+	const policies = await reporter.phase('Reading managed-cache policies', () =>
+		client.managedCaches.policies.list()
+	);
+	const repositoryId = String(identity.repositoryId);
+	const managedPolicy = policies.policies.find(
+		(policy) => policy.repositoryId === repositoryId
+	);
 	const rules = await reporter.phase('Reading trust rules', async () => {
 		const listed = await client.oidcTrust.list();
 
@@ -300,9 +335,14 @@ export async function runGithubCheck(
 	});
 
 	// These representative requests use the quickstart defaults. They cover a PR
-	// publication to `pr-1` and a branch publication to the default cache, but
+	// publication to the first policy-derived cache and a branch publication to
+	// the default cache, but
 	// they are not evidence of the arguments that a real workflow will use.
-	const pullRequestRootPrefix = `github:${identity.fullName}/pr-1`;
+	const pullRequestCacheName =
+		managedPolicy === undefined
+			? `gh-${repositoryId}-pr-1`
+			: `${managedPolicy.cacheNamespace}1`;
+	const pullRequestRootPrefix = `github:${identity.fullName}/${pullRequestCacheName}`;
 	const branchRootPrefix =
 		options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`;
 	const pullRequestRoot = parseRootName(`${pullRequestRootPrefix}/target`);
@@ -311,13 +351,17 @@ export async function runGithubCheck(
 	);
 	const branchRoot = parseRootName(`${branchRootPrefix}/target`);
 	const branchRunRoot = parseRootName(`${branchRootPrefix}/_cupboard-run/1`);
-	const pullRequestCache: CacheName = cacheNameSchema.parse('pr-1');
+	const pullRequestCache: CacheName =
+		cacheNameSchema.parse(pullRequestCacheName);
 	const pullRequestCacheScope: CacheScope = {
 		kind: 'named',
 		name: pullRequestCache
 	};
 	const branchCacheScope: CacheScope = { kind: 'default' };
 	const pullRequestRequests = [
+		managedCacheProvisionAuthorizationDetails({
+			cache: pullRequestCacheScope
+		}),
 		pushAuthorizationDetails({
 			cache: pullRequestCacheScope,
 			attest: true,
@@ -355,6 +399,14 @@ export async function runGithubCheck(
 	const findings = await reporter.phase(
 		'Checking tenant configuration',
 		async () => [
+			managedPolicy === undefined
+				? new ManagedPolicyMissingFinding('managed-cache policy', repositoryId)
+				: managedPolicy.status === 'active'
+					? new PassedCheckFinding('managed-cache policy')
+					: new ManagedPolicyStatusFinding(
+							'managed-cache policy',
+							managedPolicy.status
+						),
 			checkTrustRule(
 				'pull-request trust rule',
 				rules,
@@ -374,7 +426,17 @@ export async function runGithubCheck(
 				}),
 				branchRequests
 			),
-			await checkReuseView(url, client, dependencies.fetchCacheInfo),
+			...(managedPolicy === undefined
+				? []
+				: [
+						await checkReuseView(
+							url,
+							managedPolicy,
+							client,
+							dependencies.fetchDestinationCacheInfo,
+							dependencies.fetchReuseViewCacheInfo
+						)
+					]),
 			checkRootPrefix(options, identity)
 		]
 	);

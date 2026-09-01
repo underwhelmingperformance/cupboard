@@ -382,6 +382,58 @@ export class ReadUserRequiredError extends UsageError {
 	}
 }
 
+export class DestinationReadPasswordRequiredError extends UsageError {
+	constructor() {
+		super(
+			'destination-read-password is required when destination-read-user is supplied'
+		);
+		this.name = 'DestinationReadPasswordRequiredError';
+	}
+}
+
+export class DestinationReadUserRequiredError extends UsageError {
+	constructor() {
+		super(
+			'destination-read-user is required when destination-read-password is supplied'
+		);
+		this.name = 'DestinationReadUserRequiredError';
+	}
+}
+
+export class DestinationReadCredentialConflictError extends UsageError {
+	constructor() {
+		super(
+			'destination read credentials and cache-credentials are mutually exclusive'
+		);
+		this.name = 'DestinationReadCredentialConflictError';
+	}
+}
+
+export class DestinationReadCredentialCacheCountError extends UsageError {
+	constructor() {
+		super('destination read credentials require exactly one selected cache');
+		this.name = 'DestinationReadCredentialCacheCountError';
+	}
+}
+
+export class FallbackReadPasswordRequiredError extends UsageError {
+	constructor() {
+		super(
+			'fallback-read-password is required when fallback-read-user is supplied'
+		);
+		this.name = 'FallbackReadPasswordRequiredError';
+	}
+}
+
+export class FallbackReadUserRequiredError extends UsageError {
+	constructor() {
+		super(
+			'fallback-read-user is required when fallback-read-password is supplied'
+		);
+		this.name = 'FallbackReadUserRequiredError';
+	}
+}
+
 export class InvalidMaxJobsError extends UsageError {
 	constructor(public readonly value: string) {
 		super('max-jobs must be a non-negative 32-bit integer');

@@ -5,6 +5,7 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { type Operation, type PermittedGrant } from '@cupboard/protocol/grants';
+import { managedPolicySummarySchema } from '@cupboard/protocol/managed-caches';
 import {
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
@@ -56,6 +57,32 @@ const options: GithubCheckOptions = {
 	workflowRef: pinnedWorkflowReference,
 	rootPrefix: 'github:acme/app/main'
 };
+const managedPolicy = managedPolicySummarySchema.parse({
+	id: '11111111-1111-4111-8111-111111111111',
+	ownerId: '5678',
+	repositoryId: '1234',
+	cacheNamespace: 'gh-1234-pr-',
+	status: 'active',
+	currentRevision: 1,
+	reuseViewName: 'pull-requests',
+	configuration: {
+		groupId: '22222222-2222-4222-8222-222222222222',
+		access: 'public'
+	}
+});
+
+function managedGithubPrAddBody(
+	overrides: Parameters<typeof githubPrAddBody>[2]
+) {
+	const pullRequestVariable = '{pr}';
+
+	return githubPrAddBody(url, identity, {
+		cacheTemplate: `${managedPolicy.cacheNamespace}${pullRequestVariable}`,
+		rootTemplate: `github:${identity.fullName}/${managedPolicy.cacheNamespace}${pullRequestVariable}/`,
+		managedPolicy: managedPolicy.id,
+		...overrides
+	});
+}
 
 function storedRule(
 	id: string,
@@ -83,7 +110,7 @@ function withoutOperation(
 
 const prRule = storedRule(
 	'pr',
-	githubPrAddBody(url, identity, {
+	managedGithubPrAddBody({
 		repo: options.repo,
 		jobWorkflowRef: options.workflowRef
 	})
@@ -99,7 +126,7 @@ const branchRule = storedRule(
 
 function pullRequestView(
 	selectors: readonly ReuseViewSelectorInput[] = [
-		{ kind: 'prefix', prefix: 'pr-' }
+		{ kind: 'managed-group', groupId: managedPolicy.configuration.groupId }
 	]
 ): ReuseViewSummaryInput {
 	return {
@@ -128,6 +155,11 @@ function checkClient(overrides: {
 					})
 				)
 		},
+		managedCaches: {
+			policies: {
+				list: () => Promise.resolve({ policies: [managedPolicy] })
+			}
+		},
 		oidcTrust: {
 			list: () =>
 				Promise.resolve(
@@ -143,19 +175,17 @@ function checkDependencies(overrides: {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
 		verifyWorkflowReference: () => Promise.resolve(),
-		fetchCacheInfo: (target: URL) =>
+		fetchDestinationCacheInfo: () =>
 			Promise.resolve(
-				target.pathname.includes('/reuse/')
-					? new CacheInfo(
-							servedStoreDirectory,
-							true,
-							cachePrioritySchema.parse(overrides.viewPriority ?? 50)
-						)
-					: new CacheInfo(
-							servedStoreDirectory,
-							true,
-							cachePrioritySchema.parse(40)
-						)
+				new CacheInfo(servedStoreDirectory, true, cachePrioritySchema.parse(40))
+			),
+		fetchReuseViewCacheInfo: () =>
+			Promise.resolve(
+				new CacheInfo(
+					servedStoreDirectory,
+					true,
+					cachePrioritySchema.parse(overrides.viewPriority ?? 50)
+				)
 			)
 	};
 }
@@ -209,7 +239,7 @@ describe('runGithubCheck', () => {
 	it('checks the supplied workflow reference while previous rules overlap', async () => {
 		const previousPrRule = storedRule(
 			'previous-pr',
-			githubPrAddBody(url, identity, {
+			managedGithubPrAddBody({
 				repo: options.repo,
 				jobWorkflowRef: previousWorkflowReference
 			})
@@ -292,6 +322,7 @@ describe('runGithubCheck', () => {
 		);
 
 		expect(findings(results)).toStrictEqual([
+			{ label: 'managed-cache policy', value: 'ok' },
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
@@ -310,16 +341,7 @@ describe('runGithubCheck', () => {
 				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
 				{
 					...checkDependencies({}),
-					fetchCacheInfo: (target) =>
-						target.pathname.includes('/reuse/')
-							? Promise.reject(reason)
-							: Promise.resolve(
-									new CacheInfo(
-										servedStoreDirectory,
-										true,
-										cachePrioritySchema.parse(40)
-									)
-								)
+					fetchReuseViewCacheInfo: () => Promise.reject(reason)
 				}
 			)
 		).rejects.toBe(reason);
@@ -335,7 +357,7 @@ describe('runGithubCheck', () => {
 			name: 'wrong selector',
 			views: [pullRequestView([{ kind: 'prefix', prefix: 'pull-' }])],
 			detail:
-				'stored selectors differ from the single pr- prefix setup would write'
+				'stored selectors differ from the single managed-group:22222222-2222-4222-8222-222222222222 selector setup would write'
 		},
 		{
 			name: 'extra selector',
@@ -346,7 +368,7 @@ describe('runGithubCheck', () => {
 				])
 			],
 			detail:
-				'stored selectors differ from the single pr- prefix setup would write'
+				'stored selectors differ from the single managed-group:22222222-2222-4222-8222-222222222222 selector setup would write'
 		}
 	])(
 		'fails when the reuse-view definition is $name',
@@ -375,6 +397,7 @@ describe('runGithubCheck', () => {
 				{
 					checks: ['reuse view'],
 					rows: [
+						{ label: 'managed-cache policy', value: 'ok' },
 						{ label: 'pull-request trust rule', value: 'ok' },
 						{ label: 'main trust rule', value: 'ok' },
 						{ label: 'reuse view', value: `failed: ${detail}` },
@@ -389,7 +412,7 @@ describe('runGithubCheck', () => {
 		const results: ResultRow[][] = [];
 		const misSpelled = storedRule(
 			'pr',
-			githubPrAddBody(url, identity, {
+			managedGithubPrAddBody({
 				repo: options.repo,
 				jobWorkflowRef: 'acme/app/.github/workflows/publish.yml@refs/heads/main'
 			})
@@ -417,6 +440,7 @@ describe('runGithubCheck', () => {
 				'root prefix'
 			],
 			rows: [
+				{ label: 'managed-cache policy', value: 'ok' },
 				{
 					label: 'pull-request trust rule',
 					value:
@@ -445,7 +469,7 @@ describe('runGithubCheck', () => {
 		const results: ResultRow[][] = [];
 		const misSpelledPr = storedRule(
 			'pr',
-			githubPrAddBody(url, identity, {
+			managedGithubPrAddBody({
 				repo: options.repo,
 				jobWorkflowRef: 'acme/app/.github/workflows/publish.yml@refs/heads/main'
 			})
@@ -470,10 +494,11 @@ describe('runGithubCheck', () => {
 		expectFailed(failure);
 		expect({
 			checks: failure.checks,
-			rows: findings(results).slice(0, 2)
+			rows: findings(results).slice(0, 3)
 		}).toStrictEqual({
 			checks: ['pull-request trust rule'],
 			rows: [
+				{ label: 'managed-cache policy', value: 'ok' },
 				{
 					label: 'pull-request trust rule',
 					value:
@@ -488,12 +513,12 @@ describe('runGithubCheck', () => {
 	it('reports the claim mismatch from a pattern-pinned repository rule', async () => {
 		const results: ResultRow[][] = [];
 		const patternPinned = storedRule('pattern', {
-			...githubPrAddBody(url, identity, {
+			...managedGithubPrAddBody({
 				repo: options.repo,
 				jobWorkflowRef: 'acme/app/.github/workflows/publish.yml@refs/heads/main'
 			}),
 			claims: {
-				...githubPrAddBody(url, identity, {
+				...managedGithubPrAddBody({
 					repo: options.repo,
 					jobWorkflowRef:
 						'acme/app/.github/workflows/publish.yml@refs/heads/main'
@@ -555,7 +580,7 @@ describe('runGithubCheck', () => {
 	it('refuses an interactive owner rule that matches the modelled claims', async () => {
 		const results: ResultRow[][] = [];
 		const ownerRule = storedRule('owner', {
-			...githubPrAddBody(url, identity, {
+			...managedGithubPrAddBody({
 				repo: options.repo,
 				jobWorkflowRef: options.workflowRef
 			}),
@@ -582,10 +607,11 @@ describe('runGithubCheck', () => {
 		expectFailed(failure);
 		expect({
 			checks: failure.checks,
-			rows: findings(results).slice(0, 2)
+			rows: findings(results).slice(0, 3)
 		}).toStrictEqual({
 			checks: ['pull-request trust rule'],
 			rows: [
+				{ label: 'managed-cache policy', value: 'ok' },
 				{
 					label: 'pull-request trust rule',
 					value:
@@ -631,7 +657,7 @@ describe('runGithubCheck', () => {
 		expectFailed(failure);
 		expect({
 			checks: failure.checks,
-			row: findings(results)[1]
+			row: findings(results)[2]
 		}).toStrictEqual({
 			checks: ['main trust rule'],
 			row: {
@@ -652,25 +678,26 @@ describe('runGithubCheck', () => {
 			operation: 'root:list',
 			rules: [withoutOperation(prRule, 'root:list'), branchRule],
 			check: 'pull-request trust rule',
-			row: 0,
-			detail: 'root:list on cache pr-1 with root github:acme/app/pr-1/target'
+			row: 1,
+			detail:
+				'root:list on cache gh-1234-pr-1 with root github:acme/app/gh-1234-pr-1/target'
 		},
 		{
 			name: 'pull-request run-root attachment',
 			operation: 'root:attach',
 			rules: [withoutOperation(prRule, 'root:attach'), branchRule],
 			check: 'pull-request trust rule',
-			row: 0,
+			row: 1,
 			detail:
-				'root:attach on cache pr-1 with root ' +
-				'github:acme/app/pr-1/_cupboard-run/1'
+				'root:attach on cache gh-1234-pr-1 with root ' +
+				'github:acme/app/gh-1234-pr-1/_cupboard-run/1'
 		},
 		{
 			name: 'branch root listing',
 			operation: 'root:list',
 			rules: [prRule, withoutOperation(branchRule, 'root:list')],
 			check: 'main trust rule',
-			row: 1,
+			row: 2,
 			detail:
 				'root:list on cache (default) with root github:acme/app/main/target'
 		},
@@ -679,7 +706,7 @@ describe('runGithubCheck', () => {
 			operation: 'root:attach',
 			rules: [prRule, withoutOperation(branchRule, 'root:attach')],
 			check: 'main trust rule',
-			row: 1,
+			row: 2,
 			detail:
 				'root:attach on cache (default) with root ' +
 				'github:acme/app/main/_cupboard-run/1'
@@ -744,7 +771,7 @@ describe('runGithubCheck', () => {
 		const patternRules = [
 			storedRule(
 				'pattern-pr',
-				githubPrAddBody(url, identity, {
+				managedGithubPrAddBody({
 					repo: options.repo,
 					jobWorkflowRef: patternReference
 				})
@@ -769,6 +796,7 @@ describe('runGithubCheck', () => {
 		);
 
 		expect(findings(results)).toStrictEqual([
+			{ label: 'managed-cache policy', value: 'ok' },
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },

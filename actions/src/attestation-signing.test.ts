@@ -292,7 +292,7 @@ describe('signStatement', () => {
 describe('defaultSigningPolicy', () => {
 	it.each([
 		{
-			visibility: 'private',
+			access: 'private',
 			expected: {
 				profile: 'tsa-only',
 				uploadToGithub: false,
@@ -300,7 +300,7 @@ describe('defaultSigningPolicy', () => {
 			}
 		},
 		{
-			visibility: 'public',
+			access: 'public',
 			expected: {
 				profile: 'sigstore-default',
 				uploadToGithub: true,
@@ -308,9 +308,9 @@ describe('defaultSigningPolicy', () => {
 			}
 		}
 	] as const)(
-		'returns the default signing policy for a $visibility destination',
-		({ visibility, expected }) => {
-			expect(defaultSigningPolicy(visibility)).toStrictEqual(expected);
+		'returns the default signing policy for a destination with $access access',
+		({ access, expected }) => {
+			expect(defaultSigningPolicy(access)).toStrictEqual(expected);
 		}
 	);
 });

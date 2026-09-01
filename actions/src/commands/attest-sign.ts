@@ -16,7 +16,7 @@ import {
 	type AttestationStatement,
 	type AttestationSubject,
 	defaultSigningPolicy,
-	destinationVisibilities,
+	destinationAccesses,
 	disclosureLines,
 	type GithubSignerOptions,
 	type ProducedEvidence,
@@ -55,7 +55,7 @@ export interface AttestSignOptions {
 	readonly bundleFile?: string;
 	readonly originBundleFile?: string;
 	readonly githubToken?: string;
-	readonly destinationVisibility?: string;
+	readonly destinationAccess?: string;
 	readonly signingProfile?: string;
 	readonly uploadToGithub?: string;
 	readonly subjectGrouping?: string;
@@ -144,20 +144,20 @@ export function registerAttestSignCommand(
 			"Record the bundles in the repository's attestation store with this token."
 		)
 		.option(
-			'--destination-visibility <visibility>',
-			'Take the signing defaults from the visibility of the destination cache. Accepts public or private. If omitted, use the private defaults, which do not publish a bundle.'
+			'--destination-access <access>',
+			'Take the signing defaults from the destination cache access. Accepts public or private. If omitted, use the private defaults, which do not publish a bundle.'
 		)
 		.option(
 			'--signing-profile <profile>',
-			"Select the evidence in each signed bundle. sigstore-default selects the Sigstore instance according to the repository's visibility. tsa-only uses the public-good trust domain and adds an RFC 3161 timestamp without a Rekor entry. rekor-and-tsa uses the same trust domain and adds both. The default depends on the destination visibility."
+			"Select the evidence in each signed bundle. sigstore-default selects the Sigstore instance according to the repository's visibility. tsa-only uses the public-good trust domain and adds an RFC 3161 timestamp without a Rekor entry. rekor-and-tsa uses the same trust domain and adds both. The default depends on the destination access."
 		)
 		.option(
 			'--upload-to-github <boolean>',
-			"When true, record each bundle in the repository's attestation store. The default depends on the destination visibility."
+			"When true, record each bundle in the repository's attestation store. The default depends on the destination access."
 		)
 		.option(
 			'--subject-grouping <grouping>',
-			'Select how many subjects each statement covers. run signs one statement for all accepted subjects, up to the per-statement limit. individual signs a separate statement for each subject, so each bundle contains one subject. The default depends on the destination visibility.'
+			'Select how many subjects each statement covers. run signs one statement for all accepted subjects, up to the per-statement limit. individual signs a separate statement for each subject, so each bundle contains one subject. The default depends on the destination access.'
 		)
 		.action((options: AttestSignOptions) =>
 			attestSignAction(options, createGithubReporter(), dependencies)
@@ -211,21 +211,21 @@ export function resolveAttestSignInputs(
 }
 
 /**
- * Resolves the signing policy for this run. The destination visibility supplies
+ * Resolves the signing policy for this run. The destination access supplies
  * the defaults, and each explicit policy input overrides its corresponding
  * default. An override for a private destination can publish information that
  * the defaults keep off public services.
  *
- * An absent visibility uses the private defaults, which do not publish a
+ * An absent access value uses the private defaults, which do not publish a
  * bundle. If it used the public defaults, an omitted value could publish a
  * destination cache's NAR hashes. No later step can retract them.
  */
 function resolveSigningPolicy(options: AttestSignOptions): SigningPolicy {
 	const defaults = defaultSigningPolicy(
 		providedChoice(
-			'destination-visibility',
-			options.destinationVisibility,
-			destinationVisibilities,
+			'destination-access',
+			options.destinationAccess,
+			destinationAccesses,
 			'private'
 		)
 	);

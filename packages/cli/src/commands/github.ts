@@ -1,6 +1,19 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { type CachePriority } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cacheAccessModeSchema,
+	type CachePriority,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
+import {
+	managedCacheGroupIdSchema,
+	managedPolicyIdSchema,
+	type ManagedPolicyPutBodyInput,
+	managedPolicyPutBodySchema,
+	type ManagedPolicySummary,
+	managedPolicySummarySchema
+} from '@cupboard/protocol/managed-caches';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
@@ -9,8 +22,8 @@ import {
 } from '@cupboard/protocol/oidc';
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import {
-	isDestinationPreferred,
 	reuseViewPrioritySchema,
+	type ReuseViewSelector,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
@@ -49,7 +62,6 @@ import {
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,
-	pullRequestPrefix,
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
@@ -66,8 +78,9 @@ export interface GithubSetupOptions {
 	readonly branch: string;
 	readonly workflowRef: string;
 	readonly yes?: boolean;
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
+	readonly prCacheAccess: CacheAccessMode;
+	readonly destinationReadUser?: ReadUser;
+	readonly destinationReadPassword?: string;
 }
 
 export interface GithubSetupClient {
@@ -76,6 +89,12 @@ export interface GithubSetupClient {
 		list(): Promise<OidcTrustListResponse>;
 		add(input: OidcTrustAddBodyInput): Promise<OidcTrustSummary>;
 		remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
+	};
+	readonly managedCaches: {
+		readonly policies: {
+			list(): Promise<{ policies: ManagedPolicySummary[] }>;
+			put(input: ManagedPolicyPutBodyInput): Promise<ManagedPolicySummary>;
+		};
 	};
 }
 
@@ -550,11 +569,131 @@ interface PlannedSetupStep {
 	readonly apply?: () => Promise<void>;
 }
 
+interface PlannedManagedPolicy {
+	readonly request: ManagedPolicyPutBodyInput;
+	readonly policy: ManagedPolicySummary;
+	readonly createsPolicy: boolean;
+	readonly drift: SetupStep | undefined;
+}
+
+async function planManagedPolicy(
+	client: GithubSetupClient,
+	identity: Awaited<ReturnType<typeof lookupRepository>>,
+	access: CacheAccessMode,
+	destinationPriority: CachePriority
+): Promise<PlannedManagedPolicy> {
+	const { policies } = await client.managedCaches.policies.list();
+	const repositoryId = String(identity.repositoryId);
+	const ownerId = String(identity.repositoryOwnerId);
+	const existing = policies.find(
+		(policy) => policy.repositoryId === repositoryId
+	);
+	const sharedGroup = policies.find(
+		(policy) =>
+			policy.reuseViewName === pullRequestViewName &&
+			policy.configuration.access === access
+	);
+	const policyPriority =
+		existing?.configuration.priority ?? cachePrioritySchema.parse(40);
+	const newPolicyRequest = managedPolicyPutBodySchema.parse({
+		id: existing?.id ?? managedPolicyIdSchema.parse(crypto.randomUUID()),
+		ownerId,
+		repositoryId,
+		groupId:
+			existing?.configuration.groupId ??
+			sharedGroup?.configuration.groupId ??
+			managedCacheGroupIdSchema.parse(crypto.randomUUID()),
+		reuseViewName: pullRequestViewName,
+		access,
+		reuseViewPriority: reuseViewPrioritySchema.parse(
+			Math.max(destinationPriority, policyPriority) + viewPriorityMargin
+		)
+	});
+
+	if (existing !== undefined) {
+		const request = managedPolicyPutBodySchema.parse({
+			id: existing.id,
+			ownerId: existing.ownerId,
+			repositoryId: existing.repositoryId,
+			cacheNamespace: existing.cacheNamespace,
+			reuseViewName: existing.reuseViewName,
+			reuseViewPriority: existing.reuseViewPriority,
+			...existing.configuration
+		});
+		let detail: string | undefined;
+
+		if (existing.ownerId !== ownerId) {
+			detail = `stored owner ID is ${existing.ownerId}; repository owner ID is ${ownerId}`;
+		} else if (existing.reuseViewName !== pullRequestViewName) {
+			detail = `stored reuse view is ${existing.reuseViewName}; expected ${pullRequestViewName}`;
+		} else if (existing.configuration.access !== access) {
+			detail = `stored access is ${existing.configuration.access}; requested ${access}`;
+		} else if (
+			existing.reuseViewPriority !== newPolicyRequest.reuseViewPriority
+		) {
+			detail = `stored reuse-view priority is ${String(existing.reuseViewPriority)}; expected ${String(newPolicyRequest.reuseViewPriority)}`;
+		}
+
+		return {
+			request,
+			policy: existing,
+			createsPolicy: false,
+			drift:
+				detail === undefined
+					? undefined
+					: {
+							step: 'managed cache policy',
+							outcome: 'drift',
+							detail
+						}
+		};
+	}
+
+	const policy = managedPolicySummarySchema.parse({
+		id: newPolicyRequest.id,
+		ownerId: newPolicyRequest.ownerId,
+		repositoryId: newPolicyRequest.repositoryId,
+		cacheNamespace: `gh-${repositoryId}-pr-`,
+		status: 'active',
+		currentRevision: 1,
+		reuseViewName: newPolicyRequest.reuseViewName,
+		reuseViewPriority: newPolicyRequest.reuseViewPriority,
+		configuration: {
+			groupId: newPolicyRequest.groupId,
+			access: newPolicyRequest.access,
+			priority: newPolicyRequest.priority,
+			defaultRootRetention: newPolicyRequest.defaultRootRetention,
+			maximumRootDurationSeconds: newPolicyRequest.maximumRootDurationSeconds,
+			allowPermanentRoots: newPolicyRequest.allowPermanentRoots,
+			graceSeconds: newPolicyRequest.graceSeconds,
+			creationLeaseSeconds: newPolicyRequest.creationLeaseSeconds,
+			provisionalLeaseSeconds: newPolicyRequest.provisionalLeaseSeconds,
+			activityLeaseSeconds: newPolicyRequest.activityLeaseSeconds,
+			maximumLiveCaches: newPolicyRequest.maximumLiveCaches
+		}
+	});
+
+	return {
+		request: newPolicyRequest,
+		policy,
+		createsPolicy: true,
+		drift: undefined
+	};
+}
+
 async function planReuseView(
 	client: GithubSetupClient,
-	destinationPriority: CachePriority
+	destinationPriority: CachePriority,
+	policyPlan: PlannedManagedPolicy
 ): Promise<PlannedSetupStep> {
-	const selectors = [{ kind: 'prefix' as const, prefix: pullRequestPrefix }];
+	const { policy } = policyPlan;
+	const selectors: ReuseViewSelector[] = [
+		{ kind: 'managed-group', groupId: policy.configuration.groupId }
+	];
+	const priority = reuseViewPrioritySchema.parse(
+		Math.max(destinationPriority, policy.configuration.priority) +
+			viewPriorityMargin
+	);
 	const { views } = await client.reuseViews.list();
 	const existing = views.find((view) => view.name === pullRequestViewName);
 
@@ -563,35 +702,36 @@ async function planReuseView(
 			step: {
 				step: 'reuse view',
 				outcome: 'created',
-				detail: `${pullRequestPrefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
-			},
-			apply: async () => {
-				await client.reuseViews.set({
-					name: pullRequestViewName,
-					access: 'public',
-					selectors,
-					priority: reuseViewPrioritySchema.parse(
-						destinationPriority + viewPriorityMargin
-					)
-				});
+				detail: policyPlan.createsPolicy
+					? 'created with the managed cache policy'
+					: 'restored by reconciling the managed cache policy'
 			}
 		};
 	}
 
 	if (
+		existing.access === policy.configuration.access &&
 		isDeepEqual([...existing.selectors], selectors) &&
-		isDestinationPreferred(destinationPriority, existing.priority)
+		existing.priority === priority
 	) {
 		return { step: { step: 'reuse view', outcome: 'unchanged' } };
+	}
+
+	let detail: string;
+
+	if (existing.access !== policy.configuration.access) {
+		detail = `stored access is ${existing.access}; policy access is ${policy.configuration.access}`;
+	} else if (isDeepEqual([...existing.selectors], selectors)) {
+		detail = `stored priority is ${String(existing.priority)}; expected ${String(priority)}`;
+	} else {
+		detail = 'stored selectors do not select the managed policy group';
 	}
 
 	return {
 		step: {
 			step: 'reuse view',
 			outcome: 'drift',
-			detail: isDestinationPreferred(destinationPriority, existing.priority)
-				? 'stored selectors differ from the pr- prefix setup would write'
-				: `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
+			detail
 		}
 	};
 }
@@ -647,7 +787,12 @@ export async function runGithubSetup(
 	const reporter = ui.reporter();
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
 	const fetchCacheInfo =
-		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
+		dependencies.fetchCacheInfo ??
+		cacheInfoFetcher({
+			readUser: options.destinationReadUser,
+			readPassword: options.destinationReadPassword,
+			signal: dependencies.signal
+		});
 	const verifyReference =
 		dependencies.verifyWorkflowReference ?? verifyWorkflowReference;
 	const lookupOptions =
@@ -668,9 +813,37 @@ export async function runGithubSetup(
 		'Reading repository identity from GitHub',
 		() => resolveRepository(options.repo, lookupOptions)
 	);
+	const destination = await reporter.phase('Reading destination priority', () =>
+		fetchCacheInfo(url)
+	);
+	const policyPlan = await reporter.phase(
+		'Reading managed cache policies',
+		() =>
+			planManagedPolicy(
+				client,
+				identity,
+				options.prCacheAccess,
+				destination.priority
+			)
+	);
+	const { policy } = policyPlan;
+
+	if (policy.status !== 'active') {
+		const step: SetupStep = {
+			step: 'managed cache policy',
+			outcome: 'drift',
+			detail: `stored policy status is ${policy.status}; provisioning requires active`
+		};
+		reportSetupResult(reporter, [step]);
+		throw new GithubSetupDriftError([step.step]);
+	}
+	const managedCacheTemplate = policy.cacheNamespace + '{pr}';
 	const prBody = githubPrAddBody(url, identity, {
 		repo: options.repo,
-		jobWorkflowRef: options.workflowRef
+		jobWorkflowRef: options.workflowRef,
+		cacheTemplate: managedCacheTemplate,
+		rootTemplate: `github:${identity.fullName}/${managedCacheTemplate}/`,
+		managedPolicy: policy.id
 	});
 	const branchBody = githubBranchAddBody(url, identity, {
 		repo: options.repo,
@@ -742,12 +915,12 @@ export async function runGithubSetup(
 		);
 	}
 
-	const destination = await reporter.phase('Reading destination priority', () =>
-		fetchCacheInfo(url)
-	);
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
-		async () => [await planReuseView(client, destination.priority)]
+		async () => [
+			...(policyPlan.drift === undefined ? [] : [{ step: policyPlan.drift }]),
+			await planReuseView(client, destination.priority, policyPlan)
+		]
 	);
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'
@@ -823,6 +996,8 @@ export async function runGithubSetup(
 	const steps = await reporter.phase(
 		'Converging tenant configuration',
 		async () => {
+			await client.managedCaches.policies.put(policyPlan.request);
+
 			for (const plan of configurationPlans) {
 				await plan.apply?.();
 			}
@@ -967,18 +1142,23 @@ export function registerGithubCommands(
 			'--workflow-ref <owner/repo/path@ref>',
 			'Match job_workflow_ref to a full commit id, a tag ref for a release GitHub reports as immutable, or a tag pattern such as @refs/tags/v*. A pattern also trusts matching tags created later.'
 		)
+		.requiredOption(
+			'--pr-cache-access <access>',
+			'Access for managed pull-request caches and their reuse view.',
+			(value: string) => cacheAccessModeSchema.parse(value)
+		)
 		.option(
 			'-y, --yes',
 			'Remove conflicting trust rules without prompting; retain uncertain and superseded rules.'
 		)
 		.option(
-			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'--destination-read-user <user>',
+			'Basic read username accepted by the default destination cache.',
 			parseReadUser
 		)
 		.option(
-			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'--destination-read-password <password>',
+			'Basic read password accepted by the default destination cache.'
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -993,14 +1173,16 @@ export function registerGithubCommands(
 				ui,
 				{
 					reuseViews: rpc.reuseViews,
-					oidcTrust: rpc.oidcTrust
+					oidcTrust: rpc.oidcTrust,
+					managedCaches: rpc.managedCaches
 				},
 				{
 					...(programOptions.signal !== undefined && {
 						signal: programOptions.signal
 					}),
 					fetchCacheInfo: cacheInfoFetcher({
-						...options,
+						readUser: options.destinationReadUser,
+						readPassword: options.destinationReadPassword,
 						signal: programOptions.signal
 					})
 				}
@@ -1027,13 +1209,22 @@ export function registerGithubCommands(
 			"root-prefix value passed by the caller's workflow."
 		)
 		.option(
-			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'--destination-read-user <user>',
+			'Basic read username accepted by the default destination cache.',
 			parseReadUser
 		)
 		.option(
-			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'--destination-read-password <password>',
+			'Basic read password accepted by the default destination cache.'
+		)
+		.option(
+			'--fallback-read-user <user>',
+			'Tenant-fallback Basic read username accepted by the pull-request reuse view.',
+			parseReadUser
+		)
+		.option(
+			'--fallback-read-password <password>',
+			'Tenant-fallback Basic read password accepted by the pull-request reuse view.'
 		)
 		.action(async (url: URL, options: GithubCheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -1048,14 +1239,21 @@ export function registerGithubCommands(
 				reporter,
 				{
 					reuseViews: rpc.reuseViews,
-					oidcTrust: rpc.oidcTrust
+					oidcTrust: rpc.oidcTrust,
+					managedCaches: rpc.managedCaches
 				},
 				{
 					...(programOptions.signal !== undefined && {
 						signal: programOptions.signal
 					}),
-					fetchCacheInfo: cacheInfoFetcher({
-						...options,
+					fetchDestinationCacheInfo: cacheInfoFetcher({
+						readUser: options.destinationReadUser,
+						readPassword: options.destinationReadPassword,
+						signal: programOptions.signal
+					}),
+					fetchReuseViewCacheInfo: cacheInfoFetcher({
+						readUser: options.fallbackReadUser,
+						readPassword: options.fallbackReadPassword,
 						signal: programOptions.signal
 					})
 				}

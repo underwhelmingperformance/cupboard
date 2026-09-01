@@ -70,6 +70,8 @@ import {
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	FallbackReadPasswordRequiredError,
+	FallbackReadUserRequiredError,
 	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
@@ -366,6 +368,8 @@ export interface BuildCohortOptions {
 	readonly audience?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
+	readonly fallbackReadUser?: string;
+	readonly fallbackReadPassword?: string;
 	readonly maxJobs?: string;
 	readonly store?: string;
 	readonly push?: string;
@@ -394,6 +398,8 @@ export interface BuildCohortInputs {
 	readonly audience: string;
 	readonly readUser: string;
 	readonly readPassword: string;
+	readonly fallbackReadUser: string;
+	readonly fallbackReadPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
 	readonly push: boolean;
@@ -460,6 +466,16 @@ export function resolveBuildCohortInputs(
 	if (readPassword !== '' && readUser === '') {
 		throw new ReadUserRequiredError();
 	}
+	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
+	const fallbackReadPassword = options.fallbackReadPassword ?? '';
+
+	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
+		throw new FallbackReadPasswordRequiredError();
+	}
+
+	if (fallbackReadPassword !== '' && fallbackReadUser === '') {
+		throw new FallbackReadUserRequiredError();
+	}
 
 	const maxJobs = provided(options.maxJobs) ?? '';
 
@@ -523,6 +539,8 @@ export function resolveBuildCohortInputs(
 		audience: provided(options.audience) ?? '',
 		readUser,
 		readPassword,
+		fallbackReadUser,
+		fallbackReadPassword,
 		maxJobs,
 		store: provided(options.store) ?? '',
 		push: isEnabled('push', options.push, false),
@@ -598,6 +616,14 @@ export function registerBuildCohortCommand(
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--read-user <user>', 'username for cache reads')
 		.option('--read-password <password>', 'password for cache reads')
+		.option(
+			'--fallback-read-user <user>',
+			'tenant-fallback username for private reuse-view reads'
+		)
+		.option(
+			'--fallback-read-password <password>',
+			'tenant-fallback password for private reuse-view reads'
+		)
 		.option('--max-jobs <count>', 'maximum local build jobs')
 		.option(
 			'--store <uri>',
@@ -1862,6 +1888,9 @@ export function cohortPushArguments(
 		| 'runRootPermanent'
 		| 'readUser'
 		| 'readPassword'
+		| 'fallbackReadUser'
+		| 'fallbackReadPassword'
+		| 'reuseView'
 	>,
 	group: CohortRootGroup,
 	extras: CohortPushExtras
@@ -1903,13 +1932,21 @@ export function cohortPushArguments(
 			extras.referenceSource
 		);
 
-		if (inputs.readUser !== '') {
-			arguments_.push(
-				'--read-user',
-				inputs.readUser,
-				'--read-password',
-				inputs.readPassword
-			);
+		const viewSource =
+			inputs.reuseView === ''
+				? ''
+				: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
+		const readUser =
+			extras.referenceSource === viewSource
+				? inputs.fallbackReadUser
+				: inputs.readUser;
+		const readPassword =
+			extras.referenceSource === viewSource
+				? inputs.fallbackReadPassword
+				: inputs.readPassword;
+
+		if (readUser !== '') {
+			arguments_.push('--read-user', readUser, '--read-password', readPassword);
 		}
 	}
 

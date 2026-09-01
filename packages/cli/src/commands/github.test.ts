@@ -10,6 +10,11 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import {
+	type ManagedPolicyPutBodyInput,
+	type ManagedPolicySummary,
+	managedPolicySummarySchema
+} from '@cupboard/protocol/managed-caches';
+import {
 	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
@@ -70,13 +75,37 @@ const ruleCreated = `created: ${pinnedWorkflowReference}`;
 const options: GithubSetupOptions = {
 	repo: 'acme/app',
 	branch: 'main',
-	workflowRef: pinnedWorkflowReference
+	workflowRef: pinnedWorkflowReference,
+	prCacheAccess: 'public'
 };
 
-const prBody = githubPrAddBody(url, identity, {
-	repo: options.repo,
-	jobWorkflowRef: options.workflowRef
+const managedPolicy = managedPolicySummarySchema.parse({
+	id: 'fa3f3108-bdec-49cf-baa0-de602f4a0730',
+	ownerId: String(identity.repositoryOwnerId),
+	repositoryId: String(identity.repositoryId),
+	cacheNamespace: 'gh-1234-pr-',
+	status: 'active',
+	currentRevision: 1,
+	reuseViewName: 'pull-requests',
+	configuration: {
+		groupId: 'd23f79fe-b090-4f84-9d99-82fa3394158a',
+		access: 'public'
+	}
 });
+
+function managedPrBody(jobWorkflowReference: string) {
+	const pullRequestVariable = '{pr}';
+
+	return githubPrAddBody(url, identity, {
+		repo: options.repo,
+		jobWorkflowRef: jobWorkflowReference,
+		cacheTemplate: `${managedPolicy.cacheNamespace}${pullRequestVariable}`,
+		rootTemplate: `github:${identity.fullName}/${managedPolicy.cacheNamespace}${pullRequestVariable}/`,
+		managedPolicy: managedPolicy.id
+	});
+}
+
+const prBody = managedPrBody(options.workflowRef);
 const branchBody = githubBranchAddBody(url, identity, {
 	repo: options.repo,
 	branch: options.branch,
@@ -115,11 +144,13 @@ interface Stored {
 		selectors: readonly ReuseViewSelectorInput[];
 	}[];
 	readonly rules?: OidcTrustSummary[];
+	readonly policies?: readonly ManagedPolicySummary[];
 }
 
 function setupClient(stored: Stored): {
 	client: GithubSetupClient;
 	recorded: Recorded;
+	policyPuts: ManagedPolicyPutBodyInput[];
 } {
 	const recorded: Recorded = {
 		graceAdds: [],
@@ -127,6 +158,7 @@ function setupClient(stored: Stored): {
 		ruleAdds: [],
 		ruleRemoves: []
 	};
+	const policyPuts: ManagedPolicyPutBodyInput[] = [];
 	const client: GithubSetupClient = {
 		reuseViews: {
 			list: () =>
@@ -176,10 +208,27 @@ function setupClient(stored: Stored): {
 					removed: true
 				});
 			}
+		},
+		managedCaches: {
+			policies: {
+				list: () =>
+					Promise.resolve({
+						policies: [...(stored.policies ?? [managedPolicy])]
+					}),
+				put(input) {
+					policyPuts.push(input);
+
+					return Promise.resolve(
+						(stored.policies ?? [managedPolicy]).find(
+							(policy) => policy.repositoryId === input.repositoryId
+						) ?? managedPolicy
+					);
+				}
+			}
 		}
 	};
 
-	return { client, recorded };
+	return { client, recorded, policyPuts };
 }
 
 const dependencies = {
@@ -261,22 +310,144 @@ describe('runGithubSetup', () => {
 		expect({ recorded, results }).toStrictEqual({
 			recorded: {
 				graceAdds: [],
-				viewSets: [
-					{
-						access: 'public',
-						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
-						priority: 50
-					}
-				],
+				viewSets: [],
 				ruleAdds: [prBody, branchBody],
 				ruleRemoves: []
 			},
 			results: [
 				[
-					{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+					{
+						label: 'reuse view',
+						value: 'created: restored by reconciling the managed cache policy'
+					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated }
+				]
+			]
+		});
+	});
+
+	it('creates the managed view above a higher-priority destination', async () => {
+		const { client, policyPuts } = setupClient({ policies: [], views: [] });
+
+		await runGithubSetup(url, options, reporter([]), client, {
+			...dependencies,
+			fetchCacheInfo: () =>
+				Promise.resolve(
+					new CacheInfo(
+						servedStoreDirectory,
+						true,
+						cachePrioritySchema.parse(60)
+					)
+				)
+		});
+
+		expect(
+			policyPuts.map((policy) => ({
+				priority: policy.priority,
+				reuseViewPriority: policy.reuseViewPriority
+			}))
+		).toStrictEqual([{ priority: 40, reuseViewPriority: 70 }]);
+	});
+
+	it('preserves customised managed policy fields during repeated setup', async () => {
+		const customised = managedPolicySummarySchema.parse({
+			...managedPolicy,
+			reuseViewPriority: 70,
+			configuration: {
+				...managedPolicy.configuration,
+				priority: 60,
+				defaultRootRetention: { kind: 'permanent' },
+				maximumRootDurationSeconds: 604_800,
+				allowPermanentRoots: true,
+				graceSeconds: 3600,
+				creationLeaseSeconds: 600,
+				provisionalLeaseSeconds: 1800,
+				activityLeaseSeconds: 7200,
+				maximumLiveCaches: 17
+			}
+		});
+		const { client, policyPuts } = setupClient({
+			policies: [customised],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 70,
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: customised.configuration.groupId
+						}
+					]
+				}
+			]
+		});
+
+		await runGithubSetup(url, options, reporter([]), client, dependencies);
+
+		expect(policyPuts).toStrictEqual([
+			{
+				id: customised.id,
+				ownerId: customised.ownerId,
+				repositoryId: customised.repositoryId,
+				groupId: customised.configuration.groupId,
+				cacheNamespace: customised.cacheNamespace,
+				reuseViewName: customised.reuseViewName,
+				reuseViewPriority: customised.reuseViewPriority,
+				access: customised.configuration.access,
+				priority: customised.configuration.priority,
+				defaultRootRetention: customised.configuration.defaultRootRetention,
+				maximumRootDurationSeconds:
+					customised.configuration.maximumRootDurationSeconds,
+				allowPermanentRoots: customised.configuration.allowPermanentRoots,
+				graceSeconds: customised.configuration.graceSeconds,
+				creationLeaseSeconds: customised.configuration.creationLeaseSeconds,
+				provisionalLeaseSeconds:
+					customised.configuration.provisionalLeaseSeconds,
+				activityLeaseSeconds: customised.configuration.activityLeaseSeconds,
+				maximumLiveCaches: customised.configuration.maximumLiveCaches
+			}
+		]);
+	});
+
+	it('reports managed policy access drift before writing configuration', async () => {
+		const stored = managedPolicySummarySchema.parse({
+			...managedPolicy,
+			configuration: {
+				...managedPolicy.configuration,
+				access: 'private'
+			}
+		});
+		const results: ResultRow[][] = [];
+		const { client, policyPuts } = setupClient({ policies: [stored] });
+
+		let failure: unknown;
+		try {
+			await runGithubSetup(
+				url,
+				options,
+				reporter(results),
+				client,
+				dependencies
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectDriftError(failure);
+		expect({ policyPuts, steps: failure.steps, results }).toStrictEqual({
+			policyPuts: [],
+			steps: ['managed cache policy'],
+			results: [
+				[
+					{
+						label: 'managed cache policy',
+						value: 'drift: stored access is private; requested public'
+					},
+					{
+						label: 'reuse view',
+						value: 'missing: setup would create it after the drift is resolved'
+					}
 				]
 			]
 		});
@@ -290,7 +461,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -366,7 +542,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -407,7 +588,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -493,7 +679,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -644,7 +835,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [dispatch]
@@ -697,7 +893,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [dispatch]
@@ -780,19 +981,15 @@ describe('runGithubSetup', () => {
 		expect({ recorded, outcomes: results[0] }).toStrictEqual({
 			recorded: {
 				graceAdds: [],
-				viewSets: [
-					{
-						access: 'public',
-						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
-						priority: 50
-					}
-				],
+				viewSets: [],
 				ruleAdds: [prBody, branchBody],
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+				{
+					label: 'reuse view',
+					value: 'created: restored by reconciling the managed cache policy'
+				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated }
 			]
@@ -815,7 +1012,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -850,7 +1052,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [conflict, storedRule('branch', branchBody)]
@@ -906,14 +1113,7 @@ describe('runGithubSetup', () => {
 		).rejects.toBe(failure);
 		expect(recorded).toStrictEqual({
 			graceAdds: [],
-			viewSets: [
-				{
-					access: 'public',
-					name: 'pull-requests',
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }],
-					priority: 50
-				}
-			],
+			viewSets: [],
 			ruleAdds: [],
 			ruleRemoves: []
 		});
@@ -936,7 +1136,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -1006,7 +1211,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [legacy]
@@ -1086,7 +1296,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [legacy]
@@ -1139,7 +1354,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -1207,7 +1427,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -1242,8 +1467,7 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{
 					label: 'reuse view',
-					value:
-						"drift: stored priority 40 does not exceed the destination's 40"
+					value: 'drift: stored priority is 40; expected 50'
 				}
 			]
 		});
@@ -1265,7 +1489,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -1307,8 +1536,7 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{
 					label: 'reuse view',
-					value:
-						"drift: stored priority 40 does not exceed the destination's 40"
+					value: 'drift: stored priority is 40; expected 50'
 				},
 				{
 					label: 'superseded trust rule previous-pr',
@@ -1321,10 +1549,7 @@ describe('runGithubSetup', () => {
 	it('replaces an exact rule admitted by a new tag pattern', async () => {
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
-		const patternPrBody = githubPrAddBody(url, identity, {
-			repo: options.repo,
-			jobWorkflowRef: patternReference
-		});
+		const patternPrBody = managedPrBody(patternReference);
 		const patternBranchBody = githubBranchAddBody(url, identity, {
 			repo: options.repo,
 			branch: options.branch,
@@ -1342,7 +1567,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [exactRule]
@@ -1393,10 +1623,7 @@ describe('runGithubSetup', () => {
 				'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml';
 			const previousReference = `${workflow}@refs/tags/${previousGlob}`;
 			const desiredReference = `${workflow}@refs/tags/${desiredGlob}`;
-			const desiredPrBody = githubPrAddBody(url, identity, {
-				repo: options.repo,
-				jobWorkflowRef: desiredReference
-			});
+			const desiredPrBody = managedPrBody(desiredReference);
 			const desiredBranchBody = githubBranchAddBody(url, identity, {
 				repo: options.repo,
 				branch: options.branch,
@@ -1415,7 +1642,12 @@ describe('runGithubSetup', () => {
 					{
 						name: 'pull-requests',
 						priority: 50,
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+						selectors: [
+							{
+								kind: 'managed-group',
+								groupId: managedPolicy.configuration.groupId
+							}
+						]
 					}
 				],
 				rules: [previousRule]
@@ -1445,10 +1677,7 @@ describe('runGithubSetup', () => {
 	it('stores tag-pattern rules without probing GitHub', async () => {
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
-		const patternPrBody = githubPrAddBody(url, identity, {
-			repo: options.repo,
-			jobWorkflowRef: patternReference
-		});
+		const patternPrBody = managedPrBody(patternReference);
 		const patternBranchBody = githubBranchAddBody(url, identity, {
 			repo: options.repo,
 			branch: options.branch,
@@ -1462,7 +1691,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			]
 		});
@@ -1500,10 +1734,7 @@ describe('runGithubSetup', () => {
 	it('performs no writes when stored tag-pattern rules match the desired ones', async () => {
 		const patternReference =
 			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
-		const patternPrBody = githubPrAddBody(url, identity, {
-			repo: options.repo,
-			jobWorkflowRef: patternReference
-		});
+		const patternPrBody = managedPrBody(patternReference);
 		const patternBranchBody = githubBranchAddBody(url, identity, {
 			repo: options.repo,
 			branch: options.branch,
@@ -1516,7 +1747,12 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [
+						{
+							kind: 'managed-group',
+							groupId: managedPolicy.configuration.groupId
+						}
+					]
 				}
 			],
 			rules: [
@@ -1568,9 +1804,10 @@ describe('registerGithubCommands', () => {
 			'--repo <owner/name>',
 			'--branch <name>',
 			'--workflow-ref <owner/repo/path@ref>',
+			'--pr-cache-access <access>',
 			'-y, --yes',
-			'--read-user <user>',
-			'--read-password <password>'
+			'--destination-read-user <user>',
+			'--destination-read-password <password>'
 		]);
 	});
 

@@ -345,15 +345,34 @@ describe('cupboard acquisition', () => {
 			setupInputs
 		}).toStrictEqual({
 			configureOutput: 'resolve-cupboard',
-			setupInputs: setupInputs.map(() => ({
-				'cache-url': '${{ inputs.url }}',
-				cache: '${{ needs.configure.outputs.cache }}',
-				cupboard: '${{ needs.configure.outputs.cupboard }}',
-				'trusted-public-key': '${{ inputs.trusted-public-key }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
-				'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
-			}))
+			setupInputs: [
+				{
+					'cache-url': '${{ inputs.url }}',
+					cache: '${{ needs.configure.outputs.cache }}',
+					'provision-managed-cache':
+						'${{ needs.configure.outputs.provision-managed-cache }}',
+					cupboard: '${{ needs.configure.outputs.cupboard }}',
+					'trusted-public-key': '${{ inputs.trusted-public-key }}',
+					'destination-read-user': '${{ secrets.destination_read_user }}',
+					'destination-read-password':
+						'${{ secrets.destination_read_password }}',
+					'read-user': '${{ secrets.fallback_read_user }}',
+					'read-password': '${{ secrets.fallback_read_password }}',
+					'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
+				},
+				{
+					'cache-url': '${{ inputs.url }}',
+					cache: '${{ needs.configure.outputs.cache }}',
+					cupboard: '${{ needs.configure.outputs.cupboard }}',
+					'trusted-public-key': '${{ inputs.trusted-public-key }}',
+					'destination-read-user': '${{ secrets.destination_read_user }}',
+					'destination-read-password':
+						'${{ secrets.destination_read_password }}',
+					'read-user': '${{ secrets.fallback_read_user }}',
+					'read-password': '${{ secrets.fallback_read_password }}',
+					'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
+				}
+			]
 		});
 	});
 
@@ -383,6 +402,8 @@ describe('cupboard acquisition', () => {
 				{
 					'cache-url': '${{ inputs.url }}',
 					cache: '${{ inputs.cache }}',
+					'provision-managed-cache':
+						"${{ inputs.provision-managed-cache && inputs.cache || '' }}",
 					'trusted-public-key': '${{ inputs.trusted-public-key }}',
 					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}'
 				}
@@ -477,8 +498,10 @@ describe('SSH credential isolation', () => {
 				'store_ssh_key',
 				'store_ssh_config',
 				'input_ssh_key',
-				'read_user',
-				'read_password'
+				'destination_read_user',
+				'destination_read_password',
+				'fallback_read_user',
+				'fallback_read_password'
 			]
 		);
 	});
@@ -535,8 +558,8 @@ describe('cohort planning and publication', () => {
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				optimise: '${{ inputs.push }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				store: '${{ inputs.store }}',
@@ -597,8 +620,10 @@ describe('cohort planning and publication', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
+				'fallback-read-user': '${{ secrets.fallback_read_user }}',
+				'fallback-read-password': '${{ secrets.fallback_read_password }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
@@ -676,8 +701,8 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}'
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}'
 				}
 			],
 			publish: [
@@ -719,8 +744,8 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}',
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle:

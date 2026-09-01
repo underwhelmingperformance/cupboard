@@ -42,11 +42,25 @@ inputs:
       Named caches to use at the tenant URL, one per line or comma-separated.
       Leave empty to use the tenant's default cache.
     required: false
+  provision-managed-cache:
+    description:
+      Policy-managed publication cache to prepare with GitHub OIDC before setup
+      probes it. Leave empty for durable caches and read-only setup.
+    required: false
   cache-credentials:
     description:
       JSON array of cache scopes and cache-specific read credentials. Populate
       it from workflow secrets. A cache without an entry uses read-user and
       read-password.
+    required: false
+  destination-read-user:
+    description:
+      Basic-auth username accepted by the single selected destination cache. Use
+      cache-credentials when setup selects more than one cache.
+    required: false
+  destination-read-password:
+    description:
+      Basic-auth password accepted by the single selected destination cache.
     required: false
   trusted-public-key:
     description: Nix signing key to trust for cache reads.
@@ -145,7 +159,10 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        PROVISION_MANAGED_CACHE: ${{ inputs.provision-managed-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
+        DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
+        DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
         READ_USER: ${{ inputs.read-user }}
@@ -164,7 +181,10 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --provision-managed-cache "$PROVISION_MANAGED_CACHE"
           --cache-credentials "$CACHE_CREDENTIALS"
+          --destination-read-user "$DESTINATION_READ_USER"
+          --destination-read-password "$DESTINATION_READ_PASSWORD"
           --reuse-view "$REUSE_VIEW"
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"

@@ -199,14 +199,12 @@ export function registerCacheCommands(
 
 	cache
 		.command('provision')
-		.description(
-			'Provision a managed cache from the current GitHub OIDC policy.'
-		)
+		.description('Prepare the policy-managed cache for a GitHub publication.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'cache name when the URL does not select one')
 		.requiredOption(
 			'--github-oidc',
-			'authenticate with the GitHub Actions OIDC rule that grants this managed cache'
+			'authenticate with the GitHub Actions OIDC rule that permits this publication cache'
 		)
 		.option(
 			'--audience <audience>',

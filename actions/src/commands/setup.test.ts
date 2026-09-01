@@ -16,6 +16,8 @@ import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ProbeTimeoutError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -271,6 +273,7 @@ describe('resolveSetupInputs', () => {
 		addToPath: true,
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
+		provisionManagedCache: '',
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -415,6 +418,16 @@ describe('resolveSetupInputs', () => {
 			'read-password is supplied without read-user',
 			{ ...baseOptions, readPassword: 'secret' },
 			ReadUserRequiredError
+		],
+		[
+			'destination-read-user is supplied without destination-read-password',
+			{ ...baseOptions, destinationReadUser: 'ci' },
+			DestinationReadPasswordRequiredError
+		],
+		[
+			'destination-read-password is supplied without destination-read-user',
+			{ ...baseOptions, destinationReadPassword: 'secret' },
+			DestinationReadUserRequiredError
 		],
 		[
 			'cache-url is not an http(s) URL',
@@ -836,6 +849,69 @@ describe('fetchCachePublicKeyAt', () => {
 });
 
 describe('setupAction cache-credential masking', () => {
+	it('provisions a managed cache before probing it', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-provision-')
+		);
+		const events: string[] = [];
+		const binaryPath = path.join(directory, 'bin', 'cupboard');
+		const run = vi.fn(
+			(receivedBinary: string, arguments_: readonly string[]) => {
+				events.push('provision');
+				expect({ receivedBinary, arguments_ }).toStrictEqual({
+					receivedBinary: binaryPath,
+					arguments_: [
+						'cache',
+						'provision',
+						'https://cache.example.test/t/acme',
+						'gh-123-pr-1',
+						'--github-oidc'
+					]
+				});
+
+				return Promise.resolve([]);
+			}
+		);
+
+		await setupAction(
+			{
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test/t/acme',
+				cache: 'gh-123-pr-1',
+				provisionManagedCache: 'gh-123-pr-1',
+				reuseView: 'pull-requests',
+				trustedPublicKey: 'acme:AAAA'
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'github-env'),
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath,
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				run,
+				fetch: (input, init) => {
+					events.push('probe');
+					return stubFetch((url) =>
+						cacheInfoBody(url.includes('/reuse/') ? 50 : 40)
+					)(input, init);
+				}
+			}
+		);
+
+		expect({ events, calls: run.mock.calls.length }).toStrictEqual({
+			events: ['provision', 'probe', 'probe'],
+			calls: 1
+		});
+	});
+
 	it('registers both forms of every cache credential before it writes anything', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-mask-')

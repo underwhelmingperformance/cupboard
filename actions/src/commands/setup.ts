@@ -31,12 +31,17 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
+import { runCupboard } from '../cupboard-run.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -79,7 +84,10 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly provisionManagedCache?: string;
 	readonly cacheCredentials?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
@@ -99,6 +107,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
+	readonly provisionManagedCache: string;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -112,6 +121,7 @@ export interface SetupActionDependencies {
 	readonly fetch?: typeof fetch;
 	readonly installRelease?: typeof installCupboard;
 	readonly mask?: (value: string) => void;
+	readonly run?: typeof runCupboard;
 	readonly signal?: AbortSignal;
 }
 
@@ -177,8 +187,20 @@ export function registerSetupCommand(
 			'Add named caches at the tenant URL, one per line or comma-separated.'
 		)
 		.option(
+			'--provision-managed-cache <name>',
+			'provision this managed cache with GitHub OIDC before probing it'
+		)
+		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+		)
+		.option(
+			'--destination-read-user <user>',
+			'username accepted by the single selected destination cache'
+		)
+		.option(
+			'--destination-read-password <password>',
+			'password accepted by the single selected destination cache'
 		)
 		.option(
 			'--reuse-view <name>',
@@ -223,6 +245,16 @@ export function resolveSetupInputs(
 	}
 
 	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
+	const destinationReadUser = providedReadUser(options.destinationReadUser);
+	const destinationReadPassword = options.destinationReadPassword ?? '';
+
+	if (destinationReadUser !== '' && destinationReadPassword === '') {
+		throw new DestinationReadPasswordRequiredError();
+	}
+
+	if (destinationReadPassword !== '' && destinationReadUser === '') {
+		throw new DestinationReadUserRequiredError();
+	}
 
 	const cupboardValue = provided(options.cupboard);
 	const cupboard =
@@ -263,7 +295,12 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options),
+		caches: resolveCaches(
+			options,
+			destinationReadUser,
+			destinationReadPassword
+		),
+		provisionManagedCache: provided(options.provisionManagedCache) ?? '',
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -284,20 +321,41 @@ export function resolveSetupInputs(
  * Resolves the caches to configure and attaches cache-specific credentials.
  * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+function resolveCaches(
+	options: SetupOptions,
+	destinationReadUser: ReadUser | '',
+	destinationReadPassword: string
+): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+
+	if (
+		destinationReadUser !== '' &&
+		provided(options.cacheCredentials) !== undefined
+	) {
+		throw new DestinationReadCredentialConflictError();
+	}
+
 	const defaultCache: CacheScope = { kind: 'default' };
 	const selected = caches.length === 0 ? [defaultCache] : caches;
+
+	if (destinationReadUser !== '' && selected.length !== 1) {
+		throw new DestinationReadCredentialCacheCountError();
+	}
 
 	const credentials = providedCacheCredentials(
 		options.cacheCredentials,
 		selected
 	);
+	const destinationCredential =
+		destinationReadUser === ''
+			? undefined
+			: { user: destinationReadUser, password: destinationReadPassword };
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
-			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		const credential =
+			destinationCredential ??
+			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
+				?.credential;
 
 		return {
 			cache,
@@ -401,6 +459,25 @@ export async function setupAction(
 
 	if (inputs.cacheUrl === undefined) {
 		return;
+	}
+
+	if (inputs.provisionManagedCache !== '') {
+		await (dependencies.run ?? runCupboard)(
+			acquired.binaryPath,
+			[
+				'cache',
+				'provision',
+				canonicalHref(inputs.cacheUrl),
+				inputs.provisionManagedCache,
+				'--github-oidc'
+			],
+			environment,
+			{
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			}
+		);
 	}
 
 	await configureNix(

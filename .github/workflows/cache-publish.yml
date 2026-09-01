@@ -24,7 +24,9 @@ jobs:
   # the mutable ref during the run.
   publish-pr:
     name: publish (pr cache)
-    if: github.event_name == 'pull_request'
+    if:
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.id == github.repository_id
     permissions:
       attestations: write # record the build provenance on the repository
       contents: read # check out the flake source
@@ -35,10 +37,13 @@ jobs:
     with:
       url: https://cupboard.supply/t/cupboard
       trusted-public-key: cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=
-      cache: pr-${{ github.event.pull_request.number }}
-      root:
-        github:${{ github.repository }}/pr-${{ github.event.pull_request.number
+      cache:
+        gh-${{ github.repository_id }}-pr-${{ github.event.pull_request.number
         }}
+      provision-managed-cache: true
+      root:
+        github:${{ github.repository }}/gh-${{ github.repository_id }}-pr-${{
+        github.event.pull_request.number }}
       ttl: 14d
       cupboard-version: v0.0.19
 

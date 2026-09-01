@@ -374,6 +374,8 @@ describe('resolveBuildCohortInputs', () => {
 			permanent: inputs.permanent,
 			readUser: inputs.readUser,
 			readPassword: inputs.readPassword,
+			fallbackReadUser: inputs.fallbackReadUser,
+			fallbackReadPassword: inputs.fallbackReadPassword,
 			store: inputs.store,
 			allBestEffort: inputs.allBestEffort
 		}).toStrictEqual({
@@ -391,6 +393,8 @@ describe('resolveBuildCohortInputs', () => {
 			permanent: false,
 			readUser: '',
 			readPassword: '',
+			fallbackReadUser: '',
+			fallbackReadPassword: '',
 			store: '',
 			allBestEffort: false
 		});
@@ -4920,6 +4924,45 @@ describe('rootGroups', () => {
 			'--read-password',
 			'secret'
 		]);
+	});
+
+	it('uses separate credentials for destination and reuse-view references', () => {
+		const inputs = resolveBuildCohortInputs(
+			{
+				...baseOptions(),
+				reuseView: 'private',
+				readUser: 'destination',
+				readPassword: 'destination-secret',
+				fallbackReadUser: 'fallback',
+				fallbackReadPassword: 'fallback-secret'
+			},
+			{ RUNNER_TEMP: '/tmp' }
+		);
+		const group = {
+			root: 'github:owner/repo/main/app',
+			paths: [appPath],
+			referencePaths: [appPath],
+			complete: true
+		};
+		const argumentsFor = (referenceSource: string) =>
+			cohortPushArguments(inputs, group, {
+				intermediatePathsFile: '',
+				referencePathsFile: '/tmp/reference-paths',
+				referenceSource
+			}).slice(-4);
+
+		expect({
+			destination: argumentsFor('https://cache.example.test/t/acme'),
+			view: argumentsFor('https://cache.example.test/t/acme/reuse/private')
+		}).toStrictEqual({
+			destination: [
+				'--read-user',
+				'destination',
+				'--read-password',
+				'destination-secret'
+			],
+			view: ['--read-user', 'fallback', '--read-password', 'fallback-secret']
+		});
 	});
 
 	it('keeps floating and multi-output remote paths with their keyed target root', () => {

@@ -18,12 +18,13 @@ on:
       preset:
         description: >-
           Derive cache, root-prefix, and ttl from the triggering event.
-          'pull-request-and-branch' gives each pull_request run a pr-<number>
-          cache with a 14-day TTL. A run on the configured branch uses the
-          default cache. Both roots start with github:<repository>; other refs
-          are rejected before planning. Only branch runs use reuse-view. This
-          input is mutually exclusive with cache, root-prefix, ttl, and
-          permanent; leave it empty to use those explicit inputs.
+          'pull-request-and-branch' gives each pull_request run a managed
+          gh-<repository-id>-pr-<number> cache with a 14-day TTL. A run on the
+          configured branch uses the default cache. Both roots start with
+          github:<repository>; other refs are rejected before planning. Only
+          branch runs use reuse-view. This input is mutually exclusive with
+          cache, root-prefix, ttl, and permanent; leave it empty to use those
+          explicit inputs.
         required: false
         default: ''
         type: string
@@ -241,11 +242,22 @@ on:
           SSH key used while evaluating private flake inputs. Requires
           input-known-hosts.
         required: false
-      read_user:
-        description: Basic-auth user for private cache or reuse-view reads.
+      destination_read_user:
+        description: Basic-auth user accepted by the private destination cache.
         required: false
-      read_password:
-        description: Basic-auth password for private cache or reuse-view reads.
+      destination_read_password:
+        description:
+          Basic-auth password accepted by the private destination cache.
+        required: false
+      fallback_read_user:
+        description:
+          Tenant-fallback Basic-auth user for a private reuse view or private
+          managed cache.
+        required: false
+      fallback_read_password:
+        description:
+          Tenant-fallback Basic-auth password for a private reuse view or
+          private managed cache.
         required: false
 
 permissions: {}
@@ -267,6 +279,8 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      provision-managed-cache:
+        ${{ steps.resolve.outputs.provision-managed-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -322,10 +336,13 @@ jobs:
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
           PERMANENT: ${{ inputs.permanent }}
+          PUSH: ${{ inputs.push }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -417,7 +434,14 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                CACHE="pr-${PR_NUMBER}"
+                if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
+                  echo '::error::managed pull-request publication does not accept pull requests from forks'
+                  exit 1
+                fi
+                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
+                if [ "${PUSH}" = true ]; then
+                  PROVISION_MANAGED_CACHE="${CACHE}"
+                fi
                 TTL=14d
                 PERMANENT=false
                 if [ -n "${REUSE_VIEW}" ]; then
@@ -444,6 +468,7 @@ jobs:
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
+            echo "provision-managed-cache=${PROVISION_MANAGED_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
@@ -515,10 +540,14 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
+          provision-managed-cache:
+            ${{ needs.configure.outputs.provision-managed-cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - name: Evaluate target manifest
@@ -549,8 +578,8 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
@@ -640,8 +669,10 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: ./.cupboard-workflow/actions/build-cohort
@@ -659,8 +690,10 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
+          fallback-read-user: ${{ secrets.fallback_read_user }}
+          fallback-read-password: ${{ secrets.fallback_read_password }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}
@@ -688,8 +721,8 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
       # the bundle only after publication and only when signing produced a
@@ -702,8 +735,8 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           # Each output contains one bundle path per line. The attach input

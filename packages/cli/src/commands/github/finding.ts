@@ -55,16 +55,56 @@ export class ReuseViewMissingFinding extends FailedCheckFinding {
 	}
 }
 
-export class ReuseViewSelectorsMismatchFinding extends FailedCheckFinding {
+export class ManagedPolicyMissingFinding extends FailedCheckFinding {
 	constructor(
 		check: string,
-		public readonly cachePrefix: string
+		public readonly repositoryId: string
 	) {
 		super(check);
 	}
 
 	detail(): string {
-		return `stored selectors differ from the single ${this.cachePrefix} prefix setup would write`;
+		return `no managed-cache policy is defined for repository ${this.repositoryId}`;
+	}
+}
+
+export class ManagedPolicyStatusFinding extends FailedCheckFinding {
+	constructor(
+		check: string,
+		public readonly policyStatus: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `managed-cache policy is ${this.policyStatus}; publication requires an active policy`;
+	}
+}
+
+export class ReuseViewSelectorsMismatchFinding extends FailedCheckFinding {
+	constructor(
+		check: string,
+		public readonly expectedSelector: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `stored selectors differ from the single ${this.expectedSelector} selector setup would write`;
+	}
+}
+
+export class ReuseViewAccessMismatchFinding extends FailedCheckFinding {
+	constructor(
+		check: string,
+		public readonly viewAccess: string,
+		public readonly groupAccess: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `view access ${this.viewAccess} differs from managed-group access ${this.groupAccess}`;
 	}
 }
 
