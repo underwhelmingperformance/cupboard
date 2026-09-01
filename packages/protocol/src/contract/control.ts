@@ -12,6 +12,12 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
+	deploymentAdvanceInputSchema,
+	deploymentAdvanceResultSchema,
+	deploymentStatusInputSchema,
+	deploymentStatusSchema
+} from '../deployment.ts';
+import {
 	configuredInstanceSummarySchema,
 	instanceInitialiseBodySchema,
 	instanceSummarySchema
@@ -42,7 +48,8 @@ const controlProcedure = oc
 	.$meta<AuthzMeta>({ replaySafety: 'replay-unsafe' })
 	.errors({
 		UNAUTHORIZED: {},
-		FORBIDDEN: {}
+		FORBIDDEN: {},
+		CONFLICT: {}
 	});
 
 /**
@@ -55,6 +62,26 @@ export const controlContract = {
 		.meta({ requires: 'control:check' })
 		.route({ method: 'GET', path: '/check' })
 		.output(controlCheckReportSchema),
+
+	deployment: {
+		status: controlProcedure
+			.meta({
+				requires: 'deployment:read',
+				principal: 'global-administrator'
+			})
+			.route({ method: 'POST', path: '/deployment/status' })
+			.input(deploymentStatusInputSchema)
+			.output(deploymentStatusSchema),
+
+		advance: controlProcedure
+			.meta({
+				requires: 'deployment:advance',
+				principal: 'global-administrator'
+			})
+			.route({ method: 'POST', path: '/deployment/advance' })
+			.input(deploymentAdvanceInputSchema)
+			.output(deploymentAdvanceResultSchema)
+	},
 
 	instance: {
 		get: controlProcedure

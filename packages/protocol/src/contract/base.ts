@@ -30,6 +30,7 @@ export interface ResourceSpec {
  */
 export interface AuthzMeta {
 	readonly requires?: Operation;
+	readonly principal?: 'global-administrator';
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: boolean;
 	readonly replaySafety?: ReplaySafety;

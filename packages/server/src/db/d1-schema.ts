@@ -349,6 +349,316 @@ export const globalAdmin = sqliteTable('global_admin', {
 	claimedAt: text('claimed_at').$type<IsoTimestamp>().notNull()
 });
 
+// The singleton deployment head records the exact artifact installation and
+// manifest state which may advance. Transition claims compare its revision in
+// the same D1 transaction that changes deployment-control state.
+export const deploymentHead = sqliteTable(
+	'deployment_head',
+	{
+		id: text('id').primaryKey(),
+		manifestId: text('manifest_id').notNull(),
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		stateId: text('state_id').notNull(),
+		revision: integer('revision').notNull(),
+		status: text('status', {
+			enum: ['active', 'superseding']
+		}).notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check('deployment_head_singleton', sql`${table.id} = 'current'`),
+		check('deployment_head_revision_nonnegative', sql`${table.revision} >= 0`)
+	]
+);
+
+// One row owns execution of one declarative transition. A lost response can
+// resume the same attempt, but the next transition cannot start until this row
+// records completion.
+export const deploymentTransitionExecution = sqliteTable(
+	'deployment_transition_execution',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		transitionId: text('transition_id').notNull(),
+		fromStateId: text('from_state_id').notNull(),
+		toStateId: text('to_state_id').notNull(),
+		status: text('status', {
+			enum: ['pending', 'running', 'completed', 'failed']
+		}).notNull(),
+		attemptId: text('attempt_id'),
+		claimRevision: integer('claim_revision').notNull().default(0),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>(),
+		externalAction: text('external_action', {
+			enum: ['not-required', 'required', 'issued', 'observed']
+		})
+			.notNull()
+			.default('not-required'),
+		startedAt: text('started_at').$type<IsoTimestamp>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>(),
+		lastFailureJson: text('last_failure_json'),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.artifactId, table.instanceId, table.transitionId]
+		}),
+		check(
+			'deployment_transition_claim_revision_nonnegative',
+			sql`${table.claimRevision} >= 0`
+		),
+		index('deployment_transition_status_idx').on(
+			table.artifactId,
+			table.instanceId,
+			table.status,
+			table.transitionId
+		)
+	]
+);
+
+// The applied digest prevents a migration file from changing under an existing
+// name. Both bootstrap and ordinary deployment transitions consult this table.
+export const structuralMigrationChecksum = sqliteTable(
+	'structural_migration_checksum',
+	{
+		kind: text('kind', { enum: ['d1', 'durable-object'] }).notNull(),
+		migrationId: text('migration_id').notNull(),
+		sha256: text('sha256').notNull(),
+		appliedAt: text('applied_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.kind, table.migrationId] }),
+		check(
+			'structural_migration_checksum_sha256',
+			sql`length(${table.sha256}) = 64 AND ${table.sha256} NOT GLOB '*[^0-9a-f]*'`
+		)
+	]
+);
+
+// Global execution owns the fixed tenant cohort and proves fleet completion.
+// Per-tenant rows record results independently so an interrupted batch resumes
+// without repeating completed tenants.
+export const globalDataMigration = sqliteTable(
+	'global_data_migration',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		migrationId: text('migration_id').notNull(),
+		status: text('status', {
+			enum: ['pending', 'running', 'complete', 'failed']
+		}).notNull(),
+		cohortCreatedAt: text('cohort_created_at').$type<IsoTimestamp>().notNull(),
+		cohortHighWater: integer('cohort_high_water').notNull(),
+		scanHighWaterJson: text('scan_high_water_json'),
+		claimId: text('claim_id'),
+		claimRevision: integer('claim_revision').notNull().default(0),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>(),
+		fleetCompletionRevision: integer('fleet_completion_revision'),
+		completedAt: text('completed_at').$type<IsoTimestamp>(),
+		lastFailureJson: text('last_failure_json')
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.artifactId, table.instanceId, table.migrationId]
+		}),
+		check(
+			'global_data_migration_cohort_high_water_nonnegative',
+			sql`${table.cohortHighWater} >= 0`
+		),
+		check(
+			'global_data_migration_claim_revision_nonnegative',
+			sql`${table.claimRevision} >= 0`
+		)
+	]
+);
+
+export const tenantDataMigration = sqliteTable(
+	'tenant_data_migration',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		migrationId: text('migration_id').notNull(),
+		implementationRevision: text('implementation_revision').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		status: text('status', {
+			enum: ['pending', 'running', 'complete', 'not-applicable', 'failed']
+		}).notNull(),
+		attempts: integer('attempts').notNull().default(0),
+		claimId: text('claim_id'),
+		claimRevision: integer('claim_revision').notNull().default(0),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>(),
+		nextAttemptAt: text('next_attempt_at').$type<IsoTimestamp>(),
+		startedAt: text('started_at').$type<IsoTimestamp>(),
+		completedAt: text('completed_at').$type<IsoTimestamp>(),
+		lastFailureJson: text('last_failure_json')
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.artifactId,
+				table.instanceId,
+				table.migrationId,
+				table.tenant
+			]
+		}),
+		check(
+			'tenant_data_migration_attempts_nonnegative',
+			sql`${table.attempts} >= 0`
+		),
+		check(
+			'tenant_data_migration_claim_revision_nonnegative',
+			sql`${table.claimRevision} >= 0`
+		),
+		index('tenant_data_migration_work_idx').on(
+			table.artifactId,
+			table.instanceId,
+			table.migrationId,
+			table.status,
+			table.nextAttemptAt,
+			table.tenant
+		)
+	]
+);
+
+// Admission remains permanent after this release. Future local migrations use
+// the same per-tenant barrier instead of adding another request-path mechanism.
+export const localContractMigration = sqliteTable(
+	'local_contract_migration',
+	{
+		artifactId: text('artifact_id').notNull(),
+		instanceId: text('instance_id').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		phase: text('phase', {
+			enum: [
+				'pending',
+				'bookmark-recorded',
+				'contracting',
+				'restoration-scheduled',
+				'restored-awaiting-verification',
+				'complete',
+				'terminal-failure'
+			]
+		}).notNull(),
+		admission: text('admission', { enum: ['closed', 'open'] }).notNull(),
+		admissionRevision: integer('admission_revision').notNull().default(0),
+		preContractBookmark: text('pre_contract_bookmark'),
+		restoreUndoBookmark: text('restore_undo_bookmark'),
+		claimId: text('claim_id'),
+		claimRevision: integer('claim_revision').notNull().default(0),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+		lastFailureJson: text('last_failure_json')
+	},
+	(table) => [
+		primaryKey({ columns: [table.artifactId, table.instanceId, table.tenant] }),
+		check(
+			'local_contract_admission_revision_nonnegative',
+			sql`${table.admissionRevision} >= 0`
+		),
+		check(
+			'local_contract_claim_revision_nonnegative',
+			sql`${table.claimRevision} >= 0`
+		)
+	]
+);
+
+// Ordinary D1 mutations use this revision as an admission token. Deployment
+// control and the bounded repair executor have separate mutation classes.
+export const d1AppMutationFence = sqliteTable(
+	'd1_application_mutation_fence',
+	{
+		id: text('id').primaryKey(),
+		state: text('state', { enum: ['open', 'closed'] }).notNull(),
+		revision: integer('revision').notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'd1_application_mutation_fence_singleton',
+			sql`${table.id} = 'application'`
+		),
+		check(
+			'd1_application_mutation_fence_revision_nonnegative',
+			sql`${table.revision} >= 0`
+		)
+	]
+);
+
+export const freshInstallationBootstrap = sqliteTable(
+	'fresh_installation_bootstrap',
+	{
+		databaseId: text('database_id').primaryKey(),
+		accountId: text('account_id').notNull(),
+		artifactId: text('artifact_id').notNull(),
+		intendedResourcesJson: text('intended_resources_json').notNull(),
+		observedResourcesJson: text('observed_resources_json').notNull(),
+		instanceId: text('instance_id'),
+		topologyDigest: text('topology_digest'),
+		phase: text('phase', {
+			enum: [
+				'claimed',
+				'resources-created',
+				'topology-sealed',
+				'schema-applied',
+				'tenant-uploaded',
+				'control-uploaded',
+				'runtime-deployed',
+				'administrator-onboarded',
+				'complete'
+			]
+		}).notNull(),
+		claimId: text('claim_id').notNull(),
+		claimRevision: integer('claim_revision').notNull(),
+		claimOwner: text('claim_owner').notNull(),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>().notNull(),
+		onboardingChallengeHash: text('onboarding_challenge_hash'),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'fresh_installation_claim_revision_nonnegative',
+			sql`${table.claimRevision} >= 0`
+		),
+		check(
+			'fresh_installation_topology_shape',
+			sql`(${table.phase} IN ('claimed', 'resources-created') AND ${table.instanceId} IS NULL AND ${table.topologyDigest} IS NULL) OR (${table.phase} NOT IN ('claimed', 'resources-created') AND ${table.instanceId} IS NOT NULL AND ${table.topologyDigest} IS NOT NULL)`
+		)
+	]
+);
+
+export const successorDeploymentPreparation = sqliteTable(
+	'successor_deployment_preparation',
+	{
+		predecessorArtifactId: text('predecessor_artifact_id').notNull(),
+		predecessorInstanceId: text('predecessor_instance_id').notNull(),
+		successorArtifactId: text('successor_artifact_id').notNull(),
+		successorInstanceId: text('successor_instance_id').notNull(),
+		predecessorStateId: text('predecessor_state_id').notNull(),
+		predecessorRevision: integer('predecessor_revision').notNull(),
+		transitionId: text('transition_id').notNull(),
+		attemptId: text('attempt_id').notNull(),
+		executionSnapshotJson: text('execution_snapshot_json').notNull(),
+		status: text('status', {
+			enum: ['prepared', 'adopting', 'complete', 'failed']
+		}).notNull(),
+		claimExpiresAt: text('claim_expires_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.predecessorArtifactId,
+				table.predecessorInstanceId,
+				table.successorArtifactId,
+				table.successorInstanceId
+			]
+		}),
+		check(
+			'successor_preparation_revision_nonnegative',
+			sql`${table.predecessorRevision} >= 0`
+		)
+	]
+);
+
 // One row means that this tenant has at least one live narinfo reference to the
 // NAR hash. The same atomic batch inserts the first presence row and charges its
 // `file_size`. Removing the last reference deletes the row and credits that size.

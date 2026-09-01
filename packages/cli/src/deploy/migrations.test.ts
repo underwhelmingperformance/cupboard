@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
+	applyDeclaredD1Migrations,
 	type D1Migration,
 	type D1MigrationApi,
 	parseD1Migrations
@@ -21,9 +22,16 @@ describe('parseD1Migrations', () => {
 		expect(result).toStrictEqual([
 			{
 				name: '0000_a.sql',
+				sha256:
+					'754845157e66525f94122aa5011798ff0688ba3c9328d934b0e6f0055dcc650d',
 				statements: ['CREATE TABLE a (id);', 'CREATE INDEX ai ON a (id);']
 			},
-			{ name: '0001_b.sql', statements: ['CREATE TABLE b (id);'] }
+			{
+				name: '0001_b.sql',
+				sha256:
+					'bdd8eb0524337a0c0ce3e73bdc5ebf54e8ff466192de42b64cf88bb771f97568',
+				statements: ['CREATE TABLE b (id);']
+			}
 		]);
 	});
 });
@@ -49,9 +57,14 @@ function fakeApi(alreadyApplied: readonly string[]): {
 
 describe('applyD1Migrations', () => {
 	const migrations: D1Migration[] = [
-		{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] },
+		{
+			name: '0000_a.sql',
+			sha256: 'a'.repeat(64),
+			statements: ['CREATE TABLE a (id);']
+		},
 		{
 			name: '0001_b.sql',
+			sha256: 'b'.repeat(64),
 			statements: ['CREATE TABLE b (id);', 'CREATE TABLE c (id);']
 		}
 	];
@@ -138,5 +151,100 @@ describe('applyD1Migrations', () => {
 				"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
 			]
 		]);
+	});
+});
+
+describe('applyDeclaredD1Migrations', () => {
+	const migrations: D1Migration[] = [
+		{
+			name: '0000_bootstrap.sql',
+			sha256: 'a'.repeat(64),
+			statements: ['CREATE TABLE bootstrap (id);']
+		},
+		{
+			name: '0001_expand.sql',
+			sha256: 'b'.repeat(64),
+			statements: ['ALTER TABLE bootstrap ADD COLUMN native_id TEXT;']
+		},
+		{
+			name: '0002_contract.sql',
+			sha256: 'c'.repeat(64),
+			statements: ['DROP TABLE bootstrap;']
+		}
+	];
+
+	it('applies only the exact next set and records immutable checksums', async () => {
+		const batches: string[][] = [];
+		let query = 0;
+		const api: D1MigrationApi = {
+			queryBatch(_databaseId, statements) {
+				batches.push([...statements]);
+				return Promise.resolve();
+			},
+			queryRows() {
+				query += 1;
+				return Promise.resolve(query === 1 ? ['0000_bootstrap.sql'] : []);
+			}
+		};
+
+		await expect(
+			applyDeclaredD1Migrations(
+				api,
+				databaseIdSchema.parse('db-1'),
+				migrations,
+				['0001_expand.sql']
+			)
+		).resolves.toStrictEqual(['0001_expand.sql']);
+		expect(batches).toStrictEqual([
+			[
+				'ALTER TABLE bootstrap ADD COLUMN native_id TEXT;',
+				"INSERT INTO d1_migrations (name) VALUES ('0001_expand.sql');",
+				`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', '0001_expand.sql', '${'b'.repeat(64)}', CURRENT_TIMESTAMP);`
+			]
+		]);
+	});
+
+	it('refuses to skip a pending migration', async () => {
+		let query = 0;
+		const api: D1MigrationApi = {
+			queryBatch: () => Promise.resolve(),
+			queryRows: () => {
+				query += 1;
+				return Promise.resolve(query === 1 ? ['0000_bootstrap.sql'] : []);
+			}
+		};
+
+		await expect(
+			applyDeclaredD1Migrations(
+				api,
+				databaseIdSchema.parse('db-1'),
+				migrations,
+				['0002_contract.sql']
+			)
+		).rejects.toThrow('next contiguous D1 migration set');
+	});
+
+	it('refuses a changed applied migration', async () => {
+		let query = 0;
+		const api: D1MigrationApi = {
+			queryBatch: () => Promise.resolve(),
+			queryRows: () => {
+				query += 1;
+				return Promise.resolve(
+					query === 1
+						? ['0000_bootstrap.sql']
+						: [`0000_bootstrap.sql:${'f'.repeat(64)}`]
+				);
+			}
+		};
+
+		await expect(
+			applyDeclaredD1Migrations(
+				api,
+				databaseIdSchema.parse('db-1'),
+				migrations,
+				[]
+			)
+		).rejects.toThrow('changed after it was applied');
 	});
 });

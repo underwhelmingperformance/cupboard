@@ -6,8 +6,11 @@ import { implement } from '@orpc/server';
 import {
 	controlAuthenticate,
 	controlCheck,
+	controlDeploymentAdvance,
+	controlDeploymentStatus,
 	controlInstance,
 	controlInstanceInitialise,
+	controlIsGlobalAdministrator,
 	controlKeyRetire,
 	controlKeyRotate,
 	controlKeys,
@@ -27,6 +30,7 @@ import {
 	controlTenantSetReadMode,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
+import { InsufficientScopeError } from '../errors.ts';
 
 import { authoriseRequest } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
@@ -64,11 +68,26 @@ const os = implement(controlContract)
 			noPendingCache
 		);
 
+		if (
+			procedure['~orpc'].meta.principal === 'global-administrator' &&
+			!(await controlIsGlobalAdministrator(context.env, claims.principal))
+		) {
+			throw new InsufficientScopeError();
+		}
+
 		return next({ context: { claims } });
 	});
 
 export const controlRouter = os.router({
 	check: os.check.handler(({ context }) => controlCheck(context.env)),
+	deployment: {
+		status: os.deployment.status.handler(({ input, context }) =>
+			controlDeploymentStatus(context.env, input.deployment)
+		),
+		advance: os.deployment.advance.handler(({ input, context }) =>
+			controlDeploymentAdvance(context.env, input)
+		)
+	},
 	instance: {
 		get: os.instance.get.handler(({ context }) => controlInstance(context.env)),
 		initialise: os.instance.initialise.handler(({ input, context }) =>

@@ -141,6 +141,13 @@
 			"when": 1787928992549,
 			"tag": "0019_nar_read_authority",
 			"breakpoints": true
+		},
+		{
+			"idx": 20,
+			"version": "6",
+			"when": 1788280910522,
+			"tag": "0020_deployment_ledger",
+			"breakpoints": true
 		}
 	]
 }

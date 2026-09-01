@@ -4,6 +4,7 @@ import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, inArray, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
+import type { AccessPrincipal } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { GlobalAdminAlreadyClaimedError } from '../errors.ts';
 
@@ -25,6 +26,30 @@ export interface ClaimPrincipal {
 
 export interface ClaimOutcome {
 	readonly claimed: boolean;
+}
+
+export async function isGlobalAdminPrincipal(
+	database: Database,
+	principal: AccessPrincipal | undefined
+): Promise<boolean> {
+	if (principal === undefined) {
+		return false;
+	}
+
+	const row = await database
+		.select({ id: d1Schema.globalAdmin.id })
+		.from(d1Schema.globalAdmin)
+		.where(
+			and(
+				eq(d1Schema.globalAdmin.id, singletonId),
+				eq(d1Schema.globalAdmin.issuer, principal.issuer),
+				eq(d1Schema.globalAdmin.subject, principal.subject),
+				eq(d1Schema.globalAdmin.audience, principal.audience)
+			)
+		)
+		.get();
+
+	return row !== undefined;
 }
 
 async function repairMissingAudience(

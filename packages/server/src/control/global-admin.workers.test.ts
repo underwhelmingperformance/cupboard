@@ -1,4 +1,9 @@
-import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema,
+	trustRuleIdSchema
+} from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -8,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import { GlobalAdminAlreadyClaimedError } from '../errors.ts';
 
-import { claimGlobalAdmin } from './global-admin.ts';
+import { claimGlobalAdmin, isGlobalAdminPrincipal } from './global-admin.ts';
 
 const issuer = 'https://idp.example.test';
 const audience = 'cupboard-control-client';
@@ -263,5 +268,38 @@ describe('claimGlobalAdmin', () => {
 				t1
 			)
 		).rejects.toBeInstanceOf(GlobalAdminAlreadyClaimedError);
+	});
+});
+
+describe('isGlobalAdminPrincipal', () => {
+	it('requires the exact claimed issuer, audience, and subject', async () => {
+		const database = controlDatabase();
+		await claimGlobalAdmin(
+			database,
+			{ issuer, subject: 'owner', audience },
+			t0
+		);
+
+		const isExact = await isGlobalAdminPrincipal(database, {
+			issuer: oidcIssuerSchema.parse(issuer),
+			audience: oidcAudienceSchema.parse(audience),
+			subject: oidcSubjectSchema.parse('owner')
+		});
+		const isSameSubjectFromAnotherIssuer = await isGlobalAdminPrincipal(
+			database,
+			{
+				issuer: oidcIssuerSchema.parse('https://another.example.test'),
+				audience: oidcAudienceSchema.parse(audience),
+				subject: oidcSubjectSchema.parse('owner')
+			}
+		);
+
+		expect({
+			exact: isExact,
+			sameSubjectFromAnotherIssuer: isSameSubjectFromAnotherIssuer
+		}).toStrictEqual({
+			exact: true,
+			sameSubjectFromAnotherIssuer: false
+		});
 	});
 });

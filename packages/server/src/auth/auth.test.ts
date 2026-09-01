@@ -177,6 +177,38 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		});
 	});
 
+	it('preserves the verified principal independently of token authority', async () => {
+		const keyPair = await generateAuthKeyPair();
+		const principal = { issuer, audience, subject };
+		const token = await issueAccessJwt(
+			keyPair.privateJwk,
+			{
+				issuer,
+				audience,
+				subject,
+				grants: wildcardGrants,
+				principal,
+				kid,
+				ttlSeconds
+			},
+			now
+		);
+
+		const claims = await verifyAccessJwt(
+			keySet(keyPair.publicJwk),
+			token,
+			{ issuer, audience },
+			now
+		);
+
+		expect(claims).toStrictEqual({
+			subject,
+			grants: wildcardGrants,
+			principal,
+			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
+		});
+	});
+
 	it('marks issued tokens with the private Cupboard access-token type', async () => {
 		const keyPair = await generateAuthKeyPair();
 		const token = await issueAccessJwt(

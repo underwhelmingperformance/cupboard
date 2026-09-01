@@ -9,13 +9,16 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	type OidcAudience,
+	oidcAudienceSchema,
 	type OidcIssuer,
+	oidcIssuerSchema,
 	type OidcSubject,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { parseAuthenticationHeader } from '@cupboard/shared/http';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
+import { z } from 'zod';
 
 import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 
@@ -24,15 +27,23 @@ import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 export interface AccessClaims {
 	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
+	readonly principal?: AccessPrincipal;
 	// The instant in the JWT's `exp` claim. Verification tolerance does not
 	// extend this value.
 	readonly expiresAt: Date;
+}
+
+export interface AccessPrincipal {
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
+	readonly subject: OidcSubject;
 }
 
 // Keep Cupboard access tokens distinct from both OIDC ID tokens and the RFC
 // 9068 profile, whose required claims and algorithm contract differ.
 const accessTokenType = 'cupboard-access+jwt';
 const authorizationDetailsClaim = 'authorization_details';
+const principalClaim = 'cupboard_principal';
 
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
 export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
@@ -66,6 +77,7 @@ export interface IssueAccessJwtOptions {
 	readonly audience: OidcAudience;
 	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
+	readonly principal?: AccessPrincipal;
 	readonly kid: AuthKeyId;
 	readonly ttlSeconds: TtlSeconds;
 	readonly auditClaims?: Readonly<Record<string, unknown>>;
@@ -108,6 +120,13 @@ export class MissingSubjectError extends AccessTokenError {
 	constructor() {
 		super('Access token has no subject claim');
 		this.name = 'MissingSubjectError';
+	}
+}
+
+export class InvalidPrincipalError extends AccessTokenError {
+	constructor() {
+		super('Access token cupboard_principal claim is malformed');
+		this.name = 'InvalidPrincipalError';
 	}
 }
 
@@ -159,6 +178,9 @@ export async function issueAccessJwt(
 	// registered claims must overwrite conflicting names.
 	const jwt = new SignJWT({
 		...options.auditClaims,
+		...(options.principal !== undefined && {
+			[principalClaim]: options.principal
+		}),
 		[authorizationDetailsClaim]: options.grants
 	});
 	return jwt
@@ -218,12 +240,34 @@ export async function verifyAccessJwt(
 
 	// jose does not narrow the payload type after `requiredClaims` enforces `exp`.
 	const expiresAt = new Date((verified.payload.exp ?? 0) * 1000);
+	const principal = parsePrincipal(verified.payload[principalClaim]);
 
 	return {
 		subject: oidcSubjectSchema.parse(subject),
 		grants: parseGrants(verified.payload[authorizationDetailsClaim]),
+		...(principal !== undefined && { principal }),
 		expiresAt
 	};
+}
+
+function parsePrincipal(value: unknown): AccessPrincipal | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+
+	const parsed = z
+		.strictObject({
+			issuer: oidcIssuerSchema,
+			audience: oidcAudienceSchema,
+			subject: oidcSubjectSchema
+		})
+		.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidPrincipalError();
+	}
+
+	return parsed.data;
 }
 
 function parseGrants(value: unknown): AuthorizationDetails {

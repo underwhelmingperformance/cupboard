@@ -160,6 +160,7 @@ export async function issueAttenuatedAccessToken(
 			audience: options.audience,
 			subject: options.presented.subject,
 			grants: granted,
+			principal: options.presented.principal,
 			kid: options.kid,
 			ttlSeconds: ttlResult.data
 		},

@@ -39,7 +39,13 @@ const payloadJson = JSON.stringify({
 	tenantSource,
 	controlBundle: { mainModule: 'worker.js', code: 'control-bytes' },
 	tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant-bytes' },
-	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }],
+	d1Migrations: [
+		{
+			name: '0000_a.sql',
+			sha256: 'a'.repeat(64),
+			statements: ['CREATE TABLE a (id);']
+		}
+	],
 	buildVersion: 'abc123def456'
 });
 
@@ -99,7 +105,11 @@ describe('parseEmbeddedPayload', () => {
 			controlBundle: { mainModule: 'worker.js', code: 'control-bytes' },
 			tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant-bytes' },
 			d1Migrations: [
-				{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }
+				{
+					name: '0000_a.sql',
+					sha256: 'a'.repeat(64),
+					statements: ['CREATE TABLE a (id);']
+				}
 			],
 			buildVersion: 'abc123def456'
 		});

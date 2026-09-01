@@ -6,6 +6,7 @@ import { throwIfAborted } from '../abort.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
+import { canonicalJson } from './canonical-json.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
@@ -315,24 +316,6 @@ function canonicalise(bindings: readonly unknown[]): string[] {
 function isSecretBinding(binding: unknown): boolean {
 	return z.looseObject({ type: z.literal('secret_text') }).safeParse(binding)
 		.success;
-}
-
-// JSON with object keys sorted at every level, so two structurally equal
-// bindings serialise identically regardless of property order.
-function canonicalJson(value: unknown): string {
-	if (Array.isArray(value)) {
-		return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
-	}
-
-	if (typeof value === 'object' && value !== null) {
-		const entries = Object.entries(value)
-			.toSorted(([left], [right]) => left.localeCompare(right))
-			.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`);
-
-		return `{${entries.join(',')}}`;
-	}
-
-	return JSON.stringify(value);
 }
 
 /**

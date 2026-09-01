@@ -51,6 +51,7 @@ import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
 	type AccessClaims,
+	type AccessPrincipal,
 	adminJwtTtlSeconds,
 	bearerToken,
 	issueAccessJwt,
@@ -109,6 +110,8 @@ import {
 	listControlTrust,
 	removeControlTrust
 } from './control-trust.ts';
+import { deploymentAdvance, deploymentStatus } from './deployment.ts';
+import { isGlobalAdminPrincipal } from './global-admin.ts';
 import {
 	initialiseInstanceConfig,
 	readInstanceConfig
@@ -158,6 +161,20 @@ export function controlInstanceInitialise(
 		name,
 		isoTimestamp(new Date())
 	);
+}
+
+export function controlDeploymentStatus(
+	env: Env,
+	identity: import('@cupboard/protocol/deployment').DeploymentIdentity
+): Promise<import('@cupboard/protocol/deployment').DeploymentStatus> {
+	return deploymentStatus(controlDatabase(env), identity);
+}
+
+export function controlDeploymentAdvance(
+	env: Env,
+	input: import('@cupboard/protocol/deployment').DeploymentAdvanceInput
+): Promise<import('@cupboard/protocol/deployment').DeploymentAdvanceResult> {
+	return deploymentAdvance(controlDatabase(env), input);
 }
 
 // RFC 8693 token exchange for the control plane: the unverified claims of an
@@ -302,6 +319,11 @@ export async function controlTokenExchange(
 			audience,
 			subject,
 			grants,
+			principal: {
+				issuer: rule.issuer,
+				audience: rule.audience,
+				subject
+			},
 			kid: active.kid,
 			ttlSeconds: adminJwtTtlSeconds
 		},
@@ -455,6 +477,13 @@ export async function controlAuthenticate(
 	} catch {
 		throw new InvalidAccessTokenError();
 	}
+}
+
+export function controlIsGlobalAdministrator(
+	env: Env,
+	principal: AccessPrincipal | undefined
+): Promise<boolean> {
+	return isGlobalAdminPrincipal(controlDatabase(env), principal);
 }
 
 // The admin-gated deployment check covers diagnostics that only the deployment

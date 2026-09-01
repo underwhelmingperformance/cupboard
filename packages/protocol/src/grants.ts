@@ -87,7 +87,9 @@ export const controlOperations = [
 	'control-oidc-trust:list',
 	'control-oidc-trust:read',
 	'control-oidc-trust:add',
-	'control-oidc-trust:remove'
+	'control-oidc-trust:remove',
+	'deployment:read',
+	'deployment:advance'
 ] as const;
 
 // `gc:run` and `stats:read` occur in two grant types but appear once in this
@@ -148,7 +150,9 @@ export const operationSchema = z.enum([
 	'control-oidc-trust:list',
 	'control-oidc-trust:read',
 	'control-oidc-trust:add',
-	'control-oidc-trust:remove'
+	'control-oidc-trust:remove',
+	'deployment:read',
+	'deployment:advance'
 ]);
 export type Operation = z.infer<typeof operationSchema>;
 

@@ -31,6 +31,15 @@ export abstract class ServerHttpError extends Error {
 	readonly retryAfterSeconds?: number;
 }
 
+export class DeploymentStateConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super('The deployment state or revision no longer matches this request');
+		this.name = 'DeploymentStateConflictError';
+	}
+}
+
 export abstract class InvalidRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 }
