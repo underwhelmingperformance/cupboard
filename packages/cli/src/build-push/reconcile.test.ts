@@ -15,16 +15,16 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
-	type BuildSubjectV3,
+	type BuildSubjectV3Input,
 	derivationPathSchema
 } from '@cupboard/protocol/build';
-import type { RootSetBody } from '@cupboard/protocol/retention';
+import type { RootSetBodyInput } from '@cupboard/protocol/retention';
 import {
 	commitBatchMaxEntries,
-	type ParsedUploadNegotiateResponse,
-	type UploadDecision,
+	type UploadDecisionInput,
 	uploadDecisionSchema,
-	uploadNegotiateMaxPaths
+	uploadNegotiateMaxPaths,
+	type UploadNegotiateResponse
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
@@ -100,7 +100,7 @@ function pathInfo(
 
 function heldSubjects(
 	storePaths: readonly StorePathString[]
-): readonly BuildSubjectV3[] {
+): readonly BuildSubjectV3Input[] {
 	return storePaths.map((storePath) => ({
 		origin: 'store-held' as const,
 		storePath,
@@ -125,7 +125,7 @@ function partitionOf(
 
 function decisionFor(
 	storePath: StorePathString,
-	action: UploadDecision['action']
+	action: UploadDecisionInput['action']
 ) {
 	const base = {
 		storePathHash: StorePath.hash(storePath),
@@ -164,7 +164,10 @@ function emptyStream(): ReadableStream<Uint8Array> {
 interface HarnessOptions {
 	readonly valid?: readonly StorePathString[];
 	readonly substituted?: readonly StorePathString[];
-	readonly actions?: ReadonlyMap<StorePathString, UploadDecision['action']>;
+	readonly actions?: ReadonlyMap<
+		StorePathString,
+		UploadDecisionInput['action']
+	>;
 	readonly failUploads?: ReadonlySet<StorePathString>;
 	readonly commitBehaviour?: ReadonlyMap<
 		StorePathString,
@@ -173,7 +176,7 @@ interface HarnessOptions {
 	readonly derivationOutputs?: ReadonlyMap<string, readonly StorePathString[]>;
 	readonly decisions?: (
 		paths: readonly { readonly storePath: string }[]
-	) => ParsedUploadNegotiateResponse['uploads'];
+	) => UploadNegotiateResponse['uploads'];
 	readonly failNegotiationFor?: ReadonlySet<StorePathString>;
 }
 
@@ -181,7 +184,7 @@ class NegotiationTestError extends Error {}
 
 interface Harness {
 	readonly negotiatedPaths: string[][];
-	readonly rootReplacements: { name: string; body: RootSetBody }[];
+	readonly rootReplacements: { name: string; body: RootSetBodyInput }[];
 	readonly uploadedKeys: string[];
 	readonly clientCommits: StorePathHash[];
 	readonly store: ReconcileOptions['store'];
@@ -190,7 +193,7 @@ interface Harness {
 
 function harness(options: HarnessOptions = {}): Harness {
 	const negotiatedPaths: string[][] = [];
-	const rootReplacements: { name: string; body: RootSetBody }[] = [];
+	const rootReplacements: { name: string; body: RootSetBodyInput }[] = [];
 	const uploadedKeys: string[] = [];
 	const clientCommits: StorePathHash[] = [];
 	const valid = new Set(options.valid);
@@ -507,7 +510,7 @@ describe('reconcileBuild', () => {
 			name: 'leaves an unconfirmed root untouched and replaces the rest',
 			harness: {
 				valid: [pathA, pathB],
-				actions: new Map<StorePathString, UploadDecision['action']>([
+				actions: new Map<StorePathString, UploadDecisionInput['action']>([
 					[pathA, 'skip'],
 					[pathB, 'upload']
 				]),
@@ -546,7 +549,7 @@ describe('reconcileBuild', () => {
 			name: 'still publishes a target that was valid before the invocation',
 			harness: {
 				valid: [pathC],
-				actions: new Map<StorePathString, UploadDecision['action']>([
+				actions: new Map<StorePathString, UploadDecisionInput['action']>([
 					[pathC, 'upload']
 				])
 			},
@@ -651,7 +654,7 @@ describe('reconcileBuild', () => {
 			name: 'leaves a root unchanged when it contains a failed target',
 			harness: {
 				valid: [pathB, pathD],
-				actions: new Map<StorePathString, UploadDecision['action']>([
+				actions: new Map<StorePathString, UploadDecisionInput['action']>([
 					[pathB, 'upload']
 				]),
 				failUploads: new Set([pathB])
@@ -696,7 +699,7 @@ describe('reconcileBuild', () => {
 			name: 'retries a failed streaming upload and reports it uploaded',
 			harness: {
 				valid: [pathB],
-				actions: new Map<StorePathString, UploadDecision['action']>([
+				actions: new Map<StorePathString, UploadDecisionInput['action']>([
 					[pathB, 'upload']
 				])
 			},
@@ -928,7 +931,7 @@ describe('reconcileBuild', () => {
 	it('waits for a deferred verdict before applying the root', async () => {
 		const harnessed = harness({
 			valid: [pathA],
-			actions: new Map<StorePathString, UploadDecision['action']>([
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
 				[pathA, 'commit']
 			]),
 			commitBehaviour: new Map<StorePathString, 'pending-servable'>([
@@ -954,7 +957,7 @@ describe('reconcileBuild', () => {
 	it('leaves the root unchanged when a deferred verdict fails', async () => {
 		const harnessed = harness({
 			valid: [pathA],
-			actions: new Map<StorePathString, UploadDecision['action']>([
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
 				[pathA, 'commit']
 			]),
 			commitBehaviour: new Map<StorePathString, 'pending-failed'>([
@@ -1011,7 +1014,7 @@ describe('reconcileBuild', () => {
 		const installable: NixDerivedPathString = `${drvA}^out`;
 		const harnessed = harness({
 			valid: [pathH],
-			actions: new Map<StorePathString, UploadDecision['action']>([
+			actions: new Map<StorePathString, UploadDecisionInput['action']>([
 				[pathH, 'upload']
 			]),
 			derivationOutputs: new Map([[drvA, [pathH]]])

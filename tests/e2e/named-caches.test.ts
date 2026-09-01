@@ -5,8 +5,11 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	cacheNameSchema,
+	cachePrioritySchema,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
@@ -25,6 +28,12 @@ const namedCacheDerivation = [
 	'}'
 ].join('\n');
 
+const defaultCache = { kind: 'default' } as const satisfies CacheScope;
+const buildsCache = {
+	kind: 'named',
+	name: cacheNameSchema.parse('builds')
+} as const satisfies CacheScope;
+
 describe('Nix substitution from a named cache', () => {
 	it('pushes to a named cache, substitutes through its prefix, and tears it down', () =>
 		withTemporaryDirectory(
@@ -33,7 +42,9 @@ describe('Nix substitution from a named cache', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.tenantUrl);
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
 					const token = await server.ownerAdminToken();
 					const rpc = tenantRpc(server.tenantUrl, {
 						credential: token
@@ -43,17 +54,21 @@ describe('Nix substitution from a named cache', () => {
 						path.join(directory, 'source-home')
 					);
 					const storePath = await source.build(namedCacheDerivation);
-					const pushContext = (cache: string): PushContext => ({
+					const pushContext = (cache: CacheScope): PushContext => ({
 						client: server.pushClient(token, { cache }),
 						store: source
 					});
 
-					await rpc.caches.put({ cacheName: 'builds', priority: 30 });
+					await rpc.caches.put.inNamedCache({
+						cacheName: buildsCache.name,
+						access: 'public',
+						priority: 30
+					});
 
 					// Push the same path to the named and default caches: the NAR blob is
 					// shared, so only one is stored.
-					await pushStorePaths(pushContext('builds'), [storePath]);
-					await pushStorePaths(pushContext(''), [storePath]);
+					await pushStorePaths(pushContext(buildsCache), [storePath]);
+					await pushStorePaths(pushContext(defaultCache), [storePath]);
 
 					const target = await NixStore.chroot(
 						path.join(directory, 'target'),
@@ -69,7 +84,7 @@ describe('Nix substitution from a named cache', () => {
 						server.tenantPath('/cache/builds/nix-cache-info')
 					);
 					const cacheInfoBody = await cacheInfo.text();
-					const stats = await rpc.stats.cache({ cacheName: '_default' });
+					const stats = await rpc.stats.cache.inDefaultCache({});
 					const listed = await rpc.caches.list();
 
 					await rpc.caches.remove({
@@ -87,16 +102,14 @@ describe('Nix substitution from a named cache', () => {
 						substituted: await readFile(target.physicalPath(storePath), 'utf8'),
 						cacheInfo: cacheInfoBody,
 						sharedNarBlobs: stats.narBlobs,
-						caches: listed.caches
-							.map((cache) => cache.name)
-							.toSorted(byCodeUnit),
-						afterRemoval: afterRemoval.caches.map((cache) => cache.name)
+						caches: listed.caches.map((cache) => cache.scope),
+						afterRemoval: afterRemoval.caches.map((cache) => cache.scope)
 					}).toStrictEqual({
 						substituted: 'named',
 						cacheInfo: expectedCacheInfo.render(),
 						sharedNarBlobs: 1,
-						caches: ['', 'builds'],
-						afterRemoval: ['']
+						caches: [defaultCache, buildsCache],
+						afterRemoval: [defaultCache]
 					});
 				} finally {
 					await server.stop();

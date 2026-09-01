@@ -1,6 +1,6 @@
 import type { NixDerivedPathString } from '@cupboard/nix';
 import type { RootName, StorePathString } from '@cupboard/nix-store/scalars';
-import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 
 import {
 	type AvailabilityTarget,
@@ -28,7 +28,7 @@ export interface AvailabilityReprobe {
 
 // The initial partition removes any target whose retained root still serves
 // its output. No such target can reach this second probe.
-const noRootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse> =
+const noRootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse> =
 	new Map();
 
 // Only the initial partition may leave a target with an upstream substituter.

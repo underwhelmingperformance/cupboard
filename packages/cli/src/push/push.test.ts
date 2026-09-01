@@ -15,23 +15,23 @@ import {
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
+import type { AttestationNegotiateRequestInput } from '@cupboard/protocol/attestations';
 import {
-	nixStoreUriSchema,
-	type ParsedBuildReceiptV3
+	type BuildReceiptV3,
+	nixStoreUriSchema
 } from '@cupboard/protocol/build';
 import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import {
-	type RootSetBody,
+	type RootSetBodyInput,
 	rootSetMaxTargets,
-	type RootSetResponse
+	type RootSetResponseInput
 } from '@cupboard/protocol/retention';
 import {
-	type ParsedUploadPreviewResponse,
-	type UploadNegotiateRequest,
+	type UploadNegotiateRequestInput,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
-	type UploadPreviewRequest,
+	type UploadPreviewRequestInput,
+	type UploadPreviewResponse,
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import {
@@ -127,7 +127,7 @@ function fallbackCommitResponse() {
 	};
 }
 
-function unexpectedPreviewCall(): Promise<ParsedUploadPreviewResponse> {
+function unexpectedPreviewCall(): Promise<UploadPreviewResponse> {
 	return Promise.reject(
 		new Error('preview should not be called during a mutating push')
 	);
@@ -168,7 +168,7 @@ describe('runPush', () => {
 		{
 			name: 'partial',
 			targets: [appPath, runtimePath],
-			response: (body: Omit<UploadNegotiateRequest, 'pushId'>) => [
+			response: (body: Omit<UploadNegotiateRequestInput, 'pushId'>) => [
 				{
 					action: 'skip' as const,
 					storePathHash: body.paths[0]?.storePathHash,
@@ -180,7 +180,7 @@ describe('runPush', () => {
 		{
 			name: 'duplicate',
 			targets: [appPath],
-			response: (body: Omit<UploadNegotiateRequest, 'pushId'>) => [
+			response: (body: Omit<UploadNegotiateRequestInput, 'pushId'>) => [
 				{
 					action: 'skip' as const,
 					storePathHash: body.paths[0]?.storePathHash,
@@ -285,7 +285,7 @@ describe('runPush', () => {
 	});
 
 	it('uploads missing blobs and commits uploaded metadata', async () => {
-		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 		const uploads: {
 			r2Key: string;
 			body: Uint8Array;
@@ -388,7 +388,7 @@ describe('runPush', () => {
 	});
 
 	it('includes the run root in the negotiation request', async () => {
-		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
 			runRoot: {
@@ -872,7 +872,7 @@ describe('runPush', () => {
 	it('with --dry-run, previews without negotiating, uploading or committing', async () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
-		const previews: UploadPreviewRequest[] = [];
+		const previews: UploadPreviewRequestInput[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
 			closure: true,
@@ -1120,7 +1120,7 @@ describe('runPush', () => {
 
 	it('attaches attestation bundles to the matching pushed closure path', async () => {
 		const roots: SetRootCall[] = [];
-		const negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[] = [];
+		const negotiations: Omit<AttestationNegotiateRequestInput, 'pushId'>[] = [];
 		const uploaded: {
 			readonly r2Key: string;
 			readonly body: Uint8Array;
@@ -1299,7 +1299,7 @@ describe('runPush', () => {
 
 	it('attaches a multi-subject bundle to every matching closure path', async () => {
 		const roots: SetRootCall[] = [];
-		const negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[] = [];
+		const negotiations: Omit<AttestationNegotiateRequestInput, 'pushId'>[] = [];
 		const uploaded: {
 			readonly r2Key: string;
 			readonly body: Uint8Array;
@@ -1919,7 +1919,7 @@ describe('runPush', () => {
 	it('publishes a reference entry commit-only, without the store or a NAR read', async () => {
 		const nixCalls: NixCall[] = [];
 		const roots: SetRootCall[] = [];
-		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+		const negotiations: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 		const commits: string[] = [];
 		const fetched: string[] = [];
 		let narReads = 0;
@@ -2732,7 +2732,7 @@ describe('runPush', () => {
 	])(
 		'keeps the retention choice out of the negotiate body for $name',
 		async ({ options }) => {
-			const bodies: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+			const bodies: Omit<UploadNegotiateRequestInput, 'pushId'>[] = [];
 
 			await runPush(publication([appPath]), reporter([]), {
 				...options,
@@ -2765,7 +2765,7 @@ describe('runPush', () => {
 
 	it('with --no-retain --dry-run, reports the unretained row without a plan RPC', async () => {
 		const results: ResultRow[][] = [];
-		const previews: UploadPreviewRequest[] = [];
+		const previews: UploadPreviewRequestInput[] = [];
 
 		await runPush(publication([appPath]), reporter(results), {
 			dryRun: true,
@@ -3247,7 +3247,7 @@ describe('runPush', () => {
 	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
 		const uploaded: string[] = [];
 		const committed: string[] = [];
-		const roots: RootSetBody[] = [];
+		const roots: RootSetBodyInput[] = [];
 
 		const options = {
 			client: {
@@ -3513,7 +3513,7 @@ describe('runPush', () => {
 
 	it('falls back to legacy reporting for a retained push when the server does not acknowledge grace facts', async () => {
 		const probes: string[] = [];
-		const bodies: UploadNegotiateRequest[] = [];
+		const bodies: UploadNegotiateRequestInput[] = [];
 		const commitTargets: CommitTarget[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
@@ -3648,7 +3648,7 @@ describe('runPush', () => {
 	});
 
 	it('wraps a 404 from preview as UploadGraceFactsUnsupportedError when the empty-closure probe 404s too', async () => {
-		const previewBodies: UploadPreviewRequest[] = [];
+		const previewBodies: UploadPreviewRequestInput[] = [];
 
 		const outcome = await (async () => {
 			try {
@@ -3698,7 +3698,7 @@ describe('runPush', () => {
 	});
 
 	it('propagates the original preview 404 when the empty-closure probe answers', async () => {
-		const previewBodies: UploadPreviewRequest[] = [];
+		const previewBodies: UploadPreviewRequestInput[] = [];
 
 		const outcome = await (async () => {
 			try {
@@ -3934,7 +3934,7 @@ function receiptPush(
 		PushDependencies,
 		'buildStore' | 'alreadyHeld' | 'claimable' | 'delegated' | 'copiedFrom'
 	>
-): Promise<ParsedBuildReceiptV3 | undefined> {
+): Promise<BuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
 		retain: false,
 		client: {
@@ -4497,7 +4497,7 @@ function nixStore(
 function rootSummary(
 	fields: SetRootFields,
 	expiresAtOverride?: string
-): RootSetResponse {
+): RootSetResponseInput {
 	const base = {
 		name: fields.name,
 		expired: false,
@@ -4520,7 +4520,7 @@ function rootSummary(
 	return { ...base, expiresAt };
 }
 
-type SetRootFields = RootSetBody & { readonly name: string };
+type SetRootFields = RootSetBodyInput & { readonly name: string };
 
 interface SetRootCall {
 	readonly fields: SetRootFields;

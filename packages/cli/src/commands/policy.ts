@@ -1,20 +1,18 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
+	type CacheScope,
 	type GraceSeconds,
-	selectorForCache,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import {
+	type GraceCoverageResponse,
 	type GracePolicyAddBody,
+	type GracePolicyListResponse,
+	type GracePolicyRemoveResponse,
 	type GracePolicySummary,
-	type ParsedGraceCoverageResponse,
-	type ParsedGracePolicyListResponse,
-	type ParsedGracePolicyRemoveResponse,
-	type ParsedGracePolicySummary,
-	type ParsedRetentionPolicyListResponse,
-	type ParsedRetentionPolicyRemoveResponse,
-	type ParsedRetentionPolicySummary,
 	type RetentionPolicyAddBody,
+	type RetentionPolicyListResponse,
+	type RetentionPolicyRemoveResponse,
 	type RetentionPolicyScope,
 	retentionPolicyScopeSchema,
 	type RetentionPolicySummary
@@ -25,13 +23,10 @@ import type { Command } from 'commander';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
+import { cacheLabel, cacheNameFor, CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
@@ -47,7 +42,7 @@ interface PolicyAddGraceOptions {
 	readonly grace: GraceSeconds;
 }
 
-interface GraceCoverageOptions extends CacheSelectionOptions {
+interface GraceCoverageOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
@@ -57,15 +52,16 @@ interface ConfirmableOptions {
 }
 
 export interface PolicyClient {
-	list(): Promise<ParsedRetentionPolicyListResponse>;
-	add(input: RetentionPolicyAddBody): Promise<ParsedRetentionPolicySummary>;
-	remove(input: { id: string }): Promise<ParsedRetentionPolicyRemoveResponse>;
-	graceList(): Promise<ParsedGracePolicyListResponse>;
-	graceAdd(input: GracePolicyAddBody): Promise<ParsedGracePolicySummary>;
-	graceRemove(input: { id: string }): Promise<ParsedGracePolicyRemoveResponse>;
-	graceCoverage(input: {
-		cacheName: string;
-	}): Promise<ParsedGraceCoverageResponse>;
+	list(): Promise<RetentionPolicyListResponse>;
+	add(input: RetentionPolicyAddBody): Promise<RetentionPolicySummary>;
+	remove(input: { id: string }): Promise<RetentionPolicyRemoveResponse>;
+	graceList(): Promise<GracePolicyListResponse>;
+	graceAdd(input: GracePolicyAddBody): Promise<GracePolicySummary>;
+	graceRemove(input: { id: string }): Promise<GracePolicyRemoveResponse>;
+	graceCoverage: CacheScopedClient<
+		Record<string, never>,
+		GraceCoverageResponse
+	>;
 }
 
 function parseScope(value: string): RetentionPolicyScope {
@@ -210,11 +206,7 @@ export function registerPolicyCommands(
 			'Report whether a grace policy covers a cache, and the grace period a publication to that cache would receive.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.option(
-			'--cache <name>',
-			'report coverage of a named cache rather than the default'
-		)
-		.addOption(privateCacheOption('report coverage of'))
+		.argument('[cache]', 'named cache when the URL does not select one')
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -224,26 +216,40 @@ export function registerPolicyCommands(
 			'OIDC audience to request with --github-oidc (default: the tenant URL)',
 			parseAudience
 		)
-		.action(async (url: URL, options: GraceCoverageOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
-			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
-				{
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: confirmAuthorizationDetails({
-						cacheSelector: cacheName
-					})
-				}
-			);
-			const rpc = tenantRpc(url, {
-				credential,
-				signal: programOptions.signal
-			});
+		.action(
+			async (
+				url: URL,
+				cacheName: string | undefined,
+				options: GraceCoverageOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					cacheName === undefined
+						? urlTarget
+						: cacheTargetWithName(urlTarget, cacheName);
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: confirmAuthorizationDetails({
+							cache: target.cache
+						})
+					}
+				);
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
+					signal: programOptions.signal
+				});
 
-			await runGraceCoverage(cacheName, reporter, rpc.policies);
-		});
+				await runGraceCoverage(target.cache, reporter, rpc.policies);
+			}
+		);
 
 	policy
 		.command('remove-grace')
@@ -287,7 +293,11 @@ export async function runPolicyAdd(
 ): Promise<void> {
 	const body: RetentionPolicyAddBody =
 		scope === 'cache'
-			? { scope: 'cache', pattern, ttlSeconds }
+			? {
+					scope: 'cache',
+					cache: { kind: 'named', name: cacheNameFor(pattern) },
+					ttlSeconds
+				}
 			: { scope: 'root-name-prefix', pattern, ttlSeconds };
 
 	const summary = await reporter.phase('Adding retention policy', () =>
@@ -300,7 +310,13 @@ export async function runPolicyAdd(
 		rows: [
 			{ label: 'Policy', value: summary.id },
 			{ label: 'Scope', value: summary.scope },
-			{ label: 'Pattern', value: summary.pattern },
+			{
+				label: summary.scope === 'cache' ? 'Cache' : 'Pattern',
+				value:
+					summary.scope === 'cache'
+						? cacheLabel(summary.cache)
+						: summary.pattern
+			},
 			{ label: 'TTL (seconds)', value: formatCount(summary.ttlSeconds) }
 		]
 	});
@@ -340,24 +356,26 @@ export async function runPolicyRemove(
 function policyRow(policy: RetentionPolicySummary): ResultRow {
 	return {
 		label: policy.id,
-		value: `${policy.scope} ${policy.pattern}; ${formatCount(policy.ttlSeconds)}s`
+		value: `${policy.scope} ${
+			policy.scope === 'cache' ? cacheLabel(policy.cache) : policy.pattern
+		}; ${formatCount(policy.ttlSeconds)}s`
 	};
 }
 
 export async function runGraceCoverage(
-	cacheName: string,
+	cache: CacheScope,
 	reporter: Reporter,
 	client: Pick<PolicyClient, 'graceCoverage'>
 ): Promise<void> {
 	const coverage = await reporter.phase('Reading grace coverage', () =>
-		client.graceCoverage({ cacheName })
+		callInCache(client.graceCoverage, cache, {})
 	);
 
 	reporter.result({
 		kind: 'grace-coverage',
 		data: coverage,
 		rows: [
-			{ label: 'Cache', value: cacheName },
+			{ label: 'Cache', value: cacheLabel(cache) },
 			{ label: 'Covered', value: coverage.covered ? 'yes' : 'no' },
 			...(coverage.covered
 				? [

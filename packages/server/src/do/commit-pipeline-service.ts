@@ -7,7 +7,6 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	signingKeyGenerationSchema,
-	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
@@ -17,10 +16,10 @@ import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
 	type CommitResponse,
-	type ParsedUploadGraceFact,
-	type ParsedUploadPathNegotiation,
 	type SessionId,
-	type UploadId
+	type UploadGraceFact,
+	type UploadId,
+	type UploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import {
 	and,
@@ -37,6 +36,11 @@ import {
 import { type BatchItem } from 'drizzle-orm/batch';
 
 import { signNixFingerprint } from '../crypto/crypto.ts';
+import {
+	cacheIdentityColumns,
+	cacheIdentityCondition,
+	type ResolvedCache
+} from '../db/cache.ts';
 import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -54,11 +58,12 @@ import {
 	type R2ObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
-import { type CacheAdminService } from './cache-admin-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type MaterialiseOutcome,
@@ -100,13 +105,13 @@ export type CommitOutcome =
 	| {
 			readonly kind: 'settled';
 			readonly response: CommitResponse;
-			readonly grace?: ParsedUploadGraceFact;
+			readonly grace?: UploadGraceFact;
 	  }
 	| {
 			readonly kind: 'deferred';
 			readonly storePathHash: StorePathHash;
 			readonly narHash: NixSha256HashString;
-			readonly grace?: ParsedUploadGraceFact;
+			readonly grace?: UploadGraceFact;
 	  };
 
 export interface TenantAccount {
@@ -124,8 +129,8 @@ interface CanonicalBlobFacts {
 }
 
 export interface MaterialiseRequest {
-	readonly cache: StoredCache;
-	readonly metadata: ParsedUploadPathNegotiation;
+	readonly cache: ResolvedCache;
+	readonly metadata: UploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
 	readonly probe: MaterialisationProbe;
 	readonly mustOwnBlob: boolean;
@@ -236,7 +241,6 @@ export class CommitPipelineService {
 
 	constructor(
 		private readonly context: ServerContext,
-		private readonly cacheAdmin: CacheAdminService,
 		private readonly signingKeysService: SigningKeysService,
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService,
@@ -253,7 +257,7 @@ export class CommitPipelineService {
 		const row = this.context.db
 			.select({
 				sessionId: schema.pendingUploads.sessionId,
-				cache: schema.pendingUploads.cache,
+				cache: schema.pendingUploads.cacheId,
 				metadataJson: schema.pendingUploads.metadataJson,
 				graceDecisionJson: schema.pendingUploads.graceDecisionJson
 			})
@@ -277,7 +281,7 @@ export class CommitPipelineService {
 			graceDecision?.reportsGrace === true
 				? storedGraceFact(
 						this.context.db,
-						row.cache,
+						this.context.cacheRepository.resolvedForId(row.cache),
 						parseStoredUploadPathMetadata(uploadId, row.metadataJson)
 							.storePathHash
 					)
@@ -295,9 +299,9 @@ export class CommitPipelineService {
 
 	private async commitReusedBlob(
 		logger: Logger,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		uploadId: UploadId,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		graceDecision: GraceDecision | undefined,
 		attachRootName: RootName | undefined,
 		probe: MaterialisationProbe,
@@ -505,7 +509,7 @@ export class CommitPipelineService {
 	// Only an unexpired upload can keep a competing reservation alive. Otherwise
 	// a retry must reclaim the abandoned row instead of waiting for verification.
 	private hasLiveRival(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		narHash: NixSha256HashString,
 		uploadId: UploadId,
 		nowIso: IsoTimestamp
@@ -515,7 +519,7 @@ export class CommitPipelineService {
 			inArray(schema.pendingUploads.verdict, ['committing', 'pending'])
 		);
 		const rivalFilter = and(
-			eq(schema.pendingUploads.cache, cache),
+			eq(schema.pendingUploads.cacheId, cache.id),
 			eq(schema.pendingUploads.narHash, narHash),
 			ne(schema.pendingUploads.id, uploadId),
 			gte(schema.pendingUploads.expiresAt, nowIso),
@@ -553,8 +557,8 @@ export class CommitPipelineService {
 	// write unless the tenant is still active.
 	private chargeStatements(
 		tenant: TenantId,
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number },
 		now: IsoTimestamp
@@ -571,7 +575,11 @@ export class CommitPipelineService {
 		);
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
-			eq(d1Schema.blobReference.cache, cache),
+			cacheIdentityCondition(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.blobReference.cacheName,
+				cache.scope
+			),
 			eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
 			eq(d1Schema.blobReference.generation, generation)
 		);
@@ -605,6 +613,7 @@ export class CommitPipelineService {
 			eq(d1Schema.blobState.narHash, metadata.narHash),
 			tenantActive
 		);
+		const cacheIdentity = cacheMigrationColumns(cache.scope, cache.access);
 
 		return [
 			this.context.d1
@@ -623,14 +632,20 @@ export class CommitPipelineService {
 				})
 				.where(creditBytesFilter),
 			this.context.d1
-				.insert(d1Schema.blobReference)
+				.insert(migrationSchema.blobReferences)
 				.select((qb) =>
 					qb
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
-							cache: sql<string>`${cache}`.as('cache'),
-							cacheKind: sql<null>`null`.as('cache_kind'),
-							cacheName: sql<null>`null`.as('cache_name'),
+							legacyCache: sql<string>`${cacheIdentity.legacyCache}`.as(
+								'cache'
+							),
+							cacheKind: sql<
+								typeof cacheIdentity.cacheKind
+							>`${cacheIdentity.cacheKind}`.as('cache_kind'),
+							cacheName: sql<
+								typeof cacheIdentity.cacheName
+							>`${cacheIdentity.cacheName}`.as('cache_name'),
 							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
 								'store_path_hash'
 							),
@@ -638,7 +653,7 @@ export class CommitPipelineService {
 							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
 								'nar_hash'
 							),
-							cacheGeneration: currentCacheGeneration(tenant, cache).as(
+							cacheGeneration: currentCacheGeneration(tenant, cache.scope).as(
 								'cache_generation'
 							)
 						})
@@ -679,8 +694,8 @@ export class CommitPipelineService {
 	// cannot be recorded without its corresponding usage charge.
 	private async reserveEdgeAndCharge(
 		tenant: TenantId,
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number }
 	): Promise<ChargeOutcome> {
@@ -726,8 +741,8 @@ export class CommitPipelineService {
 	private async reserveEdgesAndCharge(
 		tenant: TenantId,
 		charges: readonly {
-			readonly cache: StoredCache;
-			readonly metadata: ParsedUploadPathNegotiation;
+			readonly cache: ResolvedCache;
+			readonly metadata: UploadPathNegotiation;
 			readonly generation: NarInfoGeneration;
 			readonly blob: CanonicalBlobFacts;
 		}[]
@@ -823,7 +838,7 @@ export class CommitPipelineService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					eq(schema.narInfos.storePathHash, metadata.storePathHash)
 				)
 			)
@@ -937,11 +952,11 @@ export class CommitPipelineService {
 		outcomes: (BatchedMaterialiseOutcome | undefined)[]
 	): void {
 		const settledAt = Date.now();
-		const managedCaches = new Set<StoredCache>();
+		const managedCaches = new Map<ResolvedCache['id'], ResolvedCache>();
 		const extensions = new Map<
 			string,
 			{
-				readonly cache: StoredCache;
+				readonly cache: ResolvedCache;
 				readonly retainUntil: IsoTimestamp;
 				readonly entries: {
 					readonly index: number;
@@ -963,7 +978,7 @@ export class CommitPipelineService {
 				continue;
 			}
 
-			managedCaches.add(request.cache);
+			managedCaches.set(request.cache.id, request.cache);
 
 			if (graceSeconds === 0) {
 				continue;
@@ -972,7 +987,7 @@ export class CommitPipelineService {
 			const retainUntil = isoTimestamp(
 				new Date(settledAt + graceSeconds * 1000)
 			);
-			const key = `${request.cache} ${retainUntil}`;
+			const key = `${String(request.cache.id)} ${retainUntil}`;
 			const group = extensions.get(key) ?? {
 				cache: request.cache,
 				retainUntil,
@@ -983,7 +998,7 @@ export class CommitPipelineService {
 			extensions.set(key, group);
 		}
 
-		for (const cache of managedCaches) {
+		for (const cache of managedCaches.values()) {
 			this.retention.markCacheGraceManaged(cache);
 		}
 
@@ -1024,7 +1039,7 @@ export class CommitPipelineService {
 			request.attachRootName !== undefined
 				? [
 						{
-							cache: request.cache,
+							cacheId: request.cache.id,
 							rootName: request.attachRootName,
 							storePathHash: request.metadata.storePathHash,
 							storePath: request.metadata.storePath
@@ -1164,7 +1179,7 @@ export class CommitPipelineService {
 	 * idempotent by cache, root, and store-path hash.
 	 */
 	attachRootTarget(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		rootName: RootName | null | undefined,
 		storePathHash: StorePathHash,
 		storePath: StorePathString
@@ -1175,7 +1190,7 @@ export class CommitPipelineService {
 
 		this.context.db
 			.insert(schema.retentionRootTargets)
-			.values({ cache, rootName, storePathHash, storePath })
+			.values({ cacheId: cache.id, rootName, storePathHash, storePath })
 			.onConflictDoNothing()
 			.run();
 	}
@@ -1186,9 +1201,9 @@ export class CommitPipelineService {
 	// this path clears only the losing upload's private staging object.
 	async concedeToWinner(
 		logger: Logger,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		uploadId: UploadId,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		stagingKey: R2ObjectKey,
 		graceDecision?: GraceDecision,
 		attachRootName?: RootName
@@ -1318,7 +1333,7 @@ export class CommitPipelineService {
 
 	async commit(
 		logger: Logger,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		uploadId: UploadId,
 		// Batch callers may reuse these advisory reads. The charge batch still
 		// makes the authoritative status and quota decision.
@@ -1346,8 +1361,12 @@ export class CommitPipelineService {
 			throw new UploadNotFoundError(uploadId);
 		}
 
-		if (pending.cache !== cache) {
-			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
+		if (pending.cacheId !== cache.id) {
+			throw new UploadCacheMismatchError(
+				uploadId,
+				this.context.cacheRepository.scopeForId(pending.cacheId),
+				cache.scope
+			);
 		}
 
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
@@ -1380,7 +1399,7 @@ export class CommitPipelineService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					eq(schema.narInfos.storePathHash, metadata.storePathHash)
 				)
 			)
@@ -1589,21 +1608,20 @@ export class CommitPipelineService {
 	// not servable. Generate its identity in the same transaction, and never
 	// reuse a generation after deletion.
 	async reserveNarInfoRow(
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation
 	): Promise<ReserveOutcome>;
 	async reserveNarInfoRow(
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
 		isStillOwned: () => boolean
 	): Promise<ReserveOutcome | undefined>;
 	async reserveNarInfoRow(
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
 		isStillOwned?: () => boolean
 	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
-		await this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
 		// Nix signatures cover the uncompressed NAR identity, not its compressed
 		// encoding. The compressed file hash and size are therefore unnecessary here.
@@ -1640,7 +1658,11 @@ export class CommitPipelineService {
 				.from(schema.generationSeq)
 				.where(
 					and(
-						eq(schema.generationSeq.cache, cache),
+						cacheIdentityCondition(
+							schema.generationSeq.cacheKind,
+							schema.generationSeq.cacheName,
+							cache.scope
+						),
 						eq(schema.generationSeq.storePathHash, metadata.storePathHash)
 					)
 				)
@@ -1649,7 +1671,7 @@ export class CommitPipelineService {
 			const inserted = tx
 				.insert(schema.narInfos)
 				.values({
-					cache,
+					cacheId: cache.id,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,
@@ -1669,17 +1691,31 @@ export class CommitPipelineService {
 			if (inserted.length > 0) {
 				const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
 
-				tx.insert(schema.generationSeq)
-					.values({
-						cache,
-						storePathHash: metadata.storePathHash,
-						nextGeneration
-					})
+				const sequence = tx.insert(schema.generationSeq).values({
+					...cacheIdentityColumns(cache.scope),
+					storePathHash: metadata.storePathHash,
+					nextGeneration
+				});
+
+				if (cache.scope.kind === 'default') {
+					sequence
+						.onConflictDoUpdate({
+							target: schema.generationSeq.storePathHash,
+							targetWhere: sql`${schema.generationSeq.cacheKind} = 'default'`,
+							set: { nextGeneration }
+						})
+						.run();
+
+					return { kind: 'reserved', generation };
+				}
+
+				sequence
 					.onConflictDoUpdate({
 						target: [
-							schema.generationSeq.cache,
+							schema.generationSeq.cacheName,
 							schema.generationSeq.storePathHash
 						],
+						targetWhere: sql`${schema.generationSeq.cacheKind} = 'named'`,
 						set: { nextGeneration }
 					})
 					.run();
@@ -1692,17 +1728,21 @@ export class CommitPipelineService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, metadata.storePathHash)
 					)
 				)
 				.get();
 
+			if (existing === undefined) {
+				return { kind: 'lost', narHash: metadata.narHash };
+			}
+
 			// Treat the row as the same narinfo version only when its store path,
 			// NAR identity, references, deriver, and content address match. Do not
 			// compare signatures: key rotation can re-sign the same version.
 			const isMine =
-				existing?.narHash === metadata.narHash &&
+				existing.narHash === metadata.narHash &&
 				existing.narSize === metadata.narSize &&
 				existing.storePath === metadata.storePath &&
 				existing.referencesJson === referencesJson &&
@@ -1713,14 +1753,14 @@ export class CommitPipelineService {
 				return { kind: 'mine', generation: existing.generation };
 			}
 
-			return { kind: 'lost', narHash: existing?.narHash ?? metadata.narHash };
+			return { kind: 'lost', narHash: existing.narHash };
 		});
 	}
 
 	// Keep D1 and R2 probe reads outside the input gate. The returned facts are
 	// advisory and may be stale by the time materialisation acquires the gate.
 	async probeMaterialisation(
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<MaterialisationProbe> {
 		// Promotion disarms the reaper before these prefetched facts are used. The
@@ -1856,14 +1896,18 @@ export class CommitPipelineService {
 	// bookkeeping without decoding the upload again. Keep these remote reads
 	// outside the input gate.
 	async isGenerationCommitted(
-		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation,
+		cache: ResolvedCache,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
-			eq(d1Schema.blobReference.cache, cache),
+			cacheIdentityCondition(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.blobReference.cacheName,
+				cache.scope
+			),
 			eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
 			eq(d1Schema.blobReference.generation, generation),
 			eq(d1Schema.blobReference.narHash, metadata.narHash)
@@ -1902,7 +1946,7 @@ export class CommitPipelineService {
 	// hash still match and no committed edge exists for that identity. Old edges
 	// can survive deletion and recommit until the deletion backlog drains.
 	async reclaimReservedRow(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		narHash: NixSha256HashString,
@@ -1916,7 +1960,7 @@ export class CommitPipelineService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					eq(schema.narInfos.storePathHash, storePathHash)
 				)
 			)
@@ -1937,7 +1981,11 @@ export class CommitPipelineService {
 			.where(
 				and(
 					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
 					eq(d1Schema.blobReference.storePathHash, storePathHash),
 					eq(d1Schema.blobReference.generation, generation),
 					eq(d1Schema.blobReference.narHash, narHash)
@@ -1965,7 +2013,7 @@ export class CommitPipelineService {
 			tx.delete(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, storePathHash),
 						eq(schema.narInfos.generation, generation),
 						eq(schema.narInfos.narHash, narHash)
@@ -1976,7 +2024,7 @@ export class CommitPipelineService {
 			tx.delete(schema.retentionGrace)
 				.where(
 					and(
-						eq(schema.retentionGrace.cache, cache),
+						eq(schema.retentionGrace.cacheId, cache.id),
 						eq(schema.retentionGrace.storePathHash, storePathHash)
 					)
 				)

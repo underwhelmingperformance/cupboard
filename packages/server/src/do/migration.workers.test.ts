@@ -1,10 +1,12 @@
 import {
 	cacheNameSchema,
-	DEFAULT_CACHE,
 	graceSecondsSchema,
-	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	authorizationDetailsSchema,
+	storedPermittedGrantsSchema
+} from '@cupboard/protocol/grants';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
 	reuseViewNameSchema,
@@ -16,27 +18,23 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { cacheScopeFromRow } from '../db/cache.ts';
 import {
 	oidcTrust,
 	refreshTokenFamilies,
 	refreshTokenMembers,
-	retentionGrace,
-	retentionGracePolicies,
-	retentionPolicies,
-	reuseViewRevisionSeq,
-	reuseViews,
-	reuseViewSelectors,
-	verificationCursor
+	retentionGracePolicies
 } from '../db/schema.ts';
 import {
 	bootstrap,
 	latestMigrationIndex,
+	latestPreContractMigrationIndex,
 	migrateThrough,
 	testServerFor,
 	useTestServer
 } from '../test-support.ts';
 
-const defaultCache: StoredCache = DEFAULT_CACHE;
+const defaultCache = '';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -71,7 +69,7 @@ describe('migrations', () => {
 					`/nix/store/${unsignedHash}-pkg`
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				return {
 					narInfos: state.storage.sql
@@ -106,13 +104,24 @@ describe('migrations', () => {
 
 		const caches = await runInDurableObject(
 			testServerFor('migration-default-cache'),
-			(_instance, state) =>
-				state.storage.sql
-					.exec('SELECT name, priority FROM cache ORDER BY name')
-					.toArray()
+			(_instance, state) => {
+				const rows = state.storage.sql
+					.exec(
+						'SELECT kind, name, access, priority FROM cache_identity ORDER BY id'
+					)
+					.toArray();
+
+				return rows.map((row) => ({
+					cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+					access: row.access,
+					priority: row.priority
+				}));
+			}
 		);
 
-		expect(caches).toStrictEqual([{ name: '', priority: 40 }]);
+		expect(caches).toStrictEqual([
+			{ cache: { kind: 'default' }, access: 'public', priority: 40 }
+		]);
 	});
 
 	it('migrates and round-trips a retention policy', async () => {
@@ -127,34 +136,26 @@ describe('migrations', () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-retention-policy'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { retentionPolicies }
-				});
-				database.insert(retentionPolicies).values(policy).run();
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
+					policy.id,
+					policy.scope,
+					policy.pattern,
+					policy.defaultTtlSeconds,
+					policy.createdAt
+				);
 
-				return database
-					.select()
-					.from(retentionPolicies)
-					.all()
-					.map((row) => ({
-						...row,
-						kind: row.kind ?? undefined,
-						cacheId: row.cacheId ?? undefined,
-						rootNamePrefix: row.rootNamePrefix ?? undefined
-					}));
+				return state.storage.sql
+					.exec(
+						'SELECT id, scope, pattern, default_ttl_seconds AS defaultTtlSeconds, created_at AS createdAt FROM retention_policy'
+					)
+					.toArray();
 			}
 		);
 
-		expect(rows).toStrictEqual([
-			{
-				...policy,
-				kind: undefined,
-				cacheId: undefined,
-				rootNamePrefix: undefined
-			}
-		]);
+		expect(rows).toStrictEqual([policy]);
 	});
 
 	it('keeps the newest retention policy for each selector', async () => {
@@ -170,7 +171,7 @@ describe('migrations', () => {
 					"INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES ('new', 'root-name-prefix', 'pr-', 20, '2026-01-02T00:00:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				return state.storage.sql
 					.exec(
@@ -192,7 +193,7 @@ describe('migrations', () => {
 				state.storage.sql.exec(
 					"INSERT INTO refresh_token (id, secret_hash, rule_id, subject, created_at, expires_at) VALUES ('live', 'hash', 'owner', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')"
 				);
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const database = drizzle(state.storage, {
 					schema: { refreshTokenFamilies, refreshTokenMembers }
@@ -399,22 +400,25 @@ describe('migrations', () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-verification-cursor'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { verificationCursor }
-				});
-				database.insert(verificationCursor).values(cursor).run();
+				state.storage.sql.exec(
+					'INSERT INTO verification_cursor (id, cache, last_store_path_hash, updated_at) VALUES (?, ?, ?, ?)',
+					cursor.id,
+					cursor.cache,
+					cursor.lastStorePathHash,
+					cursor.updatedAt
+				);
 
-				return database
-					.select()
-					.from(verificationCursor)
-					.all()
-					.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined }));
+				return state.storage.sql
+					.exec(
+						'SELECT id, cache, last_store_path_hash AS lastStorePathHash, updated_at AS updatedAt FROM verification_cursor'
+					)
+					.toArray();
 			}
 		);
 
-		expect(rows).toStrictEqual([{ ...cursor, cacheId: undefined }]);
+		expect(rows).toStrictEqual([cursor]);
 	});
 
 	it('gains the retention grace policy table at the latest migration', async () => {
@@ -434,7 +438,7 @@ describe('migrations', () => {
 				// fixed: a relative one would silently retarget the test at
 				// whatever migration lands next.
 				await migrateThrough(state, 26);
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const database = drizzle(state.storage, {
 					schema: { retentionGracePolicies }
@@ -466,19 +470,21 @@ describe('migrations', () => {
 					"INSERT INTO cache (name, priority, created_at) VALUES ('builds', 40, '2026-01-01T00:00:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { retentionGrace }
-				});
-				database.insert(retentionGrace).values(deadline).run();
+				state.storage.sql.exec(
+					'INSERT INTO retention_grace (cache, store_path_hash, retain_until) VALUES (?, ?, ?)',
+					deadline.cache,
+					deadline.storePathHash,
+					deadline.retainUntil
+				);
 
 				return {
-					deadlines: database
-						.select()
-						.from(retentionGrace)
-						.all()
-						.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined })),
+					deadlines: state.storage.sql
+						.exec(
+							'SELECT cache, store_path_hash AS storePathHash, retain_until AS retainUntil FROM retention_grace'
+						)
+						.toArray(),
 					caches: state.storage.sql
 						.exec('SELECT name, grace_managed FROM cache ORDER BY name')
 						.toArray()
@@ -487,7 +493,7 @@ describe('migrations', () => {
 		);
 
 		expect(migrated).toStrictEqual({
-			deadlines: [{ ...deadline, cacheId: undefined }],
+			deadlines: [deadline],
 			caches: [{ name: 'builds', grace_managed: 0 }]
 		});
 	});
@@ -504,7 +510,7 @@ describe('migrations', () => {
 					"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const rows = state.storage.sql
 					.exec('SELECT id, grace_decision_json FROM pending_upload')
@@ -536,7 +542,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 32);
 				state.storage.sql.exec(insertPreAttachPendingUpload);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const rows = state.storage.sql.exec(selectAttachRootNames).toArray();
 
@@ -567,7 +573,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 40);
 				state.storage.sql.exec(insertPreVerdictPendingUpload);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const rows = state.storage.sql.exec(selectRecordedVerdicts).toArray();
 
@@ -599,7 +605,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 33);
 				state.storage.sql.exec(insertCollectingScan);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				return state.storage.sql.exec(selectScans).toArray();
 			}
@@ -667,14 +673,27 @@ describe('migrations', () => {
 					narInfoRow.created_at
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
-				const after = drizzle(state.storage, {
-					schema: { reuseViews, reuseViewSelectors, reuseViewRevisionSeq }
-				});
-				after.insert(reuseViews).values(view).run();
-				after.insert(reuseViewSelectors).values(selector).run();
-				after.insert(reuseViewRevisionSeq).values(revisionSeq).run();
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view (name, revision, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+					view.name,
+					view.revision,
+					view.priority,
+					view.createdAt,
+					view.updatedAt
+				);
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view_selector (view, kind, pattern) VALUES (?, ?, ?)',
+					selector.view,
+					selector.kind,
+					selector.pattern
+				);
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view_revision_seq (name, next_revision) VALUES (?, ?)',
+					revisionSeq.name,
+					revisionSeq.nextRevision
+				);
 
 				const narinfoIndexRows = state.storage.sql
 					.exec(
@@ -689,13 +708,19 @@ describe('migrations', () => {
 							'SELECT cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, generation, created_at FROM narinfo'
 						)
 						.toArray(),
-					views: after
-						.select()
-						.from(reuseViews)
-						.all()
-						.map((row) => ({ ...row, access: row.access ?? undefined })),
-					selectors: after.select().from(reuseViewSelectors).all(),
-					revisionSeqs: after.select().from(reuseViewRevisionSeq).all(),
+					views: state.storage.sql
+						.exec(
+							'SELECT name, revision, priority, created_at AS createdAt, updated_at AS updatedAt FROM reuse_view'
+						)
+						.toArray(),
+					selectors: state.storage.sql
+						.exec('SELECT view, kind, pattern FROM reuse_view_selector')
+						.toArray(),
+					revisionSeqs: state.storage.sql
+						.exec(
+							'SELECT name, next_revision AS nextRevision FROM reuse_view_revision_seq'
+						)
+						.toArray(),
 					hasNarinfoIndex: narinfoIndexNames.includes(
 						'narinfo_store_path_hash_cache_idx'
 					)
@@ -705,7 +730,7 @@ describe('migrations', () => {
 
 		expect(migrated).toStrictEqual({
 			narInfos: [narInfoRow],
-			views: [{ ...view, access: undefined }],
+			views: [view],
 			selectors: [selector],
 			revisionSeqs: [revisionSeq],
 			hasNarinfoIndex: true
@@ -724,7 +749,7 @@ describe('migrations', () => {
 					"INSERT INTO retention_root_target (cache, root_name, store_path_hash, store_path) VALUES ('builds', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				return {
 					roots: state.storage.sql
@@ -791,7 +816,7 @@ describe('migrations', () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-oidc-trust'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const database = drizzle(state.storage, { schema: { oidcTrust } });
 				database.insert(oidcTrust).values(rule).run();
@@ -801,5 +826,282 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([rule]);
+	});
+
+	it('migrates stored cache grants to native cache scopes', async () => {
+		const substitutions = {
+			name: { claim: 'cache_name', slug: true }
+		};
+		const legacyPermittedGrants = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: { exact: '_default', validate: 'cacheName' },
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: { exact: 'aprivate-builds', validate: 'cacheName' },
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: { exact: '_private-secrets', validate: 'cacheName' },
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: {
+						equalsTemplate: 'pr-{name}',
+						substitutions,
+						validate: 'cacheName'
+					},
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: {
+						equalsTemplate: '_private-pr-{name}',
+						substitutions,
+						validate: 'cacheName'
+					},
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			},
+			{ type: 'cupboard_domain', actions: ['cache:list'] }
+		];
+		const legacyRefreshGrants = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: '_default'
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: 'aprivate-builds',
+				root: 'main'
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: '_private-secrets',
+				root: '_private-secrets'
+			},
+			{ type: 'cupboard_domain', actions: ['cache:list'] }
+		];
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-cache-grants'),
+			async (_instance, state) => {
+				await migrateThrough(state, 41);
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, '2026-01-01T00:00:00.000Z'), ('aprivate-builds', 40, '2026-01-01T00:00:00.000Z'), ('private/secrets', 40, '2026-01-01T00:00:00.000Z')"
+				);
+				await migrateThrough(state, latestPreContractMigrationIndex);
+				state.storage.sql.exec(
+					"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
+				);
+				await migrateThrough(state, 46);
+
+				state.storage.sql.exec(
+					'INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+					'legacy-rule',
+					'https://issuer.example',
+					'https://cache.example',
+					'{}',
+					JSON.stringify(legacyPermittedGrants),
+					'2026-01-01T00:00:00.000Z'
+				);
+				state.storage.sql.exec(
+					'INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+					'legacy-family',
+					'legacy-member',
+					0,
+					'legacy-rule',
+					'alice',
+					JSON.stringify(legacyRefreshGrants),
+					'2026-01-01T00:00:00.000Z',
+					'2027-01-01T00:00:00.000Z'
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const trustRow = state.storage.sql
+					.exec<{ permittedGrantsJson: string }>(
+						'SELECT permitted_grants_json AS permittedGrantsJson FROM oidc_trust WHERE id = ?',
+						'legacy-rule'
+					)
+					.one();
+				const familyRow = state.storage.sql
+					.exec<{ grantsJson: string }>(
+						'SELECT grants_json AS grantsJson FROM refresh_token_family WHERE id = ?',
+						'legacy-family'
+					)
+					.one();
+
+				return {
+					permitted: storedPermittedGrantsSchema.parse(
+						JSON.parse(trustRow.permittedGrantsJson)
+					),
+					refresh: authorizationDetailsSchema.parse(
+						JSON.parse(familyRow.grantsJson)
+					)
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			permitted: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: {
+						cache: { kind: 'default' },
+						root: { exact: '_default', validate: 'rootName' }
+					}
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: {
+						cache: {
+							kind: 'named',
+							exact: 'aprivate-builds',
+							validate: 'cacheName'
+						},
+						root: { exact: 'aprivate-builds', validate: 'rootName' }
+					}
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: {
+						cache: {
+							kind: 'named',
+							exact: 'secrets',
+							validate: 'cacheName'
+						},
+						root: { exact: '_private-secrets', validate: 'rootName' }
+					}
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: {
+						cache: {
+							kind: 'named',
+							equalsTemplate: 'pr-{name}',
+							substitutions,
+							validate: 'cacheName'
+						},
+						root: {
+							equalsTemplate: 'pr-{name}',
+							substitutions,
+							validate: 'rootName'
+						}
+					}
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: {
+						cache: {
+							kind: 'named',
+							equalsTemplate: 'pr-{name}',
+							substitutions,
+							validate: 'cacheName'
+						},
+						root: {
+							equalsTemplate: '_private-pr-{name}',
+							substitutions,
+							validate: 'rootName'
+						}
+					}
+				},
+				{ type: 'cupboard_domain', actions: ['cache:list'] }
+			],
+			refresh: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: { kind: 'default' }
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: { kind: 'named', name: 'aprivate-builds' },
+					root: 'main'
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: { kind: 'named', name: 'secrets' },
+					root: '_private-secrets'
+				},
+				{ type: 'cupboard_domain', actions: ['cache:list'] }
+			]
+		});
+	});
+
+	it('rejects a legacy cache template without a fixed scope kind', async () => {
+		await expect(
+			runInDurableObject(
+				testServerFor('migration-ambiguous-cache-grant'),
+				async (_instance, state) => {
+					await migrateThrough(state, 41);
+					state.storage.sql.exec(
+						"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, '2026-01-01T00:00:00.000Z')"
+					);
+					await migrateThrough(state, latestPreContractMigrationIndex);
+					state.storage.sql.exec(
+						"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
+					);
+					await migrateThrough(state, 46);
+
+					state.storage.sql.exec(
+						'INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+						'ambiguous-rule',
+						'https://issuer.example',
+						'https://cache.example',
+						'{}',
+						JSON.stringify([
+							{
+								type: 'cupboard_cache',
+								actions: ['upload:commit'],
+								resources: {
+									cache: {
+										equalsTemplate: '{cache}',
+										substitutions: {
+											cache: { claim: 'cache_name' }
+										},
+										validate: 'cacheName'
+									}
+								}
+							}
+						]),
+						'2026-01-01T00:00:00.000Z'
+					);
+
+					await migrateThrough(state, latestMigrationIndex);
+				}
+			)
+		).rejects.toMatchObject({
+			name: 'DurableObjectMigrationError',
+			tag: '0047_cache_grant_json'
+		});
 	});
 });

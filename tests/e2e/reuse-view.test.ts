@@ -7,7 +7,10 @@ import {
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { createReporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -30,15 +33,22 @@ const reuseDerivation = [
 	'}'
 ].join('\n');
 
+const sourceCache = {
+	kind: 'named',
+	name: cacheNameSchema.parse('pr-1')
+} as const;
+
 describe('Nix substitution through a reuse view', () => {
-	it('substitutes a path pushed only to a selected cache, resolving the NAR through the tenant canonical route', () =>
+	it('substitutes a path pushed only to a selected cache through the view NAR route', () =>
 		withTemporaryDirectory(
 			'cupboard-e2e-reuse-',
 			async (directory) => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.tenantUrl);
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
 					const token = await server.ownerAdminToken();
 					const rpc = tenantRpc(server.tenantUrl, { credential: token });
 					const publicKey = await client.publicKey();
@@ -48,17 +58,23 @@ describe('Nix substitution through a reuse view', () => {
 					const storePath = await source.build(reuseDerivation);
 					const storePathHash = StorePath.hash(storePath);
 					const pushContext: PushContext = {
-						client: server.pushClient(token, { cache: 'pr-1' }),
+						client: server.pushClient(token, { cache: sourceCache }),
 						store: source
 					};
 
 					// Only the selected source cache holds the path: substitution must
 					// come from the reuse view, not a push to any other cache.
+					await rpc.caches.put.inNamedCache({
+						cacheName: sourceCache.name,
+						access: 'public',
+						priority: 40
+					});
 					await pushStorePaths(pushContext, [storePath]);
 
 					await rpc.reuseViews.set({
 						name: 'reuse',
-						selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+						access: 'public',
+						selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 					});
 
 					const cacheInfoResponse = await fetch(
@@ -70,14 +86,12 @@ describe('Nix substitution through a reuse view', () => {
 						server.tenantPath(`/reuse/reuse/${storePathHash}.narinfo`)
 					);
 					const narInfo = NarInfo.parse(await narInfoResponse.text());
-					const expectedNarUrl = `../../nar/${narInfo.narHash.toString()}.2.nar.zst`;
+					const expectedNarUrl = `nar/${narInfo.narHash.toString()}.2.nar.zst`;
 
-					// A reuse view has no NAR route of its own: probing the relative
-					// path the narinfo names must 404 beneath the view itself.
+					// The view's NAR route checks that a selected cache references the
+					// bytes before serving them.
 					const reuseNarResponse = await fetch(
-						server.tenantPath(
-							`/reuse/reuse/nar/${narInfo.narHash.toString()}.nar.zst`
-						)
+						server.tenantPath(`/reuse/reuse/${expectedNarUrl}`)
 					);
 
 					const target = await NixStore.chroot(
@@ -86,8 +100,7 @@ describe('Nix substitution through a reuse view', () => {
 					);
 
 					// The load-bearing step: this only succeeds if Nix resolves the
-					// narinfo's relative URL against the reuse base to the tenant's
-					// canonical NAR route.
+					// narinfo's relative URL against the reuse-view base.
 					await target.realise(storePath, {
 						substituter: `${server.tenantUrl.href}/reuse/reuse`,
 						trustedPublicKeys: [publicKey],
@@ -115,7 +128,7 @@ describe('Nix substitution through a reuse view', () => {
 						narInfoStorePath: storePath,
 						narInfoUrl: expectedNarUrl,
 						narInfoControl: 'no-store',
-						reuseNarStatus: 404
+						reuseNarStatus: 200
 					});
 				} finally {
 					await server.stop();
@@ -142,16 +155,22 @@ describe('Nix substitution through a reuse view', () => {
 					// The path reaches only the selected source cache, so the
 					// destination (the default cache) does not serve it yet; the
 					// reuse view does.
+					await rpc.caches.put.inNamedCache({
+						cacheName: sourceCache.name,
+						access: 'public',
+						priority: 40
+					});
 					await pushStorePaths(
 						{
-							client: server.pushClient(token, { cache: 'pr-1' }),
+							client: server.pushClient(token, { cache: sourceCache }),
 							store: source
 						},
 						[storePath]
 					);
 					await rpc.reuseViews.set({
 						name: 'reuse',
-						selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+						access: 'public',
+						selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 					});
 
 					const before = await fetch(

@@ -19,7 +19,7 @@ describe('tenantCreateBodySchema', () => {
 	])('rejects an invalid owner issuer: %s', (ownerIssuer) => {
 		const body = {
 			id: 'acme',
-			readMode: 'public',
+			visibility: 'public',
 			ownerIssuer,
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard'

@@ -2,14 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	cacheUrl,
-	privateReuseViewUrl,
+	parseTenantCacheUrl,
 	publicKeyUrl,
 	reuseViewUrl,
 	tenantUrl,
 	urlWithCredential
 } from './cache-url.ts';
-import { InvalidCacheUrlSegmentError } from './errors.ts';
-import { DEFAULT_CACHE, storedCacheSchema } from './scalars.ts';
+import {
+	InvalidCacheUrlSegmentError,
+	InvalidTenantCacheUrlError
+} from './errors.ts';
+import { cacheScopeSchema } from './scalars.ts';
 import { parseBaseUrl } from './url.ts';
 
 function base(value: string): URL {
@@ -21,56 +24,58 @@ describe('cacheUrl', () => {
 		{
 			name: 'the default cache returns the bare base URL',
 			value: 'https://cupboard.example.workers.dev',
-			cache: undefined,
-			expected: 'https://cupboard.example.workers.dev/'
-		},
-		{
-			name: 'the empty cache name is the default cache',
-			value: 'https://cupboard.example.workers.dev',
-			cache: storedCacheSchema.parse(DEFAULT_CACHE),
+			cache: cacheScopeSchema.parse({ kind: 'default' }),
 			expected: 'https://cupboard.example.workers.dev/'
 		},
 		{
 			name: 'uses the canonical path from a parsed base for the default cache',
 			value: 'https://cupboard.example.workers.dev/t/acme/',
-			cache: undefined,
+			cache: cacheScopeSchema.parse({ kind: 'default' }),
 			expected: 'https://cupboard.example.workers.dev/t/acme'
 		},
 		{
 			name: 'a named cache appends the cache path to a bare host',
 			value: 'https://cupboard.example.workers.dev',
-			cache: storedCacheSchema.parse('builds'),
+			cache: cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'builds'
+			}),
 			expected: 'https://cupboard.example.workers.dev/cache/builds'
 		},
 		{
 			name: 'a named cache preserves a tenant path prefix',
 			value: 'https://cupboard.example.workers.dev/t/acme',
-			cache: storedCacheSchema.parse('builds'),
+			cache: cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'builds'
+			}),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		},
 		{
 			name: 'appends a named cache to the canonical path from a parsed base',
 			value: 'https://cupboard.example.workers.dev/t/acme/',
-			cache: storedCacheSchema.parse('builds'),
+			cache: cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'builds'
+			}),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		},
 		{
-			name: 'a private cache uses the private URL namespace',
+			name: 'cache access does not affect the URL',
 			value: 'https://cupboard.example.workers.dev',
-			cache: storedCacheSchema.parse('private/builds'),
-			expected: 'https://cupboard.example.workers.dev/private-cache/builds'
+			cache: cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'builds'
+			}),
+			expected: 'https://cupboard.example.workers.dev/cache/builds'
 		},
 		{
-			name: 'a private cache preserves a tenant path prefix',
+			name: 'a cache called private stays under the cache namespace',
 			value: 'https://cupboard.example.workers.dev/t/acme',
-			cache: storedCacheSchema.parse('private/builds'),
-			expected:
-				'https://cupboard.example.workers.dev/t/acme/private-cache/builds'
-		},
-		{
-			name: 'a public cache called private stays under the public namespace',
-			value: 'https://cupboard.example.workers.dev/t/acme',
-			cache: storedCacheSchema.parse('private'),
+			cache: cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'private'
+			}),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/private'
 		}
 	])('$name', ({ value, cache, expected }) => {
@@ -80,9 +85,74 @@ describe('cacheUrl', () => {
 	it('does not mutate the base URL', () => {
 		const baseUrl = base('https://cupboard.example.workers.dev/t/acme');
 
-		cacheUrl(baseUrl, storedCacheSchema.parse('builds')).pathname = '/edited';
+		cacheUrl(
+			baseUrl,
+			cacheScopeSchema.parse({
+				kind: 'named',
+				name: 'builds'
+			})
+		).pathname = '/edited';
 
 		expect(baseUrl.href).toBe('https://cupboard.example.workers.dev/t/acme');
+	});
+});
+
+describe('parseTenantCacheUrl', () => {
+	it.each([
+		{
+			name: 'a tenant URL selects the default cache',
+			value: 'https://cupboard.example.workers.dev/t/acme',
+			expected: {
+				tenantUrl: 'https://cupboard.example.workers.dev/t/acme',
+				cache: { kind: 'default' }
+			}
+		},
+		{
+			name: 'a trailing slash is canonicalised',
+			value: 'https://cupboard.example.workers.dev/t/acme/',
+			expected: {
+				tenantUrl: 'https://cupboard.example.workers.dev/t/acme',
+				cache: { kind: 'default' }
+			}
+		},
+		{
+			name: 'a named cache is separated from its tenant URL',
+			value: 'https://cupboard.example.workers.dev/t/acme/cache/builds',
+			expected: {
+				tenantUrl: 'https://cupboard.example.workers.dev/t/acme',
+				cache: { kind: 'named', name: 'builds' }
+			}
+		},
+		{
+			name: 'a deployment path prefix is preserved',
+			value: 'https://example.test/cupboard/t/acme/cache/builds/',
+			expected: {
+				tenantUrl: 'https://example.test/cupboard/t/acme',
+				cache: { kind: 'named', name: 'builds' }
+			}
+		}
+	])('$name', ({ value, expected }) => {
+		const parsed = parseTenantCacheUrl(new URL(value));
+
+		expect({
+			tenantUrl: parsed.tenantUrl.href,
+			cache: parsed.cache
+		}).toStrictEqual(expected);
+	});
+
+	it.each([
+		'https://cupboard.example.workers.dev',
+		'https://cupboard.example.workers.dev/t/acme/reuse/nightly',
+		'https://cupboard.example.workers.dev/t/acme/archive/builds',
+		'https://cupboard.example.workers.dev/t/acme/cache/builds/extra',
+		'https://cupboard.example.workers.dev/t/acme/cache/%62uilds',
+		'https://cupboard.example.workers.dev/t/acme/cache/%2F',
+		'https://cupboard.example.workers.dev/t/%2F',
+		'https://cupboard.example.workers.dev/t/acme?cache=builds'
+	])('refuses the non-cache target %s', (value) => {
+		expect(() => parseTenantCacheUrl(new URL(value))).toThrow(
+			InvalidTenantCacheUrlError
+		);
 	});
 });
 
@@ -132,32 +202,6 @@ describe('reuseViewUrl', () => {
 	it.each([[''], ['.'], ['..']])('refuses the view name %j', (view) => {
 		expect(() =>
 			reuseViewUrl(base('https://cupboard.example.workers.dev'), view)
-		).toThrow(InvalidCacheUrlSegmentError);
-	});
-});
-
-describe('privateReuseViewUrl', () => {
-	it.each([
-		{
-			name: 'appends the private reuse view path to a bare host',
-			value: 'https://cupboard.example.workers.dev',
-			view: 'nightly',
-			expected: 'https://cupboard.example.workers.dev/private-reuse/nightly'
-		},
-		{
-			name: 'preserves a tenant path prefix',
-			value: 'https://cupboard.example.workers.dev/t/acme',
-			view: 'nightly',
-			expected:
-				'https://cupboard.example.workers.dev/t/acme/private-reuse/nightly'
-		}
-	])('$name', ({ value, view, expected }) => {
-		expect(privateReuseViewUrl(base(value), view).href).toBe(expected);
-	});
-
-	it.each([[''], ['.'], ['..']])('refuses the view name %j', (view) => {
-		expect(() =>
-			privateReuseViewUrl(base('https://cupboard.example.workers.dev'), view)
 		).toThrow(InvalidCacheUrlSegmentError);
 	});
 });

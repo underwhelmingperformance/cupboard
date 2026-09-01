@@ -1,15 +1,14 @@
 import {
-	type CacheName,
 	cacheNameSchema,
-	privateStoredCache,
+	type CacheScope,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
-	type ParsedTenantCreateBody,
-	type ParsedTenantReadCredential,
+	type TenantCreateBody,
 	tenantCreateBodySchema,
+	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
@@ -20,6 +19,7 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cacheIdentityCondition, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -27,6 +27,7 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	hashReadPassword,
 	isReadPasswordMatching,
@@ -45,47 +46,56 @@ import {
 	resumeTenant,
 	setCacheReadCredential,
 	setTenantReadCredential,
-	setTenantReadMode,
 	setTenantStatus
 } from './tenant-registry.ts';
 
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const acme = tenantIdSchema.parse('acme');
 const ghost = tenantIdSchema.parse('ghost');
-const builds = cacheNameSchema.parse('builds');
-const guides = cacheNameSchema.parse('guides');
+const builds = {
+	kind: 'named',
+	name: cacheNameSchema.parse('builds')
+} satisfies CacheScope;
+const guides = {
+	kind: 'named',
+	name: cacheNameSchema.parse('guides')
+} satisfies CacheScope;
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-function usageRow(
+async function usageRow(
 	id: TenantId
-): Promise<undefined | { quotaBytes: number | null }> {
-	return database()
+): Promise<undefined | { quotaBytes: number | undefined }> {
+	const row = await database()
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
 		.from(d1Schema.tenantUsage)
 		.where(eq(d1Schema.tenantUsage.tenant, id))
 		.get();
+
+	return row === undefined
+		? undefined
+		: { quotaBytes: row.quotaBytes ?? undefined };
 }
 
 function createBody(
 	id: string,
-	readMode: 'public' | 'private' = 'private'
-): ParsedTenantCreateBody {
+	defaultCacheAccess: 'public' | 'private' = 'private'
+): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
 		id,
-		readMode,
+		defaultCacheAccess,
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud'
 	});
 }
 
-function privateBodyWithRead(id: string): ParsedTenantCreateBody {
+function privateBodyWithRead(id: string): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
 		id,
-		readMode: 'private',
+		defaultCacheAccess: 'private',
 		read: {
 			user: 'cupboard',
 			password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
@@ -102,14 +112,14 @@ const rotatedReadPassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu45';
 function readCredential(
 	user: string,
 	password: string = readPassword
-): ParsedTenantReadCredential {
+): TenantReadCredential {
 	return tenantReadCredentialSchema.parse({ user, password });
 }
 
-function quotaBody(id: string, quotaBytes: number): ParsedTenantCreateBody {
+function quotaBody(id: string, quotaBytes: number): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
 		id,
-		readMode: 'private',
+		defaultCacheAccess: 'private',
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud',
@@ -117,7 +127,7 @@ function quotaBody(id: string, quotaBytes: number): ParsedTenantCreateBody {
 	});
 }
 
-async function provision(body: ParsedTenantCreateBody): Promise<void> {
+async function provision(body: TenantCreateBody): Promise<void> {
 	await ensureTenant(database(), body, now);
 }
 
@@ -184,14 +194,14 @@ async function storedReadVerifier(id: TenantId): Promise<{
 }
 
 interface StoredCacheCredential {
-	readonly cache: string;
+	readonly cache: CacheScope;
 	readonly readUser: string;
 	readonly createdAt: string;
 	readonly acceptsPassword: boolean;
 	readonly storesPlaintext: boolean;
 }
 
-// Every private-cache credential row the tenant holds, in stored-name order,
+// Every cache-specific credential row the tenant holds, in cache-name order,
 // with the verifier checked against the password it was set from.
 async function storedCacheCredentials(
 	id: TenantId,
@@ -201,12 +211,12 @@ async function storedCacheCredentials(
 		.select()
 		.from(d1Schema.tenantCacheReadCredential)
 		.where(eq(d1Schema.tenantCacheReadCredential.tenant, id))
-		.orderBy(asc(d1Schema.tenantCacheReadCredential.cache))
+		.orderBy(asc(d1Schema.tenantCacheReadCredential.cacheName))
 		.all();
 
 	return Promise.all(
 		rows.map(async (row) => ({
-			cache: row.cache,
+			cache: cacheScopeFromRow({ kind: row.cacheKind, name: row.cacheName }),
 			readUser: row.readUser,
 			createdAt: row.createdAt,
 			acceptsPassword: await isReadPasswordMatching(
@@ -231,17 +241,20 @@ async function deleteTenantRow(id: TenantId): Promise<void> {
 
 async function isPasswordAccepted(
 	id: TenantId,
-	cacheName: CacheName,
+	cache: CacheScope,
 	password: string
 ): Promise<boolean> {
-	const cache = privateStoredCache(cacheName);
 	const row = await database()
 		.select()
 		.from(d1Schema.tenantCacheReadCredential)
 		.where(
 			and(
 				eq(d1Schema.tenantCacheReadCredential.tenant, id),
-				eq(d1Schema.tenantCacheReadCredential.cache, cache)
+				cacheIdentityCondition(
+					d1Schema.tenantCacheReadCredential.cacheKind,
+					d1Schema.tenantCacheReadCredential.cacheName,
+					cache
+				)
 			)
 		)
 		.get();
@@ -260,16 +273,23 @@ async function isPasswordAccepted(
 describe('tenant registry', () => {
 	it('creates a tenant and returns its summary', async () => {
 		const summary = await ensureTenant(database(), createBody(acme), now);
+		const defaultCache = await database()
+			.select({ access: d1Schema.cacheLifecycle.access })
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, acme))
+			.get();
 
-		expect(summary).toStrictEqual({
-			id: acme,
-			status: 'active',
-			readMode: 'private',
-			ownerIssuer: 'https://idp.test',
-			ownerSubject: 'owner',
-			ownerAudience: 'aud',
-			configVersion: 1,
-			createdAt: now
+		expect({ summary, defaultCache }).toStrictEqual({
+			summary: {
+				id: acme,
+				status: 'active',
+				ownerIssuer: 'https://idp.test',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud',
+				configVersion: 1,
+				createdAt: now
+			},
+			defaultCache: { access: 'private' }
 		});
 	});
 
@@ -297,7 +317,6 @@ describe('tenant registry', () => {
 			repaired: {
 				id: acme,
 				status: 'active',
-				readMode: 'private',
 				ownerIssuer: 'https://idp.test/',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -307,7 +326,6 @@ describe('tenant registry', () => {
 			repeated: {
 				id: acme,
 				status: 'active',
-				readMode: 'private',
 				ownerIssuer: 'https://idp.test/',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -406,13 +424,13 @@ describe('tenant registry', () => {
 		});
 	});
 
-	it('rejects a conflicting re-create of a crash residue without writing a usage row', async () => {
+	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()
-			.insert(d1Schema.tenant)
+			.insert(migrationSchema.tenants)
 			.values({
 				id: acme,
 				status: 'active',
-				readMode: 'private',
+				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -421,18 +439,20 @@ describe('tenant registry', () => {
 			})
 			.run();
 
+		await ensureTenant(database(), createBody(acme, 'public'), now);
+		const access = await database()
+			.select({ access: d1Schema.cacheLifecycle.access })
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, acme))
+			.get();
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), createBody(acme, 'public'), now)
+			ensureTenant(database(), createBody(acme, 'private'), now)
 		);
-		const poisoned = await usageRow(acme);
 
-		await ensureTenant(database(), createBody(acme, 'private'), now);
-		const recovered = await usageRow(acme);
-
-		expect({
-			poisoned: poisoned !== undefined,
-			recovered: recovered !== undefined
-		}).toStrictEqual({ poisoned: false, recovered: true });
+		expect({ access, usage: await usageRow(acme) }).toStrictEqual({
+			access: { access: 'public' },
+			usage: { quotaBytes: undefined }
+		});
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantAlreadyExistsError',
 			status: StatusCodes.CONFLICT,
@@ -444,11 +464,11 @@ describe('tenant registry', () => {
 		const body = quotaBody(acme, 1000);
 
 		await database()
-			.insert(d1Schema.tenant)
+			.insert(migrationSchema.tenants)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.readMode,
+				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,
@@ -602,10 +622,16 @@ describe('tenant registry', () => {
 			reProvision =
 				error instanceof TenantAlreadyExistsError ? 'refused' : 'other';
 		}
+		const defaultCache = await database()
+			.select({ access: d1Schema.cacheLifecycle.access })
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, acme))
+			.get();
 
 		expect({
 			row,
 			usage: await usageRow(acme),
+			defaultCache,
 			reProvision
 		}).toStrictEqual({
 			row: {
@@ -617,6 +643,7 @@ describe('tenant registry', () => {
 				ownerAudience: ''
 			},
 			usage: undefined,
+			defaultCache: undefined,
 			reProvision: 'refused'
 		});
 	});
@@ -636,7 +663,6 @@ describe('tenant lifecycle operations', () => {
 			returned: {
 				id: acme,
 				status: 'active',
-				readMode: 'private',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -647,7 +673,6 @@ describe('tenant lifecycle operations', () => {
 				{
 					id: acme,
 					status: 'active',
-					readMode: 'private',
 					ownerIssuer: 'https://idp.test',
 					ownerSubject: 'owner',
 					ownerAudience: 'aud',
@@ -702,40 +727,6 @@ describe('tenant lifecycle operations', () => {
 		expect(errorFields(rejected)).toStrictEqual(fields);
 	});
 
-	it('sets the read mode of a live tenant', async () => {
-		await ensureTenant(database(), createBody(acme, 'private'), now);
-
-		const updated = await setTenantReadMode(database(), acme, 'public');
-
-		expect({
-			returned: updated,
-			stored: await listTenants(database())
-		}).toStrictEqual({
-			returned: {
-				id: acme,
-				status: 'active',
-				readMode: 'public',
-				ownerIssuer: 'https://idp.test',
-				ownerSubject: 'owner',
-				ownerAudience: 'aud',
-				configVersion: 1,
-				createdAt: now
-			},
-			stored: [
-				{
-					id: acme,
-					status: 'active',
-					readMode: 'public',
-					ownerIssuer: 'https://idp.test',
-					ownerSubject: 'owner',
-					ownerAudience: 'aud',
-					configVersion: 1,
-					createdAt: now
-				}
-			]
-		});
-	});
-
 	it('stores a rotated read credential hashed, not in plaintext', async () => {
 		await ensureTenant(database(), createBody(acme), now);
 
@@ -779,10 +770,6 @@ describe('tenant lifecycle operations', () => {
 	});
 
 	it.each([
-		{
-			name: 'read mode',
-			run: (id: TenantId) => setTenantReadMode(database(), id, 'public')
-		},
 		{
 			name: 'read credential',
 			run: (id: TenantId) =>
@@ -854,7 +841,7 @@ describe('private cache read credentials', () => {
 
 		expect(await storedCacheCredentials(acme)).toStrictEqual([
 			{
-				cache: 'private/builds',
+				cache: builds,
 				readUser: 'reader',
 				createdAt: now,
 				acceptsPassword: true,
@@ -891,7 +878,7 @@ describe('private cache read credentials', () => {
 			)
 		}).toStrictEqual({
 			stored: {
-				cache: 'private/builds',
+				cache: builds,
 				readUser: 'rotated',
 				createdAt: now,
 				acceptsPassword: true,
@@ -922,7 +909,7 @@ describe('private cache read credentials', () => {
 
 		expect(await storedCacheCredentials(acme)).toStrictEqual([
 			{
-				cache: 'private/guides',
+				cache: guides,
 				readUser: 'reader',
 				createdAt: now,
 				acceptsPassword: true,
@@ -996,7 +983,7 @@ describe('private cache read credentials', () => {
 
 		expect(await storedCacheCredentials(acme)).toStrictEqual([
 			{
-				cache: 'private/builds',
+				cache: builds,
 				readUser: 'reader',
 				createdAt: now,
 				acceptsPassword: true,

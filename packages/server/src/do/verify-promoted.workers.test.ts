@@ -87,7 +87,9 @@ describe('recording an older promoted verdict', () => {
 			verdict: await pendingUploadVerdict(upload.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null,
 			stagingGone: (await env.BLOBS.head(upload.r2Key)) === null,
 			blobState
@@ -130,7 +132,9 @@ describe('consumer verify pass', () => {
 			blobState: await blobStateNarHashes(),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null,
 			stagingGone: (await env.BLOBS.head(upload.r2Key)) === null
 		}).toStrictEqual({
@@ -219,7 +223,9 @@ describe('consumer verify pass', () => {
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, second.storePathHash)
+					narInfoObjectKey(fixtureTenant, second.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null,
 			canonicalPresent:
 				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null
@@ -270,7 +276,9 @@ describe('consumer verify pass', () => {
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, second.storePathHash)
+					narInfoObjectKey(fixtureTenant, second.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			verdict: undefined,
@@ -338,7 +346,9 @@ describe('consumer verify pass', () => {
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, second.storePathHash)
+					narInfoObjectKey(fixtureTenant, second.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			verdict: undefined,

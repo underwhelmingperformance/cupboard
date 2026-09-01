@@ -1,4 +1,3 @@
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
@@ -11,7 +10,7 @@ import {
 	oidcTrustAddBodySchema
 } from '@cupboard/protocol/oidc';
 
-import { InvalidClaimError } from '../../errors.ts';
+import { CliUsageError, InvalidClaimError } from '../../errors.ts';
 import {
 	parseWorkflowReference,
 	workflowReferenceClaim
@@ -113,6 +112,15 @@ export class DuplicateCaptureVariableError extends Error {
 			`Template variable '${variable}' is defined by more than one capture.`
 		);
 		this.name = 'DuplicateCaptureVariableError';
+	}
+}
+
+export class RootBindingRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'The selected operations can manage roots. Specify which root they may manage with --root or --root-template.'
+		);
+		this.name = 'RootBindingRequiredError';
 	}
 }
 
@@ -224,8 +232,20 @@ export interface CacheGrantOptions {
 
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	const { cacheActions, rootActions } = expandAllow(options.allow);
+
+	if (
+		rootActions.length > 0 &&
+		options.root === undefined &&
+		options.rootTemplate === undefined
+	) {
+		throw new RootBindingRequiredError();
+	}
+
 	const substitutions = options.substitutions ?? {};
-	const hasRoot = rootActions.length > 0 || options.root !== undefined;
+	const hasRoot =
+		rootActions.length > 0 ||
+		options.root !== undefined ||
+		options.rootTemplate !== undefined;
 
 	return permittedGrantSchema.parse({
 		type: 'cupboard_cache',
@@ -243,6 +263,7 @@ function cacheBinding(
 ): Record<string, unknown> {
 	if (options.cacheTemplate !== undefined) {
 		return {
+			kind: 'named',
 			equalsTemplate: options.cacheTemplate,
 			substitutions: referencedSubstitutions(
 				options.cacheTemplate,
@@ -253,12 +274,14 @@ function cacheBinding(
 	}
 
 	if (options.cache !== undefined) {
-		return { exact: options.cache, validate: 'cacheName' };
+		return {
+			kind: 'named',
+			exact: options.cache,
+			validate: 'cacheName'
+		};
 	}
 
-	// An omitted cache means the tenant's default cache. `_default` is the
-	// selector for that cache, not a cache name the user must supply.
-	return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
+	return { kind: 'default' };
 }
 
 function rootBinding(
@@ -276,8 +299,8 @@ function rootBinding(
 		};
 	}
 
-	if (options.root === undefined || options.root === 'same-as-cache') {
-		return { validate: 'rootName', equalsResource: 'cache' };
+	if (options.root === undefined) {
+		throw new RootBindingRequiredError();
 	}
 
 	return { validate: 'rootName', exact: options.root };

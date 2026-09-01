@@ -1,12 +1,14 @@
 import {
 	cacheNameSchema,
-	DEFAULT_CACHE,
+	type CacheScope,
 	nixSha256HashSchema,
-	privateStoredCache,
-	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import type { TokenResponse } from '@cupboard/protocol/oidc';
+import {
+	oidcIssuerSchema,
+	oidcSubjectSchema,
+	type TokenResponse
+} from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
 	commitAuthenticationExpiredCloseCode,
@@ -25,12 +27,7 @@ import {
 	ResponseSchemaMismatchError
 } from '../errors.ts';
 
-import {
-	cachePrefixFor,
-	CupboardClient,
-	resolveCacheSelection,
-	type TokenProvider
-} from './client.ts';
+import { cacheNameFor, CupboardClient, type TokenProvider } from './client.ts';
 import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
@@ -61,7 +58,7 @@ function requestUrl(input: string | URL | Request): string {
 
 function capturingClient(
 	response: unknown,
-	cachePrefix = ''
+	cache: CacheScope
 ): {
 	readonly client: CupboardClient;
 	readonly captured: () => CapturedRequest | undefined;
@@ -82,7 +79,7 @@ function capturingClient(
 
 			return Promise.resolve(Response.json(response));
 		},
-		cachePrefix
+		cache
 	);
 
 	return { client, captured: () => captured };
@@ -126,7 +123,9 @@ describe('CupboardClient.tokenExchange', () => {
 			expires_in: 900,
 			issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 		};
-		const { client, captured } = capturingClient(response);
+		const { client, captured } = capturingClient(response, {
+			kind: 'default'
+		});
 
 		const result = await client.tokenExchange(
 			'subject.jwt',
@@ -150,7 +149,9 @@ describe('CupboardClient.tokenExchange', () => {
 			expires_in: 600,
 			refresh_token: 'refresh-2'
 		};
-		const { client, captured } = capturingClient(response);
+		const { client, captured } = capturingClient(response, {
+			kind: 'default'
+		});
 
 		const result = await client.tokenRefresh('refresh-1');
 
@@ -180,7 +181,7 @@ describe('CupboardClient.tokenExchange', () => {
 
 				return Promise.resolve(Response.json(response));
 			},
-			'',
+			{ kind: 'default' },
 			controller.signal
 		);
 
@@ -218,7 +219,7 @@ function scriptedClient(
 
 			return Promise.resolve(next());
 		},
-		'',
+		{ kind: 'default' },
 		signal
 	);
 
@@ -305,13 +306,15 @@ describe('CupboardClient token replay', () => {
 
 describe('CupboardClient.signup', () => {
 	const response: SignupResponse = {
-		issuer: 'https://dash.cloudflare.com',
-		subject: 'cf-user-1',
+		issuer: oidcIssuerSchema.parse('https://dash.cloudflare.com'),
+		subject: oidcSubjectSchema.parse('cf-user-1'),
 		claimed: true
 	};
 
 	it('posts a urlencoded claim and returns the established principal', async () => {
-		const { client, captured } = capturingClient(response);
+		const { client, captured } = capturingClient(response, {
+			kind: 'default'
+		});
 
 		const result = await client.signup({ subject_token: 'subject.jwt' });
 
@@ -326,7 +329,9 @@ describe('CupboardClient.signup', () => {
 	});
 
 	it('sends the claim secret when one is given', async () => {
-		const { client, captured } = capturingClient(response);
+		const { client, captured } = capturingClient(response, {
+			kind: 'default'
+		});
 
 		await client.signup({
 			subject_token: 'subject.jwt',
@@ -339,10 +344,13 @@ describe('CupboardClient.signup', () => {
 	});
 
 	it('throws a CupboardHttpError when the gate declines the claim', async () => {
-		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
-			Promise.resolve(
-				new Response('claimed by another principal', { status: 409 })
-			)
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			() =>
+				Promise.resolve(
+					new Response('claimed by another principal', { status: 409 })
+				),
+			{ kind: 'default' }
 		);
 		const error = await rejectedBy(() =>
 			client.signup({ subject_token: 'subject.jwt' })
@@ -363,12 +371,15 @@ describe('CupboardClient.signup', () => {
 	});
 
 	it('rejects an oversized signup response before parsing it', async () => {
-		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
-			Promise.resolve(
-				Response.json(response, {
-					headers: { 'content-length': String(16 * 1024 * 1024 + 1) }
-				})
-			)
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			() =>
+				Promise.resolve(
+					Response.json(response, {
+						headers: { 'content-length': String(16 * 1024 * 1024 + 1) }
+					})
+				),
+			{ kind: 'default' }
 		);
 
 		await expect(
@@ -386,7 +397,7 @@ interface CapturedConnection {
 // script against its listeners once they are attached.
 function commitClient(
 	scripts: readonly ((socket: FakeCommitSocket) => void)[],
-	cachePrefix = ''
+	cache: CacheScope
 ): {
 	readonly client: CupboardClient;
 	readonly connections: () => readonly CapturedConnection[];
@@ -396,7 +407,7 @@ function commitClient(
 	const client = new CupboardClient(
 		new URL('https://cupboard.test'),
 		fetch,
-		cachePrefix,
+		cache,
 		undefined,
 		(url, headers) => {
 			const script = scripts[connections.length];
@@ -440,17 +451,20 @@ describe('CupboardClient.commit', () => {
 
 	it('closes the one-shot session when the server rejects with an error frame', async () => {
 		let socket: FakeCommitSocket | undefined;
-		const { client } = commitClient([
-			(scripted) => {
-				socket = scripted;
-				sendFrame(scripted, {
-					ev: 'error',
-					uploadId: 'upload-app',
-					status: 507,
-					message: 'over quota'
-				});
-			}
-		]);
+		const { client } = commitClient(
+			[
+				(scripted) => {
+					socket = scripted;
+					sendFrame(scripted, {
+						ev: 'error',
+						uploadId: uploadIdSchema.parse('upload-app'),
+						status: 507,
+						message: 'over quota'
+					});
+				}
+			],
+			{ kind: 'default' }
+		);
 
 		await expect(
 			client.commit('write-token', target('upload-app'))
@@ -459,11 +473,18 @@ describe('CupboardClient.commit', () => {
 	});
 
 	it('sends the bearer token on the commit WebSocket upgrade', async () => {
-		const { client, connections } = commitClient([
-			(socket) => {
-				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
-			}
-		]);
+		const { client, connections } = commitClient(
+			[
+				(socket) => {
+					sendFrame(socket, {
+						ev: 'settled',
+						uploadId: uploadIdSchema.parse('upload-app'),
+						response
+					});
+				}
+			],
+			{ kind: 'default' }
+		);
 
 		const { settled, verdictGrace, ...result } = await client.commit(
 			'write-token',
@@ -479,7 +500,7 @@ describe('CupboardClient.commit', () => {
 			verdictGraceKind: 'function',
 			connections: [
 				{
-					url: 'wss://cupboard.test/cache/_default/commit',
+					url: 'wss://cupboard.test/commit',
 					authorization: 'Bearer write-token'
 				}
 			]
@@ -493,12 +514,12 @@ describe('CupboardClient.commit', () => {
 				(socket) => {
 					sendFrame(socket, {
 						ev: 'settled',
-						uploadId: 'upload-build',
+						uploadId: uploadIdSchema.parse('upload-build'),
 						response
 					});
 				}
 			],
-			'/cache/builds'
+			{ kind: 'named', name: cacheNameSchema.parse('builds') }
 		);
 
 		await client.commit('write-token', target('upload-build'));
@@ -512,16 +533,23 @@ describe('CupboardClient.commit', () => {
 	});
 
 	it('refreshes the token and retries once when the upgrade is refused with a 401', async () => {
-		const { client, connections } = commitClient([
-			(socket) => {
-				const refusal = new FakeUpgradeFailure(401);
-				socket.emit('unexpected-response', {}, refusal);
-				refusal.emit('end');
-			},
-			(socket) => {
-				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
-			}
-		]);
+		const { client, connections } = commitClient(
+			[
+				(socket) => {
+					const refusal = new FakeUpgradeFailure(401);
+					socket.emit('unexpected-response', {}, refusal);
+					refusal.emit('end');
+				},
+				(socket) => {
+					sendFrame(socket, {
+						ev: 'settled',
+						uploadId: uploadIdSchema.parse('upload-app'),
+						response
+					});
+				}
+			],
+			{ kind: 'default' }
+		);
 		const provider: TokenProvider = {
 			get: () => Promise.resolve('stale-token'),
 			refresh: () => Promise.resolve('fresh-token')
@@ -541,11 +569,11 @@ describe('CupboardClient.commit', () => {
 			verdictGraceKind: 'function',
 			connections: [
 				{
-					url: 'wss://cupboard.test/cache/_default/commit',
+					url: 'wss://cupboard.test/commit',
 					authorization: 'Bearer stale-token'
 				},
 				{
-					url: 'wss://cupboard.test/cache/_default/commit',
+					url: 'wss://cupboard.test/commit',
 					authorization: 'Bearer fresh-token'
 				}
 			]
@@ -554,19 +582,26 @@ describe('CupboardClient.commit', () => {
 	});
 
 	it("uses the provider's current token after the server closes a commit socket whose token expired", async () => {
-		const { client, connections } = commitClient([
-			(socket) => {
-				socket.emit('open');
-				socket.emit(
-					'close',
-					commitAuthenticationExpiredCloseCode,
-					commitAuthenticationExpiredCloseReason
-				);
-			},
-			(socket) => {
-				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
-			}
-		]);
+		const { client, connections } = commitClient(
+			[
+				(socket) => {
+					socket.emit('open');
+					socket.emit(
+						'close',
+						commitAuthenticationExpiredCloseCode,
+						commitAuthenticationExpiredCloseReason
+					);
+				},
+				(socket) => {
+					sendFrame(socket, {
+						ev: 'settled',
+						uploadId: uploadIdSchema.parse('upload-app'),
+						response
+					});
+				}
+			],
+			{ kind: 'default' }
+		);
 		const get = vi
 			.fn<() => Promise<string>>()
 			.mockResolvedValueOnce('initial-token')
@@ -590,11 +625,11 @@ describe('CupboardClient.commit', () => {
 			verdictGraceKind: 'function',
 			connections: [
 				{
-					url: 'wss://cupboard.test/cache/_default/commit',
+					url: 'wss://cupboard.test/commit',
 					authorization: 'Bearer initial-token'
 				},
 				{
-					url: 'wss://cupboard.test/cache/_default/commit',
+					url: 'wss://cupboard.test/commit',
 					authorization: 'Bearer renewed-token'
 				}
 			],
@@ -614,7 +649,8 @@ describe('CupboardClient cache prefix', () => {
 				requested = requestUrl(input);
 
 				return Promise.resolve(new Response(`${publishedPublicKey}\n`));
-			}
+			},
+			{ kind: 'default' }
 		);
 
 		await client.publicKey();
@@ -631,7 +667,7 @@ describe('CupboardClient cache prefix', () => {
 
 				return Promise.resolve(new Response(`${publishedPublicKey}\n`));
 			},
-			'/cache/builds'
+			{ kind: 'named', name: cacheNameSchema.parse('builds') }
 		);
 
 		await client.publicKey();
@@ -640,9 +676,7 @@ describe('CupboardClient cache prefix', () => {
 	});
 
 	it('rejects an invalid cache name when building a scoped client', () => {
-		const error = thrownBy(() =>
-			CupboardClient.fromUrl(new URL('https://cupboard.test'), 'Bad!')
-		);
+		const error = thrownBy(() => cacheNameFor('Bad!'));
 
 		expect(error).toBeInstanceOf(InvalidCacheNameError);
 
@@ -652,81 +686,15 @@ describe('CupboardClient cache prefix', () => {
 				cache: 'Bad!'
 			});
 		}
-	});
-});
-
-describe('resolveCacheSelection', () => {
-	it.each([
-		{
-			name: 'neither option selects the default cache',
-			options: {},
-			expected: DEFAULT_CACHE
-		},
-		{
-			name: 'the default alias selects the default cache',
-			options: { cache: DEFAULT_CACHE },
-			expected: DEFAULT_CACHE
-		},
-		{
-			name: 'a public name selects that cache',
-			options: { cache: 'builds' },
-			expected: cacheNameSchema.parse('builds')
-		},
-		{
-			name: 'a private name selects the private stored cache',
-			options: { privateCache: 'release' },
-			expected: privateStoredCache(cacheNameSchema.parse('release'))
-		}
-	])('$name', ({ expected, options }) => {
-		expect(resolveCacheSelection(options)).toBe(expected);
-	});
-
-	it.each([
-		{ name: 'a public cache', options: { cache: 'Bad!' } },
-		{ name: 'a private cache', options: { privateCache: 'Bad!' } }
-	])('rejects an invalid name for $name', ({ options }) => {
-		const error = thrownBy(() => resolveCacheSelection(options));
-
-		expect(error).toBeInstanceOf(InvalidCacheNameError);
-
-		if (error instanceof InvalidCacheNameError) {
-			expect({ name: error.name, cache: error.cache }).toStrictEqual({
-				name: 'InvalidCacheNameError',
-				cache: 'Bad!'
-			});
-		}
-	});
-});
-
-describe('cachePrefixFor', () => {
-	it.each<{
-		readonly name: string;
-		readonly cache: StoredCache;
-		readonly prefix: string;
-	}>([
-		{
-			name: 'the default cache has no prefix',
-			cache: DEFAULT_CACHE,
-			prefix: ''
-		},
-		{
-			name: 'a named public cache',
-			cache: cacheNameSchema.parse('builds'),
-			prefix: '/cache/builds'
-		},
-		{
-			name: 'a private cache uses the private namespace',
-			cache: privateStoredCache(cacheNameSchema.parse('release')),
-			prefix: '/private-cache/release'
-		}
-	])('$name', ({ cache, prefix }) => {
-		expect(cachePrefixFor(cache)).toBe(prefix);
 	});
 });
 
 describe('CupboardClient response validation', () => {
 	it('rejects a token response missing a required field', async () => {
-		const { client } = capturingClient({ token_type: 'Bearer' });
+		const { client } = capturingClient(
+			{ token_type: 'Bearer' },
+			{ kind: 'default' }
+		);
 
 		const error = await rejectedBy(() =>
 			client.tokenExchange(
@@ -743,8 +711,10 @@ describe('CupboardClient response validation', () => {
 	});
 
 	it('rejects a 200 response whose body is not valid JSON', async () => {
-		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
-			Promise.resolve(new Response('{ not json', { status: 200 }))
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			() => Promise.resolve(new Response('{ not json', { status: 200 })),
+			{ kind: 'default' }
 		);
 
 		const error = await rejectedBy(() =>

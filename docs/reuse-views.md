@@ -9,7 +9,7 @@ on the tenant with `cupboard reuse-view set`:
 
 ```bash
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --prefix pr-
+  --select prefix:pr-
 ```
 
 This view selects every cache whose name currently starts with `pr-`. A view
@@ -17,23 +17,21 @@ stores no narinfo and no membership list of its own. It is a live selector over
 the caches it matches, so a cache created, renamed, or recreated under a
 matching name is included without redefining the view.
 
-An exact selector names one cache. Use the same `_default` alias as the other
-cache-facing commands to select only the unnamed default cache:
+An exact selector names one cache. Use `default` for the tenant's default cache:
 
 ```bash
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme default-only \
-  --exact _default
+  --select default
 ```
+
+Use `all-named` to select every named cache, or `all` to include the default
+cache as well. A view selects only caches with the same access as the view.
 
 ## Read semantics
 
-The view serves `nix-cache-info` and narinfo at `/t/<tenant>/reuse/<view>/`,
-following the tenant's read mode. A public tenant exposes those routes publicly,
-while a private tenant requires the existing Basic read credential. Private
-views use separate routes that always require authentication; see [Private
-views][private-views].
-
-[private-views]: #private-views
+The view serves `nix-cache-info` and narinfo at `/t/<tenant>/reuse/<view>/`. Its
+`access` property determines whether those routes are public or require a Basic
+read credential.
 
 Every reuse-view response, hit or miss, is served with
 `cache-control: no-store`, so a shared HTTP cache never stores a stale or
@@ -49,61 +47,50 @@ affected target is built locally instead of substituted.
 
 ## Private views
 
-`--private` defines a view in the private namespace:
+Set the view's access to `private`:
 
 ```bash
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --private --prefix pr-
+  --access private --select prefix:pr-
 ```
 
-Here `pull-requests` is the local name. Its stored name is
-`private/pull-requests`, and its contract name is `_private-pull-requests`.
-Clients read it at `/t/<tenant>/private-reuse/pull-requests/`.
+Public and private views use the same name and URL. A private view selects
+private caches. It can include the default cache when that cache is private:
 
-A view is public or private according to its namespace, exactly as a cache is.
-The selectors in a view's body are plain names local to that namespace. A
-private view's selectors match private caches, while a public view's selectors
-match public caches. No selector reaches across the two namespaces, and the same
-definition selects different caches in each. A private view refuses the
-`_default` exact selector because the tenant's default cache is public and the
-private namespace has no default cache.
+```bash
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
+  --access private --select prefix:pr- --select default
+```
 
-Every request under `/private-reuse/` authenticates with the tenant's read
-credential, regardless of the method or whether the view exists. A view can
-select several caches, so a credential for one private cache does not open a
-view over that cache. A tenant without a read credential has no readable private
-view. A private view's responses carry `cache-control: no-store` like every
-other reuse-view response, misses included.
+An unknown view returns 404. Once the route resolves a private view, it
+authenticates every content request with the tenant-wide fallback read
+credential. A view can select several caches, so a credential for one private
+cache does not open a view over that cache. A tenant without a fallback
+credential has no readable private view. Its responses carry
+`cache-control: no-store` like every other reuse-view response, misses included.
 
 A narinfo served by a private view refers to the view's NAR route. That route
-requires the tenant's read credential and serves a NAR only when one of the
-tenant's private caches references its hash. This private-namespace rule is
-wider than the per-cache rule described in [What a private cache
-protects][private-cache-privacy], because a view's selectors can change after
-the server returns a narinfo and before the reader requests the corresponding
-NAR.
+requires the tenant-wide fallback credential and serves a NAR only when a
+private cache selected by the current view definition references its hash. The
+server rechecks the view revision after reading shared state, so a concurrent
+selector change produces a miss.
 
-[private-cache-privacy]: ./nix.md#what-a-private-cache-protects
+`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input. Put the
+tenant-wide fallback credential in the URL's userinfo when the selected view is
+private.
 
-`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input, so the
-input configures only public views. To use a private view, configure
-`/private-reuse/<view>/` directly and put the tenant credential in the URL's
-userinfo, as for a private cache.
-
-`cupboard reuse-view remove --private` removes a private view.
-`cupboard reuse-view list` reports public and private views in one list, each
-under the name that addresses it.
+`cupboard reuse-view remove` removes a view. `cupboard reuse-view list` reports
+each view's access property.
 
 ## Priorities
 
 Nix tries substituters in the order of their advertised priorities, lowest
-first. Cupboard's default cache advertises priority 40, a server default that
-exists before any configuration; a view's priority must be numerically greater
-than the destination's, so the destination is always tried first.
-`actions/setup` enforces this: it fetches both `nix-cache-info` responses and
-refuses to configure a view whose priority does not exceed the destination's.
-Setup rejects a `nix-cache-info` response with no `Priority` line instead of
-assuming a default.
+first. A cache starts at priority 40 unless its administrator chooses another
+value. A view's priority must be numerically greater than the destination's, so
+the destination is always tried first. `actions/setup` enforces this: it fetches
+both `nix-cache-info` responses and refuses to configure a view whose priority
+does not exceed the destination's. Setup rejects a `nix-cache-info` response
+with no `Priority` line instead of assuming a default.
 
 ## Use by the flake publish workflow
 
@@ -123,7 +110,7 @@ used by the `add-github-pr` rule (see [docs/trust-rules.md](./trust-rules.md)):
 
 ```bash
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --prefix pr-
+  --select prefix:pr-
 ```
 
 `main`'s post-merge workflow then opts into it:

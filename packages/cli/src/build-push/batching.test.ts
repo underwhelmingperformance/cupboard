@@ -9,11 +9,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedUploadNegotiateResponse,
 	uploadAttachRootSchema,
-	type UploadDecision,
+	type UploadDecisionInput,
 	uploadDecisionSchema,
-	type UploadNegotiateRequest
+	type UploadNegotiateRequestInput,
+	type UploadNegotiateResponse
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -54,7 +54,7 @@ function pathInfo(storePath: StorePathString): NixValidPathInfo {
 
 function decisionFor(
 	storePath: StorePathString,
-	action: UploadDecision['action']
+	action: UploadDecisionInput['action']
 ) {
 	const base = {
 		storePathHash: StorePath.hash(storePath),
@@ -82,7 +82,7 @@ function decisionFor(
 	});
 }
 
-type NegotiateBody = Omit<UploadNegotiateRequest, 'pushId'>;
+type NegotiateBody = Omit<UploadNegotiateRequestInput, 'pushId'>;
 
 interface Harness {
 	readonly batcher: BuildOutputBatcher;
@@ -101,13 +101,16 @@ function emptyStream(): ReadableStream<Uint8Array> {
 }
 
 interface HarnessOptions {
-	readonly actions?: ReadonlyMap<StorePathString, UploadDecision['action']>;
+	readonly actions?: ReadonlyMap<
+		StorePathString,
+		UploadDecisionInput['action']
+	>;
 	readonly vanished?: ReadonlySet<StorePathString>;
 	readonly failCommitsOnce?: ReadonlySet<StorePathString>;
 	readonly failNegotiate?: boolean;
 	readonly decisions?: (
 		paths: NegotiateBody['paths']
-	) => ParsedUploadNegotiateResponse['uploads'];
+	) => UploadNegotiateResponse['uploads'];
 	readonly maxEntries?: number;
 	/**
 	Use this shared session for every flush instead of opening another socket.

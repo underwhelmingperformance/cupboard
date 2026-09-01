@@ -1,5 +1,4 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -16,9 +15,12 @@ import {
 	deferFreshUpload,
 	flakyD1,
 	initialise,
+	namedCache,
 	narBytes,
 	pushPath,
+	putTestCache,
 	resetTestServer,
+	resolvedCache,
 	syntheticStorePathHash,
 	testBase,
 	uploadMetadata,
@@ -35,10 +37,10 @@ import { maintenancePassCursorKey } from './server.ts';
 // reading this table stalls either pass.
 const sharedBlobRowTable = 'blob_state';
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
 
-const reconciledPath: ParsedUploadPathMetadata = uploadMetadata({
+const reconciledPath: UploadPathMetadata = uploadMetadata({
 	storePathHash: syntheticStorePathHash(700),
 	name: 'retry-reconcile',
 	fileSize: narBytes.byteLength
@@ -81,8 +83,9 @@ async function driveStalledPasses(server: string): Promise<StalledPassRun> {
 	await useTestServer(server);
 
 	const token = await initialise();
+	await putTestCache(token, buildsCache);
 	await collectVerificationPasses();
-	await pushPath(token, reconciledPath, 'builds');
+	await pushPath(token, reconciledPath, buildsCache);
 
 	const upload = await deferFreshUpload(
 		token,
@@ -91,6 +94,7 @@ async function driveStalledPasses(server: string): Promise<StalledPassRun> {
 	);
 
 	return runInDurableObject(currentServer(), async (instance, state) => {
+		const cache = resolvedCache(instance.context, buildsCache);
 		const claim = await instance.claimVerificationBatch(
 			1,
 			Number.MAX_SAFE_INTEGER
@@ -111,7 +115,7 @@ async function driveStalledPasses(server: string): Promise<StalledPassRun> {
 			.run();
 
 		await new ReconcileQueueService(instance.context).enqueue(origin, [
-			{ cache: buildsCache, storePathHash: reconciledPath.storePathHash }
+			{ cacheId: cache.id, storePathHash: reconciledPath.storePathHash }
 		]);
 
 		const real = instance.context.d1;

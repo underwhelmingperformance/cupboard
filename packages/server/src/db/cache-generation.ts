@@ -1,11 +1,12 @@
 import {
 	type CacheGeneration,
 	cacheGenerationSchema,
-	type StoredCache,
+	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import { and, eq, not, type SQL, sql } from 'drizzle-orm';
+import { and, eq, isNull, not, or, type SQL, sql } from 'drizzle-orm';
 
+import { cacheIdentityCondition } from './cache.ts';
 import * as d1Schema from './d1-schema.ts';
 
 /**
@@ -28,18 +29,38 @@ const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, $
 const currentGeneration = sql`coalesce(${d1Schema.cacheLifecycle.generation}, ${firstCacheGeneration})`;
 
 /**
- * Joins each `blob_ref` row to the lifecycle row for the same tenant and stored
- * cache name. {@link authorisedByCacheGeneration} and
+ * Joins each `blob_ref` row to the lifecycle row for the same tenant and cache
+ * identity. {@link authorisedByCacheGeneration} and
  * {@link revokedByCacheGeneration} rely on this join.
  *
  * Use this condition with `leftJoin`. A cache that has never been deleted has
  * no lifecycle row, so an inner join would drop all of its edges.
  */
 export function referencedCacheLifecycle(): SQL | undefined {
-	return and(
-		eq(d1Schema.cacheLifecycle.tenant, d1Schema.blobReference.tenant),
-		eq(d1Schema.cacheLifecycle.cache, d1Schema.blobReference.cache)
+	const sameTenant = eq(
+		d1Schema.cacheLifecycle.tenant,
+		d1Schema.blobReference.tenant
 	);
+	const sameKind = eq(
+		d1Schema.cacheLifecycle.cacheKind,
+		d1Schema.blobReference.cacheKind
+	);
+	const defaultCache = eq(d1Schema.blobReference.cacheKind, 'default');
+	const defaultLifecycle = isNull(d1Schema.cacheLifecycle.cacheName);
+	const defaultReference = isNull(d1Schema.blobReference.cacheName);
+	const namedCache = eq(d1Schema.blobReference.cacheKind, 'named');
+	const sameName = eq(
+		d1Schema.cacheLifecycle.cacheName,
+		d1Schema.blobReference.cacheName
+	);
+	const sameDefaultCache = and(
+		defaultCache,
+		defaultLifecycle,
+		defaultReference
+	);
+	const sameNamedCache = and(namedCache, sameName);
+
+	return and(sameTenant, sameKind, or(sameDefaultCache, sameNamedCache));
 }
 
 /**
@@ -70,7 +91,13 @@ export function revokedByCacheGeneration(): SQL {
  */
 export function currentCacheGeneration(
 	tenant: TenantId,
-	cache: StoredCache
+	cache: CacheScope
 ): SQL<CacheGeneration> {
-	return sql<CacheGeneration>`coalesce((select ${d1Schema.cacheLifecycle.generation} from ${d1Schema.cacheLifecycle} where ${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${d1Schema.cacheLifecycle.cache} = ${cache}), ${firstCacheGeneration})`;
+	const identity = cacheIdentityCondition(
+		d1Schema.cacheLifecycle.cacheKind,
+		d1Schema.cacheLifecycle.cacheName,
+		cache
+	);
+
+	return sql<CacheGeneration>`coalesce((select ${d1Schema.cacheLifecycle.generation} from ${d1Schema.cacheLifecycle} where ${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${identity}), ${firstCacheGeneration})`;
 }

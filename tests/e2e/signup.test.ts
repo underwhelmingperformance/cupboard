@@ -79,7 +79,7 @@ describe('control plane signup bootstrap', () => {
 					},
 					body: JSON.stringify({
 						id: 'acme',
-						readMode: 'private',
+						defaultCacheAccess: 'private',
 						ownerIssuer: server.issuer.issuer,
 						ownerSubject: 'owner',
 						ownerAudience: signupAudience
@@ -105,7 +105,6 @@ describe('control plane signup bootstrap', () => {
 				});
 				expect(await create.json()).toMatchObject({
 					id: 'acme',
-					readMode: 'private',
 					ownerIssuer: server.issuer.issuer,
 					ownerSubject: 'owner',
 					ownerAudience: signupAudience,

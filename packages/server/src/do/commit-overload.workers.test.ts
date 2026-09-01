@@ -1,7 +1,3 @@
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR
-} from '@cupboard/nix-store/scalars';
 import { commitAcceptCapabilitiesHeader } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -18,6 +14,7 @@ import {
 	commitCreditAccept,
 	commitSessionFromResponse,
 	currentServer,
+	defaultCache,
 	initialise,
 	negotiateUploads,
 	openCommitSession,
@@ -77,7 +74,7 @@ async function openSessions(
 	const sessions: CommitConversation[] = [];
 
 	for (let index = 0; index < count; index += 1) {
-		sessions.push(await openCommitSession(token, DEFAULT_CACHE, accepted));
+		sessions.push(await openCommitSession(token, defaultCache(), accepted));
 	}
 
 	return sessions;
@@ -90,7 +87,7 @@ function closeAll(sessions: readonly CommitConversation[]): void {
 }
 
 function attemptUpgrade(token: string, accepted?: string): Promise<Response> {
-	return authorisedFetch(`/cache/${DEFAULT_CACHE_SELECTOR}/commit`, token, {
+	return authorisedFetch('/commit', token, {
 		headers: {
 			upgrade: 'websocket',
 			...(accepted !== undefined && {
@@ -154,7 +151,7 @@ describe('commit socket ceiling', () => {
 
 		const reopened = await openCommitSession(
 			token,
-			DEFAULT_CACHE,
+			defaultCache(),
 			commitCreditAccept
 		);
 

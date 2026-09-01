@@ -6,8 +6,8 @@ import {
 	reuseViewListResponseSchema,
 	reuseViewPrioritySchema,
 	reuseViewRemoveResponseSchema,
-	type ReuseViewSelector,
-	type ReuseViewSummary,
+	type ReuseViewSelectorInput,
+	type ReuseViewSummaryInput,
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
 import type { ResultRow } from '@cupboard/reporter';
@@ -15,12 +15,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	InvalidReuseViewPriorityError,
+	InvalidReuseViewSelectorError,
 	ReuseViewSelectorRequiredError
 } from '../errors.ts';
 
 import {
-	contractViewName,
 	parsePriority,
+	parseSelector,
 	runReuseViewList,
 	runReuseViewRemove,
 	runReuseViewSet,
@@ -29,11 +30,12 @@ import {
 
 const summary = reuseViewSummarySchema.parse({
 	name: 'reuse',
+	access: 'public',
 	revision: 1,
 	priority: 50,
 	selectors: [
-		{ kind: 'exact', pattern: 'release' },
-		{ kind: 'prefix', pattern: 'pr-' }
+		{ kind: 'named', name: 'release' },
+		{ kind: 'prefix', prefix: 'pr-' }
 	],
 	createdAt: '2026-01-01T00:00:00.000Z',
 	updatedAt: '2026-01-01T00:00:00.000Z'
@@ -53,30 +55,42 @@ describe('parsePriority', () => {
 });
 
 describe('selectorsFromOptions', () => {
-	it('orders exacts before prefixes, each as given', () => {
+	it('preserves selectors in command-line order', () => {
 		expect(
 			selectorsFromOptions({
-				exact: ['release', 'hotfix'],
-				prefix: ['pr-', 'staging-']
+				select: [
+					parseSelector('cache:release'),
+					parseSelector('prefix:pr-'),
+					parseSelector('all-named')
+				]
 			})
 		).toStrictEqual([
-			{ kind: 'exact', pattern: 'release' },
-			{ kind: 'exact', pattern: 'hotfix' },
-			{ kind: 'prefix', pattern: 'pr-' },
-			{ kind: 'prefix', pattern: 'staging-' }
+			{ kind: 'named', name: 'release' },
+			{ kind: 'prefix', prefix: 'pr-' },
+			{ kind: 'all-named' }
 		]);
 	});
 
-	it('accepts an empty prefix as one selector matching every cache', () => {
-		expect(selectorsFromOptions({ exact: [], prefix: [''] })).toStrictEqual([
-			{ kind: 'prefix', pattern: '' }
-		]);
-	});
-
-	it('rejects neither --exact nor --prefix given', () => {
+	it('rejects a call naming no cache at all', () => {
 		expect(() => {
-			selectorsFromOptions({ exact: [], prefix: [] });
+			selectorsFromOptions({ select: [] });
 		}).toThrow(ReuseViewSelectorRequiredError);
+	});
+});
+
+describe('parseSelector', () => {
+	it.each([
+		['default', { kind: 'default' }],
+		['all', { kind: 'all' }],
+		['all-named', { kind: 'all-named' }],
+		['cache:release', { kind: 'named', name: 'release' }],
+		['prefix:pr-', { kind: 'prefix', prefix: 'pr-' }]
+	] as const)('parses %s', (value, expected) => {
+		expect(parseSelector(value)).toStrictEqual(expected);
+	});
+
+	it.each(['cache:', 'prefix:', 'anything'])("rejects '%s'", (value) => {
+		expect(() => parseSelector(value)).toThrow(InvalidReuseViewSelectorError);
 	});
 });
 
@@ -93,17 +107,17 @@ describe('runReuseViewList', () => {
 			[
 				{
 					label: 'reuse',
-					value: 'revision 1; priority 50; exact:release, prefix:pr-'
+					value: 'public; revision 1; priority 50; cache:release, prefix:pr-'
 				}
 			]
 		]);
 	});
 
-	it('renders an empty prefix selector as matching every cache', async () => {
+	it('renders the all selector as matching every cache', async () => {
 		const results: ResultRow[][] = [];
-		const view: ReuseViewSummary = {
+		const view: ReuseViewSummaryInput = {
 			...summary,
-			selectors: [{ kind: 'prefix', pattern: '' }]
+			selectors: [{ kind: 'all' }]
 		};
 
 		await runReuseViewList(reporter(results), {
@@ -115,7 +129,7 @@ describe('runReuseViewList', () => {
 			[
 				{
 					label: 'reuse',
-					value: 'revision 1; priority 50; prefix:(all caches)'
+					value: 'public; revision 1; priority 50; all'
 				}
 			]
 		]);
@@ -139,31 +153,27 @@ describe('runReuseViewList', () => {
 describe('runReuseViewSet', () => {
 	it.each([
 		{
-			name: 'exact and prefix selectors, explicit priority',
-			selectors: [
-				{ kind: 'exact', pattern: 'release' },
-				{ kind: 'prefix', pattern: 'pr-' }
-			] satisfies ReuseViewSelector[],
+			name: 'named and prefix selectors, explicit priority',
+			selectors: [parseSelector('cache:release'), parseSelector('prefix:pr-')],
 			priority: reuseViewPrioritySchema.parse(10),
 			row: {
 				label: 'Selectors',
-				value: 'exact:release, prefix:pr-'
+				value: 'cache:release, prefix:pr-'
 			}
 		},
 		{
-			name: 'a single empty prefix selector',
-			selectors: [
-				{ kind: 'prefix', pattern: '' }
-			] satisfies ReuseViewSelector[],
+			name: 'the all selector',
+			selectors: [parseSelector('all')],
 			priority: undefined,
-			row: { label: 'Selectors', value: 'prefix:(all caches)' }
+			row: { label: 'Selectors', value: 'all' }
 		}
 	])(
 		'passes the selectors and priority through, reporting the summary for $name',
 		async ({ selectors, priority, row }) => {
 			const calls: {
 				name: string;
-				selectors: readonly ReuseViewSelector[];
+				access: 'public' | 'private';
+				selectors: readonly ReuseViewSelectorInput[];
 				priority?: number;
 			}[] = [];
 			const results: ResultRow[][] = [];
@@ -173,17 +183,25 @@ describe('runReuseViewSet', () => {
 				...(priority !== undefined && { priority })
 			});
 
-			await runReuseViewSet('reuse', selectors, priority, reporter(results), {
-				set(input) {
-					calls.push(input);
-					return Promise.resolve(response);
+			await runReuseViewSet(
+				'reuse',
+				'public',
+				selectors,
+				priority,
+				reporter(results),
+				{
+					set(input) {
+						calls.push(input);
+						return Promise.resolve(response);
+					}
 				}
-			});
+			);
 
 			expect({ calls, results }).toStrictEqual({
 				calls: [
 					{
 						name: 'reuse',
+						access: 'public',
 						selectors,
 						...(priority !== undefined && { priority })
 					}
@@ -191,6 +209,7 @@ describe('runReuseViewSet', () => {
 				results: [
 					[
 						{ label: 'View', value: 'reuse' },
+						{ label: 'Access', value: 'public' },
 						{ label: 'Revision', value: String(response.revision) },
 						{ label: 'Priority', value: String(response.priority) },
 						row
@@ -274,39 +293,20 @@ describe('runReuseViewRemove', () => {
 		});
 	});
 });
-
-describe('contractViewName', () => {
-	it.each([
-		{ name: 'a public view keeps its name', localName: 'reuse' },
-		{ name: 'a public view with a separator', localName: 'nightly-reuse' }
-	])('$name', ({ localName }) => {
-		expect(contractViewName(localName)).toBe(localName);
-	});
-
-	it.each([
-		{ localName: 'reuse', expected: '_private-reuse' },
-		{ localName: 'nightly-reuse', expected: '_private-nightly-reuse' }
-	])(
-		'returns the private contract name $expected for local name $localName',
-		({ localName, expected }) => {
-			expect(contractViewName(localName, true)).toBe(expected);
-		}
-	);
-});
-
 describe('a private view summary', () => {
-	it('reports a private view under its contract name', async () => {
+	it('reports access independently from the view name', async () => {
 		const results: ResultRow[][] = [];
 		const calls: { name: string }[] = [];
 		const privateSummary = reuseViewSummarySchema.parse({
 			...summary,
-			name: '_private-reuse',
-			selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+			access: 'private',
+			selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 		});
 
 		await runReuseViewSet(
-			contractViewName('reuse', true),
-			[{ kind: 'prefix', pattern: 'pr-' }],
+			'reuse',
+			'private',
+			[{ kind: 'prefix', prefix: 'pr-' }],
 			undefined,
 			reporter(results),
 			{
@@ -318,10 +318,11 @@ describe('a private view summary', () => {
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ name: '_private-reuse' }],
+			calls: [{ name: 'reuse' }],
 			results: [
 				[
-					{ label: 'View', value: '_private-reuse' },
+					{ label: 'View', value: 'reuse' },
+					{ label: 'Access', value: 'private' },
 					{ label: 'Revision', value: '1' },
 					{ label: 'Priority', value: '50' },
 					{ label: 'Selectors', value: 'prefix:pr-' }

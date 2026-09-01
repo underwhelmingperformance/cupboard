@@ -1,8 +1,8 @@
 import { openBrowser } from '@cupboard/cli-ui';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
-	type ParsedTokenResponse,
-	subjectTokenTypeIdToken
+	subjectTokenTypeIdToken,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
@@ -170,7 +170,7 @@ const defaultLoginSessionDependencies: LoginSessionDependencies = {
 };
 
 export async function cacheLoginSession(
-	response: ParsedTokenResponse,
+	response: TokenResponse,
 	target: URL,
 	signal?: AbortSignal,
 	dependencies: LoginSessionDependencies = defaultLoginSessionDependencies
@@ -215,6 +215,7 @@ export function registerLoginCommand(
 		.action(async (url: URL, options: LoginOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
+				cache: { kind: 'default' },
 				signal: programOptions.signal
 			});
 			// cupboard's own client has exact-match registered redirect URLs, so

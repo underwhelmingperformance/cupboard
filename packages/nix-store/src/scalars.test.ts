@@ -2,32 +2,19 @@ import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 
 import {
-	cacheFromSelector,
 	cacheNameSchema,
 	cachePrioritySchema,
-	cacheSelectorSchema,
+	cacheScopeSchema,
 	compressionSchema,
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	isPrivateCache,
+	isSameCacheScope,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	predicateTypeSchema,
-	PRIVATE_STORED_RANGE_END,
-	PRIVATE_STORED_RANGE_START,
-	privateCacheLocalName,
-	privateCacheSelectorSchema,
-	privateStoredCache,
-	privateStoredCacheSchema,
-	publicCacheSelectorSchema,
 	referencesMaxLength,
 	referencesSchema,
 	rootNameSchema,
-	selectorForCache,
 	sha256HexDigestSchema,
 	signingKeyIdSchema,
-	type StoredCache,
-	storedCacheSchema,
 	storeDirectoryMaxLength,
 	storeDirectorySchema,
 	storePathBasenameSchema,
@@ -164,36 +151,6 @@ const acceptedCases: readonly {
 		name: 'a 63-character cache name',
 		schema: cacheNameSchema,
 		value: 'a'.repeat(63)
-	},
-	{
-		name: 'the default cache selector',
-		schema: publicCacheSelectorSchema,
-		value: DEFAULT_CACHE_SELECTOR
-	},
-	{
-		name: 'a private stored name',
-		schema: privateStoredCacheSchema,
-		value: 'private/builds'
-	},
-	{
-		name: 'a private stored name with the allowed punctuation',
-		schema: privateStoredCacheSchema,
-		value: 'private/0a.b-c_d'
-	},
-	{
-		name: 'a private selector',
-		schema: privateCacheSelectorSchema,
-		value: '_private-builds'
-	},
-	{
-		name: 'a private selector as a cache selector',
-		schema: cacheSelectorSchema,
-		value: '_private-builds'
-	},
-	{
-		name: 'a private stored name in the general stored-name schema',
-		schema: storedCacheSchema,
-		value: 'private/builds'
 	},
 	{
 		name: 'a zero cache priority',
@@ -481,56 +438,6 @@ const rejectedCases: readonly {
 		value: 'a'.repeat(64)
 	},
 	{
-		name: 'the private stored-name prefix without a local name',
-		schema: privateStoredCacheSchema,
-		value: 'private/'
-	},
-	{
-		name: 'a private stored name with an empty first segment',
-		schema: privateStoredCacheSchema,
-		value: 'private//x'
-	},
-	{
-		name: 'an upper-case private stored name',
-		schema: privateStoredCacheSchema,
-		value: 'private/UPPER'
-	},
-	{
-		name: 'a private stored name with a 64-character local name',
-		schema: privateStoredCacheSchema,
-		value: `private/${'a'.repeat(64)}`
-	},
-	{
-		name: 'a private stored name with a further slash',
-		schema: privateStoredCacheSchema,
-		value: 'private/a/b'
-	},
-	{
-		name: 'the private selector prefix without a local name',
-		schema: privateCacheSelectorSchema,
-		value: '_private-'
-	},
-	{
-		name: 'a private selector with an underscore at the start of its local name',
-		schema: privateCacheSelectorSchema,
-		value: '_private-_x'
-	},
-	{
-		name: 'a private selector with a 64-character local name',
-		schema: privateCacheSelectorSchema,
-		value: `_private-${'a'.repeat(64)}`
-	},
-	{
-		name: 'a private selector as a public selector',
-		schema: publicCacheSelectorSchema,
-		value: '_private-builds'
-	},
-	{
-		name: 'a private stored name as a public selector',
-		schema: publicCacheSelectorSchema,
-		value: 'private/builds'
-	},
-	{
 		name: 'a negative cache priority',
 		schema: cachePrioritySchema,
 		value: -1
@@ -551,10 +458,6 @@ describe('scalar schemas', () => {
 		expect(schema.safeParse(value).success).toBe(false);
 	});
 
-	it('represents the default cache as the empty string', () => {
-		expect(DEFAULT_CACHE).toBe('');
-	});
-
 	it.each([
 		{
 			name: 'basenames',
@@ -572,79 +475,67 @@ describe('scalar schemas', () => {
 	});
 });
 
-// `privateCacheLocalName` accepts only a private cache, so this compiles only
-// while `isPrivateCache` narrows the stored name.
-function localNameOf(cache: StoredCache): string | undefined {
-	return isPrivateCache(cache) ? privateCacheLocalName(cache) : undefined;
-}
-
-describe('private cache identity', () => {
-	it.each([
-		{
-			name: 'the default cache',
-			selector: DEFAULT_CACHE_SELECTOR,
-			cache: DEFAULT_CACHE
-		},
-		{ name: 'a public named cache', selector: 'builds', cache: 'builds' },
-		{
-			name: 'a public cache called private',
-			selector: 'private',
-			cache: 'private'
-		},
-		{
-			name: 'a private cache',
-			selector: '_private-builds',
-			cache: 'private/builds'
-		}
-	])('round-trips the selector for $name', ({ selector, cache }) => {
-		const stored = cacheFromSelector(cacheSelectorSchema.parse(selector));
-
-		expect({ stored, selector: selectorForCache(stored) }).toStrictEqual({
-			stored: cache,
-			selector
-		});
-	});
-
-	it('creates a private stored name from a local name', () => {
-		expect(privateStoredCache(cacheNameSchema.parse('builds'))).toBe(
-			'private/builds'
-		);
-	});
+describe('cache scopes', () => {
+	const named = cacheNameSchema.parse('builds');
 
 	it.each([
-		{ name: 'a private cache', cache: 'private/builds', localName: 'builds' },
-		{ name: 'a public named cache', cache: 'builds', localName: undefined },
 		{
-			name: 'a public cache called private',
-			cache: 'private',
-			localName: undefined
+			name: 'two default scopes',
+			left: { kind: 'default' },
+			right: { kind: 'default' },
+			equal: true
 		},
-		{ name: 'the default cache', cache: DEFAULT_CACHE, localName: undefined }
-	])(
-		'returns a local name only for a private stored name',
-		({ cache, localName }) => {
-			expect(localNameOf(storedCacheSchema.parse(cache))).toBe(localName);
-		}
-	);
-
-	it.each([
-		{ name: 'a public cache called private', value: 'private', covered: false },
 		{
-			name: 'a public cache called private.x',
-			value: 'private.x',
-			covered: false
+			name: 'the same named cache',
+			left: { kind: 'named', name: named },
+			right: { kind: 'named', name: named },
+			equal: true
 		},
-		{ name: 'the start bound itself', value: 'private/', covered: true },
-		{ name: 'a private cache', value: 'private/x', covered: true },
-		{ name: 'the end bound itself', value: 'private0', covered: false },
 		{
-			name: 'a public cache called privatez',
-			value: 'privatez',
-			covered: false
+			name: 'the default and a named cache',
+			left: { kind: 'default' },
+			right: { kind: 'named', name: named },
+			equal: false
+		},
+		{
+			name: 'two different named caches',
+			left: { kind: 'named', name: named },
+			right: { kind: 'named', name: cacheNameSchema.parse('releases') },
+			equal: false
 		}
-	])('the private range covers $name: $covered', ({ value, covered }) => {
+	])('compares $name', ({ left, right, equal }) => {
 		expect(
-			value >= PRIVATE_STORED_RANGE_START && value < PRIVATE_STORED_RANGE_END
-		).toBe(covered);
+			isSameCacheScope(
+				cacheScopeSchema.parse(left),
+				cacheScopeSchema.parse(right)
+			)
+		).toBe(equal);
+	});
+
+	it.each([
+		{
+			name: 'a default scope carrying a name',
+			value: { kind: 'default', name: 'builds' }
+		},
+		{ name: 'a named scope with no name', value: { kind: 'named' } },
+		{
+			name: 'a named scope with an empty name',
+			value: { kind: 'named', name: '' }
+		},
+		{
+			name: 'a named scope with an invalid name',
+			value: { kind: 'named', name: 'Builds' }
+		},
+		{
+			name: 'a name beginning with an underscore',
+			value: { kind: 'named', name: '_reserved' }
+		},
+		{ name: 'a bare string', value: 'builds' },
+		{
+			name: 'an unknown kind',
+			value: { kind: 'invalid', name: 'builds' }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(cacheScopeSchema.safeParse(value).success).toBe(false);
 	});
 });

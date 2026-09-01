@@ -111,7 +111,7 @@ const tokenGrantFields = {
 export const tokenRequestSchema = z.looseObject({
 	grant_type: z.string().min(1)
 });
-export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
+export type TokenRequest = z.output<typeof tokenRequestSchema>;
 
 /**
  * The fields to validate after dispatch selects token exchange.
@@ -123,7 +123,7 @@ export const tokenExchangeGrantRequestSchema = z.object({
 	subject_token_type: z.string().min(1),
 	refresh_token: unsupportedTokenParameterSchema
 });
-export type ParsedTokenExchangeGrantRequest = z.output<
+export type TokenExchangeGrantRequest = z.output<
 	typeof tokenExchangeGrantRequestSchema
 >;
 
@@ -137,7 +137,7 @@ export const refreshTokenGrantRequestSchema = z.object({
 	subject_token: unsupportedTokenParameterSchema,
 	subject_token_type: unsupportedTokenParameterSchema
 });
-export type ParsedRefreshTokenGrantRequest = z.output<
+export type RefreshTokenGrantRequest = z.output<
 	typeof refreshTokenGrantRequestSchema
 >;
 
@@ -145,9 +145,7 @@ export type ParsedRefreshTokenGrantRequest = z.output<
 // 8693 target and token-type fields are therefore refused until Cupboard can
 // implement their semantics rather than silently returning a different token.
 export const tokenExchangeRequestSchema = tokenExchangeGrantRequestSchema;
-export type ParsedTokenExchangeRequest = z.output<
-	typeof tokenExchangeRequestSchema
->;
+export type TokenExchangeRequest = z.output<typeof tokenExchangeRequestSchema>;
 
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the Cupboard JWT; `issued_token_type` is present for the
@@ -162,7 +160,7 @@ export const tokenResponseSchema = z.strictObject({
 	refresh_token: z.string().optional(),
 	authorization_details: authorizationDetailsSchema.optional()
 });
-export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
+export type TokenResponse = z.output<typeof tokenResponseSchema>;
 
 // A trust rule maps an external OIDC identity to Cupboard grants. Deployment
 // configuration creates the owner rule with a wildcard grant. Administrators
@@ -239,5 +237,7 @@ export type OidcTrustRemoveResponse = z.output<
 	typeof oidcTrustRemoveResponseSchema
 >;
 
-export type TokenExchangeRequest = z.input<typeof tokenExchangeRequestSchema>;
-export type TokenResponse = z.input<typeof tokenResponseSchema>;
+export type TokenExchangeRequestInput = z.input<
+	typeof tokenExchangeRequestSchema
+>;
+export type TokenResponseInput = z.input<typeof tokenResponseSchema>;

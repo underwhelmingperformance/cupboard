@@ -4,21 +4,21 @@ import { tenantUrl } from '@cupboard/nix-store/cache-url';
 import { cacheNamePattern } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
+	ConfiguredInstanceSummary,
 	InstanceName,
-	ParsedConfiguredInstanceSummary,
-	ParsedInstanceSummary
+	InstanceSummary
 } from '@cupboard/protocol/instance';
 import { instanceNameSchema } from '@cupboard/protocol/instance';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type {
-	ParsedControlCheckReport,
-	ParsedR2CredentialCheck
+	ControlCheckReport,
+	R2CredentialCheck
 } from '@cupboard/protocol/reports';
 import type {
-	ParsedMembershipRebuildResponse,
-	ParsedTenantListResponse,
-	ParsedTenantSummary,
-	TenantCreateBody
+	MembershipRebuildResponse,
+	TenantCreateBodyInput,
+	TenantListResponse,
+	TenantSummary
 } from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
@@ -165,18 +165,18 @@ export interface OnboardClient extends Pick<
 	CupboardClient,
 	'version' | 'signup' | 'tokenExchange' | 'publicKey'
 > {
-	getInstance(token: string): Promise<ParsedInstanceSummary>;
+	getInstance(token: string): Promise<InstanceSummary>;
 	initialiseInstance(
 		token: string,
 		name: InstanceName
-	): Promise<ParsedConfiguredInstanceSummary>;
-	listTenants(token: string): Promise<ParsedTenantListResponse>;
+	): Promise<ConfiguredInstanceSummary>;
+	listTenants(token: string): Promise<TenantListResponse>;
 	createTenant(
 		token: string,
-		body: TenantCreateBody
-	): Promise<ParsedTenantSummary>;
-	rebuildMembership(token: string): Promise<ParsedMembershipRebuildResponse>;
-	controlCheck(token: string): Promise<ParsedControlCheckReport>;
+		body: TenantCreateBodyInput
+	): Promise<TenantSummary>;
+	rebuildMembership(token: string): Promise<MembershipRebuildResponse>;
+	controlCheck(token: string): Promise<ControlCheckReport>;
 }
 
 function defaultInstanceName(publicUrl: string): InstanceName {
@@ -546,7 +546,10 @@ async function resolveDeploymentUrl(
 // builds a derived client bound to the token issued earlier in the flow.
 function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 	const parsed = parseWorkerUrl(url);
-	const raw = CupboardClient.fromUrl(parsed, { signal });
+	const raw = CupboardClient.fromUrl(parsed, {
+		cache: { kind: 'default' },
+		signal
+	});
 	const control = (token: string) =>
 		controlRpc(parsed, { credential: token, signal });
 
@@ -575,7 +578,7 @@ type ClaimResult =
 			readonly ray?: string;
 	  };
 
-function describeR2Check(check: ParsedR2CredentialCheck): string {
+function describeR2Check(check: R2CredentialCheck): string {
 	return check.result === 'rejected'
 		? `HTTP ${String(check.status)}`
 		: check.result;
@@ -601,7 +604,7 @@ async function ensureWorkerR2(dependencies: {
 	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const { ui, client, token, r2 } = dependencies;
-	let report: ParsedR2CredentialCheck;
+	let report: R2CredentialCheck;
 
 	throwIfAborted(dependencies.signal);
 
@@ -854,7 +857,7 @@ async function createFirstTenant(
 	url: string,
 	token: string,
 	owner: OwnerBinding
-): Promise<ParsedTenantSummary | undefined> {
+): Promise<TenantSummary | undefined> {
 	for (;;) {
 		const slug = await ui.prefixedText({
 			message: 'Choose a slug for the first cache',
@@ -870,7 +873,7 @@ async function createFirstTenant(
 			return await ui.reporter().phase(`Creating ${slug}`, () =>
 				client.createTenant(token, {
 					id: slug,
-					readMode: 'public',
+					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
 					ownerAudience: owner.audience

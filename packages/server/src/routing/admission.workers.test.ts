@@ -1,14 +1,13 @@
 import {
 	cacheNameSchema,
-	type PrivateStoredCache,
-	privateStoredCache,
+	type CacheScope,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
-	type ParsedTenantCreateBody,
-	type ParsedTenantReadCredential,
+	type TenantCreateBody,
 	tenantCreateBodySchema,
+	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { readUserSchema } from '@cupboard/shared/http';
@@ -39,6 +38,8 @@ import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	isReadPasswordMatching,
 	readPasswordHashSchema,
@@ -46,6 +47,7 @@ import {
 } from '../read/read-auth.ts';
 import {
 	adminGrants,
+	defaultCache,
 	flakyD1,
 	issueTokenForTenant,
 	provisionNamedTenant,
@@ -56,11 +58,10 @@ import worker from './handler.ts';
 
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const cachePassword = 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23';
-const cacheCredential: ParsedTenantReadCredential =
-	tenantReadCredentialSchema.parse({
-		user: 'reader',
-		password: cachePassword
-	});
+const cacheCredential: TenantReadCredential = tenantReadCredentialSchema.parse({
+	user: 'reader',
+	password: cachePassword
+});
 
 async function admitWithFaults(
 	slug: string,
@@ -83,11 +84,11 @@ function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 
 function createBody(
 	id: string,
-	readMode: 'public' | 'private' = 'private'
-): ParsedTenantCreateBody {
+	defaultCacheAccess: 'public' | 'private' = 'private'
+): TenantCreateBody {
 	return tenantCreateBodySchema.parse({
 		id,
-		readMode,
+		defaultCacheAccess,
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud'
@@ -122,8 +123,7 @@ describe('layered admission gate', () => {
 		await refreshTenantMembership(env);
 
 		expect(await admit('acme')).toStrictEqual({
-			status: 'active',
-			readMode: 'private'
+			status: 'active'
 		});
 	});
 
@@ -149,8 +149,7 @@ describe('layered admission gate', () => {
 		);
 
 		expect(await admit('acme')).toStrictEqual({
-			status: 'suspended',
-			readMode: 'private'
+			status: 'suspended'
 		});
 	});
 
@@ -173,8 +172,8 @@ describe('layered admission gate', () => {
 		const created = await admit('beta');
 
 		expect({ seeded, created }).toStrictEqual({
-			seeded: { status: 'active', readMode: 'private' },
-			created: { status: 'active', readMode: 'private' }
+			seeded: { status: 'active' },
+			created: { status: 'active' }
 		});
 	});
 
@@ -223,7 +222,7 @@ describe('layered admission gate', () => {
 
 		expect({ dropped, healed }).toStrictEqual({
 			dropped: undefined,
-			healed: { status: 'active', readMode: 'private' }
+			healed: { status: 'active' }
 		});
 	});
 
@@ -259,8 +258,7 @@ describe('layered admission gate', () => {
 		await refreshTenantMembership(env);
 
 		expect(await admitWithFaults('acme', 1)).toStrictEqual({
-			status: 'active',
-			readMode: 'private'
+			status: 'active'
 		});
 	});
 
@@ -409,10 +407,10 @@ describe('layered admission gate', () => {
 		};
 
 		const [preview, negotiate, previewPut, previewChild] = await Promise.all([
-			request('/cache/_default/uploads/preview'),
-			request('/cache/_default/uploads'),
-			request('/cache/_default/uploads/preview', 'PUT'),
-			request('/cache/_default/uploads/preview/child')
+			request('/uploads/preview'),
+			request('/uploads'),
+			request('/uploads/preview', 'PUT'),
+			request('/uploads/preview/child')
 		]);
 
 		expect({
@@ -435,7 +433,9 @@ describe('layered admission gate', () => {
 		'stops authenticated upload preview for a fresh $status tenant',
 		async ({ status }) => {
 			const slug = `preview-${status}`;
-			const issuer = await provisionNamedTenant(slug, { readMode: 'private' });
+			const issuer = await provisionNamedTenant(slug, {
+				defaultCacheAccess: 'private'
+			});
 			const token = await issueTokenForTenant(
 				testServerFor(slug),
 				issuer,
@@ -446,17 +446,14 @@ describe('layered admission gate', () => {
 
 			const ctx = createExecutionContext();
 			const response = await worker.fetch(
-				new Request(
-					`https://cache.example/t/${slug}/cache/_default/uploads/preview`,
-					{
-						body: JSON.stringify({ paths: [] }),
-						headers: {
-							authorization: `Bearer ${token}`,
-							'content-type': 'application/json'
-						},
-						method: 'POST'
-					}
-				),
+				new Request(`https://cache.example/t/${slug}/uploads/preview`, {
+					body: JSON.stringify({ paths: [] }),
+					headers: {
+						authorization: `Bearer ${token}`,
+						'content-type': 'application/json'
+					},
+					method: 'POST'
+				}),
 				env,
 				ctx
 			);
@@ -482,7 +479,7 @@ describe('layered admission gate', () => {
 		}).toStrictEqual({ status: 503, retryAfter: '5' });
 	});
 
-	it('reflects a private tenant credential change with no row caching', async () => {
+	it('reflects a tenant read credential change with no row caching', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
@@ -499,10 +496,9 @@ describe('layered admission gate', () => {
 		const after = await admit('acme');
 
 		expect({ before, after }).toStrictEqual({
-			before: { status: 'active', readMode: 'private' },
+			before: { status: 'active' },
 			after: {
 				status: 'active',
-				readMode: 'private',
 				readVerifier: {
 					user: 'reader',
 					passwordHash: '0'.repeat(64),
@@ -529,18 +525,20 @@ function countingD1(inner: D1Database, batches: number[]): D1Database {
 	};
 }
 
-interface PrivateAdmission {
+interface CacheAdmission {
 	readonly entry: TenantEntry | undefined;
 	readonly cacheUser: string | undefined;
 	readonly cacheAcceptsPassword: boolean;
-	readonly isCacheDeleted: boolean | undefined;
+	readonly cache:
+		| { readonly access: 'public' | 'private'; readonly isDeleted: boolean }
+		| undefined;
 	readonly batches: number[];
 }
 
-async function admitPrivate(
+async function admitCache(
 	slug: string,
-	cache?: PrivateStoredCache
-): Promise<PrivateAdmission> {
+	cache: CacheScope = defaultCache()
+): Promise<CacheAdmission> {
 	const batches: number[] = [];
 	const countedEnv = {
 		...env,
@@ -559,7 +557,7 @@ async function admitPrivate(
 	return {
 		entry: admission?.entry,
 		cacheUser: verifier?.user,
-		isCacheDeleted: admission?.isCacheDeleted,
+		cache: admission?.cache,
 		cacheAcceptsPassword:
 			verifier !== undefined &&
 			(await isReadPasswordMatching(
@@ -571,9 +569,15 @@ async function admitPrivate(
 	};
 }
 
-describe('private cache admission', () => {
-	const builds = cacheNameSchema.parse('builds');
-	const guides = cacheNameSchema.parse('guides');
+describe('cache admission', () => {
+	const builds: CacheScope = {
+		kind: 'named',
+		name: cacheNameSchema.parse('builds')
+	};
+	const guides: CacheScope = {
+		kind: 'named',
+		name: cacheNameSchema.parse('guides')
+	};
 
 	it("returns the selected cache's verifier from one batch", async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
@@ -586,13 +590,11 @@ describe('private cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(
-			await admitPrivate('acme', privateStoredCache(builds))
-		).toStrictEqual({
-			entry: { status: 'active', readMode: 'public' },
+		expect(await admitCache('acme', builds)).toStrictEqual({
+			entry: { status: 'active' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
-			isCacheDeleted: false,
+			cache: undefined,
 			batches: [3]
 		});
 	});
@@ -601,13 +603,11 @@ describe('private cache admission', () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
 		await refreshTenantMembership(env);
 
-		expect(
-			await admitPrivate('acme', privateStoredCache(builds))
-		).toStrictEqual({
-			entry: { status: 'active', readMode: 'public' },
+		expect(await admitCache('acme', builds)).toStrictEqual({
+			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			isCacheDeleted: false,
+			cache: undefined,
 			batches: [3]
 		});
 	});
@@ -623,13 +623,11 @@ describe('private cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(
-			await admitPrivate('acme', privateStoredCache(builds))
-		).toStrictEqual({
-			entry: { status: 'active', readMode: 'public' },
+		expect(await admitCache('acme', builds)).toStrictEqual({
+			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			isCacheDeleted: false,
+			cache: undefined,
 			batches: [3]
 		});
 	});
@@ -645,12 +643,12 @@ describe('private cache admission', () => {
 		);
 		await refreshTenantMembership(env);
 
-		expect(await admitPrivate('acme')).toStrictEqual({
-			entry: { status: 'active', readMode: 'public' },
+		expect(await admitCache('acme')).toStrictEqual({
+			entry: { status: 'active' },
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			isCacheDeleted: false,
-			batches: []
+			cache: { access: 'public', isDeleted: false },
+			batches: [3]
 		});
 	});
 
@@ -664,11 +662,12 @@ describe('private cache admission', () => {
 			now
 		);
 		await refreshTenantMembership(env);
-		await database()
-			.insert(d1Schema.cacheLifecycle)
+		await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
+			.insert(migrationSchema.cacheLifecycles)
 			.values({
 				tenant: tenantIdSchema.parse('acme'),
-				cache: privateStoredCache(builds),
+				...cacheMigrationColumns(builds, 'private'),
+				access: 'private',
 				generation: secondCacheGeneration,
 				deletedAt: now,
 				updatedAt: now
@@ -677,18 +676,16 @@ describe('private cache admission', () => {
 
 		// A deletion keeps the cache credential, so the reader still authenticates.
 		// The deleted cache state causes the content request to fail.
-		expect(
-			await admitPrivate('acme', privateStoredCache(builds))
-		).toStrictEqual({
-			entry: { status: 'active', readMode: 'public' },
+		expect(await admitCache('acme', builds)).toStrictEqual({
+			entry: { status: 'active' },
 			cacheUser: 'reader',
 			cacheAcceptsPassword: true,
-			isCacheDeleted: true,
+			cache: { access: 'private', isDeleted: true },
 			batches: [3]
 		});
 	});
 
-	it('refuses an offboarded tenant even inside the private namespace', async () => {
+	it('refuses an offboarded tenant for a private cache', async () => {
 		await ensureTenant(database(), createBody('acme', 'public'), now);
 		await setCacheReadCredential(
 			database(),
@@ -704,13 +701,11 @@ describe('private cache admission', () => {
 			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();
 
-		expect(
-			await admitPrivate('acme', privateStoredCache(builds))
-		).toStrictEqual({
+		expect(await admitCache('acme', builds)).toStrictEqual({
 			entry: undefined,
 			cacheUser: undefined,
 			cacheAcceptsPassword: false,
-			isCacheDeleted: undefined,
+			cache: undefined,
 			batches: [3]
 		});
 	});

@@ -1,10 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	ControlKeySummary,
-	ParsedControlKeyListResponse,
-	ParsedControlKeyRetireResponse,
-	ParsedControlKeyRotateResponse
+	ControlKeyListResponse,
+	ControlKeyRetireResponse,
+	ControlKeyRotateResponse,
+	ControlKeySummaryInput
 } from '@cupboard/protocol/control-keys';
 import {
 	formatTimestamp,
@@ -24,9 +24,9 @@ interface RetireOptions {
 }
 
 export interface ControlKeyClient {
-	list(): Promise<ParsedControlKeyListResponse>;
-	rotate(): Promise<ParsedControlKeyRotateResponse>;
-	retire(input: { kid: AuthKeyId }): Promise<ParsedControlKeyRetireResponse>;
+	list(): Promise<ControlKeyListResponse>;
+	rotate(): Promise<ControlKeyRotateResponse>;
+	retire(input: { kid: AuthKeyId }): Promise<ControlKeyRetireResponse>;
 }
 
 export function registerControlKeyCommands(
@@ -161,7 +161,7 @@ export async function runControlKeyRetire(
 	});
 }
 
-function controlKeyRow(key: ControlKeySummary): ResultRow {
+function controlKeyRow(key: ControlKeySummaryInput): ResultRow {
 	const retirement =
 		key.scheduledRetireAt === undefined
 			? ''

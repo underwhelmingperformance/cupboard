@@ -1,5 +1,5 @@
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, asc, eq, isNotNull, sql } from 'drizzle-orm';
@@ -27,6 +27,7 @@ import {
 	initialise,
 	type MeasuredInvocation,
 	measureInvocations,
+	namedCache,
 	narBytes,
 	negotiateUploads,
 	pushPath,
@@ -80,7 +81,7 @@ type ClaimObservation = MeasuredInvocation<{
 
 // Store path hashes that sort in index order, so the scan cursor identifies how
 // far one pass reached.
-function indexedMetadata(index: number): ParsedUploadPathMetadata {
+function indexedMetadata(index: number): UploadPathMetadata {
 	const suffix =
 		storePathAlphabet.charAt(Math.floor(index / 32)) +
 		storePathAlphabet.charAt(index % 32);
@@ -95,12 +96,14 @@ function indexedMetadata(index: number): ParsedUploadPathMetadata {
 async function commitScannedPaths(server: string): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({
+		caches: [{ scope: namedCache('builds') }]
+	});
 
 	for (let start = 0; start < committedPaths; start += pushConcurrency) {
 		await Promise.all(
 			Array.from({ length: pushConcurrency }, (_, offset) =>
-				pushPath(token, indexedMetadata(start + offset), 'builds')
+				pushPath(token, indexedMetadata(start + offset), namedCache('builds'))
 			)
 		);
 	}

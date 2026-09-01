@@ -8,6 +8,7 @@ import {
 	InvalidCaptureSpecError,
 	jobWorkflowReferenceClaim,
 	parseCapture,
+	RootBindingRequiredError,
 	UnknownAllowError,
 	UnknownTemplateSourceError
 } from './rule-builder.ts';
@@ -116,7 +117,7 @@ describe('collectSubstitutions', () => {
 });
 
 describe('buildCacheGrant', () => {
-	it('builds a per-PR cache grant with a same-as-cache root', () => {
+	it('builds a per-PR cache grant with an explicit root template', () => {
 		const substitutions = collectSubstitutions({
 			templateSource: 'github-pr',
 			captures: []
@@ -126,7 +127,7 @@ describe('buildCacheGrant', () => {
 			buildCacheGrant({
 				cacheTemplate: 'pr-{pr}',
 				allow: ['push', 'root'],
-				root: 'same-as-cache',
+				rootTemplate: 'pr-{pr}',
 				substitutions
 			})
 		).toStrictEqual({
@@ -151,9 +152,22 @@ describe('buildCacheGrant', () => {
 							}
 						}
 					},
+					kind: 'named',
 					validate: 'cacheName'
 				},
-				root: { validate: 'rootName', equalsResource: 'cache' }
+				root: {
+					equalsTemplate: 'pr-{pr}',
+					substitutions: {
+						pr: {
+							claim: 'ref',
+							capture: {
+								pattern: '^refs/pull/(?<pr>[0-9]+)/merge$',
+								group: 'pr'
+							}
+						}
+					},
+					validate: 'rootName'
+				}
 			}
 		});
 	});
@@ -167,7 +181,7 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+			resources: { cache: { kind: 'default' } }
 		});
 	});
 
@@ -184,21 +198,16 @@ describe('buildCacheGrant', () => {
 				'root:attach'
 			],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'default' },
 				root: { validate: 'rootName', exact: 'github:acme/ci/' }
 			}
 		});
 	});
 
-	it('uses the cache binding as the root for an attach-only allowance', () => {
-		expect(buildCacheGrant({ allow: ['attach'] })).toStrictEqual({
-			type: 'cupboard_cache',
-			actions: ['root:attach'],
-			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
-				root: { validate: 'rootName', equalsResource: 'cache' }
-			}
-		});
+	it('requires an explicit root for operations that manage roots', () => {
+		expect(() => buildCacheGrant({ allow: ['attach'] })).toThrow(
+			RootBindingRequiredError
+		);
 	});
 
 	it('builds an exact cache grant', () => {
@@ -212,7 +221,9 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: 'acme-ci', validate: 'cacheName' } }
+			resources: {
+				cache: { exact: 'acme-ci', kind: 'named', validate: 'cacheName' }
+			}
 		});
 	});
 
@@ -232,6 +243,7 @@ describe('buildCacheGrant', () => {
 			grant.type === 'cupboard_cache' && grant.resources.cache
 		).toStrictEqual({
 			exact: 'fixed',
+			kind: 'named',
 			validate: 'cacheName'
 		});
 	});

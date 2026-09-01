@@ -12,7 +12,6 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
-	privateStoredCache,
 	rootNameSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
@@ -27,6 +26,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { cacheIdentityCondition, cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
@@ -49,13 +49,9 @@ import {
 	maxRootsExpiredPerRun
 } from './garbage-collection-service.ts';
 import {
-	attestationReferenceDeleteChunk,
-	type AttestationReferenceKey,
-	attestationReferenceMatch,
-	blobReferenceDeleteChunk,
-	type BlobReferenceKey,
-	blobReferenceMatch,
+	buildTenantAttestationReferenceDeleteStatement,
 	buildTenantBlobDeleteStatement,
+	buildTenantBlobReferenceDeleteStatement,
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
@@ -78,7 +74,11 @@ const database = drizzle(stubD1, { schema: d1Schema });
 // SQLite. Use its Drizzle driver so the generated SQL matches production.
 const doDatabase = drizzleDurable({ exec: throwStub } as never, { schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
-const cache = cacheNameSchema.parse('builds');
+const cache = {
+	kind: 'named' as const,
+	name: cacheNameSchema.parse('builds')
+};
+const cacheId = cacheIdSchema.parse(1);
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
 const testNarHash = nixSha256HashSchema.parse(
@@ -108,7 +108,7 @@ describe('selected D1 statements', () => {
 		it('target INSERT stays within the parameter budget at maxRootTargetInsertRows', () => {
 			const query = database.insert(schema.retentionRootTargets).values(
 				Array.from({ length: maxRootTargetInsertRows }, () => ({
-					cache,
+					cacheId,
 					rootName: testRootName,
 					storePathHash: testStorePathHash,
 					storePath: testStorePath
@@ -186,40 +186,42 @@ describe('selected D1 statements', () => {
 	});
 
 	describe('offboarding reference deletes (offboarding-service)', () => {
-		it('blob-reference DELETE stays within the parameter budget at blobReferenceDeleteChunk', () => {
-			const rows: BlobReferenceKey[] = Array.from(
-				{ length: blobReferenceDeleteChunk },
-				() => ({
-					cache,
-					storePathHash: testStorePathHash,
-					generation: narInfoGenerationSchema.parse(0)
-				})
+		const blobReferences = Array.from({ length: 24 }, (_, index) => ({
+			cacheKind: 'named' as const,
+			cacheName: cache.name,
+			storePathHash: storePathHashSchema.parse(
+				`${'a'.repeat(31)}${String(index % 10)}`
+			),
+			generation: narInfoGenerationSchema.parse(index)
+		}));
+		const attestationReferences = blobReferences
+			.slice(0, 16)
+			.map((row, index) => ({
+				...row,
+				predicateType: predicateTypeSchema.parse(
+					`https://example.test/${String(index)}`
+				),
+				digest: sha256HexDigestSchema.parse(
+					index.toString(16).padStart(64, 'a')
+				)
+			}));
+
+		it('blob-reference DELETE stays within the parameter budget for its widest chunk', () => {
+			const del = buildTenantBlobReferenceDeleteStatement(
+				database,
+				tenant,
+				blobReferences
 			);
-			const inBatch = or(...rows.map((row) => blobReferenceMatch(row)));
-			const del = database
-				.delete(d1Schema.blobReference)
-				.where(and(eq(d1Schema.blobReference.tenant, tenant), inBatch));
 
 			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
 
-		it('attestation-reference DELETE stays within the parameter budget at attestationReferenceDeleteChunk', () => {
-			const rows: AttestationReferenceKey[] = Array.from(
-				{ length: attestationReferenceDeleteChunk },
-				() => ({
-					cache,
-					storePathHash: testStorePathHash,
-					generation: narInfoGenerationSchema.parse(0),
-					predicateType: predicateTypeSchema.parse(
-						'https://slsa.dev/provenance/v1'
-					),
-					digest: sha256HexDigestSchema.parse('0'.repeat(64))
-				})
+		it('attestation-reference DELETE stays within the parameter budget for its widest chunk', () => {
+			const del = buildTenantAttestationReferenceDeleteStatement(
+				database,
+				tenant,
+				attestationReferences
 			);
-			const inBatch = or(...rows.map((row) => attestationReferenceMatch(row)));
-			const del = database
-				.delete(d1Schema.attestationReference)
-				.where(and(eq(d1Schema.attestationReference.tenant, tenant), inBatch));
 
 			expect(del.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
 		});
@@ -323,7 +325,11 @@ describe('selected D1 statements', () => {
 				.where(
 					and(
 						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.cache, cache),
+						cacheIdentityCondition(
+							d1Schema.blobReference.cacheKind,
+							d1Schema.blobReference.cacheName,
+							cache
+						),
 						inArray(d1Schema.blobReference.storePathHash, storePaths)
 					)
 				);
@@ -341,7 +347,7 @@ describe('selected D1 statements', () => {
 			const query = narInfoReferenceQuery(
 				database,
 				tenant,
-				privateStoredCache(cache),
+				cache,
 				Array.from({ length: maxInClauseValues }, () => testStorePathHash)
 			);
 
@@ -456,7 +462,7 @@ describe('selected D1 statements', () => {
 		it('target SELECT stays within the parameter budget at maxRootsExpiredPerRun', () => {
 			const select = expiredRootTargetSelect(
 				doDatabase,
-				cache,
+				cacheId,
 				Array.from({ length: maxRootsExpiredPerRun }, () => testRootName)
 			);
 

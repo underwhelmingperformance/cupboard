@@ -12,6 +12,10 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 
 import {
+	type CacheAccessMode,
+	type CacheScope
+} from '@cupboard/nix-store/scalars';
+import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
 	tokenResponseSchema
@@ -20,7 +24,6 @@ import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 
-import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
 import type { AccessCredential } from '../../packages/cli/src/client/credentials.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
@@ -44,10 +47,10 @@ export const signupSecret = 'e2e-signup-secret';
 // stands in for the operator who would do this through the control plane.
 const harnessAdminSubject = 'harness-admin';
 
-// How the harness provisions the fixture tenant: its read mode and, for a private
-// cache, the read credential its reads require.
+// How the harness provisions the fixture tenant: the default cache's access and
+// the fallback credential for private cache reads.
 export interface TenantProvisionSpec {
-	readonly readMode: 'public' | 'private';
+	readonly defaultCacheAccess: CacheAccessMode;
 	readonly read?: { readonly user: string; readonly password: string };
 }
 
@@ -237,7 +240,7 @@ export class CupboardTestServer {
 		// the control surface) opts out with `provision: false`.
 		if (options.provision !== false) {
 			await instance.provisionFixtureTenant(
-				options.provision ?? { readMode: 'public' }
+				options.provision ?? { defaultCacheAccess: 'public' }
 			);
 		}
 
@@ -343,7 +346,7 @@ export class CupboardTestServer {
 
 		const body = {
 			id: fixtureTenant,
-			readMode: spec.readMode,
+			defaultCacheAccess: spec.defaultCacheAccess,
 			ownerIssuer: this.issuer.issuer,
 			ownerSubject,
 			ownerAudience,
@@ -375,10 +378,10 @@ export class CupboardTestServer {
 	 */
 	pushClient(
 		credential: AccessCredential,
-		options: { readonly cache?: string } = {}
+		options: { readonly cache?: CacheScope } = {}
 	): PushClient {
 		const base = pushClientFor(this.tenantUrl, credential, {
-			cache: storedCacheFor(options.cache)
+			cache: options.cache ?? { kind: 'default' }
 		});
 
 		return {

@@ -1,6 +1,6 @@
 import { positiveIntSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import type { R2Credential } from '@cupboard/protocol/upload';
+import type { R2CredentialInput } from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
 import type { R2PresignerConfiguration } from './presign.ts';
@@ -99,7 +99,7 @@ export async function createR2TemporaryCredentials(
 	configuration: R2PresignerConfiguration,
 	options: R2TemporaryCredentialOptions,
 	now: Date
-): Promise<R2Credential> {
+): Promise<R2CredentialInput> {
 	const endpoint = `https://${configuration.accountId}.r2.cloudflarestorage.com`;
 	const issuedAt = Math.floor(now.getTime() / 1000);
 	const expiresAt = issuedAt + options.ttlSeconds;

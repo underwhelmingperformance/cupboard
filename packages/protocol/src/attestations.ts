@@ -14,14 +14,14 @@ export const attestationDescriptorSchema = z.strictObject({
 	predicateType: predicateTypeSchema,
 	size: positiveIntSchema
 });
-export type ParsedAttestationDescriptor = z.output<
+export type AttestationDescriptor = z.output<
 	typeof attestationDescriptorSchema
 >;
 
 export const attestationListSchema = z.strictObject({
 	attestations: z.array(attestationDescriptorSchema)
 });
-export type ParsedAttestationList = z.output<typeof attestationListSchema>;
+export type AttestationList = z.output<typeof attestationListSchema>;
 
 const attestationBundleRequestSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
@@ -36,7 +36,7 @@ export const attestationNegotiateRequestSchema = z.strictObject({
 		.array(attestationBundleRequestSchema)
 		.max(attestationNegotiateMaxBundles)
 });
-export type ParsedAttestationNegotiateRequest = z.output<
+export type AttestationNegotiateRequest = z.output<
 	typeof attestationNegotiateRequestSchema
 >;
 
@@ -45,7 +45,7 @@ export const attestationSkipDecisionSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	digest: sha256HexDigestSchema
 });
-export type ParsedAttestationSkipDecision = z.output<
+export type AttestationSkipDecision = z.output<
 	typeof attestationSkipDecisionSchema
 >;
 
@@ -57,7 +57,7 @@ export const attestationUploadDecisionSchema = z.strictObject({
 	r2Key: z.string(),
 	expiresAt: isoTimestampSchema
 });
-export type ParsedAttestationUploadDecision = z.output<
+export type AttestationUploadDecision = z.output<
 	typeof attestationUploadDecisionSchema
 >;
 
@@ -65,14 +65,12 @@ export const attestationDecisionSchema = z.discriminatedUnion('action', [
 	attestationSkipDecisionSchema,
 	attestationUploadDecisionSchema
 ]);
-export type ParsedAttestationDecision = z.output<
-	typeof attestationDecisionSchema
->;
+export type AttestationDecision = z.output<typeof attestationDecisionSchema>;
 
 export const attestationNegotiateResponseSchema = z.strictObject({
 	bundles: z.array(attestationDecisionSchema)
 });
-export type ParsedAttestationNegotiateResponse = z.output<
+export type AttestationNegotiateResponse = z.output<
 	typeof attestationNegotiateResponseSchema
 >;
 
@@ -82,22 +80,26 @@ export const attestationAttachResponseSchema = z.strictObject({
 	predicateType: predicateTypeSchema,
 	status: z.enum(['attached', 'already-present'])
 });
-export type ParsedAttestationAttachResponse = z.output<
+export type AttestationAttachResponse = z.output<
 	typeof attestationAttachResponseSchema
 >;
 
-export type AttestationDescriptor = z.input<typeof attestationDescriptorSchema>;
-export type AttestationList = z.input<typeof attestationListSchema>;
-export type AttestationNegotiateRequest = z.input<
+export type AttestationDescriptorInput = z.input<
+	typeof attestationDescriptorSchema
+>;
+export type AttestationListInput = z.input<typeof attestationListSchema>;
+export type AttestationNegotiateRequestInput = z.input<
 	typeof attestationNegotiateRequestSchema
 >;
-export type AttestationDecision = z.input<typeof attestationDecisionSchema>;
-export type AttestationUploadDecision = z.input<
+export type AttestationDecisionInput = z.input<
+	typeof attestationDecisionSchema
+>;
+export type AttestationUploadDecisionInput = z.input<
 	typeof attestationUploadDecisionSchema
 >;
-export type AttestationNegotiateResponse = z.input<
+export type AttestationNegotiateResponseInput = z.input<
 	typeof attestationNegotiateResponseSchema
 >;
-export type AttestationAttachResponse = z.input<
+export type AttestationAttachResponseInput = z.input<
 	typeof attestationAttachResponseSchema
 >;

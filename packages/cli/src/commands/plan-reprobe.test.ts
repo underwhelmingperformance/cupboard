@@ -17,7 +17,7 @@ import {
 	ReadCredentialPairError
 } from '../errors.ts';
 import type { DestinationProbes } from '../plan/availability-partition.ts';
-import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
+import type { CohortTarget } from '../plan/cohort-target.ts';
 
 import { registerPlanCommands } from './plan-cohort.ts';
 import { runPlanReprobe } from './plan-reprobe.ts';
@@ -36,13 +36,13 @@ const otherPath = storePathSchema.parse(
 );
 const appRoot = rootNameSchema.parse('github:owner/repo/main/app');
 
-const appTarget: ParsedCohortTarget = {
+const appTarget: CohortTarget = {
 	attr: 'packages.x86_64-linux.app',
 	installable: appPath,
 	expectedPath: appPath,
 	root: appRoot
 };
-const otherTarget: ParsedCohortTarget = {
+const otherTarget: CohortTarget = {
 	attr: 'packages.x86_64-linux.other',
 	installable: otherPath,
 	expectedPath: otherPath,

@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { runCohortSequence } from '../build-push/cohorts.ts';
 import {
 	BuildCommandFailedError,
+	CacheTargetConflictError,
 	CliAbortError,
 	CohortInputError,
 	CohortsFileInvalidError,
@@ -282,6 +283,29 @@ async function parseBuildPush(arguments_: readonly string[]): Promise<unknown> {
 }
 
 describe('registerBuildPushCommand', () => {
+	it('recognises a cache name only before the command boundary', async () => {
+		const result = await parseBuildPush([
+			`${tenantUrl}/cache/release`,
+			'builds',
+			'--',
+			'nix',
+			'build'
+		]);
+
+		expect(result).toBeInstanceOf(CacheTargetConflictError);
+	});
+
+	it('treats the sole positional as a cache in cohorts-file mode', async () => {
+		const result = await parseBuildPush([
+			`${tenantUrl}/cache/release`,
+			'builds',
+			'--cohorts-file',
+			'plan.json'
+		]);
+
+		expect(result).toBeInstanceOf(CacheTargetConflictError);
+	});
+
 	it.each([
 		{
 			name: '--no-retain combined with --root',
