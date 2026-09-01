@@ -1,5 +1,7 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
+	type CacheReadRevision,
 	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -63,6 +65,8 @@ export interface TenantAdmission {
 	readonly fresh: boolean;
 	readonly cache?: {
 		readonly access: CacheAccessMode;
+		readonly generation: CacheGeneration;
+		readonly readRevision: CacheReadRevision;
 		readonly isDeleted: boolean;
 	};
 	readonly cacheVerifier?: TenantReadVerifier;
@@ -191,7 +195,12 @@ async function readTenantAndCacheRows(
 	tenant: TenantAdmissionRow | undefined;
 	credential: TenantReadVerifier | undefined;
 	cache:
-		| { readonly access: CacheAccessMode; readonly isDeleted: boolean }
+		| {
+				readonly access: CacheAccessMode;
+				readonly generation: CacheGeneration;
+				readonly readRevision: CacheReadRevision;
+				readonly isDeleted: boolean;
+		  }
 		| undefined;
 }> {
 	const credentialRow = and(
@@ -226,6 +235,8 @@ async function readTenantAndCacheRows(
 					database
 						.select({
 							access: d1Schema.cacheLifecycle.access,
+							generation: d1Schema.cacheLifecycle.generation,
+							readRevision: d1Schema.cacheLifecycle.readRevision,
 							deletedAt: d1Schema.cacheLifecycle.deletedAt
 						})
 						.from(d1Schema.cacheLifecycle)
@@ -250,6 +261,8 @@ async function readTenantAndCacheRows(
 					? undefined
 					: {
 							access: lifecycle.access,
+							generation: lifecycle.generation,
+							readRevision: lifecycle.readRevision,
 							isDeleted: lifecycle.deletedAt !== null
 						}
 		};

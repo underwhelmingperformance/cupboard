@@ -1,6 +1,8 @@
 import {
 	type CacheGeneration,
 	cacheGenerationSchema,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -23,6 +25,14 @@ export const firstCacheGeneration = cacheGenerationSchema.parse(1);
 export const secondCacheGeneration = cacheGenerationSchema.parse(
 	firstCacheGeneration + 1
 );
+
+export const firstCacheReadRevision = cacheReadRevisionSchema.parse(1);
+
+export function nextCacheReadRevision(
+	revision: CacheReadRevision
+): CacheReadRevision {
+	return cacheReadRevisionSchema.parse(revision + 1);
+}
 
 const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, ${firstCacheGeneration})`;
 

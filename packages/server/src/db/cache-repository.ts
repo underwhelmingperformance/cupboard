@@ -1,8 +1,10 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	type CachePriority,
 	cachePrioritySchema,
+	type CacheReadRevision,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -20,6 +22,10 @@ import {
 	cacheScopeFromRow,
 	type ResolvedCache
 } from './cache.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from './cache-generation.ts';
 import * as schema from './schema.ts';
 
 export class CacheRepository {
@@ -31,7 +37,9 @@ export class CacheRepository {
 				id: schema.caches.id,
 				kind: schema.caches.kind,
 				name: schema.caches.name,
-				access: schema.caches.access
+				access: schema.caches.access,
+				generation: schema.caches.generation,
+				readRevision: schema.caches.readRevision
 			})
 			.from(schema.caches)
 			.where(
@@ -49,7 +57,9 @@ export class CacheRepository {
 		return {
 			id: row.id,
 			scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
-			access: row.access
+			access: row.access,
+			generation: row.generation,
+			readRevision: row.readRevision
 		};
 	}
 
@@ -66,7 +76,9 @@ export class CacheRepository {
 	create(
 		scope: CacheScope,
 		access: CacheAccessMode,
-		priority: CachePriority
+		priority: CachePriority,
+		generation: CacheGeneration,
+		readRevision: CacheReadRevision
 	): ResolvedCache {
 		const created = this.database
 			.insert(schema.caches)
@@ -75,6 +87,8 @@ export class CacheRepository {
 				name: scope.kind === 'named' ? scope.name : undefined,
 				access,
 				priority,
+				generation,
+				readRevision,
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()
@@ -82,7 +96,9 @@ export class CacheRepository {
 				id: schema.caches.id,
 				kind: schema.caches.kind,
 				name: schema.caches.name,
-				access: schema.caches.access
+				access: schema.caches.access,
+				generation: schema.caches.generation,
+				readRevision: schema.caches.readRevision
 			})
 			.all()
 			.at(0);
@@ -94,7 +110,9 @@ export class CacheRepository {
 		return {
 			id: created.id,
 			scope: cacheScopeFromRow({ kind: created.kind, name: created.name }),
-			access: created.access
+			access: created.access,
+			generation: created.generation,
+			readRevision: created.readRevision
 		};
 	}
 
@@ -116,6 +134,8 @@ export class CacheRepository {
 				name: scope.name,
 				access,
 				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
+				generation: firstCacheGeneration,
+				readRevision: firstCacheReadRevision,
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()
@@ -124,18 +144,22 @@ export class CacheRepository {
 		return this.require(scope);
 	}
 
-	setAccess(cache: ResolvedCache, access: CacheAccessMode): ResolvedCache {
-		if (cache.access === access) {
+	setAccess(
+		cache: ResolvedCache,
+		access: CacheAccessMode,
+		readRevision: CacheReadRevision
+	): ResolvedCache {
+		if (cache.access === access && cache.readRevision === readRevision) {
 			return cache;
 		}
 
 		this.database
 			.update(schema.caches)
-			.set({ access })
+			.set({ access, readRevision })
 			.where(eq(schema.caches.id, cache.id))
 			.run();
 
-		return { ...cache, access };
+		return { ...cache, access, readRevision };
 	}
 
 	scopeForId(id: ResolvedCache['id']): CacheScope {
@@ -148,7 +172,9 @@ export class CacheRepository {
 				id: schema.caches.id,
 				kind: schema.caches.kind,
 				name: schema.caches.name,
-				access: schema.caches.access
+				access: schema.caches.access,
+				generation: schema.caches.generation,
+				readRevision: schema.caches.readRevision
 			})
 			.from(schema.caches)
 			.where(eq(schema.caches.id, id))
@@ -161,7 +187,9 @@ export class CacheRepository {
 		return {
 			id: row.id,
 			scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
-			access: row.access
+			access: row.access,
+			generation: row.generation,
+			readRevision: row.readRevision
 		};
 	}
 }

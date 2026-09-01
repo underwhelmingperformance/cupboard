@@ -1,5 +1,7 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
+	type CacheReadRevision,
 	type CacheScope,
 	type NixSha256HashString,
 	type StorePathHash,
@@ -36,6 +38,7 @@ import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
 	isNotModified,
+	legacyNarInfoObjectKey,
 	narCacheControl,
 	narInfoCacheControl,
 	narInfoObjectKey,
@@ -64,6 +67,8 @@ interface ReadEnv {
 export interface ReadScope {
 	readonly scope: CacheScope;
 	readonly access: CacheAccessMode;
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
 }
 
 /**
@@ -269,7 +274,7 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
 }
 
 /**
- * Builds the reference-edge lookup that authorises private narinfo reads.
+ * Builds the reference-edge lookup that authorises narinfo reads.
  *
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
  * `blob_ref` through its existing `(tenant, cache, store_path_hash,
@@ -316,7 +321,7 @@ export function narInfoReferenceQuery(
 }
 
 /**
- * Returns the current commit of each requested path in this private cache,
+ * Returns the current commit of each requested path in this cache,
  * taken from the reference edges the cache generation authorises.
  *
  * A recommit can leave an earlier edge in place until the teardown drain
@@ -368,12 +373,10 @@ async function authorisedNarInfoVersions(
 // the same tenant, cache, and path identity in its cache tag so deletion and
 // re-signing purge only this narinfo.
 //
-// A private read serves the object only when an authorised reference edge
+// A read serves the object only when an authorised reference edge
 // matches the path and the object's recorded generation and NAR hash match that
 // edge. Without the second check, a reader of a recreated cache could receive
-// the object published by the previous cache with that name. Public caches accept
-// the eventual removal of a deleted cache's objects instead, which keeps the
-// cacheable read path free of D1.
+// the object published by the previous cache with that name.
 export async function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
@@ -382,13 +385,15 @@ export async function serveNarInfo(
 	storePathHash: StorePathHash,
 	isPrivate: boolean
 ): Promise<Response> {
-	const key = narInfoObjectKey(tenant, storePathHash, cache.scope);
+	const key = narInfoObjectKey(
+		tenant,
+		storePathHash,
+		cache.scope,
+		cache.generation
+	);
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache.scope, storePathHash);
-
-	if (cache.access !== 'private') {
-		return serveR2(request, env, key, headersFor, !isPrivate);
-	}
+	const legacyKey = legacyNarInfoObjectKey(tenant, storePathHash, cache.scope);
 
 	const versions = await authorisedNarInfoVersions(env, tenant, cache.scope, [
 		storePathHash
@@ -399,8 +404,14 @@ export async function serveNarInfo(
 		return uncachedNotFoundResponse();
 	}
 
-	return serveR2(request, env, key, headersFor, !isPrivate, (object) =>
-		isNarInfoObjectOfCommit(object, current)
+	return serveR2(
+		request,
+		env,
+		key,
+		headersFor,
+		!isPrivate,
+		(object) => isNarInfoObjectOfCommit(object, current),
+		legacyKey
 	);
 }
 
@@ -414,30 +425,38 @@ export async function missingStorePathHashes(
 	storePathHashes: readonly StorePathHash[]
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
-	// For a private cache, resolve the current commit for each path before
-	// checking R2. Report the path as missing if the object belongs to another
-	// commit. A narinfo GET would refuse that object, so the push must not skip
-	// the path.
-	const versions =
-		cache.access === 'private'
-			? await authorisedNarInfoVersions(env, tenant, cache.scope, unique)
-			: undefined;
+	// Resolve the current commit for every path before checking R2. Public and
+	// private reads use the same generation fence, so recreation cannot make a
+	// stale object satisfy availability.
+	const versions = await authorisedNarInfoVersions(
+		env,
+		tenant,
+		cache.scope,
+		unique
+	);
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
 		async (storePathHash) => {
-			const current = versions?.get(storePathHash);
+			const current = versions.get(storePathHash);
 
-			if (versions !== undefined && current === undefined) {
+			if (current === undefined) {
 				return storePathHash;
 			}
 
-			const object = await env.BLOBS.head(
-				narInfoObjectKey(tenant, storePathHash, cache.scope)
+			const key = narInfoObjectKey(
+				tenant,
+				storePathHash,
+				cache.scope,
+				cache.generation
 			);
+			const object =
+				(await env.BLOBS.head(key)) ??
+				(await env.BLOBS.head(
+					legacyNarInfoObjectKey(tenant, storePathHash, cache.scope)
+				));
 			const isServable =
-				object !== null &&
-				(current === undefined || isNarInfoObjectOfCommit(object, current));
+				object !== null && isNarInfoObjectOfCommit(object, current);
 
 			return isServable ? undefined : storePathHash;
 		}
@@ -452,28 +471,32 @@ export async function missingStorePathHashes(
 // Public origin requests reach the cache-owning tenant Worker only after
 // control admission; private requests stay on the uncached control Worker.
 //
-// `isServable` validates an object after R2 returns it. A private narinfo read
-// uses the predicate to refuse an object from a previous cache with the same
-// stored name.
+// `isServable` validates an object after R2 returns it. Narinfo reads use the
+// predicate to refuse an object from a previous cache with the same stored name.
 async function serveR2(
 	request: Request,
 	env: ReadEnv,
 	key: R2ObjectKey,
 	headersFor: (object: R2Object) => Headers,
 	isPublicCache: boolean,
-	isServable?: (object: R2Object) => boolean
+	isServable?: (object: R2Object) => boolean,
+	fallbackKey?: R2ObjectKey
 ): Promise<Response> {
 	if (!isPublicCache && request.method === 'HEAD') {
-		return r2Response(
-			request,
-			await env.BLOBS.head(key),
-			headersFor,
-			isPublicCache,
-			isServable
-		);
+		const primary = await env.BLOBS.head(key);
+		const object =
+			primary === null && fallbackKey !== undefined
+				? await env.BLOBS.head(fallbackKey)
+				: primary;
+
+		return r2Response(request, object, headersFor, isPublicCache, isServable);
 	}
 
-	const object = await env.BLOBS.get(key);
+	const primary = await env.BLOBS.get(key);
+	const object =
+		primary === null && fallbackKey !== undefined
+			? await env.BLOBS.get(fallbackKey)
+			: primary;
 
 	return r2Response(
 		request,

@@ -167,7 +167,12 @@ export class IntegrityCheckService {
 		for (const row of rows) {
 			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 			const narInfoObject = await this.context.env.BLOBS.head(
-				narInfoObjectKey(tenant, row.storePathHash, cache.scope)
+				narInfoObjectKey(
+					tenant,
+					row.storePathHash,
+					cache.scope,
+					cache.generation
+				)
 			);
 
 			if (narInfoObject === null) {

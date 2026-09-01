@@ -354,7 +354,7 @@ describe('background verification', () => {
 		}).toStrictEqual({ first: 0, second: 0 });
 	});
 
-	it('avoids an R2 list when scan order and object-key order diverge', async () => {
+	it('uses an R2 list when scan order and generation-scoped object order agree', async () => {
 		await useTestServer('verify-divergent');
 		const token = await initialise();
 		await putTestCache(token, namedCache('aa'));
@@ -379,15 +379,14 @@ describe('background verification', () => {
 
 		await runVerify(token, 1);
 
-		// The next batch is the named cache, whose object sorts before the `z`
-		// cursor. Resuming from the cursor would skip it and listing from the start
-		// would rescan the prefix. The batch must use per-row heads instead.
+		// Generation-scoped keys sort the default cache before the named cache in
+		// this fixture, which is the same order as their local cache IDs.
 		const list = vi.spyOn(env.BLOBS, 'list');
 
 		try {
 			await runVerify(token, 1);
 
-			expect(list).not.toHaveBeenCalled();
+			expect(list).toHaveBeenCalledTimes(1);
 		} finally {
 			list.mockRestore();
 		}

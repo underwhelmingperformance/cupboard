@@ -145,13 +145,13 @@ describe('isNotModified', () => {
 describe('narInfoObjectKey', () => {
 	const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
 
-	it('uses no cache segment for the default cache and adds one for a named cache', () => {
+	it('includes the cache generation and exact cache identity', () => {
 		expect({
 			default: narInfoObjectKey(tenant, hash, { kind: 'default' }),
 			named: narInfoObjectKey(tenant, hash, buildsCache)
 		}).toStrictEqual({
-			default: `t/acme/narinfo/${hash}`,
-			named: `t/acme/narinfo/builds/${hash}`
+			default: `t/acme/narinfo/generation/1/default/${hash}`,
+			named: `t/acme/narinfo/generation/1/named/builds/${hash}`
 		});
 	});
 });

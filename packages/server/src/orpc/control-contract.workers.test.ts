@@ -61,9 +61,10 @@ async function provisionNamedCacheLifecycle(tenant: string): Promise<void> {
 			cache_name,
 			access,
 			generation,
+			read_revision,
 			deleted_at,
 			updated_at
-		) VALUES (?, 'named', 'builds', 'public', 1, NULL, ?)`
+		) VALUES (?, 'named', 'builds', 'public', 1, 1, NULL, ?)`
 	)
 		.bind(tenant, '2026-01-01T00:00:00.000Z')
 		.run();

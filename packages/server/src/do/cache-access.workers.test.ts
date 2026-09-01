@@ -4,8 +4,10 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type CacheGeneration,
 	cacheNameSchema,
 	cachePrioritySchema,
+	type CacheReadRevision,
 	type CacheScope,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
@@ -99,6 +101,32 @@ function withCredential(
 
 function database() {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+}
+
+async function cacheLifecycleVersion(cache: CacheScope): Promise<{
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
+}> {
+	const rows = await database()
+		.select({
+			kind: d1Schema.cacheLifecycle.cacheKind,
+			name: d1Schema.cacheLifecycle.cacheName,
+			generation: d1Schema.cacheLifecycle.generation,
+			readRevision: d1Schema.cacheLifecycle.readRevision
+		})
+		.from(d1Schema.cacheLifecycle)
+		.all();
+	const row = rows.find(
+		(candidate) =>
+			candidate.kind === cache.kind &&
+			(cache.kind === 'default' || candidate.name === cache.name)
+	);
+
+	if (row === undefined) {
+		throw new Error(`No lifecycle row exists for ${JSON.stringify(cache)}`);
+	}
+
+	return { generation: row.generation, readRevision: row.readRevision };
 }
 
 async function cacheCredentialRows(): Promise<
@@ -361,6 +389,47 @@ describe('private cache access', () => {
 				cachePrioritySchema.parse(30)
 			).render(),
 			availability: { missingStorePathHashes: [] }
+		});
+	});
+
+	it('changes the read revision without changing the cache generation when access changes', async () => {
+		const token = await initialiseViaWorker();
+		await putNamedCache(token, localName, 'public');
+		const created = await cacheLifecycleVersion(privateCache);
+
+		const privateResponse = await authorisedWorkerFetch(
+			`/caches/${localName}`,
+			token,
+			{
+				body: JSON.stringify({ kind: 'access', access: 'private' }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PATCH'
+			}
+		);
+		const privateVersion = await cacheLifecycleVersion(privateCache);
+		const publicResponse = await authorisedWorkerFetch(
+			`/caches/${localName}`,
+			token,
+			{
+				body: JSON.stringify({ kind: 'access', access: 'public' }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PATCH'
+			}
+		);
+		const publicVersion = await cacheLifecycleVersion(privateCache);
+
+		expect({
+			privateStatus: privateResponse.status,
+			publicStatus: publicResponse.status,
+			created,
+			privateVersion,
+			publicVersion
+		}).toStrictEqual({
+			privateStatus: StatusCodes.OK,
+			publicStatus: StatusCodes.OK,
+			created: { generation: 1, readRevision: 1 },
+			privateVersion: { generation: 1, readRevision: 2 },
+			publicVersion: { generation: 1, readRevision: 3 }
 		});
 	});
 

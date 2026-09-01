@@ -7,6 +7,10 @@ import {
 	type TenantEntry,
 	type TenantReadVerifier
 } from '../control/tenant-membership.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 
 import { guardScopedRead, type ReadScope } from './read.ts';
 import { hashReadPassword, readPasswordSaltSchema } from './read-auth.ts';
@@ -19,10 +23,17 @@ const namedCache: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse('builds')
 };
-const publicScope: ReadScope = { scope: defaultCache, access: 'public' };
+const publicScope: ReadScope = {
+	scope: defaultCache,
+	access: 'public',
+	generation: firstCacheGeneration,
+	readRevision: firstCacheReadRevision
+};
 const privateScope: ReadScope = {
 	scope: namedCache,
-	access: 'private'
+	access: 'private',
+	generation: firstCacheGeneration,
+	readRevision: firstCacheReadRevision
 };
 
 async function verifier(

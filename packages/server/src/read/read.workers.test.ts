@@ -16,7 +16,10 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { firstCacheGeneration } from '../db/cache-generation.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
@@ -37,6 +40,7 @@ import {
 	serveNar,
 	serveNarInfo
 } from './read.ts';
+import { type ReadScope } from './read.ts';
 
 const tenant = tenantIdSchema.parse('acme');
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
@@ -48,6 +52,19 @@ const privateCache = namedCache('builds');
 
 // The narinfo generation every seeded reference edge records.
 const referencedGeneration = narInfoGenerationSchema.parse(1);
+
+function readScope(
+	scope: CacheScope,
+	access: CacheAccessMode,
+	generation: CacheGeneration = firstCacheGeneration
+): ReadScope {
+	return {
+		scope,
+		access,
+		generation,
+		readRevision: firstCacheReadRevision
+	};
+}
 
 function cacheAuthority(
 	scope: CacheScope,
@@ -161,6 +178,7 @@ async function serveWithFaults(failures: number): Promise<Response> {
 describe('NAR serve under shared-fact read faults', () => {
 	it('marks every private miss as uncacheable', async () => {
 		const absentNarHash = nixSha256HashSchema.parse(`sha256:${'2'.repeat(52)}`);
+		const publicDefaultCache = readScope(defaultCache(), 'public');
 		await seedOwnedNarReference();
 
 		const [unreferencedMiss, objectMiss, narInfoMiss] = await Promise.all([
@@ -184,7 +202,7 @@ describe('NAR serve under shared-fact read faults', () => {
 				new Request('https://cache.example/0.narinfo'),
 				env,
 				tenant,
-				{ scope: defaultCache(), access: 'public' },
+				publicDefaultCache,
 				referencingPath,
 				true
 			)
@@ -539,7 +557,12 @@ async function seedPrivateNarInfoObject(
 ): Promise<void> {
 	await seedOwnedNarReference(privateCache, 'private', edgeGeneration);
 	await env.BLOBS.put(
-		narInfoObjectKey(tenant, referencingPath, privateCache),
+		narInfoObjectKey(
+			tenant,
+			referencingPath,
+			privateCache,
+			edgeGeneration ?? firstCacheGeneration
+		),
 		'narinfo-bytes',
 		objectMetadata === undefined
 			? undefined
@@ -553,7 +576,7 @@ function seedPrivateNarInfo(edgeGeneration?: CacheGeneration): Promise<void> {
 
 describe('private narinfo reference gate', () => {
 	const secondGeneration = cacheGenerationSchema.parse(2);
-	const privateRead = { scope: privateCache, access: 'private' } as const;
+	const privateRead = readScope(privateCache, 'private');
 
 	it.each([
 		{
@@ -584,15 +607,20 @@ describe('private narinfo reference gate', () => {
 				await seedCacheGeneration(privateCache, cacheGeneration, 'private');
 			}
 
+			const currentRead = readScope(
+				privateCache,
+				'private',
+				cacheGeneration ?? firstCacheGeneration
+			);
 			const response = await serveNarInfo(
 				new Request('https://cache.example/probe.narinfo'),
 				env,
 				tenant,
-				privateRead,
+				currentRead,
 				referencingPath,
 				true
 			);
-			const missing = await missingStorePathHashes(env, tenant, privateRead, [
+			const missing = await missingStorePathHashes(env, tenant, currentRead, [
 				referencingPath
 			]);
 

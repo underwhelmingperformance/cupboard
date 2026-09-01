@@ -4,8 +4,8 @@
  *
  * Workers Cache keys a stored response by the request path and query. Deploying
  * new code does not remove responses written by an earlier version. Increment
- * this value when a change alters which readers may receive a response, so the
- * a new deployment uses a cache-key format that earlier versions did not
+ * this value when a change alters which readers may receive a response, so a
+ * new deployment uses a cache-key format that earlier versions did not
  * populate.
  */
 const cacheKeyVersion = '2';
@@ -20,11 +20,19 @@ const cacheKeyVersion = '2';
  * Worker and requests that differ only in their credentials share one cache
  * entry.
  */
-export function canonicalCacheRequest(request: Request): Request {
+export function canonicalCacheRequest(
+	request: Request,
+	cache: {
+		readonly generation: CacheGeneration;
+		readonly readRevision: CacheReadRevision;
+	}
+): Request {
 	const canonical = new URL(request.url);
 	canonical.search = '';
 	canonical.hash = '';
 	canonical.searchParams.set('cache-key-version', cacheKeyVersion);
+	canonical.searchParams.set('cache-generation', String(cache.generation));
+	canonical.searchParams.set('cache-read-revision', String(cache.readRevision));
 
 	const forwarded = new Request(canonical, request);
 	forwarded.headers.delete('authorization');
@@ -32,3 +40,7 @@ export function canonicalCacheRequest(request: Request): Request {
 
 	return forwarded;
 }
+import {
+	type CacheGeneration,
+	type CacheReadRevision
+} from '@cupboard/nix-store/scalars';

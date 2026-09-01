@@ -1,4 +1,6 @@
 import {
+	type CacheGeneration,
+	cacheGenerationSchema,
 	type CacheScope,
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -136,6 +138,19 @@ export function attestationListCachePath(
 export function attestationListObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
+	cache: CacheScope,
+	generation: CacheGeneration = cacheGenerationSchema.parse(1)
+): R2ObjectKey {
+	const identity = cache.kind === 'default' ? 'default' : `named/${cache.name}`;
+
+	return r2ObjectKeySchema.parse(
+		`t/${tenant}/attestations/generation/${String(generation)}/${identity}/${storePathHash}`
+	);
+}
+
+export function legacyAttestationListObjectKey(
+	tenant: TenantId,
+	storePathHash: StorePathHash,
 	cache: CacheScope
 ): R2ObjectKey {
 	const suffix =
@@ -180,6 +195,19 @@ export function narInfoObjectPrefix(tenant: TenantId): string {
 }
 
 export function narInfoObjectKey(
+	tenant: TenantId,
+	storePathHash: StorePathHash,
+	cache: CacheScope,
+	generation: CacheGeneration = cacheGenerationSchema.parse(1)
+): R2ObjectKey {
+	const identity = cache.kind === 'default' ? 'default' : `named/${cache.name}`;
+
+	return r2ObjectKeySchema.parse(
+		`${narInfoObjectPrefix(tenant)}generation/${String(generation)}/${identity}/${storePathHash}`
+	);
+}
+
+export function legacyNarInfoObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
 	cache: CacheScope

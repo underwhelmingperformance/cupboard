@@ -89,6 +89,18 @@ export class CacheCatalogueMigrationError extends ServerHttpError {
 	}
 }
 
+export class CacheIncarnationMigrationError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly tenant: TenantId,
+		public readonly problem: string
+	) {
+		super(`Cache incarnation migration failed: ${problem}`);
+		this.name = 'CacheIncarnationMigrationError';
+	}
+}
+
 export class CommitCreditBudgetInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

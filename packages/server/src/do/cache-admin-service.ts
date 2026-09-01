@@ -265,7 +265,10 @@ export class CacheAdminService {
 				throw new CacheAlreadyExistsError(scope);
 			}
 
-			await this.deletionQueue.clearCacheDeletion({ scope, access });
+			const lifecycle = await this.deletionQueue.clearCacheDeletion({
+				scope,
+				access
+			});
 
 			if (access === 'public') {
 				await this.clearCacheReadCredential(scope);
@@ -274,7 +277,9 @@ export class CacheAdminService {
 			const cache = this.context.cacheRepository.create(
 				scope,
 				access,
-				priority
+				priority,
+				lifecycle.generation,
+				lifecycle.readRevision
 			);
 
 			return this.cacheSummary(cache, priority);
@@ -299,17 +304,17 @@ export class CacheAdminService {
 
 		return this.context.criticalSection(async () => {
 			const existing = this.context.cacheRepository.require(scope);
-			let cache: ResolvedCache;
+			const lifecycle = await this.deletionQueue.clearCacheDeletion({
+				scope,
+				access: update.access
+			});
+			const cache = this.context.cacheRepository.setAccess(
+				existing,
+				update.access,
+				lifecycle.readRevision
+			);
 
-			if (update.access === 'private') {
-				await this.deletionQueue.clearCacheDeletion({
-					scope,
-					access: update.access
-				});
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
-			} else {
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
-				await this.deletionQueue.clearCacheDeletion(cache);
+			if (update.access === 'public') {
 				await this.clearCacheReadCredential(cache.scope);
 			}
 

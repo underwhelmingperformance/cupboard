@@ -1467,10 +1467,12 @@ export class VerificationService {
 	// A targeted reconciliation checks a small set of unrelated paths, so probe
 	// each narinfo object directly instead of listing a prefix.
 	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
+		const cache = this.cache(row.cacheId);
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
 			row.storePathHash,
-			this.cache(row.cacheId).scope
+			cache.scope,
+			cache.generation
 		);
 
 		return (await this.context.env.BLOBS.head(key)) !== null;
@@ -1495,10 +1497,12 @@ export class VerificationService {
 		let minKey: string | undefined;
 		let lastKey = '';
 		for (const row of rows) {
+			const cache = this.cache(row.cacheId);
 			const key = narInfoObjectKey(
 				tenant,
 				row.storePathHash,
-				this.cache(row.cacheId).scope
+				cache.scope,
+				cache.generation
 			);
 
 			if (key > lastKey) {
@@ -2323,12 +2327,13 @@ export class VerificationService {
 		// reconcile exists to heal.
 		const tenant = this.context.requireTenant();
 		const startAfter =
-			resumeCursor === undefined
+			resumeCursor === undefined || resumeCache === undefined
 				? undefined
 				: narInfoObjectKey(
 						tenant,
 						resumeCursor.storePathHash,
-						this.cache(resumeCursor.cacheId).scope
+						resumeCache.scope,
+						resumeCache.generation
 					);
 		const presentObjects = await this.presentNarInfoObjects(
 			logger,
@@ -2343,7 +2348,8 @@ export class VerificationService {
 						const key = narInfoObjectKey(
 							tenant,
 							target.storePathHash,
-							cache.scope
+							cache.scope,
+							cache.generation
 						);
 
 						return Promise.resolve(presentObjects.has(key));

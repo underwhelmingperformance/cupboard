@@ -2,8 +2,11 @@ import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
 	cacheAccessModeSchema,
+	type CacheGeneration,
 	cacheGenerationSchema,
 	cachePrioritySchema,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -24,6 +27,11 @@ export const cacheCatalogueVersion = 1;
 interface LifecycleRow {
 	readonly access: CacheAccessMode;
 	readonly deletedAt: IsoTimestamp | undefined;
+}
+
+export interface CacheLifecycleVersion {
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
 }
 
 function scopeKey(scope: CacheScope): string {
@@ -61,12 +69,14 @@ export async function revokeCacheLifecycle(
 		...identity,
 		access,
 		generation: cacheGenerationSchema.parse(2),
+		readRevision: cacheReadRevisionSchema.parse(2),
 		deletedAt: now,
 		updatedAt: now
 	});
 	const set: SQLiteUpdateSetSource<typeof d1Schema.cacheLifecycle> = {
 		access,
 		generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
+		readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
 		deletedAt: now,
 		updatedAt: now
 	};
@@ -100,34 +110,42 @@ export async function clearCacheLifecycleDeletion(
 	scope: CacheScope,
 	access: CacheAccessMode,
 	now: IsoTimestamp
-): Promise<void> {
+): Promise<CacheLifecycleVersion> {
 	const identity = cacheIdentityColumns(scope);
 	const insert = context.d1.insert(d1Schema.cacheLifecycle).values({
 		tenant,
 		...identity,
 		access,
 		generation: cacheGenerationSchema.parse(1),
+		readRevision: cacheReadRevisionSchema.parse(1),
 		deletedAt: sql`null`,
 		updatedAt: now
 	});
 	const set: SQLiteUpdateSetSource<typeof d1Schema.cacheLifecycle> = {
 		access,
+		readRevision: sql<CacheReadRevision>`case when ${d1Schema.cacheLifecycle.access} <> ${access} then ${d1Schema.cacheLifecycle.readRevision} + 1 else ${d1Schema.cacheLifecycle.readRevision} end`,
 		deletedAt: sql`null`,
 		updatedAt: now
 	};
+	const returned = {
+		generation: d1Schema.cacheLifecycle.generation,
+		readRevision: d1Schema.cacheLifecycle.readRevision
+	};
 
 	if (scope.kind === 'default') {
-		await insert
+		const row = await insert
 			.onConflictDoUpdate({
 				target: [d1Schema.cacheLifecycle.tenant],
 				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
 				set
 			})
-			.run();
-		return;
+			.returning(returned)
+			.get();
+
+		return row;
 	}
 
-	await insert
+	const row = await insert
 		.onConflictDoUpdate({
 			target: [
 				d1Schema.cacheLifecycle.tenant,
@@ -136,7 +154,10 @@ export async function clearCacheLifecycleDeletion(
 			targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
 			set
 		})
-		.run();
+		.returning(returned)
+		.get();
+
+	return row;
 }
 
 async function d1Lifecycles(
@@ -226,6 +247,62 @@ function reconcileLocalCaches(
 	});
 }
 
+async function projectLocalCacheLifecycles(
+	context: ServerContext,
+	tenant: TenantId,
+	lifecycles: ReadonlyMap<string, LifecycleRow>
+): Promise<void> {
+	const rows = context.db
+		.select({
+			kind: migrationSchema.cacheIdentities.kind,
+			name: migrationSchema.cacheIdentities.name,
+			access: migrationSchema.cacheIdentities.access,
+			deletedAt: migrationSchema.cacheIdentities.deletedAt
+		})
+		.from(migrationSchema.cacheIdentities)
+		.orderBy(migrationSchema.cacheIdentities.id)
+		.all();
+	const current = new Map<
+		string,
+		{ readonly row: (typeof rows)[number]; readonly incarnations: number }
+	>();
+
+	for (const row of rows) {
+		const scope = cacheScopeFromRow({ kind: row.kind, name: row.name });
+		const key = scopeKey(scope);
+		const existing = current.get(key);
+		current.set(key, {
+			row,
+			incarnations: (existing?.incarnations ?? 0) + 1
+		});
+	}
+
+	for (const { row, incarnations } of current.values()) {
+		const scope = cacheScopeFromRow({ kind: row.kind, name: row.name });
+
+		if (lifecycles.has(scopeKey(scope))) {
+			continue;
+		}
+
+		const access = cacheAccessModeSchema.parse(row.access);
+		await context.d1
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant,
+				...cacheIdentityColumns(scope),
+				access,
+				generation: cacheGenerationSchema.parse(
+					incarnations + (row.deletedAt === null ? 0 : 1)
+				),
+				readRevision: cacheReadRevisionSchema.parse(1),
+				deletedAt: row.deletedAt,
+				updatedAt: isoTimestamp(new Date())
+			})
+			.onConflictDoNothing()
+			.run();
+	}
+}
+
 export async function reconcileCacheCatalogue(
 	context: ServerContext,
 	tenant: TenantId
@@ -238,6 +315,7 @@ export async function reconcileCacheCatalogue(
 	}
 
 	reconcileLocalCaches(context, defaultLifecycle.access, lifecycles);
+	await projectLocalCacheLifecycles(context, tenant, lifecycles);
 }
 
 export function isLocalCacheCatalogueComplete(context: ServerContext): boolean {

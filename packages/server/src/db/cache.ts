@@ -1,7 +1,9 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	type CacheName,
 	cacheNameSchema,
+	type CacheReadRevision,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
@@ -26,6 +28,8 @@ export interface ResolvedCache {
 	readonly id: CacheId;
 	readonly scope: CacheScope;
 	readonly access: CacheAccessMode;
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
 }
 
 type CacheIdentityColumns =

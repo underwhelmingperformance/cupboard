@@ -29,6 +29,7 @@ import { AttestationPathNotFoundError } from '../errors.ts';
 import {
 	attestationListObjectKey,
 	casObjectKey,
+	legacyAttestationListObjectKey,
 	type R2ObjectKey
 } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -289,7 +290,12 @@ describe('attestation attach and reads', () => {
 			metadata.storePathHash,
 			{ kind: 'default' }
 		);
-		await env.BLOBS.delete(key);
+		const legacyKey = legacyAttestationListObjectKey(
+			fixtureTenant,
+			metadata.storePathHash,
+			{ kind: 'default' }
+		);
+		await env.BLOBS.delete([key, legacyKey]);
 		const beforeRead = {
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows(),

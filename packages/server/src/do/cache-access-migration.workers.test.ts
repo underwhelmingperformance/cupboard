@@ -12,7 +12,10 @@ import { describe, expect, it } from 'vitest';
 
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { CacheIncarnationMigrationError } from '../errors.ts';
+import { reconcileCacheCatalogue } from '../migration/cache-access.ts';
 import * as migrationSchema from '../migration/cache-access-schema.ts';
+import { reconcileLocalCacheIncarnations } from '../migration/cache-incarnation.ts';
 import {
 	latestMigrationIndex,
 	latestPreContractMigrationIndex,
@@ -455,11 +458,21 @@ describe('cache access migration', () => {
 				]
 			},
 			tenantRow: { version: 1 },
-			lifecycles: [{ cache: { kind: 'default' }, access: 'private' }]
+			lifecycles: [
+				{ cache: { kind: 'default' }, access: 'private' },
+				{
+					cache: { kind: 'named', name: 'builds' },
+					access: 'private'
+				},
+				{
+					cache: { kind: 'named', name: 'releases' },
+					access: 'private'
+				}
+			]
 		});
 	});
 
-	it('does not revoke a D1 cache absent from the Durable Object catalogue', async () => {
+	it('refuses a live D1 cache absent from the Durable Object catalogue', async () => {
 		const tenant = tenantIdSchema.parse('migration-phantom-cache');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -501,7 +514,14 @@ describe('cache access migration', () => {
 			);
 		});
 
-		await server.migrateCacheCatalogue(tenant);
+		await expect(
+			runInDurableObject(server, async (instance, state) => {
+				await migrateThrough(state, 43);
+				await reconcileCacheCatalogue(instance.context, tenant);
+				await migrateThrough(state, latestMigrationIndex);
+				await reconcileLocalCacheIncarnations(instance.context, tenant);
+			})
+		).rejects.toBeInstanceOf(CacheIncarnationMigrationError);
 
 		const rows = await d1
 			.select({

@@ -75,6 +75,7 @@ import {
 	markCacheCatalogueComplete,
 	reconcileCacheCatalogue as reconcileStoredCacheCatalogue
 } from '../migration/cache-access.ts';
+import { reconcileLocalCacheIncarnations } from '../migration/cache-incarnation.ts';
 import {
 	loggerMiddleware,
 	requestLogger,
@@ -1501,6 +1502,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		applyMigrations(this.context.db, migrations);
+		await reconcileLocalCacheIncarnations(this.context, tenant);
 
 		if (!isCatalogueComplete) {
 			await markCacheCatalogueComplete(this.context, tenant);

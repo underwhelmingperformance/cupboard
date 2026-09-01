@@ -2,8 +2,12 @@ import {
 	type AuthKeyId,
 	authKeyIdSchema,
 	type CacheAccessMode,
+	type CacheGeneration,
+	cacheGenerationSchema,
 	type CacheName,
 	type CachePriority,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type GraceSeconds,
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
@@ -60,6 +64,14 @@ export const caches = sqliteTable(
 			.$type<CacheAccessMode>()
 			.notNull(),
 		priority: integer('priority').$type<CachePriority>().notNull(),
+		generation: integer('generation')
+			.$type<CacheGeneration>()
+			.notNull()
+			.default(cacheGenerationSchema.parse(1)),
+		readRevision: integer('read_revision')
+			.$type<CacheReadRevision>()
+			.notNull()
+			.default(cacheReadRevisionSchema.parse(1)),
 		// Set when the first grace-policy event applies to this cache and never
 		// cleared while the cache exists: the empty-cache collection guard stays off
 		// even if every policy is later removed, so a partially drained cache cannot

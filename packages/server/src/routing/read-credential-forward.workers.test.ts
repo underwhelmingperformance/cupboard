@@ -84,7 +84,7 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			body: forwardedBody,
 			forwarded: [
 				{
-					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2`,
+					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1`,
 					headers: { accept: 'text/x-nix-narinfo' }
 				}
 			]

@@ -29,6 +29,7 @@ import {
 	StoredSignaturesInvalidError
 } from '../errors.ts';
 import {
+	legacyNarInfoObjectKey,
 	narInfoCacheControl,
 	narInfoObjectKey,
 	narObjectKey
@@ -266,7 +267,12 @@ export class NarInfoObjectsService {
 		}
 
 		const existing = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			narInfoObjectKey(
+				this.context.requireTenant(),
+				storePathHash,
+				cache.scope,
+				cache.generation
+			)
 		);
 
 		if (
@@ -426,7 +432,12 @@ export class NarInfoObjectsService {
 		}
 
 		const object = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			narInfoObjectKey(
+				this.context.requireTenant(),
+				storePathHash,
+				cache.scope,
+				cache.generation
+			)
 		);
 
 		const narInfo = await this.narInfoFromRow(row);
@@ -557,7 +568,12 @@ export class NarInfoObjectsService {
 		await this.materialiseIfRecoverable(cache, storePathHash, committedEdges);
 
 		const object = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			narInfoObjectKey(
+				this.context.requireTenant(),
+				storePathHash,
+				cache.scope,
+				cache.generation
+			)
 		);
 
 		return object !== null;
@@ -706,7 +722,7 @@ export class NarInfoObjectsService {
 			maxOutgoingConnections,
 			async (storePathHash) => {
 				const object = await this.context.env.BLOBS.head(
-					narInfoObjectKey(tenant, storePathHash, cache.scope)
+					narInfoObjectKey(tenant, storePathHash, cache.scope, cache.generation)
 				);
 				const metadata = recordedNarInfoMetadata(object);
 
@@ -864,18 +880,27 @@ export class NarInfoObjectsService {
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
+			cache.scope,
+			cache.generation
+		);
+		const legacyKey = legacyNarInfoObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
 			cache.scope
 		);
+		const body = narInfo.render();
+		const options = {
+			customMetadata: narInfoObjectMetadata(version),
+			httpMetadata: {
+				contentType: 'text/x-nix-narinfo; charset=utf-8',
+				cacheControl: narInfoCacheControl
+			}
+		};
 
-		await this.context.objectWrites.write([key], () =>
-			this.context.env.BLOBS.put(key, narInfo.render(), {
-				customMetadata: narInfoObjectMetadata(version),
-				httpMetadata: {
-					contentType: 'text/x-nix-narinfo; charset=utf-8',
-					cacheControl: narInfoCacheControl
-				}
-			})
-		);
+		await this.context.objectWrites.write([key, legacyKey], async () => {
+			await this.context.env.BLOBS.put(key, body, options);
+			await this.context.env.BLOBS.put(legacyKey, body, options);
+		});
 	}
 
 	// Narinfo objects are path-keyed. Order every delete behind abandoned
@@ -888,7 +913,8 @@ export class NarInfoObjectsService {
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
-			cache.scope
+			cache.scope,
+			cache.generation
 		);
 
 		await this.context.objectWrites.write([key], () =>
@@ -906,7 +932,7 @@ export class NarInfoObjectsService {
 
 		const tenant = this.context.requireTenant();
 		const keys = storePathHashes.map((storePathHash) =>
-			narInfoObjectKey(tenant, storePathHash, cache.scope)
+			narInfoObjectKey(tenant, storePathHash, cache.scope, cache.generation)
 		);
 
 		await this.context.objectWrites.write(keys, () =>

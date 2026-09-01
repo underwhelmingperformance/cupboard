@@ -1,11 +1,19 @@
 import {
+	type CacheGeneration,
+	cacheGenerationSchema,
 	cacheNameSchema,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type Context, Hono } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	notFoundResponse,
@@ -23,6 +31,8 @@ interface TenantReadHonoEnv {
 	Variables: {
 		tenant: TenantId;
 		cache: CacheScope;
+		generation: CacheGeneration;
+		readRevision: CacheReadRevision;
 		tenantRest: string;
 	};
 }
@@ -65,7 +75,12 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			{ scope: context.get('cache'), access: 'public' },
+			{
+				scope: context.get('cache'),
+				access: 'public',
+				generation: context.get('generation'),
+				readRevision: context.get('readRevision')
+			},
 			storePathHash,
 			false
 		);
@@ -85,7 +100,9 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			nar,
 			narAuthorityForScope({
 				scope: context.get('cache'),
-				access: 'public'
+				access: 'public',
+				generation: context.get('generation'),
+				readRevision: context.get('readRevision')
 			}),
 			false
 		);
@@ -121,7 +138,8 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 		}
 	});
 	app.use('/t/:tenant/*', async (context, next) => {
-		const route = parseTenantPath(new URL(context.req.url).pathname);
+		const requestUrl = new URL(context.req.url);
+		const route = parseTenantPath(requestUrl.pathname);
 
 		if (route === undefined) {
 			return noStore(notFoundResponse());
@@ -129,6 +147,22 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 
 		context.set('tenant', route.tenant);
 		context.set('cache', { kind: 'default' });
+		const parsedGeneration = cacheGenerationSchema.safeParse(
+			Number(requestUrl.searchParams.get('cache-generation'))
+		);
+		const parsedReadRevision = cacheReadRevisionSchema.safeParse(
+			Number(requestUrl.searchParams.get('cache-read-revision'))
+		);
+		context.set(
+			'generation',
+			parsedGeneration.success ? parsedGeneration.data : firstCacheGeneration
+		);
+		context.set(
+			'readRevision',
+			parsedReadRevision.success
+				? parsedReadRevision.data
+				: firstCacheReadRevision
+		);
 		context.set('tenantRest', route.rest);
 		await next();
 	});

@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
+
 import { canonicalCacheRequest } from './cache-request.ts';
+
+const cacheVersion = {
+	generation: firstCacheGeneration,
+	readRevision: firstCacheReadRevision
+};
 
 function headerSet(request: Request): Record<string, string> {
 	return Object.fromEntries(request.headers);
@@ -16,14 +26,14 @@ describe('canonicalCacheRequest', () => {
 			}
 		);
 
-		const canonical = canonicalCacheRequest(request);
+		const canonical = canonicalCacheRequest(request, cacheVersion);
 
 		expect({
 			url: canonical.url,
 			method: canonical.method,
 			ifNoneMatch: canonical.headers.get('if-none-match')
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
 			method: 'HEAD',
 			ifNoneMatch: '"abc"'
 		});
@@ -43,14 +53,14 @@ describe('canonicalCacheRequest', () => {
 			}
 		);
 
-		const canonical = canonicalCacheRequest(request);
+		const canonical = canonicalCacheRequest(request, cacheVersion);
 
 		expect({
 			url: canonical.url,
 			method: canonical.method,
 			headers: headerSet(canonical)
 		}).toStrictEqual({
-			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2',
+			url: 'https://cache.example/t/acme/abc.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1',
 			method: 'GET',
 			headers: {
 				accept: 'text/x-nix-narinfo',

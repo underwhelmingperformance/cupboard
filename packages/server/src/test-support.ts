@@ -1953,6 +1953,7 @@ export async function pendingAttestationRows(): Promise<
  */
 export async function publishAttestationList(fields: {
 	readonly cache?: CacheScope;
+	readonly cacheGeneration?: CacheGeneration;
 	readonly storePathHash: StorePathHash;
 	readonly generation?: number;
 	readonly attestations?: readonly unknown[];
@@ -1961,7 +1962,8 @@ export async function publishAttestationList(fields: {
 		attestationListObjectKey(
 			fixtureTenant,
 			fields.storePathHash,
-			fields.cache ?? defaultCache()
+			fields.cache ?? defaultCache(),
+			fields.cacheGeneration
 		),
 		JSON.stringify({ attestations: fields.attestations ?? [] }),
 		fields.generation === undefined

@@ -230,6 +230,7 @@ describe('offboarding drain', () => {
 
 		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
+		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 
 		const finalRow = await tenantRow(id);
 
@@ -254,7 +255,11 @@ describe('offboarding drain', () => {
 					}
 				],
 				presence: [{ narHash: narHashA, fileSize: 47 }],
-				objects: [`t/${id}/narinfo/${'b'.repeat(32)}`]
+				objects: [
+					`t/${id}/narinfo/${'b'.repeat(32)}`,
+					`t/${id}/narinfo/generation/1/default/${'a'.repeat(32)}`,
+					`t/${id}/narinfo/generation/1/default/${'b'.repeat(32)}`
+				]
 			},
 			final: {
 				status: 'offboarded',

@@ -22,7 +22,8 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import { cacheScopeFromRow } from '../db/cache.ts';
+import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
+import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -262,11 +263,19 @@ function teardownPending(_cache: CacheScope): Promise<unknown> {
  * workerd delivers an alarm that is already due, and the pass it runs claims
  * whatever marker it finds.
  */
-async function deleteAndParkTeardown(cache: CacheScope): Promise<void> {
-	await runInDurableObject(currentServer(), async (instance, state) => {
+async function deleteAndParkTeardown(cache: CacheScope): Promise<CacheId> {
+	return runInDurableObject(currentServer(), async (instance, state) => {
 		const resolved = instance.context.cacheRepository.require(cache);
 		await instance.runCacheTeardown(cache, origin);
 		await state.storage.delete(`${teardownEntryPrefix}${String(resolved.id)}`);
+
+		return resolved.id;
+	});
+}
+
+async function restoreTeardownMarker(cacheId: CacheId): Promise<void> {
+	await runInDurableObject(currentServer(), async (_instance, state) => {
+		await state.storage.put(`${teardownEntryPrefix}${String(cacheId)}`, origin);
 	});
 }
 
@@ -708,11 +717,17 @@ describe('deleted private cache', () => {
 		);
 
 		const afterRecommit = await readPrivateNarInfo(metadata.storePathHash);
+		const currentNarInfoKey = narInfoObjectKey(
+			fixtureTenant,
+			metadata.storePathHash,
+			privateBuilds,
+			secondCacheGeneration
+		);
 
 		// Restore the previous object to model the interval after the new
 		// reference edge is written but before the replacement object is
 		// published.
-		await env.BLOBS.put(narInfoKey, previousBody, {
+		await env.BLOBS.put(currentNarInfoKey, previousBody, {
 			...(previousMetadata !== undefined && {
 				customMetadata: previousMetadata
 			})
@@ -890,10 +905,117 @@ describe('deleted private cache', () => {
 	});
 });
 
+describe('deleted public cache', () => {
+	beforeEach(resetTestServer);
+
+	it('does not disclose stale narinfo when its name is recreated', async () => {
+		await useTestServer('generation-public-recreation');
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
+		const nar = await verifiableNar('public-recreation-stale');
+		const path = indexedMetadata(0, nar);
+
+		await pushPath(token, path, buildsCache, nar);
+		await deleteAndParkTeardown(buildsCache);
+		await putTestCache(token, buildsCache, 'public');
+
+		const narInfo = await readFetch(
+			`/cache/builds/${path.storePathHash}.narinfo`
+		);
+		const availability = await readFetch('/cache/builds/api/v1/missing-paths', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ storePathHashes: [path.storePathHash] })
+		});
+
+		expect({
+			narInfo: narInfo.status,
+			availability: cacheAvailabilityResponseSchema.parse(
+				await availability.json()
+			),
+			staleObjectPresent:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, path.storePathHash, buildsCache)
+				)) !== null
+		}).toStrictEqual({
+			narInfo: StatusCodes.NOT_FOUND,
+			availability: { missingStorePathHashes: [path.storePathHash] },
+			staleObjectPresent: true
+		});
+	});
+
+	it('keeps current metadata when the previous teardown resumes', async () => {
+		await useTestServer('generation-resumed-old-teardown');
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
+		const oldNar = await verifiableNar('old-incarnation');
+		const currentNar = await verifiableNar('current-incarnation');
+		const oldPath = indexedMetadata(0, oldNar);
+		const currentPath = indexedMetadata(0, currentNar);
+
+		await pushPath(token, oldPath, buildsCache, oldNar);
+		const retiredCacheId = await deleteAndParkTeardown(buildsCache);
+		await putTestCache(token, buildsCache, 'public');
+		await pushPath(token, currentPath, buildsCache, currentNar);
+		const currentNarInfoGeneration = await narInfoGeneration(
+			currentPath.storePathHash
+		);
+
+		expect(currentNarInfoGeneration).toBeDefined();
+
+		if (currentNarInfoGeneration === undefined) {
+			return;
+		}
+
+		await publishAttestationList({
+			cache: buildsCache,
+			cacheGeneration: secondCacheGeneration,
+			storePathHash: currentPath.storePathHash,
+			generation: currentNarInfoGeneration
+		});
+		await restoreTeardownMarker(retiredCacheId);
+		await currentServer().resumeCacheTeardown();
+
+		const currentNarInfoKey = narInfoObjectKey(
+			fixtureTenant,
+			currentPath.storePathHash,
+			buildsCache,
+			secondCacheGeneration
+		);
+		const currentListKey = attestationListObjectKey(
+			fixtureTenant,
+			currentPath.storePathHash,
+			buildsCache,
+			secondCacheGeneration
+		);
+		const narInfo = await readFetch(
+			`/cache/builds/${currentPath.storePathHash}.narinfo`
+		);
+		const list = await fetchPath(
+			`/cache/builds/attestations/${currentPath.storePathHash}`
+		);
+
+		expect({
+			narInfo: narInfo.status,
+			list: list.status,
+			oldNarInfo:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, oldPath.storePathHash, buildsCache)
+				)) !== null,
+			currentNarInfo: (await env.BLOBS.head(currentNarInfoKey)) !== null,
+			currentList: (await env.BLOBS.head(currentListKey)) !== null
+		}).toStrictEqual({
+			narInfo: StatusCodes.OK,
+			list: StatusCodes.OK,
+			oldNarInfo: false,
+			currentNarInfo: true,
+			currentList: true
+		});
+	});
+});
+
 describe('attestation list generation', () => {
 	beforeEach(resetTestServer);
 
-	it('refuses an attestation list published for the generation before a recommit', async () => {
+	it('does not serve an attestation list published for the generation before a recommit', async () => {
 		await useTestServer('gen-stale-list');
 
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
@@ -930,14 +1052,17 @@ describe('attestation list generation', () => {
 		await pushPath(token, metadata, buildsCache, nar);
 
 		const afterRecommit = await fetchPath(listPath);
+		const afterRecommitBody = await afterRecommit.json();
 
 		expect({
 			beforeDeletion: beforeDeletion.status,
 			afterRecommit: afterRecommit.status,
+			afterRecommitBody,
 			generation: await narInfoGeneration(metadata.storePathHash)
 		}).toStrictEqual({
 			beforeDeletion: StatusCodes.OK,
-			afterRecommit: StatusCodes.NOT_FOUND,
+			afterRecommit: StatusCodes.OK,
+			afterRecommitBody: { attestations: [] },
 			generation: firstNarInfoGeneration + 1
 		});
 	});

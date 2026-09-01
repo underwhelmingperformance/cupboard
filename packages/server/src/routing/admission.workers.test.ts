@@ -1,6 +1,7 @@
 import {
 	cacheGenerationSchema,
 	cacheNameSchema,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -114,6 +115,7 @@ async function provisionCacheLifecycle(
 			cacheName: cache.kind === 'named' ? cache.name : undefined,
 			access: 'private',
 			generation: cacheGenerationSchema.parse(1),
+			readRevision: cacheReadRevisionSchema.parse(1),
 			updatedAt: now
 		})
 		.run();
@@ -613,6 +615,8 @@ describe('cache admission', () => {
 			cacheAcceptsPassword: true,
 			cache: {
 				access: 'private',
+				generation: 1,
+				readRevision: 1,
 				isDeleted: false
 			},
 			batches: [3]
@@ -671,6 +675,8 @@ describe('cache admission', () => {
 			cacheAcceptsPassword: false,
 			cache: {
 				access: 'public',
+				generation: 1,
+				readRevision: 1,
 				isDeleted: false
 			},
 			batches: [3]
@@ -693,6 +699,7 @@ describe('cache admission', () => {
 			.update(d1Schema.cacheLifecycle)
 			.set({
 				generation: secondCacheGeneration,
+				readRevision: cacheReadRevisionSchema.parse(2),
 				deletedAt: now,
 				updatedAt: now
 			})
@@ -713,6 +720,8 @@ describe('cache admission', () => {
 			cacheAcceptsPassword: true,
 			cache: {
 				access: 'private',
+				generation: 2,
+				readRevision: 2,
 				isDeleted: true
 			},
 			batches: [3]

@@ -60,6 +60,7 @@ import {
 	attestationStagingObjectKey,
 	casObjectKey,
 	isNotModified,
+	legacyAttestationListObjectKey,
 	parseAttestationDigestName,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
@@ -450,9 +451,14 @@ export class AttestationsService {
 		key: string,
 		contentType: string,
 		cacheControl = 'no-store',
-		isServable?: (object: R2Object) => boolean
+		isServable?: (object: R2Object) => boolean,
+		fallbackKey?: string
 	): Promise<Response> {
-		const object = await this.context.env.BLOBS.get(key);
+		const primary = await this.context.env.BLOBS.get(key);
+		const object =
+			primary === null && fallbackKey !== undefined
+				? await this.context.env.BLOBS.get(fallbackKey)
+				: primary;
 
 		if (object === null) {
 			return uncachedNotFoundResponse();
@@ -751,11 +757,17 @@ export class AttestationsService {
 			attestationListObjectKey(
 				this.context.requireTenant(),
 				storePathHash,
-				cache.scope
+				cache.scope,
+				cache.generation
 			),
 			'application/json; charset=utf-8',
 			'no-store',
-			(object) => isListOfCommittedGeneration(object, cache, committed)
+			(object) => isListOfCommittedGeneration(object, cache, committed),
+			legacyAttestationListObjectKey(
+				this.context.requireTenant(),
+				storePathHash,
+				cache.scope
+			)
 		);
 	}
 
@@ -796,6 +808,12 @@ export class AttestationsService {
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
+			cache.scope,
+			cache.generation
+		);
+		const legacyKey = legacyAttestationListObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
 			cache.scope
 		);
 		const committedRow =
@@ -807,8 +825,8 @@ export class AttestationsService {
 		// The list object is path-keyed, so its mutations order behind any
 		// abandoned mutation of the same key, exactly as the narinfo objects do.
 		if (resolvedGeneration === undefined) {
-			await this.context.objectWrites.write([key], () =>
-				this.context.env.BLOBS.delete(key)
+			await this.context.objectWrites.write([key, legacyKey], () =>
+				this.context.env.BLOBS.delete([key, legacyKey])
 			);
 			return;
 		}
@@ -820,26 +838,31 @@ export class AttestationsService {
 		);
 
 		if (descriptors.length === 0) {
-			await this.context.objectWrites.write([key], () =>
-				this.context.env.BLOBS.delete(key)
+			await this.context.objectWrites.write([key, legacyKey], () =>
+				this.context.env.BLOBS.delete([key, legacyKey])
 			);
 			return;
 		}
 
 		const body: AttestationListInput = { attestations: descriptors };
-		await this.context.objectWrites.write([key], () =>
-			this.context.env.BLOBS.put(key, `${JSON.stringify(body)}\n`, {
-				httpMetadata: {
-					contentType: 'application/json; charset=utf-8',
-					cacheControl: 'no-store'
-				},
-				// Readers validate the published response body against a strict
-				// schema. Store the narinfo generation in R2 custom metadata so the
-				// response schema does not change.
-				customMetadata: {
-					[listGenerationMetadataKey]: String(resolvedGeneration)
-				}
-			})
+		const rendered = `${JSON.stringify(body)}\n`;
+		const options = {
+			httpMetadata: {
+				contentType: 'application/json; charset=utf-8',
+				cacheControl: 'no-store'
+			},
+			// Readers validate the published response body against a strict
+			// schema. Store the narinfo generation in R2 custom metadata so the
+			// response schema does not change.
+			customMetadata: {
+				[listGenerationMetadataKey]: String(resolvedGeneration)
+			}
+		};
+		await this.context.objectWrites.write([key, legacyKey], () =>
+			Promise.all([
+				this.context.env.BLOBS.put(key, rendered, options),
+				this.context.env.BLOBS.put(legacyKey, rendered, options)
+			])
 		);
 	}
 
@@ -858,7 +881,12 @@ export class AttestationsService {
 
 		const tenant = this.context.requireTenant();
 		const keys = [...new Set(storePathHashes)].map((storePathHash) =>
-			attestationListObjectKey(tenant, storePathHash, cache.scope)
+			attestationListObjectKey(
+				tenant,
+				storePathHash,
+				cache.scope,
+				cache.generation
+			)
 		);
 
 		await this.context.objectWrites.write(keys, () =>
@@ -887,7 +915,8 @@ export class AttestationsService {
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
-			cache.scope
+			cache.scope,
+			cache.generation
 		);
 
 		await this.context.objectWrites.write([key], async () => {

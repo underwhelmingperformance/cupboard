@@ -26,6 +26,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
 import {
+	type CacheLifecycleVersion,
 	clearCacheLifecycleDeletion,
 	revokeCacheLifecycle
 } from '../migration/cache-access.ts';
@@ -933,11 +934,11 @@ export class DeletionQueueService {
 	 */
 	async clearCacheDeletion(
 		cache: Pick<ResolvedCache, 'scope' | 'access'>
-	): Promise<void> {
+	): Promise<CacheLifecycleVersion> {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
-		await clearCacheLifecycleDeletion(
+		return clearCacheLifecycleDeletion(
 			this.context,
 			tenant,
 			cache.scope,

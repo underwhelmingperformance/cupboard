@@ -11,6 +11,10 @@ import { type Context, Hono } from 'hono';
 
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
@@ -159,7 +163,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantRest', route.rest);
 		context.set('readScope', {
 			scope: cacheScope,
-			access: cache?.access ?? 'public'
+			access: cache?.access ?? 'public',
+			generation: cache?.generation ?? firstCacheGeneration,
+			readRevision: cache?.readRevision ?? firstCacheReadRevision
 		});
 		context.set('isCacheDeleted', cache?.isDeleted ?? true);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));

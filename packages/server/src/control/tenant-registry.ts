@@ -26,7 +26,10 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
-import { firstCacheGeneration } from '../db/cache-generation.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	CacheNotFoundError,
@@ -197,6 +200,9 @@ export async function ensureTenant(
 		typeof body.defaultCacheAccess
 	>`${body.defaultCacheAccess}`.as('access');
 	const generation = sql<number>`${firstCacheGeneration}`.as('generation');
+	const readRevision = sql<number>`${firstCacheReadRevision}`.as(
+		'read_revision'
+	);
 	const deletedAt = sql<null>`null`.as('deleted_at');
 	const updatedAt = sql<IsoTimestamp>`${now}`.as('updated_at');
 	const zero = sql<number>`0`;
@@ -209,6 +215,7 @@ export async function ensureTenant(
 			cacheName,
 			access: cacheAccess,
 			generation,
+			readRevision,
 			deletedAt,
 			updatedAt
 		})

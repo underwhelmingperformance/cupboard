@@ -3,6 +3,8 @@ import {
 	type CacheAccessMode,
 	type CacheGeneration,
 	type CacheName,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
@@ -172,6 +174,10 @@ export const cacheLifecycle = sqliteTable(
 			.$type<CacheAccessMode>()
 			.notNull(),
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
+		readRevision: integer('read_revision')
+			.$type<CacheReadRevision>()
+			.notNull()
+			.default(cacheReadRevisionSchema.parse(1)),
 		deletedAt: text('deleted_at').$type<IsoTimestamp>(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
