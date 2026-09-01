@@ -20,7 +20,7 @@ import * as migrationSchema from './cache-access-schema.ts';
 
 interface LifecycleRow {
 	readonly access: CacheAccessMode;
-	readonly deletedAt: IsoTimestamp | undefined;
+	readonly deletedAt: IsoTimestamp | null;
 }
 
 function scopeKey(scope: CacheScope): string {
@@ -139,7 +139,7 @@ async function d1Lifecycles(
 			const scope = cacheScopeFromRow({ kind: row.kind, name: row.name });
 			lifecycles.set(scopeKey(scope), {
 				access: cacheAccessModeSchema.parse(row.access),
-				deletedAt: row.deletedAt ?? undefined
+				deletedAt: row.deletedAt
 			});
 		} catch (error) {
 			throw new CacheAccessMigrationError(
@@ -180,7 +180,8 @@ function reconcileLocalCaches(
 			const scope = cacheScopeFromRow({ kind: row.kind, name: row.name });
 			const lifecycle = lifecycles.get(scopeKey(scope));
 			const access = lifecycle?.access ?? row.access ?? defaultAccess;
-			const deletedAt = lifecycle?.deletedAt ?? row.deletedAt ?? undefined;
+			const deletedAt =
+				lifecycle === undefined ? row.deletedAt : lifecycle.deletedAt;
 
 			transaction
 				.update(migrationSchema.cacheIdentities)

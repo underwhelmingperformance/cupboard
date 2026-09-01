@@ -457,6 +457,75 @@ describe('cache access migration', () => {
 		});
 	});
 
+	it('clears a local deletion tombstone when D1 records the cache as live', async () => {
+		const tenant = tenantIdSchema.parse('migration-restored-cache');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const cacheName = cacheNameSchema.parse('builds');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values([
+			{
+				tenant,
+				cacheKind: 'default',
+				access: 'private',
+				generation: cacheGenerationSchema.parse(1),
+				updatedAt: now
+			},
+			{
+				tenant,
+				cacheKind: 'named',
+				cacheName,
+				access: 'public',
+				generation: cacheGenerationSchema.parse(2),
+				updatedAt: now
+			}
+		]);
+
+		const server = testServerFor(tenant);
+		await runInDurableObject(server, async (_instance, state) => {
+			await migrateThrough(state, 41);
+			state.storage.sql.exec(
+				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?), ('builds', 41, ?)",
+				now,
+				now
+			);
+			state.storage.sql.exec(
+				"INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at) VALUES ('builds', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'sha256:queued', 1, ?)",
+				now
+			);
+			state.storage.sql.exec("DELETE FROM cache WHERE name = 'builds'");
+
+			await migrateThrough(state, latestPreContractMigrationIndex);
+		});
+
+		const result = await runInDurableObject(server, async (instance, state) => {
+			await migrateLocalCacheAccess(instance.context, tenant);
+			await migrateThrough(state, latestMigrationIndex);
+
+			const row = state.storage.sql
+				.exec(
+					"SELECT access, deleted_at FROM cache_identity WHERE kind = 'named' AND name = 'builds'"
+				)
+				.one();
+
+			return {
+				access: row.access,
+				isDeleted: row.deleted_at !== null
+			};
+		});
+
+		expect(result).toStrictEqual({ access: 'public', isDeleted: false });
+	});
+
 	it('reports a missing default lifecycle with a typed migration error', async () => {
 		const tenant = tenantIdSchema.parse('migration-missing-default');
 		const result = await runInDurableObject(
