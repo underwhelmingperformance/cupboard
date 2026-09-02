@@ -71,17 +71,18 @@ accepts explicit API endpoints and workflow identity inputs.
 ## Cache-aware flake publishing quickstart
 
 This is the shortest complete setup for publishing pull-request builds to
-short-lived `pr-<number>` caches, then reusing those builds when `main` is
-published.
+managed caches, then reusing those builds when `main` is published. Each cache
+name contains the immutable repository ID and pull-request number.
 
-The example assumes that cupboard is deployed, the tenant exists, its reads are
-public, and `cupboard login` has stored its owner credential. Everything is
-written either to the tenant or to files in the repository. The repository
-lookup needs no GitHub credentials for a public repository; for a private one,
-set a token in `GH_TOKEN` or `GITHUB_TOKEN` and setup and check will use it. See
-[Getting started][readme-getting-started] in the README for deployment and
-tenant creation. The later sections cover private reads, remote builders and
-each setting in more detail.
+The example assumes that cupboard is deployed, the tenant exists, the selected
+destination cache and pull-request reuse view are public, and `cupboard login`
+has stored the tenant owner credential. Everything is written either to the
+tenant or to files in the repository. The repository lookup needs no GitHub
+credentials for a public repository; for a private one, set a token in
+`GH_TOKEN` or `GITHUB_TOKEN` and setup and check will use it. See [Getting
+started][readme-getting-started] in the README for deployment and tenant
+creation. The later sections cover private reads, remote builders and each
+setting in more detail.
 
 [readme-getting-started]: ../README.md#getting-started
 
@@ -105,12 +106,12 @@ Choose an immutable cupboard release from the [releases page][] and replace
 ### 2. Configure the tenant
 
 One idempotent command writes all tenant configuration required by these runs: a
-24-hour retention grace period for every cache, the `pull-requests` reuse view
-over the per-PR caches, and trust rules for this repository's PR and `main`
-runs:
+managed-cache policy for the repository, the `pull-requests` reuse view over its
+managed group, and trust rules for this repository's PR and `main` runs:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
+  --pr-cache-access public \
   --workflow-ref "$workflow@refs/tags/v*"
 ```
 
@@ -120,16 +121,9 @@ release and source commit agree before installation. The pattern makes
 cupboard's release publishers part of the tenant's trust boundary, but it needs
 to be configured only once.
 
-Re-running the command leaves matching state unchanged. It reports a different
-grace policy or reuse view as drift and does not replace it. The tag-pattern
-trust rules already cover later matching releases. The commands that write each
-setting individually are under [Manual configuration](#manual-configuration).
-
-The grace policy permanently changes collection for the covered caches. The
-first publication accepted under the policy marks its cache as grace-managed.
-`policy remove-grace` does not remove that marker. When the last deadline on a
-grace-managed cache lapses, collection may empty it; a cache without the marker
-is never emptied that way.
+Re-running the command leaves matching state unchanged. It reports policy or
+reuse-view drift and does not replace it. The tag-pattern trust rules already
+cover later matching releases.
 
 ### 3. Declare the targets
 
@@ -192,11 +186,13 @@ jobs:
       reuse-view: pull-requests
 ```
 
-The preset derives the cache, root prefix, and TTL from the triggering event. A
-`pull_request` run uses a `pr-<number>` cache with a 14-day TTL. The PR trust
-rule grants access to that cache and its retention root. A run whose ref matches
-the configured `branch` uses the default cache, permanent retention under
-`github:<repository>/<branch>`, and the reuse view.
+The preset derives the cache, root prefix and retention request from the
+triggering event. A `pull_request` run provisions the cache selected by the
+repository's managed policy and uses a 14-day root TTL. The default namespace is
+`gh-<repository-id>-pr-`, followed by the pull-request number. The PR trust rule
+grants access only to that policy-selected cache and its retention root. A run
+whose ref matches the configured `branch` uses the default cache, permanent
+retention under `github:<repository>/<branch>`, and the reuse view.
 
 `branch` defaults to `main` and must match the value passed to
 `cupboard github setup --branch`. The configure job rejects another ref before
@@ -230,27 +226,28 @@ grants access to the requested caches and roots.
 The check fails if only an interactive administrator rule matches, even when
 that rule's wildcard grant would allow the operations. It does not inspect the
 caller workflow, so the supplied reference must still match the caller's `uses`
-line. The check also verifies grace-policy coverage and duration, the reuse
-view's effective priority over the destination, and whether the root prefix is
-within the grant. If an input is missing for a check, such as `--root-prefix`,
-the command reports the unchecked invariant and returns a non-success status.
+line. The check also verifies the reuse view's effective priority over the
+destination and whether the root prefix is within the grant. If an input is
+missing for a check, such as `--root-prefix`, the command reports the unchecked
+invariant and returns a non-success status.
 
-Listing the configuration by hand remains available (`cupboard policy list`,
-`cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
-only that rows exist, not that they will match a real run.
+Listing the configuration by hand remains available (`cupboard reuse-view list`,
+`cupboard oidc-trust list`), but a listing shows only that rows exist, not that
+they will match a real run.
 
-Open a pull request and confirm that the workflow publishes to `pr-<number>`.
-After merging it, the `main` run should plan already-published targets from the
-reuse view and retain them beneath `github:<owner>/<repo>/main` in the default
-cache. If a push is refused anyway, the refusal names the first failing claim
-when the token really is from this repository; compare it against
-[docs/trust-rules.md](./trust-rules.md).
+Open a pull request and confirm that the workflow provisions and publishes to
+the cache derived from the managed policy. After merging it, the `main` run
+should plan already-published targets from the reuse view and retain them
+beneath `github:<owner>/<repo>/main` in the default cache. If a push is refused
+anyway, the refusal names the first failing claim when the token really is from
+this repository; compare it against [docs/trust-rules.md](./trust-rules.md).
 
-### Manual configuration
+### Configuration written by setup
 
-Everything `cupboard github setup` writes can be written by hand; this section
-is for doing that, or for understanding exactly what the command wrote. Set one
-more variable first, the reusable workflow reference the trust rules pin:
+The managed policy and its OIDC provisioning grant must agree on an internal
+policy ID and managed-group ID. Use `cupboard github setup` to create this state
+as one operation. The following variable shows the reusable workflow reference
+which the generated trust rules pin:
 
 ```bash
 trusted_workflow="$workflow@refs/tags/v*"
@@ -261,37 +258,18 @@ The `trusted_workflow` value produces an anchored pattern for the
 repository, where the reusable workflow file lives, and admits only `v*` release
 tags. See [docs/trust-rules.md](./trust-rules.md) for how the claim works.
 
-On the tenant, give every cache a retention grace period, define a view over the
-PR caches, and trust this repository's PR and `main` runs when they use
-cupboard's reusable workflow:
+Setup resolves and pins the repository's immutable GitHub IDs. It reserves the
+default `gh-<repository-id>-pr-` namespace, creates an access-homogeneous
+managed group, and defines the `pull-requests` view over that group. A durable
+cache cannot enter the view by choosing a matching name. The PR rule grants
+`cache:provision` for the policy, so the workflow cannot create an arbitrary
+cache or choose weaker access and retention properties. The branch rule confines
+`main` to the tenant's default cache and its own root prefix.
 
-```bash
-cupboard policy add-grace "$tenant" --cache-prefix '' --grace 24h
-
-cupboard reuse-view set "$tenant" pull-requests \
-  --select prefix:pr- --priority 50
-
-cupboard oidc-trust add-github-pr "$tenant" \
-  --repo "$repo" \
-  --job-workflow-ref "$trusted_workflow"
-
-cupboard oidc-trust add-github-branch "$tenant" \
-  --repo "$repo" --branch main \
-  --job-workflow-ref "$trusted_workflow"
-```
-
-The empty grace prefix covers the default cache and every named cache, including
-the per-PR caches. The grace period must be long enough for the workflow's plan
-and cohort jobs to finish.
-
-The view priority is 50, which is greater than the destination's default
-priority of 40. Nix queries lower numeric priorities first, so this ordering
-keeps the destination preferred. The CLI also defaults view priorities to 50.
-Setup rejects a view with a priority equal to or lower than the destination's.
-
-The trust commands resolve and pin the repository's immutable GitHub ids. The PR
-rule confines each pull request to its own cache and root; the branch rule
-confines `main` to the tenant's default cache and its own root prefix.
+The view priority is 50 by default, which is greater than the destination's
+default priority of 40. Nix queries lower numeric priorities first, so this
+ordering keeps the destination preferred. Setup rejects a view with a priority
+equal to or lower than the destination's.
 
 On the repository side, the tenant URL, release pin and runner labels are
 ordinary values in files the operator owns: the caller workflow and the flake
@@ -697,16 +675,18 @@ jobs:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
     with:
       url: https://cupboard.example.workers.dev/t/acme
-      cache: pr-${{ github.event.pull_request.number }}
+      cache: pull-requests
       root: github:acme/app/pr-${{ github.event.pull_request.number }}
       ttl: 14d
 ```
 
 `cache`, `root`, and `ttl` specify the destination cache, retention root and
-retention duration. In this example every pull request publishes to its own
-`pr-<number>` cache, and the pushed paths expire two weeks after the last push.
-A cache is created the first time something is pushed to it, so per-PR and
-per-release caches need no setup step.
+retention duration. This lower-level example publishes every pull request to a
+durable `pull-requests` cache which the administrator created beforehand. The
+pushed paths expire two weeks after the last push. A publication never creates
+an arbitrary missing cache. Use the flake workflow's `pull-request-and-branch`
+preset with `cupboard github setup` when each pull request needs an
+independently retired managed cache.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
 under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
@@ -878,22 +858,23 @@ known-hosts sources, accepts only those pins and offers only the input key;
 input credentials and pins never enter the builder or direct-store
 configuration.
 
-For a tenant whose reads are private, also pass `read_user` and `read_password`
-as workflow secrets. `actions/setup`'s netrc file covers only Nix substituter
-reads. The plan job also probes the cache directly, outside Nix, so pass the
-same credentials separately: `actions/plan` accepts them as
-`read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
-header on every narinfo probe.
+For a private destination cache, pass `destination_read_user` and
+`destination_read_password` as workflow secrets. The selected cache must accept
+this credential. For a private reuse view, pass `fallback_read_user` and
+`fallback_read_password`; a reuse view authenticates with the tenant-wide
+fallback credential. These pairs may contain the same values when the
+destination cache also uses the fallback credential.
 
 To publish to a named cache, set `cache`; omitting it selects the default cache.
 The cache can be public or private. Combining `cache` with `preset` fails
 because a preset chooses the destination. The workflow passes the selection to
 `actions/setup`, `actions/plan`, `actions/build-cohort`, `actions/attest` and
 `actions/attest-attach`, so every job reads and writes the same destination. The
-workflow supplies one `read_user` and `read_password` pair for all authenticated
-reads, so supply the credential that the selected private cache accepts. If the
-cache has its own verifier, the tenant-wide fallback credential is rejected by
-setup's initial cache-info probe, before publication starts.
+workflow keeps the destination and fallback credentials separate in setup,
+planning and publication. `actions/setup` writes the appropriate credential for
+each Nix substituter. The plan job sends the destination credential when it
+probes the selected cache and the fallback credential when it probes the reuse
+view.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter
@@ -1123,16 +1104,16 @@ remove the superseded rule.
 ### Add a target or a platform
 
 Add the entry to the flake's `cupboardOutputs` list, naming the runner label its
-jobs should use as `os`. No tenant change is needed: caches are created on first
-push, and the existing root-prefix grant covers the new target's root.
+jobs should use as `os`. No tenant change is needed: the workflow provisions its
+managed destination before publication, and the existing root-prefix grant
+covers the new target's root.
 
 ### Add another repository to the same tenant
 
-The tenant-wide grace policy and the `pull-requests` view already cover any
-number of repositories. Run quickstart step 2's `cupboard github setup` for the
-new repository: it adds that repository's trust rules and reports the shared
-tenant state as unchanged. The equivalent individual commands are in
-[Manual configuration](#manual-configuration).
+The `pull-requests` view can cover up to 20 repositories. Run quickstart step
+2's `cupboard github setup` for the new repository: it adds that repository's
+managed policy and trust rules, then adds the policy to the group which the
+shared view selects.
 
 ### Tighten or audit a trust rule
 
@@ -1147,7 +1128,7 @@ Check these conditions in order:
 
 - The run passed `reuse-view`. The quickstart caller sets it for `push` events
   only.
-- The PR cache still exists and matches the view's `pr-` prefix.
+- The managed PR cache remains active in the group selected by the view.
 - The PR run published the path.
 - The grace or TTL window has not lapsed.
 

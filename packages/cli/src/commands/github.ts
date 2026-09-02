@@ -129,9 +129,9 @@ interface CacheInfoFetcherDependencies {
 const cacheInfoTimeoutMs = 30_000;
 
 /**
- * Reads `nix-cache-info` with the supplied Basic credential. Private tenant
- * routes return 401 without one. Supplying only one part of the credential pair
- * fails before the request starts.
+ * Reads `nix-cache-info` with the supplied Basic credential. A private cache
+ * returns 401 without an accepted credential. Supplying only one part of the
+ * credential pair fails before the request starts.
  */
 export function cacheInfoFetcher(
 	options: ReadCredentialOptions,

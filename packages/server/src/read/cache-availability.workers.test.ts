@@ -69,7 +69,7 @@ describe('cache availability query', () => {
 		}
 	);
 
-	it("requires the tenant's Basic credentials when reads are private", async () => {
+	it('requires an accepted Basic credential when the cache is private', async () => {
 		const { token } = await bootstrap();
 		await provisionFixtureTenant({
 			read: { user: 'alice', password: 'secret' }

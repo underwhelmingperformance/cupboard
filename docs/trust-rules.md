@@ -30,10 +30,16 @@ Optionally, `job_workflow_ref` can also restrict the workflow file.
 The `add-github-pr` and `add-github-branch` commands assemble these rules for
 the common cases.
 
-`add-github-pr` trusts pull-request builds. It routes each build to its own
-short-lived cache, `pr-<number>`, and to the matching retention root,
-`github:<owner>/<repo>/pr-<number>/`. Both are keyed on the pull-request number,
-so one pull request cannot reach another's paths.
+`cupboard github setup` trusts pull-request builds through a managed-cache
+policy. It routes each build to a cache whose default name is
+`gh-<repository-id>-pr-<number>` and to the matching retention root. The server
+derives both values from the verified claims and policy, so one pull request
+cannot reach another's cache or choose its access and retention properties.
+
+The lower-level `add-github-pr` command creates only a trust rule. It does not
+create a managed policy, so use it only for destinations which an administrator
+has already created. Dynamic pull-request caches should use
+`cupboard github setup`.
 
 `add-github-branch` trusts pushes to one branch and publishes to the tenant's
 default cache, under `github:<owner>/<repo>/<branch>/`, which is the retention
@@ -46,9 +52,11 @@ retention operation a run performs on its roots, and attestation. Pass
 root.
 
 ```bash
-# Per-PR rule: build the pull request, push to its own pr-<n> cache.
-cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
-  --repo acme/infra
+# Managed PR publication: create the policy, view and trust rules together.
+cupboard github setup https://cupboard.example.workers.dev/t/acme \
+  --repo acme/infra \
+  --pr-cache-access public \
+  --workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v\*
 
 # Branch rule: pushes to main, requiring the reusable publish workflow,
 # publish to the default cache.

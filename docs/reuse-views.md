@@ -14,8 +14,8 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-request
 
 This view selects every cache whose name currently starts with `pr-`. A view
 stores no narinfo and no membership list of its own. It is a live selector over
-the caches it matches, so a cache created, renamed, or recreated under a
-matching name is included without redefining the view.
+the caches it matches, so a cache created or recreated under a matching name is
+included without redefining the view.
 
 An exact selector names one cache. Use `default` for the tenant's default cache:
 
@@ -75,9 +75,10 @@ private cache selected by the current view definition references its hash. The
 server rechecks the view revision after reading shared state, so a concurrent
 selector change produces a miss.
 
-`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input. Put the
-tenant-wide fallback credential in the URL's userinfo when the selected view is
-private.
+`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input. When
+the selected view is private, pass the tenant-wide fallback credential through
+the Action's `read-user` and `read-password` inputs. The Action rejects
+credentials embedded in URL userinfo.
 
 `cupboard reuse-view remove` removes a view. `cupboard reuse-view list` reports
 each view's access property.
@@ -105,12 +106,14 @@ path by itself.
 ## Adopting pull-request builds into a branch
 
 A post-merge `main` workflow can reuse outputs that CI published for the pull
-request. An administrator defines the view once so it selects the per-PR caches
-used by the `add-github-pr` rule (see [docs/trust-rules.md](./trust-rules.md)):
+request. `cupboard github setup` creates a managed-cache policy and defines the
+view over its managed group (see [docs/trust-rules.md](./trust-rules.md)):
 
 ```bash
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --select prefix:pr-
+cupboard github setup https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app \
+  --pr-cache-access public \
+  --workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v\*
 ```
 
 `main`'s post-merge workflow then opts into it:

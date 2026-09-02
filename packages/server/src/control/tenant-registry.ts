@@ -675,8 +675,8 @@ async function requireLiveTenant(
 	}
 }
 
-// A private tenant without a complete read credential fails closed. Do not clear
-// credentials after offboarding has begun.
+// A private cache without its own verifier needs the complete tenant fallback
+// credential. Do not clear the fallback after offboarding has begun.
 export async function clearTenantReadCredential(
 	database: Database,
 	id: TenantId

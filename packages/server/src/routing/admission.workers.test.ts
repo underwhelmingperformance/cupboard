@@ -316,9 +316,9 @@ describe('layered admission gate', () => {
 
 	// The dispatch write gate reconfirms the status against D1 only when admission
 	// served the entry from the row cache, so a suspend stays timely within the
-	// cache TTL. A public tenant is cached, so priming the cache with a read drives
-	// a later write through the gate query; these confine the faults to that query
-	// so admission itself stays healthy.
+	// cache TTL. This tenant's default cache is public, so priming the row cache
+	// with a read drives a later write through the gate query; these confine the
+	// faults to that query so admission itself stays healthy.
 	const statusGateQuery = 'select "status" from "tenant"';
 
 	// A public slug distinct from the private `acme` the other cases use, so priming
