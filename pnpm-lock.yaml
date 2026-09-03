@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^5.20260705.1
+        version: 5.20260705.1
       '@cupboard/cli-ui':
         specifier: workspace:*
         version: link:packages/cli-ui

@@ -12,5 +12,6 @@
 		"tests/e2e/**/*.ts",
 		"tests/fixtures/**/*.ts",
 		"tests/support/**/*.ts"
-	]
+	],
+	"exclude": ["tests/fixtures/cache-deployment-predecessor"]
 }
