@@ -9,7 +9,6 @@ import {
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,7 +21,6 @@ import {
 	authorisedFetch,
 	commitPath,
 	commitUpload,
-	countingD1,
 	currentServer,
 	defaultCache,
 	drivenDirectly,
@@ -41,13 +39,15 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-import { boundedD1 } from './bounded-io.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
-import { withStatementAllowance } from './statement-scope.ts';
+import {
+	statementsRemaining,
+	withStatementAllowance
+} from './statement-scope.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
@@ -504,16 +504,7 @@ async function drivePagedBurst(server: string): Promise<{
 		await commitUpload(token, decision.uploadId);
 	}
 
-	const counting = countingD1(env.CUPBOARD_DB);
-
 	return runInDurableObject(currentServer(), async (instance, state) => {
-		const real = instance.context.d1;
-
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
-		});
-
 		const local = drizzle(state.storage, { schema: { narInfos } });
 		const generations = new Map(
 			local
@@ -531,13 +522,10 @@ async function drivePagedBurst(server: string): Promise<{
 				)
 		);
 		const pipeline = pipelineFor(instance.context);
-		const before = counting.statementsSent();
-
 		// Use one allowance for the complete burst, as a dispatched method does.
-		const kinds = await withStatementAllowance(async () => {
+		const invocation = await withStatementAllowance(async () => {
 			const probe = await pipeline.probeMaterialisation(committed);
-
-			return Promise.all(
+			const outcomes = await Promise.all(
 				paths.map((metadata) => {
 					const generation = generations.get(metadata.storePathHash);
 
@@ -556,13 +544,10 @@ async function drivePagedBurst(server: string): Promise<{
 					});
 				})
 			);
-		});
-		const statements = counting.statementsSent() - before;
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: real
+			return { outcomes, remaining: statementsRemaining() };
 		});
+		const statements = d1StatementsPerInvocation - invocation.remaining;
 
 		const tenant = instance.context.requireTenant();
 		const edges = await instance.context.d1
@@ -582,7 +567,9 @@ async function drivePagedBurst(server: string): Promise<{
 			.get();
 
 		return {
-			kinds: kinds.map((outcome) => outcome.kind).toSorted(byCodeUnit),
+			kinds: invocation.outcomes
+				.map((outcome) => outcome.kind)
+				.toSorted(byCodeUnit),
 			statements,
 			allowance: d1StatementsPerInvocation,
 			edges: edges.length,
@@ -605,6 +592,7 @@ describe('materialise flush paging', () => {
 		// taken theirs. The flush returns `deferred` for the other five requests and
 		// leaves their uploads pending for verification.
 		expect({
+			statements: driven.statements,
 			deferred: driven.kinds.filter((kind) => kind === 'deferred').length,
 			materialised: driven.kinds.filter((kind) => kind === 'materialised')
 				.length,
@@ -616,6 +604,7 @@ describe('materialise flush paging', () => {
 			presence: driven.presence,
 			narinfoUsage: driven.narinfoUsage
 		}).toStrictEqual({
+			statements: 49,
 			deferred: 5,
 			materialised: 9,
 			otherKinds: [],

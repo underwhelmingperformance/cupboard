@@ -18,6 +18,7 @@ import * as schema from '../db/schema.ts';
 import type { SchemaWriter, ServerContext } from './context.ts';
 
 const encoder = new TextEncoder();
+const ruleInsertBatchSize = 16;
 
 export type RetentionRuleDigest = (value: string) => Promise<Sha256HexDigest>;
 
@@ -122,10 +123,16 @@ export async function ensureRetentionRuleSet(
 				.get().id
 		);
 
-		if (canonical.length > 0) {
+		for (
+			let offset = 0;
+			offset < canonical.length;
+			offset += ruleInsertBatchSize
+		) {
+			const batch = canonical.slice(offset, offset + ruleInsertBatchSize);
+
 			tx.insert(schema.rootRetentionRules)
 				.values(
-					canonical.map((rule) => ({
+					batch.map((rule) => ({
 						ruleSetId,
 						rootPrefix: rule.rootPrefix,
 						kind: rule.retention.kind,

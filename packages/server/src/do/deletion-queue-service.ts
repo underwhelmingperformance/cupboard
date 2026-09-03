@@ -52,11 +52,12 @@ export interface TornDownNarInfo {
 	readonly narHash: NixSha256HashString;
 }
 
-// Both statements use the same edge filter, which binds 2N + 2 parameters: a
-// path and generation for each edge, plus the tenant and cache. The credit
-// update embeds that filter in its `count(*)` subquery and also binds `updatedAt`
-// and its own tenant predicate. Its 2N + 4 parameters determine the chunk width.
-export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+// Both statements use the same edge filter, which binds 2N + 3 parameters: a
+// path and generation for each edge, plus the tenant, cache and cache
+// generation. The credit update embeds that filter in its `count(*)` subquery
+// and also binds `updatedAt` and its own tenant predicate. Its 2N + 5 parameters
+// determine the chunk width.
+export const maxFencedRetireRows = Math.floor((maxInClauseValues - 1) / 2);
 
 // Limit each flush to a few retirement batches. An alarm continues any backlog
 // without keeping the critical section open for the entire queue.
@@ -117,7 +118,7 @@ const maxSinglePathAttestationRetirements = Math.floor(
 export function fencedEdgeRetirement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	cache: CacheScope,
+	cache: Pick<ResolvedCache, 'scope' | 'generation'>,
 	batch: readonly TornDownNarInfo[],
 	now: IsoTimestamp
 ) {
@@ -126,8 +127,9 @@ export function fencedEdgeRetirement(
 		cacheIdentityCondition(
 			d1Schema.blobReference.cacheKind,
 			d1Schema.blobReference.cacheName,
-			cache
+			cache.scope
 		),
+		sql`coalesce(${d1Schema.blobReference.cacheGeneration}, 1) = ${cache.generation}`,
 		or(
 			...batch.map((entry) =>
 				and(
@@ -223,6 +225,7 @@ export class DeletionQueueService {
 				d1Schema.blobReference.cacheName,
 				cache.scope
 			),
+			sql`coalesce(${d1Schema.blobReference.cacheGeneration}, 1) = ${cache.generation}`,
 			eq(d1Schema.blobReference.storePathHash, storePathHash),
 			eq(d1Schema.blobReference.generation, generation)
 		);
@@ -536,7 +539,7 @@ export class DeletionQueueService {
 		const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
 			this.context.d1,
 			tenant,
-			cache.scope,
+			cache,
 			batch,
 			now
 		);

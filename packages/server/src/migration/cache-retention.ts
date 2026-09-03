@@ -1,18 +1,29 @@
 import {
+	cacheNameSchema,
 	graceSecondsSchema,
 	rootNameSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import type { RootRetentionOverride } from '@cupboard/protocol/caches';
-import { and, asc, eq, gt, inArray, isNull, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	desc,
+	eq,
+	gt,
+	inArray,
+	isNull,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 
 import { cacheIdSchema } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import type { SchemaDatabase } from '../do/context.ts';
 import { ensureRetentionRuleSet } from '../do/retention-rule-service.ts';
 
-export const retentionMigrationBatchSize = 50;
-export const maximumLegacyRetentionRules = 4096;
+export const retentionMigrationBatchSize = 16;
+export const maximumLegacyRetentionRules = 256;
 
 export type CacheRetentionMigrationOutcome =
 	| { readonly status: 'pending' }
@@ -37,20 +48,28 @@ function validateBatchSize(batchSize: number): void {
 }
 
 function graceForCache(
-	cache: Pick<typeof schema.caches.$inferSelect, 'kind' | 'name' | 'access'>,
-	policies: readonly (typeof schema.legacyRetentionGracePolicies.$inferSelect)[]
+	database: SchemaDatabase,
+	cache: Pick<typeof schema.caches.$inferSelect, 'kind' | 'name' | 'access'>
 ): (typeof schema.caches.$inferInsert)['graceSeconds'] | SQL<null> {
 	if (cache.access === 'private') {
 		return sql<null>`null`;
 	}
 
-	const cacheName = cache.kind === 'default' ? '' : cache.name;
-	const match = policies
-		.filter((policy) => cacheName?.startsWith(policy.cachePrefix) === true)
-		.toSorted(
-			(left, right) => right.cachePrefix.length - left.cachePrefix.length
+	const cacheName =
+		cache.kind === 'default' ? '' : cacheNameSchema.parse(cache.name);
+	const prefixes = Array.from(
+		{ length: cacheName.length + 1 },
+		(_value, length) => cacheName.slice(0, length)
+	);
+	const match = database
+		.select({ graceSeconds: schema.legacyRetentionGracePolicies.graceSeconds })
+		.from(schema.legacyRetentionGracePolicies)
+		.where(inArray(schema.legacyRetentionGracePolicies.cachePrefix, prefixes))
+		.orderBy(
+			desc(sql`length(${schema.legacyRetentionGracePolicies.cachePrefix})`)
 		)
-		.at(0);
+		.limit(1)
+		.get();
 
 	return match === undefined
 		? sql<null>`null`
@@ -195,20 +214,13 @@ function advanceCaches(
 						)
 					)
 					.all();
-	const gracePolicies = database
-		.select()
-		.from(schema.legacyRetentionGracePolicies)
-		.limit(maximumLegacyRetentionRules + 1)
-		.all();
-
-	if (gracePolicies.length > maximumLegacyRetentionRules) {
-		throw new CacheRetentionMigrationError(
-			`The tenant has more than ${maximumLegacyRetentionRules.toString()} legacy grace rules`
-		);
-	}
+	const cachesWithGrace = caches.map((cache) => ({
+		cache,
+		graceSeconds: graceForCache(database, cache)
+	}));
 
 	database.transaction((tx) => {
-		for (const cache of caches) {
+		for (const { cache, graceSeconds } of cachesWithGrace) {
 			const configuredDefault = defaults.find(
 				(candidate) => candidate.cacheId === cache.id
 			);
@@ -220,7 +232,7 @@ function advanceCaches(
 						configuredDefault === undefined
 							? sql`null`
 							: ttlSecondsSchema.parse(configuredDefault.ttlSeconds),
-					graceSeconds: graceForCache(cache, gracePolicies)
+					graceSeconds
 				})
 				.where(eq(schema.caches.id, cache.id))
 				.run();

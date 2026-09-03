@@ -7,6 +7,7 @@
 // that size or adding a bound parameter must keep the statement at or below the
 // Cloudflare limit.
 import {
+	cacheGenerationSchema,
 	cacheNameSchema,
 	type CacheScope,
 	narInfoGenerationSchema,
@@ -27,7 +28,11 @@ import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
-import { cacheIdentityCondition, cacheIdSchema } from '../db/cache.ts';
+import {
+	cacheIdentityCondition,
+	cacheIdSchema,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
@@ -79,6 +84,10 @@ const cache: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse('builds')
 };
+const teardownCache = {
+	scope: cache,
+	generation: cacheGenerationSchema.parse(1)
+} satisfies Pick<ResolvedCache, 'scope' | 'generation'>;
 const cacheId = cacheIdSchema.parse(1);
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
@@ -161,7 +170,7 @@ describe('selected D1 statements', () => {
 			const { creditUpdate } = fencedEdgeRetirement(
 				database,
 				tenant,
-				cache,
+				teardownCache,
 				batch,
 				now
 			);
@@ -175,7 +184,7 @@ describe('selected D1 statements', () => {
 			const { edgeDelete } = fencedEdgeRetirement(
 				database,
 				tenant,
-				cache,
+				teardownCache,
 				batch,
 				now
 			);

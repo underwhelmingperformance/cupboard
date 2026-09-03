@@ -5,6 +5,12 @@ import {
 } from '../errors.ts';
 
 import { maxBoundParameters } from './bulk.ts';
+import {
+	hasDataMigrationBudget,
+	recordMigrationRows,
+	reserveMigrationR2Operation,
+	reserveMigrationStatement
+} from './database-cost-meter.ts';
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
 
@@ -21,15 +27,105 @@ function bounded<A extends unknown[], R>(
 // would exceed the allowance, throw before D1 receives the statement.
 function charged<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
-	subrequest: string
+	subrequest: string,
+	parameterCount: number,
+	resultKind: 'd1-result' | 'first-row' | 'raw-rows'
 ): (...arguments_: A) => Promise<R> {
 	const run = bounded(method, subrequest);
 
-	return (...arguments_: A) => {
+	return async (...arguments_: A) => {
 		spendStatements(1, subrequest);
+		reserveMigrationStatement(parameterCount, subrequest);
+		const result = await run(...arguments_);
+		recordD1MigrationRows(result, resultKind);
 
-		return run(...arguments_);
+		return result;
 	};
+}
+
+function numericProperty(value: unknown, property: string): number {
+	if (value === null || typeof value !== 'object') {
+		return 0;
+	}
+
+	const propertyValue: unknown = Reflect.get(value, property);
+
+	return typeof propertyValue === 'number' ? propertyValue : 0;
+}
+
+function resultRows(result: unknown): number {
+	if (result === null || typeof result !== 'object') {
+		return 0;
+	}
+
+	const rows: unknown = Reflect.get(result, 'results');
+
+	return Array.isArray(rows) ? rows.length : 0;
+}
+
+function recordD1MigrationRows(
+	result: unknown,
+	resultKind: 'd1-result' | 'first-row' | 'raw-rows' = 'd1-result'
+): void {
+	if (resultKind === 'first-row') {
+		recordMigrationRows({
+			rowsReturned: result === null ? 0 : 1,
+			reportedRowsRead: 0,
+			rowsWritten: 0
+		});
+		return;
+	}
+
+	if (resultKind === 'raw-rows' && Array.isArray(result)) {
+		recordMigrationRows({
+			rowsReturned: result.length,
+			reportedRowsRead: 0,
+			rowsWritten: 0
+		});
+		return;
+	}
+
+	if (result === null || typeof result !== 'object') {
+		return;
+	}
+
+	const meta: unknown = Reflect.get(result, 'meta');
+	const rowsRead = numericProperty(meta, 'rows_read');
+
+	recordMigrationRows({
+		rowsReturned: resultRows(result),
+		reportedRowsRead: rowsRead,
+		rowsWritten: numericProperty(meta, 'rows_written')
+	});
+}
+
+async function auditedAll(
+	statement: D1PreparedStatement,
+	subrequest: string,
+	parameterCount: number
+): Promise<D1Result<Record<string, unknown>>> {
+	spendStatements(1, subrequest);
+	reserveMigrationStatement(parameterCount, subrequest);
+	const result = await bounded(statement.all.bind(statement), subrequest)();
+	recordD1MigrationRows(result);
+
+	return result;
+}
+
+function r2BodyLength(value: Parameters<R2Bucket['put']>[1]): number {
+	if (typeof value === 'string') {
+		return new TextEncoder().encode(value).byteLength;
+	}
+
+	if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+		return value.byteLength;
+	}
+
+	if (value instanceof Blob) {
+		return value.size;
+	}
+
+	throw new UnboundableIoError('migration.r2.put-stream');
 }
 
 // A session or multipart handle issues requests outside these per-call proxies.
@@ -64,19 +160,62 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 		get(target, property) {
 			switch (property) {
 				case 'head': {
-					return bounded(target.head.bind(target), 'r2.head');
+					const run = bounded(target.head.bind(target), 'r2.head');
+
+					return (...arguments_: Parameters<R2Bucket['head']>) => {
+						reserveMigrationR2Operation({});
+
+						return run(...arguments_);
+					};
 				}
 				case 'get': {
-					return bounded(target.get.bind(target), 'r2.get', unboundedCapMs);
+					const run = bounded(
+						target.get.bind(target),
+						'r2.get',
+						unboundedCapMs
+					);
+
+					return async (...arguments_: Parameters<R2Bucket['get']>) => {
+						const result = await run(...arguments_);
+						reserveMigrationR2Operation({ bytesRead: result?.size ?? 0 });
+
+						return result;
+					};
 				}
 				case 'put': {
-					return bounded(target.put.bind(target), 'r2.put', unboundedCapMs);
+					const run = bounded(
+						target.put.bind(target),
+						'r2.put',
+						unboundedCapMs
+					);
+
+					return (...arguments_: Parameters<R2Bucket['put']>) => {
+						if (hasDataMigrationBudget()) {
+							reserveMigrationR2Operation({
+								bytesWritten: r2BodyLength(arguments_[1])
+							});
+						}
+
+						return run(...arguments_);
+					};
 				}
 				case 'delete': {
-					return bounded(target.delete.bind(target), 'r2.delete');
+					const run = bounded(target.delete.bind(target), 'r2.delete');
+
+					return (...arguments_: Parameters<R2Bucket['delete']>) => {
+						reserveMigrationR2Operation({});
+
+						return run(...arguments_);
+					};
 				}
 				case 'list': {
-					return bounded(target.list.bind(target), 'r2.list');
+					const run = bounded(target.list.bind(target), 'r2.list');
+
+					return (...arguments_: Parameters<R2Bucket['list']>) => {
+						reserveMigrationR2Operation({});
+
+						return run(...arguments_);
+					};
 				}
 				case 'createMultipartUpload':
 				case 'resumeMultipartUpload': {
@@ -93,8 +232,12 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 // Associate each bounded proxy with its native statement. `batch` unwraps its
 // arguments before passing them to D1.
 const realStatement = new WeakMap<D1PreparedStatement, D1PreparedStatement>();
+const statementParameterCounts = new WeakMap<D1PreparedStatement, number>();
 
-function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
+function boundedStatement(
+	statement: D1PreparedStatement,
+	parameterCount = 0
+): D1PreparedStatement {
 	const proxy = new Proxy(statement, {
 		get(target, property) {
 			switch (property) {
@@ -107,20 +250,56 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 							);
 						}
 
-						return boundedStatement(target.bind(...values));
+						return boundedStatement(target.bind(...values), values.length);
 					};
 				}
 				case 'run': {
-					return charged(target.run.bind(target), 'd1.run');
+					return charged(
+						target.run.bind(target),
+						'd1.run',
+						parameterCount,
+						'd1-result'
+					);
 				}
 				case 'all': {
-					return charged(target.all.bind(target), 'd1.all');
+					return charged(
+						target.all.bind(target),
+						'd1.all',
+						parameterCount,
+						'd1-result'
+					);
 				}
 				case 'first': {
-					return charged(target.first.bind(target), 'd1.first');
+					if (hasDataMigrationBudget()) {
+						return unboundable('d1.first');
+					}
+
+					return charged(
+						target.first.bind(target),
+						'd1.first',
+						parameterCount,
+						'first-row'
+					);
 				}
 				case 'raw': {
-					return charged(target.raw.bind(target), 'd1.raw');
+					if (hasDataMigrationBudget()) {
+						return async (options?: { readonly columnNames?: boolean }) => {
+							if (options?.columnNames === true) {
+								throw new UnboundableIoError('d1.raw.column-names');
+							}
+
+							const result = await auditedAll(target, 'd1.raw', parameterCount);
+
+							return result.results.map((row) => Object.values(row));
+						};
+					}
+
+					return charged(
+						target.raw.bind(target),
+						'd1.raw',
+						parameterCount,
+						'raw-rows'
+					);
 				}
 				default: {
 					return passThrough(target, property);
@@ -130,6 +309,7 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 	});
 
 	realStatement.set(proxy, statement);
+	statementParameterCounts.set(proxy, parameterCount);
 
 	return proxy;
 }
@@ -153,10 +333,17 @@ export function boundedD1(database: D1Database): D1Database {
 						boundedStatement(target.prepare(query));
 				}
 				case 'batch': {
-					return (statements: D1PreparedStatement[]) => {
+					return async (statements: D1PreparedStatement[]) => {
 						spendStatements(statements.length, 'd1.batch');
 
-						return boundedSubrequest(
+						for (const statement of statements) {
+							reserveMigrationStatement(
+								statementParameterCounts.get(statement) ?? 0,
+								'd1.batch'
+							);
+						}
+
+						const results = await boundedSubrequest(
 							() =>
 								target.batch(
 									statements.map(
@@ -165,6 +352,12 @@ export function boundedD1(database: D1Database): D1Database {
 								),
 							'd1.batch'
 						);
+
+						for (const result of results) {
+							recordD1MigrationRows(result);
+						}
+
+						return results;
 					};
 				}
 				case 'exec': {
