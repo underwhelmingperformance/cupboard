@@ -43,6 +43,10 @@ import {
 	runDeploy
 } from './deploy-run.ts';
 import {
+	advanceFreshInstallationPhase,
+	type FreshInstallationClaim
+} from './deployment-bootstrap.ts';
+import {
 	deploymentOperatorClient,
 	DeploymentOperatorIdentityRequiredError,
 	DeploymentOperatorUrlUnavailableError
@@ -1405,11 +1409,16 @@ async function deployFlow(
 		};
 	}
 
+	let freshInstallationClaim: FreshInstallationClaim | undefined;
+
 	await runDeploy({
 		artifact: { ...artifact, config: deployedConfig },
 		api: deploymentApi,
 		accountId: agreed.accountId,
 		...(deploymentClient !== undefined && { deploymentClient }),
+		onFreshInstallationClaim: (claim) => {
+			freshInstallationClaim = claim;
+		},
 		reporter: ui.reporter(),
 		options,
 		signal: runtimeOptions.signal
@@ -1475,6 +1484,25 @@ async function deployFlow(
 				})
 		})
 	});
+
+	const hasCompletedOnboarding = [
+		'ready',
+		'cancelled',
+		'already-initialised'
+	].includes(outcome.kind);
+
+	if (freshInstallationClaim !== undefined && hasCompletedOnboarding) {
+		const onboardedClaim = await advanceFreshInstallationPhase({
+			api: deploymentApi,
+			claim: freshInstallationClaim,
+			phase: 'administrator-onboarded'
+		});
+		await advanceFreshInstallationPhase({
+			api: deploymentApi,
+			claim: onboardedClaim,
+			phase: 'complete'
+		});
+	}
 
 	switch (outcome.kind) {
 		case 'no-subdomain': {

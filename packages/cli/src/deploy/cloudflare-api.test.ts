@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	createCloudflareApi,
 	D1BookmarkMissingError,
+	D1RestoreBookmarkMissingError,
 	maximumCloudflareCollectionPages,
 	QueueConsumerIdMissingError
 } from './cloudflare-api.ts';
@@ -305,6 +306,26 @@ describe('d1QueryBatch', () => {
 	});
 });
 
+describe('d1QueryRows', () => {
+	it('returns the first string column regardless of its SQL alias', async () => {
+		const path = '/accounts/acc-1/d1/database/db-1/query';
+		const { client } = fakeCloudflare({
+			[`POST ${path}`]: [
+				{
+					results: [{ identity: 'deployment-head' }, { identity: 'next-head' }]
+				}
+			]
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).d1QueryRows(
+				databaseIdSchema.parse('db-1'),
+				"SELECT 'deployment-head' AS identity"
+			)
+		).resolves.toStrictEqual(['deployment-head', 'next-head']);
+	});
+});
+
 describe('getD1Bookmark', () => {
 	const path = '/accounts/acc-1/d1/database/db-1/time_travel/bookmark';
 
@@ -329,6 +350,43 @@ describe('getD1Bookmark', () => {
 				databaseIdSchema.parse('db-1')
 			)
 		).rejects.toBeInstanceOf(D1BookmarkMissingError);
+	});
+});
+
+describe('restoreD1Database', () => {
+	const path = '/accounts/acc-1/d1/database/db-1/time_travel/restore';
+
+	it('returns the restored and undo bookmarks', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`POST ${path}`]: {
+				bookmark: 'bookmark-restored',
+				previous_bookmark: 'bookmark-undo'
+			}
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).restoreD1Database(
+				databaseIdSchema.parse('db-1'),
+				'bookmark-before-contract'
+			)
+		).resolves.toStrictEqual({
+			bookmark: 'bookmark-restored',
+			undoBookmark: 'bookmark-undo'
+		});
+		expect(requests).toStrictEqual([{ method: 'POST', path }]);
+	});
+
+	it('refuses a response without both bookmarks', async () => {
+		const { client } = fakeCloudflare({
+			[`POST ${path}`]: { bookmark: 'bookmark-restored' }
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).restoreD1Database(
+				databaseIdSchema.parse('db-1'),
+				'bookmark-before-contract'
+			)
+		).rejects.toBeInstanceOf(D1RestoreBookmarkMissingError);
 	});
 });
 

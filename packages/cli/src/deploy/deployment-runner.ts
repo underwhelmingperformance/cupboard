@@ -1,17 +1,24 @@
 import {
 	type CloudflareDeploymentObservation,
+	type DeploymentAdoptionResult,
+	type DeploymentAdoptPredecessorInput,
 	type DeploymentAdvanceInput,
 	type DeploymentAdvanceResult,
 	type DeploymentAttemptId,
 	type DeploymentExternalAction,
 	type DeploymentIdentity,
+	type DeploymentPrepareSuccessorInput,
+	type DeploymentRecoverInput,
+	type DeploymentRecoveryResult,
 	type DeploymentRevision,
 	type DeploymentStateId,
-	type DeploymentStatus
+	type DeploymentStatus,
+	type SuccessorPreparationResult
 } from '@cupboard/protocol/deployment';
 import type {
 	DeploymentManifestBody,
 	ForwardDeploymentTransition,
+	RecoveryDeploymentTransition,
 	RuntimeStageId
 } from '@cupboard/protocol/deployment-manifest';
 import { runtimeStageIdSchema } from '@cupboard/protocol/deployment-manifest';
@@ -25,6 +32,16 @@ export interface DeploymentRunnerClient {
 		readonly deployment: DeploymentIdentity;
 	}): Promise<DeploymentStatus>;
 	advance(input: DeploymentAdvanceInput): Promise<DeploymentAdvanceResult>;
+	prepareSuccessor(
+		input: DeploymentPrepareSuccessorInput
+	): Promise<SuccessorPreparationResult>;
+	adoptPredecessor(
+		input: DeploymentAdoptPredecessorInput
+	): Promise<DeploymentAdoptionResult>;
+}
+
+export interface DeploymentRecoveryClient extends DeploymentRunnerClient {
+	recover(input: DeploymentRecoverInput): Promise<DeploymentRecoveryResult>;
 }
 
 export type ExecuteDeploymentExternalAction = (
@@ -179,6 +196,139 @@ interface AdvanceDeploymentOptions {
 	readonly executeExternalAction: ExecuteDeploymentExternalAction;
 }
 
+interface RecoverDeploymentOptions {
+	readonly client: DeploymentRecoveryClient;
+	readonly deployment: DeploymentIdentity;
+	readonly manifest: DeploymentManifestBody;
+	readonly targetState: DeploymentStateId;
+	readonly executeExternalAction: ExecuteDeploymentExternalAction;
+}
+
+type ExecutableRecoveryTransition = Exclude<
+	RecoveryDeploymentTransition,
+	{ readonly kind: 'adopt-predecessor-deployment' }
+>;
+
+interface AdoptSuccessorDeploymentOptions {
+	readonly predecessorClient: DeploymentRunnerClient;
+	readonly connectSuccessor: () => Promise<DeploymentRunnerClient>;
+	readonly predecessor: DeploymentIdentity;
+	readonly successor: DeploymentIdentity;
+	readonly manifest: DeploymentManifestBody;
+	readonly deployRuntimeStage: (
+		stage: RuntimeStageId
+	) => Promise<RuntimeStageObservation>;
+}
+
+function successorTransition(
+	manifest: DeploymentManifestBody,
+	predecessor: DeploymentIdentity,
+	state: DeploymentStateId
+): Extract<
+	RecoveryDeploymentTransition,
+	{ readonly kind: 'adopt-predecessor-deployment' }
+> {
+	const matches = manifest.recoveryTransitions.filter(
+		(transition) =>
+			transition.kind === 'adopt-predecessor-deployment' &&
+			transition.predecessorState === state &&
+			transition.compatiblePredecessorArtifacts.includes(predecessor.artifactId)
+	);
+	const [transition, ...extra] = matches;
+
+	if (transition?.kind !== 'adopt-predecessor-deployment' || extra.length > 0) {
+		throw new DeploymentManifestResponseError(
+			`The manifest does not contain one successor transition for predecessor state ${state}`
+		);
+	}
+
+	return transition;
+}
+
+function successorRuntimeStage(
+	manifest: DeploymentManifestBody,
+	transition: Extract<
+		RecoveryDeploymentTransition,
+		{ readonly kind: 'adopt-predecessor-deployment' }
+	>
+): RuntimeStageId {
+	const target = manifest.states.find((state) => state.id === transition.to);
+
+	if (
+		target?.tenantRuntime.kind !== 'registered' ||
+		target.controlRuntime.kind !== 'registered' ||
+		target.tenantRuntime.stage !== target.controlRuntime.stage
+	) {
+		throw new DeploymentManifestResponseError(
+			`Successor state ${transition.to} does not deploy one registered runtime stage`
+		);
+	}
+
+	return target.tenantRuntime.stage;
+}
+
+/**
+ * Replaces a failed deployment with the sole compatible successor declared by
+ * the new manifest. The predecessor is fenced before the CLI uploads the new
+ * runtime, and the new runtime must observe and adopt that exact preparation.
+ */
+export async function adoptSuccessorDeployment(
+	options: AdoptSuccessorDeploymentOptions
+): Promise<
+	Extract<DeploymentAdoptionResult, { readonly outcome: 'completed' }>
+> {
+	const status = await options.predecessorClient.status({
+		deployment: options.predecessor
+	});
+
+	if (status.state !== 'current') {
+		throw new DeploymentNotInitialisedError();
+	}
+
+	const transition = successorTransition(
+		options.manifest,
+		options.predecessor,
+		status.deploymentState
+	);
+	const prepared = await options.predecessorClient.prepareSuccessor({
+		predecessor: options.predecessor,
+		successor: options.successor,
+		expectedState: status.deploymentState,
+		expectedRevision: status.revision
+	});
+	const stage = successorRuntimeStage(options.manifest, transition);
+	const observation = await options.deployRuntimeStage(stage);
+	const successorClient = await options.connectSuccessor();
+	const adopted = await successorClient.adoptPredecessor({
+		predecessor: options.predecessor,
+		successor: options.successor,
+		predecessorState: status.deploymentState,
+		expectedRevision: prepared.revision,
+		attemptId: prepared.execution.attemptId,
+		externalObservation: observation
+	});
+
+	if (adopted.outcome === 'failed') {
+		throw new DeploymentTransitionFailedError(
+			adopted.failure.code,
+			adopted.failure.detail
+		);
+	}
+
+	if (
+		adopted.deployment.artifactId !== options.successor.artifactId ||
+		adopted.deployment.instanceId !== options.successor.instanceId ||
+		adopted.state !== transition.to ||
+		adopted.revision !== prepared.revision + 1
+	) {
+		throw new DeploymentManifestResponseError(
+			'The successor runtime adopted an unexpected deployment state'
+		);
+	}
+
+	return adopted;
+}
+
 function nextTransition(
 	manifest: DeploymentManifestBody,
 	state: DeploymentStateId
@@ -186,6 +336,32 @@ function nextTransition(
 	return manifest.forwardTransitions.find(
 		(transition) => transition.from === state
 	);
+}
+
+function recoveryTransition(
+	manifest: DeploymentManifestBody,
+	from: DeploymentStateId,
+	to: DeploymentStateId
+): ExecutableRecoveryTransition {
+	const matches = manifest.recoveryTransitions.filter(
+		(transition) =>
+			transition.kind !== 'adopt-predecessor-deployment' &&
+			transition.from === from &&
+			transition.to === to
+	);
+	const [transition, ...extra] = matches;
+
+	if (
+		transition === undefined ||
+		transition.kind === 'adopt-predecessor-deployment' ||
+		extra.length > 0
+	) {
+		throw new DeploymentManifestResponseError(
+			`The manifest does not contain one recovery transition from ${from} to ${to}`
+		);
+	}
+
+	return transition;
 }
 
 function expectedExternalAction(
@@ -227,9 +403,31 @@ function assertExternalAction(
 	}
 }
 
+function assertRecoveryExternalAction(
+	transition: ExecutableRecoveryTransition,
+	action: DeploymentExternalAction
+): void {
+	if (
+		transition.kind === 'deploy-recovery-stage' &&
+		action.kind === 'deploy-runtime-stage' &&
+		action.stage === transition.stage
+	) {
+		return;
+	}
+
+	if (transition.kind === 'restore-d1' && action.kind === 'restore-d1') {
+		return;
+	}
+
+	throw new DeploymentManifestResponseError(
+		`The control plane returned an external action which does not match recovery transition ${transition.id}`
+	);
+}
+
 function existingAttempt(
 	status: Extract<DeploymentStatus, { state: 'current' }>,
-	transition: ForwardDeploymentTransition
+	transition:
+		Pick<ForwardDeploymentTransition, 'id'> | ExecutableRecoveryTransition
 ): DeploymentAttemptId | undefined {
 	const execution = status.execution;
 
@@ -251,7 +449,9 @@ function existingAttempt(
 
 function completedOutcome(
 	result: Extract<DeploymentAdvanceResult, { outcome: 'completed' }>,
-	transition: ForwardDeploymentTransition,
+	transition:
+		| Pick<ForwardDeploymentTransition, 'id' | 'to'>
+		| ExecutableRecoveryTransition,
 	expectedRevision: DeploymentRevision
 ): DeploymentAdvanceOutcome {
 	if (
@@ -380,4 +580,86 @@ export async function advanceDeployment(
 	const result = await options.client.advance(input);
 
 	return settleAdvanceResult(options, status, transition, input, result);
+}
+
+async function settleRecoveryResult(
+	options: RecoverDeploymentOptions,
+	status: Extract<DeploymentStatus, { state: 'current' }>,
+	transition: ExecutableRecoveryTransition,
+	input: DeploymentRecoverInput,
+	result: DeploymentRecoveryResult
+): Promise<DeploymentAdvanceOutcome> {
+	if (result.outcome === 'completed') {
+		return completedOutcome(result, transition, status.revision);
+	}
+
+	if (result.outcome === 'running') {
+		return runningOutcome(result, status);
+	}
+
+	if (result.outcome === 'failed') {
+		return failTransition(result);
+	}
+
+	assertRecoveryExternalAction(transition, result.action);
+	const observation = await options.executeExternalAction(
+		result.action,
+		result.attemptId
+	);
+	const observed = await options.client.recover({
+		...input,
+		attemptId: result.attemptId,
+		externalObservation: observation
+	});
+
+	if (observed.outcome === 'external-action-required') {
+		throw new DeploymentManifestResponseError(
+			`Recovery transition ${transition.id} requested another external action after observing the first one`
+		);
+	}
+
+	if (observed.outcome === 'completed') {
+		return completedOutcome(observed, transition, status.revision);
+	}
+
+	if (observed.outcome === 'running') {
+		return runningOutcome(observed, status);
+	}
+
+	return failTransition(observed);
+}
+
+/**
+ * Advances one manifest-declared recovery edge from the current deployment
+ * state. The caller chooses only the target state; the control plane derives
+ * the recovery operation and claims it before the CLI performs any external
+ * action.
+ */
+export async function recoverDeployment(
+	options: RecoverDeploymentOptions
+): Promise<DeploymentAdvanceOutcome> {
+	const status = await options.client.status({
+		deployment: options.deployment
+	});
+
+	if (status.state === 'uninitialised') {
+		throw new DeploymentNotInitialisedError();
+	}
+
+	const transition = recoveryTransition(
+		options.manifest,
+		status.deploymentState,
+		options.targetState
+	);
+	const attemptId = existingAttempt(status, transition);
+	const input: DeploymentRecoverInput = {
+		deployment: options.deployment,
+		expectedState: transition.from,
+		targetRecoveryState: transition.to,
+		expectedRevision: status.revision,
+		...(attemptId !== undefined && { attemptId })
+	};
+	const result = await options.client.recover(input);
+
+	return settleRecoveryResult(options, status, transition, input, result);
 }

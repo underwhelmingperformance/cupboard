@@ -17,16 +17,43 @@ export interface RawMigrationFile {
 	readonly sql: string;
 }
 
-function checksumMapEntry(entry: string): readonly [string, string] {
-	const separator = entry.indexOf(':');
+interface StoredMigrationEvidence {
+	readonly sha256?: string;
+	readonly verificationState: 'verified' | 'unverified-baseline';
+}
 
-	if (separator < 1) {
+function migrationEvidenceMapEntry(
+	entry: string
+): readonly [string, StoredMigrationEvidence] {
+	const firstSeparator = entry.indexOf(':');
+	const lastSeparator = entry.lastIndexOf(':');
+
+	if (lastSeparator === firstSeparator || firstSeparator < 1) {
 		throw new D1MigrationSequenceError(
-			`Invalid stored D1 migration checksum ${entry}`
+			`Invalid stored D1 migration evidence ${entry}`
 		);
 	}
 
-	return [entry.slice(0, separator), entry.slice(separator + 1)];
+	const verificationState = entry.slice(lastSeparator + 1);
+
+	if (
+		verificationState !== 'verified' &&
+		verificationState !== 'unverified-baseline'
+	) {
+		throw new D1MigrationSequenceError(
+			`Invalid D1 migration verification state ${verificationState}`
+		);
+	}
+
+	const sha256 = entry.slice(firstSeparator + 1, lastSeparator);
+
+	return [
+		entry.slice(0, firstSeparator),
+		{
+			verificationState,
+			...(sha256 !== '' && { sha256 })
+		}
+	];
 }
 
 function migrationMapEntry(
@@ -127,12 +154,12 @@ export async function applyDeclaredD1Migrations(
 		databaseId,
 		'SELECT name FROM d1_migrations ORDER BY id;'
 	);
-	const storedChecksumRows = await api.queryRows(
+	const storedEvidenceRows = await api.queryRows(
 		databaseId,
-		"SELECT migration_id || ':' || sha256 AS name FROM structural_migration_checksum WHERE kind = 'd1' ORDER BY migration_id;"
+		"SELECT migration_id || ':' || COALESCE(sha256, '') || ':' || verification_state AS name FROM structural_migration_checksum WHERE kind = 'd1' ORDER BY migration_id;"
 	);
-	const appliedChecksums = new Map(
-		storedChecksumRows.map((entry) => checksumMapEntry(entry))
+	const appliedEvidence = new Map(
+		storedEvidenceRows.map((entry) => migrationEvidenceMapEntry(entry))
 	);
 	const migrationByName = new Map(
 		allMigrations.map((migration) => migrationMapEntry(migration))
@@ -172,10 +199,16 @@ export async function applyDeclaredD1Migrations(
 	}
 
 	for (const name of appliedNames) {
-		const storedChecksum = appliedChecksums.get(name);
+		const evidence = appliedEvidence.get(name);
 		const migration = migrationByName.get(name);
 
-		if (storedChecksum !== undefined && storedChecksum !== migration?.sha256) {
+		if (evidence === undefined) {
+			throw new D1MigrationSequenceError(
+				`D1 migration ${name} has no verification evidence`
+			);
+		}
+
+		if (evidence.sha256 !== migration?.sha256) {
 			throw new D1MigrationSequenceError(
 				`D1 migration ${name} changed after it was applied`
 			);
@@ -194,7 +227,7 @@ export async function applyDeclaredD1Migrations(
 		await api.queryBatch(databaseId, [
 			...migration.statements,
 			`INSERT INTO d1_migrations (name) VALUES (${quote(migration.name)});`,
-			`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', ${quote(migration.name)}, ${quote(migration.sha256)}, CURRENT_TIMESTAMP);`
+			`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, verification_state, applied_at) VALUES ('d1', ${quote(migration.name)}, ${quote(migration.sha256)}, 'verified', CURRENT_TIMESTAMP);`
 		]);
 	}
 
@@ -217,13 +250,24 @@ function migrationIndex(
 }
 
 function checksumInsert(migration: D1Migration): string {
-	return `INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', ${quote(migration.name)}, ${quote(migration.sha256)}, CURRENT_TIMESTAMP) ON CONFLICT (kind, migration_id) DO NOTHING;`;
+	return `INSERT INTO structural_migration_checksum (kind, migration_id, sha256, verification_state, applied_at) VALUES ('d1', ${quote(migration.name)}, ${quote(migration.sha256)}, 'verified', CURRENT_TIMESTAMP) ON CONFLICT (kind, migration_id) DO NOTHING;`;
+}
+
+function recordLegacyBaselines(
+	migrations: readonly D1Migration[]
+): readonly string[] {
+	return migrations.map(
+		(migration) =>
+			`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, verification_state, applied_at) SELECT 'd1', name, ${quote(migration.sha256)}, 'unverified-baseline', CURRENT_TIMESTAMP FROM d1_migrations WHERE name = ${quote(migration.name)} ON CONFLICT (kind, migration_id) DO UPDATE SET sha256 = excluded.sha256 WHERE structural_migration_checksum.verification_state = 'unverified-baseline' AND structural_migration_checksum.sha256 IS NULL;`
+	);
 }
 
 /**
  * Applies the one manifest-declared legacy bootstrap range. The first
- * migration creates the checksum table, so the same transaction records a
- * labelled digest for every migration in the verified legacy prefix.
+ * migration creates the checksum table. Historical migration names prove the
+ * supported prefix. Their current checked-in digests become an immutable
+ * baseline, while the provenance records that their original execution was not
+ * observed.
  */
 export async function applyLegacyBootstrapD1Migrations(
 	api: D1MigrationApi,
@@ -288,14 +332,16 @@ export async function applyLegacyBootstrapD1Migrations(
 		await api.queryBatch(databaseId, [
 			...first.statements,
 			`INSERT INTO d1_migrations (name) VALUES (${quote(first.name)});`,
-			...allMigrations
-				.slice(0, bootstrapStart)
-				.map((migration) => checksumInsert(migration)),
 			checksumInsert(first)
 		]);
 		newlyApplied.push(first.name);
 		appliedNames = [...appliedNames, first.name];
 	}
+
+	await api.queryBatch(
+		databaseId,
+		recordLegacyBaselines(allMigrations.slice(0, bootstrapStart))
+	);
 
 	const remaining = declaredNames.slice(appliedNames.length - bootstrapStart);
 	newlyApplied.push(

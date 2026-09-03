@@ -429,11 +429,11 @@ describe('runDeploy', () => {
 		});
 
 		expect(calls).toStrictEqual([
+			'd1:cupboard',
 			'r2:cupboard-blobs',
 			'lifecycle:cupboard-blobs',
 			'queue:cupboard-maintenance',
 			'queue:cupboard-maintenance-dlq',
-			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
@@ -744,11 +744,11 @@ describe('runDeploy', () => {
 
 		expect({ calls, succeeded, skipped }).toStrictEqual({
 			calls: [
+				'd1:cupboard',
 				'r2:cupboard-blobs',
 				'lifecycle:cupboard-blobs',
 				'queue:cupboard-maintenance',
 				'queue:cupboard-maintenance-dlq',
-				'd1:cupboard',
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
@@ -836,11 +836,11 @@ describe('runDeploy', () => {
 		});
 
 		expect(calls).toStrictEqual([
+			'd1:cupboard',
 			'r2:cupboard-blobs',
 			'lifecycle:cupboard-blobs',
 			'queue:cupboard-maintenance',
 			'queue:cupboard-maintenance-dlq',
-			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
@@ -914,11 +914,11 @@ describe('runDeploy', () => {
 
 		expect({ calls, warnings }).toStrictEqual({
 			calls: [
+				'd1:cupboard',
 				'r2:cupboard-blobs',
 				'lifecycle:cupboard-blobs',
 				'queue:cupboard-maintenance',
 				'queue:cupboard-maintenance-dlq',
-				'd1:cupboard',
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',

@@ -5,6 +5,7 @@ import {
 	deploymentAttemptIdSchema,
 	type DeploymentIdentity,
 	deploymentInstanceIdSchema,
+	type DeploymentRecoverInput,
 	deploymentRevisionSchema,
 	deploymentStateIdSchema,
 	type DeploymentStatus,
@@ -16,23 +17,32 @@ import type {
 } from '@cupboard/protocol/deployment-manifest';
 import {
 	d1MigrationIdSchema,
-	d1SchemaStateIdSchema
+	d1SchemaStateIdSchema,
+	deploymentRecoveryTransitionIdSchema,
+	runtimeStageIdSchema
 } from '@cupboard/protocol/deployment-manifest';
 import { describe, expect, it, vi } from 'vitest';
 
 import { testDeploymentManifest } from './deployment-manifest.test-support.ts';
 import {
+	adoptSuccessorDeployment,
 	advanceDeployment,
 	cloudflareDeploymentExecutor,
 	DeploymentManifestResponseError,
+	type DeploymentRecoveryClient,
 	type DeploymentRunnerClient,
-	type ExecuteDeploymentExternalAction
+	type ExecuteDeploymentExternalAction,
+	recoverDeployment
 } from './deployment-runner.ts';
 import { databaseIdSchema } from './identifiers.ts';
 
 const identity: DeploymentIdentity = {
 	artifactId: deploymentArtifactIdSchema.parse('a'.repeat(64)),
 	instanceId: deploymentInstanceIdSchema.parse('b'.repeat(64))
+};
+const successorIdentity: DeploymentIdentity = {
+	artifactId: deploymentArtifactIdSchema.parse('d'.repeat(64)),
+	instanceId: deploymentInstanceIdSchema.parse('e'.repeat(64))
 };
 const source = deploymentStateIdSchema.parse('source');
 const target = deploymentStateIdSchema.parse('target');
@@ -99,6 +109,10 @@ function scriptedClient(
 		inputs,
 		client: {
 			status: () => Promise.resolve(status),
+			prepareSuccessor: () =>
+				Promise.reject(new Error('Successor preparation was not expected')),
+			adoptPredecessor: () =>
+				Promise.reject(new Error('Predecessor adoption was not expected')),
 			advance: (input) => {
 				inputs.push(input);
 				const result = results[index];
@@ -139,6 +153,8 @@ describe('advanceDeployment', () => {
 		});
 		const recordingClient: DeploymentRunnerClient = {
 			status: (input) => client.status(input),
+			prepareSuccessor: (input) => client.prepareSuccessor(input),
+			adoptPredecessor: (input) => client.adoptPredecessor(input),
 			advance: (input) => {
 				order.push('advance');
 
@@ -264,6 +280,241 @@ describe('advanceDeployment', () => {
 	});
 });
 
+describe('recoverDeployment', () => {
+	it('claims and executes the declared recovery edge', async () => {
+		const stage = runtimeStageIdSchema.parse('installed');
+		const recoveryManifest: DeploymentManifestBody = {
+			...manifest,
+			recoveryTransitions: [
+				{
+					id: deploymentRecoveryTransitionIdSchema.parse('recover-runtime'),
+					from: target,
+					to: source,
+					kind: 'deploy-recovery-stage',
+					stage,
+					checks: []
+				}
+			]
+		};
+		const inputs: DeploymentRecoverInput[] = [];
+		const client: DeploymentRecoveryClient = {
+			status: () =>
+				Promise.resolve(
+					currentStatus({
+						deploymentState: target,
+						nextState: undefined
+					})
+				),
+			advance: () => Promise.reject(new Error('Advance was not expected')),
+			prepareSuccessor: () =>
+				Promise.reject(new Error('Successor preparation was not expected')),
+			adoptPredecessor: () =>
+				Promise.reject(new Error('Predecessor adoption was not expected')),
+			recover: (input) => {
+				inputs.push(input);
+
+				return Promise.resolve(
+					inputs.length === 1
+						? {
+								outcome: 'external-action-required',
+								attemptId,
+								action: {
+									kind: 'deploy-runtime-stage',
+									stage,
+									tenantFirst: true
+								}
+							}
+						: {
+								outcome: 'completed',
+								state: source,
+								revision: deploymentRevisionSchema.parse(3)
+							}
+				);
+			}
+		};
+
+		await expect(
+			recoverDeployment({
+				client,
+				deployment: identity,
+				manifest: recoveryManifest,
+				targetState: source,
+				executeExternalAction: () =>
+					Promise.resolve({
+						kind: 'runtime-stage',
+						stage,
+						tenantVersionId: 'tenant-recovery',
+						controlVersionId: 'control-recovery',
+						tenantTrafficPercent: 100,
+						controlTrafficPercent: 100
+					})
+			})
+		).resolves.toStrictEqual({
+			state: 'completed',
+			deploymentState: source,
+			revision: deploymentRevisionSchema.parse(3)
+		});
+		expect(inputs).toStrictEqual([
+			{
+				deployment: identity,
+				expectedState: target,
+				targetRecoveryState: source,
+				expectedRevision: deploymentRevisionSchema.parse(2)
+			},
+			{
+				deployment: identity,
+				expectedState: target,
+				targetRecoveryState: source,
+				expectedRevision: deploymentRevisionSchema.parse(2),
+				attemptId,
+				externalObservation: {
+					kind: 'runtime-stage',
+					stage,
+					tenantVersionId: 'tenant-recovery',
+					controlVersionId: 'control-recovery',
+					tenantTrafficPercent: 100,
+					controlTrafficPercent: 100
+				}
+			}
+		]);
+	});
+});
+
+describe('adoptSuccessorDeployment', () => {
+	it('fences the predecessor before deploying and adopting the successor', async () => {
+		const recoveryManifest: DeploymentManifestBody = {
+			...manifest,
+			recoveryTransitions: [
+				{
+					id: deploymentRecoveryTransitionIdSchema.parse(
+						'adopt-failed-release'
+					),
+					kind: 'adopt-predecessor-deployment',
+					compatiblePredecessorArtifacts: [identity.artifactId],
+					predecessorState: source,
+					to: target,
+					expiredExecution: { kind: 'abandon-unissued' },
+					migrationResults: [],
+					checks: []
+				}
+			]
+		};
+		const order: string[] = [];
+		const predecessorClient: DeploymentRunnerClient = {
+			status: () => Promise.resolve(currentStatus()),
+			advance: () => Promise.reject(new Error('Advance was not expected')),
+			prepareSuccessor: (input) => {
+				order.push('prepare');
+				expect(input).toStrictEqual({
+					predecessor: identity,
+					successor: successorIdentity,
+					expectedState: source,
+					expectedRevision: deploymentRevisionSchema.parse(2)
+				});
+
+				return Promise.resolve({
+					outcome: 'prepared',
+					predecessorState: source,
+					revision: deploymentRevisionSchema.parse(3),
+					claimExpiresAt: '2026-09-02T12:05:00.000Z',
+					execution: {
+						transitionId: transition.id,
+						attemptId,
+						phase: 'failed',
+						claimRevision: 1,
+						claimExpiresAt: '2026-09-02T11:55:00.000Z',
+						externalAction: 'not-required'
+					}
+				});
+			},
+			adoptPredecessor: () =>
+				Promise.reject(new Error('The predecessor tried to adopt itself'))
+		};
+		const successorClient: DeploymentRunnerClient = {
+			status: () => Promise.reject(new Error('Status was not expected')),
+			advance: () => Promise.reject(new Error('Advance was not expected')),
+			prepareSuccessor: () =>
+				Promise.reject(new Error('Preparation was not expected')),
+			adoptPredecessor: (input) => {
+				order.push('adopt');
+				expect(input).toStrictEqual({
+					predecessor: identity,
+					successor: successorIdentity,
+					predecessorState: source,
+					expectedRevision: deploymentRevisionSchema.parse(3),
+					attemptId,
+					externalObservation: {
+						kind: 'runtime-stage',
+						stage: runtimeStageIdSchema.parse('installed'),
+						tenantVersionId: 'tenant-v2',
+						controlVersionId: 'control-v2',
+						tenantTrafficPercent: 100,
+						controlTrafficPercent: 100
+					}
+				});
+
+				return Promise.resolve({
+					outcome: 'completed',
+					deployment: successorIdentity,
+					state: target,
+					revision: deploymentRevisionSchema.parse(4)
+				});
+			}
+		};
+
+		await expect(
+			adoptSuccessorDeployment({
+				predecessorClient,
+				connectSuccessor: () => {
+					order.push('connect');
+
+					return Promise.resolve(successorClient);
+				},
+				predecessor: identity,
+				successor: successorIdentity,
+				manifest: recoveryManifest,
+				deployRuntimeStage: (stage) => {
+					order.push('deploy');
+					expect(stage).toBe(runtimeStageIdSchema.parse('installed'));
+
+					return Promise.resolve({
+						kind: 'runtime-stage',
+						stage,
+						tenantVersionId: 'tenant-v2',
+						controlVersionId: 'control-v2',
+						tenantTrafficPercent: 100,
+						controlTrafficPercent: 100
+					});
+				}
+			})
+		).resolves.toStrictEqual({
+			outcome: 'completed',
+			deployment: successorIdentity,
+			state: target,
+			revision: deploymentRevisionSchema.parse(4)
+		});
+		expect(order).toStrictEqual(['prepare', 'deploy', 'connect', 'adopt']);
+	});
+
+	it('rejects a predecessor without one declared successor edge', async () => {
+		const { client } = scriptedClient(currentStatus(), []);
+
+		await expect(
+			adoptSuccessorDeployment({
+				predecessorClient: client,
+				connectSuccessor: () => Promise.resolve(client),
+				predecessor: identity,
+				successor: successorIdentity,
+				manifest,
+				deployRuntimeStage: () =>
+					Promise.reject(new Error('Runtime deployment was not expected'))
+			})
+		).rejects.toThrow(
+			'The manifest does not contain one successor transition for predecessor state source'
+		);
+	});
+});
+
 describe('cloudflareDeploymentExecutor', () => {
 	it('applies only the declared D1 migrations and reports their digests', async () => {
 		const mutableBatches: string[][] = [];
@@ -302,7 +553,7 @@ describe('cloudflareDeploymentExecutor', () => {
 			[
 				'CREATE TABLE expanded (id TEXT);',
 				"INSERT INTO d1_migrations (name) VALUES ('0020_expand.sql');",
-				`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', '0020_expand.sql', '${'c'.repeat(64)}', CURRENT_TIMESTAMP);`
+				`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, verification_state, applied_at) VALUES ('d1', '0020_expand.sql', '${'c'.repeat(64)}', 'verified', CURRENT_TIMESTAMP);`
 			]
 		]);
 	});
@@ -330,5 +581,80 @@ describe('cloudflareDeploymentExecutor', () => {
 			databaseId: 'database-1',
 			bookmark: 'bookmark-1'
 		});
+	});
+
+	it('restores only the D1 bookmark supplied by the claimed action', async () => {
+		const restoreD1Database = vi.fn(() =>
+			Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo-1' })
+		);
+		const executor = cloudflareDeploymentExecutor({
+			api: {
+				d1QueryBatch: () => Promise.resolve(),
+				d1QueryRows: () => Promise.resolve([]),
+				getD1Bookmark: () => Promise.resolve('bookmark-1'),
+				restoreD1Database
+			},
+			databaseId: databaseIdSchema.parse('database-1'),
+			d1Migrations: [],
+			deployRuntimeStage: () => {
+				throw new Error('The D1 recovery action tried to deploy a runtime');
+			}
+		});
+
+		await expect(
+			executor(
+				{
+					kind: 'restore-d1',
+					databaseId: 'database-1',
+					preContractBookmark: 'bookmark-before-contract',
+					recoveryEnvelopeKey: 'd1/database-1/envelope.json'
+				},
+				attemptId
+			)
+		).resolves.toStrictEqual({
+			kind: 'd1-restoration',
+			databaseId: 'database-1',
+			preContractBookmark: 'bookmark-before-contract',
+			undoBookmark: 'undo-1',
+			recoveryEnvelopeKey: 'd1/database-1/envelope.json'
+		});
+		expect(restoreD1Database).toHaveBeenCalledExactlyOnceWith(
+			databaseIdSchema.parse('database-1'),
+			'bookmark-before-contract'
+		);
+	});
+
+	it('refuses a D1 restore action for another database', async () => {
+		const restoreD1Database = vi.fn(() =>
+			Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo-1' })
+		);
+		const executor = cloudflareDeploymentExecutor({
+			api: {
+				d1QueryBatch: () => Promise.resolve(),
+				d1QueryRows: () => Promise.resolve([]),
+				getD1Bookmark: () => Promise.resolve('bookmark-1'),
+				restoreD1Database
+			},
+			databaseId: databaseIdSchema.parse('database-1'),
+			d1Migrations: [],
+			deployRuntimeStage: () => {
+				throw new Error('The D1 recovery action tried to deploy a runtime');
+			}
+		});
+
+		await expect(
+			executor(
+				{
+					kind: 'restore-d1',
+					databaseId: 'database-2',
+					preContractBookmark: 'bookmark-before-contract',
+					recoveryEnvelopeKey: 'd1/database-2/envelope.json'
+				},
+				attemptId
+			)
+		).rejects.toThrow(
+			'The control plane requested recovery for D1 database database-2, but this deployment uses database-1'
+		);
+		expect(restoreD1Database).not.toHaveBeenCalled();
 	});
 });

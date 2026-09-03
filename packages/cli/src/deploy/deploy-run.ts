@@ -1,4 +1,10 @@
-import type { DeploymentIdentity } from '@cupboard/protocol/deployment';
+import {
+	deploymentArtifactIdSchema,
+	type DeploymentIdentity,
+	deploymentInstanceIdSchema,
+	deploymentRevisionSchema,
+	deploymentStateIdSchema
+} from '@cupboard/protocol/deployment';
 import type { RuntimeStageId } from '@cupboard/protocol/deployment-manifest';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
@@ -12,13 +18,21 @@ import { canonicalJson } from './canonical-json.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import {
+	advanceFreshInstallationPhase,
 	bootstrapLegacyDeployment,
-	initialiseFreshDeployment
+	claimFreshInstallation,
+	type FreshInstallationClaim,
+	initialiseFreshDeployment,
+	recordFreshInstallationResources,
+	resumeFreshInstallation,
+	sealFreshInstallationTopology
 } from './deployment-bootstrap.ts';
 import { deploymentInstanceId } from './deployment-identity.ts';
 import {
+	adoptSuccessorDeployment,
 	advanceDeployment,
 	cloudflareDeploymentExecutor,
+	DeploymentManifestResponseError,
 	type DeploymentRunnerClient,
 	type RuntimeStageObservation
 } from './deployment-runner.ts';
@@ -87,12 +101,18 @@ export interface DeployDependencies {
 	readonly api: CloudflareApi;
 	readonly accountId: CloudflareAccountId;
 	readonly deploymentClient?: () => Promise<DeploymentRunnerClient>;
+	readonly onFreshInstallationClaim?: (claim: FreshInstallationClaim) => void;
 	readonly reporter: Reporter;
 	readonly options: DeployOptions;
 	readonly signal?: AbortSignal;
 }
 
 interface ReconciledResources extends ResolvedResources {
+	readonly topologyResources: Readonly<Record<string, string>>;
+}
+
+interface ReconciledD1Resources {
+	readonly d1: ReadonlyMap<string, DatabaseId>;
 	readonly topologyResources: Readonly<Record<string, string>>;
 }
 
@@ -123,13 +143,34 @@ export class DeploymentAdvanceIncompleteError extends Error {
 	}
 }
 
+export class DeploymentD1DatabaseRequiredError extends Error {
+	constructor() {
+		super('The deployment manifest requires a D1 database');
+		this.name = 'DeploymentD1DatabaseRequiredError';
+	}
+}
+
+const deploymentHeadSnapshotSchema = z.strictObject({
+	artifactId: deploymentArtifactIdSchema,
+	instanceId: deploymentInstanceIdSchema,
+	state: deploymentStateIdSchema,
+	revision: deploymentRevisionSchema
+});
+
+type DeploymentHeadSnapshot = z.infer<typeof deploymentHeadSnapshotSchema>;
+
 function workerForRuntimeStage(
 	worker: DeploymentConfig['tenant'],
-	stage: RuntimeStageId
+	stage: RuntimeStageId,
+	artifactId: DeploymentArtifact['deploymentArtifactId']
 ): DeploymentConfig['tenant'] {
 	return {
 		...worker,
-		vars: { ...worker.vars, CUPBOARD_RUNTIME_STAGE: stage }
+		vars: {
+			...worker.vars,
+			CUPBOARD_RUNTIME_STAGE: stage,
+			CUPBOARD_DEPLOYMENT_ARTIFACT_ID: artifactId
+		}
 	};
 }
 
@@ -268,12 +309,15 @@ export function choicePlanRows(
 
 async function reconcileResources(
 	dependencies: DeployDependencies,
-	plan: ResourcePlan
+	plan: ResourcePlan,
+	d1Resources: ReconciledD1Resources
 ): Promise<ReconciledResources> {
 	const { api, reporter } = dependencies;
 
 	return reporter.phase('Reconciling resources', async (context) => {
-		const topologyResources: Record<string, string> = {};
+		const topologyResources: Record<string, string> = {
+			...d1Resources.topologyResources
+		};
 
 		for (const name of plan.r2Buckets) {
 			await api.ensureR2Bucket(name);
@@ -286,14 +330,6 @@ async function reconcileResources(
 			topologyResources[`queue:${name}`] = id;
 		}
 
-		const d1 = new Map<string, DatabaseId>();
-
-		for (const name of plan.d1Databases) {
-			const id = await api.ensureD1Database(name);
-			d1.set(name, id);
-			topologyResources[`d1:${name}`] = id;
-		}
-
 		const kv = new Map<string, KvNamespaceId>();
 
 		for (const title of plan.kvTitles) {
@@ -304,14 +340,62 @@ async function reconcileResources(
 
 		context.fact(
 			'resources',
-			plan.r2Buckets.length +
-				plan.d1Databases.length +
-				plan.kvTitles.length +
-				plan.queues.length
+			plan.r2Buckets.length + plan.kvTitles.length + plan.queues.length
 		);
 
-		return { d1, kv, topologyResources };
+		return { d1: d1Resources.d1, kv, topologyResources };
 	});
+}
+
+async function reconcileD1Resources(
+	dependencies: DeployDependencies,
+	plan: ResourcePlan
+): Promise<ReconciledD1Resources> {
+	return dependencies.reporter.phase(
+		'Reconciling D1 resources',
+		async (context) => {
+			const d1 = new Map<string, DatabaseId>();
+			const topologyResources: Record<string, string> = {};
+
+			for (const name of plan.d1Databases) {
+				const id = await dependencies.api.ensureD1Database(name);
+				d1.set(name, id);
+				topologyResources[`d1:${name}`] = id;
+			}
+
+			context.fact('resources', plan.d1Databases.length);
+
+			return { d1, topologyResources };
+		}
+	);
+}
+
+function freshInstallationResourceIntent(
+	artifact: DeploymentArtifact,
+	plan: ResourcePlan
+): Readonly<Record<string, string>> {
+	const resources: Record<string, string> = {
+		'worker:tenant': artifact.config.tenant.name,
+		'worker:control': artifact.config.control.name
+	};
+
+	for (const name of plan.d1Databases) {
+		resources[`d1:${name}`] = name;
+	}
+
+	for (const name of plan.r2Buckets) {
+		resources[`r2:${name}`] = name;
+	}
+
+	for (const name of plan.kvTitles) {
+		resources[`kv:${name}`] = name;
+	}
+
+	for (const name of plan.queues) {
+		resources[`queue:${name}`] = name;
+	}
+
+	return resources;
 }
 
 export function deploymentIdentityFor(
@@ -437,8 +521,16 @@ export async function deployRuntimeStage(
 	stage: RuntimeStageId
 ): Promise<RuntimeStageObservation> {
 	const { artifact, api, reporter } = dependencies;
-	const tenantConfig = workerForRuntimeStage(artifact.config.tenant, stage);
-	const controlConfig = workerForRuntimeStage(artifact.config.control, stage);
+	const tenantConfig = workerForRuntimeStage(
+		artifact.config.tenant,
+		stage,
+		artifact.deploymentArtifactId
+	);
+	const controlConfig = workerForRuntimeStage(
+		artifact.config.control,
+		stage,
+		artifact.deploymentArtifactId
+	);
 	const tenantMetadata = withBuildVersion(
 		buildScriptMetadata(tenantConfig, resources),
 		artifact.buildVersion
@@ -567,23 +659,83 @@ async function performStagedDeployment(
 		throw new DeploymentOperatorRequiredError();
 	}
 
-	const client = await createClient();
-
 	const deployment = deploymentIdentityFor(
 		dependencies.artifact,
 		dependencies.accountId,
 		resources
 	);
+	let client = await createClient();
 
 	await configureTenantRoutes(dependencies);
-	await bootstrapLegacyDeployment({
-		api: dependencies.api,
-		databaseId,
-		artifact: dependencies.artifact,
-		deployment,
-		deployRuntime: (transition) =>
-			deployRuntimeStage(dependencies, resources, transition.stage)
-	});
+	const head = await currentDeploymentHead(dependencies, databaseId);
+
+	if (head === undefined) {
+		await bootstrapLegacyDeployment({
+			api: dependencies.api,
+			databaseId,
+			artifact: dependencies.artifact,
+			deployment,
+			observeLegacyRuntime: async () => {
+				const [
+					tenantConfig,
+					controlConfig,
+					tenantDeployment,
+					controlDeployment
+				] = await Promise.all([
+					dependencies.api.getScriptConfiguration(
+						dependencies.artifact.config.tenant.name
+					),
+					dependencies.api.getScriptConfiguration(
+						dependencies.artifact.config.control.name
+					),
+					dependencies.api.getActiveScriptDeployment(
+						dependencies.artifact.config.tenant.name
+					),
+					dependencies.api.getActiveScriptDeployment(
+						dependencies.artifact.config.control.name
+					)
+				]);
+
+				if (
+					tenantDeployment === undefined ||
+					controlDeployment === undefined ||
+					tenantConfig?.buildVersion === undefined ||
+					controlConfig?.buildVersion === undefined
+				) {
+					throw new DeploymentManifestResponseError(
+						'The legacy deployment runtime cannot be observed exactly'
+					);
+				}
+
+				return {
+					tenantVersionTag: tenantConfig.buildVersion,
+					controlVersionTag: controlConfig.buildVersion,
+					tenantTrafficPercent: tenantDeployment.trafficPercent,
+					controlTrafficPercent: controlDeployment.trafficPercent
+				};
+			},
+			deployRuntime: (transition) =>
+				deployRuntimeStage(dependencies, resources, transition.stage)
+		});
+		client = await createClient();
+	} else if (
+		head.artifactId !== deployment.artifactId ||
+		head.instanceId !== deployment.instanceId
+	) {
+		await adoptSuccessorDeployment({
+			predecessorClient: client,
+			connectSuccessor: createClient,
+			predecessor: {
+				artifactId: head.artifactId,
+				instanceId: head.instanceId
+			},
+			successor: deployment,
+			manifest: dependencies.artifact.deploymentManifest,
+			deployRuntimeStage: (stage) =>
+				deployRuntimeStage(dependencies, resources, stage)
+		});
+		client = await createClient();
+	}
 	await dependencies.api.setWorkersDevRoutes(
 		dependencies.artifact.config.tenant.name,
 		{
@@ -631,6 +783,48 @@ async function performStagedDeployment(
 	throw new DeploymentAdvanceIncompleteError(
 		dependencies.artifact.deploymentManifest.terminalState
 	);
+}
+
+async function currentDeploymentHead(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId
+): Promise<DeploymentHeadSnapshot | undefined> {
+	const bootstrap =
+		dependencies.artifact.deploymentManifest.bootstrapTransitions[0];
+	const ledgerMigration = bootstrap?.migrations[0];
+
+	if (ledgerMigration === undefined) {
+		return;
+	}
+
+	const applied = await dependencies.api.d1QueryRows(
+		databaseId,
+		'SELECT name FROM d1_migrations ORDER BY id;'
+	);
+
+	if (!applied.includes(ledgerMigration)) {
+		return;
+	}
+
+	const rows = await dependencies.api.d1QueryRows(
+		databaseId,
+		"SELECT json_object('artifactId', artifact_id, 'instanceId', instance_id, 'state', state_id, 'revision', revision) AS deployment FROM deployment_head WHERE id = 'current';"
+	);
+	const [row, ...extra] = rows;
+
+	if (row === undefined) {
+		return;
+	}
+
+	if (extra.length > 0) {
+		throw new DeploymentManifestResponseError(
+			'The deployment ledger contains more than one current head'
+		);
+	}
+
+	const parsed: unknown = JSON.parse(row);
+
+	return deploymentHeadSnapshotSchema.parse(parsed);
 }
 
 async function isExactTerminalHead(
@@ -745,15 +939,57 @@ async function performDeploy(
 	const existingControl = isStaged
 		? await api.getScriptConfiguration(artifact.config.control.name)
 		: undefined;
+	const resourcePlan = collectResources(artifact.config);
+	const d1Resources = await reconcileD1Resources(dependencies, resourcePlan);
+	const databaseId = d1Resources.d1.get(
+		artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
+	);
+	let freshClaim: FreshInstallationClaim | undefined;
+
+	if (isStaged) {
+		if (databaseId === undefined) {
+			throw new DeploymentD1DatabaseRequiredError();
+		}
+
+		const claimOptions = {
+			api,
+			databaseId,
+			accountId: dependencies.accountId,
+			artifactId: artifact.deploymentArtifactId,
+			intendedResources: freshInstallationResourceIntent(artifact, resourcePlan)
+		};
+
+		freshClaim =
+			existingControl === undefined
+				? await claimFreshInstallation(claimOptions)
+				: await resumeFreshInstallation(claimOptions);
+	}
 
 	const resources = await reconcileResources(
 		dependencies,
-		collectResources(artifact.config)
+		resourcePlan,
+		d1Resources
 	);
 
-	const databaseId = resources.d1.get(
-		artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
-	);
+	if (freshClaim?.phase === 'claimed') {
+		freshClaim = await recordFreshInstallationResources({
+			api,
+			claim: freshClaim,
+			observedResources: resources.topologyResources
+		});
+	}
+
+	if (freshClaim?.phase === 'resources-created') {
+		freshClaim = await sealFreshInstallationTopology({
+			api,
+			claim: freshClaim,
+			deployment: deploymentIdentityFor(
+				artifact,
+				dependencies.accountId,
+				resources
+			)
+		});
+	}
 
 	const isFreshResume =
 		isStaged &&
@@ -763,7 +999,7 @@ async function performDeploy(
 
 	if (isStaged && existingControl !== undefined && !isFreshResume) {
 		if (databaseId === undefined) {
-			throw new Error('The deployment manifest requires a D1 database');
+			throw new DeploymentD1DatabaseRequiredError();
 		}
 
 		await performStagedDeployment(dependencies, resources, databaseId);
@@ -790,11 +1026,12 @@ async function performDeploy(
 			reporter.step('Applying D1 migrations · no migrations to apply');
 		}
 
-		if (isStaged) {
-			await initialiseFreshDeployment({
+		if (isStaged && freshClaim?.phase === 'topology-sealed') {
+			freshClaim = await initialiseFreshDeployment({
 				api,
 				databaseId,
 				artifact,
+				claim: freshClaim,
 				deployment: deploymentIdentityFor(
 					artifact,
 					dependencies.accountId,
@@ -802,6 +1039,10 @@ async function performDeploy(
 				)
 			});
 		}
+	}
+
+	if (freshClaim !== undefined) {
+		dependencies.onFreshInstallationClaim?.(freshClaim);
 	}
 
 	const tenantMetadata = withBuildVersion(
@@ -881,6 +1122,34 @@ async function performDeploy(
 			)
 		);
 	};
+	const freshRuntimePhases: readonly FreshInstallationClaim['phase'][] = [
+		'schema-applied',
+		'tenant-uploaded',
+		'control-uploaded',
+		'runtime-deployed',
+		'administrator-onboarded',
+		'complete'
+	];
+	const recordFreshPhase = async (
+		phase: FreshInstallationClaim['phase']
+	): Promise<void> => {
+		if (freshClaim === undefined) {
+			return;
+		}
+		const currentIndex = freshRuntimePhases.indexOf(freshClaim.phase);
+		const targetIndex = freshRuntimePhases.indexOf(phase);
+
+		if (currentIndex >= targetIndex) {
+			return;
+		}
+
+		freshClaim = await advanceFreshInstallationPhase({
+			api,
+			claim: freshClaim,
+			phase
+		});
+		dependencies.onFreshInstallationClaim?.(freshClaim);
+	};
 	const tenantRoutes = {
 		workersDev: artifact.config.tenant.workersDev,
 		previewUrls: artifact.config.tenant.previewUrls
@@ -905,9 +1174,11 @@ async function performDeploy(
 			service.binding === 'CUPBOARD_TENANT' && service.entrypoint !== undefined
 	);
 
-	if (hasNamedTenantEntrypoint) {
+	if (freshClaim !== undefined || hasNamedTenantEntrypoint) {
 		await uploadTenant();
+		await recordFreshPhase('tenant-uploaded');
 		await uploadControl();
+		await recordFreshPhase('control-uploaded');
 	} else {
 		await uploadControl();
 		await uploadTenant();
@@ -939,6 +1210,7 @@ async function performDeploy(
 	}
 
 	await configureTriggers(dependencies);
+	await recordFreshPhase('runtime-deployed');
 
 	return deploymentResult(dependencies, databaseId);
 }

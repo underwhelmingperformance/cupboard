@@ -34,6 +34,8 @@ export interface AccountSummary {
 	readonly name: string;
 }
 
+const d1QueryRowSchema = z.record(z.string(), z.unknown());
+
 export interface QueueConsumerSettings {
 	readonly maxBatchSize: number | undefined;
 	readonly maxBatchTimeout: number | undefined;
@@ -544,7 +546,7 @@ export function createCloudflareApi(
 			for (const result of response.result) {
 				const records = result.results ?? [];
 				for (const record of records) {
-					const value = (record as Record<string, unknown>).name;
+					const [value] = Object.values(d1QueryRowSchema.parse(record));
 
 					if (typeof value === 'string') {
 						rows.push(value);

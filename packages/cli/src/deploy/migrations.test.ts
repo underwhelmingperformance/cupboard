@@ -173,6 +173,18 @@ describe('applyDeclaredD1Migrations', () => {
 			statements: ['DROP TABLE bootstrap;']
 		}
 	];
+	const evidenceFor = (names: readonly string[]): string[] =>
+		names.map((name, index) => {
+			const migration = migrations.find((candidate) => candidate.name === name);
+
+			if (migration === undefined) {
+				throw new Error(`No migration fixture exists for ${name}`);
+			}
+
+			return index === 0
+				? `${name}:${migration.sha256}:unverified-baseline`
+				: `${name}:${migration.sha256}:verified`;
+		});
 
 	it('applies only the exact next set and records immutable checksums', async () => {
 		const batches: string[][] = [];
@@ -184,7 +196,11 @@ describe('applyDeclaredD1Migrations', () => {
 			},
 			queryRows() {
 				query += 1;
-				return Promise.resolve(query === 1 ? ['0000_bootstrap.sql'] : []);
+				return Promise.resolve(
+					query === 1
+						? ['0000_bootstrap.sql']
+						: evidenceFor(['0000_bootstrap.sql'])
+				);
 			}
 		};
 
@@ -200,7 +216,7 @@ describe('applyDeclaredD1Migrations', () => {
 			[
 				'ALTER TABLE bootstrap ADD COLUMN native_id TEXT;',
 				"INSERT INTO d1_migrations (name) VALUES ('0001_expand.sql');",
-				`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', '0001_expand.sql', '${'b'.repeat(64)}', CURRENT_TIMESTAMP);`
+				`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, verification_state, applied_at) VALUES ('d1', '0001_expand.sql', '${'b'.repeat(64)}', 'verified', CURRENT_TIMESTAMP);`
 			]
 		]);
 	});
@@ -246,7 +262,7 @@ describe('applyDeclaredD1Migrations', () => {
 			},
 			queryRows() {
 				query += 1;
-				return Promise.resolve(query === 1 ? applied : []);
+				return Promise.resolve(query === 1 ? applied : evidenceFor(applied));
 			}
 		};
 
@@ -270,7 +286,31 @@ describe('applyDeclaredD1Migrations', () => {
 				return Promise.resolve(
 					query === 1
 						? ['0000_bootstrap.sql']
-						: [`0000_bootstrap.sql:${'f'.repeat(64)}`]
+						: [`0000_bootstrap.sql:${'f'.repeat(64)}:verified`]
+				);
+			}
+		};
+
+		await expect(
+			applyDeclaredD1Migrations(
+				api,
+				databaseIdSchema.parse('db-1'),
+				migrations,
+				[]
+			)
+		).rejects.toThrow('changed after it was applied');
+	});
+
+	it('refuses a changed unverified baseline migration', async () => {
+		let query = 0;
+		const api: D1MigrationApi = {
+			queryBatch: () => Promise.resolve(),
+			queryRows: () => {
+				query += 1;
+				return Promise.resolve(
+					query === 1
+						? ['0000_bootstrap.sql']
+						: [`0000_bootstrap.sql:${'f'.repeat(64)}:unverified-baseline`]
 				);
 			}
 		};
@@ -310,8 +350,22 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 		readonly batches: string[][];
 	} {
 		const applied = [...initialApplied];
-		const checksums = new Map<string, string>();
+		const evidence = new Map<
+			string,
+			{ readonly sha256?: string; readonly verificationState: string }
+		>();
 		const batches: string[][] = [];
+
+		for (const migration of migrations.slice(1)) {
+			if (!applied.includes(migration.name)) {
+				continue;
+			}
+
+			evidence.set(migration.name, {
+				sha256: migration.sha256,
+				verificationState: 'verified'
+			});
+		}
 
 		return {
 			batches,
@@ -328,12 +382,22 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 							applied.push(migration.name);
 						}
 
+						const evidenceStatement = statements.find((statement) =>
+							statement.includes(migration.sha256)
+						);
+
 						if (
-							statements.some((statement) =>
-								statement.includes(migration.sha256)
-							)
+							evidenceStatement !== undefined &&
+							applied.includes(migration.name)
 						) {
-							checksums.set(migration.name, migration.sha256);
+							evidence.set(migration.name, {
+								sha256: migration.sha256,
+								verificationState: evidenceStatement.includes(
+									"'unverified-baseline'"
+								)
+									? 'unverified-baseline'
+									: 'verified'
+							});
 						}
 					}
 
@@ -342,7 +406,10 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 				queryRows(_databaseId, sql) {
 					if (sql.includes('structural_migration_checksum')) {
 						return Promise.resolve(
-							[...checksums].map(([name, checksum]) => `${name}:${checksum}`)
+							[...evidence].map(
+								([name, record]) =>
+									`${name}:${record.sha256 ?? ''}:${record.verificationState}`
+							)
 						);
 					}
 
@@ -352,7 +419,7 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 		};
 	}
 
-	it('records the legacy prefix and applies only the declared bootstrap range', async () => {
+	it('records baseline digests with unverified provenance and applies the declared range', async () => {
 		const { api, batches } = bootstrapApi(['0000_legacy.sql']);
 
 		await expect(
@@ -368,9 +435,9 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 			[
 				'CREATE TABLE structural_migration_checksum (id);',
 				"INSERT INTO d1_migrations (name) VALUES ('0001_ledger.sql');",
-				expect.stringContaining("'0000_legacy.sql'"),
 				expect.stringContaining("'0001_ledger.sql'")
 			],
+			[expect.stringContaining("'unverified-baseline'")],
 			[
 				'ALTER TABLE legacy ADD COLUMN native_id TEXT;',
 				"INSERT INTO d1_migrations (name) VALUES ('0002_expand.sql');",
@@ -395,6 +462,7 @@ describe('applyLegacyBootstrapD1Migrations', () => {
 			)
 		).resolves.toStrictEqual(['0002_expand.sql']);
 		expect(batches).toStrictEqual([
+			[expect.stringContaining("'unverified-baseline'")],
 			[
 				'ALTER TABLE legacy ADD COLUMN native_id TEXT;',
 				"INSERT INTO d1_migrations (name) VALUES ('0002_expand.sql');",

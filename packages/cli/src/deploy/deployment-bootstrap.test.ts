@@ -10,15 +10,21 @@ import {
 } from '@cupboard/protocol/deployment';
 import type { LegacyBootstrapTransition } from '@cupboard/protocol/deployment-manifest';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
+import { canonicalJson } from './canonical-json.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import {
 	bootstrapLegacyDeployment,
+	claimFreshInstallation,
+	type FreshInstallationClaim,
 	initialiseFreshDeployment,
-	LegacyDeploymentBootstrapError
+	LegacyDeploymentBootstrapError,
+	recordFreshInstallationResources,
+	sealFreshInstallationTopology
 } from './deployment-bootstrap.ts';
 import type { RuntimeStageObservation } from './deployment-runner.ts';
-import { databaseIdSchema } from './identifiers.ts';
+import { cloudflareAccountIdSchema, databaseIdSchema } from './identifiers.ts';
 import type { D1Migration } from './migrations.ts';
 
 const manifest = cacheDeploymentManifest({
@@ -96,12 +102,33 @@ const artifact = {
 	deploymentManifest: manifest,
 	deploymentManifestId: deploymentManifestIdSchema.parse('c'.repeat(64))
 };
+const sealedFreshClaim: FreshInstallationClaim = {
+	databaseId: databaseIdSchema.parse('database-1'),
+	accountId: cloudflareAccountIdSchema.parse('account-1'),
+	artifactId: deployment.artifactId,
+	intendedResources: { 'd1:cupboard': 'cupboard' },
+	observedResources: { 'd1:cupboard': 'database-1' },
+	instanceId: deployment.instanceId,
+	topologyDigest: 'd'.repeat(64),
+	phase: 'topology-sealed',
+	claimId: '0199a0ea-1a00-7000-8000-000000000001',
+	claimRevision: 2,
+	claimOwner: '0199a0ea-1a00-7000-8000-000000000002',
+	claimExpiresAt: '2026-09-02T12:15:00.000Z',
+	updatedAt: '2026-09-02T12:00:00.000Z'
+};
 const expectedHead = [
 	artifact.deploymentManifestId,
 	deployment.artifactId,
 	deployment.instanceId,
 	transition.to
 ].join(':');
+const legacyRuntimeObservation = {
+	tenantVersionTag: source.tenantVersionTag,
+	controlVersionTag: source.controlVersionTag,
+	tenantTrafficPercent: 100,
+	controlTrafficPercent: 100
+};
 
 function bootstrapApi(options?: { readonly head?: string }): {
 	readonly api: Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'>;
@@ -111,6 +138,10 @@ function bootstrapApi(options?: { readonly head?: string }): {
 		.slice(0, legacyEnd + 1)
 		.map((migration) => migration.name);
 	const batches: string[][] = [];
+	const evidence = new Map<
+		string,
+		{ readonly sha256?: string; readonly verificationState: string }
+	>();
 	let head = options?.head;
 
 	if (head !== undefined) {
@@ -131,6 +162,29 @@ function bootstrapApi(options?: { readonly head?: string }): {
 					) {
 						applied.push(migration.name);
 					}
+
+					if (
+						statements.some((statement) => statement.includes(migration.sha256))
+					) {
+						evidence.set(migration.name, {
+							sha256: migration.sha256,
+							verificationState: 'verified'
+						});
+					}
+				}
+
+				if (
+					statements.some((statement) =>
+						statement.includes("SELECT 'd1', name, NULL")
+					)
+				) {
+					for (const name of applied) {
+						if (!evidence.has(name)) {
+							evidence.set(name, {
+								verificationState: 'unverified-baseline'
+							});
+						}
+					}
 				}
 
 				if (
@@ -147,7 +201,12 @@ function bootstrapApi(options?: { readonly head?: string }): {
 				}
 
 				if (sql.includes('structural_migration_checksum')) {
-					return Promise.resolve([]);
+					return Promise.resolve(
+						[...evidence].map(
+							([name, record]) =>
+								`${name}:${record.sha256 ?? ''}:${record.verificationState}`
+						)
+					);
 				}
 
 				return Promise.resolve([...applied]);
@@ -180,6 +239,7 @@ describe('bootstrapLegacyDeployment', () => {
 				databaseId: databaseIdSchema.parse('database-1'),
 				artifact,
 				deployment,
+				observeLegacyRuntime: () => Promise.resolve(legacyRuntimeObservation),
 				deployRuntime
 			})
 		).resolves.toBeUndefined();
@@ -201,6 +261,7 @@ describe('bootstrapLegacyDeployment', () => {
 				databaseId: databaseIdSchema.parse('database-1'),
 				artifact,
 				deployment,
+				observeLegacyRuntime: () => Promise.resolve(legacyRuntimeObservation),
 				deployRuntime
 			})
 		).resolves.toBeUndefined();
@@ -217,11 +278,200 @@ describe('bootstrapLegacyDeployment', () => {
 				databaseId: databaseIdSchema.parse('database-1'),
 				artifact,
 				deployment,
+				observeLegacyRuntime: () => Promise.resolve(legacyRuntimeObservation),
 				deployRuntime: () => {
 					throw new Error('A foreign ledger triggered a runtime deployment');
 				}
 			})
 		).rejects.toBeInstanceOf(LegacyDeploymentBootstrapError);
+	});
+
+	it('refuses a predecessor runtime which does not match the manifest', async () => {
+		const { api, batches } = bootstrapApi();
+		const deployRuntime = vi.fn();
+
+		await expect(
+			bootstrapLegacyDeployment({
+				api,
+				databaseId: databaseIdSchema.parse('database-1'),
+				artifact,
+				deployment,
+				observeLegacyRuntime: () =>
+					Promise.resolve({
+						...legacyRuntimeObservation,
+						tenantVersionTag: 'unexpected-predecessor'
+					}),
+				deployRuntime
+			})
+		).rejects.toThrow(
+			'The deployed predecessor Workers do not match the manifest legacy fingerprint'
+		);
+		expect({
+			batches,
+			deployRuntimeCalls: deployRuntime.mock.calls
+		}).toStrictEqual({
+			batches: [],
+			deployRuntimeCalls: []
+		});
+	});
+});
+
+describe('fresh installation claim', () => {
+	it('claims an empty database and seals the observed topology in order', async () => {
+		const databaseId = databaseIdSchema.parse('database-1');
+		const accountId = cloudflareAccountIdSchema.parse('account-1');
+		const intendedResources = {
+			'd1:cupboard': 'cupboard',
+			'r2:blobs': 'blobs'
+		};
+		const observedResources = {
+			'd1:cupboard': 'database-1',
+			'r2:blobs': 'blobs'
+		};
+		const claimId = '0199a0ea-1a00-7000-8000-000000000011';
+		const claimOwner = '0199a0ea-1a00-7000-8000-000000000012';
+		const ids = [claimId, claimOwner];
+		const absent = z.null().parse(JSON.parse('null'));
+		let hasClaimTable = false;
+		let stored: FreshInstallationClaim | undefined;
+		const currentClaim = (): FreshInstallationClaim => {
+			if (stored === undefined) {
+				throw new Error('The fake database has no fresh-install claim');
+			}
+
+			return stored;
+		};
+		const api: Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> = {
+			d1QueryRows(_databaseId, sql) {
+				if (sql.includes('sqlite_master')) {
+					return Promise.resolve(
+						hasClaimTable ? ['fresh_installation_bootstrap_claim'] : []
+					);
+				}
+
+				return Promise.resolve(
+					stored === undefined ? [] : [JSON.stringify(stored)]
+				);
+			},
+			d1QueryBatch(_databaseId, statements) {
+				if (
+					statements.some((statement) =>
+						statement.startsWith(
+							'CREATE TABLE IF NOT EXISTS fresh_installation_bootstrap_claim'
+						)
+					)
+				) {
+					hasClaimTable = true;
+				}
+
+				if (
+					statements.some((statement) =>
+						statement.startsWith(
+							'INSERT INTO fresh_installation_bootstrap_claim'
+						)
+					)
+				) {
+					stored = {
+						databaseId,
+						accountId,
+						artifactId: deployment.artifactId,
+						intendedResources,
+						observedResources: {},
+						instanceId: absent,
+						topologyDigest: absent,
+						phase: 'claimed',
+						claimId,
+						claimRevision: 0,
+						claimOwner,
+						claimExpiresAt: '2026-09-02T12:15:00.000Z',
+						updatedAt: '2026-09-02T12:00:00.000Z'
+					};
+				}
+
+				if (
+					statements.some((statement) =>
+						statement.includes("phase = 'resources-created'")
+					)
+				) {
+					stored = {
+						...currentClaim(),
+						observedResources,
+						phase: 'resources-created',
+						claimRevision: 1
+					};
+				}
+
+				if (
+					statements.some((statement) =>
+						statement.includes("phase = 'topology-sealed'")
+					)
+				) {
+					stored = {
+						...currentClaim(),
+						instanceId: deployment.instanceId,
+						topologyDigest: createHash('sha256')
+							.update(canonicalJson(observedResources))
+							.digest('hex'),
+						phase: 'topology-sealed',
+						claimRevision: 2
+					};
+				}
+
+				return Promise.resolve();
+			}
+		};
+		const claimed = await claimFreshInstallation({
+			api,
+			databaseId,
+			accountId,
+			artifactId: deployment.artifactId,
+			intendedResources,
+			now: new Date('2026-09-02T12:00:00.000Z'),
+			createId: () => ids.shift() ?? ''
+		});
+		const recorded = await recordFreshInstallationResources({
+			api,
+			claim: claimed,
+			observedResources,
+			now: new Date('2026-09-02T12:01:00.000Z')
+		});
+
+		await expect(
+			sealFreshInstallationTopology({
+				api,
+				claim: recorded,
+				deployment,
+				now: new Date('2026-09-02T12:02:00.000Z')
+			})
+		).resolves.toStrictEqual({
+			...recorded,
+			instanceId: deployment.instanceId,
+			topologyDigest: createHash('sha256')
+				.update(canonicalJson(observedResources))
+				.digest('hex'),
+			phase: 'topology-sealed',
+			claimRevision: 2
+		});
+	});
+
+	it('refuses a partial database which has no fresh-install claim', async () => {
+		const api: Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> = {
+			d1QueryBatch: () =>
+				Promise.reject(new Error('The partial database was modified')),
+			d1QueryRows: () => Promise.resolve(['blob_state'])
+		};
+
+		await expect(
+			claimFreshInstallation({
+				api,
+				databaseId: databaseIdSchema.parse('database-1'),
+				accountId: cloudflareAccountIdSchema.parse('account-1'),
+				artifactId: deployment.artifactId,
+				intendedResources: {}
+			})
+		).rejects.toThrow(
+			'The database is not empty and has no fresh-install bootstrap claim'
+		);
 	});
 });
 
@@ -229,19 +479,41 @@ describe('initialiseFreshDeployment', () => {
 	it('records checksums and the terminal state for a complete fresh schema', async () => {
 		const batches: string[][] = [];
 		let head: string | undefined;
+		let claim = sealedFreshClaim;
+		let areChecksumsRecorded = false;
 		const api: Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> = {
 			d1QueryBatch(_databaseId, statements) {
 				batches.push([...statements]);
+				areChecksumsRecorded = true;
 				head = [
 					artifact.deploymentManifestId,
 					deployment.artifactId,
 					deployment.instanceId,
 					manifest.terminalState
 				].join(':');
+				claim = {
+					...claim,
+					phase: 'schema-applied',
+					claimRevision: claim.claimRevision + 1
+				};
 
 				return Promise.resolve();
 			},
 			d1QueryRows(_databaseId, sql) {
+				if (sql.includes('fresh_installation_bootstrap_claim')) {
+					return Promise.resolve([JSON.stringify(claim)]);
+				}
+
+				if (sql.includes("migration_id || ':' || sha256")) {
+					return Promise.resolve(
+						areChecksumsRecorded
+							? migrations.map(
+									(migration) => `${migration.name}:${migration.sha256}`
+								)
+							: []
+					);
+				}
+
 				return Promise.resolve(
 					sql.includes('deployment_head')
 						? head === undefined
@@ -257,9 +529,14 @@ describe('initialiseFreshDeployment', () => {
 				api,
 				databaseId: databaseIdSchema.parse('database-1'),
 				artifact,
+				claim: sealedFreshClaim,
 				deployment
 			})
-		).resolves.toBeUndefined();
+		).resolves.toStrictEqual({
+			...sealedFreshClaim,
+			phase: 'schema-applied',
+			claimRevision: 3
+		});
 		expect(batches).toHaveLength(1);
 		const batch = batches[0];
 
@@ -267,13 +544,51 @@ describe('initialiseFreshDeployment', () => {
 			throw new Error('The fresh initialisation wrote no D1 batch');
 		}
 
-		expect(batch.slice(0, -1)).toStrictEqual(
+		expect(batch.slice(0, migrations.length)).toStrictEqual(
 			migrations.map(
 				(migration) =>
-					`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', '${migration.name}', '${migration.sha256}', CURRENT_TIMESTAMP) ON CONFLICT (kind, migration_id) DO UPDATE SET sha256 = excluded.sha256;`
+					`INSERT INTO structural_migration_checksum (kind, migration_id, sha256, applied_at) VALUES ('d1', '${migration.name}', '${migration.sha256}', CURRENT_TIMESTAMP) ON CONFLICT (kind, migration_id) DO NOTHING;`
 			)
 		);
-		expect(batch.at(-1)).toContain(`'${manifest.terminalState}'`);
+		expect(
+			batch.some((statement) =>
+				statement.includes(`'${manifest.terminalState}'`)
+			)
+		).toBe(true);
+	});
+
+	it('refuses conflicting migration checksum evidence before finalisation', async () => {
+		const firstMigration = migrations[0];
+
+		if (firstMigration === undefined) {
+			throw new Error('The deployment fixture has no D1 migrations');
+		}
+
+		let writes = 0;
+		const api: Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> = {
+			d1QueryBatch() {
+				writes += 1;
+				return Promise.resolve();
+			},
+			d1QueryRows(_databaseId, sql) {
+				if (sql.includes("migration_id || ':' || sha256")) {
+					return Promise.resolve([`${firstMigration.name}:conflicting`]);
+				}
+
+				return Promise.resolve(migrations.map((migration) => migration.name));
+			}
+		};
+
+		await expect(
+			initialiseFreshDeployment({
+				api,
+				databaseId: databaseIdSchema.parse('database-1'),
+				artifact,
+				claim: sealedFreshClaim,
+				deployment
+			})
+		).rejects.toThrow('conflicting D1 migration checksums');
+		expect(writes).toBe(0);
 	});
 
 	it('refuses to record a fresh head before the complete schema is applied', async () => {
@@ -290,8 +605,10 @@ describe('initialiseFreshDeployment', () => {
 				api,
 				databaseId: databaseIdSchema.parse('database-1'),
 				artifact,
+				claim: sealedFreshClaim,
 				deployment
 			})
 		).rejects.toThrow('complete declared D1 schema');
 	});
 });
+import { createHash } from 'node:crypto';

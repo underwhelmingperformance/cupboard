@@ -4,7 +4,7 @@ import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 
-import type { DeploymentRunnerClient } from './deployment-runner.ts';
+import type { DeploymentRecoveryClient } from './deployment-runner.ts';
 
 export class DeploymentOperatorIdentityRequiredError extends Error {
 	constructor() {
@@ -33,7 +33,7 @@ export async function deploymentOperatorClient(
 	url: string,
 	idToken: string,
 	signal?: AbortSignal
-): Promise<DeploymentRunnerClient> {
+): Promise<DeploymentRecoveryClient> {
 	const parsed = parseWorkerUrl(url);
 	const raw = CupboardClient.fromUrl(parsed, {
 		cache: { kind: 'default' },
@@ -47,6 +47,9 @@ export async function deploymentOperatorClient(
 
 	return {
 		status: (input) => control.deployment.status(input),
-		advance: (input) => control.deployment.advance(input)
+		advance: (input) => control.deployment.advance(input),
+		recover: (input) => control.deployment.recover(input),
+		prepareSuccessor: (input) => control.deployment.prepareSuccessor(input),
+		adoptPredecessor: (input) => control.deployment.adoptPredecessor(input)
 	};
 }

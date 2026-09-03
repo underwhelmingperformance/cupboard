@@ -22,6 +22,7 @@ import {
 	isoDateSchema,
 	validateDeploymentManifest
 } from '@cupboard/protocol/deployment-manifest';
+import { format, resolveConfig } from 'prettier';
 import { z } from 'zod';
 
 import { resolveBuildVersion } from './build-version.ts';
@@ -78,31 +79,41 @@ function bindingTemplates(
 		...(worker.versionMetadataBinding === undefined
 			? []
 			: [{ name: worker.versionMetadataBinding, type: 'version_metadata' }]),
-		...worker.durableObjects.map(({ binding }) => ({
+		...worker.durableObjects.map(({ binding, className, scriptName }) => ({
 			name: binding,
-			type: 'durable_object_namespace'
+			type: 'durable_object_namespace',
+			target: `${scriptName ?? 'self'}:${className}`
 		})),
-		...worker.r2Buckets.map(({ binding }) => ({
+		...worker.r2Buckets.map(({ binding, bucketName }) => ({
 			name: binding,
-			type: 'r2_bucket'
+			type: 'r2_bucket',
+			target: bucketName
 		})),
-		...worker.kvNamespaces.map(({ binding }) => ({
+		...worker.kvNamespaces.map(({ binding, title }) => ({
 			name: binding,
-			type: 'kv_namespace'
+			type: 'kv_namespace',
+			target: title
 		})),
-		...worker.d1Databases.map(({ binding }) => ({
+		...worker.d1Databases.map(({ binding, databaseName }) => ({
 			name: binding,
-			type: 'd1'
+			type: 'd1',
+			target: databaseName
 		})),
-		...worker.queueProducers.map(({ binding }) => ({
+		...worker.queueProducers.map(({ binding, queue }) => ({
 			name: binding,
-			type: 'queue'
+			type: 'queue',
+			target: queue
 		})),
-		...worker.services.map(({ binding }) => ({
+		...worker.services.map(({ binding, service, entrypoint }) => ({
 			name: binding,
-			type: 'service'
+			type: 'service',
+			target: `${service}:${entrypoint ?? ''}`
 		})),
-		...Object.keys(worker.vars).map((name) => ({ name, type: 'plain_text' }))
+		...Object.entries(worker.vars).map(([name, value]) => ({
+			name,
+			type: 'plain_text',
+			...(name !== 'CUPBOARD_DEPLOYMENT_ARTIFACT_ID' && { target: value })
+		}))
 	].toSorted((left, right) =>
 		`${left.type}:${left.name}`.localeCompare(`${right.type}:${right.name}`)
 	);
@@ -353,8 +364,13 @@ async function writeDeploymentManifest(
 ): Promise<void> {
 	const outputPath = path.join(checkoutRoot, deploymentManifestOutputPath);
 	const temporaryPath = `${outputPath}.${String(process.pid)}.tmp`;
+	const formatting = await resolveConfig(outputPath);
+	const source = await format(deploymentManifestSource(manifest), {
+		...formatting,
+		parser: 'typescript'
+	});
 
-	await writeFile(temporaryPath, deploymentManifestSource(manifest));
+	await writeFile(temporaryPath, source);
 	await rename(temporaryPath, outputPath);
 }
 
