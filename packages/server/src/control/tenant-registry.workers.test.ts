@@ -4,6 +4,11 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { cacheCatalogueMigration } from '@cupboard/protocol/cache-deployment-manifest';
+import {
+	deploymentArtifactIdSchema,
+	deploymentInstanceIdSchema
+} from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type TenantCreateBody,
@@ -22,6 +27,7 @@ import { z } from 'zod';
 import { cacheIdentityCondition, cacheScopeFromRow } from '../db/cache.ts';
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { deploymentManifest } from '../deployment-manifest.generated.ts';
 import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
@@ -309,6 +315,97 @@ describe('tenant registry', () => {
 			},
 			defaultCache: { access: 'private' }
 		});
+	});
+
+	it('records native completion for every active fleet migration', async () => {
+		const descriptor = deploymentManifest.dataMigrations.find(
+			(candidate) => candidate.id === cacheCatalogueMigration
+		);
+
+		if (descriptor === undefined) {
+			throw new Error('The cache catalogue migration is not registered');
+		}
+
+		const artifactId = deploymentArtifactIdSchema.parse('a'.repeat(64));
+		const instanceId = deploymentInstanceIdSchema.parse('b'.repeat(64));
+		await database()
+			.insert(d1Schema.globalDataMigration)
+			.values({
+				artifactId,
+				instanceId,
+				migrationId: descriptor.id,
+				status: 'running',
+				cohortCreatedAt: now,
+				cohortHighWater: 0
+			})
+			.run();
+
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rows = await database()
+			.select({
+				artifactId: d1Schema.tenantDataMigration.artifactId,
+				instanceId: d1Schema.tenantDataMigration.instanceId,
+				migrationId: d1Schema.tenantDataMigration.migrationId,
+				implementationRevision:
+					d1Schema.tenantDataMigration.implementationRevision,
+				tenant: d1Schema.tenantDataMigration.tenant,
+				status: d1Schema.tenantDataMigration.status,
+				completedAt: d1Schema.tenantDataMigration.completedAt
+			})
+			.from(d1Schema.tenantDataMigration)
+			.all();
+
+		expect(rows).toStrictEqual([
+			{
+				artifactId,
+				instanceId,
+				migrationId: descriptor.id,
+				implementationRevision: descriptor.implementationRevision,
+				tenant: acme,
+				status: 'complete',
+				completedAt: now
+			}
+		]);
+	});
+
+	it('does not complete a migration when an existing tenant is ensured', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		const descriptor = deploymentManifest.dataMigrations.find(
+			(candidate) => candidate.id === cacheCatalogueMigration
+		);
+
+		if (descriptor === undefined) {
+			throw new Error('The cache catalogue migration is not registered');
+		}
+
+		const artifactId = deploymentArtifactIdSchema.parse('c'.repeat(64));
+
+		await database()
+			.insert(d1Schema.globalDataMigration)
+			.values({
+				artifactId,
+				instanceId: deploymentInstanceIdSchema.parse('d'.repeat(64)),
+				migrationId: descriptor.id,
+				status: 'running',
+				cohortCreatedAt: now,
+				cohortHighWater: 1
+			})
+			.run();
+
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rows = await database()
+			.select({
+				tenant: d1Schema.tenantDataMigration.tenant,
+				status: d1Schema.tenantDataMigration.status
+			})
+			.from(d1Schema.tenantDataMigration)
+			.where(eq(d1Schema.tenantDataMigration.artifactId, artifactId))
+			.all();
+
+		expect(rows).toStrictEqual([]);
 	});
 
 	it('is idempotent for a matching re-create', async () => {

@@ -275,7 +275,9 @@ describe('cloudflareDeploymentExecutor', () => {
 					return Promise.resolve();
 				},
 				d1QueryRows: () => Promise.resolve([]),
-				getD1Bookmark: () => Promise.resolve('bookmark-1')
+				getD1Bookmark: () => Promise.resolve('bookmark-1'),
+				restoreD1Database: () =>
+					Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo' })
 			},
 			databaseId: databaseIdSchema.parse('database-1'),
 			d1Migrations: [
@@ -310,7 +312,9 @@ describe('cloudflareDeploymentExecutor', () => {
 			api: {
 				d1QueryBatch: () => Promise.resolve(),
 				d1QueryRows: () => Promise.resolve([]),
-				getD1Bookmark: () => Promise.resolve('bookmark-1')
+				getD1Bookmark: () => Promise.resolve('bookmark-1'),
+				restoreD1Database: () =>
+					Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo' })
 			},
 			databaseId: databaseIdSchema.parse('database-1'),
 			d1Migrations: [],

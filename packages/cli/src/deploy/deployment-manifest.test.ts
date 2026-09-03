@@ -128,7 +128,10 @@ function manifest(
 				id: runtimeStageIdSchema.parse('foundation'),
 				localMigrationCeiling:
 					durableObjectMigrationIdSchema.parse('0040_foundation'),
-				supportedD1Schemas: [d1SchemaStateIdSchema.parse('expanded')]
+				supportedD1Schemas: [
+					d1SchemaStateIdSchema.parse('expanded'),
+					d1SchemaStateIdSchema.parse('contracted')
+				]
 			}
 		],
 		d1Migrations: [],
@@ -152,6 +155,10 @@ function uploadTemplate(bundleHash: string): WorkerUploadTemplate {
 		mainModule: 'worker.js',
 		compatibilityDate: isoDateSchema.parse('2026-09-01'),
 		compatibilityFlags: ['nodejs_compat'],
+		observability: { enabled: true, tracing: true },
+		keepBindings: ['secret_text', 'plain_text'],
+		cache: { enabled: true, crossVersion: true },
+		exports: {},
 		bindings: [{ name: 'CUPBOARD_DB', type: 'd1' }]
 	};
 }

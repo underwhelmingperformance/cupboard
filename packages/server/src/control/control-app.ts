@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { Hono } from 'hono';
 
+import { withAppMutationAdmission } from '../db/app-mutation-admission.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { notFoundResponse } from '../http/http.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
@@ -34,20 +35,36 @@ function buildControlApp() {
 	// Admin procedure responses contain mutable control-plane state, so never
 	// cache them.
 	app.use('/control/*', async (context, next) => {
-		const { matched: isMatched, response } = await controlOrpcHandler.handle(
-			context.req.raw,
-			{
-				prefix: '/control',
-				context: {
-					request: context.req.raw,
-					env: context.env,
-					logger: context.get('logger')
+		const handle = async (): Promise<Response | undefined> => {
+			const { matched: isMatched, response } = await controlOrpcHandler.handle(
+				context.req.raw,
+				{
+					prefix: '/control',
+					context: {
+						request: context.req.raw,
+						env: context.env,
+						logger: context.get('logger')
+					}
 				}
-			}
-		);
+			);
 
-		if (isMatched) {
+			if (!isMatched) {
+				return;
+			}
+
 			response.headers.set('cache-control', 'no-store');
+			return response;
+		};
+		const pathname = new URL(context.req.url).pathname;
+		const isDeploymentControl = pathname.startsWith('/control/deployment/');
+		const isRead =
+			context.req.method === 'GET' || context.req.method === 'HEAD';
+		const response =
+			isDeploymentControl || isRead
+				? await handle()
+				: await withAppMutationAdmission(context.env.CUPBOARD_DB, handle);
+
+		if (response !== undefined) {
 			return response;
 		}
 

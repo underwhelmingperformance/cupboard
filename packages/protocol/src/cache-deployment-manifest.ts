@@ -3,8 +3,10 @@ import {
 	deploymentTransitionIdSchema
 } from './deployment.ts';
 import {
+	cloudflareWorkerVersionTagSchema,
 	type D1MigrationId,
 	d1MigrationIdSchema,
+	d1RecoveryEnvelopeIdSchema,
 	d1SchemaStateIdSchema,
 	type DataMigrationBudget,
 	type DataMigrationDescriptor,
@@ -15,6 +17,7 @@ import {
 	type DeploymentCheckId,
 	deploymentCheckIdSchema,
 	type DeploymentManifestBody,
+	deploymentRecoveryTransitionIdSchema,
 	type DeploymentState,
 	type DurableObjectMigrationId,
 	durableObjectMigrationIdSchema,
@@ -482,8 +485,16 @@ export function cacheDeploymentManifest(
 		controlRuntime: registeredRuntime(cacheStorageContractStage),
 		localSchema: { runtimeCeiling: contractCeiling, fleetState: 'migrating' }
 	};
-	const localContractsComplete: DeploymentState = {
+	const appWritesOpen: DeploymentState = {
 		...contractRuntime,
+		id: deploymentStateIdSchema.parse('application-writes-open'),
+		fences: {
+			...contractRuntime.fences,
+			d1ApplicationWrites: 'open'
+		}
+	};
+	const localContractsComplete: DeploymentState = {
+		...appWritesOpen,
 		id: deploymentStateIdSchema.parse('local-contracts-complete'),
 		localSchema: { runtimeCeiling: contractCeiling, fleetState: 'complete' }
 	};
@@ -495,16 +506,8 @@ export function cacheDeploymentManifest(
 			durableObjectFleet: 'complete'
 		}
 	};
-	const appWritesOpen: DeploymentState = {
-		...doRecoveryRecorded,
-		id: deploymentStateIdSchema.parse('application-writes-open'),
-		fences: {
-			...doRecoveryRecorded.fences,
-			d1ApplicationWrites: 'open'
-		}
-	};
 	const cacheReleaseComplete: DeploymentState = {
-		...appWritesOpen,
+		...doRecoveryRecorded,
 		id: deploymentStateIdSchema.parse('cache-release-complete')
 	};
 	const states: DeploymentState[] = [
@@ -526,9 +529,9 @@ export function cacheDeploymentManifest(
 		r2WindowClosed,
 		localAdmissionRequired,
 		contractRuntime,
+		appWritesOpen,
 		localContractsComplete,
 		doRecoveryRecorded,
-		appWritesOpen,
 		cacheReleaseComplete
 	];
 
@@ -619,8 +622,14 @@ export function cacheDeploymentManifest(
 			'contract-runtime',
 			cacheStorageContractStage
 		),
-		dataMigrationTransition(
+		fenceTransition(
 			'contract-runtime',
+			'application-writes-open',
+			'd1-application-writes',
+			'open'
+		),
+		dataMigrationTransition(
+			'application-writes-open',
 			'local-contracts-complete',
 			cacheLocalContractMigration
 		),
@@ -629,17 +638,45 @@ export function cacheDeploymentManifest(
 			'do-recovery-recorded',
 			'durable-object-fleet'
 		),
-		fenceTransition(
-			'do-recovery-recorded',
-			'application-writes-open',
-			'd1-application-writes',
-			'open'
-		),
 		simpleTransition(
-			'application-writes-open',
+			'do-recovery-recorded',
 			'cache-release-complete',
-			'verify'
+			'verify',
+			[cacheDeploymentChecks.terminal]
 		)
+	];
+	const d1RecoveryEnvelope = d1RecoveryEnvelopeIdSchema.parse('d1');
+	const recoveryTransitions: DeploymentManifestBody['recoveryTransitions'] = [
+		{
+			id: deploymentRecoveryTransitionIdSchema.parse(
+				'restore-failed-d1-contraction'
+			),
+			from: deploymentStateIdSchema.parse('d1-recovery-recorded'),
+			to: deploymentStateIdSchema.parse('repairs-resolved'),
+			kind: 'restore-d1',
+			recoveryEnvelope: d1RecoveryEnvelope,
+			checks: [cacheDeploymentChecks.compatibleD1]
+		},
+		{
+			id: deploymentRecoveryTransitionIdSchema.parse(
+				'restore-unverified-d1-contraction'
+			),
+			from: deploymentStateIdSchema.parse('d1-contracted'),
+			to: deploymentStateIdSchema.parse('repairs-resolved'),
+			kind: 'restore-d1',
+			recoveryEnvelope: d1RecoveryEnvelope,
+			checks: [cacheDeploymentChecks.compatibleD1]
+		},
+		{
+			id: deploymentRecoveryTransitionIdSchema.parse(
+				'restore-before-r2-compatibility-closure'
+			),
+			from: deploymentStateIdSchema.parse('d1-verified'),
+			to: deploymentStateIdSchema.parse('repairs-resolved'),
+			kind: 'restore-d1',
+			recoveryEnvelope: d1RecoveryEnvelope,
+			checks: [cacheDeploymentChecks.compatibleD1]
+		}
 	];
 
 	return {
@@ -647,7 +684,7 @@ export function cacheDeploymentManifest(
 		terminalState: deploymentStateIdSchema.parse('cache-release-complete'),
 		states,
 		forwardTransitions,
-		recoveryTransitions: [],
+		recoveryTransitions,
 		bootstrapTransitions: [
 			{
 				id: deploymentBootstrapTransitionIdSchema.parse(
@@ -674,7 +711,11 @@ export function cacheDeploymentManifest(
 			{
 				id: legacyRuntime,
 				d1Migration: d1MigrationIdSchema.parse('0019_nar_read_authority.sql'),
-				durableObjectMigration: cachePredecessorLocalMigrationCeiling
+				durableObjectMigration: cachePredecessorLocalMigrationCeiling,
+				tenantVersionTag:
+					cloudflareWorkerVersionTagSchema.parse('37bc799de0bc'),
+				controlVersionTag:
+					cloudflareWorkerVersionTagSchema.parse('37bc799de0bc')
 			}
 		],
 		runtimeStages: runtimeStages(),

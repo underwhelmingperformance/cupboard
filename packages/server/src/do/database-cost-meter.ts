@@ -1,5 +1,162 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import type { DataMigrationBudget } from '@cupboard/protocol/deployment-manifest';
+
+interface MigrationUsage {
+	statements: number;
+	rowsReturned: number;
+	reportedD1RowsRead: number;
+	rowsWritten: number;
+	r2Operations: number;
+	r2BytesRead: number;
+	r2BytesWritten: number;
+}
+
+interface MigrationBudgetScope {
+	readonly budget: DataMigrationBudget;
+	readonly usage: MigrationUsage;
+}
+
+export class DataMigrationBudgetExceededError extends Error {
+	constructor(resource: keyof MigrationUsage, used: number, maximum: number) {
+		super(
+			`The data migration used ${used.toString()} ${resource}, above its declared maximum of ${maximum.toString()}`
+		);
+		this.name = 'DataMigrationBudgetExceededError';
+	}
+}
+
+const migrationBudgetScope = new AsyncLocalStorage<MigrationBudgetScope>();
+
+function currentMigrationBudget(): MigrationBudgetScope | undefined {
+	return migrationBudgetScope.getStore();
+}
+
+export function hasDataMigrationBudget(): boolean {
+	return currentMigrationBudget() !== undefined;
+}
+
+function addMigrationUsage(
+	resource: keyof MigrationUsage,
+	amount: number,
+	maximum: number
+): void {
+	const scope = currentMigrationBudget();
+
+	if (scope === undefined || amount === 0) {
+		return;
+	}
+
+	const used = scope.usage[resource] + amount;
+
+	if (used > maximum) {
+		throw new DataMigrationBudgetExceededError(resource, used, maximum);
+	}
+
+	scope.usage[resource] = used;
+}
+
+export function withDataMigrationBudget<T>(
+	budget: DataMigrationBudget,
+	body: () => Promise<T>
+): Promise<T> {
+	if (currentMigrationBudget() !== undefined) {
+		return body();
+	}
+
+	return migrationBudgetScope.run(
+		{
+			budget,
+			usage: {
+				statements: 0,
+				rowsReturned: 0,
+				reportedD1RowsRead: 0,
+				rowsWritten: 0,
+				r2Operations: 0,
+				r2BytesRead: 0,
+				r2BytesWritten: 0
+			}
+		},
+		body
+	);
+}
+
+export function reserveMigrationStatement(
+	parameterCount: number,
+	subject: string
+): void {
+	const scope = currentMigrationBudget();
+
+	if (scope === undefined) {
+		return;
+	}
+
+	if (parameterCount > scope.budget.maximumParametersPerStatement) {
+		throw new DataMigrationBudgetExceededError(
+			'statements',
+			parameterCount,
+			scope.budget.maximumParametersPerStatement
+		);
+	}
+
+	addMigrationUsage('statements', 1, scope.budget.maximumStatements);
+
+	if (subject.length === 0) {
+		throw new TypeError('A migration statement must have a subject');
+	}
+}
+
+export function recordMigrationRows(input: {
+	readonly rowsReturned: number;
+	readonly reportedRowsRead: number;
+	readonly rowsWritten: number;
+}): void {
+	const scope = currentMigrationBudget();
+
+	if (scope === undefined) {
+		return;
+	}
+
+	addMigrationUsage(
+		'rowsReturned',
+		input.rowsReturned,
+		scope.budget.maximumRowsReturned
+	);
+	addMigrationUsage(
+		'reportedD1RowsRead',
+		input.reportedRowsRead,
+		scope.budget.maximumReportedD1RowsRead
+	);
+	addMigrationUsage(
+		'rowsWritten',
+		input.rowsWritten,
+		scope.budget.maximumRowsWritten
+	);
+}
+
+export function reserveMigrationR2Operation(input: {
+	readonly bytesRead?: number;
+	readonly bytesWritten?: number;
+}): void {
+	const scope = currentMigrationBudget();
+
+	if (scope === undefined) {
+		return;
+	}
+
+	addMigrationUsage('r2Operations', 1, scope.budget.maximumR2Operations);
+	addMigrationUsage(
+		'r2BytesRead',
+		input.bytesRead ?? 0,
+		scope.budget.maximumR2BytesRead
+	);
+	addMigrationUsage(
+		'r2BytesWritten',
+		input.bytesWritten ?? 0,
+		scope.budget.maximumR2BytesWritten
+	);
+}
+
 type AnyCursor = SqlStorageCursor<Record<string, SqlStorageValue>>;
 
 export interface DatabaseCost {
@@ -69,7 +226,13 @@ function meteredSql(
 			query: string,
 			...bindings: unknown[]
 		): SqlStorageCursor<T> {
+			reserveMigrationStatement(bindings.length, 'durable-object.sql');
 			const cursor = sql.exec<T>(query, ...bindings);
+			recordMigrationRows({
+				rowsReturned: cursor.rowsRead,
+				reportedRowsRead: cursor.rowsRead,
+				rowsWritten: cursor.rowsWritten
+			});
 			cumulative.track(cursor);
 			requestMeter.getStore()?.track(cursor);
 

@@ -5,7 +5,10 @@ import { implement } from '@orpc/server';
 import {
 	controlAuthenticate,
 	controlCheck,
+	controlDeploymentAdoptPredecessor,
 	controlDeploymentAdvance,
+	controlDeploymentPrepareSuccessor,
+	controlDeploymentRecover,
 	controlDeploymentStatus,
 	controlInstance,
 	controlInstanceInitialise,
@@ -83,6 +86,17 @@ export const controlRouter = os.router({
 		),
 		advance: os.deployment.advance.handler(({ input, context }) =>
 			controlDeploymentAdvance(context.env, input)
+		),
+		recover: os.deployment.recover.handler(({ input, context }) =>
+			controlDeploymentRecover(context.env, input)
+		),
+		prepareSuccessor: os.deployment.prepareSuccessor.handler(
+			({ input, context }) =>
+				controlDeploymentPrepareSuccessor(context.env, input)
+		),
+		adoptPredecessor: os.deployment.adoptPredecessor.handler(
+			({ input, context }) =>
+				controlDeploymentAdoptPredecessor(context.env, input)
 		)
 	},
 	instance: {

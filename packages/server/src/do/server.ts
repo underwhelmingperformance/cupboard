@@ -16,7 +16,10 @@ import {
 	cachePredecessorLocalMigrationCeiling,
 	cacheWriterEpoch
 } from '@cupboard/protocol/cache-deployment-manifest';
-import type { WriterEpoch } from '@cupboard/protocol/deployment-manifest';
+import type {
+	DataMigrationBudget,
+	WriterEpoch
+} from '@cupboard/protocol/deployment-manifest';
 import type {
 	R2CredentialCheck,
 	VerifyReportInput
@@ -152,7 +155,11 @@ import {
 	type RuntimeEnv,
 	ServerContext
 } from './context.ts';
-import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
+import {
+	type DatabaseCost,
+	withDataMigrationBudget,
+	withRequestCost
+} from './database-cost-meter.ts';
 import { currentDeadlineSignal, withDeadlineBudget } from './deadline.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
@@ -220,6 +227,13 @@ import {
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
+
+const durableObjectMigrationDigests = new Map(
+	deploymentManifest.durableObjectMigrations.map((migration) => [
+		migration.id,
+		migration.sha256
+	])
+);
 
 const verificationClaimBoundSchema = z
 	.number()
@@ -393,19 +407,26 @@ function mergeGarbageCollectionContinuation(
  * the D1 binding enforces the allowance during settlement. Unprocessed rows
  * remain pending, and the pass requests another verification run.
  */
-const durableObjectMigrationDigests = new Map(
-	deploymentManifest.durableObjectMigrations.map((migration) => [
-		migration.id,
-		migration.sha256
-	])
-);
-
 export const verifyBackstopReuseSettleLimit = Math.floor(
 	(maintenancePassStatements - pendingSettlePrefetchStatements) /
 		statementsPerPendingSettleRow
 );
 
 type MaintenanceKind = 'gc' | 'verify';
+
+class R2MetadataMigrationEmptyBatchError extends Error {
+	constructor() {
+		super('The R2 metadata migration produced an empty batch');
+		this.name = 'R2MetadataMigrationEmptyBatchError';
+	}
+}
+
+class UnsupportedProjectionRepairOperationError extends Error {
+	constructor(public readonly operation: string) {
+		super(`Unsupported projection repair operation: ${operation}`);
+		this.name = 'UnsupportedProjectionRepairOperationError';
+	}
+}
 
 class CountingSemaphore {
 	private slots: number;
@@ -435,13 +456,6 @@ class CountingSemaphore {
 		}
 
 		next(undefined);
-	}
-}
-
-class UnsupportedProjectionRepairOperationError extends Error {
-	constructor(public readonly operation: string) {
-		super(`Unsupported projection repair operation: ${operation}`);
-		this.name = 'UnsupportedProjectionRepairOperationError';
 	}
 }
 
@@ -1541,7 +1555,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		applyMigrations(
 			this.context.db,
 			migrationsThrough(migrations, additiveLocalMigrationCeiling),
-			undefined,
+			durableObjectMigrationDigests,
 			{ enforceCeiling: false }
 		);
 		await this.assertZstdAvailable();
@@ -1579,7 +1593,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			() => {
 				applyMigrations(
 					this.context.db,
-					migrationsThrough(migrations, localMigrationCeiling(runtimeStage))
+					migrationsThrough(migrations, localMigrationCeiling(runtimeStage)),
+					durableObjectMigrationDigests
 				);
 			}
 		);
@@ -2254,7 +2269,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		for (const row of rows) {
 			const cache: ResolvedCache = {
 				id: row.cacheId,
-				scope: cacheScopeFromRow(row),
+				scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
 				access: row.access,
 				generation: row.generation,
 				readRevision: row.readRevision
@@ -2267,7 +2282,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const last = rows.at(-1);
 
 		if (last === undefined) {
-			throw new Error('R2 metadata migration produced an empty batch');
+			throw new R2MetadataMigrationEmptyBatchError();
 		}
 
 		await this.ctx.storage.put(cursorKey, {
@@ -2771,25 +2786,48 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			| 'cache-catalogue-reconciliation'
 			| 'cache-r2-generation-metadata'
 			| 'cache-retention-properties'
-			| 'cache-local-storage-contract'
+			| 'cache-local-storage-contract',
+		budget: DataMigrationBudget
 	): Promise<{ readonly outcome: 'complete' | 'pending' }> {
 		await this.initialise(tenant);
 
-		if (migration === 'cache-catalogue-reconciliation') {
-			return { outcome: 'complete' };
+		return withDataMigrationBudget(budget, async () => {
+			if (migration === 'cache-catalogue-reconciliation') {
+				return { outcome: 'complete' };
+			}
+
+			if (migration === 'cache-retention-properties') {
+				const outcome = await advanceCacheRetentionMigration(this.context.db);
+
+				return { outcome: outcome.status };
+			}
+
+			if (migration === 'cache-local-storage-contract') {
+				return { outcome: 'complete' };
+			}
+
+			return this.advanceR2GenerationMetadataMigration();
+		});
+	}
+
+	async resolveProjectionRepair(
+		tenant: TenantId,
+		id: string,
+		operation: string,
+		payloadJson: string
+	): Promise<{ readonly outcome: 'complete' | 'rolled-back' }> {
+		await this.initialise(tenant);
+
+		if (operation !== 'managed-cache-activation') {
+			throw new UnsupportedProjectionRepairOperationError(operation);
 		}
 
-		if (migration === 'cache-retention-properties') {
-			const outcome = await advanceCacheRetentionMigration(this.context.db);
+		const outcome = await this.managedCaches.resolveManagedActivationRepair(
+			id,
+			payloadJson
+		);
 
-			return { outcome: outcome.status };
-		}
-
-		if (migration === 'cache-local-storage-contract') {
-			return { outcome: 'complete' };
-		}
-
-		return this.advanceR2GenerationMetadataMigration();
+		return { outcome };
 	}
 
 	async drainWriterEpoch(
@@ -2837,26 +2875,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		return { outcome: 'complete' };
-	}
-
-	async resolveProjectionRepair(
-		tenant: TenantId,
-		id: string,
-		operation: string,
-		payloadJson: string
-	): Promise<{ readonly outcome: 'complete' | 'rolled-back' }> {
-		await this.initialise(tenant);
-
-		if (operation !== 'managed-cache-activation') {
-			throw new UnsupportedProjectionRepairOperationError(operation);
-		}
-
-		const outcome = await this.managedCaches.resolveManagedActivationRepair(
-			id,
-			payloadJson
-		);
-
-		return { outcome };
 	}
 
 	// The socket attachment preserves cache and session identity across

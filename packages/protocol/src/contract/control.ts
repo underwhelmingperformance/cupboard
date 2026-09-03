@@ -12,10 +12,16 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
+	deploymentAdoptionResultSchema,
+	deploymentAdoptPredecessorInputSchema,
 	deploymentAdvanceInputSchema,
 	deploymentAdvanceResultSchema,
+	deploymentPrepareSuccessorInputSchema,
+	deploymentRecoverInputSchema,
+	deploymentRecoveryResultSchema,
 	deploymentStatusInputSchema,
-	deploymentStatusSchema
+	deploymentStatusSchema,
+	successorPreparationResultSchema
 } from '../deployment.ts';
 import {
 	configuredInstanceSummarySchema,
@@ -79,7 +85,34 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/deployment/advance' })
 			.input(deploymentAdvanceInputSchema)
-			.output(deploymentAdvanceResultSchema)
+			.output(deploymentAdvanceResultSchema),
+
+		recover: controlProcedure
+			.meta({
+				requires: 'deployment:advance',
+				principal: 'global-administrator'
+			})
+			.route({ method: 'POST', path: '/deployment/recovery' })
+			.input(deploymentRecoverInputSchema)
+			.output(deploymentRecoveryResultSchema),
+
+		prepareSuccessor: controlProcedure
+			.meta({
+				requires: 'deployment:advance',
+				principal: 'global-administrator'
+			})
+			.route({ method: 'POST', path: '/deployment/successor' })
+			.input(deploymentPrepareSuccessorInputSchema)
+			.output(successorPreparationResultSchema),
+
+		adoptPredecessor: controlProcedure
+			.meta({
+				requires: 'deployment:advance',
+				principal: 'global-administrator'
+			})
+			.route({ method: 'POST', path: '/deployment/adoption' })
+			.input(deploymentAdoptPredecessorInputSchema)
+			.output(deploymentAdoptionResultSchema)
 	},
 
 	instance: {

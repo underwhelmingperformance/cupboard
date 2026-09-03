@@ -71,6 +71,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			return Promise.resolve([]);
 		},
 		getD1Bookmark: () => Promise.resolve('bookmark'),
+		restoreD1Database: () =>
+			Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo' }),
 		getScriptConfiguration: () => {
 			recordApiCall(apiCalls, 'getScriptConfiguration');
 			return Promise.resolve(absentScriptConfiguration);

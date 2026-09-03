@@ -31,9 +31,11 @@ import {
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { deploymentManifest } from '../deployment-manifest.generated.ts';
 import {
 	CacheNotFoundError,
 	TenantAlreadyExistsError,
+	TenantDataMigrationDescriptorMissingError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
 	TenantRetiredError
@@ -251,8 +253,37 @@ export async function ensureTenant(
 		})
 		.from(d1Schema.tenant)
 		.where(tenantFilter);
+	const activeMigrations = await database
+		.select({
+			artifactId: d1Schema.globalDataMigration.artifactId,
+			instanceId: d1Schema.globalDataMigration.instanceId,
+			migrationId: d1Schema.globalDataMigration.migrationId
+		})
+		.from(d1Schema.globalDataMigration)
+		.where(ne(d1Schema.globalDataMigration.status, 'complete'))
+		.all();
+	const nativeMigrationRows: (typeof d1Schema.tenantDataMigration.$inferInsert)[] =
+		activeMigrations.map((migration) => {
+			const descriptor = deploymentManifest.dataMigrations.find(
+				(candidate) => candidate.id === migration.migrationId
+			);
 
-	await database.batch([
+			if (descriptor === undefined) {
+				throw new TenantDataMigrationDescriptorMissingError(
+					migration.migrationId
+				);
+			}
+
+			return {
+				...migration,
+				implementationRevision: descriptor.implementationRevision,
+				tenant: body.id,
+				status: 'complete',
+				completedAt: now
+			};
+		});
+
+	const [tenantInsert] = await database.batch([
 		database
 			.insert(d1Schema.tenant)
 			.values({
@@ -275,6 +306,23 @@ export async function ensureTenant(
 			.onConflictDoNothing(),
 		database.insert(d1Schema.tenantUsage).select(usageRow).onConflictDoNothing()
 	]);
+
+	const [firstMigration, ...remainingMigrations] = nativeMigrationRows;
+
+	if (firstMigration !== undefined && tenantInsert.meta.changes === 1) {
+		await database.batch([
+			database
+				.insert(d1Schema.tenantDataMigration)
+				.values(firstMigration)
+				.onConflictDoNothing(),
+			...remainingMigrations.map((migration) =>
+				database
+					.insert(d1Schema.tenantDataMigration)
+					.values(migration)
+					.onConflictDoNothing()
+			)
+		]);
+	}
 
 	const existing = await loadTenant(database, body.id);
 

@@ -471,26 +471,6 @@ export const managedGroupAccessTransitionCache = sqliteTable(
 // read this table (D1 is database-wide) still cannot recover a key. `retired_at`
 // is NULL while a key still verifies; the newest non-retired key is the one that
 // issues.
-export const d1AppMutationAdmission = sqliteTable(
-	'd1_application_mutation_admission',
-	{
-		id: text('id').primaryKey(),
-		fenceRevision: integer('fence_revision').notNull(),
-		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
-	},
-	(table) => [
-		check(
-			'd1_application_mutation_admission_revision_nonnegative',
-			sql`${table.fenceRevision} >= 0`
-		),
-		index('d1_application_mutation_admission_drain_idx').on(
-			table.fenceRevision,
-			table.expiresAt
-		)
-	]
-);
-
 export const controlAuthKey = sqliteTable('control_auth_key', {
 	id: text('id').primaryKey(),
 	kid: text('kid').$type<AuthKeyId>().notNull(),
@@ -709,21 +689,26 @@ export const deploymentTransitionExecution = sqliteTable(
 	]
 );
 
-// The applied digest prevents a migration file from changing under an existing
-// name. Both bootstrap and ordinary deployment transitions consult this table.
+// Verified rows bind an applied migration name to the SQL digest this release
+// observed. Pre-ledger migrations remain explicit unverified baselines.
 export const structuralMigrationChecksum = sqliteTable(
 	'structural_migration_checksum',
 	{
 		kind: text('kind', { enum: ['d1', 'durable-object'] }).notNull(),
 		migrationId: text('migration_id').notNull(),
 		sha256: text('sha256').notNull(),
+		verificationState: text('verification_state', {
+			enum: ['verified', 'unverified-baseline']
+		})
+			.notNull()
+			.default('verified'),
 		appliedAt: text('applied_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		primaryKey({ columns: [table.kind, table.migrationId] }),
 		check(
-			'structural_migration_checksum_sha256',
-			sql`length(${table.sha256}) = 64 AND ${table.sha256} NOT GLOB '*[^0-9a-f]*'`
+			'structural_migration_checksum_shape',
+			sql`${table.verificationState} IN ('verified', 'unverified-baseline') AND length(${table.sha256}) = 64 AND ${table.sha256} NOT GLOB '*[^0-9a-f]*'`
 		)
 	]
 );
@@ -872,6 +857,26 @@ export const d1AppMutationFence = sqliteTable(
 		check(
 			'd1_application_mutation_fence_revision_nonnegative',
 			sql`${table.revision} >= 0`
+		)
+	]
+);
+
+export const d1AppMutationAdmission = sqliteTable(
+	'd1_application_mutation_admission',
+	{
+		id: text('id').primaryKey(),
+		fenceRevision: integer('fence_revision').notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		check(
+			'd1_application_mutation_admission_revision_nonnegative',
+			sql`${table.fenceRevision} >= 0`
+		),
+		index('d1_application_mutation_admission_drain_idx').on(
+			table.fenceRevision,
+			table.expiresAt
 		)
 	]
 );

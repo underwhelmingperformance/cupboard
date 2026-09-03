@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { canonicalJson } from './canonical-json.ts';
 import {
 	type DeploymentArtifactId,
+	deploymentArtifactIdSchema,
 	type DeploymentInstanceId,
 	type DeploymentManifestId,
 	type DeploymentStateId,
@@ -90,6 +91,33 @@ export const migrationFailureCodeSchema = manifestIdentifierSchema.brand(
 	'MigrationFailureCode'
 );
 export type MigrationFailureCode = z.infer<typeof migrationFailureCodeSchema>;
+export const dataMigrationCheckpointIdSchema = manifestIdentifierSchema.brand(
+	'DataMigrationCheckpointId'
+);
+export type DataMigrationCheckpointId = z.infer<
+	typeof dataMigrationCheckpointIdSchema
+>;
+export const dataMigrationCursorFormatIdSchema = manifestIdentifierSchema.brand(
+	'DataMigrationCursorFormatId'
+);
+export type DataMigrationCursorFormatId = z.infer<
+	typeof dataMigrationCursorFormatIdSchema
+>;
+export const dataMigrationCompatibilityIdSchema =
+	manifestIdentifierSchema.brand('DataMigrationCompatibilityId');
+export type DataMigrationCompatibilityId = z.infer<
+	typeof dataMigrationCompatibilityIdSchema
+>;
+export const registeredForwardRepairIdSchema = manifestIdentifierSchema.brand(
+	'RegisteredForwardRepairId'
+);
+export type RegisteredForwardRepairId = z.infer<
+	typeof registeredForwardRepairIdSchema
+>;
+export const d1RecoveryEnvelopeIdSchema = manifestIdentifierSchema.brand(
+	'D1RecoveryEnvelopeId'
+);
+export type D1RecoveryEnvelopeId = z.infer<typeof d1RecoveryEnvelopeIdSchema>;
 
 export type RuntimeDeployment =
 	| { readonly kind: 'registered'; readonly stage: RuntimeStageId }
@@ -175,18 +203,98 @@ export type ForwardDeploymentTransition =
 	  })
 	| (TransitionBase & { readonly kind: 'verify' });
 
-export interface RecoveryDeploymentTransition {
-	readonly id: DeploymentRecoveryTransitionId;
-	readonly from: DeploymentStateId;
-	readonly to: DeploymentStateId;
-	readonly kind:
-		| 'restore-d1'
-		| 'restore-durable-objects'
-		| 'deploy-recovery-stage'
-		| 'forward-repair'
-		| 'adopt-predecessor-deployment';
-	readonly checks: readonly DeploymentCheckId[];
+export interface DataMigrationResultAdoption {
+	readonly predecessorMigration: DataMigrationId;
+	readonly successorMigration: DataMigrationId;
+	readonly completed:
+		| {
+				readonly kind: 'reverify';
+				readonly checks: readonly DeploymentCheckId[];
+		  }
+		| {
+				readonly kind: 'rerun';
+				readonly checkpoint: DataMigrationCheckpointId;
+		  };
+	readonly notApplicable: {
+		readonly kind: 'revalidate';
+		readonly checks: readonly DeploymentCheckId[];
+		readonly becameApplicable: {
+			readonly kind: 'restart';
+			readonly checkpoint: DataMigrationCheckpointId;
+		};
+	};
+	readonly incomplete:
+		| {
+				readonly kind: 'resume';
+				readonly cursorFormat: DataMigrationCursorFormatId;
+				readonly implementationCompatibility: DataMigrationCompatibilityId;
+		  }
+		| {
+				readonly kind: 'restart';
+				readonly checkpoint: DataMigrationCheckpointId;
+		  };
+	readonly invariantFailure:
+		| { readonly kind: 'preserve' }
+		| {
+				readonly kind: 'repair';
+				readonly repair: RegisteredForwardRepairId;
+		  };
 }
+
+export type RecoveryDeploymentTransition =
+	| {
+			readonly id: DeploymentRecoveryTransitionId;
+			readonly from: DeploymentStateId;
+			readonly to: DeploymentStateId;
+			readonly kind: 'restore-d1';
+			readonly recoveryEnvelope: D1RecoveryEnvelopeId;
+			readonly checks: readonly DeploymentCheckId[];
+	  }
+	| {
+			readonly id: DeploymentRecoveryTransitionId;
+			readonly from: DeploymentStateId;
+			readonly to: DeploymentStateId;
+			readonly kind: 'restore-durable-objects';
+			readonly cohort: DataMigrationId;
+			readonly bookmarkPhase:
+				| 'pre-contract-bookmark-recorded'
+				| 'contracting'
+				| 'restoration-scheduled'
+				| 'restored-awaiting-verification';
+			readonly checks: readonly DeploymentCheckId[];
+	  }
+	| {
+			readonly id: DeploymentRecoveryTransitionId;
+			readonly from: DeploymentStateId;
+			readonly to: DeploymentStateId;
+			readonly kind: 'deploy-recovery-stage';
+			readonly stage: RuntimeStageId;
+			readonly checks: readonly DeploymentCheckId[];
+	  }
+	| {
+			readonly id: DeploymentRecoveryTransitionId;
+			readonly from: DeploymentStateId;
+			readonly to: DeploymentStateId;
+			readonly kind: 'forward-repair';
+			readonly repair: RegisteredForwardRepairId;
+			readonly checks: readonly DeploymentCheckId[];
+	  }
+	| {
+			readonly id: DeploymentRecoveryTransitionId;
+			readonly kind: 'adopt-predecessor-deployment';
+			readonly compatiblePredecessorArtifacts: readonly DeploymentArtifactId[];
+			readonly predecessorState: DeploymentStateId;
+			readonly to: DeploymentStateId;
+			readonly expiredExecution:
+				| { readonly kind: 'reject' }
+				| { readonly kind: 'abandon-unissued' }
+				| {
+						readonly kind: 'observe-external-effects';
+						readonly checks: readonly DeploymentCheckId[];
+				  };
+			readonly migrationResults: readonly DataMigrationResultAdoption[];
+			readonly checks: readonly DeploymentCheckId[];
+	  };
 
 export interface LegacyBootstrapTransition {
 	readonly id: DeploymentBootstrapTransitionId;
@@ -237,6 +345,8 @@ export interface LegacyRuntimeFingerprint {
 	readonly id: LegacyRuntimeFingerprintId;
 	readonly d1Migration: D1MigrationId;
 	readonly durableObjectMigration: DurableObjectMigrationId;
+	readonly tenantVersionTag: CloudflareWorkerVersionTag;
+	readonly controlVersionTag: CloudflareWorkerVersionTag;
 }
 
 export interface RuntimeStage {
@@ -364,20 +474,126 @@ const forwardDeploymentTransitionSchema: z.ZodType<ForwardDeploymentTransition> 
 		z.strictObject({ ...transitionBaseShape, kind: z.literal('verify') })
 	]);
 
-const recoveryDeploymentTransitionSchema: z.ZodType<RecoveryDeploymentTransition> =
+const restartAdoptionSchema = z.strictObject({
+	kind: z.literal('restart'),
+	checkpoint: dataMigrationCheckpointIdSchema
+});
+const adoptionCheckListSchema = z.array(deploymentCheckIdSchema);
+const reverifyAdoptionSchema = z.strictObject({
+	kind: z.literal('reverify'),
+	checks: adoptionCheckListSchema
+});
+const rerunAdoptionSchema = z.strictObject({
+	kind: z.literal('rerun'),
+	checkpoint: dataMigrationCheckpointIdSchema
+});
+const resumeAdoptionSchema = z.strictObject({
+	kind: z.literal('resume'),
+	cursorFormat: dataMigrationCursorFormatIdSchema,
+	implementationCompatibility: dataMigrationCompatibilityIdSchema
+});
+const preserveFailureAdoptionSchema = z.strictObject({
+	kind: z.literal('preserve')
+});
+const repairFailureAdoptionSchema = z.strictObject({
+	kind: z.literal('repair'),
+	repair: registeredForwardRepairIdSchema
+});
+const completedAdoptionSchema = z.discriminatedUnion('kind', [
+	reverifyAdoptionSchema,
+	rerunAdoptionSchema
+]);
+const incompleteAdoptionSchema = z.discriminatedUnion('kind', [
+	resumeAdoptionSchema,
+	restartAdoptionSchema
+]);
+const invariantFailureAdoptionSchema = z.discriminatedUnion('kind', [
+	preserveFailureAdoptionSchema,
+	repairFailureAdoptionSchema
+]);
+const notApplicableAdoptionSchema = z.strictObject({
+	kind: z.literal('revalidate'),
+	checks: adoptionCheckListSchema,
+	becameApplicable: restartAdoptionSchema
+});
+
+const dataMigrationResultAdoptionSchema: z.ZodType<DataMigrationResultAdoption> =
 	z.strictObject({
-		id: deploymentRecoveryTransitionIdSchema,
-		from: deploymentStateIdSchema,
-		to: deploymentStateIdSchema,
-		kind: z.enum([
-			'restore-d1',
-			'restore-durable-objects',
-			'deploy-recovery-stage',
-			'forward-repair',
-			'adopt-predecessor-deployment'
-		]),
-		checks: z.array(deploymentCheckIdSchema)
+		predecessorMigration: dataMigrationIdSchema,
+		successorMigration: dataMigrationIdSchema,
+		completed: completedAdoptionSchema,
+		notApplicable: notApplicableAdoptionSchema,
+		incomplete: incompleteAdoptionSchema,
+		invariantFailure: invariantFailureAdoptionSchema
 	});
+
+const rejectExpiredExecutionSchema = z.strictObject({
+	kind: z.literal('reject')
+});
+const abandonExpiredExecutionSchema = z.strictObject({
+	kind: z.literal('abandon-unissued')
+});
+const observeExpiredExecutionSchema = z.strictObject({
+	kind: z.literal('observe-external-effects'),
+	checks: adoptionCheckListSchema
+});
+const expiredExecutionAdoptionSchema = z.discriminatedUnion('kind', [
+	rejectExpiredExecutionSchema,
+	abandonExpiredExecutionSchema,
+	observeExpiredExecutionSchema
+]);
+
+const recoveryDeploymentTransitionSchema: z.ZodType<RecoveryDeploymentTransition> =
+	z.discriminatedUnion('kind', [
+		z.strictObject({
+			id: deploymentRecoveryTransitionIdSchema,
+			from: deploymentStateIdSchema,
+			to: deploymentStateIdSchema,
+			kind: z.literal('restore-d1'),
+			recoveryEnvelope: d1RecoveryEnvelopeIdSchema,
+			checks: z.array(deploymentCheckIdSchema)
+		}),
+		z.strictObject({
+			id: deploymentRecoveryTransitionIdSchema,
+			from: deploymentStateIdSchema,
+			to: deploymentStateIdSchema,
+			kind: z.literal('restore-durable-objects'),
+			cohort: dataMigrationIdSchema,
+			bookmarkPhase: z.enum([
+				'pre-contract-bookmark-recorded',
+				'contracting',
+				'restoration-scheduled',
+				'restored-awaiting-verification'
+			]),
+			checks: z.array(deploymentCheckIdSchema)
+		}),
+		z.strictObject({
+			id: deploymentRecoveryTransitionIdSchema,
+			from: deploymentStateIdSchema,
+			to: deploymentStateIdSchema,
+			kind: z.literal('deploy-recovery-stage'),
+			stage: runtimeStageIdSchema,
+			checks: z.array(deploymentCheckIdSchema)
+		}),
+		z.strictObject({
+			id: deploymentRecoveryTransitionIdSchema,
+			from: deploymentStateIdSchema,
+			to: deploymentStateIdSchema,
+			kind: z.literal('forward-repair'),
+			repair: registeredForwardRepairIdSchema,
+			checks: z.array(deploymentCheckIdSchema)
+		}),
+		z.strictObject({
+			id: deploymentRecoveryTransitionIdSchema,
+			kind: z.literal('adopt-predecessor-deployment'),
+			compatiblePredecessorArtifacts: z.array(deploymentArtifactIdSchema),
+			predecessorState: deploymentStateIdSchema,
+			to: deploymentStateIdSchema,
+			expiredExecution: expiredExecutionAdoptionSchema,
+			migrationResults: z.array(dataMigrationResultAdoptionSchema),
+			checks: z.array(deploymentCheckIdSchema)
+		})
+	]);
 
 const legacyBootstrapTransitionSchema: z.ZodType<LegacyBootstrapTransition> =
 	z.strictObject({
@@ -433,7 +649,9 @@ const legacyRuntimeFingerprintSchema: z.ZodType<LegacyRuntimeFingerprint> =
 	z.strictObject({
 		id: legacyRuntimeFingerprintIdSchema,
 		d1Migration: d1MigrationIdSchema,
-		durableObjectMigration: durableObjectMigrationIdSchema
+		durableObjectMigration: durableObjectMigrationIdSchema,
+		tenantVersionTag: cloudflareWorkerVersionTagSchema,
+		controlVersionTag: cloudflareWorkerVersionTagSchema
 	});
 
 const runtimeStageSchema: z.ZodType<RuntimeStage> = z.strictObject({
@@ -469,9 +687,21 @@ export interface WorkerUploadTemplate {
 	readonly mainModule: string;
 	readonly compatibilityDate: IsoDate;
 	readonly compatibilityFlags: readonly string[];
+	readonly observability: {
+		readonly enabled: boolean;
+		readonly tracing: boolean;
+	};
+	readonly keepBindings: readonly string[];
+	readonly cache: {
+		readonly enabled: boolean;
+		readonly crossVersion: boolean;
+	};
+	readonly exports: Readonly<Record<string, unknown>>;
+	readonly cpuMilliseconds?: number;
 	readonly bindings: readonly {
 		readonly name: string;
 		readonly type: string;
+		readonly target?: string;
 	}[];
 }
 
@@ -674,15 +904,29 @@ function validateMigrationDigests(
 function validateRuntimeDeployment(
 	runtime: RuntimeDeployment,
 	state: DeploymentState,
-	runtimeStages: ReadonlySet<string>,
+	runtimeStages: ReadonlyMap<string, RuntimeStage>,
 	legacyFingerprints: ReadonlySet<string>
 ): void {
 	if (runtime.kind === 'registered') {
-		requireDeclared(
-			runtimeStages,
-			runtime.stage,
-			`State ${state.id} runtime stage`
-		);
+		const stage = runtimeStages.get(runtime.stage);
+
+		if (stage === undefined) {
+			throw new DeploymentManifestError(
+				`State ${state.id} runtime stage ${runtime.stage} is not declared by the manifest`
+			);
+		}
+
+		if (!stage.supportedD1Schemas.includes(state.d1Schema)) {
+			throw new DeploymentManifestError(
+				`State ${state.id} runtime stage ${runtime.stage} does not support D1 schema ${state.d1Schema}`
+			);
+		}
+
+		if (stage.localMigrationCeiling !== state.localSchema.runtimeCeiling) {
+			throw new DeploymentManifestError(
+				`State ${state.id} runtime stage ${runtime.stage} does not match local migration ceiling ${state.localSchema.runtimeCeiling}`
+			);
+		}
 		return;
 	}
 
@@ -691,6 +935,125 @@ function validateRuntimeDeployment(
 		runtime.fingerprint,
 		`State ${state.id} legacy runtime fingerprint`
 	);
+}
+
+function validateRecoveryTransition(
+	transition: RecoveryDeploymentTransition,
+	states: ReadonlyMap<string, DeploymentState>,
+	runtimeStages: ReadonlySet<string>,
+	dataMigrations: ReadonlySet<string>,
+	checks: ReadonlySet<string>
+): void {
+	const fromState =
+		transition.kind === 'adopt-predecessor-deployment'
+			? transition.predecessorState
+			: transition.from;
+
+	const declaredStates = new Set(states.keys());
+	requireDeclared(declaredStates, fromState, 'Recovery source state');
+	requireDeclared(declaredStates, transition.to, 'Recovery target state');
+
+	for (const check of transition.checks) {
+		requireDeclared(
+			checks,
+			check,
+			`Recovery transition ${transition.id} check`
+		);
+	}
+
+	switch (transition.kind) {
+		case 'deploy-recovery-stage': {
+			requireDeclared(
+				runtimeStages,
+				transition.stage,
+				`Recovery transition ${transition.id} runtime stage`
+			);
+			break;
+		}
+		case 'restore-durable-objects': {
+			requireDeclared(
+				dataMigrations,
+				transition.cohort,
+				`Recovery transition ${transition.id} data migration`
+			);
+			break;
+		}
+		case 'adopt-predecessor-deployment': {
+			if (transition.compatiblePredecessorArtifacts.length === 0) {
+				throw new DeploymentManifestError(
+					`Recovery transition ${transition.id} has no compatible predecessor artifact`
+				);
+			}
+
+			for (const adoption of transition.migrationResults) {
+				requireDeclared(
+					dataMigrations,
+					adoption.successorMigration,
+					`Recovery transition ${transition.id} successor data migration`
+				);
+			}
+			break;
+		}
+	}
+}
+
+function validateOrderedD1Coverage(
+	manifest: DeploymentManifestBody,
+	path: readonly (ForwardDeploymentTransition | LegacyBootstrapTransition)[]
+): void {
+	const declared = manifest.d1Migrations.map((migration) => migration.id);
+	const applied = path.flatMap((transition) =>
+		transition.kind === 'apply-d1' ||
+		transition.kind === 'bootstrap-legacy-runtime'
+			? transition.migrations
+			: []
+	);
+	const uniqueApplied = new Set(applied);
+
+	if (uniqueApplied.size !== applied.length) {
+		throw new DeploymentManifestError(
+			'The deployment path applies a D1 migration more than once'
+		);
+	}
+
+	const bootstrap = path.find(
+		(transition) => transition.kind === 'bootstrap-legacy-runtime'
+	);
+
+	if (bootstrap === undefined) {
+		for (const [index, migration] of applied.entries()) {
+			const declaredIndex = declared.indexOf(migration);
+			const previousMigration = applied[index - 1];
+			const previousIndex =
+				previousMigration === undefined
+					? -1
+					: declared.indexOf(previousMigration);
+
+			if (declaredIndex <= previousIndex) {
+				throw new DeploymentManifestError(
+					'The deployment path does not preserve D1 migration order'
+				);
+			}
+		}
+		return;
+	}
+
+	const fingerprint = manifest.legacyRuntimeFingerprints.find(
+		(candidate) => candidate.id === bootstrap.sourceFingerprint
+	);
+	const sourceIndex =
+		fingerprint === undefined ? -1 : declared.indexOf(fingerprint.d1Migration);
+	const expected = declared.slice(sourceIndex + 1);
+
+	if (
+		fingerprint === undefined ||
+		sourceIndex === -1 ||
+		canonicalJson(applied) !== canonicalJson(expected)
+	) {
+		throw new DeploymentManifestError(
+			'The legacy deployment path does not apply every remaining D1 migration exactly once and in order'
+		);
+	}
 }
 
 function validateTransitionDeclarations(
@@ -797,13 +1160,13 @@ export function validateDeploymentManifest(
 		validateRuntimeDeployment(
 			state.tenantRuntime,
 			state,
-			declaredRuntimeStages,
+			runtimeStages,
 			legacyFingerprints
 		);
 		validateRuntimeDeployment(
 			state.controlRuntime,
 			state,
-			declaredRuntimeStages,
+			runtimeStages,
 			legacyFingerprints
 		);
 
@@ -832,6 +1195,34 @@ export function validateDeploymentManifest(
 	const declaredChecks = new Set(checks.keys());
 	const declaredD1Migrations = new Set(d1Migrations.keys());
 	const declaredDataMigrations = new Set(dataMigrations.keys());
+
+	for (const check of checks.values()) {
+		if (check.runtimeStage !== undefined) {
+			requireDeclared(
+				declaredRuntimeStages,
+				check.runtimeStage,
+				`Check ${check.id} runtime stage`
+			);
+		}
+	}
+
+	for (const migration of dataMigrations.values()) {
+		requireDeclared(
+			declaredRuntimeStages,
+			migration.runtimeStage,
+			`Data migration ${migration.id} runtime stage`
+		);
+
+		for (const schema of migration.d1Schemas) {
+			const stage = runtimeStages.get(migration.runtimeStage);
+
+			if (stage !== undefined && !stage.supportedD1Schemas.includes(schema)) {
+				throw new DeploymentManifestError(
+					`Data migration ${migration.id} uses D1 schema ${schema} outside runtime stage ${migration.runtimeStage}`
+				);
+			}
+		}
+	}
 	for (const transition of transitions.values()) {
 		const from = states.get(transition.from);
 		const to = states.get(transition.to);
@@ -928,7 +1319,18 @@ export function validateDeploymentManifest(
 		bootstrapByState.set(bootstrap.from, bootstrap.to);
 	}
 
+	for (const recovery of manifest.recoveryTransitions) {
+		validateRecoveryTransition(
+			recovery,
+			states,
+			declaredRuntimeStages,
+			declaredDataMigrations,
+			declaredChecks
+		);
+	}
+
 	const visited = new Set<DeploymentStateId>();
+	const path: (ForwardDeploymentTransition | LegacyBootstrapTransition)[] = [];
 	let current: DeploymentStateId | undefined = manifest.initialState;
 
 	while (current !== undefined) {
@@ -939,6 +1341,19 @@ export function validateDeploymentManifest(
 		}
 
 		visited.add(current);
+		const bootstrap = manifest.bootstrapTransitions.find(
+			(transition) => transition.from === current
+		);
+		const transition = manifest.forwardTransitions.find(
+			(candidate) => candidate.from === current
+		);
+
+		if (bootstrap !== undefined) {
+			path.push(bootstrap);
+		} else if (transition !== undefined) {
+			path.push(transition);
+		}
+
 		current = bootstrapByState.get(current) ?? successorByState.get(current);
 	}
 
@@ -947,4 +1362,12 @@ export function validateDeploymentManifest(
 			'The terminal state is not reachable from the initial state'
 		);
 	}
+
+	if (visited.size !== states.size) {
+		throw new DeploymentManifestError(
+			'The manifest contains a state outside the forward deployment path'
+		);
+	}
+
+	validateOrderedD1Coverage(manifest, path);
 }

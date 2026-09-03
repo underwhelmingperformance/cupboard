@@ -40,7 +40,7 @@ export type RuntimeStageObservation = Extract<
 export interface CloudflareDeploymentExecutorOptions {
 	readonly api: Pick<
 		CloudflareApi,
-		'd1QueryBatch' | 'd1QueryRows' | 'getD1Bookmark'
+		'd1QueryBatch' | 'd1QueryRows' | 'getD1Bookmark' | 'restoreD1Database'
 	>;
 	readonly databaseId: DatabaseId;
 	readonly d1Migrations: readonly D1Migration[];
@@ -103,6 +103,27 @@ export function cloudflareDeploymentExecutor(
 				kind: 'd1-recovery-point',
 				databaseId: options.databaseId,
 				bookmark: await options.api.getD1Bookmark(options.databaseId)
+			};
+		}
+
+		if (action.kind === 'restore-d1') {
+			if (action.databaseId !== options.databaseId) {
+				throw new DeploymentManifestResponseError(
+					`The control plane requested recovery for D1 database ${action.databaseId}, but this deployment uses ${options.databaseId}`
+				);
+			}
+
+			const restored = await options.api.restoreD1Database(
+				options.databaseId,
+				action.preContractBookmark
+			);
+
+			return {
+				kind: 'd1-restoration',
+				databaseId: options.databaseId,
+				preContractBookmark: action.preContractBookmark,
+				undoBookmark: restored.undoBookmark,
+				recoveryEnvelopeKey: action.recoveryEnvelopeKey
 			};
 		}
 

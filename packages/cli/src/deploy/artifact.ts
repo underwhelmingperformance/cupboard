@@ -121,6 +121,17 @@ function workerUploadTemplate(
 		mainModule: bundle.mainModule,
 		compatibilityDate: isoDateSchema.parse(worker.compatibilityDate),
 		compatibilityFlags: [...worker.compatibilityFlags],
+		observability: {
+			enabled: worker.observability,
+			tracing: worker.tracing
+		},
+		keepBindings: ['secret_text', 'plain_text'],
+		cache: {
+			enabled: worker.cacheEnabled,
+			crossVersion: worker.cacheEnabled
+		},
+		exports: worker.exports,
+		...(worker.cpuMs !== undefined && { cpuMilliseconds: worker.cpuMs }),
 		bindings: bindingTemplates(worker)
 	};
 }

@@ -177,6 +177,20 @@ export class ServerContext {
 		this.cacheRepository = new CacheRepository(this.db);
 	}
 
+	async requireRetentionAdministration(): Promise<void> {
+		const control = await this.d1
+			.select({
+				state: d1Schema.deploymentRuntimeControl.retentionAdministration
+			})
+			.from(d1Schema.deploymentRuntimeControl)
+			.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'))
+			.get();
+
+		if (control?.state !== 'open') {
+			throw new RetentionAdministrationFencedError();
+		}
+	}
+
 	// Do not let an error escape from `blockConcurrencyWhile`: the runtime would
 	// break the Durable Object and fail every in-flight request. Return the error
 	// through the gate and reject only this caller instead.
@@ -255,20 +269,6 @@ export class ServerContext {
 		}
 
 		return row.tenant;
-	}
-
-	async requireRetentionAdministration(): Promise<void> {
-		const control = await this.d1
-			.select({
-				state: d1Schema.deploymentRuntimeControl.retentionAdministration
-			})
-			.from(d1Schema.deploymentRuntimeControl)
-			.where(eq(d1Schema.deploymentRuntimeControl.id, 'current'))
-			.get();
-
-		if (control?.state !== 'open') {
-			throw new RetentionAdministrationFencedError();
-		}
 	}
 }
 

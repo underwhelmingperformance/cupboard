@@ -84,6 +84,20 @@ export class D1BookmarkMissingError extends CliError {
 	}
 }
 
+export class D1RestoreBookmarkMissingError extends CliError {
+	constructor(public readonly databaseId: DatabaseId) {
+		super(
+			`Cloudflare returned an incomplete Time Travel restore result for D1 database ${databaseId}`
+		);
+		this.name = 'D1RestoreBookmarkMissingError';
+	}
+}
+
+export interface D1RestoreResult {
+	readonly bookmark: string;
+	readonly undoBookmark: string;
+}
+
 export interface WorkersDevelopmentRoutes {
 	readonly workersDev: boolean;
 	readonly previewUrls: boolean;
@@ -151,6 +165,10 @@ export interface CloudflareApi {
 	): Promise<void>;
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 	getD1Bookmark(databaseId: DatabaseId): Promise<string>;
+	restoreD1Database(
+		databaseId: DatabaseId,
+		bookmark: string
+	): Promise<D1RestoreResult>;
 
 	/**
 	 * The live bindings and cache settings needed for deployment convergence.
@@ -548,6 +566,25 @@ export function createCloudflareApi(
 			}
 
 			return response.bookmark;
+		},
+
+		async restoreD1Database(databaseId, bookmark) {
+			const response = await client.d1.database.timeTravel.restore(databaseId, {
+				...account,
+				bookmark
+			});
+
+			if (
+				response.bookmark === undefined ||
+				response.previous_bookmark === undefined
+			) {
+				throw new D1RestoreBookmarkMissingError(databaseId);
+			}
+
+			return {
+				bookmark: response.bookmark,
+				undoBookmark: response.previous_bookmark
+			};
 		},
 
 		async getScriptConfiguration(scriptName) {

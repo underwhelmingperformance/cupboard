@@ -29,6 +29,10 @@ export type DeploymentTransitionId = z.infer<
 	typeof deploymentTransitionIdSchema
 >;
 
+export const deploymentExecutionTransitionIdSchema =
+	deploymentTransitionIdSchema;
+export type DeploymentExecutionTransitionId = DeploymentTransitionId;
+
 export const deploymentAttemptIdSchema = z.uuid().brand('DeploymentAttemptId');
 export type DeploymentAttemptId = z.infer<typeof deploymentAttemptIdSchema>;
 
@@ -61,7 +65,7 @@ export const deploymentFailureSchema = z.strictObject({
 export type DeploymentFailure = z.infer<typeof deploymentFailureSchema>;
 
 export const deploymentExecutionSchema = z.strictObject({
-	transitionId: deploymentTransitionIdSchema,
+	transitionId: deploymentExecutionTransitionIdSchema,
 	fromState: deploymentStateIdSchema,
 	toState: deploymentStateIdSchema,
 	status: deploymentExecutionStatusSchema,
@@ -104,6 +108,14 @@ const d1RecoveryPointObservationSchema = z.strictObject({
 	bookmark: identifierSchema
 });
 
+const d1RestorationObservationSchema = z.strictObject({
+	kind: z.literal('d1-restoration'),
+	databaseId: identifierSchema,
+	preContractBookmark: identifierSchema,
+	undoBookmark: identifierSchema,
+	recoveryEnvelopeKey: z.string().min(1).max(1000)
+});
+
 export const cloudflareDeploymentObservationSchema = z.discriminatedUnion(
 	'kind',
 	[
@@ -119,7 +131,8 @@ export const cloudflareDeploymentObservationSchema = z.discriminatedUnion(
 			kind: z.literal('d1-migrations'),
 			migrations: z.array(d1MigrationObservationSchema)
 		}),
-		d1RecoveryPointObservationSchema
+		d1RecoveryPointObservationSchema,
+		d1RestorationObservationSchema
 	]
 );
 export type CloudflareDeploymentObservation = z.infer<
@@ -150,6 +163,12 @@ export const deploymentExternalActionSchema = z.discriminatedUnion('kind', [
 	}),
 	z.strictObject({
 		kind: z.literal('capture-d1-recovery-point')
+	}),
+	z.strictObject({
+		kind: z.literal('restore-d1'),
+		databaseId: identifierSchema,
+		preContractBookmark: identifierSchema,
+		recoveryEnvelopeKey: identifierSchema
 	})
 ]);
 export type DeploymentExternalAction = z.infer<
@@ -179,4 +198,84 @@ export const deploymentAdvanceResultSchema = z.discriminatedUnion('outcome', [
 ]);
 export type DeploymentAdvanceResult = z.infer<
 	typeof deploymentAdvanceResultSchema
+>;
+
+export const deploymentRecoverInputSchema = z.strictObject({
+	deployment: deploymentIdentitySchema,
+	expectedState: deploymentStateIdSchema,
+	targetRecoveryState: deploymentStateIdSchema,
+	expectedRevision: deploymentRevisionSchema,
+	attemptId: deploymentAttemptIdSchema.optional(),
+	externalObservation: cloudflareDeploymentObservationSchema.optional()
+});
+export type DeploymentRecoverInput = z.infer<
+	typeof deploymentRecoverInputSchema
+>;
+
+export const deploymentRecoveryResultSchema = deploymentAdvanceResultSchema;
+export type DeploymentRecoveryResult = z.infer<
+	typeof deploymentRecoveryResultSchema
+>;
+
+export const predecessorExecutionSnapshotSchema = z.strictObject({
+	transitionId: deploymentTransitionIdSchema,
+	attemptId: deploymentAttemptIdSchema,
+	phase: z.enum(['running', 'failed']),
+	claimRevision: z.int().nonnegative(),
+	claimExpiresAt: z.iso.datetime().nullable(),
+	externalAction: z
+		.enum(['not-required', 'required', 'issued', 'observed'])
+		.nullable()
+});
+export type PredecessorExecutionSnapshot = z.infer<
+	typeof predecessorExecutionSnapshotSchema
+>;
+
+export const deploymentPrepareSuccessorInputSchema = z.strictObject({
+	predecessor: deploymentIdentitySchema,
+	successor: deploymentIdentitySchema,
+	expectedState: deploymentStateIdSchema,
+	expectedRevision: deploymentRevisionSchema
+});
+export type DeploymentPrepareSuccessorInput = z.infer<
+	typeof deploymentPrepareSuccessorInputSchema
+>;
+
+export const successorPreparationResultSchema = z.strictObject({
+	outcome: z.literal('prepared'),
+	predecessorState: deploymentStateIdSchema,
+	revision: deploymentRevisionSchema,
+	claimExpiresAt: z.iso.datetime(),
+	execution: predecessorExecutionSnapshotSchema
+});
+export type SuccessorPreparationResult = z.infer<
+	typeof successorPreparationResultSchema
+>;
+
+export const deploymentAdoptPredecessorInputSchema = z.strictObject({
+	predecessor: deploymentIdentitySchema,
+	successor: deploymentIdentitySchema,
+	predecessorState: deploymentStateIdSchema,
+	expectedRevision: deploymentRevisionSchema,
+	attemptId: deploymentAttemptIdSchema,
+	externalObservation: cloudflareDeploymentObservationSchema
+});
+export type DeploymentAdoptPredecessorInput = z.infer<
+	typeof deploymentAdoptPredecessorInputSchema
+>;
+
+export const deploymentAdoptionResultSchema = z.discriminatedUnion('outcome', [
+	z.strictObject({
+		outcome: z.literal('completed'),
+		deployment: deploymentIdentitySchema,
+		state: deploymentStateIdSchema,
+		revision: deploymentRevisionSchema
+	}),
+	z.strictObject({
+		outcome: z.literal('failed'),
+		failure: deploymentFailureSchema
+	})
+]);
+export type DeploymentAdoptionResult = z.infer<
+	typeof deploymentAdoptionResultSchema
 >;

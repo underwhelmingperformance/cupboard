@@ -111,7 +111,10 @@ import {
 	removeControlTrust
 } from './control-trust.ts';
 import {
+	deploymentAdoptPredecessor,
 	deploymentAdvance,
+	deploymentPrepareSuccessor,
+	deploymentRecover,
 	deploymentServiceDependencies,
 	deploymentStatus
 } from './deployment.ts';
@@ -178,6 +181,39 @@ export function controlDeploymentAdvance(
 	input: import('@cupboard/protocol/deployment').DeploymentAdvanceInput
 ): Promise<import('@cupboard/protocol/deployment').DeploymentAdvanceResult> {
 	return deploymentAdvance(
+		controlDatabase(env),
+		input,
+		deploymentServiceDependencies(env)
+	);
+}
+
+export function controlDeploymentRecover(
+	env: Env,
+	input: import('@cupboard/protocol/deployment').DeploymentRecoverInput
+): Promise<import('@cupboard/protocol/deployment').DeploymentRecoveryResult> {
+	return deploymentRecover(
+		controlDatabase(env),
+		input,
+		deploymentServiceDependencies(env)
+	);
+}
+
+export function controlDeploymentPrepareSuccessor(
+	env: Env,
+	input: import('@cupboard/protocol/deployment').DeploymentPrepareSuccessorInput
+): Promise<import('@cupboard/protocol/deployment').SuccessorPreparationResult> {
+	return deploymentPrepareSuccessor(
+		controlDatabase(env),
+		input,
+		deploymentServiceDependencies(env)
+	);
+}
+
+export function controlDeploymentAdoptPredecessor(
+	env: Env,
+	input: import('@cupboard/protocol/deployment').DeploymentAdoptPredecessorInput
+): Promise<import('@cupboard/protocol/deployment').DeploymentAdoptionResult> {
+	return deploymentAdoptPredecessor(
 		controlDatabase(env),
 		input,
 		deploymentServiceDependencies(env)

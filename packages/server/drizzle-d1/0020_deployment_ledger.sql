@@ -110,9 +110,10 @@ CREATE TABLE `structural_migration_checksum` (
 	`kind` text NOT NULL,
 	`migration_id` text NOT NULL,
 	`sha256` text NOT NULL,
+	`verification_state` text DEFAULT 'verified' NOT NULL,
 	`applied_at` text NOT NULL,
 	PRIMARY KEY(`kind`, `migration_id`),
-	CONSTRAINT "structural_migration_checksum_sha256" CHECK(length("structural_migration_checksum"."sha256") = 64 AND "structural_migration_checksum"."sha256" NOT GLOB '*[^0-9a-f]*')
+	CONSTRAINT "structural_migration_checksum_shape" CHECK("structural_migration_checksum"."verification_state" IN ('verified', 'unverified-baseline') AND length("structural_migration_checksum"."sha256") = 64 AND "structural_migration_checksum"."sha256" NOT GLOB '*[^0-9a-f]*')
 );
 --> statement-breakpoint
 CREATE TABLE `successor_deployment_preparation` (

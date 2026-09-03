@@ -89,7 +89,7 @@ export const deploymentManifest = cacheDeploymentManifest({
 		},
 		{
 			id: d1MigrationId('0020_deployment_ledger.sql'),
-			sha256: 'c79ad4cc4193ddb8abbbf1d66d99573bb93be6a414b91372196567a20d7ddab2'
+			sha256: '36adbb826f555f703fb8d440158e75f6e181b6dbe2ad7f1aa59fdaf52e873b42'
 		},
 		{
 			id: d1MigrationId('0020a_deployment_runtime_controls.sql'),

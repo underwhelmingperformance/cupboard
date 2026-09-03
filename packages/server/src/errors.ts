@@ -36,6 +36,15 @@ export abstract class ServerHttpError extends Error {
 	readonly retryAfterSeconds?: number;
 }
 
+export class DeploymentStateConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super('The deployment state or revision no longer matches this request');
+		this.name = 'DeploymentStateConflictError';
+	}
+}
+
 export class AppWritesFencedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -57,15 +66,6 @@ export class RetentionAdministrationFencedError extends ServerHttpError {
 			'Retention administration is temporarily paused for a deployment migration'
 		);
 		this.name = 'RetentionAdministrationFencedError';
-	}
-}
-
-export class DeploymentStateConflictError extends ServerHttpError {
-	readonly status = StatusCodes.CONFLICT;
-
-	constructor() {
-		super('The deployment state or revision no longer matches this request');
-		this.name = 'DeploymentStateConflictError';
 	}
 }
 

@@ -219,6 +219,8 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				return Promise.resolve([]);
 			},
 			getD1Bookmark: () => Promise.resolve('bookmark'),
+			restoreD1Database: () =>
+				Promise.resolve({ bookmark: 'restored', undoBookmark: 'undo' }),
 			getScriptConfiguration: () => {
 				recordFallbackApiCall(calls, 'getScriptConfiguration');
 				return Promise.resolve(undefined);
