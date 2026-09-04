@@ -9,6 +9,7 @@ import type {
 	NixSubstitutablePathInfo
 } from '@cupboard/nix';
 import {
+	DEFAULT_CACHE,
 	rootNameSchema,
 	storePathSchema,
 	type StorePathString
@@ -29,6 +30,7 @@ import {
 	StoreCapacityError
 } from '../plan/capacity.ts';
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
+import { cacheScopedDouble } from '../test-support.ts';
 
 import {
 	requeryUnknownWith,
@@ -122,8 +124,9 @@ function requeryAnswering(
 
 function rejectingRootClient(): Pick<RootClient, 'ensure'> {
 	return {
-		ensure: () =>
+		ensure: cacheScopedDouble(() =>
 			Promise.reject(new Error('roots.ensure must not be called here'))
+		)
 	};
 }
 
@@ -132,11 +135,11 @@ function recordingRootClient(
 	response: ParsedRootEnsureResponse
 ): Pick<RootClient, 'ensure'> {
 	return {
-		ensure(input) {
+		ensure: cacheScopedDouble((input) => {
 			calls.push(input);
 
 			return Promise.resolve(response);
-		}
+		})
 	};
 }
 
@@ -149,7 +152,7 @@ function runOptions(
 ): PlanCohortRunOptions {
 	return {
 		targets: [],
-		cacheName: '_default',
+		cache: DEFAULT_CACHE,
 		storeIdentity: { kind: 'daemon' },
 		plannedSubstitutionPolicy: {
 			kind: 'known',
@@ -237,11 +240,7 @@ describe('runPlanCohort', () => {
 			);
 
 			expect(ensureCalls).toStrictEqual([
-				{
-					cacheName: '_default',
-					name: appRoot,
-					targets: [appPath, otherPath]
-				}
+				{ name: appRoot, targets: [appPath, otherPath] }
 			]);
 
 			const expectedPartition: AvailabilityPartition = {

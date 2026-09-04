@@ -1,6 +1,6 @@
 import {
-	type CacheSelector,
 	selectorForCache,
+	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -23,6 +23,7 @@ import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import {
 	type CacheSelectionOptions,
 	CupboardClient,
@@ -39,10 +40,10 @@ interface ConfirmOptions extends CacheSelectionOptions {
 }
 
 export interface ConfirmClient {
-	confirm(input: {
-		cacheName: CacheSelector;
-		storePathHashes: StorePathHash[];
-	}): Promise<ParsedUploadConfirmResponse>;
+	confirm: CacheScopedClient<
+		{ storePathHashes: StorePathHash[] },
+		ParsedUploadConfirmResponse
+	>;
 }
 
 export function registerConfirmCommand(
@@ -80,14 +81,14 @@ export function registerConfirmCommand(
 		)
 		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
+			const cache = resolveCacheSelection(options);
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: confirmAuthorizationDetails({
-						cacheSelector: cacheName
+						cacheSelector: selectorForCache(cache)
 					})
 				}
 			);
@@ -96,12 +97,12 @@ export function registerConfirmCommand(
 				signal: programOptions.signal
 			});
 
-			await runConfirm(cacheName, storePaths, reporter, rpc.uploads);
+			await runConfirm(cache, storePaths, reporter, rpc.uploads);
 		});
 }
 
 export async function runConfirm(
-	cacheName: CacheSelector,
+	cache: StoredCache,
 	storePaths: readonly string[],
 	reporter: Reporter,
 	client: ConfirmClient
@@ -128,8 +129,7 @@ export async function runConfirm(
 				index < storePathHashes.length;
 				index += uploadConfirmMaxPaths
 			) {
-				const batch = await client.confirm({
-					cacheName,
+				const batch = await callInCache(client.confirm, cache, {
 					storePathHashes: storePathHashes.slice(
 						index,
 						index + uploadConfirmMaxPaths

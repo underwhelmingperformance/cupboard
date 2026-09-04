@@ -1,5 +1,4 @@
 import { type Logger } from '@cupboard/logger';
-import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -33,13 +32,8 @@ import {
 	controlLocalStepWake
 } from '../control/local-step.ts';
 
-import { authoriseRequest } from './authorise.ts';
+import { authoriseRequest, noPendingCache } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
-
-// The control plane has no pending-upload rows; resource resolution never needs
-// a pending-cache lookup, so the resolver always reports absence.
-const noPendingCache = (): Promise<StoredCache | undefined> =>
-	Promise.resolve(undefined);
 
 export interface ControlOrpcContext {
 	readonly request: Request;
@@ -66,6 +60,7 @@ const os = implement(controlContract)
 			claims,
 			procedure['~orpc'].meta,
 			input,
+			undefined,
 			noPendingCache
 		);
 

@@ -69,6 +69,9 @@ export interface TenantRpcServices {
 export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;
+	// The cache the request path selected: the default cache for a bare path,
+	// and the named one for a path under `/cache/<selector>`.
+	readonly cache: StoredCache;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;
 }
