@@ -53,8 +53,13 @@ export async function makeWritable(target: string): Promise<void> {
 	);
 }
 
+// `fs.watch` can drop events for a directory that other processes write to
+// heavily, so the file is also checked on this interval.
+const missedEventCheckIntervalMs = 50;
+
 /**
-Resolves once a file exists, using filesystem events instead of polling.
+Resolves once a file exists. Filesystem events report it promptly, and a
+periodic check covers an event the watcher does not deliver.
 */
 export async function waitForFile(
 	filePath: string,
@@ -84,6 +89,7 @@ export async function waitForFile(
 
 			isSettled = true;
 			signal?.removeEventListener('abort', onAbort);
+			clearInterval(missedEventCheck);
 			watcher.close();
 
 			if (error === undefined) {
@@ -106,6 +112,10 @@ export async function waitForFile(
 				}
 			}
 		};
+
+		const missedEventCheck = setInterval(() => {
+			void observeFile();
+		}, missedEventCheckIntervalMs);
 
 		watcher.on('change', (_event, filename) => {
 			if (shouldObserveFile(filename, expectedName)) {
