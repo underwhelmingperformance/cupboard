@@ -12,6 +12,7 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
+	deploymentPhaseResponseSchema,
 	localStepStatusSchema,
 	localStepWakeBodySchema,
 	localStepWakeResponseSchema
@@ -208,6 +209,15 @@ export const controlContract = {
 			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
 			.output(membershipRebuildResponseSchema)
+	},
+
+	// `cupboard deploy` records which phase the deployed build runs in, and both
+	// the Workers and the operator read it from here.
+	deployment: {
+		phase: controlProcedure
+			.meta({ requires: 'deployment:read' })
+			.route({ method: 'GET', path: '/deployment/phase' })
+			.output(deploymentPhaseResponseSchema)
 	},
 
 	// A release that changes each tenant's local state waits for every active

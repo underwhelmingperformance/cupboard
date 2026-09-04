@@ -1,13 +1,12 @@
 import { rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
-import { localStep } from '@cupboard/protocol/deployment';
+import { currentLocalStep, localStep } from '@cupboard/protocol/deployment';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { currentLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 import { provisionNamedTenant, suspendTenant } from '../test-support.ts';
 

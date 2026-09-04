@@ -10,7 +10,10 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import type { LocalStep } from '@cupboard/protocol/deployment';
+import type {
+	DeploymentPhaseName,
+	LocalStep
+} from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
@@ -335,6 +338,20 @@ export const tenantMaintenanceEligibility = sqliteTable(
 		)
 	]
 );
+
+// This table has one row, under the `id` `current`. It records which phase the
+// deployed build runs in, and the local step every tenant must reach before the
+// release advances past that phase. `cupboard deploy` writes the row and reads
+// it again on its next run. The Workers read it and behave as the phase
+// requires.
+export const deploymentPhase = sqliteTable('deployment_phase', {
+	id: text('id').primaryKey(),
+	phase: text('phase').$type<DeploymentPhaseName>().notNull(),
+	requiredLocalStep: integer('required_local_step')
+		.$type<LocalStep>()
+		.notNull(),
+	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
+});
 
 // Existing databases retain this table for migration compatibility. Admission
 // now reads tenant rows from D1 and uses KV only for negative membership hints.

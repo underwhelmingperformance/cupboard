@@ -357,6 +357,10 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'uploadScript');
 			return Promise.resolve();
 		},
+		listDeployedVersions: () => {
+			recordApiCall(apiCalls, 'listDeployedVersions');
+			return Promise.resolve([]);
+		},
 		ensureQueueConsumer: () => {
 			recordApiCall(apiCalls, 'ensureQueueConsumer');
 			return Promise.resolve();
