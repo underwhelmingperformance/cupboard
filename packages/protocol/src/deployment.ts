@@ -28,13 +28,15 @@ export function localStep(value: number): LocalStep {
  * This build requires every tenant Durable Object to reach this step.
  *
  * A release that needs per-object work after its migrations gives that work the
- * next step number and raises this constant. This build defines no such work,
- * so an object is at step 0 once it has applied its migrations.
+ * next step number and raises this constant. Step 1 gives every cache an
+ * identity and fills the `cache_id` of the rows that still refer to a cache by
+ * name alone. A migration cannot do that work, because both builds keep writing
+ * such rows while the release is rolling out.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(0);
+export const currentLocalStep: LocalStep = localStep(1);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a
