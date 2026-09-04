@@ -27,6 +27,7 @@ import {
 	controlTenantSetReadMode,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
+import { controlDeploymentPhase } from '../control/deployment-phase.ts';
 import {
 	controlLocalStepStatus,
 	controlLocalStepWake
@@ -137,6 +138,11 @@ export const controlRouter = os.router({
 	membership: {
 		rebuild: os.membership.rebuild.handler(({ context }) =>
 			controlMembershipRebuild(context.env)
+		)
+	},
+	deployment: {
+		phase: os.deployment.phase.handler(({ context }) =>
+			controlDeploymentPhase(context.env)
 		)
 	},
 	localStep: {
