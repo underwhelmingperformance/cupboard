@@ -28,12 +28,14 @@ import {
 	putNarBytes,
 	resetTestServer,
 	seedReservedNarInfo,
+	takeStalledMaintenancePasses,
 	uploadMetadata,
 	verifiableNar,
 	verifiablePath,
 	verifyCurrentTenant
 } from '../test-support.ts';
 
+import { noProgressRetryMs } from './alarm.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
@@ -41,6 +43,20 @@ import {
 	raceVerificationOperation
 } from './verification-claim-lease.ts';
 import { type VerificationService } from './verification-service.ts';
+
+/**
+ * Takes the retry deadline a failed verdict-drain pass left behind.
+ *
+ * A pass that resolves none of its page reports a stall and waits before it
+ * runs again. The tests below make every verdict in the page fail, so that
+ * stall is the behaviour under test. The shared teardown reports any parked
+ * pass a test does not take.
+ */
+async function expectParkedVerdictDrain(): Promise<void> {
+	await expect(takeStalledMaintenancePasses()).resolves.toStrictEqual([
+		{ pass: 'verdict-drain', waitMs: noProgressRetryMs }
+	]);
+}
 
 describe('verification RPC compatibility', () => {
 	it('defers an ownerless claim from a preceding Durable Object', async () => {
@@ -165,6 +181,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			put.mockRestore();
 		}
+
+		await expectParkedVerdictDrain();
 	});
 
 	it('keeps the Durable Object instance usable and the upload pending when D1 rejects inside the settle gate', async () => {
@@ -215,6 +233,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			prepare.mockRestore();
 		}
+
+		await expectParkedVerdictDrain();
 	});
 
 	it('settles uploads when the prefetch D1 batch faults and falls back to per-path probes', async () => {
@@ -285,6 +305,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			put.mockRestore();
 		}
+
+		await expectParkedVerdictDrain();
 	});
 
 	it('does not continue a truncated batch after a stale verdict finds no row', async () => {
