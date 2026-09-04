@@ -237,19 +237,25 @@ export class ServerContext {
 		);
 	}
 
+	// The tenant this object serves, or undefined before the control plane has
+	// configured it.
+	tenant(): TenantId | undefined {
+		return this.db
+			.select({ tenant: schema.tenantIdentity.tenant })
+			.from(schema.tenantIdentity)
+			.get()?.tenant;
+	}
+
 	// Derive D1 reference and R2 narinfo ownership from the Durable Object's
 	// assigned tenant identity. Do not accept tenant scope from a request.
 	requireTenant(): TenantId {
-		const row = this.db
-			.select({ tenant: schema.tenantIdentity.tenant })
-			.from(schema.tenantIdentity)
-			.get();
+		const tenant = this.tenant();
 
-		if (row === undefined) {
+		if (tenant === undefined) {
 			throw new TenantNotConfiguredError();
 		}
 
-		return row.tenant;
+		return tenant;
 	}
 }
 

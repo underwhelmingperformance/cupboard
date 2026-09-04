@@ -12,6 +12,7 @@ import {
 	controlAuthKey,
 	controlTrust,
 	globalAdmin,
+	localStepWakeCursor,
 	manifestState,
 	objectDeletion,
 	objectIncarnation,
@@ -60,6 +61,7 @@ beforeEach(async () => {
 	await database.delete(globalAdmin).run();
 	await database.delete(tenant).run();
 	await database.delete(manifestState).run();
+	await database.delete(localStepWakeCursor).run();
 
 	// KV is shared across tests like D1. Clear the negative membership hints and
 	// the cron's operational state so neither membership state nor the reaper's
