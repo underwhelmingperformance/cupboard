@@ -203,6 +203,10 @@ export const cacheScopeSchema = z.discriminatedUnion('kind', [
 ]);
 export type CacheScope = z.output<typeof cacheScopeSchema>;
 
+// Whether a reader must present a credential for the cache.
+export const cacheAccessModeSchema = z.enum(['public', 'private']);
+export type CacheAccessMode = z.output<typeof cacheAccessModeSchema>;
+
 // The default cache's selector. Its stored name is the empty string, which
 // cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell it
 // `_default`. The leading underscore fails `cacheNamePattern`, so the selector
@@ -338,6 +342,31 @@ export function cacheFromSelector(selector: CacheSelector): StoredCache {
 	}
 
 	return selector;
+}
+
+/**
+ * The scope a legacy cache key names, with the access the key itself
+ * encodes: `private` for a `private/` key and `public` otherwise. A public
+ * named cache of a private tenant is `public` here although its readers
+ * present the tenant credential; the key does not carry the tenant's read
+ * mode. `legacyCacheKey` converts back.
+ */
+export function identityForCache(cache: StoredCache): {
+	readonly scope: CacheScope;
+	readonly access: CacheAccessMode;
+} {
+	if (cache === DEFAULT_CACHE) {
+		return { scope: { kind: 'default' }, access: 'public' };
+	}
+
+	if (isPrivateCache(cache)) {
+		return {
+			scope: { kind: 'named', name: privateCacheLocalName(cache) },
+			access: 'private'
+		};
+	}
+
+	return { scope: { kind: 'named', name: cache }, access: 'public' };
 }
 
 export function selectorForCache(cache: StoredCache): CacheSelector {
