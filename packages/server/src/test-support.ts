@@ -1713,7 +1713,14 @@ export async function blobReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
-		.select()
+		.select({
+			tenant: blobReference.tenant,
+			cache: blobReference.cache,
+			storePathHash: blobReference.storePathHash,
+			generation: blobReference.generation,
+			narHash: blobReference.narHash,
+			cacheGeneration: blobReference.cacheGeneration
+		})
 		.from(blobReference)
 		.all();
 
@@ -1769,7 +1776,14 @@ export async function attestationReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.select()
+		.select({
+			tenant: d1Schema.attestationReference.tenant,
+			cache: d1Schema.attestationReference.cache,
+			storePathHash: d1Schema.attestationReference.storePathHash,
+			generation: d1Schema.attestationReference.generation,
+			predicateType: d1Schema.attestationReference.predicateType,
+			digest: d1Schema.attestationReference.digest
+		})
 		.from(d1Schema.attestationReference)
 		.all();
 
@@ -3802,14 +3816,20 @@ function migrationsThrough(throughIndex: number) {
  * a test plant rows in an older table shape and then assert how a later
  * migration backfills them; the migrator skips migrations already applied.
  */
-export function migrateThrough(
+export async function migrateThrough(
 	state: DurableObjectState,
 	throughIndex: number
 ): Promise<void> {
-	return applyMigrations(
-		drizzle(state.storage),
-		migrationsThrough(throughIndex)
-	);
+	const database = drizzle(state.storage);
+	const bundle = migrationsThrough(throughIndex);
+
+	for (;;) {
+		const result = await applyMigrations(database, bundle);
+
+		if (result.kind === 'complete') {
+			return;
+		}
+	}
 }
 
 export interface SigningKeySeed {

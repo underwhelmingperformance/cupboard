@@ -62,6 +62,7 @@ import {
 	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
 	DatabaseOverloadedError,
+	LocalSchemaMigrationPendingError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	SubrequestTimeoutError,
@@ -70,7 +71,10 @@ import {
 	ZstdUnavailableError
 } from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
-import { serverErrorHandler } from '../http/error-response.ts';
+import {
+	serverErrorHandler,
+	serverHttpErrorResponse
+} from '../http/error-response.ts';
 import {
 	maxVerificationRpcRows,
 	parseNarInfoName,
@@ -115,6 +119,7 @@ import {
 	type CasReferenceDemotion,
 	type NarInfoDemotion
 } from './blob-reaper-service.ts';
+import { localMigrationBudget } from './bounded-migration.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
@@ -1442,9 +1447,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private initialise(): Promise<void> {
-		this.migrationPromise ??= this.migrateAndSeed();
+		this.migrationPromise ??= this.runInitialisation();
 
 		return this.migrationPromise;
+	}
+
+	private async runInitialisation(): Promise<void> {
+		try {
+			await this.migrateAndSeed();
+		} catch (error: unknown) {
+			this.migrationPromise = undefined;
+			throw error;
+		}
 	}
 
 	// Fail loudly at initialisation if the runtime lacks native zstd, before
@@ -1478,6 +1492,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async migrateAndSeed(): Promise<void> {
+		const migrationBudget = localMigrationBudget();
 		// The meter is cumulative and a purged object can initialise again. Measure
 		// only this migration interval; the awaited operations (hashing the bundled
 		// migrations, probing zstd) do not access the database.
@@ -1485,7 +1500,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		await applyMigrations(this.context.db, migrations);
+		const migration = await applyMigrations(this.context.db, migrations, {
+			budget: migrationBudget
+		});
+
+		if (migration.kind === 'pending') {
+			throw new LocalSchemaMigrationPendingError(
+				migration.migration,
+				migration.stage
+			);
+		}
 		await this.assertZstdAvailable();
 
 		// The default cache always exists in the registry so its priority is
@@ -2095,7 +2119,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async fetch(request: Request): Promise<Response> {
-		await this.initialise();
+		try {
+			await this.initialise();
+		} catch (error) {
+			if (error instanceof LocalSchemaMigrationPendingError) {
+				return serverHttpErrorResponse(error);
+			}
+
+			throw error;
+		}
 
 		let status = StatusCodes.INTERNAL_SERVER_ERROR;
 		const { pathname } = new URL(request.url);
@@ -2145,7 +2177,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 * for whichever pass is due next.
 	 */
 	override async alarm(): Promise<void> {
-		await this.initialise();
+		try {
+			await this.initialise();
+		} catch (error) {
+			if (!(error instanceof LocalSchemaMigrationPendingError)) {
+				throw error;
+			}
+
+			await this.ctx.storage.setAlarm(
+				Date.now() + error.retryAfterSeconds * 1000
+			);
+			return;
+		}
 		const logger = rootLogger().with({ trigger: 'alarm' });
 		const now = Date.now();
 		this.commitCredit.closeExpiredSessions(now);
