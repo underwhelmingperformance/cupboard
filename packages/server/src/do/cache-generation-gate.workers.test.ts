@@ -1,5 +1,6 @@
 import {
 	cacheNameSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
 	privateStoredCache,
 	type StoredCache,
@@ -22,6 +23,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
+import { storedCacheScope } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -138,6 +140,24 @@ function cacheGenerationRows(): Promise<
 		})
 		.from(d1Schema.cacheLifecycle)
 		.all();
+}
+
+async function cacheScopeRows(): Promise<
+	{ cache: string; scope: CacheScope | undefined }[]
+> {
+	const rows = await database()
+		.select({
+			cache: d1Schema.cacheLifecycle.cache,
+			cacheKind: d1Schema.cacheLifecycle.cacheKind,
+			cacheName: d1Schema.cacheLifecycle.cacheName
+		})
+		.from(d1Schema.cacheLifecycle)
+		.all();
+
+	return rows.map((row) => ({
+		cache: row.cache,
+		scope: storedCacheScope(row.cacheKind, row.cacheName)
+	}));
 }
 
 function cacheCredentialCaches(): Promise<{ cache: string }[]> {
@@ -777,6 +797,17 @@ describe('deleted private cache', () => {
 				{ cache: privateBuilds, generation: 2 }
 			]
 		});
+	});
+
+	it('gives every lifecycle row a cache scope', async () => {
+		await publishPrivatePath('gen-lifecycle-identity');
+
+		await deleteAndParkTeardown(privateBuilds);
+
+		expect(await cacheScopeRows()).toStrictEqual([
+			{ cache: '', scope: { kind: 'default' } },
+			{ cache: privateBuilds, scope: { kind: 'named', name: 'builds' } }
+		]);
 	});
 
 	it('refuses attestations from the previous cache after the name is reused', async () => {
