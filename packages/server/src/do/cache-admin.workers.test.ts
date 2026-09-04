@@ -1,6 +1,7 @@
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
+	type CacheScope,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
@@ -19,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -44,6 +46,43 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+
+/**
+ * Every cache identity in creation order, with the scope read back out of the
+ * stored columns.
+ */
+async function cacheIdentities(): Promise<
+	{
+		id: CacheId;
+		scope: CacheScope | undefined;
+		access: string | undefined;
+		deleted: boolean;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				id: schema.cacheIdentities.id,
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: schema.cacheIdentities.access,
+				deletedAt: schema.cacheIdentities.deletedAt
+			})
+			.from(schema.cacheIdentities)
+			.orderBy(schema.cacheIdentities.id)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		id: row.id,
+		scope: cacheScopeFromRow({
+			kind: row.kind,
+			name: row.name ?? undefined
+		}),
+		access: row.access ?? undefined,
+		deleted: row.deletedAt !== null
+	}));
+}
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
@@ -210,6 +249,50 @@ describe('cache registry admin', () => {
 		}).toStrictEqual({
 			one: 1,
 			many: 21
+		});
+	});
+
+	it('gives each incarnation of a cache name its own identity', async () => {
+		await useTestServer('cache-admin-identity');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterPush = await cacheIdentities();
+
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+
+		const afterDeletion = await cacheIdentities();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('b')
+			}),
+			'builds'
+		);
+
+		const afterReuse = await cacheIdentities();
+		const builds = {
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public'
+		};
+
+		expect({ afterPush, afterDeletion, afterReuse }).toStrictEqual({
+			afterPush: [{ ...builds, id: 1, deleted: false }],
+			afterDeletion: [{ ...builds, id: 1, deleted: true }],
+			afterReuse: [
+				{ ...builds, id: 1, deleted: true },
+				{ ...builds, id: 2, deleted: false }
+			]
 		});
 	});
 

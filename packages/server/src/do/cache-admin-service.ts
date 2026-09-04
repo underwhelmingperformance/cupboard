@@ -15,6 +15,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import {
@@ -58,10 +59,14 @@ export const maxPathsTornDownPerRun =
 export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
+	private readonly identities: CacheRepository;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
-	) {}
+	) {
+		this.identities = new CacheRepository(context.db);
+	}
 
 	private teardownKey(cache: StoredCache): string {
 		return `${teardownEntryPrefix}${cache}`;
@@ -196,18 +201,18 @@ export class CacheAdminService {
 		cache: StoredCache,
 		priority: CachePriority
 	): Promise<CacheSummary> {
+		const now = isoTimestamp(new Date());
+
 		this.context.db
 			.insert(schema.caches)
-			.values({
-				name: cache,
-				priority,
-				createdAt: isoTimestamp(new Date())
-			})
+			.values({ name: cache, priority, createdAt: now })
 			.onConflictDoUpdate({
 				target: schema.caches.name,
 				set: { priority }
 			})
 			.run();
+		this.identities.ensure(cache, priority, now);
+		this.identities.setPriority(cache, priority);
 		await this.deletionQueue.clearCacheDeletion(cache);
 
 		return this.cacheSummary(cache, priority);
@@ -279,6 +284,13 @@ export class CacheAdminService {
 	 * for read authorisation.
 	 */
 	async loadOrCreateCache(cache: StoredCache): Promise<void> {
+		const now = isoTimestamp(new Date());
+		const defaultPriority = cachePrioritySchema.parse(
+			CacheInfo.default.priority
+		);
+
+		this.identities.ensure(cache, defaultPriority, now);
+
 		if (cache === DEFAULT_CACHE) {
 			return;
 		}
@@ -287,8 +299,8 @@ export class CacheAdminService {
 			.insert(schema.caches)
 			.values({
 				name: cache,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
+				priority: defaultPriority,
+				createdAt: now
 			})
 			.onConflictDoNothing()
 			.returning({ name: schema.caches.name })
@@ -353,6 +365,8 @@ export class CacheAdminService {
 			await this.deletionQueue.revokeCacheGeneration(cache);
 
 			const now = isoTimestamp(new Date());
+
+			this.identities.markDeleted(cache, now);
 			const pending = this.context.db
 				.select({
 					r2Key: schema.pendingUploads.r2Key,
