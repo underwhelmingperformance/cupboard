@@ -1,6 +1,7 @@
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	type CacheName,
 	type CachePriority,
 	type GraceSeconds,
 	type NarInfoGeneration,
@@ -26,20 +27,51 @@ import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import { sql } from 'drizzle-orm';
 import {
+	check,
 	index,
 	integer,
 	primaryKey,
 	sqliteTable,
 	text,
-	unique
+	unique,
+	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 
 import type { R2ObjectKey } from '../http/http.ts';
+
+export const cacheIdentities = sqliteTable(
+	'cache_identity',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		kind: text('kind', { enum: ['default', 'named'] }).notNull(),
+		name: text('name'),
+		access: text('access', { enum: ['public', 'private'] }),
+		priority: integer('priority').notNull(),
+		graceManaged: integer('grace_managed', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		deletedAt: text('deleted_at').$type<IsoTimestamp>()
+	},
+	(table) => [
+		check(
+			'cache_identity_shape_check',
+			sql`(${table.kind} = 'default' AND ${table.name} IS NULL) OR (${table.kind} = 'named' AND ${table.name} IS NOT NULL)`
+		),
+		uniqueIndex('cache_identity_default_idx')
+			.on(table.kind)
+			.where(sql`${table.kind} = 'default' AND ${table.deletedAt} IS NULL`),
+		uniqueIndex('cache_identity_name_idx')
+			.on(table.name)
+			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
+	]
+);
 
 export const narInfos = sqliteTable(
 	'narinfo',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
@@ -91,6 +123,8 @@ export const generationSeq = sqliteTable(
 	'generation_seq',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheName: text('cache_name').$type<CacheName>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		nextGeneration: integer('next_generation')
 			.$type<NarInfoGeneration>()
@@ -105,6 +139,7 @@ export const pendingUploads = sqliteTable(
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -160,6 +195,7 @@ export const pendingAttestations = sqliteTable(
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>(),
@@ -180,6 +216,7 @@ export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		// The generation of the narinfo version this deletion captured, so the D1
@@ -362,6 +399,7 @@ export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		name: text('name').$type<RootName>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
@@ -384,6 +422,7 @@ export const retentionRootTargets = sqliteTable(
 	'retention_root_target',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull()
@@ -403,6 +442,7 @@ export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		retainUntil: text('retain_until').$type<IsoTimestamp>().notNull()
 	},
@@ -420,12 +460,14 @@ export const garbageCollectionRevisions = sqliteTable(
 	'garbage_collection_revision',
 	{
 		cache: text('cache').$type<StoredCache>().primaryKey(),
+		cacheId: integer('cache_id'),
 		revision: integer('revision').notNull().default(0)
 	}
 );
 
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cache: text('cache').$type<StoredCache>().primaryKey(),
+	cacheId: integer('cache_id'),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
@@ -442,6 +484,7 @@ export const garbageCollectionFrontier = sqliteTable(
 	'garbage_collection_frontier',
 	{
 		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -451,6 +494,7 @@ export const garbageCollectionMarks = sqliteTable(
 	'garbage_collection_mark',
 	{
 		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheId: integer('cache_id'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -463,7 +507,8 @@ export const garbageCollectionTenantRuns = sqliteTable(
 	'garbage_collection_tenant_run',
 	{
 		id: integer('id').primaryKey(),
-		cache: text('cache').$type<StoredCache>().notNull()
+		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheId: integer('cache_id')
 	}
 );
 
@@ -486,6 +531,9 @@ export const retentionPolicies = sqliteTable(
 		id: text('id').primaryKey(),
 		scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
 		pattern: text('pattern').notNull(),
+		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }),
+		cacheId: integer('cache_id'),
+		rootNamePrefix: text('root_name_prefix'),
 		defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
@@ -519,6 +567,7 @@ export const retentionGracePolicies = sqliteTable(
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
 	cache: text('cache').$type<StoredCache>().notNull().default(''),
+	cacheId: integer('cache_id'),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
@@ -541,6 +590,7 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 
 export const reuseViews = sqliteTable('reuse_view', {
 	name: text('name').$type<StoredReuseView>().primaryKey(),
+	access: text('access', { enum: ['public', 'private'] }),
 	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
 	priority: integer('priority').$type<ReuseViewPriority>().notNull(),
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
@@ -555,6 +605,25 @@ export const reuseViewSelectors = sqliteTable(
 		pattern: text('pattern').notNull()
 	},
 	(table) => [primaryKey({ columns: [table.view, table.kind, table.pattern] })]
+);
+
+export const nativeReuseViewSelectors = sqliteTable(
+	'reuse_view_selector_native',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		view: text('view').notNull(),
+		kind: text('kind', {
+			enum: ['default', 'named', 'prefix', 'all-named', 'all']
+		}).notNull(),
+		cacheName: text('cache_name'),
+		prefix: text('prefix')
+	},
+	(table) => [
+		check(
+			'reuse_view_selector_native_shape_check',
+			sql`(${table.kind} IN ('default', 'all-named', 'all') AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'prefix' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NOT NULL AND length(${table.prefix}) > 0)`
+		)
+	]
 );
 
 // Removing a view does not delete its counter. A view recreated under the same
