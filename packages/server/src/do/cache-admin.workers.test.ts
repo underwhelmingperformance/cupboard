@@ -297,6 +297,43 @@ describe('cache registry admin', () => {
 		});
 	});
 
+	it('binds retention rows to the cache identity', async () => {
+		await useTestServer('cache-admin-identity-retention');
+
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await pushPath(init.token, metadata, 'builds');
+
+		const set = await authorisedFetch(
+			'/cache/builds/roots/channel',
+			init.token,
+			{
+				body: JSON.stringify({ targets: [metadata.storePath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+		const bound = await runInDurableObject(currentServer(), (instance) => ({
+			roots: instance.context.db
+				.select({ cacheId: schema.retentionRoots.cacheId })
+				.from(schema.retentionRoots)
+				.all(),
+			targets: instance.context.db
+				.select({ cacheId: schema.retentionRootTargets.cacheId })
+				.from(schema.retentionRootTargets)
+				.all()
+		}));
+
+		expect({ set: set.status, bound }).toStrictEqual({
+			set: StatusCodes.OK,
+			bound: {
+				roots: [{ cacheId: 1 }],
+				targets: [{ cacheId: 1 }]
+			}
+		});
+	});
+
 	it('gives each incarnation of a cache name its own identity', async () => {
 		await useTestServer('cache-admin-identity');
 

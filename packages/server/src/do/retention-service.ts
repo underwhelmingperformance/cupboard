@@ -19,6 +19,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
@@ -73,13 +74,19 @@ export class RetentionService {
 		}[],
 		writer: SchemaWriter
 	): void {
+		if (entries.length === 0) {
+			return;
+		}
+
+		const cacheId = new CacheRepository(writer).find(cache);
+
 		for (const rows of jsonRowLists(entries)) {
 			writer
 				.insert(schema.retentionGrace)
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
-						sql`null`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
 						rows.column('storePathHash'),
 						rows.column('retainUntil')
 					])
