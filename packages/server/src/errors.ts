@@ -1,5 +1,7 @@
 import {
 	type AuthKeyId,
+	type CacheAccessMode,
+	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
 	type SigningKeyId,
@@ -153,6 +155,24 @@ export class CacheNotEmptyError extends ServerHttpError {
 	constructor(public readonly cache: StoredCache) {
 		super('The cache contains store paths. Set force to true to delete it.');
 		this.name = 'CacheNotEmptyError';
+	}
+}
+
+// An identity is keyed by kind and name. The cache the request names has the
+// other access, so it is a different cache under the legacy key and cannot
+// share the live identity.
+export class CacheAccessConflictError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly scope: CacheScope,
+		public readonly liveAccess: CacheAccessMode,
+		public readonly requestedAccess: CacheAccessMode
+	) {
+		super(
+			`The cache is registered as ${liveAccess} and cannot be registered as ${requestedAccess}`
+		);
+		this.name = 'CacheAccessConflictError';
 	}
 }
 
