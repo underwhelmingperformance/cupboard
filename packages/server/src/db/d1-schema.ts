@@ -10,6 +10,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { LocalStep } from '@cupboard/protocol/deployment';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
@@ -262,7 +263,10 @@ export const tenant = sqliteTable(
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
 		// Scheduled maintenance processes the least recently maintained active
 		// tenants first. Null sorts first, so a new tenant is selected promptly.
-		lastMaintainedAt: text('last_maintained_at').$type<IsoTimestamp>()
+		lastMaintainedAt: text('last_maintained_at').$type<IsoTimestamp>(),
+		// The highest local step this tenant's Durable Object has reported. Null
+		// means the control Worker has not woken it since the column was added.
+		localStep: integer('local_step').$type<LocalStep>()
 	},
 	(table) => [
 		index('tenant_maintenance_idx').on(table.status, table.lastMaintainedAt)
@@ -450,3 +454,8 @@ export const tenantUsage = sqliteTable(
 		)
 	]
 );
+
+export const localStepWakeCursor = sqliteTable('local_step_wake_cursor', {
+	id: integer('id').primaryKey(),
+	afterTenant: text('after_tenant').$type<TenantId>().notNull()
+});

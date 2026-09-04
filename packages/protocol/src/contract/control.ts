@@ -12,6 +12,11 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
+	localStepStatusSchema,
+	localStepWakeBodySchema,
+	localStepWakeResponseSchema
+} from '../deployment.ts';
+import {
 	configuredInstanceSummarySchema,
 	instanceInitialiseBodySchema,
 	instanceSummarySchema
@@ -203,6 +208,23 @@ export const controlContract = {
 			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
 			.output(membershipRebuildResponseSchema)
+	},
+
+	// A release that changes each tenant's local state needs every active
+	// tenant's Durable Object to report the step it has reached. `status` reports
+	// how far the tenants have come and `wake` advances a bounded batch of those
+	// that have not; an object records its step only when woken here.
+	localStep: {
+		status: controlProcedure
+			.meta({ requires: 'local-step:read' })
+			.route({ method: 'GET', path: '/local-step' })
+			.output(localStepStatusSchema),
+
+		wake: controlProcedure
+			.meta({ requires: 'local-step:wake' })
+			.route({ method: 'POST', path: '/local-step/wake' })
+			.input(localStepWakeBodySchema)
+			.output(localStepWakeResponseSchema)
 	},
 
 	// The control plane's OIDC trust rules determine which external identities can
