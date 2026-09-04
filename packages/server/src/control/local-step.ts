@@ -89,14 +89,24 @@ async function wakeTenant(
 	tenant: TenantId
 ): Promise<WakeOutcome> {
 	try {
-		const step = await tenantServer(env, tenant).reportLocalStep();
+		const outcome = await tenantServer(env, tenant).reportLocalStep();
 
-		if (step === undefined) {
+		if (outcome.kind === 'unconfigured') {
 			// The registry holds a row whose Durable Object was never configured, so
 			// a create failed part way through. Retrying the create repairs it.
 			logger.warn('local step wake found an unconfigured tenant', { tenant });
 
 			return 'failed';
+		}
+
+		if (outcome.kind === 'incomplete') {
+			// The object made progress but has more work than one invocation
+			// allows, so it left its step unrecorded. It stays a straggler and a
+			// later pass wakes it again.
+			logger.info('local step wake made partial progress', {
+				tenant,
+				projected: outcome.projected
+			});
 		}
 
 		return 'woken';
