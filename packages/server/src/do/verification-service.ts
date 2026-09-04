@@ -177,7 +177,21 @@ const pendingDecodeFreeCursorKey =
 // the last valid verdict in its page. The drain wraps to the lowest upload ID
 // when no row follows the cursor. A pass with no verdict to apply deletes the
 // cursor, so the next pass starts from the beginning.
-const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
+export const recordedVerdictCursorKey = 'maintenance:verdict-drain-cursor';
+
+/**
+ * What one page of the verdict drain did.
+ *
+ * `applied` counts the verdicts that settled their upload. `resolved` also
+ * counts the verdicts the page discarded because they no longer apply, so a
+ * caller can tell a page that finished its work from one that failed on every
+ * verdict it tried. The number of held verdicts cannot make that distinction,
+ * because a commit can record a new verdict while the page runs.
+ */
+export interface RecordedVerdictPage {
+	readonly applied: number;
+	readonly resolved: number;
+}
 
 function parseUploadIdCursor(value: unknown): UploadId | undefined {
 	const parsed = uploadIdSchema.safeParse(value);
@@ -396,6 +410,16 @@ function parseRecordedVerdict(
 
 interface HeldVerdictRow extends RecordedVerdict {
 	readonly pending: PendingUploadRow;
+}
+
+/**
+ * One page of held verdicts, with the number of verdicts the read discarded
+ * because the row's claim moved on. A discarded verdict leaves the page but is
+ * still work the pass completed.
+ */
+interface HeldVerdictPage {
+	readonly held: readonly HeldVerdictRow[];
+	readonly discarded: number;
 }
 
 interface PreparedSettle {
@@ -2019,26 +2043,28 @@ export class VerificationService {
 	private heldVerdicts(
 		after: UploadId | undefined,
 		limit: number
-	): HeldVerdictRow[] {
+	): HeldVerdictPage {
 		const page = this.heldVerdictPage(after, limit);
 		const rows =
 			after === undefined || page.length > 0
 				? page
 				: this.heldVerdictPage(undefined, limit);
 		const held: HeldVerdictRow[] = [];
+		let discarded = 0;
 
 		for (const pending of rows) {
 			const parsed = parseRecordedVerdict(pending.recordedVerdictJson);
 
 			if (parsed?.owner !== pending.claimOwner) {
 				this.clearRecordedVerdict(pending);
+				discarded += 1;
 				continue;
 			}
 
 			held.push({ pending, ...parsed });
 		}
 
-		return held;
+		return { held, discarded };
 	}
 
 	/**
@@ -2598,7 +2624,9 @@ export class VerificationService {
 		this.holdVerdicts(owner, results);
 		signal?.throwIfAborted();
 
-		return this.applyRecordedVerdicts(logger, signal);
+		const page = await this.applyRecordedVerdicts(logger, signal);
+
+		return page.applied;
 	}
 
 	/**
@@ -2619,21 +2647,6 @@ export class VerificationService {
 	}
 
 	/**
-	 * The number of upload rows with a recorded verdict awaiting application.
-	 *
-	 * The drain compares this count before and after each pass. Applying a verdict
-	 * or discarding an inapplicable verdict reduces the count and records
-	 * progress.
-	 */
-	recordedVerdictCount(): number {
-		return this.context.db
-			.select({ id: schema.pendingUploads.id })
-			.from(schema.pendingUploads)
-			.where(isNotNull(schema.pendingUploads.recordedVerdictJson))
-			.all().length;
-	}
-
-	/**
 	 * Applies recorded verdicts up to the invocation's D1 allowance. It prepares
 	 * the verdicts concurrently and flushes their materialisations together.
 	 *
@@ -2642,13 +2655,11 @@ export class VerificationService {
 	 * leaves the verdict in place, so the next pass retries application without
 	 * repeating the decode. The D1 binding can return such an error when the
 	 * statement allowance is exhausted.
-	 *
-	 * Returns how many rows it settled.
 	 */
 	async applyRecordedVerdicts(
 		logger: Logger,
 		signal?: AbortSignal
-	): Promise<number> {
+	): Promise<RecordedVerdictPage> {
 		signal?.throwIfAborted();
 		const affordable = Math.min(
 			maxVerificationRpcRows,
@@ -2659,18 +2670,18 @@ export class VerificationService {
 		);
 
 		if (affordable === 0) {
-			return 0;
+			return { applied: 0, resolved: 0 };
 		}
 
 		const after = parseUploadIdCursor(
 			await this.context.ctx.storage.get(recordedVerdictCursorKey)
 		);
-		const held = this.heldVerdicts(after, affordable);
+		const { held, discarded } = this.heldVerdicts(after, affordable);
 
 		if (held.length === 0) {
 			await this.context.ctx.storage.delete(recordedVerdictCursorKey);
 
-			return 0;
+			return { applied: 0, resolved: discarded };
 		}
 
 		// Save the final upload ID in this page. The next pass starts after that ID
@@ -2685,6 +2696,8 @@ export class VerificationService {
 		}
 
 		let applied = 0;
+		// A verdict this page leaves in place is the only one it did not resolve.
+		let unresolved = 0;
 		const ready: ReadyRecordedVerdict[] = [];
 
 		await mapWithConcurrency(
@@ -2736,6 +2749,7 @@ export class VerificationService {
 						return;
 					}
 
+					unresolved += 1;
 					logger.warn('verification verdict not applied', {
 						kind: 'fresh',
 						reason: 'prepare-failed'
@@ -2746,7 +2760,7 @@ export class VerificationService {
 		signal?.throwIfAborted();
 
 		if (ready.length === 0) {
-			return applied;
+			return { applied, resolved: discarded + held.length - unresolved };
 		}
 
 		// Read the shared blob rows in chunks, then materialise each surviving upload
@@ -2778,6 +2792,7 @@ export class VerificationService {
 				this.clearRecordedVerdict(entry.held);
 			} catch {
 				signal?.throwIfAborted();
+				unresolved += 1;
 				logger.warn('verification verdict not applied', {
 					kind: 'fresh',
 					reason: 'materialisation-failed'
@@ -2786,7 +2801,7 @@ export class VerificationService {
 		});
 		signal?.throwIfAborted();
 
-		return applied;
+		return { applied, resolved: discarded + held.length - unresolved };
 	}
 
 	// A missing private staging object is a terminal mismatch because those bytes
