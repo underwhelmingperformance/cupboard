@@ -160,6 +160,37 @@ async function cacheScopeRows(): Promise<
 	}));
 }
 
+async function edgeScopeRows(): Promise<{
+	blobReferences: (CacheScope | undefined)[];
+	attestationReferences: (CacheScope | undefined)[];
+}> {
+	const [blobRows, attestationRows] = await Promise.all([
+		database()
+			.select({
+				cacheKind: d1Schema.blobReference.cacheKind,
+				cacheName: d1Schema.blobReference.cacheName
+			})
+			.from(d1Schema.blobReference)
+			.all(),
+		database()
+			.select({
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				cacheName: d1Schema.attestationReference.cacheName
+			})
+			.from(d1Schema.attestationReference)
+			.all()
+	]);
+	const scopeOf = (row: {
+		cacheKind: 'default' | 'named' | null;
+		cacheName: string | null;
+	}): CacheScope | undefined => storedCacheScope(row.cacheKind, row.cacheName);
+
+	return {
+		blobReferences: blobRows.map((row) => scopeOf(row)),
+		attestationReferences: attestationRows.map((row) => scopeOf(row))
+	};
+}
+
 function cacheCredentialCaches(): Promise<{ cache: string }[]> {
 	return database()
 		.select({ cache: d1Schema.tenantCacheReadCredential.cache })
@@ -808,6 +839,28 @@ describe('deleted private cache', () => {
 			{ cache: '', scope: { kind: 'default' } },
 			{ cache: privateBuilds, scope: { kind: 'named', name: 'builds' } }
 		]);
+	});
+
+	it('gives every reference edge a cache scope', async () => {
+		await useTestServer('gen-edge-scope');
+
+		const { token } = await bootstrap();
+		const nar = await verifiableNar('edge-scope-path');
+		const metadata = indexedMetadata(0, nar);
+
+		await pushPath(token, metadata, 'builds', nar);
+		await fileAttestationReference({
+			uploadId: '00000000-0000-4000-8000-000000000002',
+			bytes: new TextEncoder().encode('{"bundle":true}'),
+			cache: 'builds',
+			storePathHash: metadata.storePathHash,
+			generation: firstNarInfoGeneration
+		});
+
+		expect(await edgeScopeRows()).toStrictEqual({
+			blobReferences: [{ kind: 'named', name: 'builds' }],
+			attestationReferences: [{ kind: 'named', name: 'builds' }]
+		});
 	});
 
 	it('refuses attestations from the previous cache after the name is reused', async () => {
