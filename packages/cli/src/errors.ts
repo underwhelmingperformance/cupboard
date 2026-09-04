@@ -54,6 +54,29 @@ export class SigningKeyNotFoundError extends CliError {
 	}
 }
 
+/**
+ * The recorded phase describes the code that is running, so a deploy records it
+ * only when every script serves the build it just uploaded. A script fails this
+ * check when it still serves an earlier build, or when a gradual deployment
+ * splits its traffic across two versions.
+ *
+ * The deploy has already uploaded the Workers when it throws this. Running the
+ * deploy again once the rollout has finished records the phase.
+ */
+export class DeploymentPhaseUnsettledError extends CliError {
+	constructor(
+		public readonly scripts: readonly string[],
+		public readonly buildVersion: string
+	) {
+		const verb = scripts.length === 1 ? 'is' : 'are';
+
+		super(
+			`${scripts.join(' and ')} ${verb} not serving ${buildVersion} from a single version, so the deployment phase was not recorded. Re-run the deploy once the rollout has settled.`
+		);
+		this.name = 'DeploymentPhaseUnsettledError';
+	}
+}
+
 export class InvalidCacheNameError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);

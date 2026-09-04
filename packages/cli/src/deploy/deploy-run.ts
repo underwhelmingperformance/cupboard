@@ -1,8 +1,13 @@
+import {
+	currentLocalStep,
+	settledDeploymentPhase
+} from '@cupboard/protocol/deployment';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
+import { DeploymentPhaseUnsettledError } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
@@ -12,6 +17,7 @@ import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import { applyD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
+import { readDeploymentPhase, recordDeploymentPhase } from './phase.ts';
 import type { DeploySecrets } from './secrets.ts';
 import {
 	buildScriptMetadata,
@@ -532,6 +538,10 @@ async function performDeploy(
 
 	await configureTriggers(dependencies);
 
+	if (databaseId !== undefined) {
+		await settlePhase(dependencies, databaseId);
+	}
+
 	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
 	const d1Database =
 		databaseId === undefined || d1Name === undefined
@@ -574,4 +584,81 @@ function isMissingWorkerScriptError(error: unknown): boolean {
 		error instanceof NotFoundError &&
 		error.errors.some((item) => item.code === 10_007)
 	);
+}
+
+/**
+ * Returns the build a script is serving, or undefined when its deployment does
+ * not send every request to one version. A gradual deployment splits traffic
+ * between two versions, and there is then no single build to report.
+ */
+async function servingBuildVersion(
+	api: CloudflareApi,
+	scriptName: ScriptName
+): Promise<string | undefined> {
+	const versions = await api.listDeployedVersions(scriptName);
+	const [only] = versions;
+
+	if (versions.length !== 1 || only?.percentage !== 100) {
+		return undefined;
+	}
+
+	const configuration = await api.getScriptConfiguration(scriptName);
+
+	return configuration?.buildVersion;
+}
+
+/**
+ * Records the phase the deployment now runs in, once both Workers serve this
+ * build from a single version.
+ *
+ * The phase row describes the running code, so it must not be written while an
+ * earlier version can still take a request. If a script is still split across
+ * versions, or still serves an earlier build, this throws
+ * {@link DeploymentPhaseUnsettledError} and leaves the row unchanged.
+ */
+async function settlePhase(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId
+): Promise<void> {
+	const { api, artifact, reporter } = dependencies;
+	const phaseApi = {
+		queryBatch: (database: DatabaseId, statements: readonly string[]) =>
+			api.d1QueryBatch(database, statements),
+		queryRows: (database: DatabaseId, sql: string) =>
+			api.d1QueryRows(database, sql)
+	};
+
+	await reporter.phase('Recording the deployment phase', async (context) => {
+		const recorded = await readDeploymentPhase(phaseApi, databaseId);
+
+		if (recorded !== undefined) {
+			context.fact('from', recorded.name);
+		}
+
+		const unsettled: ScriptName[] = [];
+
+		for (const scriptName of [
+			artifact.config.control.name,
+			artifact.config.tenant.name
+		]) {
+			const serving = await servingBuildVersion(api, scriptName);
+
+			if (serving !== artifact.buildVersion) {
+				unsettled.push(scriptName);
+			}
+		}
+
+		if (unsettled.length > 0) {
+			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
+		}
+
+		await recordDeploymentPhase(
+			phaseApi,
+			databaseId,
+			settledDeploymentPhase,
+			currentLocalStep,
+			new Date()
+		);
+		context.fact('phase', settledDeploymentPhase);
+	});
 }

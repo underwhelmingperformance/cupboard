@@ -1,18 +1,12 @@
-import { type LocalStep, localStep } from '@cupboard/protocol/deployment';
+import {
+	currentLocalStep,
+	type LocalStep
+} from '@cupboard/protocol/deployment';
 import { and, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 
 import { type ServerContext } from './context.ts';
-
-/**
- * The step this build asks of every tenant Durable Object.
- *
- * A release that needs per-object work after its migrations numbers that work
- * as the next step and raises this constant. This build carries no such work,
- * so an object is at step 0 once its migrations have applied.
- */
-export const currentLocalStep: LocalStep = localStep(0);
 
 /**
  * Matches a tenant row whose object has not recorded the current step. A null

@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import {
+	currentLocalStep,
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
 	type LocalStepWakeResponse
@@ -10,7 +11,7 @@ import { and, asc, count, eq, gte, type SQL } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { belowCurrentLocalStep, currentLocalStep } from '../do/local-step.ts';
+import { belowCurrentLocalStep } from '../do/local-step.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
