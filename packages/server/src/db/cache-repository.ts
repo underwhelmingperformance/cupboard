@@ -123,8 +123,11 @@ export class CacheRepository {
 			.get();
 
 		// A pending upload or attestation can be negotiated before its cache
-		// exists. Those rows wait with a null `cache_id` under the legacy name,
-		// and this is the only write that can link them.
+		// exists, and a cache-scoped retention policy can be added before it.
+		// Those rows wait with a null `cache_id` under the legacy name. A policy
+		// also outlives a deletion and applies to the name, so every policy
+		// naming the cache is bound to the new identity, not only the ones still
+		// null.
 		for (const table of [schema.pendingUploads, schema.pendingAttestations]) {
 			this.database
 				.update(table)
@@ -132,6 +135,17 @@ export class CacheRepository {
 				.where(and(eq(table.cache, cache), isNull(table.cacheId)))
 				.run();
 		}
+
+		this.database
+			.update(schema.retentionPolicies)
+			.set({ cacheId: created.id })
+			.where(
+				and(
+					eq(schema.retentionPolicies.scope, 'cache'),
+					eq(schema.retentionPolicies.pattern, cache)
+				)
+			)
+			.run();
 
 		return created.id;
 	}
