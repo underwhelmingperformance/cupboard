@@ -1,6 +1,7 @@
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
+	type CacheScope,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
@@ -19,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -44,6 +46,69 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+
+/**
+ * Every cache identity in creation order, with the scope read back out of the
+ * stored columns.
+ */
+async function cacheIdentities(): Promise<
+	{
+		id: CacheId;
+		scope: CacheScope | undefined;
+		access: string | undefined;
+		priority: number;
+		deleted: boolean;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				id: schema.cacheIdentities.id,
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: schema.cacheIdentities.access,
+				priority: schema.cacheIdentities.priority,
+				deletedAt: schema.cacheIdentities.deletedAt
+			})
+			.from(schema.cacheIdentities)
+			.orderBy(schema.cacheIdentities.id)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		id: row.id,
+		scope: cacheScopeFromRow({
+			kind: row.kind,
+			name: row.name ?? undefined
+		}),
+		access: row.access ?? undefined,
+		priority: row.priority,
+		deleted: row.deletedAt !== null
+	}));
+}
+
+/**
+ * The names in the legacy `cache` table, in name order.
+ */
+async function legacyCacheNames(): Promise<string[]> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({ name: schema.caches.name })
+			.from(schema.caches)
+			.orderBy(schema.caches.name)
+			.all()
+	);
+
+	return rows.map((row) => row.name);
+}
+
+const defaultIdentity = {
+	id: 1,
+	scope: { kind: 'default' },
+	access: 'public',
+	priority: 40,
+	deleted: false
+};
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
@@ -210,6 +275,158 @@ describe('cache registry admin', () => {
 		}).toStrictEqual({
 			one: 1,
 			many: 21
+		});
+	});
+
+	it('registers the default cache identity at initialise', async () => {
+		await useTestServer('cache-admin-identity-default');
+
+		await bootstrap();
+
+		expect(await cacheIdentities()).toStrictEqual([defaultIdentity]);
+	});
+
+	it('gives each incarnation of a cache name its own identity', async () => {
+		await useTestServer('cache-admin-identity');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterPush = await cacheIdentities();
+
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+
+		const afterDeletion = await cacheIdentities();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('b')
+			}),
+			'builds'
+		);
+
+		const afterReuse = await cacheIdentities();
+		const builds = {
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 40
+		};
+
+		expect({ afterPush, afterDeletion, afterReuse }).toStrictEqual({
+			afterPush: [defaultIdentity, { ...builds, id: 2, deleted: false }],
+			afterDeletion: [defaultIdentity, { ...builds, id: 2, deleted: true }],
+			afterReuse: [
+				defaultIdentity,
+				{ ...builds, id: 2, deleted: true },
+				{ ...builds, id: 3, deleted: false }
+			]
+		});
+	});
+
+	it('refuses to register a name whose live identity has the other access', async () => {
+		await useTestServer('cache-admin-identity-access-conflict');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+
+		const refused = await authorisedFetch(
+			'/caches/_private-builds',
+			init.token,
+			{
+				body: JSON.stringify({ priority: 10 }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+
+		expect({
+			refused: refused.status,
+			identities: await cacheIdentities(),
+			legacyNames: await legacyCacheNames()
+		}).toStrictEqual({
+			refused: StatusCodes.CONFLICT,
+			identities: [
+				defaultIdentity,
+				{
+					id: 2,
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 30,
+					deleted: false
+				}
+			],
+			legacyNames: ['', 'builds']
+		});
+	});
+
+	it('keeps the identity live when a teardown fails before its transaction', async () => {
+		await useTestServer('cache-admin-identity-teardown-failure');
+
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await putCache(init.token, 'builds', 30);
+		// A fresh upload stages under its own key, so the teardown has an R2
+		// object to delete before its local transaction.
+		await negotiateUploads(init.token, [metadata], 'builds');
+
+		const deleteSpy = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockRejectedValue(new Error('R2 unavailable'));
+
+		let failed: Response;
+
+		try {
+			failed = await authorisedFetch('/caches/builds', init.token, {
+				method: 'DELETE'
+			});
+		} finally {
+			deleteSpy.mockRestore();
+		}
+
+		const afterFailure = {
+			identities: await cacheIdentities(),
+			legacyNames: await legacyCacheNames()
+		};
+		const removed = await authorisedFetch('/caches/builds', init.token, {
+			method: 'DELETE'
+		});
+		const builds = {
+			id: 2,
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 30
+		};
+
+		expect({
+			failed: failed.status,
+			afterFailure,
+			removed: removed.status,
+			afterRemoval: {
+				identities: await cacheIdentities(),
+				legacyNames: await legacyCacheNames()
+			}
+		}).toStrictEqual({
+			failed: StatusCodes.INTERNAL_SERVER_ERROR,
+			afterFailure: {
+				identities: [defaultIdentity, { ...builds, deleted: false }],
+				legacyNames: ['', 'builds']
+			},
+			removed: StatusCodes.OK,
+			afterRemoval: {
+				identities: [defaultIdentity, { ...builds, deleted: true }],
+				legacyNames: ['']
+			}
 		});
 	});
 

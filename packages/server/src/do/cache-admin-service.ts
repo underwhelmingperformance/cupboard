@@ -15,6 +15,8 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 
+import { type CacheId } from '../db/cache.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import {
@@ -58,10 +60,14 @@ export const maxPathsTornDownPerRun =
 export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
+	private readonly identities: CacheRepository;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
-	) {}
+	) {
+		this.identities = new CacheRepository(context.db);
+	}
 
 	private teardownKey(cache: StoredCache): string {
 		return `${teardownEntryPrefix}${cache}`;
@@ -196,13 +202,15 @@ export class CacheAdminService {
 		cache: StoredCache,
 		priority: CachePriority
 	): Promise<CacheSummary> {
+		const now = isoTimestamp(new Date());
+
+		// A refused registration must leave no legacy row behind, so the
+		// identity is registered first.
+		this.identities.ensure(cache, priority, now);
+		this.identities.setPriority(cache, priority);
 		this.context.db
 			.insert(schema.caches)
-			.values({
-				name: cache,
-				priority,
-				createdAt: isoTimestamp(new Date())
-			})
+			.values({ name: cache, priority, createdAt: now })
 			.onConflictDoUpdate({
 				target: schema.caches.name,
 				set: { priority }
@@ -269,36 +277,46 @@ export class CacheAdminService {
 	}
 
 	/**
-	 * Registers the cache in the local registry if it is not there already.
+	 * Registers the cache in the local registry if it is not there already,
+	 * and returns its identity.
 	 *
 	 * Creating a registry row also clears the D1 deletion timestamp. This handles
 	 * the first write to a new cache and recreation after deletion. The transition
 	 * uses one D1 statement per newly registered cache.
 	 *
-	 * The default cache is always public and uses only the lifecycle generation
-	 * for read authorisation.
+	 * The default cache is registered at initialise, is always public, and
+	 * uses only the lifecycle generation for read authorisation, so it has no
+	 * deletion to clear.
 	 */
-	async loadOrCreateCache(cache: StoredCache): Promise<void> {
+	async loadOrCreateCache(cache: StoredCache): Promise<CacheId> {
+		const now = isoTimestamp(new Date());
+		const defaultPriority = cachePrioritySchema.parse(
+			CacheInfo.default.priority
+		);
+		const cacheId = this.identities.ensure(cache, defaultPriority, now);
+
 		if (cache === DEFAULT_CACHE) {
-			return;
+			return cacheId;
 		}
 
 		const created = this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
+				priority: defaultPriority,
+				createdAt: now
 			})
 			.onConflictDoNothing()
 			.returning({ name: schema.caches.name })
 			.all();
 
 		if (created.length === 0) {
-			return;
+			return cacheId;
 		}
 
 		await this.deletionQueue.clearCacheDeletion(cache);
+
+		return cacheId;
 	}
 
 	// Claim one cache marker per alarm so several large teardowns make progress
@@ -404,6 +422,7 @@ export class CacheAdminService {
 					.where(eq(schema.retentionGrace.cache, cache))
 					.run();
 				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
+				new CacheRepository(tx).markDeleted(cache, now);
 				// Remove in-flight uploads so a later commit cannot recreate the cache.
 				tx.delete(schema.pendingUploads)
 					.where(eq(schema.pendingUploads.cache, cache))

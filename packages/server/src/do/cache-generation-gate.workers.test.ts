@@ -1016,7 +1016,9 @@ describe('attestation list generation', () => {
 		const publicPath = indexedMetadata(0, publicNar);
 		const privatePath = indexedMetadata(1, privateNar);
 
-		await pushPath(token, publicPath, 'builds', publicNar);
+		// A tenant cannot hold a public and a private cache of one name, so the
+		// public list lives in a cache of another name.
+		await pushPath(token, publicPath, 'docs', publicNar);
 		await pushPath(token, privatePath, privateBuilds, privateNar);
 		await provisionFixtureTenant({ read: tenantReader });
 		await setCacheReadCredential(
@@ -1029,7 +1031,7 @@ describe('attestation list generation', () => {
 
 		// The list objects a server that recorded no generation left behind.
 		await publishAttestationList({
-			cache: buildsCache,
+			cache: cacheNameSchema.parse('docs'),
 			storePathHash: publicPath.storePathHash
 		});
 		await publishAttestationList({
@@ -1038,7 +1040,7 @@ describe('attestation list generation', () => {
 		});
 
 		const publicList = await readFetch(
-			`/cache/builds/attestations/${publicPath.storePathHash}`
+			`/cache/docs/attestations/${publicPath.storePathHash}`
 		);
 		const privateList = await readFetch(
 			`/private-cache/builds/attestations/${privatePath.storePathHash}`,
