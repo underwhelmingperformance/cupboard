@@ -39,6 +39,10 @@ import { committedPath, setView } from './reuse-view-read.test-support.ts';
 const tenant = tenantIdSchema.parse(fixtureTenant);
 const builds = cacheNameSchema.parse('builds');
 const privateBuilds = `_private-${builds}`;
+// The public cache beside the private one. A tenant cannot hold a public and
+// a private cache of one name, so a view's selectors are tested against a
+// public cache whose name they do not match.
+const publicCache = cacheNameSchema.parse('docs');
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 // The tenant's own read credential. It is the only credential that opens a
@@ -358,7 +362,7 @@ describe('private reuse views', () => {
 		'resolves inside the private namespace: $name',
 		async ({ selectors, isPrivateServed }) => {
 			const privateHash = await commitTo(privateBuilds);
-			const publicHash = await commitTo(builds);
+			const publicHash = await commitTo(publicCache);
 			await setView(selectors, privateViewName);
 			await provisionFixtureTenant({ read: tenantReader });
 
@@ -383,7 +387,7 @@ describe('private reuse views', () => {
 
 	it('does not expose a private cache through a public view with an empty-prefix selector', async () => {
 		const privateHash = await commitTo(privateBuilds);
-		const publicHash = await commitTo(builds);
+		const publicHash = await commitTo(publicCache);
 		await setView([{ kind: 'prefix', pattern: '' }]);
 
 		const privateRead = await readFetch(`/reuse/reuse/${privateHash}.narinfo`);
