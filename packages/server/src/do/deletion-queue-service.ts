@@ -20,7 +20,7 @@ import {
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { cacheIdentityColumns } from '../db/cache.ts';
+import { type CacheId, cacheIdentityColumns } from '../db/cache.ts';
 import {
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
@@ -677,6 +677,7 @@ export class DeletionQueueService {
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
 		cache: StoredCache,
+		cacheId: CacheId | undefined,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString,
 		generation: NarInfoGeneration,
@@ -685,6 +686,7 @@ export class DeletionQueueService {
 		this.enqueueNarInfoDeletions(
 			handle,
 			cache,
+			cacheId,
 			[{ storePathHash, narHash, generation }],
 			now
 		);
@@ -694,20 +696,30 @@ export class DeletionQueueService {
 	 * Queues narinfo versions for deletion, one statement per bound list. A
 	 * version already queued keeps its `created_at` and takes the incoming NAR
 	 * hash.
+	 *
+	 * `cacheId` is the identity the rows were published under, which a caller
+	 * reads from the narinfo row it retires. A lookup by name would be wrong
+	 * here: a teardown queues after it has marked the identity deleted, and
+	 * the name may be registered again before the revoked-edge sweep runs.
 	 */
 	enqueueNarInfoDeletions(
 		handle: SchemaWriter,
 		cache: StoredCache,
+		cacheId: CacheId | undefined,
 		entries: readonly TornDownNarInfo[],
 		now: IsoTimestamp
 	): void {
+		if (entries.length === 0) {
+			return;
+		}
+
 		for (const rows of jsonRowLists(entries)) {
 			handle
 				.insert(schema.narInfoDeletions)
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
-						sql`null`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
 						rows.column('storePathHash'),
 						rows.column('narHash'),
 						rows.column('generation'),
@@ -1052,9 +1064,13 @@ export class DeletionQueueService {
 
 		this.context.db.transaction((tx) => {
 			for (const edge of page) {
+				// These edges belong to an earlier cache of the same name, since
+				// deleted. The live identity, if there is one, is a later cache, so
+				// no identity is recorded.
 				this.enqueueNarInfoDeletion(
 					tx,
 					cache,
+					undefined,
 					edge.storePathHash,
 					edge.narHash,
 					edge.generation,
@@ -1157,6 +1173,7 @@ export class DeletionQueueService {
 				this.enqueueNarInfoDeletion(
 					tx,
 					row.cache,
+					row.cacheId ?? undefined,
 					storePathHash,
 					row.narHash,
 					row.generation,
@@ -1247,6 +1264,7 @@ export class DeletionQueueService {
 			this.enqueueNarInfoDeletion(
 				tx,
 				row.cache,
+				row.cacheId ?? undefined,
 				row.storePathHash,
 				row.narHash,
 				row.generation,

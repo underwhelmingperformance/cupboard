@@ -21,6 +21,7 @@ import {
 	sql
 } from 'drizzle-orm';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredReferencesInvalidError,
@@ -795,6 +796,7 @@ export class GarbageCollectionService {
 			.limit(page + 1)
 			.all();
 		const batch = rows.slice(0, page);
+		const cacheId = new CacheRepository(this.context.db).find(cache);
 		let pathsCollected = 0;
 
 		for (const paths of jsonRowLists(batch)) {
@@ -824,7 +826,13 @@ export class GarbageCollectionService {
 					})
 					.all();
 
-				this.deletionQueue.enqueueNarInfoDeletions(tx, cache, collected, now);
+				this.deletionQueue.enqueueNarInfoDeletions(
+					tx,
+					cache,
+					cacheId,
+					collected,
+					now
+				);
 				pathsCollected += collected.length;
 			});
 		}
