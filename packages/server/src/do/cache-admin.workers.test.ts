@@ -39,6 +39,7 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	runGcResult,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -449,6 +450,65 @@ describe('cache registry admin', () => {
 				},
 				prefixPolicy
 			]
+		});
+	});
+
+	it('fills the identity of rows a forward write left behind', async () => {
+		await useTestServer('cache-admin-identity-reconcile');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+		// A collection pass reaches the default cache, which nothing has
+		// registered, so it writes a revision row with no identity. The insert
+		// does nothing on conflict, so no later pass repairs it.
+		await runGcResult();
+
+		const collectionState = (): Promise<
+			{ cache: string; cacheId: CacheId | undefined }[]
+		> =>
+			runInDurableObject(currentServer(), (instance) =>
+				instance.context.db
+					.select({
+						cache: schema.garbageCollectionRevisions.cache,
+						cacheId: schema.garbageCollectionRevisions.cacheId
+					})
+					.from(schema.garbageCollectionRevisions)
+					.orderBy(schema.garbageCollectionRevisions.cache)
+					.all()
+					.map((row) => ({
+						cache: row.cache,
+						cacheId: row.cacheId ?? undefined
+					}))
+			);
+
+		const beforeStep = await collectionState();
+
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep()
+		);
+
+		const afterStep = await collectionState();
+		const identities = await cacheIdentities();
+
+		expect({
+			beforeStep,
+			afterStep,
+			identities: identities.map(({ scope }) => scope)
+		}).toStrictEqual({
+			beforeStep: [
+				{ cache: '', cacheId: undefined },
+				{ cache: 'builds', cacheId: undefined }
+			],
+			afterStep: [
+				{ cache: '', cacheId: 2 },
+				{ cache: 'builds', cacheId: 1 }
+			],
+			identities: [{ kind: 'named', name: 'builds' }, { kind: 'default' }]
 		});
 	});
 
