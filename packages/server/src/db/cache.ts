@@ -1,6 +1,7 @@
 import {
 	type CacheAccessMode,
 	type CacheName,
+	cacheNameSchema,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type SQL, sql } from 'drizzle-orm';
@@ -39,6 +40,25 @@ export function cacheIdentityCondition(
 	}
 
 	return sql`${kind} = 'named' and ${name} = ${scope.name}`;
+}
+
+/**
+ * The scope stored in a row's identity columns, or undefined when those
+ * columns are still null because the backfill has not reached the row.
+ */
+export function storedCacheScope(
+	kind: 'default' | 'named' | null,
+	name: string | null
+): CacheScope | undefined {
+	if (kind === null) {
+		return undefined;
+	}
+
+	if (kind === 'default') {
+		return { kind: 'default' };
+	}
+
+	return { kind: 'named', name: cacheNameSchema.parse(name) };
 }
 
 /**

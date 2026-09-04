@@ -1,4 +1,5 @@
 import {
+	identityForCache,
 	isPrivateCache,
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -19,6 +20,7 @@ import {
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
 import {
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
@@ -959,12 +961,14 @@ export class DeletionQueueService {
 	async revokeCacheGeneration(cache: StoredCache): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
+		const identity = cacheIdentityColumns(identityForCache(cache).scope);
 
 		await this.context.d1
 			.insert(d1Schema.cacheLifecycle)
 			.values({
 				tenant,
 				cache,
+				...identity,
 				generation: secondCacheGeneration,
 				deletedAt: now,
 				updatedAt: now
@@ -972,6 +976,7 @@ export class DeletionQueueService {
 			.onConflictDoUpdate({
 				target: [d1Schema.cacheLifecycle.tenant, d1Schema.cacheLifecycle.cache],
 				set: {
+					...identity,
 					generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
 					deletedAt: now,
 					updatedAt: now
@@ -992,7 +997,11 @@ export class DeletionQueueService {
 
 		await this.context.d1
 			.update(d1Schema.cacheLifecycle)
-			.set({ deletedAt: sql`null`, updatedAt: isoTimestamp(new Date()) })
+			.set({
+				...cacheIdentityColumns(identityForCache(cache).scope),
+				deletedAt: sql`null`,
+				updatedAt: isoTimestamp(new Date())
+			})
 			.where(
 				and(
 					eq(d1Schema.cacheLifecycle.tenant, tenant),

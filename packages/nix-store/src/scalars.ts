@@ -347,6 +347,30 @@ export function cacheFromSelector(selector: CacheSelector): StoredCache {
 	return selector;
 }
 
+/**
+ * The scope and access mode encoded in a legacy cache key.
+ *
+ * Use this to write the identity columns beside a legacy key while a row
+ * stores both representations. `legacyCacheKey` converts back.
+ */
+export function identityForCache(cache: StoredCache): {
+	readonly scope: CacheScope;
+	readonly access: CacheAccessMode;
+} {
+	if (cache === DEFAULT_CACHE) {
+		return { scope: { kind: 'default' }, access: 'public' };
+	}
+
+	if (isPrivateCache(cache)) {
+		return {
+			scope: { kind: 'named', name: privateCacheLocalName(cache) },
+			access: 'private'
+		};
+	}
+
+	return { scope: { kind: 'named', name: cache }, access: 'public' };
+}
+
 export function selectorForCache(cache: StoredCache): CacheSelector {
 	if (cache === DEFAULT_CACHE) {
 		return DEFAULT_CACHE_SELECTOR;
