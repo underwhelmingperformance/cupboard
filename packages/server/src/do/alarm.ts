@@ -31,7 +31,7 @@ export type MaintenanceProgress = 'progressed' | 'stalled';
 
 // Each pass has its own key and retry deadline. A stalled pass therefore does
 // not make another stalled pass due. The keys sit outside every queue prefix.
-const maintenanceRetryPrefix = 'maintenance:retry:';
+export const maintenanceRetryPrefix = 'maintenance:retry:';
 
 /**
  * Where one maintenance pass records the time before which it must not run
