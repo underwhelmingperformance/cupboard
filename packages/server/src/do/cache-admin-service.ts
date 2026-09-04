@@ -401,8 +401,8 @@ export class CacheAdminService {
 			// deletion cannot remove.
 			this.context.db.transaction((tx) => {
 				tx.run(
-					sql`INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache, store_path_hash, nar_hash, generation, ${now}
+					sql`INSERT INTO narinfo_deletion (cache, cache_id, store_path_hash, nar_hash, generation, created_at)
+						SELECT cache, cache_id, store_path_hash, nar_hash, generation, ${now}
 						FROM narinfo WHERE cache = ${cache}
 						ON CONFLICT (cache, store_path_hash, generation)
 						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`

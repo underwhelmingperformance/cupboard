@@ -2,6 +2,7 @@ import {
 	cacheNameSchema,
 	cachePrioritySchema,
 	type CacheScope,
+	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
@@ -22,7 +23,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -39,6 +40,7 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	testPushId,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -87,6 +89,101 @@ async function cacheIdentities(): Promise<
 	}));
 }
 
+function withId(row: { cache: string; cacheId: CacheId | null }): {
+	cache: string;
+	cacheId: CacheId | undefined;
+} {
+	return { cache: row.cache, cacheId: row.cacheId ?? undefined };
+}
+
+/**
+ * The cache columns of every row a publish writes, in store-path order.
+ */
+async function publishedRows(): Promise<{
+	narInfos: { cache: string; cacheId: CacheId | undefined }[];
+	generationSeq: {
+		cache: string;
+		cacheKind: string | undefined;
+		cacheName: string | undefined;
+	}[];
+	pendingUploads: { cache: string; cacheId: CacheId | undefined }[];
+	pendingAttestations: { cache: string; cacheId: CacheId | undefined }[];
+}> {
+	return runInDurableObject(currentServer(), (instance) => ({
+		narInfos: instance.context.db
+			.select({
+				cache: schema.narInfos.cache,
+				cacheId: schema.narInfos.cacheId
+			})
+			.from(schema.narInfos)
+			.orderBy(schema.narInfos.cache, schema.narInfos.storePathHash)
+			.all()
+			.map((row) => withId(row)),
+		generationSeq: instance.context.db
+			.select({
+				cache: schema.generationSeq.cache,
+				cacheKind: schema.generationSeq.cacheKind,
+				cacheName: schema.generationSeq.cacheName
+			})
+			.from(schema.generationSeq)
+			.orderBy(schema.generationSeq.cache, schema.generationSeq.storePathHash)
+			.all()
+			.map((row) => ({
+				cache: row.cache,
+				cacheKind: row.cacheKind ?? undefined,
+				cacheName: row.cacheName ?? undefined
+			})),
+		pendingUploads: instance.context.db
+			.select({
+				cache: schema.pendingUploads.cache,
+				cacheId: schema.pendingUploads.cacheId
+			})
+			.from(schema.pendingUploads)
+			.orderBy(schema.pendingUploads.cache, schema.pendingUploads.id)
+			.all()
+			.map((row) => withId(row)),
+		pendingAttestations: instance.context.db
+			.select({
+				cache: schema.pendingAttestations.cache,
+				cacheId: schema.pendingAttestations.cacheId
+			})
+			.from(schema.pendingAttestations)
+			.orderBy(
+				schema.pendingAttestations.cache,
+				schema.pendingAttestations.storePathHash
+			)
+			.all()
+			.map((row) => withId(row))
+	}));
+}
+
+/**
+ * Tears the cache down inside the object and returns the cache columns of
+ * every queued narinfo deletion, read before the object takes another
+ * event: the teardown's alarm passes would otherwise retire the rows first.
+ */
+async function tearDownAndReadQueue(
+	cache: StoredCache
+): Promise<{ cache: string; cacheId: CacheId | undefined }[]> {
+	const rows = await runInDurableObject(currentServer(), async (instance) => {
+		await instance.runCacheTeardown(cache, origin);
+
+		return instance.context.db
+			.select({
+				cache: schema.narInfoDeletions.cache,
+				cacheId: schema.narInfoDeletions.cacheId
+			})
+			.from(schema.narInfoDeletions)
+			.orderBy(
+				schema.narInfoDeletions.cache,
+				schema.narInfoDeletions.storePathHash
+			)
+			.all();
+	});
+
+	return rows.map((row) => withId(row));
+}
+
 /**
  * The names in the legacy `cache` table, in name order.
  */
@@ -110,6 +207,7 @@ const defaultIdentity = {
 	deleted: false
 };
 const buildsCache = cacheNameSchema.parse('builds');
+const origin = requestOriginSchema.parse('https://cache.example');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const earlierLiveDeadline = isoTimestampSchema.parse(
@@ -284,6 +382,101 @@ describe('cache registry admin', () => {
 		await bootstrap();
 
 		expect(await cacheIdentities()).toStrictEqual([defaultIdentity]);
+	});
+
+	it('records the cache identity on the rows a publish writes', async () => {
+		await useTestServer('cache-admin-identity-binding');
+
+		const init = await bootstrap();
+		const published = uploadMetadata({ fileSize: narBytes.byteLength });
+		const digest = 'ab'.repeat(32);
+
+		// Neither negotiation registers its cache, so both rows wait under the
+		// legacy name. A commit deletes its pending row, so the upload stays
+		// uncommitted to be read back.
+		await negotiateUploads(
+			init.token,
+			[
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash: repeated('c')
+				})
+			],
+			'docs'
+		);
+		await authorisedFetch('/cache/builds/attestations', init.token, {
+			body: JSON.stringify({
+				pushId: testPushId,
+				bundles: [{ storePathHash: published.storePathHash, digest }]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+
+		const beforeRegistration = await publishedRows();
+
+		await pushPath(init.token, published, 'docs');
+		await putCache(init.token, 'builds', 30);
+
+		const identities = await cacheIdentities();
+
+		expect({
+			identities: identities.map((identity) => ({
+				id: identity.id,
+				scope: identity.scope
+			})),
+			beforeRegistration,
+			afterRegistration: await publishedRows()
+		}).toStrictEqual({
+			identities: [
+				{ id: 1, scope: { kind: 'default' } },
+				{ id: 2, scope: { kind: 'named', name: 'docs' } },
+				{ id: 3, scope: { kind: 'named', name: 'builds' } }
+			],
+			beforeRegistration: {
+				narInfos: [],
+				generationSeq: [],
+				pendingUploads: [{ cache: 'docs', cacheId: undefined }],
+				pendingAttestations: [{ cache: 'builds', cacheId: undefined }]
+			},
+			afterRegistration: {
+				narInfos: [{ cache: 'docs', cacheId: 2 }],
+				generationSeq: [
+					{ cache: 'docs', cacheKind: 'named', cacheName: 'docs' }
+				],
+				pendingUploads: [{ cache: 'docs', cacheId: 2 }],
+				pendingAttestations: [{ cache: 'builds', cacheId: 3 }]
+			}
+		});
+	});
+
+	it('queues the deletions of a torn-down cache under its deleted identity', async () => {
+		await useTestServer('cache-admin-identity-teardown-queue');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const narInfoDeletions = await tearDownAndReadQueue(buildsCache);
+		const identities = await cacheIdentities();
+
+		expect({ identities, narInfoDeletions }).toStrictEqual({
+			identities: [
+				defaultIdentity,
+				{
+					id: 2,
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 40,
+					deleted: true
+				}
+			],
+			narInfoDeletions: [{ cache: 'builds', cacheId: 2 }]
+		});
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {

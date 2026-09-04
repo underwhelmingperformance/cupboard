@@ -1672,7 +1672,7 @@ export class CommitPipelineService {
 		isStillOwned?: () => boolean
 	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
-		await this.cacheAdmin.loadOrCreateCache(cache);
+		const cacheId = await this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
 		// Nix signatures cover the uncompressed NAR identity, not its compressed
 		// encoding. The compressed file hash and size are therefore unnecessary here.
@@ -1719,6 +1719,7 @@ export class CommitPipelineService {
 				.insert(schema.narInfos)
 				.values({
 					cache,
+					cacheId,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,
@@ -1737,10 +1738,12 @@ export class CommitPipelineService {
 
 			if (inserted.length > 0) {
 				const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
+				const identity = cacheIdentityColumns(identityForCache(cache).scope);
 
 				tx.insert(schema.generationSeq)
 					.values({
 						cache,
+						...identity,
 						storePathHash: metadata.storePathHash,
 						nextGeneration
 					})
@@ -1749,7 +1752,7 @@ export class CommitPipelineService {
 							schema.generationSeq.cache,
 							schema.generationSeq.storePathHash
 						],
-						set: { nextGeneration }
+						set: { ...identity, nextGeneration }
 					})
 					.run();
 
