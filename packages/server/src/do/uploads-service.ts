@@ -24,6 +24,7 @@ import {
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { InvalidPushIdError } from '../errors.ts';
@@ -169,9 +170,10 @@ export class UploadsService {
 			.insert(schema.pendingUploads)
 			.values({
 				id: uploadId,
-				// Store the cache in the pending row. Commit accepts only the upload
-				// identifier, so this binding prevents cross-cache redirection.
+				// Commit accepts only the upload identifier, so the cache recorded
+				// here is what prevents cross-cache redirection.
 				cache,
+				cacheId: new CacheRepository(this.context.db).find(cache),
 				narHash: metadata.narHash,
 				r2Key,
 				metadataJson: JSON.stringify(pendingMetadata),

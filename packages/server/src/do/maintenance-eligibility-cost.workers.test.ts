@@ -77,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 19,
-			largeBacklogCost: 19
+			emptyBacklogCost: 18,
+			largeBacklogCost: 18
 		});
 	});
 
@@ -323,8 +323,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 56,
-			largeBacklogCost: 56
+			smallBacklogCost: 57,
+			largeBacklogCost: 57
 		});
 	});
 });

@@ -110,7 +110,7 @@ export class CacheRepository {
 			return live.id;
 		}
 
-		return this.database
+		const created = this.database
 			.insert(schema.cacheIdentities)
 			.values({
 				kind: scope.kind,
@@ -120,7 +120,20 @@ export class CacheRepository {
 				createdAt: now
 			})
 			.returning({ id: schema.cacheIdentities.id })
-			.get().id;
+			.get();
+
+		// A pending upload or attestation can be negotiated before its cache
+		// exists. Those rows wait with a null `cache_id` under the legacy name,
+		// and this is the only write that can link them.
+		for (const table of [schema.pendingUploads, schema.pendingAttestations]) {
+			this.database
+				.update(table)
+				.set({ cacheId: created.id })
+				.where(and(eq(table.cache, cache), isNull(table.cacheId)))
+				.run();
+		}
+
+		return created.id;
 	}
 
 	setPriority(cache: StoredCache, priority: CachePriority): void {
