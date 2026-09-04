@@ -135,6 +135,10 @@ export interface CloudflareApi {
 		databaseId: DatabaseId,
 		statements: readonly string[]
 	): Promise<void>;
+	/**
+	 * Runs one read query and returns the first column of each row. A row whose
+	 * first column is not a string is left out.
+	 */
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	/**
@@ -508,7 +512,10 @@ export function createCloudflareApi(
 			for (const result of response.result) {
 				const records = result.results ?? [];
 				for (const record of records) {
-					const value = (record as Record<string, unknown>).name;
+					// SQLite names a result column after the expression that produced
+					// it, so a query that selects anything but a bare column has no
+					// column a caller could name here. Take the first column instead.
+					const [value] = Object.values(record as Record<string, unknown>);
 
 					if (typeof value === 'string') {
 						rows.push(value);
