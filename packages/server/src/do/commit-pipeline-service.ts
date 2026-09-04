@@ -39,7 +39,7 @@ import {
 import { type BatchItem } from 'drizzle-orm/batch';
 
 import { signNixFingerprint } from '../crypto/crypto.ts';
-import { cacheIdentityColumns } from '../db/cache.ts';
+import { type CacheId, cacheIdentityColumns } from '../db/cache.ts';
 import { currentCacheGeneration } from '../db/cache-generation.ts';
 import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -1076,12 +1076,27 @@ export class CommitPipelineService {
 		requests: readonly MaterialiseRequest[],
 		outcomes: readonly (BatchedMaterialiseOutcome | undefined)[]
 	): void {
+		const identities = new CacheRepository(this.context.db);
+		const cacheIds = new Map<StoredCache, CacheId | undefined>();
+		// One flush can attach targets in several caches, so resolve each cache
+		// once rather than per target.
+		const cacheIdFor = (cache: StoredCache): CacheId | undefined => {
+			if (!cacheIds.has(cache)) {
+				cacheIds.set(cache, identities.find(cache));
+			}
+
+			return cacheIds.get(cache);
+		};
 		const targets = requests.flatMap((request, index) =>
 			outcomes[index]?.kind === 'materialised' &&
 			request.attachRootName !== undefined
 				? [
 						{
 							cache: request.cache,
+							// A list value is text or a number, so a cache the identity backfill
+							// has not reached travels as zero and the statement writes null
+							// back. An identity id is positive.
+							cacheId: cacheIdFor(request.cache) ?? 0,
 							rootName: request.attachRootName,
 							storePathHash: request.metadata.storePathHash,
 							storePath: request.metadata.storePath
@@ -1096,7 +1111,7 @@ export class CommitPipelineService {
 				.select(
 					batch.insertSource([
 						batch.column('cache'),
-						sql`null`,
+						sql`nullif(${batch.column('cacheId')}, 0)`,
 						batch.column('rootName'),
 						batch.column('storePathHash'),
 						batch.column('storePath')
@@ -1240,7 +1255,13 @@ export class CommitPipelineService {
 
 		this.context.db
 			.insert(schema.retentionRootTargets)
-			.values({ cache, rootName, storePathHash, storePath })
+			.values({
+				cache,
+				cacheId: new CacheRepository(this.context.db).find(cache),
+				rootName,
+				storePathHash,
+				storePath
+			})
 			.onConflictDoNothing()
 			.run();
 	}

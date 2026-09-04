@@ -21,6 +21,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, sql } from 'drizzle-orm';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
@@ -76,6 +77,8 @@ export class RootsService {
 
 		await this.cacheAdmin.loadOrCreateCache(cache);
 
+		const cacheId = new CacheRepository(this.context.db).find(cache);
+
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
 		const requested = new Set<string>(
@@ -120,6 +123,7 @@ export class RootsService {
 			tx.insert(schema.retentionRoots)
 				.values({
 					cache,
+					cacheId,
 					name: request.name,
 					expiresAt,
 					createdAt: created,
@@ -132,7 +136,7 @@ export class RootsService {
 					.select(
 						targets.insertSource([
 							sql`${cache}`,
-							sql`null`,
+							cacheId === undefined ? sql`null` : sql`${cacheId}`,
 							sql`${request.name}`,
 							targets.column('storePathHash'),
 							targets.column('storePath')
@@ -355,6 +359,7 @@ export class RootsService {
 			.insert(schema.retentionRoots)
 			.values({
 				cache,
+				cacheId: new CacheRepository(this.context.db).find(cache),
 				name,
 				expiresAt,
 				createdAt: nowIso,
@@ -384,13 +389,19 @@ export class RootsService {
 			readonly storePath: StorePathString;
 		}[]
 	): void {
+		if (targets.length === 0) {
+			return;
+		}
+
+		const cacheId = new CacheRepository(this.context.db).find(cache);
+
 		for (const batch of jsonRowLists(targets)) {
 			this.context.db
 				.insert(schema.retentionRootTargets)
 				.select(
 					batch.insertSource([
 						sql`${cache}`,
-						sql`null`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
 						sql`${name}`,
 						batch.column('storePathHash'),
 						batch.column('storePath')
