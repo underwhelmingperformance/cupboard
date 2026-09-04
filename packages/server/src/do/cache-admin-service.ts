@@ -13,9 +13,13 @@ import {
 	type CacheSummary
 } from '@cupboard/protocol/caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, min, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
 
-import { type CacheId } from '../db/cache.ts';
+import {
+	type CacheId,
+	cacheScopeFromRow,
+	legacyCacheKey
+} from '../db/cache.ts';
 import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
@@ -32,6 +36,7 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
+import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -61,12 +66,14 @@ export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
 	private readonly identities: CacheRepository;
+	private readonly phases: DeploymentPhaseGate;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
 	) {
 		this.identities = new CacheRepository(context.db);
+		this.phases = new DeploymentPhaseGate(context.d1);
 	}
 
 	private teardownKey(cache: StoredCache): string {
@@ -139,6 +146,51 @@ export class CacheAdminService {
 		return row?.earliest ?? undefined;
 	}
 
+	/**
+	 * The registered caches, from the identity table once the deployment has
+	 * reached `native-reads` and from the legacy table before that. Both tables
+	 * are written until the legacy key is dropped, so the two readings agree.
+	 */
+	private async registeredCaches(): Promise<
+		{ name: StoredCache; priority: CachePriority; graceManaged: boolean }[]
+	> {
+		if (!(await this.phases.hasReached('native-reads'))) {
+			return this.context.db.select().from(schema.caches).all();
+		}
+
+		return this.context.db
+			.select({
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: schema.cacheIdentities.access,
+				priority: schema.cacheIdentities.priority,
+				graceManaged: schema.cacheIdentities.graceManaged
+			})
+			.from(schema.cacheIdentities)
+			.where(isNull(schema.cacheIdentities.deletedAt))
+			.all()
+			.flatMap((row) => {
+				const scope = cacheScopeFromRow({
+					kind: row.kind,
+					name: row.name ?? undefined
+				});
+
+				if (scope === undefined) {
+					return [];
+				}
+
+				return [
+					{
+						name: storedCacheSchema.parse(
+							legacyCacheKey(scope, row.access ?? 'public')
+						),
+						priority: cachePrioritySchema.parse(row.priority),
+						graceManaged: row.graceManaged
+					}
+				];
+			});
+	}
+
 	cacheInfoBody(cache: StoredCache): string {
 		const row = this.context.db
 			.select({ priority: schema.caches.priority })
@@ -154,8 +206,8 @@ export class CacheAdminService {
 		return info.render();
 	}
 
-	listCaches(): CacheListResponse {
-		const registered = this.context.db.select().from(schema.caches).all();
+	async listCaches(): Promise<CacheListResponse> {
+		const registered = await this.registeredCaches();
 		const counts = new Map(
 			this.context.db
 				.select({ cache: schema.narInfos.cache, count: count() })
