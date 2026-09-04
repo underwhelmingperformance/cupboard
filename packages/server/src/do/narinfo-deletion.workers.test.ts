@@ -207,12 +207,17 @@ describe('narinfo deletion queue', () => {
 				second
 			);
 
-			return instance.context.db.select().from(narInfoDeletions).all();
+			return instance.context.db
+				.select()
+				.from(narInfoDeletions)
+				.all()
+				.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined }));
 		});
 
 		expect(rows).toStrictEqual([
 			{
 				cache: defaultCache,
+				cacheId: undefined,
 				storePathHash: entry.storePathHash,
 				narHash: replacement,
 				generation: entry.generation,

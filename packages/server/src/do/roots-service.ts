@@ -132,6 +132,7 @@ export class RootsService {
 					.select(
 						targets.insertSource([
 							sql`${cache}`,
+							sql`null`,
 							sql`${request.name}`,
 							targets.column('storePathHash'),
 							targets.column('storePath')
@@ -389,6 +390,7 @@ export class RootsService {
 				.select(
 					batch.insertSource([
 						sql`${cache}`,
+						sql`null`,
 						sql`${name}`,
 						batch.column('storePathHash'),
 						batch.column('storePath')
