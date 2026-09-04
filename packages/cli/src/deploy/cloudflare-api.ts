@@ -135,6 +135,10 @@ export interface CloudflareApi {
 		databaseId: DatabaseId,
 		statements: readonly string[]
 	): Promise<void>;
+	/**
+	 * Runs one read query and returns the first column of each row. A row whose
+	 * first column is not a string is left out.
+	 */
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	/**
@@ -508,7 +512,9 @@ export function createCloudflareApi(
 			for (const result of response.result) {
 				const records = result.results ?? [];
 				for (const record of records) {
-					const value = (record as Record<string, unknown>).name;
+					// Read the first column by position, so a caller can pass any
+					// single-column query without aliasing the column.
+					const [value] = Object.values(record as Record<string, unknown>);
 
 					if (typeof value === 'string') {
 						rows.push(value);
