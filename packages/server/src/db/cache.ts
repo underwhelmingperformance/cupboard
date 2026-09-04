@@ -6,6 +6,27 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type SQL, sql } from 'drizzle-orm';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
+import { z } from 'zod';
+
+/**
+ * The surrogate key of a `cache_identity` row. Rows in other tables refer to a
+ * cache by this id rather than by its stored name.
+ */
+export const cacheIdSchema = z
+	.number()
+	.int()
+	.positive()
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('CacheId');
+export type CacheId = z.infer<typeof cacheIdSchema>;
+
+const cacheIdentityRowSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		kind: z.literal('default'),
+		name: z.undefined().optional()
+	}),
+	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema })
+]);
 
 type CacheIdentityColumns =
 	| { readonly cacheKind: 'default'; readonly cacheName: SQL<null> }
@@ -43,30 +64,38 @@ export function cacheIdentityCondition(
 }
 
 /**
- * The scope stored in a row's identity columns, or undefined when those
- * columns are still null because the backfill has not reached the row.
+ * The scope stored in a row's identity columns, or undefined when the row has
+ * no `kind` because the backfill has not reached it.
+ *
+ * A row with a `kind` refuses to parse unless its name matches: a default
+ * cache has no name and a named cache has one.
+ *
+ * A caller reading a database row converts each SQL null to undefined, so no
+ * null reaches this layer.
  */
-export function storedCacheScope(
-	kind: 'default' | 'named' | null,
-	name: string | null
-): CacheScope | undefined {
-	if (kind === null) {
+export function cacheScopeFromRow(row: {
+	readonly kind?: 'default' | 'named';
+	readonly name?: string;
+}): CacheScope | undefined {
+	if (row.kind === undefined) {
 		return undefined;
 	}
 
-	if (kind === 'default') {
+	const identity = cacheIdentityRowSchema.parse(row);
+
+	if (identity.kind === 'default') {
 		return { kind: 'default' };
 	}
 
-	return { kind: 'named', name: cacheNameSchema.parse(name) };
+	return { kind: 'named', name: identity.name };
 }
 
 /**
  * The legacy key for a scope and its access.
  *
- * A row carries both spellings until the contraction drops the legacy column.
- * Deriving the key here keeps it from disagreeing with the identity written
- * beside it.
+ * A row carries both representations until the contraction drops the legacy
+ * column. Deriving the key here keeps it from disagreeing with the identity
+ * written beside it.
  */
 export function legacyCacheKey(
 	scope: CacheScope,

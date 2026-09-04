@@ -23,7 +23,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import { storedCacheScope } from '../db/cache.ts';
+import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -156,7 +156,10 @@ async function cacheScopeRows(): Promise<
 
 	return rows.map((row) => ({
 		cache: row.cache,
-		scope: storedCacheScope(row.cacheKind, row.cacheName)
+		scope: cacheScopeFromRow({
+			kind: row.cacheKind ?? undefined,
+			name: row.cacheName ?? undefined
+		})
 	}));
 }
 
@@ -183,7 +186,11 @@ async function edgeScopeRows(): Promise<{
 	const scopeOf = (row: {
 		cacheKind: 'default' | 'named' | null;
 		cacheName: string | null;
-	}): CacheScope | undefined => storedCacheScope(row.cacheKind, row.cacheName);
+	}): CacheScope | undefined =>
+		cacheScopeFromRow({
+			kind: row.cacheKind ?? undefined,
+			name: row.cacheName ?? undefined
+		});
 
 	return {
 		blobReferences: blobRows.map((row) => scopeOf(row)),
