@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { currentLocalStep } from '../do/local-step.ts';
 import {
 	offboardTenant,
 	provisionNamedTenant,
@@ -135,7 +136,8 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' }
+				{ kind: 'control-key-retirement' },
+				{ kind: 'local-step-sweep' }
 			],
 			sent: [
 				[
@@ -146,7 +148,8 @@ describe('scheduled tenant pass failure records', () => {
 					{ kind: 'cas-reaper' },
 					{ kind: 'blob-demote' },
 					{ kind: 'cas-demote' },
-					{ kind: 'control-key-retirement' }
+					{ kind: 'control-key-retirement' },
+					{ kind: 'local-step-sweep' }
 				]
 			],
 			acmeOutcome: undefined,
@@ -273,10 +276,30 @@ describe('scheduled tenant pass failure records', () => {
 				{ kind: 'cas-reaper' },
 				{ kind: 'blob-demote' },
 				{ kind: 'cas-demote' },
-				{ kind: 'control-key-retirement' }
+				{ kind: 'control-key-retirement' },
+				{ kind: 'local-step-sweep' }
 			],
 			acmeOutcome: undefined,
 			retiringOutcome: undefined
+		});
+	});
+
+	it('brings every tenant to the current local step from the queue', async () => {
+		await provisionNamedTenant('acme');
+		await provisionNamedTenant('beta');
+
+		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
+			kind: 'local-step-sweep'
+		});
+
+		expect({
+			decision,
+			acme: await localStepOf('acme'),
+			beta: await localStepOf('beta')
+		}).toStrictEqual({
+			decision: { action: 'ack' },
+			acme: currentLocalStep,
+			beta: currentLocalStep
 		});
 	});
 
@@ -558,7 +581,8 @@ describe('scheduled tenant pass failure records', () => {
 									'cas-reaper',
 									'blob-demote',
 									'cas-demote',
-									'control-key-retirement'
+									'control-key-retirement',
+									'local-step-sweep'
 								],
 								path: ['kind']
 							}
@@ -929,6 +953,16 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 });
+
+async function localStepOf(tenant: string): Promise<number | null | undefined> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ localStep: d1Schema.tenant.localStep })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(tenant)))
+		.get();
+
+	return row?.localStep;
+}
 
 async function writeEligibility(
 	tenant: string,

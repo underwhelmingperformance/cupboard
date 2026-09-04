@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import { narVerifyBudgetMs, verifyStoredNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
+import { controlLocalStepWake } from '../control/local-step.ts';
 import {
 	deleteTenantMember,
 	refreshTenantMembership
@@ -51,6 +52,9 @@ import { tenantServer } from './durable-object.ts';
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
+// Each wake is a subrequest, so keep a sweep well inside one invocation's
+// subrequest budget. The next tick takes the next batch.
+const localStepSweepSize = 20;
 export const verificationConsumerBudgetMs = 14 * 60 * 1000;
 
 // Bound offboarding by tenants, rounds, and objects per round. The object chunk
@@ -101,6 +105,7 @@ interface ExecuteMaintenanceQueueOptions {
 		logger: Logger,
 		env: Env
 	) => Promise<unknown>;
+	readonly runLocalStepSweep?: (logger: Logger, env: Env) => Promise<unknown>;
 }
 
 const maxStoredErrorLength = 4096;
@@ -128,7 +133,8 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	}),
 	z.object({ kind: z.literal('blob-demote') }),
 	z.object({ kind: z.literal('cas-demote') }),
-	z.object({ kind: z.literal('control-key-retirement') })
+	z.object({ kind: z.literal('control-key-retirement') }),
+	z.object({ kind: z.literal('local-step-sweep') })
 ]);
 
 export type MaintenanceQueueMessage =
@@ -139,7 +145,8 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'cas-reaper'; readonly phase?: ObjectReaperPhase }
 	| { readonly kind: 'blob-demote' }
 	| { readonly kind: 'cas-demote' }
-	| { readonly kind: 'control-key-retirement' };
+	| { readonly kind: 'control-key-retirement' }
+	| { readonly kind: 'local-step-sweep' };
 
 /**
  * Runs every maintenance pass in sequence and reports their failures together.
@@ -156,7 +163,8 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 		() => runCasReaper(logger, env),
 		() => runReaperDemote(logger, env),
 		() => runCasReaperDemote(logger, env),
-		() => runControlKeyRetirement(logger, env)
+		() => runControlKeyRetirement(logger, env),
+		() => runLocalStepSweep(logger, env)
 	]) {
 		try {
 			await pass();
@@ -203,7 +211,8 @@ export async function enqueueMaintenanceJobs(
 		{ kind: 'cas-reaper' },
 		{ kind: 'blob-demote' },
 		{ kind: 'cas-demote' },
-		{ kind: 'control-key-retirement' }
+		{ kind: 'control-key-retirement' },
+		{ kind: 'local-step-sweep' }
 	];
 
 	await sendQueueMessages(queue, messages);
@@ -339,6 +348,10 @@ export async function executeMaintenanceQueueMessage(
 					logger,
 					env
 				);
+				return { action: 'ack' };
+			}
+			case 'local-step-sweep': {
+				await (options.runLocalStepSweep ?? runLocalStepSweep)(logger, env);
 				return { action: 'ack' };
 			}
 		}
@@ -1266,6 +1279,24 @@ async function settleAuthKeyRetirement(
 	} catch (error) {
 		return { status: 'rejected', reason: error };
 	}
+}
+
+/**
+ * Wakes a bounded batch of tenants that have not reached the step this build
+ * asks for, so an idle object still applies its pending migrations. Each pass
+ * takes the next batch, and the whole fleet converges over successive ticks.
+ */
+export async function runLocalStepSweep(
+	logger: Logger,
+	env: Env
+): Promise<void> {
+	const { woken, failed } = await controlLocalStepWake(
+		logger,
+		env,
+		localStepSweepSize
+	);
+
+	logger.info('local step sweep finished', { woken, failed });
 }
 
 function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
