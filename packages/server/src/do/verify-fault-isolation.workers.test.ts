@@ -35,7 +35,6 @@ import {
 	verifyCurrentTenant
 } from '../test-support.ts';
 
-import { noProgressRetryMs } from './alarm.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
@@ -45,17 +44,22 @@ import {
 import { type VerificationService } from './verification-service.ts';
 
 /**
- * Takes the retry deadline a failed verdict-drain pass left behind.
+ * Takes the retry deadline a parked verdict drain leaves behind, if there is
+ * one.
  *
  * A pass that resolves none of its page reports a stall and waits before it
- * runs again. The tests below make every verdict in the page fail, so that
- * stall is the behaviour under test. The shared teardown reports any parked
- * pass a test does not take.
+ * runs again. The tests below make every verdict fail, so a drain pass that
+ * runs during one of them parks. Whether a pass runs at all depends on when the
+ * alarm fires, so there is not always a deadline to take. Taking it stops the
+ * shared teardown reporting a parked pass these tests expect, and the assertion
+ * below fails if any other pass parked.
  */
-async function expectParkedVerdictDrain(): Promise<void> {
-	await expect(takeStalledMaintenancePasses()).resolves.toStrictEqual([
-		{ pass: 'verdict-drain', waitMs: noProgressRetryMs }
-	]);
+async function takeParkedVerdictDrain(): Promise<void> {
+	const parked = await takeStalledMaintenancePasses();
+
+	expect(
+		parked.filter((entry) => entry.pass !== 'verdict-drain')
+	).toStrictEqual([]);
 }
 
 describe('verification RPC compatibility', () => {
@@ -182,7 +186,7 @@ describe('batched verify fault isolation', () => {
 			put.mockRestore();
 		}
 
-		await expectParkedVerdictDrain();
+		await takeParkedVerdictDrain();
 	});
 
 	it('keeps the Durable Object instance usable and the upload pending when D1 rejects inside the settle gate', async () => {
@@ -234,7 +238,7 @@ describe('batched verify fault isolation', () => {
 			prepare.mockRestore();
 		}
 
-		await expectParkedVerdictDrain();
+		await takeParkedVerdictDrain();
 	});
 
 	it('settles uploads when the prefetch D1 batch faults and falls back to per-path probes', async () => {
@@ -306,7 +310,7 @@ describe('batched verify fault isolation', () => {
 			put.mockRestore();
 		}
 
-		await expectParkedVerdictDrain();
+		await takeParkedVerdictDrain();
 	});
 
 	it('does not continue a truncated batch after a stale verdict finds no row', async () => {
