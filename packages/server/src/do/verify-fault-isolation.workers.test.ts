@@ -28,6 +28,7 @@ import {
 	putNarBytes,
 	resetTestServer,
 	seedReservedNarInfo,
+	takeStalledMaintenancePasses,
 	uploadMetadata,
 	verifiableNar,
 	verifiablePath,
@@ -41,6 +42,22 @@ import {
 	raceVerificationOperation
 } from './verification-claim-lease.ts';
 import { type VerificationService } from './verification-service.ts';
+
+/**
+ * Takes the retry deadline of a parked verdict drain, if there is one.
+ *
+ * The tests below make every verdict in a page fail, so a drain pass that
+ * runs during one of them parks. Whether one runs before the test ends
+ * depends on when the alarm fires. Taking the deadline keeps the shared
+ * teardown from reporting it; any other parked pass fails the test.
+ */
+async function takeParkedVerdictDrain(): Promise<void> {
+	const parked = await takeStalledMaintenancePasses();
+
+	expect(
+		parked.filter((entry) => entry.pass !== 'verdict-drain')
+	).toStrictEqual([]);
+}
 
 describe('verification RPC compatibility', () => {
 	it('defers an ownerless claim from a preceding Durable Object', async () => {
@@ -165,6 +182,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			put.mockRestore();
 		}
+
+		await takeParkedVerdictDrain();
 	});
 
 	it('keeps the Durable Object instance usable and the upload pending when D1 rejects inside the settle gate', async () => {
@@ -215,6 +234,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			prepare.mockRestore();
 		}
+
+		await takeParkedVerdictDrain();
 	});
 
 	it('settles uploads when the prefetch D1 batch faults and falls back to per-path probes', async () => {
@@ -285,6 +306,8 @@ describe('batched verify fault isolation', () => {
 		} finally {
 			put.mockRestore();
 		}
+
+		await takeParkedVerdictDrain();
 	});
 
 	it('does not continue a truncated batch after a stale verdict finds no row', async () => {
