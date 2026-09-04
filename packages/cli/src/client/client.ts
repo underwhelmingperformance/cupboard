@@ -126,8 +126,9 @@ export class CupboardClient {
 		return body.trimEnd();
 	}
 
-	// Contract routes require an explicit cache selector, including `_default`
-	// for the tenant's default cache.
+	// The commit socket is outside the contract. The Durable Object serves it on
+	// the bare path and under `/cache/<selector>`; this client still sends the
+	// `_default` selector for the default cache.
 	private selectorScoped(path: string): string {
 		return this.cachePrefix === ''
 			? `/cache/${DEFAULT_CACHE_SELECTOR}${path}`

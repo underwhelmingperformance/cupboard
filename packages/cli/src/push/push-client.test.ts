@@ -52,7 +52,7 @@ describe('pushClientFor', () => {
 				supported: responseCapability !== undefined,
 				requests: [
 					{
-						url: 'https://cupboard.test/t/acme/cache/_default/uploads/preview',
+						url: 'https://cupboard.test/t/acme/uploads/preview',
 						method: 'POST',
 						capability: uploadGraceFactsCapability,
 						body: { paths: [] }
