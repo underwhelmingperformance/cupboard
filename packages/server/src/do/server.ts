@@ -8,6 +8,7 @@ import {
 	DEFAULT_CACHE,
 	isPrivateCache,
 	privateStoredCache,
+	selectorForCache,
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
@@ -85,7 +86,7 @@ import {
 	rootLogger
 } from '../observability/logging.ts';
 import { withSpan } from '../observability/span.ts';
-import { authoriseRequest } from '../orpc/authorise.ts';
+import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 import { commitEntryCreditBudget } from '../policy/commit-credit.ts';
@@ -226,6 +227,11 @@ export type VerificationClaimRpcResult =
 export type VerificationRecordRpcResult =
 	| { readonly kind: 'recorded'; readonly applied: number }
 	| { readonly kind: 'timed-out' };
+
+// The negotiate and preview routes on both paths: the bare default-cache path
+// and the named-cache path. A response to one of these advertises the
+// grace-facts capability when the client accepted it.
+const uploadGracePathPattern = /^(?:\/cache\/[^/]+)?\/uploads(?:\/preview)?$/u;
 
 // Reuse misses must be `no-store`. A view update or commit can make the same
 // lookup succeed, and no purge key covers the cached 404.
@@ -546,49 +552,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// Contract routes must run before the routes that handle raw
-		// Request/Response, because the oRPC handler signals an unmatched request
-		// by falling through.
-		this.app.use(async (context, next) => {
-			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
-				context.req.raw,
-				{
-					context: {
-						request: context.req.raw,
-						services: this.rpcServices(),
-						logger: context.get('logger')
-					}
-				}
-			);
-
-			if (isMatched) {
-				response.headers.set('cache-control', 'no-store');
-				const pathname = new URL(context.req.url).pathname;
-				const isUploadGraceEndpoint =
-					context.req.method === 'POST' &&
-					(/^\/cache\/[^/]+\/uploads$/.test(pathname) ||
-						/^\/cache\/[^/]+\/uploads\/preview$/.test(pathname));
-
-				if (
-					isUploadGraceEndpoint &&
-					hasAcceptedCapability(context.req.raw, uploadGraceFactsCapability)
-				) {
-					const headers = new Headers(response.headers);
-					headers.set(uploadCapabilitiesHeader, uploadCapabilitiesValue);
-
-					return new Response(response.body, {
-						status: response.status,
-						statusText: response.statusText,
-						headers
-					});
-				}
-
-				return response;
-			}
-
-			await next();
-		});
-
 		// Treat an absent cache prefix and the `_default` selector as the stored
 		// default-cache name. Validate named prefixes before route dispatch.
 		this.app.use(async (context, next) => {
@@ -614,6 +577,51 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			context.set('cache', privateStoredCache(name));
+			await next();
+		});
+
+		// Contract routes must run before the routes that handle raw
+		// Request/Response, because the oRPC handler signals an unmatched request
+		// by falling through. The cache middleware above must be registered before
+		// this handler, because a contract procedure reads the cache its path
+		// selected.
+		this.app.use(async (context, next) => {
+			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
+				context.req.raw,
+				{
+					context: {
+						request: context.req.raw,
+						services: this.rpcServices(),
+						cache: context.get('cache'),
+						logger: context.get('logger')
+					}
+				}
+			);
+
+			if (isMatched) {
+				response.headers.set('cache-control', 'no-store');
+				const pathname = new URL(context.req.url).pathname;
+				const isUploadGraceEndpoint =
+					context.req.method === 'POST' &&
+					uploadGracePathPattern.test(pathname);
+
+				if (
+					isUploadGraceEndpoint &&
+					hasAcceptedCapability(context.req.raw, uploadGraceFactsCapability)
+				) {
+					const headers = new Headers(response.headers);
+					headers.set(uploadCapabilitiesHeader, uploadCapabilitiesValue);
+
+					return new Response(response.body, {
+						status: response.status,
+						statusText: response.statusText,
+						headers
+					});
+				}
+
+				return response;
+			}
+
 			await next();
 		});
 
@@ -1273,9 +1281,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			await authoriseRequest(
 				claims,
-				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
-				{ id: cache },
-				() => Promise.resolve(cache)
+				{ requires: 'upload:commit', resource: { cache: { fromPath: true } } },
+				{},
+				selectorForCache(cache),
+				noPendingCache
 			);
 			context.set('claims', claims);
 

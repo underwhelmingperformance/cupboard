@@ -1,7 +1,6 @@
 import {
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
-	selectorForCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -28,6 +27,7 @@ import {
 	armBlobReaperTimer,
 	authorisedFetch,
 	blobStateArmTimes,
+	cacheScopedPath,
 	currentServer,
 	initialise,
 	issueServerSignedToken,
@@ -85,7 +85,7 @@ async function previewUploads(
 	readonly body: UploadPreviewResponse;
 }> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/uploads/preview`,
+		cacheScopedPath(cache, '/uploads/preview'),
 		token,
 		{
 			body: JSON.stringify({
@@ -446,18 +446,14 @@ describe('upload preview', () => {
 			name: 'no-push-id'
 		});
 
-		const response = await authorisedFetch(
-			`/cache/${selectorForCache(DEFAULT_CACHE)}/uploads/preview`,
-			token,
-			{
-				body: JSON.stringify({
-					pushId: testPushId,
-					paths: [uploadPathNegotiation(path)]
-				}),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			}
-		);
+		const response = await authorisedFetch('/uploads/preview', token, {
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(path)]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
@@ -471,18 +467,14 @@ describe('upload preview', () => {
 			name: 'authz'
 		});
 
-		const negotiateResponse = await authorisedFetch(
-			`/cache/${selectorForCache(DEFAULT_CACHE)}/uploads`,
-			token,
-			{
-				body: JSON.stringify({
-					pushId: testPushId,
-					paths: [uploadPathNegotiation(path)]
-				}),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			}
-		);
+		const negotiateResponse = await authorisedFetch('/uploads', token, {
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(path)]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
 		const preview = await previewUploads(token, [path]);
 
 		expect({

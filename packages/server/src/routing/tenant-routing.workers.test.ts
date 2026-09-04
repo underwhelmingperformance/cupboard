@@ -276,10 +276,7 @@ describe('tenant routing', () => {
 	it('dispatches a named tenant write to its Durable Object to authorise', async () => {
 		await provisionNamedTenant('acme');
 
-		const response = await handlerFetch(
-			'/t/acme/cache/_default/uploads',
-			writeRequest()
-		);
+		const response = await handlerFetch('/t/acme/uploads', writeRequest());
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
@@ -288,7 +285,7 @@ describe('tenant routing', () => {
 		await suspendTenant(fixtureTenant);
 
 		const response = await handlerFetch(
-			`/t/${fixtureTenant}/cache/_default/uploads`,
+			`/t/${fixtureTenant}/uploads`,
 			writeRequest()
 		);
 

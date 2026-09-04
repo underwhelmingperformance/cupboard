@@ -5,6 +5,7 @@ import {
 	DEFAULT_CACHE,
 	privateStoredCache,
 	publicCacheSelectorSchema,
+	type StoredCache,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -59,7 +60,7 @@ import {
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
-const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
+const uploadPreviewPathPattern = /^(?:\/cache\/[^/]+)?\/uploads\/preview$/u;
 const cacheAvailabilityPathPattern =
 	/^(?:(?:\/cache\/[^/]+)|(?:\/private-cache\/[^/]+)|(?:\/reuse\/[^/]+)|(?:\/private-reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 
@@ -436,48 +437,49 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// Compute shared D1 hints on the Worker before entering the tenant Durable
 	// Object. If hint preparation or the deployment-skew RPC fails, dispatch
 	// without them and let the Durable Object read authoritative facts.
-	app.on('POST', '/t/:tenant/cache/:cacheName/uploads', async (context) => {
-		const tenant = context.get('tenant');
-		const writeStatus = admittedWriteStatus(context);
-		const selector = cacheSelectorSchema.safeParse(
-			context.req.param('cacheName')
-		);
+	app.on(
+		'POST',
+		['/t/:tenant/uploads', '/t/:tenant/cache/:cacheName/uploads'],
+		async (context) => {
+			const tenant = context.get('tenant');
+			const writeStatus = admittedWriteStatus(context);
 
-		// Skip advisory hint reads when fresh admission already found an inactive
-		// tenant. The write gate still produces the authoritative refusal.
-		if (writeStatus !== undefined && writeStatus !== 'active') {
-			return dispatchTenant(
-				innerRequest(context),
+			// Skip advisory hint reads when fresh admission already found an inactive
+			// tenant. The write gate still produces the authoritative refusal.
+			if (writeStatus !== undefined && writeStatus !== 'active') {
+				return dispatchTenant(
+					innerRequest(context),
+					context.env,
+					tenant,
+					writeStatus
+				);
+			}
+
+			// Compute hints before constructing the forwarded request because reading
+			// them clones the original body.
+			const hints = await computeNegotiateHints(
+				context.req.raw,
 				context.env,
 				tenant,
-				writeStatus
+				negotiatedCache(context.req.param('cacheName'))
 			);
-		}
+			const inner = innerRequest(context);
 
-		// Compute hints before constructing the forwarded request because reading
-		// them clones the original body.
-		const hints = await computeNegotiateHints(
-			context.req.raw,
-			context.env,
-			tenant,
-			selector.success ? cacheFromSelector(selector.data) : undefined
-		);
-		const inner = innerRequest(context);
-
-		if (hints !== undefined) {
-			try {
-				const token = await tenantServer(
-					context.env,
-					tenant
-				).stageNegotiateHints(hints);
-				inner.headers.set(negotiateHintsHeader, token);
-			} catch {
-				// Hints are advisory; fall back to authoritative reads in the tenant.
+			if (hints !== undefined) {
+				try {
+					const token = await tenantServer(
+						context.env,
+						tenant
+					).stageNegotiateHints(hints);
+					inner.headers.set(negotiateHintsHeader, token);
+				} catch {
+					// Hints are advisory; fall back to authoritative reads in the tenant.
+				}
 			}
-		}
 
-		return dispatchTenant(inner, context.env, tenant, writeStatus);
-	});
+			return dispatchTenant(inner, context.env, tenant, writeStatus);
+		}
+	);
 
 	// Nothing in the private namespace reaches the Durable Object fallback below,
 	// which serves reads without authenticating the reader. A request the read
@@ -621,6 +623,23 @@ function refusePrivateNamespace(context: Context<WorkerHonoEnv>): Response {
 
 function isUploadPreviewRequest(method: string, pathname: string): boolean {
 	return method === 'POST' && uploadPreviewPathPattern.test(pathname);
+}
+
+// The cache a negotiate request addresses: the tenant's default cache on the
+// bare path, and the selector's cache under `/cache/<selector>`. When the
+// selector does not parse, this returns `undefined` and the Worker computes no
+// hints; the Durable Object validates the selector itself and refuses the
+// request.
+function negotiatedCache(
+	selector: string | undefined
+): StoredCache | undefined {
+	if (selector === undefined) {
+		return DEFAULT_CACHE;
+	}
+
+	const parsed = cacheSelectorSchema.safeParse(selector);
+
+	return parsed.success ? cacheFromSelector(parsed.data) : undefined;
 }
 
 function isCacheAvailabilityRequest(method: string, pathname: string): boolean {

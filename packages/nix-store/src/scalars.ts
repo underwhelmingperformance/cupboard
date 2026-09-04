@@ -250,8 +250,9 @@ export type CacheSelector = z.output<typeof cacheSelectorSchema>;
 
 /**
  * A selector for a named cache: a public cache's local name or a private
- * cache's selector. The cache administration API cannot create or remove the
- * default cache, so this schema excludes `_default`.
+ * cache's selector. This schema excludes `_default`: the admin API addresses
+ * the default cache by the bare path, and the cache administration API can
+ * neither create nor remove it.
  */
 export const namedCacheSelectorSchema = z.union([
 	cacheNameSchema,
@@ -281,6 +282,11 @@ export const storedCacheSchema = z.union([
 	privateStoredCacheSchema
 ]);
 export type StoredCache = z.output<typeof storedCacheSchema>;
+
+/**
+ * The stored name of a cache other than the default one.
+ */
+export type NamedStoredCache = Exclude<StoredCache, typeof DEFAULT_CACHE>;
 
 export function isPrivateCache(
 	cache: StoredCache
@@ -327,6 +333,18 @@ export function selectorForCache(cache: StoredCache): CacheSelector {
 		return DEFAULT_CACHE_SELECTOR;
 	}
 
+	return namedSelectorForCache(cache);
+}
+
+/**
+ * The selector for a cache other than the default one, as it appears in a
+ * `/cache/{cacheName}` path segment. No named-cache path addresses the default
+ * cache: the admin API addresses it by the bare path, and `selectorForCache`
+ * returns its `_default` selector for the routes that still take one.
+ */
+export function namedSelectorForCache(
+	cache: NamedStoredCache
+): NamedCacheSelector {
 	if (isPrivateCache(cache)) {
 		return privateCacheSelectorSchema.parse(
 			`${PRIVATE_SELECTOR_PREFIX}${privateCacheLocalName(cache)}`
