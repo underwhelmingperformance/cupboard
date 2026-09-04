@@ -347,6 +347,8 @@ export class AttestationCasService {
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
 							cache: sql<StoredCache>`${reference.cache}`.as('cache'),
+							cacheKind: sql<null>`null`.as('cache_kind'),
+							cacheName: sql<null>`null`.as('cache_name'),
 							storePathHash: sql<StorePathHash>`${reference.storePathHash}`.as(
 								'store_path_hash'
 							),

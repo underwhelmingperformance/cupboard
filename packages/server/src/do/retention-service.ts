@@ -79,6 +79,7 @@ export class RetentionService {
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
+						sql`null`,
 						rows.column('storePathHash'),
 						rows.column('retainUntil')
 					])

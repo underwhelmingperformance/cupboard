@@ -49,6 +49,21 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export class LocalSchemaMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor(
+		readonly migration: string,
+		readonly stage: string
+	) {
+		super(
+			`Durable Object migration ${migration} is still running stage ${stage}; retry shortly`
+		);
+		this.name = 'LocalSchemaMigrationPendingError';
+	}
+}
+
 export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
