@@ -16,6 +16,7 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -149,6 +150,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -354,7 +356,7 @@ export const verifyBackstopReuseSettleLimit = Math.floor(
 		statementsPerPendingSettleRow
 );
 
-type MaintenanceKind = 'gc' | 'verify';
+type MaintenanceKind = 'gc' | 'verify' | 'local-step';
 
 class CountingSemaphore {
 	private slots: number;
@@ -2405,6 +2407,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requestVerificationPass();
 	}
 
+	/**
+	 * Applies any pending migrations and records the step this object has
+	 * reached in its tenant row. This is the only path that records the step;
+	 * serving traffic does not. Returns undefined when the control plane has not
+	 * configured this object, which then has no tenant state to advance.
+	 */
+	async reportLocalStep(): Promise<LocalStep | undefined> {
+		try {
+			await this.initialise();
+		} catch (error) {
+			if (error instanceof TenantNotConfiguredError) {
+				return undefined;
+			}
+			throw error;
+		}
+
+		return this.runExclusiveMaintenance('local-step', () =>
+			this.metered('local-step', () => recordLocalStep(this.context))
+		);
+	}
+
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
@@ -2888,6 +2911,7 @@ type MeteredMethod =
 	| 'demote-narinfo-objects'
 	| 'garbage-collection'
 	| 'initialise'
+	| 'local-step'
 	| 'offboard'
 	| 'reconcile'
 	| 'record-missing-object'

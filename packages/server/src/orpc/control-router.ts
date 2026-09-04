@@ -27,6 +27,10 @@ import {
 	controlTenantSetReadMode,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
+import {
+	controlLocalStepStatus,
+	controlLocalStepWake
+} from '../control/local-step.ts';
 
 import { authoriseRequest } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
@@ -133,6 +137,14 @@ export const controlRouter = os.router({
 	membership: {
 		rebuild: os.membership.rebuild.handler(({ context }) =>
 			controlMembershipRebuild(context.env)
+		)
+	},
+	localStep: {
+		status: os.localStep.status.handler(({ context }) =>
+			controlLocalStepStatus(context.env)
+		),
+		wake: os.localStep.wake.handler(({ input, context }) =>
+			controlLocalStepWake(context.logger, context.env, input.limit)
 		)
 	},
 	oidcTrust: {
