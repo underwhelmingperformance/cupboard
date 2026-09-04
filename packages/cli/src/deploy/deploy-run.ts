@@ -7,7 +7,10 @@ import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
-import { DeploymentPhaseUnsettledError } from '../errors.ts';
+import {
+	DeploymentPhaseUnsettledError,
+	LocalStepUnreachedError
+} from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
@@ -17,7 +20,11 @@ import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import { applyD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
-import { readDeploymentPhase, recordDeploymentPhase } from './phase.ts';
+import {
+	readDeploymentPhase,
+	readLocalStepReadiness,
+	recordDeploymentPhase
+} from './phase.ts';
 import type { DeploySecrets } from './secrets.ts';
 import {
 	buildScriptMetadata,
@@ -650,6 +657,22 @@ async function settlePhase(
 
 		if (unsettled.length > 0) {
 			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
+		}
+
+		const readiness = await readLocalStepReadiness(
+			phaseApi,
+			databaseId,
+			currentLocalStep
+		);
+
+		context.fact('tenants behind', String(readiness.pending));
+
+		if (readiness.pending > 0) {
+			throw new LocalStepUnreachedError(
+				readiness.pending,
+				currentLocalStep,
+				readiness.stragglers
+			);
 		}
 
 		await recordDeploymentPhase(

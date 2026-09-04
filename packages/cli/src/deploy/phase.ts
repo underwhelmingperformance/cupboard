@@ -24,6 +24,50 @@ const fieldSeparator = '|';
 
 const recordedPhaseQuery = `SELECT phase || '${fieldSeparator}' || required_local_step || '${fieldSeparator}' || updated_at FROM deployment_phase WHERE id = '${deploymentPhaseRowId}';`;
 
+// How many stragglers a readiness query names. A separate query supplies the
+// count, so this limit bounds only the list an error can print.
+const laggingTenantSampleSize = 20;
+
+export interface LocalStepReadiness {
+	readonly pending: number;
+	readonly stragglers: readonly string[];
+}
+
+/**
+ * Counts the active tenants whose object has not reached the step this build
+ * requires, and returns up to {@link laggingTenantSampleSize} of their ids.
+ *
+ * A phase describes what every object has already done, so recording one while
+ * a tenant is behind would claim work that has not happened. This function
+ * only reads: the control plane's scheduled sweep is what wakes a tenant with
+ * no traffic of its own, so the count falls without the deploy doing anything
+ * and a later deploy can record the phase.
+ */
+export async function readLocalStepReadiness(
+	api: PhaseApi,
+	databaseId: DatabaseId,
+	requiredStep: LocalStep
+): Promise<LocalStepReadiness> {
+	const behind = `status = 'active' AND (local_step IS NULL OR local_step < ${String(requiredStep)})`;
+	const counted = await api.queryRows(
+		databaseId,
+		`SELECT count(*) FROM tenant WHERE ${behind};`
+	);
+	const [count] = counted;
+
+	if (count === undefined || count === '0') {
+		return { pending: 0, stragglers: [] };
+	}
+
+	return {
+		pending: Number(count),
+		stragglers: await api.queryRows(
+			databaseId,
+			`SELECT id FROM tenant WHERE ${behind} ORDER BY id LIMIT ${String(laggingTenantSampleSize)};`
+		)
+	};
+}
+
 /**
  * This build does not define the stored phase name. That happens after a
  * rollback past a release that added a phase. The deploy has no steps to run

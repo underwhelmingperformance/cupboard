@@ -46,12 +46,17 @@ export const currentLocalStep: LocalStep = localStep(1);
  * requires. A release that changes what a tenant Durable Object stores adds the
  * phases it needs. A build that needs no such coordination runs in `current`.
  */
-export const deploymentPhaseNameSchema = z.enum(['current']);
+export const deploymentPhaseNameSchema = z.enum(['current', 'expanded']);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
-export const settledDeploymentPhase: DeploymentPhaseName = 'current';
+//
+// `expanded` says that every cache row stores its identity beside the legacy
+// key and that every object has reached the step which fills the rows the
+// forward writes could not. A later release reads the identity instead of the
+// key, which is safe only once a deploy has settled in this phase.
+export const settledDeploymentPhase: DeploymentPhaseName = 'expanded';
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row and the Workers read it.
