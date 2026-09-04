@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { currentLocalStep } from '@cupboard/protocol/deployment';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
@@ -9,7 +10,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { currentLocalStep } from '../do/local-step.ts';
 import {
 	offboardTenant,
 	provisionNamedTenant,

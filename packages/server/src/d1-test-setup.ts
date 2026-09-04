@@ -11,6 +11,7 @@ import {
 	casObject,
 	controlAuthKey,
 	controlTrust,
+	deploymentPhase,
 	globalAdmin,
 	localStepWakeCursor,
 	manifestState,
@@ -58,6 +59,7 @@ beforeEach(async () => {
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();
 	await database.delete(controlTrust).run();
+	await database.delete(deploymentPhase).run();
 	await database.delete(globalAdmin).run();
 	await database.delete(tenant).run();
 	await database.delete(manifestState).run();

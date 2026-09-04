@@ -1,6 +1,8 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isoTimestampSchema } from './scalars.ts';
+
 /**
  * How far a tenant's Durable Object has advanced its own store: the migrations
  * it has applied plus any per-object data work a release needed afterwards.
@@ -21,6 +23,60 @@ export type LocalStep = z.infer<typeof localStepSchema>;
 export function localStep(value: number): LocalStep {
 	return localStepSchema.parse(value);
 }
+
+/**
+ * This build requires every tenant Durable Object to reach this step.
+ *
+ * A release that needs per-object work after its migrations gives that work the
+ * next step number and raises this constant. This build defines no such work,
+ * so an object is at step 0 once it has applied its migrations.
+ *
+ * `cupboard deploy` records this number with the phase, and the control plane
+ * compares each tenant's recorded step against it.
+ */
+export const currentLocalStep: LocalStep = localStep(0);
+
+/**
+ * A deploy records one of these phase names. They are listed in the order a
+ * release records them.
+ *
+ * The control Worker reports the recorded phase through `deployment.phase`. A
+ * release that changes what a tenant Durable Object stores adds the phases it
+ * needs and reads the recorded one to choose behaviour. A build that needs no
+ * such coordination runs in `current`.
+ */
+export const deploymentPhaseNameSchema = z.enum(['current']);
+export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
+
+// A deploy of this build ends in this phase. A release that adds phases changes
+// this to the last phase it introduces.
+export const settledDeploymentPhase: DeploymentPhaseName = 'current';
+
+// The `deployment_phase` table has one row, and this is its `id`. `cupboard
+// deploy` writes that row.
+export const deploymentPhaseRowId = 'current';
+
+export const deploymentPhaseSchema = z.strictObject({
+	name: deploymentPhaseNameSchema,
+	// The local step every active tenant must reach before the release may
+	// advance past this phase.
+	requiredLocalStep: localStepSchema,
+	updatedAt: isoTimestampSchema
+});
+export type ParsedDeploymentPhase = z.output<typeof deploymentPhaseSchema>;
+export type DeploymentPhase = z.input<typeof deploymentPhaseSchema>;
+
+// The phase is absent until a deploy records one. A deployment set up before
+// phases existed has no phase row.
+export const deploymentPhaseResponseSchema = z.strictObject({
+	phase: deploymentPhaseSchema.optional()
+});
+export type ParsedDeploymentPhaseResponse = z.output<
+	typeof deploymentPhaseResponseSchema
+>;
+export type DeploymentPhaseResponse = z.input<
+	typeof deploymentPhaseResponseSchema
+>;
 
 // A status response lists at most this many stragglers: enough to name the
 // tenants an operator would chase by hand, while bounding the response.
