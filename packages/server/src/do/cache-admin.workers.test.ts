@@ -83,6 +83,35 @@ async function cacheIdentities(): Promise<
 		deleted: row.deletedAt !== null
 	}));
 }
+async function policyIdentityRows(): Promise<
+	{
+		pattern: string;
+		kind: string | undefined;
+		cacheId: CacheId | undefined;
+		rootNamePrefix: string | undefined;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				pattern: schema.retentionPolicies.pattern,
+				kind: schema.retentionPolicies.kind,
+				cacheId: schema.retentionPolicies.cacheId,
+				rootNamePrefix: schema.retentionPolicies.rootNamePrefix
+			})
+			.from(schema.retentionPolicies)
+			.orderBy(schema.retentionPolicies.pattern)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		pattern: row.pattern,
+		kind: row.kind ?? undefined,
+		cacheId: row.cacheId ?? undefined,
+		rootNamePrefix: row.rootNamePrefix ?? undefined
+	}));
+}
+
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
@@ -331,6 +360,95 @@ describe('cache registry admin', () => {
 				roots: [{ cacheId: 1 }],
 				targets: [{ cacheId: 1 }]
 			}
+		});
+	});
+
+	it('links a cache-scoped policy when its cache is created', async () => {
+		await useTestServer('cache-admin-identity-policy');
+
+		const init = await bootstrap();
+		const addPolicy = (body: unknown): Promise<Response> =>
+			authorisedFetch('/policies', init.token, {
+				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+		// The cache does not exist yet, so this policy has no identity to name.
+		await addPolicy({ scope: 'cache', pattern: 'builds', ttlSeconds: 3600 });
+		await addPolicy({
+			scope: 'root-name-prefix',
+			pattern: 'release/',
+			ttlSeconds: 7200
+		});
+
+		const beforeCache = await policyIdentityRows();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterCache = await policyIdentityRows();
+
+		// The other order: this cache exists before its policy is added, so the
+		// insert resolves the identity itself.
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('d')
+			}),
+			'docs'
+		);
+		await addPolicy({ scope: 'cache', pattern: 'docs', ttlSeconds: 3600 });
+
+		const prefixPolicy = {
+			pattern: 'release/',
+			kind: 'root-name-prefix',
+			cacheId: undefined,
+			rootNamePrefix: 'release/'
+		};
+
+		expect({
+			beforeCache,
+			afterCache,
+			afterSecondCache: await policyIdentityRows()
+		}).toStrictEqual({
+			beforeCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: undefined,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			],
+			afterCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: 1,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			],
+			afterSecondCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: 1,
+					rootNamePrefix: undefined
+				},
+				{
+					pattern: 'docs',
+					kind: 'cache',
+					cacheId: 2,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			]
 		});
 	});
 
