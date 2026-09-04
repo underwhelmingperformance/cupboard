@@ -16,6 +16,7 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -149,6 +150,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -2404,6 +2406,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requestVerificationPass();
 	}
 
+	/**
+	 * Applies any pending migrations and records the step this object has
+	 * reached in its tenant row. Returns undefined when the control plane has
+	 * not configured this object, which has no tenant state to advance.
+	 *
+	 * The control plane calls this to advance a tenant with no traffic of its
+	 * own, so a deployment does not wait on an idle object.
+	 */
+	async reportLocalStep(): Promise<LocalStep | undefined> {
+		await this.initialise();
+
+		return this.metered('local-step', () => recordLocalStep(this.context));
+	}
+
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
@@ -2887,6 +2903,7 @@ type MeteredMethod =
 	| 'demote-narinfo-objects'
 	| 'garbage-collection'
 	| 'initialise'
+	| 'local-step'
 	| 'offboard'
 	| 'reconcile'
 	| 'record-missing-object'
