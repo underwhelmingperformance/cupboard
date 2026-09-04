@@ -46,8 +46,34 @@ export const currentLocalStep: LocalStep = localStep(1);
  * requires. A release that changes what a tenant Durable Object stores adds the
  * phases it needs. A build that needs no such coordination runs in `current`.
  */
-export const deploymentPhaseNameSchema = z.enum(['current', 'expanded']);
+export const deploymentPhaseNameSchema = z.enum([
+	'current',
+	'expanded',
+	'native-reads'
+]);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
+
+// The phases in the order a release records them. A build compares phases to
+// decide whether the state a later phase requires is in place yet.
+const phaseOrder: readonly DeploymentPhaseName[] =
+	deploymentPhaseNameSchema.options;
+
+/**
+ * Whether the recorded phase has reached the one asked about.
+ *
+ * A deployment with no phase row has not reached any of them: it was set up
+ * before phases existed, so nothing has confirmed the state a phase describes.
+ */
+export function hasReachedPhase(
+	recorded: DeploymentPhaseName | undefined,
+	wanted: DeploymentPhaseName
+): boolean {
+	if (recorded === undefined) {
+		return false;
+	}
+
+	return phaseOrder.indexOf(recorded) >= phaseOrder.indexOf(wanted);
+}
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
