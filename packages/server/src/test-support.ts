@@ -137,6 +137,7 @@ import {
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import { maintenanceRetryPrefix } from './do/alarm.ts';
 import { listGenerationMetadataKey } from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
@@ -613,6 +614,71 @@ export async function clearAbandonedAlarms(): Promise<void> {
 			state.storage.deleteAlarm()
 		);
 	}
+}
+
+/**
+ * Thrown when a maintenance pass is parked behind a retry deadline that the
+ * test clock never reaches.
+ *
+ * A pass that reports a stall is delayed until `now + noProgressRetryMs`. The
+ * shared setup pins `Date` so timestamps are deterministic, so that deadline
+ * never arrives and the pass does not run again for the rest of the test.
+ * Anything that waits on the work the pass left behind then waits until the
+ * test times out, and the timeout does not identify the pass that stopped.
+ */
+export class StalledMaintenancePassError extends Error {
+	constructor(
+		public readonly pass: string,
+		public readonly waitMs: number
+	) {
+		super(
+			`The ${pass} maintenance pass reported a stall and is parked for ${String(waitMs)}ms. The test clock does not advance, so the pass will not run again in this test.`
+		);
+		this.name = 'StalledMaintenancePassError';
+	}
+}
+
+/**
+ * Returns every maintenance pass parked behind a retry deadline the pinned
+ * test clock cannot reach, and deletes those deadlines so they do not survive
+ * into the next test.
+ *
+ * The shared `afterEach` calls this and fails the test on the first pass it
+ * finds. A test that means to leave a pass stalled calls this function itself
+ * and asserts on the result.
+ */
+export async function takeStalledMaintenancePasses(): Promise<
+	{ readonly pass: string; readonly waitMs: number }[]
+> {
+	const now = Date.now();
+	const stalled: { pass: string; waitMs: number }[] = [];
+
+	for (const stub of [harness.server, fixtureWorkerServer()]) {
+		const parked = await runInDurableObject(stub, async (_instance, state) => {
+			const deadlines = await state.storage.list<number>({
+				prefix: maintenanceRetryPrefix
+			});
+			const found: { pass: string; waitMs: number }[] = [];
+
+			for (const [key, deadline] of deadlines) {
+				if (deadline <= now) {
+					continue;
+				}
+
+				found.push({
+					pass: key.slice(maintenanceRetryPrefix.length),
+					waitMs: deadline - now
+				});
+				await state.storage.delete(key);
+			}
+
+			return found;
+		});
+
+		stalled.push(...parked);
+	}
+
+	return stalled;
 }
 
 interface SuspendedAlarmArming {
