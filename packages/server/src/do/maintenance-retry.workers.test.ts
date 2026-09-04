@@ -23,6 +23,7 @@ import {
 	pushPath,
 	resetTestServer,
 	syntheticStorePathHash,
+	takeStalledMaintenancePasses,
 	testBase,
 	uploadMetadata,
 	useTestServer
@@ -359,5 +360,12 @@ describe('stalled maintenance passes', () => {
 			],
 			retryAlarmsSetByIdlePass: [testBase.getTime() + noProgressRetryMs]
 		});
+
+		// This test ends with the reconcile pass parked on purpose, so take that
+		// deadline here. The shared teardown fails the test for any deadline it
+		// still finds.
+		await expect(takeStalledMaintenancePasses()).resolves.toStrictEqual([
+			{ pass: 'reconcile', waitMs: noProgressRetryMs }
+		]);
 	}, 240_000);
 });

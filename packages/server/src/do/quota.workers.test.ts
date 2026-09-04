@@ -3,6 +3,7 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -42,6 +43,7 @@ import {
 	resetTestServer,
 	seedCanonicalBlob,
 	suspendTenant,
+	takeStalledMaintenancePasses,
 	tenantBlobRows,
 	tenantUsageRow,
 	testBase,
@@ -49,8 +51,11 @@ import {
 	type VerifiableNar,
 	verifiableNar,
 	verifiableNarStored,
-	verifyCurrentTenant
+	verifyCurrentTenant,
+	withoutAlarmArming
 } from '../test-support.ts';
+
+import { noProgressRetryMs } from './alarm.ts';
 
 // Both encodings decompress to the same NAR and therefore share a narHash. Only
 // their compressed sizes differ.
@@ -349,13 +354,25 @@ describe('per-tenant quota', () => {
 		);
 
 		await dropFixtureTenantUsage();
-		await verifyCurrentTenant();
+		// The refused verdict is the only one in the page, so the drain pass that
+		// applies it stalls. Run that pass here, so its retry deadline is left in
+		// this test and not by an alarm racing the teardown.
+		await withoutAlarmArming(async () => {
+			await verifyCurrentTenant();
+			await runInDurableObject(currentServer(), (instance) => instance.alarm());
+		});
 
 		expect({
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
-			verdict: await pendingUploadVerdict(upload.uploadId)
-		}).toStrictEqual({ edges: [], presence: [], verdict: 'pending' });
+			verdict: await pendingUploadVerdict(upload.uploadId),
+			parked: await takeStalledMaintenancePasses()
+		}).toStrictEqual({
+			edges: [],
+			presence: [],
+			verdict: 'pending',
+			parked: [{ pass: 'verdict-drain', waitMs: noProgressRetryMs }]
+		});
 	});
 
 	it('rejects a NAR commit when CAS usage has consumed the quota', async () => {
