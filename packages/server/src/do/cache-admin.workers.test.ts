@@ -206,6 +206,36 @@ const defaultIdentity = {
 	priority: 40,
 	deleted: false
 };
+
+async function policyIdentityRows(): Promise<
+	{
+		pattern: string;
+		kind: string | undefined;
+		cacheId: CacheId | undefined;
+		rootNamePrefix: string | undefined;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				pattern: schema.retentionPolicies.pattern,
+				kind: schema.retentionPolicies.kind,
+				cacheId: schema.retentionPolicies.cacheId,
+				rootNamePrefix: schema.retentionPolicies.rootNamePrefix
+			})
+			.from(schema.retentionPolicies)
+			.orderBy(schema.retentionPolicies.pattern)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		pattern: row.pattern,
+		kind: row.kind ?? undefined,
+		cacheId: row.cacheId ?? undefined,
+		rootNamePrefix: row.rootNamePrefix ?? undefined
+	}));
+}
+
 const buildsCache = cacheNameSchema.parse('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
 
@@ -519,6 +549,95 @@ describe('cache registry admin', () => {
 				roots: [{ cache: 'builds', cacheId: 2 }],
 				targets: [{ cache: 'builds', cacheId: 2 }]
 			}
+		});
+	});
+
+	it('links a cache-scoped policy when its cache is created', async () => {
+		await useTestServer('cache-admin-identity-policy');
+
+		const init = await bootstrap();
+		const addPolicy = (body: unknown): Promise<Response> =>
+			authorisedFetch('/policies', init.token, {
+				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+		// The cache does not exist yet, so this policy has no identity to name.
+		await addPolicy({ scope: 'cache', pattern: 'builds', ttlSeconds: 3600 });
+		await addPolicy({
+			scope: 'root-name-prefix',
+			pattern: 'release/',
+			ttlSeconds: 7200
+		});
+
+		const beforeCache = await policyIdentityRows();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterCache = await policyIdentityRows();
+
+		// The other order: this cache exists before its policy is added, so the
+		// insert resolves the identity itself.
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('d')
+			}),
+			'docs'
+		);
+		await addPolicy({ scope: 'cache', pattern: 'docs', ttlSeconds: 3600 });
+
+		const afterSecondCache = await policyIdentityRows();
+
+		// A deleted cache keeps its policy, so registering the name again binds
+		// the policy to the new identity.
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('f')
+			}),
+			'builds'
+		);
+
+		const prefixPolicy = {
+			pattern: 'release/',
+			kind: 'root-name-prefix',
+			cacheId: undefined,
+			rootNamePrefix: 'release/'
+		};
+		const buildsPolicy = (cacheId: number | undefined) => ({
+			pattern: 'builds',
+			kind: 'cache',
+			cacheId,
+			rootNamePrefix: undefined
+		});
+		const secondCachePolicy = {
+			pattern: 'docs',
+			kind: 'cache',
+			cacheId: 3,
+			rootNamePrefix: undefined
+		};
+
+		expect({
+			beforeCache,
+			afterCache,
+			afterSecondCache,
+			afterRegisteredAgain: await policyIdentityRows()
+		}).toStrictEqual({
+			beforeCache: [buildsPolicy(undefined), prefixPolicy],
+			afterCache: [buildsPolicy(2), prefixPolicy],
+			afterSecondCache: [buildsPolicy(2), secondCachePolicy, prefixPolicy],
+			afterRegisteredAgain: [buildsPolicy(4), secondCachePolicy, prefixPolicy]
 		});
 	});
 
