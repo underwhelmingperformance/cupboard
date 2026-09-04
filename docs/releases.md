@@ -2,7 +2,8 @@
 
 This document describes how cupboard's release workflow builds and publishes the
 binaries installed by the GitHub actions. Nothing here is needed to use the
-actions; see [docs/github-actions.md](./github-actions.md) for that.
+actions; see [docs/github-actions.md](./github-actions.md) for that. For how a
+release reaches a running deployment, see [docs/deploying.md](./deploying.md).
 
 ## Release ordering
 
