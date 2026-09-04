@@ -117,6 +117,19 @@ export class RetentionService {
 
 	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
+		// A cache-scoped policy names one cache, which need not exist yet. Its
+		// `cache_id` stays null until `CacheRepository.ensure` registers that
+		// cache and links the row.
+		const identity =
+			body.scope === 'cache'
+				? {
+						kind: 'cache' as const,
+						cacheId: new CacheRepository(this.context.db).find(body.pattern)
+					}
+				: {
+						kind: 'root-name-prefix' as const,
+						rootNamePrefix: body.pattern
+					};
 
 		const row = this.context.db
 			.insert(schema.retentionPolicies)
@@ -124,6 +137,7 @@ export class RetentionService {
 				id,
 				scope: body.scope,
 				pattern: body.pattern,
+				...identity,
 				defaultTtlSeconds: body.ttlSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
@@ -132,7 +146,7 @@ export class RetentionService {
 					schema.retentionPolicies.scope,
 					schema.retentionPolicies.pattern
 				],
-				set: { defaultTtlSeconds: body.ttlSeconds }
+				set: { ...identity, defaultTtlSeconds: body.ttlSeconds }
 			})
 			.returning()
 			.get();

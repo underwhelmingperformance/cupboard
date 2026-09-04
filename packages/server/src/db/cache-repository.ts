@@ -4,7 +4,7 @@ import {
 	type StoredCache
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, isNull } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import { type SchemaWriter } from '../do/context.ts';
 
@@ -71,8 +71,7 @@ export class CacheRepository {
 		}
 
 		const { scope, access } = identityForCache(cache);
-
-		return this.database
+		const created = this.database
 			.insert(schema.cacheIdentities)
 			.values({
 				kind: scope.kind,
@@ -82,7 +81,25 @@ export class CacheRepository {
 				createdAt: now
 			})
 			.returning({ id: schema.cacheIdentities.id })
-			.get().id;
+			.get();
+
+		// A cache-scoped retention policy may name a cache that does not exist
+		// yet, so its `cache_id` stays null until the cache is created. Every
+		// other table keyed by a cache name is written only after the cache is
+		// registered, so no row in one of those can be waiting for an identity.
+		this.database
+			.update(schema.retentionPolicies)
+			.set({ cacheId: created.id })
+			.where(
+				and(
+					eq(schema.retentionPolicies.scope, 'cache'),
+					eq(schema.retentionPolicies.pattern, cache),
+					isNull(schema.retentionPolicies.cacheId)
+				)
+			)
+			.run();
+
+		return created.id;
 	}
 
 	setPriority(cache: StoredCache, priority: CachePriority): void {
