@@ -464,6 +464,44 @@ export async function offboardTenant(id: string): Promise<void> {
 	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
 }
 
+const cacheMirrorTriggerCount = 6;
+
+/**
+ * Runs `write` with the six D1 mirroring triggers of migrations 0023 and
+ * 0024 dropped, then recreates them from the definitions `sqlite_master`
+ * recorded.
+ *
+ * The triggers fill `cache_kind`, `cache_name` and `access` on a row inserted
+ * with them null, with the same values the code writes, so a row read back
+ * after a write cannot show which of the two filled it. A test that checks
+ * what the code wrote runs the write inside this.
+ */
+export async function withoutCacheMirrorTriggers<T>(
+	write: () => Promise<T>
+): Promise<T> {
+	const { results: triggers } = await env.CUPBOARD_DB.prepare(
+		"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'cache_access_mirror_%'"
+	).all<{ readonly name: string; readonly sql: string }>();
+
+	if (triggers.length !== cacheMirrorTriggerCount) {
+		throw new Error(
+			`Expected ${String(cacheMirrorTriggerCount)} cache mirroring triggers, found ${String(triggers.length)}`
+		);
+	}
+
+	for (const trigger of triggers) {
+		await env.CUPBOARD_DB.prepare(`DROP TRIGGER \`${trigger.name}\``).run();
+	}
+
+	try {
+		return await write();
+	} finally {
+		for (const trigger of triggers) {
+			await env.CUPBOARD_DB.prepare(trigger.sql).run();
+		}
+	}
+}
+
 /**
 A tenant's registry row, for asserting the offboarding lifecycle.
 */
