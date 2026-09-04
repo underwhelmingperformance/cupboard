@@ -1,10 +1,13 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import {
 	type DeletePathResponse,
 	pathDeletionResponseSchema
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
+
+import { cacheScopedDouble } from '../test-support.ts';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
 
@@ -43,14 +46,14 @@ A delete client that records its calls and reports the path as present.
 */
 function recordingClient(): {
 	client: DeleteClient;
-	calls: { cacheName: string; hash: string }[];
+	calls: { cacheName?: string; hash: string }[];
 } {
-	const calls: { cacheName: string; hash: string }[] = [];
+	const calls: { cacheName?: string; hash: string }[] = [];
 
 	return {
 		calls,
 		client: {
-			remove(input) {
+			remove: cacheScopedDouble((input) => {
 				calls.push(input);
 
 				return Promise.resolve(
@@ -60,20 +63,20 @@ function recordingClient(): {
 						narScheduledForDeletion: false
 					})
 				);
-			}
+			})
 		}
 	};
 }
 
 describe('runDelete', () => {
-	it('derives the hash, addresses the cache, and reports once confirmed', async () => {
+	it('derives the hash, addresses a named cache, and reports once confirmed', async () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		await runDelete('_default', storePath, ui, client);
+		await runDelete(cacheNameSchema.parse('builds'), storePath, ui, client);
 
 		expect({ calls, results: captured.results }).toStrictEqual({
-			calls: [{ cacheName: '_default', hash: storePathHash }],
+			calls: [{ cacheName: 'builds', hash: storePathHash }],
 			results: [
 				{
 					kind: 'deleted-path',
@@ -96,7 +99,7 @@ describe('runDelete', () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runDelete('_default', storePath, ui, client);
+		await runDelete(DEFAULT_CACHE, storePath, ui, client);
 
 		expect({ calls, cancellations: captured.cancellations }).toStrictEqual({
 			calls: [],
@@ -105,15 +108,15 @@ describe('runDelete', () => {
 	});
 
 	it('rejects an argument that is not a store path', async () => {
-		const calls: Parameters<DeleteClient['remove']>[0][] = [];
+		const calls: { hash: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
 		let outcome:
 			| { value: Awaited<ReturnType<typeof runDelete>> }
 			| { error: { name: string; storePath: string } };
 		try {
-			await runDelete('_default', '/tmp/not-a-store-path', ui, {
-				remove(input) {
+			await runDelete(DEFAULT_CACHE, '/tmp/not-a-store-path', ui, {
+				remove: cacheScopedDouble((input) => {
 					calls.push(input);
 
 					return Promise.resolve(
@@ -123,7 +126,7 @@ describe('runDelete', () => {
 							narScheduledForDeletion: false
 						})
 					);
-				}
+				})
 			});
 			outcome = { value: undefined };
 		} catch (error_: unknown) {

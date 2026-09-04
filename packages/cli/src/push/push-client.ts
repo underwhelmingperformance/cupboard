@@ -1,8 +1,4 @@
-import {
-	DEFAULT_CACHE,
-	selectorForCache,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE, type StoredCache } from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
@@ -11,6 +7,7 @@ import {
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
+import { callInCache } from '../client/cache-scoped.ts';
 import { cachePrefixFor, CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
@@ -38,7 +35,6 @@ export function pushClientFor(
 	options: PushClientOptions = {}
 ): PushClient {
 	const cache = options.cache ?? DEFAULT_CACHE;
-	const cacheName = selectorForCache(cache);
 	const baseFetcher = options.fetcher ?? fetch;
 	let hasUploadGraceFacts = false;
 	const uploadFetcher: typeof fetch = async (input, init) => {
@@ -74,7 +70,7 @@ export function pushClientFor(
 	);
 
 	const session = credentialSession((pushId) =>
-		rpc.uploads.credential({ cacheName, pushId })
+		callInCache(rpc.uploads.credential, cache, { pushId })
 	);
 
 	let uploader: Promise<BlobUploader> | undefined;
@@ -94,8 +90,7 @@ export function pushClientFor(
 		negotiate: async (body) => {
 			hasUploadGraceFacts = false;
 
-			return uploadRpc.uploads.negotiate({
-				cacheName,
+			return callInCache(uploadRpc.uploads.negotiate, cache, {
 				pushId: await session.pushId(),
 				...body
 			});
@@ -105,16 +100,15 @@ export function pushClientFor(
 		preview: async (body) => {
 			hasUploadGraceFacts = false;
 
-			return uploadRpc.uploads.preview({ cacheName, ...body });
+			return callInCache(uploadRpc.uploads.preview, cache, body);
 		},
 		probeUploadGraceFacts: async (kind) => {
 			hasUploadGraceFacts = false;
 
 			if (kind === 'preview') {
-				await uploadRpc.uploads.preview({ cacheName, paths: [] });
+				await callInCache(uploadRpc.uploads.preview, cache, { paths: [] });
 			} else {
-				await uploadRpc.uploads.negotiate({
-					cacheName,
+				await callInCache(uploadRpc.uploads.negotiate, cache, {
 					pushId: await session.pushId(),
 					paths: []
 				});
@@ -141,13 +135,13 @@ export function pushClientFor(
 		openCommitSession: (commitOptions) =>
 			raw.openCommitSession(credential, commitOptions),
 		negotiateAttestations: async (body) =>
-			rpc.attestations.negotiate({
-				cacheName,
+			callInCache(rpc.attestations.negotiate, cache, {
 				pushId: await session.pushId(),
 				...body
 			}),
 		attachAttestation: (uploadId) =>
-			rpc.attestations.attach({ cacheName, id: uploadId }),
-		setRoot: (name, body) => rpc.roots.set({ cacheName, name, ...body })
+			callInCache(rpc.attestations.attach, cache, { id: uploadId }),
+		setRoot: (name, body) =>
+			callInCache(rpc.roots.set, cache, { name, ...body })
 	};
 }

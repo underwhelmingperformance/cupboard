@@ -1,7 +1,4 @@
-import {
-	cacheSelectorSchema,
-	rootNameSchema
-} from '@cupboard/nix-store/scalars';
+import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -15,111 +12,82 @@ import {
 	rootTargetsPageSchema
 } from '../retention.ts';
 
-import { baseProcedure } from './base.ts';
+import { cacheScopedProcedure } from './cache-scoped.ts';
 
 // Both listing routes accept the opaque cursor from the previous page and a
-// limit within the shared page bound.
-const listPageQuerySchema = z
-	.strictObject({
-		cursor: z.string().min(1).optional(),
-		limit: z.number().int().min(1).max(rootListPageSize).optional()
-	})
-	.default({});
+// limit within the shared page bound. They are GET routes, so oRPC sends any
+// field that is not a path parameter in the query string.
+const listPageShape = {
+	cursor: z.string().min(1).optional(),
+	limit: z.number().int().min(1).max(rootListPageSize).optional()
+};
 
 export const rootsContract = {
-	list: baseProcedure
-		.meta({
-			requires: 'root:list',
-			resource: { cache: { field: 'cacheName' } },
-			replaySafety: 'replay-safe'
-		})
-		.route({
+	list: cacheScopedProcedure(
+		{
 			method: 'GET',
-			path: '/cache/{cacheName}/roots',
-			inputStructure: 'detailed'
-		})
-		.input(
-			// The detailed shape also carries headers and body, so the top level
-			// stays open; the parts we consume are strict.
-			z.object({
-				params: z.strictObject({ cacheName: cacheSelectorSchema }),
-				query: listPageQuerySchema
-			})
-		)
-		.output(rootListResponseSchema),
+			suffix: '/roots',
+			requires: 'root:list',
+			replaySafety: 'replay-safe'
+		},
+		listPageShape,
+		rootListResponseSchema
+	),
 
 	// Fetch targets one bounded page at a time. Each page checks whether its
 	// targets can be served, so a run root can grow beyond one request and remain
 	// listable.
-	targets: baseProcedure
-		.meta({
-			requires: 'root:list',
-			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
-			replaySafety: 'replay-safe'
-		})
-		.route({
+	targets: cacheScopedProcedure(
+		{
 			method: 'GET',
-			path: '/cache/{cacheName}/roots/{name}/targets',
-			inputStructure: 'detailed'
-		})
-		.input(
-			z.object({
-				params: z.strictObject({
-					cacheName: cacheSelectorSchema,
-					name: rootNameSchema
-				}),
-				query: listPageQuerySchema
-			})
-		)
-		.output(rootTargetsPageSchema),
+			suffix: '/roots/{name}/targets',
+			requires: 'root:list',
+			resource: { root: { field: 'name' } },
+			replaySafety: 'replay-safe'
+		},
+		{ name: rootNameSchema, ...listPageShape },
+		rootTargetsPageSchema
+	),
 
 	// The token must grant `root:set` for both this cache and this root. An empty
 	// target list clears the targets but keeps the root. The CLI's `root set`
 	// and `root ensure` commands require at least one store path, so
 	// clearing a root requires a direct request with an empty list.
-	set: baseProcedure
-		.meta({
+	set: cacheScopedProcedure(
+		{
+			method: 'PUT',
+			suffix: '/roots/{name}',
 			requires: 'root:set',
-			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
+			resource: { root: { field: 'name' } },
 			maintenance: true
-		})
-		.route({ method: 'PUT', path: '/cache/{cacheName}/roots/{name}' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				name: rootNameSchema,
-				...rootSetBodySchema.shape
-			})
-		)
-		.output(rootSetResponseSchema),
+		},
+		{ name: rootNameSchema, ...rootSetBodySchema.shape },
+		rootSetResponseSchema
+	),
 
-	ensure: baseProcedure
-		.meta({
+	ensure: cacheScopedProcedure(
+		{
+			method: 'POST',
+			suffix: '/roots/{name}/ensure',
 			requires: 'root:set',
-			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
+			resource: { root: { field: 'name' } },
 			maintenance: true
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/roots/{name}/ensure' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				name: rootNameSchema,
-				...rootEnsureBodySchema.shape
-			})
-		)
-		.output(rootEnsureResponseSchema),
+		},
+		{ name: rootNameSchema, ...rootEnsureBodySchema.shape },
+		rootEnsureResponseSchema
+	),
 
 	// Removal keeps the default. A retry sent after the name was bound to a new
 	// root would delete that one.
-	remove: baseProcedure
-		.meta({
+	remove: cacheScopedProcedure(
+		{
+			method: 'DELETE',
+			suffix: '/roots/{name}',
 			requires: 'root:remove',
-			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
+			resource: { root: { field: 'name' } },
 			maintenance: true
-		})
-		.route({ method: 'DELETE', path: '/cache/{cacheName}/roots/{name}' })
-		.input(
-			z.strictObject({ cacheName: cacheSelectorSchema, name: rootNameSchema })
-		)
-		.output(rootRemoveResponseSchema)
+		},
+		{ name: rootNameSchema },
+		rootRemoveResponseSchema
+	)
 };

@@ -1,4 +1,7 @@
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	DEFAULT_CACHE_SELECTOR
+} from '@cupboard/nix-store/scalars';
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import type {
 	GracePolicyListResponse,
@@ -24,6 +27,7 @@ import { z } from 'zod';
 
 import {
 	authorisedFetch,
+	cacheScopedPath,
 	cacheWriteGrants,
 	initialise,
 	issueServerSignedToken,
@@ -126,7 +130,7 @@ async function setRoot(
 	name: string
 ): Promise<{ readonly status: number; readonly body: RootSetResponse }> {
 	const response = await authorisedFetch(
-		`/cache/_default/roots/${encodeURIComponent(name)}`,
+		`/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),
@@ -405,10 +409,10 @@ describe('retention grace policies', () => {
 
 async function graceCoverage(
 	token: string,
-	cacheSelector: string
+	cache: string
 ): Promise<{ readonly status: number; readonly body: unknown }> {
 	const response = await authorisedFetch(
-		`/cache/${encodeURIComponent(cacheSelector)}/grace-coverage`,
+		cacheScopedPath(cache, '/grace-coverage'),
 		token
 	);
 
@@ -424,7 +428,7 @@ describe('grace coverage', () => {
 		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });
 
 		const pullRequestCache = await graceCoverage(token, 'pr-7');
-		const defaultCache = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
+		const defaultCache = await graceCoverage(token, DEFAULT_CACHE);
 
 		expect({ pullRequestCache, defaultCache }).toStrictEqual({
 			pullRequestCache: {
@@ -447,7 +451,7 @@ describe('grace coverage', () => {
 	it('returns covered: false when no grace policy matches', async () => {
 		const token = await initialise();
 
-		const coverage = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
+		const coverage = await graceCoverage(token, DEFAULT_CACHE);
 
 		expect(coverage).toStrictEqual({
 			status: StatusCodes.OK,
@@ -469,11 +473,8 @@ describe('grace coverage', () => {
 		);
 		const commitOnlyToken = await issueServerSignedToken(cacheWriteGrants());
 
-		const coverage = await graceCoverage(confirmToken, DEFAULT_CACHE_SELECTOR);
-		const commitOnly = await graceCoverage(
-			commitOnlyToken,
-			DEFAULT_CACHE_SELECTOR
-		);
+		const coverage = await graceCoverage(confirmToken, DEFAULT_CACHE);
+		const commitOnly = await graceCoverage(commitOnlyToken, DEFAULT_CACHE);
 		const refusedList = await authorisedFetch('/policies/grace', confirmToken);
 
 		expect({
