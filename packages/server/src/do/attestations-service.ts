@@ -36,6 +36,7 @@ import {
 	authorisedByCacheGeneration,
 	referencedCacheLifecycle
 } from '../db/cache-generation.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -613,6 +614,7 @@ export class AttestationsService {
 				.values({
 					id: uploadId,
 					cache,
+					cacheId: new CacheRepository(this.context.db).find(cache),
 					storePathHash: bundle.storePathHash,
 					digest: bundle.digest,
 					r2Key,

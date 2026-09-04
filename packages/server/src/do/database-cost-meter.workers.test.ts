@@ -146,7 +146,8 @@ describe('db cost meter', () => {
 		// count would still pass a looser integration check. Two of the reads
 		// compare a store path against a bound list, and SQLite counts each element
 		// it reads from that list as a row, so a one-path negotiation reads two
-		// rows more than its table rows.
+		// rows more than its table rows. One read is the default cache's identity,
+		// which the pending row records.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -158,8 +159,8 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 19,
-			rowsWritten: 9
+			rowsRead: 18,
+			rowsWritten: 7
 		});
 	});
 
