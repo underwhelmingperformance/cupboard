@@ -9,18 +9,27 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
+import { type SQLiteColumn, type SQLiteTable } from 'drizzle-orm/sqlite-core';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	garbageCollectionFrontier,
+	garbageCollectionMarks,
+	garbageCollectionRevisions,
+	garbageCollectionScans,
+	garbageCollectionTenantRuns,
 	narInfoDeletions,
 	retentionRoots,
-	retentionRootTargets
+	retentionRootTargets,
+	verificationCursor
 } from '../db/schema.ts';
 import {
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
 } from '../errors.ts';
 import {
+	authorisedFetch,
 	bootstrap,
 	currentServer,
 	driveToCompletion,
@@ -784,6 +793,165 @@ describe('garbage collection narinfo-deletion continuation', () => {
 			armed: true,
 			continuation: [tenantWideContinuation],
 			remaining: backlog - maxNarInfoDeletionsFlushedPerRun
+		});
+	});
+});
+
+/**
+ * The cache columns of every collection-state row and of the verification
+ * cursor. A cache-keyed table is read in cache order.
+ */
+interface CollectionStateIdentities {
+	readonly scans: { cache: string; cacheId: number | undefined }[];
+	readonly frontier: { cache: string; cacheId: number | undefined }[];
+	readonly marks: { cache: string; cacheId: number | undefined }[];
+	readonly tenantRun: { cache: string; cacheId: number | undefined }[];
+	readonly revisions: { cache: string; cacheId: number | undefined }[];
+	readonly cursor: { cache: string; cacheId: number | undefined }[];
+}
+
+async function collectionStateIdentities(): Promise<CollectionStateIdentities> {
+	return runInDurableObject(currentServer(), (instance) => {
+		const read = (
+			table: SQLiteTable & { cache: SQLiteColumn; cacheId: SQLiteColumn }
+		): { cache: string; cacheId: number | undefined }[] =>
+			instance.context.db
+				.select({ cache: table.cache, cacheId: table.cacheId })
+				.from(table)
+				.orderBy(table.cache)
+				.all()
+				.map((row) => ({
+					cache: String(row.cache),
+					cacheId: row.cacheId === null ? undefined : Number(row.cacheId)
+				}));
+
+		return {
+			scans: read(garbageCollectionScans),
+			frontier: read(garbageCollectionFrontier),
+			marks: read(garbageCollectionMarks),
+			tenantRun: read(garbageCollectionTenantRuns),
+			revisions: read(garbageCollectionRevisions),
+			cursor: read(verificationCursor)
+		};
+	});
+}
+
+describe('garbage collection identity columns', () => {
+	beforeEach(resetTestServer);
+
+	it('records the cache identity on collection state and the verification cursor', async () => {
+		await useTestServer('gc-identity-columns');
+		const { token } = await bootstrap();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept',
+			references: []
+		});
+		const collectable = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'collectable',
+			references: []
+		});
+
+		await pushPath(token, kept, 'builds');
+		await pushPath(token, collectable, 'builds');
+		await authorisedFetch('/cache/builds/roots/channel', token, {
+			body: JSON.stringify({ targets: [kept.storePath] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		// The tenant-wide run reaches `builds` after the empty default cache. Stop
+		// at the step that has seeded the root's target into the frontier and
+		// marked nothing yet, so every collection table holds a row for `builds`.
+		await driveToCompletion(
+			() => driven.collectOneUnitOfWork(),
+			async () => {
+				const rows = await collectionStateIdentities();
+
+				return (
+					rows.scans.some((scan) => scan.cache === 'builds') &&
+					rows.frontier.length === 1
+				);
+			},
+			maxDrivenPasses
+		);
+		const seeded = await collectionStateIdentities();
+
+		await driveToCompletion(
+			() => driven.collectOneUnitOfWork(),
+			async () => {
+				const rows = await collectionStateIdentities();
+
+				return rows.marks.length === 1;
+			},
+			maxDrivenPasses
+		);
+		const marked = await collectionStateIdentities();
+
+		await driven.restore();
+		await drainContinuation();
+
+		// One row per pass: the first stops on a `builds` row and the second
+		// reaches the end of the scan and wraps.
+		let stoppedCursor: CollectionStateIdentities['cursor'] = [];
+
+		for (const limit of [1, 500]) {
+			const response = await authorisedFetch('/verify', token, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ limit })
+			});
+
+			expect(response.status).toBe(StatusCodes.OK);
+
+			if (limit === 1) {
+				const rows = await collectionStateIdentities();
+
+				stoppedCursor = rows.cursor;
+			}
+		}
+
+		const builds = { cache: 'builds', cacheId: 2 };
+
+		expect({
+			seeded: { ...seeded, revisions: undefined, cursor: undefined },
+			marked: {
+				scans: marked.scans,
+				frontier: marked.frontier,
+				marks: marked.marks,
+				tenantRun: marked.tenantRun
+			},
+			completed: {
+				...(await collectionStateIdentities()),
+				stoppedCursor
+			}
+		}).toStrictEqual({
+			seeded: {
+				scans: [builds],
+				frontier: [builds],
+				marks: [],
+				tenantRun: [builds],
+				revisions: undefined,
+				cursor: undefined
+			},
+			marked: {
+				scans: [builds],
+				frontier: [],
+				marks: [builds],
+				tenantRun: [builds]
+			},
+			completed: {
+				scans: [],
+				frontier: [],
+				marks: [],
+				tenantRun: [],
+				revisions: [{ cache: '', cacheId: 1 }, builds],
+				cursor: [{ cache: '', cacheId: undefined }],
+				stoppedCursor: [builds]
+			}
 		});
 	});
 });

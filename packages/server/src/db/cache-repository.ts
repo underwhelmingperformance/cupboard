@@ -69,11 +69,18 @@ export class CacheRepository {
 	 * has none.
 	 */
 	find(cache: StoredCache): CacheId | undefined {
+		return this.liveIdentityId(cache).get()?.id;
+	}
+
+	/**
+	 * The select that `find` runs, for a statement that embeds it as a
+	 * subquery and so needs no statement of its own for the lookup.
+	 */
+	liveIdentityId(cache: StoredCache) {
 		return this.database
 			.select({ id: schema.cacheIdentities.id })
 			.from(schema.cacheIdentities)
-			.where(this.liveIdentity(cache))
-			.get()?.id;
+			.where(this.liveIdentity(cache));
 	}
 
 	/**

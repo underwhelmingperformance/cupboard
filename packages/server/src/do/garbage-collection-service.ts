@@ -21,6 +21,7 @@ import {
 	sql
 } from 'drizzle-orm';
 
+import { type CacheId } from '../db/cache.ts';
 import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -140,20 +141,45 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private currentRevision(cache: StoredCache): number {
-		this.context.db
-			.insert(schema.garbageCollectionRevisions)
-			.values({ cache, revision: 0 })
-			.onConflictDoNothing()
-			.run();
+	private cacheIdOf(cache: StoredCache): CacheId | undefined {
+		return new CacheRepository(this.context.db).find(cache);
+	}
 
-		return (
-			this.context.db
-				.select({ revision: schema.garbageCollectionRevisions.revision })
-				.from(schema.garbageCollectionRevisions)
-				.where(eq(schema.garbageCollectionRevisions.cache, cache))
-				.get()?.revision ?? 0
+	private currentRevision(cache: StoredCache): number {
+		const stored = this.context.db
+			.select({
+				revision: schema.garbageCollectionRevisions.revision,
+				cacheId: schema.garbageCollectionRevisions.cacheId
+			})
+			.from(schema.garbageCollectionRevisions)
+			.where(eq(schema.garbageCollectionRevisions.cache, cache))
+			.get();
+		const liveIdentityId = new CacheRepository(this.context.db).liveIdentityId(
+			cache
 		);
+
+		if (stored === undefined) {
+			this.context.db
+				.insert(schema.garbageCollectionRevisions)
+				.values({ cache, cacheId: sql`(${liveIdentityId})`, revision: 0 })
+				.onConflictDoNothing()
+				.run();
+
+			return 0;
+		}
+
+		// The triggers of migration 0032 create this row without an identity on
+		// the first narinfo, root, target or grace write, and advance the
+		// revision. Bind such a row once; a bound row costs the one read above.
+		if (stored.cacheId === null) {
+			this.context.db
+				.update(schema.garbageCollectionRevisions)
+				.set({ cacheId: sql`(${liveIdentityId})` })
+				.where(eq(schema.garbageCollectionRevisions.cache, cache))
+				.run();
+		}
+
+		return stored.revision;
 	}
 
 	private clearScan(cache: StoredCache): void {
@@ -181,6 +207,7 @@ export class GarbageCollectionService {
 			tx.insert(schema.garbageCollectionScans)
 				.values({
 					cache,
+					cacheId: this.cacheIdOf(cache),
 					revision,
 					phase: 'expire-roots',
 					cursor: '',
@@ -190,6 +217,7 @@ export class GarbageCollectionService {
 				.onConflictDoUpdate({
 					target: schema.garbageCollectionScans.cache,
 					set: {
+						cacheId: sql`excluded.cache_id`,
 						revision,
 						phase: 'expire-roots',
 						cursor: '',
@@ -214,9 +242,10 @@ export class GarbageCollectionService {
 
 	/**
 	 * Reads the scan, restarting it when the cache's revision no longer matches
-	 * the one the scan recorded. Reading the revision costs two statements;
-	 * `collectUnreachable` calls this once, at the start of a pass, and reads
-	 * the row with {@link scanRow} after that.
+	 * the one the scan recorded. Reading the revision costs one statement once
+	 * the revision row exists and is bound to its identity; `collectUnreachable`
+	 * calls this once, at the start of a pass, and reads the row with
+	 * {@link scanRow} after that.
 	 */
 	private scan(
 		cache: StoredCache
@@ -400,11 +429,21 @@ export class GarbageCollectionService {
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
+		if (storePathHashes.length === 0) {
+			return;
+		}
+
+		const cacheId = this.cacheIdOf(cache);
+
 		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
 				.select(
-					hashes.insertSource([sql`${cache}`, sql`null`, hashes.element()])
+					hashes.insertSource([
+						sql`${cache}`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						hashes.element()
+					])
 				)
 				.onConflictDoNothing()
 				.run();
@@ -562,6 +601,10 @@ export class GarbageCollectionService {
 	): { readonly complete: boolean } {
 		let pending = scan.markStorePathHash ?? undefined;
 		let referenceCursor = scan.referenceCursor;
+		// Resolve the cache once for the paths this step marks. A lookup per
+		// frontier row would add a row read per marked path to a pass that is
+		// bounded by rows read.
+		const cacheId = this.cacheIdOf(cache);
 
 		for (;;) {
 			let storePathHash: StorePathHash;
@@ -605,7 +648,11 @@ export class GarbageCollectionService {
 						)
 						.run();
 					tx.insert(schema.garbageCollectionMarks)
-						.values({ cache, storePathHash: frontier.storePathHash })
+						.values({
+							cache,
+							cacheId,
+							storePathHash: frontier.storePathHash
+						})
 						.onConflictDoNothing()
 						.run();
 
@@ -796,7 +843,7 @@ export class GarbageCollectionService {
 			.limit(page + 1)
 			.all();
 		const batch = rows.slice(0, page);
-		const cacheId = new CacheRepository(this.context.db).find(cache);
+		const cacheId = this.cacheIdOf(cache);
 		let pathsCollected = 0;
 
 		for (const paths of jsonRowLists(batch)) {
@@ -1152,7 +1199,11 @@ export class GarbageCollectionService {
 
 		this.context.db
 			.insert(schema.garbageCollectionTenantRuns)
-			.values({ id: 1, cache: first.cache })
+			.values({
+				id: 1,
+				cache: first.cache,
+				cacheId: this.cacheIdOf(first.cache)
+			})
 			.run();
 
 		return first.cache;
@@ -1177,7 +1228,7 @@ export class GarbageCollectionService {
 
 		this.context.db
 			.update(schema.garbageCollectionTenantRuns)
-			.set({ cache: next.cache })
+			.set({ cache: next.cache, cacheId: this.cacheIdOf(next.cache) })
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.run();
 
