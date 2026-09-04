@@ -3,6 +3,15 @@ import type { DrizzleSqliteDODatabase } from 'drizzle-orm/durable-sqlite';
 
 import { sha256Hex } from '../crypto/crypto.ts';
 
+import {
+	clearBoundedLocalMigration,
+	type LocalMigrationBudget,
+	localMigrationBudget,
+	type LocalMigrationResult,
+	runBoundedLocalMigration
+} from './bounded-migration.ts';
+import { localMigrationRecipe } from './migration-recipes.ts';
+
 interface JournalEntry {
 	readonly idx: number;
 	readonly when: number;
@@ -441,11 +450,13 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  */
 export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,
-	bundle: MigrationBundle
-): Promise<void> {
+	bundle: MigrationBundle,
+	options: { readonly budget?: LocalMigrationBudget } = {}
+): Promise<LocalMigrationResult> {
 	const digests = await digestsOf(bundle);
 	const rows = admit(database, bundle, digests);
 	const entries = bundle.journal.entries.toSorted((a, b) => a.idx - b.idx);
+	const budget = options.budget ?? localMigrationBudget();
 
 	// Admission proved the recorded rows are a prefix of the journal, so each
 	// row pairs with the entry at its position and the migrations still to run
@@ -461,11 +472,39 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	}
 
 	for (const entry of entries.slice(rows.length)) {
-		applyMigration(
-			database,
-			entry,
-			statementsOf(bundle, entry),
-			digestOf(digests, entry)
-		);
+		const statements = statementsOf(bundle, entry);
+		const recipe = localMigrationRecipe(entry.tag, statements);
+
+		if (recipe === undefined) {
+			applyMigration(database, entry, statements, digestOf(digests, entry));
+			continue;
+		}
+
+		let result: LocalMigrationResult;
+
+		try {
+			result = runBoundedLocalMigration(database, recipe, budget);
+		} catch (error) {
+			throw new DurableObjectMigrationError(
+				entry.tag,
+				'bounded migration recipe',
+				error
+			);
+		}
+
+		if (result.kind === 'pending') {
+			return result;
+		}
+
+		const verificationState: VerificationState = 'verified';
+		const digest = digestOf(digests, entry);
+		database.transaction((tx) => {
+			clearBoundedLocalMigration(tx);
+			tx.run(
+				sql`INSERT INTO ${sql.identifier(trackingTable)} (hash, created_at, digest, verification_state) VALUES (${entry.tag}, ${entry.when}, ${digest}, ${verificationState})`
+			);
+		});
 	}
+
+	return { kind: 'complete' };
 }
