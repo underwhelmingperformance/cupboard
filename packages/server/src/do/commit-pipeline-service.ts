@@ -651,6 +651,8 @@ export class CommitPipelineService {
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
 							cache: sql<string>`${cache}`.as('cache'),
+							cacheKind: sql<null>`null`.as('cache_kind'),
+							cacheName: sql<null>`null`.as('cache_name'),
 							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
 								'store_path_hash'
 							),
@@ -1085,6 +1087,7 @@ export class CommitPipelineService {
 				.select(
 					batch.insertSource([
 						batch.column('cache'),
+						sql`null`,
 						batch.column('rootName'),
 						batch.column('storePathHash'),
 						batch.column('storePath')

@@ -710,6 +710,7 @@ export class DeletionQueueService {
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
+						sql`null`,
 						rows.column('storePathHash'),
 						rows.column('narHash'),
 						rows.column('generation'),
