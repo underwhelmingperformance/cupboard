@@ -77,6 +77,25 @@ export class DeploymentPhaseUnsettledError extends CliError {
 	}
 }
 
+export class LocalStepUnreachedError extends CliError {
+	constructor(
+		public readonly pending: number,
+		public readonly requiredStep: number,
+		public readonly stragglers: readonly string[]
+	) {
+		const unnamed = pending - stragglers.length;
+		const named =
+			unnamed > 0
+				? `${stragglers.join(', ')} and ${String(unnamed)} more`
+				: stragglers.join(', ');
+
+		super(
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. The control plane wakes an idle tenant on its own schedule, so re-run the deploy once every tenant has reached the step.`
+		);
+		this.name = 'LocalStepUnreachedError';
+	}
+}
+
 export class InvalidCacheNameError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);

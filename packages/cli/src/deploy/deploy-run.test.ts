@@ -415,6 +415,7 @@ describe('runDeploy', () => {
 			'config:cupboard',
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
+			'd1qr:SELECT count',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -720,6 +721,7 @@ describe('runDeploy', () => {
 				'config:cupboard',
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
+				'd1qr:SELECT count',
 				'd1q:INSERT INTO '
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
@@ -805,6 +807,7 @@ describe('runDeploy', () => {
 			'config:cupboard',
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
+			'd1qr:SELECT count',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -892,6 +895,7 @@ describe('runDeploy', () => {
 				'config:cupboard',
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
+				'd1qr:SELECT count',
 				'd1q:INSERT INTO '
 			],
 			warnings: [
