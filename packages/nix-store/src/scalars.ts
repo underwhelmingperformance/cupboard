@@ -191,6 +191,18 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 // uses the same first-character rule and alphabet as a complete cache name.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
+/**
+ * Which cache something refers to: the default cache, which has no name,
+ * or a named cache. A stored cache name (`StoredCache`) spells the same
+ * thing together with the cache's namespace: the empty string for the
+ * default cache, `private/<name>` for a private named cache.
+ */
+export const cacheScopeSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema })
+]);
+export type CacheScope = z.output<typeof cacheScopeSchema>;
+
 // The default cache's selector. Its stored name is the empty string, which
 // cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell it
 // `_default`. The leading underscore fails `cacheNamePattern`, so the selector
