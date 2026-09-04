@@ -39,10 +39,12 @@ import {
 
 import type { R2ObjectKey } from '../http/http.ts';
 
+import { type CacheId } from './cache.ts';
+
 export const cacheIdentities = sqliteTable(
 	'cache_identity',
 	{
-		id: integer('id').primaryKey({ autoIncrement: true }),
+		id: integer('id').primaryKey({ autoIncrement: true }).$type<CacheId>(),
 		kind: text('kind', { enum: ['default', 'named'] }).notNull(),
 		name: text('name'),
 		access: text('access', { enum: ['public', 'private'] }),
@@ -71,7 +73,7 @@ export const narInfos = sqliteTable(
 	'narinfo',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
@@ -139,7 +141,7 @@ export const pendingUploads = sqliteTable(
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -195,7 +197,7 @@ export const pendingAttestations = sqliteTable(
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>(),
@@ -216,7 +218,7 @@ export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		// The generation of the narinfo version this deletion captured, so the D1
@@ -399,7 +401,7 @@ export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		name: text('name').$type<RootName>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
@@ -422,7 +424,7 @@ export const retentionRootTargets = sqliteTable(
 	'retention_root_target',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull()
@@ -442,7 +444,7 @@ export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		retainUntil: text('retain_until').$type<IsoTimestamp>().notNull()
 	},
@@ -460,14 +462,14 @@ export const garbageCollectionRevisions = sqliteTable(
 	'garbage_collection_revision',
 	{
 		cache: text('cache').$type<StoredCache>().primaryKey(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		revision: integer('revision').notNull().default(0)
 	}
 );
 
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cache: text('cache').$type<StoredCache>().primaryKey(),
-	cacheId: integer('cache_id'),
+	cacheId: integer('cache_id').$type<CacheId>(),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
@@ -484,7 +486,7 @@ export const garbageCollectionFrontier = sqliteTable(
 	'garbage_collection_frontier',
 	{
 		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -494,7 +496,7 @@ export const garbageCollectionMarks = sqliteTable(
 	'garbage_collection_mark',
 	{
 		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -508,7 +510,7 @@ export const garbageCollectionTenantRuns = sqliteTable(
 	{
 		id: integer('id').primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id')
+		cacheId: integer('cache_id').$type<CacheId>()
 	}
 );
 
@@ -532,7 +534,7 @@ export const retentionPolicies = sqliteTable(
 		scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
 		pattern: text('pattern').notNull(),
 		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		rootNamePrefix: text('root_name_prefix'),
 		defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
@@ -567,7 +569,7 @@ export const retentionGracePolicies = sqliteTable(
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
 	cache: text('cache').$type<StoredCache>().notNull().default(''),
-	cacheId: integer('cache_id'),
+	cacheId: integer('cache_id').$type<CacheId>(),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
