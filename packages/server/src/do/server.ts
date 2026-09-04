@@ -1447,12 +1447,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async migrateAndSeed(): Promise<void> {
 		// The meter is cumulative and a purged object can initialise again. Measure
-		// only this migration interval; its sole await does not access the database.
+		// only this migration interval; the awaited operations (hashing the bundled
+		// migrations, probing zstd) do not access the database.
 		this.context.dbCost.recordOutstanding();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		applyMigrations(this.context.db, migrations);
+		await applyMigrations(this.context.db, migrations);
 		await this.assertZstdAvailable();
 
 		// The default cache always exists in the registry so its priority is
