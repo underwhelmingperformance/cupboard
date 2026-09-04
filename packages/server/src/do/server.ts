@@ -1865,23 +1865,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Apply the verdicts the upload rows are still holding. A pass that left the
-	// queue no shorter failed on every verdict it tried, so it reports a stall
-	// and waits before the next attempt.
+	// A pass that resolved none of its page failed on every verdict it tried,
+	// so it reports a stall and waits. Do not judge this by the number of held
+	// verdicts: a commit can record a new one while the pass runs.
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
-		const before = this.verification.recordedVerdictCount();
-		await this.metered('verdict-drain', (logger) =>
+		const page = await this.metered('verdict-drain', (logger) =>
 			this.withMaintenanceEligibility(() =>
 				this.verification.applyRecordedVerdicts(logger)
 			)
 		);
-		const remaining = this.verification.recordedVerdictCount();
 
-		if (remaining === 0) {
+		if (!this.verification.hasRecordedVerdicts()) {
 			return 'progressed';
 		}
 
-		if (remaining >= before) {
+		if (page.resolved === 0) {
 			return 'stalled';
 		}
 
