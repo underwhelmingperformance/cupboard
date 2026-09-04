@@ -402,7 +402,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('serves stats, usage and check, addressing the default cache as _default', async () => {
+	it('serves stats, usage and check, addressing the default cache by the bare path', async () => {
 		await useTestServer('contract-stats');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -411,7 +411,7 @@ describe('tenant contract round trip', () => {
 			uploadMetadata({ fileSize: narBytes.byteLength })
 		);
 
-		const stats = await client.stats.cache({ cacheName: '_default' });
+		const stats = await client.stats.cache.inDefaultCache({});
 		const usage = await client.stats.usage();
 		const report = await client.check.run({ deep: true });
 
@@ -436,6 +436,35 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('refuses _default in a named-cache path and serves a named cache there', async () => {
+		await useTestServer('contract-named-cache-path');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await client.caches.put({ cacheName: 'builds', priority: 30 });
+
+		const defaultSelectorUrl = new URL(
+			'/cache/_default/stats',
+			currentOrigin()
+		);
+		const defaultSelector = await currentServer().fetch(
+			new Request(defaultSelectorUrl, {
+				headers: { authorization: `Bearer ${init.token}` }
+			})
+		);
+		await defaultSelector.body?.cancel();
+		const named = await client.stats.cache.inNamedCache({
+			cacheName: 'builds'
+		});
+
+		expect({
+			defaultSelectorStatus: defaultSelector.status,
+			namedStorePaths: named.storePaths
+		}).toStrictEqual({
+			defaultSelectorStatus: StatusCodes.BAD_REQUEST,
+			namedStorePaths: 0
+		});
+	});
+
 	it('updates roots, deletes paths, and runs GC through the derived client', async () => {
 		await useTestServer('contract-roots');
 		const init = await bootstrap();
@@ -443,24 +472,19 @@ describe('tenant contract round trip', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata);
 
-		const set = await client.roots.set({
-			cacheName: '_default',
+		const set = await client.roots.set.inDefaultCache({
 			name: 'github:owner/repo/main',
 			targets: [metadata.storePath]
 		});
-		const listed = await client.roots.list({
-			params: { cacheName: '_default' }
+		const listed = await client.roots.list.inDefaultCache({});
+		const targetsPage = await client.roots.targets.inDefaultCache({
+			name: 'github:owner/repo/main',
+			limit: 1
 		});
-		const targetsPage = await client.roots.targets({
-			params: { cacheName: '_default', name: 'github:owner/repo/main' },
-			query: { limit: 1 }
-		});
-		const removedRoot = await client.roots.remove({
-			cacheName: '_default',
+		const removedRoot = await client.roots.remove.inDefaultCache({
 			name: 'github:owner/repo/main'
 		});
-		const removedPath = await client.paths.remove({
-			cacheName: '_default',
+		const removedPath = await client.paths.remove.inDefaultCache({
 			hash: metadata.storePathHash
 		});
 		const collected = await client.gc.runAll();
@@ -502,8 +526,7 @@ describe('tenant contract round trip', () => {
 		const client = tenantClient(init.token);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		const negotiated = await client.uploads.negotiate({
-			cacheName: '_default',
+		const negotiated = await client.uploads.negotiate.inDefaultCache({
 			pushId: testPushId,
 			paths: [uploadPathNegotiation(metadata)]
 		});
@@ -534,8 +557,7 @@ describe('tenant contract round trip', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		const [error] = await safe(
-			client.uploads.negotiate({
-				cacheName: '_default',
+			client.uploads.negotiate.inDefaultCache({
 				pushId: 'f'.repeat(96),
 				paths: [uploadPathNegotiation(metadata)]
 			})
@@ -553,9 +575,8 @@ describe('tenant contract round trip', () => {
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
 
-		const issued = await client.uploads.credential({ cacheName: '_default' });
-		const refreshed = await client.uploads.credential({
-			cacheName: '_default',
+		const issued = await client.uploads.credential.inDefaultCache({});
+		const refreshed = await client.uploads.credential.inDefaultCache({
 			pushId: issued.pushId
 		});
 
@@ -584,10 +605,7 @@ describe('tenant contract round trip', () => {
 		});
 
 		const [forgedError] = await safe(
-			client.uploads.credential({
-				cacheName: '_default',
-				pushId: 'f'.repeat(96)
-			})
+			client.uploads.credential.inDefaultCache({ pushId: 'f'.repeat(96) })
 		);
 
 		expect(forgedError).toBeInstanceOf(ORPCError);
@@ -612,8 +630,7 @@ describe('tenant contract round trip', () => {
 
 		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
 		const digest = await sha256HexBytes(bundle);
-		const negotiated = await client.attestations.negotiate({
-			cacheName: '_default',
+		const negotiated = await client.attestations.negotiate.inDefaultCache({
 			pushId: testPushId,
 			bundles: [{ storePathHash: metadata.storePathHash, digest }]
 		});
@@ -626,8 +643,7 @@ describe('tenant contract round trip', () => {
 			.parse(negotiated.bundles);
 
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
-		const attached = await client.attestations.attach({
-			cacheName: '_default',
+		const attached = await client.attestations.attach.inDefaultCache({
 			id: decision.uploadId
 		});
 
@@ -645,8 +661,7 @@ describe('tenant contract round trip', () => {
 		const client = tenantClient(init.token);
 
 		const [error] = await safe(
-			client.attestations.negotiate({
-				cacheName: '_default',
+			client.attestations.negotiate.inDefaultCache({
 				pushId: 'f'.repeat(96),
 				bundles: [{ storePathHash: 'a'.repeat(32), digest: 'b'.repeat(64) }]
 			})

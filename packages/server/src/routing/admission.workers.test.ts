@@ -409,10 +409,10 @@ describe('layered admission gate', () => {
 		};
 
 		const [preview, negotiate, previewPut, previewChild] = await Promise.all([
-			request('/cache/_default/uploads/preview'),
-			request('/cache/_default/uploads'),
-			request('/cache/_default/uploads/preview', 'PUT'),
-			request('/cache/_default/uploads/preview/child')
+			request('/cache/builds/uploads/preview'),
+			request('/cache/builds/uploads'),
+			request('/cache/builds/uploads/preview', 'PUT'),
+			request('/cache/builds/uploads/preview/child')
 		]);
 
 		expect({
@@ -446,17 +446,14 @@ describe('layered admission gate', () => {
 
 			const ctx = createExecutionContext();
 			const response = await worker.fetch(
-				new Request(
-					`https://cache.example/t/${slug}/cache/_default/uploads/preview`,
-					{
-						body: JSON.stringify({ paths: [] }),
-						headers: {
-							authorization: `Bearer ${token}`,
-							'content-type': 'application/json'
-						},
-						method: 'POST'
-					}
-				),
+				new Request(`https://cache.example/t/${slug}/uploads/preview`, {
+					body: JSON.stringify({ paths: [] }),
+					headers: {
+						authorization: `Bearer ${token}`,
+						'content-type': 'application/json'
+					},
+					method: 'POST'
+				}),
 				env,
 				ctx
 			);

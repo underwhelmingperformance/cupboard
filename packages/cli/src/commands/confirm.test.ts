@@ -1,5 +1,5 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedUploadConfirmResponse,
@@ -16,6 +16,7 @@ import {
 	ConfirmIncompleteError,
 	PathsNotConfirmedError
 } from '../errors.ts';
+import { cacheScopedDouble } from '../test-support.ts';
 
 import { type ConfirmClient, runConfirm } from './confirm.ts';
 
@@ -31,32 +32,52 @@ const appHash = StorePath.hash(appPath);
 const runtimeHash = StorePath.hash(runtimePath);
 
 function confirmClient(response: ParsedUploadConfirmResponse): ConfirmClient {
-	return { confirm: () => Promise.resolve(response) };
+	return { confirm: cacheScopedDouble(() => Promise.resolve(response)) };
 }
 
 describe('runConfirm', () => {
 	it('resolves store paths to hashes and calls confirm against the exact cache', async () => {
-		const calls: { cacheName: string; storePathHashes: string[] }[] = [];
+		const calls: { cacheName?: string; storePathHashes: string[] }[] = [];
 		const { ui } = fakeCliUi();
 
-		const cacheName = selectorForCache(storedCacheFor('pr-1'));
+		await runConfirm(
+			storedCacheFor('pr-1'),
+			[appPath, runtimePath],
+			ui.reporter(),
+			{
+				confirm: cacheScopedDouble((input) => {
+					calls.push(input);
 
-		await runConfirm(cacheName, [appPath, runtimePath], ui.reporter(), {
-			confirm(input) {
-				calls.push(input);
-
-				return Promise.resolve({
-					paths: [
-						{ storePathHash: appHash, confirmed: true, grace: {} },
-						{ storePathHash: runtimeHash, confirmed: true, grace: {} }
-					]
-				});
+					return Promise.resolve({
+						paths: [
+							{ storePathHash: appHash, confirmed: true, grace: {} },
+							{ storePathHash: runtimeHash, confirmed: true, grace: {} }
+						]
+					});
+				})
 			}
-		});
+		);
 
 		expect(calls).toStrictEqual([
 			{ cacheName: 'pr-1', storePathHashes: [appHash, runtimeHash] }
 		]);
+	});
+
+	it('addresses the default cache by the bare path', async () => {
+		const calls: { cacheName?: string; storePathHashes: string[] }[] = [];
+		const { ui } = fakeCliUi();
+
+		await runConfirm(DEFAULT_CACHE, [appPath], ui.reporter(), {
+			confirm: cacheScopedDouble((input) => {
+				calls.push(input);
+
+				return Promise.resolve({
+					paths: [{ storePathHash: appHash, confirmed: true, grace: {} }]
+				});
+			})
+		});
+
+		expect(calls).toStrictEqual([{ storePathHashes: [appHash] }]);
 	});
 
 	it.each<{
@@ -89,7 +110,7 @@ describe('runConfirm', () => {
 
 		try {
 			await runConfirm(
-				'_default',
+				DEFAULT_CACHE,
 				[appPath],
 				ui.reporter(),
 				confirmClient(response)
@@ -118,7 +139,7 @@ describe('runConfirm', () => {
 
 		try {
 			await runConfirm(
-				'_default',
+				DEFAULT_CACHE,
 				[appPath, runtimePath],
 				ui.reporter(),
 				confirmClient(response)
@@ -141,7 +162,12 @@ describe('runConfirm', () => {
 		});
 
 		await expect(
-			runConfirm('_default', [appPath], ui.reporter(), confirmClient(response))
+			runConfirm(
+				DEFAULT_CACHE,
+				[appPath],
+				ui.reporter(),
+				confirmClient(response)
+			)
 		).resolves.toBeUndefined();
 	});
 
@@ -158,8 +184,8 @@ describe('runConfirm', () => {
 		let error: unknown;
 
 		try {
-			await runConfirm('_default', storePaths, ui.reporter(), {
-				confirm(input) {
+			await runConfirm(DEFAULT_CACHE, storePaths, ui.reporter(), {
+				confirm: cacheScopedDouble((input) => {
 					requests += 1;
 
 					if (requests > 1) {
@@ -175,7 +201,7 @@ describe('runConfirm', () => {
 							}))
 						})
 					);
-				}
+				})
 			});
 		} catch (error_: unknown) {
 			error = error_;
@@ -205,8 +231,8 @@ describe('runConfirm', () => {
 		const abort = new CliAbortError();
 		let requests = 0;
 
-		const pending = runConfirm('_default', storePaths, ui.reporter(), {
-			confirm(input) {
+		const pending = runConfirm(DEFAULT_CACHE, storePaths, ui.reporter(), {
+			confirm: cacheScopedDouble((input) => {
 				requests += 1;
 
 				if (requests > 1) {
@@ -222,7 +248,7 @@ describe('runConfirm', () => {
 						}))
 					})
 				);
-			}
+			})
 		});
 
 		await expect(pending).rejects.toBe(abort);
@@ -243,8 +269,8 @@ describe('runConfirm', () => {
 		const hashes = storePaths.map((storePath) => StorePath.hash(storePath));
 		const calls: string[][] = [];
 
-		await runConfirm('_default', storePaths, ui.reporter(), {
-			confirm(input) {
+		await runConfirm(DEFAULT_CACHE, storePaths, ui.reporter(), {
+			confirm: cacheScopedDouble((input) => {
 				calls.push(input.storePathHashes);
 
 				return Promise.resolve(
@@ -256,7 +282,7 @@ describe('runConfirm', () => {
 						}))
 					})
 				);
-			}
+			})
 		});
 
 		expect({
