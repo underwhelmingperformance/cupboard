@@ -17,6 +17,7 @@ const workerBundleSchema = z.object({
 
 const d1MigrationSchema = z.object({
 	name: z.string(),
+	sha256: z.string(),
 	statements: z.array(z.string())
 });
 

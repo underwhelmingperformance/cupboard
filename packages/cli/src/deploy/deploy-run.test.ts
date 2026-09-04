@@ -92,7 +92,14 @@ const artifact: DeploymentArtifact = {
 	},
 	controlBundle: { mainModule: 'worker.js', code: 'control' },
 	tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant' },
-	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }],
+	d1Migrations: [
+		{
+			name: '0000_a.sql',
+			sha256:
+				'7f07f8d020fed7a8f79462634bc21708339f44069448533d8d9a9973f4386065',
+			statements: ['CREATE TABLE a (id);']
+		}
+	],
 	buildVersion: 'abc123def456'
 };
 
@@ -349,6 +356,8 @@ describe('runDeploy', () => {
 			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
+			'd1qr:SELECT name ',
+			'd1q:ALTER TABLE ',
 			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'unexpected:getScriptConfiguration',
@@ -657,6 +666,8 @@ describe('runDeploy', () => {
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
+				'd1q:ALTER TABLE ',
+				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
 				'workers-dev:cupboard-tenant:false:false',
 				'workers-dev:cupboard-tenant:false:false',
@@ -746,6 +757,8 @@ describe('runDeploy', () => {
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
+			'd1q:ALTER TABLE ',
+			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
@@ -822,6 +835,8 @@ describe('runDeploy', () => {
 				'd1:cupboard',
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
+				'd1qr:SELECT name ',
+				'd1q:ALTER TABLE ',
 				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
 				'unexpected:getScriptConfiguration',
