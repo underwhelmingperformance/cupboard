@@ -136,6 +136,14 @@ export class CacheRepository {
 		return created.id;
 	}
 
+	markGraceManaged(cache: StoredCache): void {
+		this.database
+			.update(schema.cacheIdentities)
+			.set({ graceManaged: true })
+			.where(this.liveIdentity(cache))
+			.run();
+	}
+
 	setPriority(cache: StoredCache, priority: CachePriority): void {
 		this.database
 			.update(schema.cacheIdentities)
