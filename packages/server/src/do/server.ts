@@ -17,7 +17,6 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
-import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -148,7 +147,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
-import { recordLocalStep } from './local-step.ts';
+import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -2404,7 +2403,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 * The control plane calls this to advance a tenant with no traffic of its
 	 * own, so a deployment does not wait on an idle object.
 	 */
-	async reportLocalStep(): Promise<LocalStep | undefined> {
+	async reportLocalStep(): Promise<LocalStepOutcome> {
 		await this.initialise();
 
 		return this.metered('local-step', () => recordLocalStep(this.context));
