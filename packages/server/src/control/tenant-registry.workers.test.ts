@@ -35,6 +35,7 @@ import {
 	type ReadPasswordSalt,
 	readPasswordSaltSchema
 } from '../read/read-auth.ts';
+import { withoutCacheMirrorTriggers } from '../test-support.ts';
 
 import {
 	clearCacheReadCredential,
@@ -949,6 +950,36 @@ describe('private cache read credentials', () => {
 				acceptsPassword: true,
 				storesPlaintext: false
 			}
+		]);
+	});
+
+	// The mirroring trigger writes the same values for a row inserted with
+	// them null, so the write runs with the triggers dropped.
+	it('records the cache identity beside the legacy key', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		await withoutCacheMirrorTriggers(() =>
+			setCacheReadCredential(
+				database(),
+				acme,
+				builds,
+				readCredential('reader'),
+				now
+			)
+		);
+
+		const rows = await database()
+			.select({
+				cache: d1Schema.tenantCacheReadCredential.cache,
+				cacheKind: d1Schema.tenantCacheReadCredential.cacheKind,
+				cacheName: d1Schema.tenantCacheReadCredential.cacheName
+			})
+			.from(d1Schema.tenantCacheReadCredential)
+			.where(eq(d1Schema.tenantCacheReadCredential.tenant, acme))
+			.all();
+
+		expect(rows).toStrictEqual([
+			{ cache: 'private/builds', cacheKind: 'named', cacheName: 'builds' }
 		]);
 	});
 
