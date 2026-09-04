@@ -1,7 +1,6 @@
 import {
 	cacheNameSchema,
 	narInfoGenerationSchema,
-	selectorForCache,
 	storedCacheSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -28,6 +27,7 @@ import {
 	authorisedFetch,
 	blobStateCount,
 	bootstrap,
+	cacheScopedPath,
 	cacheWriteGrants,
 	CommitSocketError,
 	commitUpload,
@@ -68,7 +68,7 @@ async function putRoot(
 	storePath: string
 ): Promise<void> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/roots/${name}`,
+		cacheScopedPath(cache, `/roots/${name}`),
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),
@@ -85,7 +85,7 @@ async function statsForCache(
 	cache: string
 ): Promise<StatsResponse> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/stats`,
+		cacheScopedPath(cache, '/stats'),
 		token
 	);
 
@@ -417,26 +417,27 @@ describe('named caches', () => {
 		});
 	});
 
-	it('authenticates before judging an invalid cache name', async () => {
+	it('refuses a malformed cache name in the path with or without a valid token', async () => {
 		await useTestServer('named-cache-invalid');
 
-		// The contract authenticates ahead of input validation, so a request
-		// without a valid token learns nothing about the path's validity.
+		// Middleware parses the cache prefix before any route runs, so the
+		// refusal comes before authentication. The 400 reveals only that the path
+		// segment is not a cache selector, and nothing about the tenant.
 		const unauthenticated = await authorisedFetch(
 			'/cache/Bad_NAME!/stats',
 			'any-token'
 		);
-		const malformed = await authorisedFetch(
+		const authenticated = await authorisedFetch(
 			'/cache/Bad_NAME!/stats',
 			await issueServerSignedToken(adminGrants())
 		);
 
 		expect({
 			unauthenticated: unauthenticated.status,
-			malformed: malformed.status
+			authenticated: authenticated.status
 		}).toStrictEqual({
-			unauthenticated: StatusCodes.UNAUTHORIZED,
-			malformed: StatusCodes.BAD_REQUEST
+			unauthenticated: StatusCodes.BAD_REQUEST,
+			authenticated: StatusCodes.BAD_REQUEST
 		});
 	});
 

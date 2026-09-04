@@ -1,9 +1,7 @@
-import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
-import { z } from 'zod';
-
 import { gcResponseSchema } from '../retention.ts';
 
 import { baseProcedure } from './base.ts';
+import { namedCacheProcedure } from './cache-scoped.ts';
 
 export const gcContract = {
 	// One tenant-wide call advances a bounded collection continuation. It does
@@ -13,13 +11,12 @@ export const gcContract = {
 		.route({ method: 'POST', path: '/gc' })
 		.output(gcResponseSchema),
 
-	runCache: baseProcedure
-		.meta({
-			requires: 'gc:run',
-			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/gc' })
-		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
-		.output(gcResponseSchema)
+	// `POST /gc` is the tenant-wide pass, so a bare path cannot also mean the
+	// default cache. Collecting the default cache alone therefore has no route;
+	// the tenant-wide pass reaches it.
+	runCache: namedCacheProcedure(
+		{ method: 'POST', suffix: '/gc', requires: 'gc:run', maintenance: true },
+		{},
+		gcResponseSchema
+	)
 };

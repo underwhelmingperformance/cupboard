@@ -2126,20 +2126,16 @@ describe('retention grace facts reported to clients', () => {
 		'acknowledges grace facts only when requested ($reportsGrace)',
 		async ({ reportsGrace: shouldAcceptGraceFacts, capabilities }) => {
 			const { token } = await bootstrap();
-			const response = await authorisedFetch(
-				`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-				token,
-				{
-					method: 'POST',
-					headers: {
-						'content-type': 'application/json',
-						...(shouldAcceptGraceFacts && {
-							[acceptCapabilitiesHeader]: uploadGraceFactsCapability
-						})
-					},
-					body: JSON.stringify({ pushId: testPushId, paths: [] })
-				}
-			);
+			const response = await authorisedFetch('/uploads', token, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					...(shouldAcceptGraceFacts && {
+						[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+					})
+				},
+				body: JSON.stringify({ pushId: testPushId, paths: [] })
+			});
 
 			expect({
 				status: response.status,
@@ -2915,15 +2911,11 @@ async function confirmPaths(
 	token: string,
 	storePathHashes: readonly string[]
 ): Promise<{ readonly status: number; readonly body: UploadConfirmResponse }> {
-	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
-		token,
-		{
-			body: JSON.stringify({ storePathHashes }),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const response = await authorisedFetch('/uploads/confirm', token, {
+		body: JSON.stringify({ storePathHashes }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 
 	return {
 		status: response.status,
@@ -3538,7 +3530,7 @@ describe('confirming an unretained publication', () => {
 		const commitToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const negotiateResponse = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
+			'/uploads',
 			confirmOnlyToken,
 			{
 				body: JSON.stringify({
@@ -3559,7 +3551,7 @@ describe('confirming an unretained publication', () => {
 		// path in the cache) is issuance-only, so a presented commit-only token
 		// must not reach confirm.
 		const confirmByCommitTokenResponse = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads/confirm`,
+			'/uploads/confirm',
 			commitToken,
 			{
 				body: JSON.stringify({ storePathHashes: [path.storePathHash] }),

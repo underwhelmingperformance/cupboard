@@ -4,8 +4,22 @@ import path from 'node:path';
 
 import { test, vi } from 'vitest';
 
+import { type CacheScopedClient } from './client/cache-scoped.ts';
+
 interface ConfigHomeFixture {
 	readonly configHome: string;
+}
+
+/**
+ * A double for a cache-scoped procedure pair. One handler answers both path
+ * variants, so a test sees the input the command sent whichever cache it
+ * addressed. Only the named-cache input carries `cacheName`, which lets a test
+ * assert which path the command chose.
+ */
+export function cacheScopedDouble<Input, Output>(
+	handler: (input: Input & { cacheName?: string }) => Promise<Output>
+): CacheScopedClient<Input, Output> {
+	return { inDefaultCache: handler, inNamedCache: handler };
 }
 
 /**

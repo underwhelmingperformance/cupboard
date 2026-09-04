@@ -65,7 +65,7 @@ function negotiate(
 	paths: readonly ReturnType<typeof uploadMetadata>[],
 	attachRoot?: UploadAttachRoot
 ): Promise<Response> {
-	return authorisedFetch(`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`, token, {
+	return authorisedFetch('/uploads', token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({

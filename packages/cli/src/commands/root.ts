@@ -2,6 +2,7 @@ import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type RootName,
 	selectorForCache,
+	type StoredCache,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type { AuthorizationDetails } from '@cupboard/protocol/grants';
@@ -29,6 +30,7 @@ import {
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import {
 	type CacheSelectionOptions,
 	CupboardClient,
@@ -80,30 +82,23 @@ export function rootListingAuthorizationDetails(
  * interface by construction.
  */
 export interface RootClient {
-	set(input: {
-		cacheName: string;
-		name: string;
-		targets: string[];
-		ttlSeconds?: number;
-	}): Promise<ParsedRootSetResponse>;
-	ensure(input: {
-		cacheName: string;
-		name: string;
-		targets: string[];
-		ttlSeconds?: number;
-	}): Promise<ParsedRootEnsureResponse>;
-	list(input: {
-		params: { cacheName: string };
-		query?: { cursor?: string; limit?: number };
-	}): Promise<ParsedRootListResponse>;
-	targets(input: {
-		params: { cacheName: string; name: string };
-		query?: { cursor?: string; limit?: number };
-	}): Promise<ParsedRootTargetsPage>;
-	remove(input: {
-		cacheName: string;
-		name: string;
-	}): Promise<ParsedRootRemoveResponse>;
+	set: CacheScopedClient<
+		{ name: string; targets: string[]; ttlSeconds?: number },
+		ParsedRootSetResponse
+	>;
+	ensure: CacheScopedClient<
+		{ name: string; targets: string[]; ttlSeconds?: number },
+		ParsedRootEnsureResponse
+	>;
+	list: CacheScopedClient<
+		{ cursor?: string; limit?: number },
+		ParsedRootListResponse
+	>;
+	targets: CacheScopedClient<
+		{ name: string; cursor?: string; limit?: number },
+		ParsedRootTargetsPage
+	>;
+	remove: CacheScopedClient<{ name: string }, ParsedRootRemoveResponse>;
 }
 
 export function registerRootCommands(
@@ -147,14 +142,14 @@ export function registerRootCommands(
 				options: RootEnsureOptions
 			) => {
 				const reporter = commandUi(program, programOptions).reporter();
-				const cacheName = selectorForCache(resolveCacheSelection(options));
+				const cache = resolveCacheSelection(options);
 				const credential = await authenticateForPush(
 					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 					{
 						githubOidc: options.githubOidc,
 						audience: options.audience ?? audienceSchema.parse(url),
 						authorizationDetails: rootEnsureAuthorizationDetails({
-							cacheSelector: cacheName,
+							cacheSelector: selectorForCache(cache),
 							root: name
 						})
 					}
@@ -165,7 +160,7 @@ export function registerRootCommands(
 				});
 
 				await runRootEnsure(
-					cacheName,
+					cache,
 					name,
 					targets,
 					options.ttl,
@@ -214,7 +209,7 @@ export function registerRootCommands(
 				});
 
 				await runRootSet(
-					selectorForCache(resolveCacheSelection(options)),
+					resolveCacheSelection(options),
 					name,
 					targets,
 					options.ttl,
@@ -241,13 +236,15 @@ export function registerRootCommands(
 		)
 		.action(async (url: URL, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
+			const cache = resolveCacheSelection(options);
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: rootListingAuthorizationDetails(cacheName)
+					authorizationDetails: rootListingAuthorizationDetails(
+						selectorForCache(cache)
+					)
 				}
 			);
 			const rpc = tenantRpc(url, {
@@ -255,7 +252,7 @@ export function registerRootCommands(
 				signal: programOptions.signal
 			});
 
-			await runRootList(cacheName, reporter, rpc.roots);
+			await runRootList(cache, reporter, rpc.roots);
 		});
 
 	root
@@ -276,13 +273,16 @@ export function registerRootCommands(
 		)
 		.action(async (url: URL, name: RootName, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(resolveCacheSelection(options));
+			const cache = resolveCacheSelection(options);
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: rootListingAuthorizationDetails(cacheName, name)
+					authorizationDetails: rootListingAuthorizationDetails(
+						selectorForCache(cache),
+						name
+					)
 				}
 			);
 			const rpc = tenantRpc(url, {
@@ -290,7 +290,7 @@ export function registerRootCommands(
 				signal: programOptions.signal
 			});
 
-			await runRootTargets(cacheName, name, reporter, rpc.roots);
+			await runRootTargets(cache, name, reporter, rpc.roots);
 		});
 
 	root
@@ -308,17 +308,12 @@ export function registerRootCommands(
 				signal: programOptions.signal
 			});
 
-			await runRootRemove(
-				selectorForCache(resolveCacheSelection(options)),
-				name,
-				ui,
-				rpc.roots
-			);
+			await runRootRemove(resolveCacheSelection(options), name, ui, rpc.roots);
 		});
 }
 
 export async function runRootEnsure(
-	cacheName: string,
+	cache: StoredCache,
 	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
@@ -326,8 +321,7 @@ export async function runRootEnsure(
 	client: Pick<RootClient, 'ensure'>
 ): Promise<void> {
 	const result = await reporter.phase('Checking retention root', () =>
-		client.ensure({
-			cacheName,
+		callInCache(client.ensure, cache, {
 			name,
 			targets: [...targets],
 			...(ttlSeconds !== undefined && { ttlSeconds })
@@ -356,7 +350,7 @@ export async function runRootEnsure(
 }
 
 export async function runRootSet(
-	cacheName: string,
+	cache: StoredCache,
 	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
@@ -364,8 +358,7 @@ export async function runRootSet(
 	client: Pick<RootClient, 'set'>
 ): Promise<void> {
 	const summary = await reporter.phase('Setting retention root', () =>
-		client.set({
-			cacheName,
+		callInCache(client.set, cache, {
 			name,
 			targets: [...targets],
 			...(ttlSeconds !== undefined && { ttlSeconds })
@@ -384,7 +377,7 @@ export async function runRootSet(
 }
 
 export async function runRootList(
-	cacheName: string,
+	cache: StoredCache,
 	reporter: Reporter,
 	client: Pick<RootClient, 'list'>
 ): Promise<void> {
@@ -393,9 +386,8 @@ export async function runRootList(
 		let cursor: string | undefined;
 
 		do {
-			const page = await client.list({
-				params: { cacheName },
-				...(cursor !== undefined && { query: { cursor } })
+			const page = await callInCache(client.list, cache, {
+				...(cursor !== undefined && { cursor })
 			});
 
 			entries.push(...page.roots);
@@ -414,7 +406,7 @@ export async function runRootList(
 }
 
 export async function runRootTargets(
-	cacheName: string,
+	cache: StoredCache,
 	name: RootName,
 	reporter: Reporter,
 	client: Pick<RootClient, 'targets'>
@@ -426,9 +418,9 @@ export async function runRootTargets(
 		let cursor: string | undefined;
 
 		do {
-			const page = await client.targets({
-				params: { cacheName, name },
-				...(cursor !== undefined && { query: { cursor } })
+			const page = await callInCache(client.targets, cache, {
+				name,
+				...(cursor !== undefined && { cursor })
 			});
 
 			collected.push(...page.targets);
@@ -450,7 +442,7 @@ export async function runRootTargets(
 }
 
 export async function runRootRemove(
-	cacheName: string,
+	cache: StoredCache,
 	name: RootName,
 	ui: CliUi,
 	client: RootClient
@@ -467,7 +459,7 @@ export async function runRootRemove(
 
 	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing retention root', () =>
-		client.remove({ cacheName, name })
+		callInCache(client.remove, cache, { name })
 	);
 
 	reporter.result({

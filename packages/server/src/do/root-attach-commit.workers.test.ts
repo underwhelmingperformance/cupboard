@@ -1,8 +1,4 @@
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	rootNameSchema
-} from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE, rootNameSchema } from '@cupboard/nix-store/scalars';
 import {
 	type UploadAttachRoot,
 	type UploadNegotiateResponse,
@@ -40,19 +36,15 @@ async function negotiateWithRoot(
 	paths: readonly ReturnType<typeof uploadMetadata>[],
 	attachRoot?: UploadAttachRoot
 ): Promise<UploadNegotiateResponse> {
-	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-		token,
-		{
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path)),
-				...(attachRoot !== undefined && { attachRoot })
-			})
-		}
-	);
+	const response = await authorisedFetch('/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			pushId: testPushId,
+			paths: paths.map((path) => uploadPathNegotiation(path)),
+			...(attachRoot !== undefined && { attachRoot })
+		})
+	});
 
 	expect(response.status).toBe(StatusCodes.OK);
 

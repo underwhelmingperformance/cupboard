@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import type { StoredCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	DeletePathResponse,
@@ -10,6 +10,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
 import {
 	type CacheSelectionOptions,
 	resolveCacheSelection
@@ -23,10 +24,7 @@ interface DeleteOptions extends CacheSelectionOptions {
 }
 
 export interface DeleteClient {
-	remove(input: {
-		cacheName: string;
-		hash: string;
-	}): Promise<ParsedDeletePathResponse>;
+	remove: CacheScopedClient<{ hash: string }, ParsedDeletePathResponse>;
 }
 
 export function registerDeleteCommand(
@@ -54,17 +52,12 @@ export function registerDeleteCommand(
 				signal: programOptions.signal
 			});
 
-			await runDelete(
-				selectorForCache(resolveCacheSelection(options)),
-				storePath,
-				ui,
-				rpc.paths
-			);
+			await runDelete(resolveCacheSelection(options), storePath, ui, rpc.paths);
 		});
 }
 
 export async function runDelete(
-	cacheName: string,
+	cache: StoredCache,
 	storePath: string,
 	ui: CliUi,
 	client: DeleteClient
@@ -82,7 +75,7 @@ export async function runDelete(
 
 	const reporter = ui.reporter();
 	const result = await reporter.phase('Deleting from cupboard', () =>
-		client.remove({ cacheName, hash: storePathHash })
+		callInCache(client.remove, cache, { hash: storePathHash })
 	);
 
 	reporter.result({

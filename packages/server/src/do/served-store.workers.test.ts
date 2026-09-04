@@ -64,12 +64,8 @@ describe('paths from another store directory', () => {
 	it('accepts a negotiate and a preview naming a path in the served store', async () => {
 		const token = await initialise();
 
-		const negotiate = await jsonPost(
-			'/cache/_default/uploads',
-			token,
-			negotiateBody(served)
-		);
-		const preview = await jsonPost('/cache/_default/uploads/preview', token, {
+		const negotiate = await jsonPost('/uploads', token, negotiateBody(served));
+		const preview = await jsonPost('/uploads/preview', token, {
 			paths: [uploadPathNegotiation(metadata)]
 		});
 
@@ -91,11 +87,11 @@ describe('paths from another store directory', () => {
 			const storePath = foreignPath(directory);
 
 			const negotiate = await jsonPost(
-				'/cache/_default/uploads',
+				'/uploads',
 				token,
 				negotiateBody(storePath)
 			);
-			const preview = await jsonPost('/cache/_default/uploads/preview', token, {
+			const preview = await jsonPost('/uploads/preview', token, {
 				paths: [{ ...uploadPathNegotiation(metadata), storePath }]
 			});
 
@@ -116,8 +112,8 @@ describe('paths from another store directory', () => {
 			await pushPath(token, metadata);
 			const targets = [foreignPath(directory)];
 
-			const set = await jsonPut('/cache/_default/roots/ci', token, { targets });
-			const ensure = await jsonPost('/cache/_default/roots/ci/ensure', token, {
+			const set = await jsonPut('/roots/ci', token, { targets });
+			const ensure = await jsonPost('/roots/ci/ensure', token, {
 				targets
 			});
 
@@ -132,7 +128,7 @@ describe('paths from another store directory', () => {
 		const token = await initialise();
 		await pushPath(token, metadata);
 
-		const set = await jsonPut('/cache/_default/roots/ci', token, {
+		const set = await jsonPut('/roots/ci', token, {
 			targets: [served]
 		});
 

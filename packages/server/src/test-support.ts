@@ -5,15 +5,17 @@ import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	cacheFromSelector,
 	type CacheGeneration,
+	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
+	namedSelectorForCache,
 	narInfoGenerationSchema,
 	nixKeyNameSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
-	selectorForCache,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type SigningKeyId,
@@ -2080,10 +2082,17 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
-Prepends the `/cache/<selector>` prefix to a cache-scoped route.
+The path for a cache-scoped route: the bare suffix for the default cache, and
+the suffix under `/cache/<selector>` for a named one.
 */
-function cacheScopedPath(cache: string, suffix: string): string {
-	return `/cache/${selectorForCache(storedCacheSchema.parse(cache))}${suffix}`;
+export function cacheScopedPath(cache: string, suffix: string): string {
+	const stored = storedCacheSchema.parse(cache);
+
+	if (stored === DEFAULT_CACHE) {
+		return suffix;
+	}
+
+	return `/cache/${namedSelectorForCache(stored)}${suffix}`;
 }
 
 // A push id signed with the test signing key (the PUSH_ID_SIGNING_KEY the worker
@@ -2162,20 +2171,16 @@ export async function negotiateViaWorker(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[]
 ): Promise<UploadNegotiateResponse> {
-	const response = await authorisedWorkerFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-		token,
-		{
-			body: JSON.stringify({
-				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path))
-			}),
-			headers: {
-				'content-type': 'application/json'
-			},
-			method: 'POST'
-		}
-	);
+	const response = await authorisedWorkerFetch('/uploads', token, {
+		body: JSON.stringify({
+			pushId: testPushId,
+			paths: paths.map((path) => uploadPathNegotiation(path))
+		}),
+		headers: {
+			'content-type': 'application/json'
+		},
+		method: 'POST'
+	});
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -2214,19 +2219,18 @@ export async function pushPathToTenant(
 	cache: string = DEFAULT_CACHE_SELECTOR
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantWorkerFetch(
-		tenant,
-		`/cache/${cache}/uploads`,
-		token,
-		{
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				pushId,
-				paths: [uploadPathNegotiation(metadata)]
-			})
-		}
+	const uploadsPath = cacheScopedPath(
+		cacheFromSelector(cacheSelectorSchema.parse(cache)),
+		'/uploads'
 	);
+	const negotiated = await tenantWorkerFetch(tenant, uploadsPath, token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			pushId,
+			paths: [uploadPathNegotiation(metadata)]
+		})
+	});
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = singleDecision(
@@ -2262,19 +2266,14 @@ export async function attemptPushToTenant(
 	nar?: VerifiableNar
 ): Promise<number> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantWorkerFetch(
-		tenant,
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-		token,
-		{
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				pushId,
-				paths: [uploadPathNegotiation(metadata)]
-			})
-		}
-	);
+	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			pushId,
+			paths: [uploadPathNegotiation(metadata)]
+		})
+	});
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
@@ -2322,19 +2321,14 @@ export async function stageDeferredForTenant(
 	nar?: VerifiableNar
 ): Promise<UploadId> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantWorkerFetch(
-		tenant,
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-		token,
-		{
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				pushId,
-				paths: [uploadPathNegotiation(metadata)]
-			})
-		}
-	);
+	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			pushId,
+			paths: [uploadPathNegotiation(metadata)]
+		})
+	});
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
@@ -2691,13 +2685,9 @@ export async function deletePath(
 	token: string,
 	storePathHash: StorePathHash
 ): Promise<DeletePathResponse> {
-	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/paths/${storePathHash}`,
-		token,
-		{
-			method: 'DELETE'
-		}
-	);
+	const response = await authorisedFetch(`/paths/${storePathHash}`, token, {
+		method: 'DELETE'
+	});
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -2710,7 +2700,7 @@ export async function setRoot(
 ): Promise<RootSetResponse> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}`,
+		`/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify(body),
@@ -2729,7 +2719,7 @@ export async function listRoots(
 	options: { readonly cursor?: string; readonly limit?: number } = {}
 ): Promise<RootListResponse> {
 	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/roots${listPageQuery(options)}`,
+		`/roots${listPageQuery(options)}`,
 		token
 	);
 
@@ -2747,7 +2737,7 @@ export async function listRootTargets(
 	options: { readonly cursor?: string; readonly limit?: number } = {}
 ): Promise<z.output<typeof rootTargetsPageSchema>> {
 	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}/targets${listPageQuery(options)}`,
+		`/roots/${encodeURIComponent(name)}/targets${listPageQuery(options)}`,
 		token
 	);
 
@@ -2773,7 +2763,7 @@ export async function removeRoot(
 	name: string
 ): Promise<RootRemoveResponse> {
 	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/roots/${encodeURIComponent(name)}`,
+		`/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			method: 'DELETE'
@@ -3022,9 +3012,8 @@ export async function expectTextResponse(
 	});
 }
 
-// The contract addresses the default cache as `_default`; there is no bare
-// `/stats` route.
-export const defaultCacheStatsPath = `/cache/${DEFAULT_CACHE_SELECTOR}/stats`;
+// The contract addresses the default cache by the bare path.
+export const defaultCacheStatsPath = '/stats';
 
 export async function expectStats(
 	token: string,
