@@ -252,6 +252,51 @@ describe('cache registry admin', () => {
 		});
 	});
 
+	it('binds a published path to the cache identity', async () => {
+		await useTestServer('cache-admin-identity-binding');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		// A commit deletes the pending row, so negotiate a second path and leave
+		// it uncommitted so that a pending row survives to be read.
+		await negotiateUploads(
+			init.token,
+			[
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash: repeated('c')
+				})
+			],
+			'builds'
+		);
+
+		const [identity] = await cacheIdentities();
+		const bound = await runInDurableObject(currentServer(), (instance) => ({
+			narInfos: instance.context.db
+				.select({ cacheId: schema.narInfos.cacheId })
+				.from(schema.narInfos)
+				.all(),
+			pendingUploads: instance.context.db
+				.select({ cacheId: schema.pendingUploads.cacheId })
+				.from(schema.pendingUploads)
+				.all()
+		}));
+
+		expect({ identity: identity?.id, bound }).toStrictEqual({
+			identity: 1,
+			bound: {
+				narInfos: [{ cacheId: 1 }],
+				pendingUploads: [{ cacheId: 1 }]
+			}
+		});
+	});
+
 	it('gives each incarnation of a cache name its own identity', async () => {
 		await useTestServer('cache-admin-identity');
 

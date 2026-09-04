@@ -41,6 +41,7 @@ import { type BatchItem } from 'drizzle-orm/batch';
 import { signNixFingerprint } from '../crypto/crypto.ts';
 import { cacheIdentityColumns } from '../db/cache.ts';
 import { currentCacheGeneration } from '../db/cache-generation.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -1672,7 +1673,10 @@ export class CommitPipelineService {
 		isStillOwned?: () => boolean
 	): Promise<ReserveOutcome | undefined> {
 		const now = isoTimestamp(new Date());
+
 		await this.cacheAdmin.loadOrCreateCache(cache);
+
+		const cacheId = new CacheRepository(this.context.db).find(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
 		// Nix signatures cover the uncompressed NAR identity, not its compressed
 		// encoding. The compressed file hash and size are therefore unnecessary here.
@@ -1719,6 +1723,7 @@ export class CommitPipelineService {
 				.insert(schema.narInfos)
 				.values({
 					cache,
+					cacheId,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,

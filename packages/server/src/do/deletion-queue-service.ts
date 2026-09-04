@@ -27,6 +27,7 @@ import {
 	secondCacheGeneration
 } from '../db/cache-generation.ts';
 import { outsidePrivateCaches } from '../db/cache-range.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
@@ -706,13 +707,19 @@ export class DeletionQueueService {
 		entries: readonly TornDownNarInfo[],
 		now: IsoTimestamp
 	): void {
+		if (entries.length === 0) {
+			return;
+		}
+
+		const cacheId = new CacheRepository(handle).find(cache);
+
 		for (const rows of jsonRowLists(entries)) {
 			handle
 				.insert(schema.narInfoDeletions)
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
-						sql`null`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
 						rows.column('storePathHash'),
 						rows.column('narHash'),
 						rows.column('generation'),
