@@ -56,6 +56,7 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
 import {
@@ -1489,16 +1490,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.assertZstdAvailable();
 
 		// The default cache always exists in the registry so its priority is
-		// resolved the same way as a named cache's. Idempotent across restarts.
+		// resolved the same way as a named cache's, and its identity exists
+		// before any row refers to it. Idempotent across restarts.
+		const defaultPriority = cachePrioritySchema.parse(
+			CacheInfo.default.priority
+		);
+		const now = isoTimestamp(new Date());
+
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: DEFAULT_CACHE,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
+				priority: defaultPriority,
+				createdAt: now
 			})
 			.onConflictDoNothing()
 			.run();
+		new CacheRepository(this.context.db).ensure(
+			DEFAULT_CACHE,
+			defaultPriority,
+			now
+		);
 
 		this.oidcTrust.seedOwnerRule();
 

@@ -54,6 +54,10 @@ import {
 
 const localName = cacheNameSchema.parse('builds');
 const sibling = cacheNameSchema.parse('guides');
+// A public cache beside the private ones. An earlier test registers a private
+// `guides`, and the object refuses a public cache of a name whose live
+// identity is private.
+const publicSibling = cacheNameSchema.parse('docs');
 const privateSelector = `_private-${localName}`;
 const privatePrefix = `/private-cache/${localName}`;
 const tenant = tenantIdSchema.parse(fixtureTenant);
@@ -572,7 +576,7 @@ describe('private cache namespace', () => {
 
 	it("creates and removes a private cache by selector without removing another cache or the private cache's read credential", async () => {
 		const published = await publishToPrivateCache();
-		await authorisedWorkerFetch(`/caches/${sibling}`, published.token, {
+		await authorisedWorkerFetch(`/caches/${publicSibling}`, published.token, {
 			body: JSON.stringify({ priority: 41 }),
 			headers: { 'content-type': 'application/json' },
 			method: 'PUT'
@@ -601,7 +605,10 @@ describe('private cache namespace', () => {
 		);
 		const listed = await authorisedWorkerFetch('/caches', published.token);
 		const registry = cacheNamesSchema.parse(await listed.json());
-		const touched = new Set<string>([sibling, privateStoredCache(localName)]);
+		const touched = new Set<string>([
+			publicSibling,
+			privateStoredCache(localName)
+		]);
 
 		expect({
 			created: await created.json(),
@@ -624,7 +631,7 @@ describe('private cache namespace', () => {
 				removed: true,
 				storePathsRemoved: 1
 			},
-			caches: [sibling],
+			caches: [publicSibling],
 			credentials: [{ tenant, cache: privateStoredCache(localName) }]
 		});
 	});
