@@ -143,6 +143,28 @@ export class CacheAdminService {
 	}
 
 	/**
+	 * What is registered against one cache, read either from the legacy table or
+	 * from the identity table. Both hold the same values while a deployment
+	 * stores each cache twice.
+	 */
+	private async registeredCache(
+		cache: StoredCache
+	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
+		if (await this.phases.hasReached('native-reads')) {
+			return this.identities.readRegistration(cache);
+		}
+
+		return this.context.db
+			.select({
+				priority: schema.caches.priority,
+				graceManaged: schema.caches.graceManaged
+			})
+			.from(schema.caches)
+			.where(eq(schema.caches.name, cache))
+			.get();
+	}
+
+	/**
 	 * The registered caches, read either from the legacy table or from the
 	 * identity table.
 	 *
@@ -193,12 +215,8 @@ export class CacheAdminService {
 			});
 	}
 
-	cacheInfoBody(cache: StoredCache): string {
-		const row = this.context.db
-			.select({ priority: schema.caches.priority })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.get();
+	async cacheInfoBody(cache: StoredCache): Promise<string> {
+		const row = await this.registeredCache(cache);
 		const info = new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
@@ -311,12 +329,11 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: StoredCache, priority: CachePriority): CacheSummary {
-		const managed = this.context.db
-			.select({ graceManaged: schema.caches.graceManaged })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.get();
+	async cacheSummary(
+		cache: StoredCache,
+		priority: CachePriority
+	): Promise<CacheSummary> {
+		const managed = await this.registeredCache(cache);
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {

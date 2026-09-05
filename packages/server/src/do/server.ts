@@ -653,20 +653,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.get(
 			'/cache/:cacheName/nix-cache-info',
 			refusePrivateCache,
-			(context) =>
+			async (context) =>
 				textResponse(
 					context.req.raw,
-					this.cacheAdmin.cacheInfoBody(context.get('cache')),
+					await this.cacheAdmin.cacheInfoBody(context.get('cache')),
 					{
 						'content-type': 'text/x-nix-cache-info; charset=utf-8'
 					}
 				)
 		);
 
-		this.app.get('/private-cache/:cacheName/nix-cache-info', (context) =>
+		this.app.get('/private-cache/:cacheName/nix-cache-info', async (context) =>
 			textResponse(
 				context.req.raw,
-				this.cacheAdmin.cacheInfoBody(context.get('cache')),
+				await this.cacheAdmin.cacheInfoBody(context.get('cache')),
 				{
 					'content-type': 'text/x-nix-cache-info; charset=utf-8',
 					'cache-control': 'no-store'
