@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import {
+	identityForCache,
 	type RootName,
 	type StoredCache,
 	storePathBasenameSchema,
@@ -349,6 +350,7 @@ export class GarbageCollectionService {
 			// between separate operations could leave the path with no retention source.
 			this.retention.applyGraceTransitions(
 				cache,
+				identityForCache(cache).access,
 				expiredRootTargets.flatMap((target) => {
 					const anchorIso = expiryByRoot.get(target.rootName);
 
