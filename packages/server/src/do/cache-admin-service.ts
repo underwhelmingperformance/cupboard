@@ -147,6 +147,27 @@ export class CacheAdminService {
 	}
 
 	/**
+	 * One cache's priority and grace flag, read from the same table
+	 * `registeredCaches` reads.
+	 */
+	private async registeredCache(
+		cache: StoredCache
+	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
+		if (await this.phases.hasReached('native-reads')) {
+			return this.identities.readRegistration(cache);
+		}
+
+		return this.context.db
+			.select({
+				priority: schema.caches.priority,
+				graceManaged: schema.caches.graceManaged
+			})
+			.from(schema.caches)
+			.where(eq(schema.caches.name, cache))
+			.get();
+	}
+
+	/**
 	 * The registered caches, from the identity table once the deployment has
 	 * reached `native-reads` and from the legacy table before that. Both tables
 	 * are written until the legacy key is dropped, so the two readings agree.
@@ -191,12 +212,8 @@ export class CacheAdminService {
 			});
 	}
 
-	cacheInfoBody(cache: StoredCache): string {
-		const row = this.context.db
-			.select({ priority: schema.caches.priority })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.get();
+	async cacheInfoBody(cache: StoredCache): Promise<string> {
+		const row = await this.registeredCache(cache);
 		const info = new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
@@ -311,12 +328,11 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: StoredCache, priority: CachePriority): CacheSummary {
-		const managed = this.context.db
-			.select({ graceManaged: schema.caches.graceManaged })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.get();
+	async cacheSummary(
+		cache: StoredCache,
+		priority: CachePriority
+	): Promise<CacheSummary> {
+		const managed = await this.registeredCache(cache);
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {
