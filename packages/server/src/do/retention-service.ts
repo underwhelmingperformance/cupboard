@@ -1,6 +1,6 @@
 import {
+	type CacheAccessMode,
 	type GraceSeconds,
-	isPrivateCache,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -238,8 +238,11 @@ export class RetentionService {
 		};
 	}
 
-	graceCoverage(cache: StoredCache): GraceCoverageResponse {
-		const graceSeconds = this.resolveGraceSeconds(cache);
+	graceCoverage(
+		cache: StoredCache,
+		access: CacheAccessMode
+	): GraceCoverageResponse {
+		const graceSeconds = this.resolveGraceSeconds(cache, access);
 
 		return graceSeconds === undefined
 			? { covered: false }
@@ -249,8 +252,11 @@ export class RetentionService {
 	// The longest matching cache-name prefix wins. The empty prefix is the
 	// tenant-wide default for public caches. Private caches do not use retention
 	// grace policies, although the empty prefix also matches their stored names.
-	resolveGraceSeconds(cache: StoredCache): GraceSeconds | undefined {
-		if (isPrivateCache(cache)) {
+	resolveGraceSeconds(
+		cache: StoredCache,
+		access: CacheAccessMode
+	): GraceSeconds | undefined {
+		if (access === 'private') {
 			return undefined;
 		}
 
@@ -302,12 +308,14 @@ export class RetentionService {
 
 	applyGraceTransition(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHashes: readonly StorePathHash[],
 		anchorIso: IsoTimestamp,
 		writer: SchemaWriter = this.context.db
 	): void {
 		this.applyGraceTransitions(
 			cache,
+			access,
 			storePathHashes.map((storePathHash) => ({ storePathHash, anchorIso })),
 			writer
 		);
@@ -319,6 +327,7 @@ export class RetentionService {
 	// grace cannot be separated by a crash.
 	applyGraceTransitions(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		transitions: readonly GraceTransition[],
 		writer: SchemaWriter = this.context.db
 	): void {
@@ -326,7 +335,7 @@ export class RetentionService {
 			return;
 		}
 
-		const graceSeconds = this.resolveGraceSeconds(cache);
+		const graceSeconds = this.resolveGraceSeconds(cache, access);
 
 		if (graceSeconds === undefined) {
 			return;
