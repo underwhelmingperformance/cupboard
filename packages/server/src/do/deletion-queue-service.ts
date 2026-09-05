@@ -1,4 +1,5 @@
 import {
+	type CacheAccessMode,
 	identityForCache,
 	isPrivateCache,
 	type NarInfoGeneration,
@@ -249,6 +250,7 @@ export class DeletionQueueService {
 
 	private async retireBlobRefEdge(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
@@ -308,11 +310,14 @@ export class DeletionQueueService {
 		]);
 		// Invalidate a cached public NAR after the tenant's final public reference
 		// is retired. Retiring a private edge does not change public authorisation.
+		//
+		// `blob_ref` has no access column, so the access of the remaining edges'
+		// caches can only be read from the legacy name.
 		const hasPublicReference = stillReferencedRows.some(
 			(row) => !isPrivateCache(row.cache)
 		);
 
-		if (!hasPublicReference && !isPrivateCache(cache)) {
+		if (!hasPublicReference && access === 'public') {
 			await this.cachePurges.enqueueNars([narHash]);
 		}
 
@@ -355,11 +360,14 @@ export class DeletionQueueService {
 	// Queues a cache-tag purge for each hash the tenant's public caches have
 	// stopped referencing. Retiring an edge of a private cache leaves the public
 	// references untouched, so only a public cache needs the check.
+	//
+	// `blob_ref` has no access column, so `outsidePrivateCaches` selects the
+	// public edges by a range over the legacy cache name.
 	private async purgeUnreferencedNars(
-		cache: StoredCache,
+		access: CacheAccessMode,
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
-		if (isPrivateCache(cache) || narHashes.length === 0) {
+		if (access === 'private' || narHashes.length === 0) {
 			return;
 		}
 
@@ -483,6 +491,7 @@ export class DeletionQueueService {
 	 */
 	private async retireTornDownChunk(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		tenant: TenantId,
 		batch: readonly TornDownNarInfo[],
 		now: IsoTimestamp
@@ -588,7 +597,7 @@ export class DeletionQueueService {
 				})
 		);
 
-		await this.purgeUnreferencedNars(cache, retiredHashes);
+		await this.purgeUnreferencedNars(access, retiredHashes);
 
 		await this.discardRetiredLists(cache, removable, superseded);
 
@@ -775,7 +784,12 @@ export class DeletionQueueService {
 		let deleted = 0;
 
 		for (const [cache, entries] of byCache) {
-			deleted += await this.retireTornDownNarInfos(cache, entries, origin);
+			deleted += await this.retireTornDownNarInfos(
+				cache,
+				identityForCache(cache).access,
+				entries,
+				origin
+			);
 		}
 
 		return deleted;
@@ -805,6 +819,7 @@ export class DeletionQueueService {
 	 */
 	async retireQueuedNarInfoEdge(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<typeof schema.narInfoDeletions.$inferSelect | undefined> {
@@ -826,6 +841,7 @@ export class DeletionQueueService {
 
 		await this.retireBlobRefEdge(
 			cache,
+			access,
 			storePathHash,
 			queued.generation,
 			queued.narHash
@@ -838,12 +854,14 @@ export class DeletionQueueService {
 	// deletion, edge retirement, and queue clear span asynchronous operations.
 	async deleteQueuedNarInfo(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		origin?: RequestOrigin
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		const queued = await this.retireQueuedNarInfoEdge(
 			cache,
+			access,
 			storePathHash,
 			generation
 		);
@@ -1096,6 +1114,7 @@ export class DeletionQueueService {
 	 */
 	async retireTornDownNarInfos(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		entries: readonly TornDownNarInfo[],
 		_origin?: RequestOrigin
 	): Promise<number> {
@@ -1109,7 +1128,13 @@ export class DeletionQueueService {
 		let deletedObjects = 0;
 
 		for (const batch of chunk(entries, maxFencedRetireRows)) {
-			const retired = await this.retireTornDownChunk(cache, tenant, batch, now);
+			const retired = await this.retireTornDownChunk(
+				cache,
+				access,
+				tenant,
+				batch,
+				now
+			);
 
 			if (retired === undefined) {
 				break;
@@ -1123,6 +1148,7 @@ export class DeletionQueueService {
 
 	deleteStorePath(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHash: StorePathHash,
 		origin: RequestOrigin
 	): Promise<DeletePathResponse> {
@@ -1183,6 +1209,7 @@ export class DeletionQueueService {
 
 			const queued = await this.retireQueuedNarInfoEdge(
 				row.cache,
+				access,
 				storePathHash,
 				row.generation
 			);
@@ -1281,6 +1308,7 @@ export class DeletionQueueService {
 		try {
 			await this.deleteQueuedNarInfo(
 				row.cache,
+				identityForCache(row.cache).access,
 				row.storePathHash,
 				row.generation,
 				origin

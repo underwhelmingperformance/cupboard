@@ -3,6 +3,7 @@ import {
 	type CachePriority,
 	cachePrioritySchema,
 	DEFAULT_CACHE,
+	identityForCache,
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
@@ -118,7 +119,12 @@ export class CacheAdminService {
 			.limit(limit)
 			.all();
 
-		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
+		await this.deletionQueue.retireTornDownNarInfos(
+			cache,
+			identityForCache(cache).access,
+			queued,
+			origin
+		);
 
 		if (this.hasQueuedDeletions(cache)) {
 			return;
