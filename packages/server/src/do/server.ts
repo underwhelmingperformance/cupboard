@@ -6,7 +6,7 @@ import {
 	cachePrioritySchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
-	isPrivateCache,
+	identityForCache,
 	privateStoredCache,
 	selectorForCache,
 	type StoredCache,
@@ -555,6 +555,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// default-cache name. Validate named prefixes before route dispatch.
 		this.app.use(async (context, next) => {
 			context.set('cache', DEFAULT_CACHE);
+			context.set('cacheAccess', 'public');
 			await next();
 		});
 		this.app.use('/cache/:cacheName/*', async (context, next) => {
@@ -562,8 +563,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				cacheSelectorSchema,
 				context.req.param('cacheName')
 			);
+			// This prefix accepts a private cache's selector as well, so the
+			// selector rather than the prefix says which access the request means.
+			const cache = cacheFromSelector(selector);
 
-			context.set('cache', cacheFromSelector(selector));
+			context.set('cache', cache);
+			context.set('cacheAccess', identityForCache(cache).access);
 			await next();
 		});
 
@@ -576,6 +581,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			context.set('cache', privateStoredCache(name));
+			context.set('cacheAccess', 'private');
 			await next();
 		});
 
@@ -642,7 +648,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// authentication, so these routes return 404 before serving their content.
 		const refusePrivateCache = createMiddleware<TenantHonoEnv>(
 			async (context, next) => {
-				if (isPrivateCache(context.get('cache'))) {
+				if (context.get('cacheAccess') === 'private') {
 					return uncachedNotFoundResponse();
 				}
 
@@ -751,7 +757,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.req.raw,
 					context.get('cache'),
 					context.req.param('hash'),
-					'public'
+					context.get('cacheAccess')
 				)
 		);
 		this.app.on(
@@ -777,7 +783,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				context.req.raw,
 				context.get('cache'),
 				context.req.param('hash'),
-				'private'
+				context.get('cacheAccess')
 			)
 		);
 		this.app.get(
