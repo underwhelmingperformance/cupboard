@@ -81,13 +81,15 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
+		// Only public caches are mounted here.
 		return serveNarInfo(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
 			context.get('cache'),
 			storePathHash,
-			false
+			false,
+			'public'
 		);
 	});
 
