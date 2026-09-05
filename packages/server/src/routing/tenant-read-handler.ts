@@ -81,13 +81,17 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
+		// This Worker serves only the public namespace. An authenticated read
+		// stays on the control Worker and never reaches here, so the cache is
+		// public whichever selector named it.
 		return serveNarInfo(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
 			context.get('cache'),
 			storePathHash,
-			false
+			false,
+			'public'
 		);
 	});
 

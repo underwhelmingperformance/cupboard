@@ -88,7 +88,8 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 					context.get('tenant'),
 					context.get('readScope').cache,
 					storePathHash,
-					true
+					true,
+					context.get('readScope').visibility
 				);
 	});
 
