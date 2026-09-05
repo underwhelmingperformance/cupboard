@@ -43,6 +43,7 @@ import {
 	currentServer,
 	driveToCompletion,
 	expectSingleUploadDecision,
+	fetchPath,
 	issueServerSignedToken,
 	narBytes,
 	narHash,
@@ -62,6 +63,7 @@ import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
 import { phaseCacheMs } from './deployment-phase-gate.ts';
 import { type LocalStepOutcome } from './local-step.ts';
+import { RetentionService } from './retention-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 
@@ -992,7 +994,31 @@ describe('cache registry admin', () => {
 			'builds'
 		);
 
-		const legacy = await listCaches(init.token);
+		// A grace flag set through the retention path reaches both tables, so
+		// the flag the reads compare is `true` for one cache.
+		await runInDurableObject(currentServer(), (instance) => {
+			const retention = new RetentionService(instance.context);
+
+			instance.context.db.transaction((tx) => {
+				retention.markCacheGraceManaged(buildsCache, tx);
+			});
+		});
+
+		const reads = async (): Promise<{
+			list: CacheListResponse;
+			cacheInfo: string;
+			summary: CacheSummary;
+		}> => {
+			const info = await fetchPath('/cache/builds/nix-cache-info');
+
+			return {
+				list: await listCaches(init.token),
+				cacheInfo: await info.text(),
+				summary: await putCache(init.token, 'builds', 30)
+			};
+		};
+
+		const legacy = await reads();
 
 		await recordPhase('native-reads');
 		// The gate answers from its last reading for `phaseCacheMs`; the first
@@ -1000,7 +1026,7 @@ describe('cache registry admin', () => {
 		// clock has passed that interval.
 		vi.setSystemTime(new Date(testBase.getTime() + phaseCacheMs));
 
-		expect(await listCaches(init.token)).toStrictEqual(legacy);
+		expect(await reads()).toStrictEqual(legacy);
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {
