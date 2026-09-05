@@ -1,5 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CacheAccessMode,
 	DEFAULT_CACHE,
 	isPrivateCache,
 	type NixSha256HashString,
@@ -380,14 +381,15 @@ export async function serveNarInfo(
 	tenant: TenantId,
 	cache: StoredCache,
 	storePathHash: StorePathHash,
-	isPrivate: boolean
+	isAuthenticatedRead: boolean,
+	access: CacheAccessMode
 ): Promise<Response> {
 	const key = narInfoObjectKey(tenant, storePathHash, cache);
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache, storePathHash);
 
-	if (!isPrivateCache(cache)) {
-		return serveR2(request, env, key, headersFor, !isPrivate);
+	if (access === 'public') {
+		return serveR2(request, env, key, headersFor, !isAuthenticatedRead);
 	}
 
 	const versions = await authorisedNarInfoVersions(
@@ -402,8 +404,13 @@ export async function serveNarInfo(
 		return uncachedNotFoundResponse();
 	}
 
-	return serveR2(request, env, key, headersFor, !isPrivate, (object) =>
-		isNarInfoObjectOfCommit(object, current)
+	return serveR2(
+		request,
+		env,
+		key,
+		headersFor,
+		!isAuthenticatedRead,
+		(object) => isNarInfoObjectOfCommit(object, current)
 	);
 }
 
