@@ -346,7 +346,10 @@ export const tenantRouter = os.router({
 // below never read a cache from their input.
 
 function graceCoverage(context: TenantOrpcContext) {
-	return context.services.retention.graceCoverage(context.cache);
+	return context.services.retention.graceCoverage(
+		context.cache,
+		context.cacheAccess
+	);
 }
 
 interface ListPageQuery {
@@ -384,24 +387,38 @@ function setRoot(
 	context: TenantOrpcContext,
 	input: ParsedRootSetBody & { readonly name: RootName }
 ) {
-	return context.services.roots.setRoot(context.cache, input.name, {
-		targets: input.targets,
-		ttlSeconds: input.ttlSeconds
-	});
+	return context.services.roots.setRoot(
+		context.cache,
+		context.cacheAccess,
+		input.name,
+		{
+			targets: input.targets,
+			ttlSeconds: input.ttlSeconds
+		}
+	);
 }
 
 function ensureRoot(
 	context: TenantOrpcContext,
 	input: ParsedRootEnsureBody & { readonly name: RootName }
 ) {
-	return context.services.roots.ensureRoot(context.cache, input.name, {
-		targets: input.targets,
-		ttlSeconds: input.ttlSeconds
-	});
+	return context.services.roots.ensureRoot(
+		context.cache,
+		context.cacheAccess,
+		input.name,
+		{
+			targets: input.targets,
+			ttlSeconds: input.ttlSeconds
+		}
+	);
 }
 
 function removeRoot(context: TenantOrpcContext, name: RootName) {
-	return context.services.roots.removeRoot(context.cache, name);
+	return context.services.roots.removeRoot(
+		context.cache,
+		context.cacheAccess,
+		name
+	);
 }
 
 function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
@@ -426,6 +443,7 @@ function negotiateUpload(
 
 	return context.services.uploads.negotiate(
 		context.cache,
+		context.cacheAccess,
 		{
 			pushId: input.pushId,
 			paths: input.paths,
@@ -443,6 +461,7 @@ function previewUpload(
 ) {
 	return context.services.uploads.preview(
 		context.cache,
+		context.cacheAccess,
 		{ paths },
 		context.services.takeNegotiateHints(context.request),
 		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
@@ -453,7 +472,11 @@ function confirmPaths(
 	context: TenantOrpcContext,
 	storePathHashes: ParsedUploadConfirmRequest['storePathHashes']
 ) {
-	return context.services.uploads.confirmPaths(context.cache, storePathHashes);
+	return context.services.uploads.confirmPaths(
+		context.cache,
+		context.cacheAccess,
+		storePathHashes
+	);
 }
 
 // Interactive GC purges this colo's edge cache via the caller's public
