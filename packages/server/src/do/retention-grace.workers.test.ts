@@ -1014,7 +1014,7 @@ describe('retention grace transitions', () => {
 
 		const resolved = await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
-			const withoutPolicies = service.resolveGraceSeconds(pr5Cache);
+			const withoutPolicies = service.resolveGraceSeconds(pr5Cache, 'public');
 
 			service.addGracePolicy({
 				cachePrefix: '',
@@ -1027,8 +1027,8 @@ describe('retention grace transitions', () => {
 
 			return {
 				withoutPolicies,
-				prCache: service.resolveGraceSeconds(pr5Cache),
-				otherCache: service.resolveGraceSeconds(buildsCache)
+				prCache: service.resolveGraceSeconds(pr5Cache, 'public'),
+				otherCache: service.resolveGraceSeconds(buildsCache, 'public')
 			};
 		});
 
@@ -1057,11 +1057,17 @@ describe('retention grace transitions', () => {
 
 			return {
 				privateCache: service.resolveGraceSeconds(
-					privateStoredCache(buildsCache)
+					privateStoredCache(buildsCache),
+					'private'
 				),
-				privateCoverage: service.graceCoverage(privateStoredCache(buildsCache)),
+				privateCoverage: service.graceCoverage(
+					privateStoredCache(buildsCache),
+					'private'
+				),
+				// A public cache whose own name happens to be `private`.
 				publicCacheCalledPrivate: service.resolveGraceSeconds(
-					storedCacheSchema.parse('private')
+					storedCacheSchema.parse('private'),
+					'public'
 				)
 			};
 		});
@@ -2459,6 +2465,7 @@ describe('retention grace facts reported to clients', () => {
 
 				return uploadsServiceFor(context).negotiate(
 					DEFAULT_CACHE,
+					'public',
 					{
 						pushId: testPushId,
 						paths: [uploadPathNegotiation(path)]
@@ -3017,7 +3024,7 @@ describe('grace transition atomicity', () => {
 							)
 						)
 						.run();
-					retention.applyGraceTransition(cache, [hash], nowIso, tx);
+					retention.applyGraceTransition(cache, 'public', [hash], nowIso, tx);
 					throw new ForcedRollbackError();
 				});
 			}).toThrow(ForcedRollbackError);
@@ -3381,7 +3388,11 @@ describe('confirming an unretained publication', () => {
 					})
 				});
 
-				return uploadsServiceFor(context).confirmPaths(DEFAULT_CACHE, [hash]);
+				return uploadsServiceFor(context).confirmPaths(
+					DEFAULT_CACHE,
+					'public',
+					[hash]
+				);
 			}
 		);
 
@@ -3416,7 +3427,7 @@ describe('confirming an unretained publication', () => {
 			async (instance) => {
 				const transactions = vi.spyOn(instance.context.db, 'transaction');
 				const uploads = uploadsServiceFor(instance.context);
-				const response = await uploads.confirmPaths(DEFAULT_CACHE, [
+				const response = await uploads.confirmPaths(DEFAULT_CACHE, 'public', [
 					hash,
 					hash,
 					hash
