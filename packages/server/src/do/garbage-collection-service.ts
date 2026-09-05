@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import {
+	identityForCache,
 	type RootName,
 	type StoredCache,
 	storePathBasenameSchema,
@@ -334,8 +335,12 @@ export class GarbageCollectionService {
 		this.context.db.transaction((tx) => {
 			// Add the grace deadline and remove the root target atomically. A crash
 			// between separate operations could leave the path with no retention source.
+			// A collection pass sweeps every cache, so the cache comes from stored
+			// state rather than from a request's selector. Its access comes from the
+			// same place.
 			this.retention.applyGraceTransitions(
 				cache,
+				identityForCache(cache).access,
 				expiredRootTargets.flatMap((target) => {
 					const anchorIso = expiryByRoot.get(target.rootName);
 
