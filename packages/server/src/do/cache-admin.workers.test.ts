@@ -45,6 +45,7 @@ import {
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
+	readFetch,
 	resetTestServer,
 	runGcResult,
 	uploadMetadata,
@@ -601,11 +602,25 @@ describe('cache registry admin', () => {
 			'builds'
 		);
 
-		const legacy = await listCaches(init.token);
+		const reads = async (): Promise<{
+			list: CacheListResponse;
+			cacheInfo: string;
+			summary: CacheSummary;
+		}> => {
+			const info = await readFetch('/cache/builds/nix-cache-info');
+
+			return {
+				list: await listCaches(init.token),
+				cacheInfo: await info.text(),
+				summary: await putCache(init.token, 'builds', 30)
+			};
+		};
+
+		const legacy = await reads();
 
 		await recordPhase('native-reads');
 
-		expect(await listCaches(init.token)).toStrictEqual(legacy);
+		expect(await reads()).toStrictEqual(legacy);
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {
