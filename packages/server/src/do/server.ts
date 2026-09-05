@@ -750,7 +750,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.attestations.handleServeList(
 					context.req.raw,
 					context.get('cache'),
-					context.req.param('hash')
+					context.req.param('hash'),
+					'public'
 				)
 		);
 		this.app.on(
@@ -775,7 +776,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.attestations.handleServeList(
 				context.req.raw,
 				context.get('cache'),
-				context.req.param('hash')
+				context.req.param('hash'),
+				'private'
 			)
 		);
 		this.app.get(
