@@ -427,6 +427,7 @@ function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
 
 	return context.services.deletionQueue.deleteStorePath(
 		context.cache,
+		identityForCache(context.cache).access,
 		hash,
 		origin
 	);
