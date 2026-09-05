@@ -6,7 +6,7 @@ import {
 	cachePrioritySchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
-	isPrivateCache,
+	identityForCache,
 	privateStoredCache,
 	selectorForCache,
 	type StoredCache,
@@ -563,6 +563,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// default-cache name. Validate named prefixes before route dispatch.
 		this.app.use(async (context, next) => {
 			context.set('cache', DEFAULT_CACHE);
+			context.set('cacheAccess', 'public');
 			await next();
 		});
 		this.app.use('/cache/:cacheName/*', async (context, next) => {
@@ -570,8 +571,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				cacheSelectorSchema,
 				context.req.param('cacheName')
 			);
+			// This prefix also accepts a private cache's `_private-` selector, so
+			// the selector, not the prefix, gives the access.
+			const cache = cacheFromSelector(selector);
 
-			context.set('cache', cacheFromSelector(selector));
+			context.set('cache', cache);
+			context.set('cacheAccess', identityForCache(cache).access);
 			await next();
 		});
 
@@ -584,14 +589,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			context.set('cache', privateStoredCache(name));
+			context.set('cacheAccess', 'private');
 			await next();
 		});
 
 		// Contract routes must run before the routes that handle raw
 		// Request/Response, because the oRPC handler signals an unmatched request
 		// by falling through. The cache middleware above must run before this
-		// handler: the handler passes `context.get('cache')`, which that
-		// middleware sets.
+		// handler: the handler passes `context.get('cache')` and
+		// `context.get('cacheAccess')`, which that middleware sets.
 		this.app.use(async (context, next) => {
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				context.req.raw,
@@ -600,6 +606,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						request: context.req.raw,
 						services: this.rpcServices(),
 						cache: context.get('cache'),
+						cacheAccess: context.get('cacheAccess'),
 						logger: context.get('logger')
 					}
 				}
@@ -650,7 +657,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// authentication, so these routes return 404 before serving their content.
 		const refusePrivateCache = createMiddleware<TenantHonoEnv>(
 			async (context, next) => {
-				if (isPrivateCache(context.get('cache'))) {
+				if (context.get('cacheAccess') === 'private') {
 					return uncachedNotFoundResponse();
 				}
 
@@ -789,7 +796,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.req.raw,
 					context.get('cache'),
 					context.req.param('hash'),
-					'public'
+					context.get('cacheAccess')
 				)
 		);
 		this.app.on(
@@ -815,7 +822,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				context.req.raw,
 				context.get('cache'),
 				context.req.param('hash'),
-				'private'
+				context.get('cacheAccess')
 			)
 		);
 		this.app.get(
