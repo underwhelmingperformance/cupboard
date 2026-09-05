@@ -248,7 +248,7 @@ describe('narinfo deletion queue', () => {
 				try {
 					await asOneInvocation(() =>
 						instance.context.criticalSection(() =>
-							queue.retireTornDownNarInfos(DEFAULT_CACHE, entries)
+							queue.retireTornDownNarInfos(DEFAULT_CACHE, 'public', entries)
 						)
 					);
 
