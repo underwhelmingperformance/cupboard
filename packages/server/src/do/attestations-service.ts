@@ -1,6 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
-	isPrivateCache,
+	type CacheAccessMode,
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
@@ -697,7 +697,8 @@ export class AttestationsService {
 	async handleServeList(
 		request: Request,
 		cache: StoredCache,
-		hash: string
+		hash: string,
+		access: CacheAccessMode
 	): Promise<Response> {
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
 		const committed = await this.authorisedNarInfoGeneration(
@@ -718,7 +719,7 @@ export class AttestationsService {
 			),
 			'application/json; charset=utf-8',
 			'no-store',
-			(object) => isListOfCommittedGeneration(object, cache, committed)
+			(object) => isListOfCommittedGeneration(object, access, committed)
 		);
 	}
 
@@ -960,13 +961,13 @@ function recordedListGeneration(
  */
 function isListOfCommittedGeneration(
 	object: R2Object,
-	cache: StoredCache,
+	access: CacheAccessMode,
 	committed: NarInfoGeneration
 ): boolean {
 	const recorded = recordedListGeneration(object);
 
 	if (recorded === undefined) {
-		return !isPrivateCache(cache);
+		return access === 'public';
 	}
 
 	return recorded === committed;
