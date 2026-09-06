@@ -162,7 +162,7 @@ describe('reuse-view nix-cache-info', () => {
 		});
 	});
 
-	it('404s every unimplemented path under a public tenant reuse subtree, no-store', async () => {
+	it('404s every unimplemented path under a public reuse view, no-store', async () => {
 		await setView('reuse', 50);
 
 		const narPath = await readFetch('/reuse/reuse/nar/whatever.nar.zst');

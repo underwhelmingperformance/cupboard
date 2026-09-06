@@ -741,36 +741,14 @@ cache.
 
 ### Read path
 
-- [x] Support private-read mode via HTTP basic auth, consumed by Nix through
-      `~/.config/nix/netrc`.
-
-  To enable: set both `CUPBOARD_READ_USER` and `CUPBOARD_READ_PASSWORD`
-  (`wrangler secret put`). Reads then require Basic auth; `/pubkey`, `/_health`
-  and `/_version` stay public. `cupboard config` with `--read-user` and
-  `--read-password` (or those variables in the environment) prints the matching
-  `netrc` line, keyed on the substituter host.
-
-  Design:
-  - A deployment-level private toggle plus a read credential
-    (`CUPBOARD_READ_USER`/`CUPBOARD_READ_PASSWORD` secrets). When set, `read.ts`
-    requires HTTP Basic auth on the narinfo, NAR, and `nix-cache-info` routes,
-    compared in constant time.
-  - `/pubkey` stays public: it is not secret, users need it to populate
-    `trusted-public-keys`, and gating it complicates first-time config for no
-    real gain.
-  - Nix consumes it via netrc: clients add
-    `machine <host> login <user> password <pass>` to a `netrc-file`. The
-    `config` command emits the netrc snippet alongside the substituter line when
-    a credential is configured.
-  - Cached read responses key on the URL only, so private reads stay on the
-    uncached control entrypoint rather than forwarding authenticated bodies to
-    the cache-owning tenant entrypoint. Keying cache entries by credential is
-    deferred unless a later measured need justifies it.
-  - Per-cache private mode is deferred; this is a global toggle first.
-  - Current model: cache identity and access are separate properties. The
-    default cache and each named cache can be public or private, and an access
-    update does not change the cache URL or identity. Named caches use
-    `/t/<tenant>/cache/<name>/`; the bare tenant URL selects the default cache.
+- [x] Support public and private cache reads. Cache identity and access are
+      separate properties. The default cache and each named cache can be public
+      or private, and an access update does not change the cache URL or
+      identity. Named caches use `/t/<tenant>/cache/<name>/`; the bare tenant
+      URL selects the default cache. A private cache uses its cache-specific
+      Basic credential when configured, then the tenant fallback credential. Nix
+      receives the selected credential through URL userinfo or its netrc
+      configuration. `/pubkey`, `/_health`, and `/_version` stay public.
 
 - [x] Support one or more named cache paths for organisation:
   - [x] `/cache/:cacheName/nix-cache-info`
@@ -788,26 +766,23 @@ cache.
     and other characters that do not belong in a path segment). Proposed
     pattern: `[a-z0-9][a-z0-9._-]{0,62}`: lowercase, no slashes, no
     percent-encoding.
-  - Storage: add a `cache` column to `narInfos` and the retention tables,
-    defaulting to the empty default cache. NAR blobs stay content-addressed by
-    `narHash` and are **shared across caches** (identical bytes), so only
-    narinfo membership and retention are per-cache; the narinfo R2 object is
-    namespaced `narinfo/<cache>/<storePathHash>`.
-  - Registry: a `cache` row (name, priority, created_at). Created implicitly on
-    the first push or root with `--cache <name>` (default priority), or
-    explicitly with `cupboard cache create <name> [--priority N]`. The default
-    cache is the empty name with the standard priority.
+  - Storage: each narinfo and retention row refers to a native default or named
+    cache identity. NAR blobs stay content-addressed by `narHash` and are
+    **shared across caches** (identical bytes), so only narinfo membership and
+    retention are per-cache; each narinfo R2 key includes its cache identity.
+  - Registry: each tenant has a default cache and can have named caches. The
+    default cache is created with the tenant. Users create named caches
+    explicitly with `cupboard cache create`.
   - Per-cache priority is honoured: `/cache/:cacheName/nix-cache-info` renders
-    the cache's registered priority (the bare/default cache keeps the standard
-    `CacheInfo.default` priority).
-  - Management surface: `cupboard cache list` / `create [--priority]` /
-    `inspect` / `remove [--force]`, backed by admin routes `GET /caches`,
-    `PUT /caches/:cacheName` (upsert priority), and `DELETE /caches/:cacheName`
-    (teardown; refuses the default cache and a non-empty cache without
-    `--force`, which retires the cache's paths through the durable removal
-    queue).
+    the cache's registered priority, including for the default cache.
+  - Management surface: `cupboard cache list`, `create`, `inspect`, the
+    property-specific `set-*` and `clear-*` commands, and `remove [--force]`.
+    Cache creation is create-only. Updates use operation-specific contract
+    procedures, and removal retires the cache's paths through the durable
+    removal queue.
   - Reachability GC and retention roots are scoped per cache.
-  - CLI: `--cache <name>` on `push`, `config`, `stats`, `root`, and `delete`.
+  - CLI: a tenant URL selects the default cache. A `/cache/:cacheName` URL or a
+    contextual second positional selects a named cache.
   - One deployment-wide signing key, shared by all caches (each
     `/cache/:cacheName/pubkey` returns it). Per-cache keys would add rotation
     and config complexity with no clear personal-cache benefit.
@@ -1993,11 +1968,10 @@ together.
    Worker reads the authoritative D1 `tenant.status`; a suspended or offboarding
    tenant receives a 403. `tenant_identity` is the sole identity source: an
    unconfigured tenant DO returns 503 for every route rather than minting or
-   verifying under the literal `cupboard` default. The per-tenant read verifier
-   is a hashed credential carried in the manifest, never the global
-   `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a plaintext
-   secret in KV. Writes to any non-default tenant were refused with 501 until
-   step 6 plumbed tenant-scoped storage; that gate is now lifted.
+   verifying under the literal `cupboard` default. D1 stores the tenant fallback
+   and cache-specific read verifiers as password hashes, never as plaintext
+   secrets. Writes to any non-default tenant were refused with 501 until step 6
+   plumbed tenant-scoped storage; that gate is now lifted.
 6. **Multi-tenant upload path + push contract.** The narinfo R2 object key
    (`narInfoObjectKey`) and the read-path edge-cache key now carry a tenant
    segment, so distrusting tenants never collide on `narinfo/<hash>` or the edge
@@ -2109,12 +2083,11 @@ together.
   default identity (and tokens from two un-configured DOs not cross-verifying),
   `config_version` as a monotonic fence, client-supplied identity headers
   ignored, suspension stopping writes immediately via the Worker's authoritative
-  D1 status read, private tenants rejecting unauthenticated reads from creation
-  enforced from the KV manifest, `/t/<tenant>/pubkey` verifying that tenant's
-  narinfo signature with the advertised issuer equal to a minted token's `iss`,
-  a token cached for tenant A never sent to tenant B on the same origin, and
-  offboarding draining edge rows through the DO without ordinary GC resurrecting
-  a draining tenant's objects.
+  D1 status read, private caches rejecting unauthenticated reads from creation,
+  `/t/<tenant>/pubkey` verifying that tenant's narinfo signature with the
+  advertised issuer equal to a minted token's `iss`, a token cached for tenant A
+  never sent to tenant B on the same origin, and offboarding draining edge rows
+  through the DO without ordinary GC resurrecting a draining tenant's objects.
 - Push UX tests cover push waiting until substitution succeeds, `--no-wait`
   returning pending, roots activating only when targets are available, and a
   background mismatch terminating `push --wait` with a hard error (not hanging)
@@ -3579,13 +3552,14 @@ describe their real semantics.
 3. Named tenant reuse views at `/t/<tenant>/reuse/<view>`. A tenant-domain
    administrator defines each view in advance from exact cache names and cache-
    name prefixes. The view merges the matching servable narinfos at read time
-   without becoming a stored cache or materialising derived state. It follows
-   the tenant's existing read mode: public tenants expose it publicly, while
-   private tenants require their existing Basic read credential. A reader opts
-   into a view explicitly and thereby trusts every writer able to publish to a
-   matching source cache. CI can use that view for substitution and availability
-   probes, then adopts what it consumes into its destination cache under the
-   destination's own roots or grace deadlines.
+   without becoming a stored cache or materialising derived state. Each view has
+   its own public or private access property. A private view uses the tenant
+   fallback Basic credential because one cache-specific credential cannot
+   authorise an aggregate view. A reader opts into a view explicitly and thereby
+   trusts every writer able to publish to a matching source cache. CI can use
+   that view for substitution and availability probes, then adopts what it
+   consumes into its destination cache under the destination's own roots or
+   grace deadlines.
 
 The reuse view separates two questions that a single per-cache URL cannot
 answer: whether the tenant can substitute a path, and whether the destination
@@ -3813,7 +3787,7 @@ the tenant fallback credential because one cache-specific credential cannot
 authorise an aggregate view.
 
 Reuse-view `nix-cache-info` and narinfo responses are always `no-store`,
-including for public tenants. An answer can change when the view definition
+including for public views. An answer can change when the view definition
 changes, a matching cache introduces a conflicting candidate, or a candidate is
 collected, and the existing per-cache purge keys cannot invalidate it. Canonical
 NAR responses and ordinary per-cache responses keep their current cache
@@ -4086,8 +4060,8 @@ an administrator later recreates that cache name.
    default. This reader opt-in is independent of `intermediate-retention`:
    either can be enabled without the other. Setup still obtains signing keys
    from the tenant base URL; root ensure and every publication continue to name
-   the destination cache. Private tenants reuse their existing read secrets,
-   while public tenants need none.
+   the destination cache. A private destination or view uses its corresponding
+   configured credential, while a public one needs none.
 
 Step 2 depends on 1; step 3 depends on 2; step 4 is independent of the
 retention-grace work. Step 5 depends on 4, and its grace-mode confirmation path
@@ -4206,10 +4180,10 @@ mode without waiting for retention grace.
 - Content-addressed outputs still have no known path before they build, so they
   keep using the fallback grouping and are not seeded; retention grace and reuse
   views apply once they are committed like any other path.
-- Per-credential reuse-view visibility is deferred. Every configured view
-  follows the current tenant read boundary: all readers authorised for a private
-  tenant, or every reader of a public tenant, may use it. The administrator's
-  source selectors constrain which cache writers can influence its answers.
+- Per-credential reuse-view access is deferred. Every configured private view
+  uses the tenant fallback credential, while every reader may use a public view.
+  The administrator's source selectors constrain which cache writers can
+  influence its answers.
 - Materialised view membership, snapshots, and per-cache mutation fan-out are
   deliberately excluded. A view always resolves current candidates at read time.
 - Reuse narinfo responses are deliberately `no-store` and each successful lookup

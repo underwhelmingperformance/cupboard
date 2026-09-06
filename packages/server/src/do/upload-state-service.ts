@@ -29,11 +29,10 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
-	// canonical blob only after this tenant has established its own presence edge,
-	// so another tenant's identical bytes cannot become an existence oracle. The
-	// chunked reads also keep large closures within D1's parameter and subrequest
-	// limits.
+	// Reuse is tenant-scoped. Joining through `tenant_blob` exposes a canonical
+	// blob only after this tenant has established its own presence edge, so another
+	// tenant's identical bytes cannot become an existence oracle. The chunked
+	// reads also keep large closures within D1's parameter and subrequest limits.
 	private async ownedBlobStates(
 		tenant: TenantId,
 		narHashes: readonly NixSha256HashString[]

@@ -183,7 +183,7 @@ export function storeClientForBackend(
  * substituters. Each offer includes the NAR hash and signatures needed for
  * consumer policy checks.
  *
- * Private-cache requests use credentials from the configured netrc entry for
+ * Requests to private caches use credentials from the configured netrc entry for
  * each host. Every request uses the proxy selected by the environment's
  * `http_proxy` and `https_proxy` variables.
  *
