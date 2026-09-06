@@ -21,4 +21,4 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: underwhelmingperformance/wrapscallion@8c68138bf9b11b83983e26693930b868c288967d # v0.2.1
+      - uses: underwhelmingperformance/wrapscallion@84a29c83de42c3dbb294ede1205e6ad54c3de757 # v0.2.2
