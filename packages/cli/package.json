@@ -40,7 +40,7 @@
 		"@types/ws": "^8.18.1",
 		"esbuild": "^0.28.1",
 		"miniflare": "^4.20260730.0",
-		"typescript": "^6.0.3",
+		"typescript": "^7.0.0",
 		"vitest": "^4.1.8"
 	},
 	"engines": {

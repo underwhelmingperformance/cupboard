@@ -24,7 +24,7 @@
 		"@orpc/contract": "^1.15.0",
 		"@orpc/openapi-client": "^1.15.0",
 		"drizzle-kit": "^0.31.10",
-		"typescript": "^6.0.3",
+		"typescript": "^7.0.0",
 		"vitest": "^4.1.8",
 		"wrangler": "^4.116.0"
 	},
