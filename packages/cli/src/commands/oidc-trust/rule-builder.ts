@@ -1,4 +1,3 @@
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
@@ -243,6 +242,7 @@ function cacheBinding(
 ): Record<string, unknown> {
 	if (options.cacheTemplate !== undefined) {
 		return {
+			kind: 'named',
 			equalsTemplate: options.cacheTemplate,
 			substitutions: referencedSubstitutions(
 				options.cacheTemplate,
@@ -253,12 +253,12 @@ function cacheBinding(
 	}
 
 	if (options.cache !== undefined) {
-		return { exact: options.cache, validate: 'cacheName' };
+		return { kind: 'named', exact: options.cache, validate: 'cacheName' };
 	}
 
-	// An omitted cache means the tenant's default cache. `_default` is the
-	// selector for that cache, not a cache name the user must supply.
-	return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
+	// An omitted cache means the tenant's default cache, which has no name to
+	// bind.
+	return { kind: 'default' };
 }
 
 function rootBinding(

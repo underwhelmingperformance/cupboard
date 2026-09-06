@@ -1,7 +1,4 @@
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR
-} from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import type {
 	GracePolicyListResponse,
@@ -467,7 +464,7 @@ describe('grace coverage', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					cache: DEFAULT_CACHE_SELECTOR
+					cache: { kind: 'default' }
 				}
 			])
 		);

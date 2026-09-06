@@ -17,8 +17,12 @@ function describeAuthorizationDetail(detail: AuthorizationDetail): string {
 	}
 
 	const root = detail.root === undefined ? '' : ` with root ${detail.root}`;
+	const cache =
+		detail.cache.kind === 'default'
+			? 'the default cache'
+			: `cache ${detail.cache.name}`;
 
-	return `${detail.actions.join(', ')} on cache ${detail.cache}${root}`;
+	return `${detail.actions.join(', ')} on ${cache}${root}`;
 }
 
 export class RepositoryTrustRuleMissingFinding extends FailedCheckFinding {

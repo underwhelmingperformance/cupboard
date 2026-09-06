@@ -4,6 +4,7 @@ import {
 } from '@cupboard/cli-ui/testing';
 import {
 	cacheNameSchema,
+	type CacheScope,
 	DEFAULT_CACHE,
 	rootNameSchema,
 	ttlSecondsSchema
@@ -40,6 +41,10 @@ import {
 
 const rootName = (value: string) => rootNameSchema.parse(value);
 const buildsCache = cacheNameSchema.parse('builds');
+const prCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('pr-1')
+};
 
 interface RootWriteInput {
 	readonly cacheName?: string;
@@ -87,11 +92,11 @@ describe('describeExpiry', () => {
 
 describe('rootListingAuthorizationDetails', () => {
 	it('requests a cache-wide root:list grant when no root is named', () => {
-		expect(rootListingAuthorizationDetails('pr-1')).toStrictEqual([
+		expect(rootListingAuthorizationDetails(prCache)).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1'
+				cache: prCache
 			}
 		]);
 	});
@@ -99,14 +104,14 @@ describe('rootListingAuthorizationDetails', () => {
 	it('narrows the grant to the named root for a single root listing', () => {
 		expect(
 			rootListingAuthorizationDetails(
-				'pr-1',
+				prCache,
 				rootName('github:owner/repo/main')
 			)
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1',
+				cache: prCache,
 				root: rootName('github:owner/repo/main')
 			}
 		]);

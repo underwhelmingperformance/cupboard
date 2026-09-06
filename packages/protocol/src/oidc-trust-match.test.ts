@@ -27,7 +27,9 @@ function ciGrant(cache: string): OidcTrustRule['permittedGrants'] {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
-			resources: { cache: { exact: cache, validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: cache, validate: 'cacheName' }
+			}
 		}
 	];
 }

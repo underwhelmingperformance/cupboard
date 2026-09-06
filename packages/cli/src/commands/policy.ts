@@ -1,6 +1,7 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type GraceSeconds,
+	identityForCache,
 	selectorForCache,
 	type StoredCache,
 	type TtlSeconds
@@ -236,7 +237,7 @@ export function registerPolicyCommands(
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: confirmAuthorizationDetails({
-						cacheSelector: selectorForCache(cache)
+						cache: identityForCache(cache).scope
 					})
 				}
 			);

@@ -570,14 +570,18 @@ const trustClassGrants = {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+			}
 		}
 	],
 	'private-write': [
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+			}
 		}
 	]
 } as const;
@@ -721,15 +725,23 @@ async function exchange(
 	return { ...body, status: response.status };
 }
 
+function namedCache(name: string): unknown {
+	return { kind: 'named', name };
+}
+
 const ciRequest = [
-	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
+	{
+		type: 'cupboard_cache',
+		actions: ['upload:commit'],
+		cache: namedCache('ci')
+	}
 ];
 
 const privateCiRequest = [
 	{
 		type: 'cupboard_cache',
 		actions: ['upload:negotiate'],
-		cache: '_private-ci'
+		cache: namedCache('ci')
 	}
 ];
 
@@ -2024,12 +2036,16 @@ describe('requested grants', () => {
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
 			resources: {
-				cache: { exact: 'private', validate: 'cacheName' }
+				cache: { kind: 'named', exact: 'private', validate: 'cacheName' }
 			}
 		};
 		await installAdditionalTrustRule('private-rule', [privateGrant]);
 		const requested = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('private')
+			}
 		];
 
 		const exchanged = await exchange(subjectToken, requested);
@@ -2051,7 +2067,9 @@ describe('requested grants', () => {
 		const overlappingGrant: PermittedGrant = {
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+			}
 		};
 		await installAdditionalTrustRule('overlapping-rule', [overlappingGrant]);
 
@@ -2080,13 +2098,17 @@ describe('requested grants', () => {
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
 			resources: {
-				cache: { exact: 'private', validate: 'cacheName' }
+				cache: { kind: 'named', exact: 'private', validate: 'cacheName' }
 			}
 		};
 		await installAdditionalTrustRule('private-rule', [privateGrant]);
 		const requested = [
 			...ciRequest,
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'private' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('private')
+			}
 		];
 
 		const response = await postToken({
@@ -2108,18 +2130,28 @@ describe('requested grants', () => {
 		});
 	});
 
-	it('confines a grant for a private selector to that private cache', async () => {
+	// A grant names a cache and says nothing about its access, and a tenant
+	// cannot hold a public and a private cache of the same name. A rule bound to
+	// cache `ci` therefore issues one grant, which opens `ci` and no other cache.
+	it('confines a grant to the cache it names', async () => {
 		const subjectToken = await installTrustedIdp('private-write');
 		const issued = await exchange(subjectToken, privateCiRequest);
+		const otherRequest = [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate'],
+				cache: namedCache('other')
+			}
+		];
 		const refused = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenTypeIdToken,
-			authorization_details: JSON.stringify(ciRequest)
+			authorization_details: JSON.stringify(otherRequest)
 		});
 		const refusedBody = oauthErrorShape(await refused.json());
-		const negotiated = await negotiateFor(issued.access_token, '_private-ci');
-		const denied = await negotiateFor(issued.access_token, 'ci');
+		const negotiated = await negotiateFor(issued.access_token, 'ci');
+		const denied = await negotiateFor(issued.access_token, 'other');
 
 		expect({
 			granted: issued.authorization_details,
@@ -2141,7 +2173,11 @@ describe('requested grants', () => {
 	// not imply confirm permission.
 	it('refuses upload:confirm when the rule permits only upload:commit', async () => {
 		const confirmRequest = [
-			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'ci' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: namedCache('ci')
+			}
 		];
 		const { status, body } = await exchangeWith(JSON.stringify(confirmRequest));
 
@@ -2195,14 +2231,18 @@ describe('requested grants', () => {
 		{
 			name: "a grant outside the rule's permitted caches",
 			details: JSON.stringify([
-				{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'other' }
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					cache: namedCache('other')
+				}
 			]),
 			problem: 'not-permitted'
 		},
 		{
 			name: "an operation outside the rule's permissions",
 			details: JSON.stringify([
-				{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'ci' }
+				{ type: 'cupboard_cache', actions: ['gc:run'], cache: namedCache('ci') }
 			]),
 			problem: 'not-permitted'
 		}
@@ -2276,7 +2316,11 @@ describe('attenuation', () => {
 	it('narrows a self-issued token to a requested subset, with no refresh', async () => {
 		const owner = await ownerToken();
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		];
 
 		const response = await attenuate(owner, subset);
@@ -2296,15 +2340,23 @@ describe('attenuation', () => {
 	it('refuses a request that exceeds the presented token', async () => {
 		const owner = await ownerToken();
 		const narrowResponse = await attenuate(owner, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		]);
 		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
 
 		const otherCache = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-2' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-2')
+			}
 		]);
 		const otherOp = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'pr-1' }
+			{ type: 'cupboard_cache', actions: ['gc:run'], cache: namedCache('pr-1') }
 		]);
 
 		expect({
@@ -2321,12 +2373,20 @@ describe('attenuation', () => {
 	it('refuses to narrow a commit-only token into confirm authority', async () => {
 		const owner = await ownerToken();
 		const narrowResponse = await attenuate(owner, [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		]);
 		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
 
 		const confirmAttempt = await attenuate(narrowed.access_token, [
-			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: namedCache('pr-1')
+			}
 		]);
 
 		expect({
@@ -2369,7 +2429,11 @@ describe('attenuation', () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		];
 
 		const refreshed = await postToken({
@@ -2391,7 +2455,11 @@ describe('attenuation', () => {
 	it('keeps the original grant ceiling across refresh rotations', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const subset = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		];
 		const exchanged = await exchange(subjectToken, subset);
 
@@ -2427,11 +2495,15 @@ describe('attenuation', () => {
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate', 'upload:commit'],
-				cache: 'pr-1'
+				cache: namedCache('pr-1')
 			}
 		];
 		const narrower = [
-			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: namedCache('pr-1')
+			}
 		];
 		const exchanged = await exchange(subjectToken, initial);
 
@@ -2813,7 +2885,9 @@ describe('multi-audience subject tokens', () => {
 	const secondAudienceGrant: PermittedGrant = {
 		type: 'cupboard_cache',
 		actions: ['upload:commit'],
-		resources: { cache: { exact: 'other', validate: 'cacheName' } }
+		resources: {
+			cache: { kind: 'named', exact: 'other', validate: 'cacheName' }
+		}
 	};
 
 	it('exchanges a token whose audiences are all configured', async () => {

@@ -43,6 +43,7 @@ import m0040 from './0040_dusty_tombstone.sql';
 import m0041 from './0041_pending_upload_recorded_verdict.sql';
 import m0042 from './0042_cache_access_expand.sql';
 import m0043 from './0043_cache_access_backfill.sql';
+import m0044 from './0044_cache_grant_json.sql';
 
 export default {
 	journal,
@@ -90,6 +91,7 @@ export default {
 		m0040,
 		m0041,
 		m0042,
-		m0043
+		m0043,
+		m0044
 	}
 };

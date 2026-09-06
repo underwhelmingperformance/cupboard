@@ -1,6 +1,8 @@
 import {
+	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
+	scopeFromSelector,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -57,7 +59,7 @@ function previewOnlyGrants(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:preview'],
-			cache: cacheSelector
+			cache: scopeFromSelector(cacheSelectorSchema.parse(cacheSelector))
 		}
 	]);
 }
@@ -69,7 +71,7 @@ function negotiateOnlyGrants(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate'],
-			cache: cacheSelector
+			cache: scopeFromSelector(cacheSelectorSchema.parse(cacheSelector))
 		}
 	]);
 }

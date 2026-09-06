@@ -12,6 +12,7 @@ import {
 } from '@cupboard/nix';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
+	identityForCache,
 	type RootName,
 	selectorForCache,
 	storePathSchema,
@@ -554,7 +555,7 @@ export function registerBuildPushCommand(
 				const cacheSelector = selectorForCache(cache);
 				const targetRoot = options.retain === false ? undefined : options.root;
 				const authorizationDetails = pushAuthorizationDetails({
-					cacheSelector,
+					cache: identityForCache(cache).scope,
 					attest: false,
 					...(targetRoot !== undefined && { root: targetRoot }),
 					...(options.runRoot !== undefined && { runRoot: options.runRoot })
