@@ -133,7 +133,7 @@ export const tenant = sqliteTable(
 		status: text('status', {
 			enum: ['active', 'suspended', 'offboarding', 'offboarded']
 		}).notNull(),
-		readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
+		readMode: text('read_mode', { enum: ['public', 'private'] }),
 		ownerIssuer: text('owner_issuer').notNull(),
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),

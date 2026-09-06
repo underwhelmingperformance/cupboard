@@ -247,7 +247,6 @@ export const tenant = sqliteTable(
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
-		cacheCatalogueVersion: integer('cache_catalogue_version'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		// Private caches store the Basic-auth user, salt, and password verifier.
 		// Public caches keep all three columns null. A private cache with an

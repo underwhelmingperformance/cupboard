@@ -70,10 +70,8 @@ import {
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import {
-	isCacheCatalogueComplete,
-	isLocalCacheCatalogueComplete,
-	markCacheCatalogueComplete,
-	reconcileCacheCatalogue as reconcileStoredCacheCatalogue
+	isLocalCacheAccessComplete,
+	migrateLocalCacheAccess
 } from '../migration/cache-access.ts';
 import {
 	loggerMiddleware,
@@ -1491,20 +1489,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw new TenantNotConfiguredError();
 		}
 
-		const isCatalogueComplete = await isCacheCatalogueComplete(
-			this.context,
-			tenant
-		);
-
-		if (!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context)) {
-			await reconcileStoredCacheCatalogue(this.context, tenant);
+		if (!isLocalCacheAccessComplete(this.context)) {
+			await migrateLocalCacheAccess(this.context, tenant);
 		}
 
 		applyMigrations(this.context.db, migrations);
-
-		if (!isCatalogueComplete) {
-			await markCacheCatalogueComplete(this.context, tenant);
-		}
 
 		this.oidcTrust.seedOwnerRule();
 

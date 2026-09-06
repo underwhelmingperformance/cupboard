@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { CacheAccessMigrationError } from '../errors.ts';
+import { migrateLocalCacheAccess } from '../migration/cache-access.ts';
 import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	latestMigrationIndex,
@@ -348,7 +350,7 @@ describe('cache access migration', () => {
 		}
 	);
 
-	it('uses the default lifecycle when legacy cache access is unspecified', async () => {
+	it('initialises local cache access through the stale migration RPC', async () => {
 		const tenant = tenantIdSchema.parse('migration-private-tenant');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -412,9 +414,9 @@ describe('cache access migration', () => {
 			};
 		});
 		const tenantRow = await d1
-			.select({ version: d1Schema.tenant.cacheCatalogueVersion })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, tenant))
+			.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
+			.from(migrationSchema.tenants)
+			.where(eq(migrationSchema.tenants.id, tenant))
 			.get();
 		const lifecycleRows = await d1
 			.select({
@@ -434,7 +436,14 @@ describe('cache access migration', () => {
 			access: row.access
 		}));
 
-		expect({ local, tenantRow, lifecycles }).toStrictEqual({
+		expect({
+			local,
+			tenantRow:
+				tenantRow === undefined
+					? undefined
+					: { version: tenantRow.version ?? undefined },
+			lifecycles
+		}).toStrictEqual({
 			local: {
 				caches: [
 					{ cache: { kind: 'default' }, access: 'private', priority: 40 },
@@ -454,8 +463,44 @@ describe('cache access migration', () => {
 					{ name: 'secure', access: 'private' }
 				]
 			},
-			tenantRow: { version: 1 },
+			tenantRow: { version: undefined },
 			lifecycles: [{ cache: { kind: 'default' }, access: 'private' }]
+		});
+	});
+
+	it('reports a missing default lifecycle with a typed migration error', async () => {
+		const tenant = tenantIdSchema.parse('migration-missing-default');
+		const result = await runInDurableObject(
+			testServerFor(tenant),
+			async (instance, state) => {
+				await migrateThrough(state, latestPreContractMigrationIndex);
+
+				try {
+					await migrateLocalCacheAccess(instance.context, tenant);
+
+					return {
+						isCacheAccessMigrationError: false,
+						name: 'none',
+						problem: 'none'
+					};
+				} catch (error) {
+					return {
+						isCacheAccessMigrationError:
+							error instanceof CacheAccessMigrationError,
+						name: error instanceof Error ? error.name : 'not-an-error',
+						problem:
+							error instanceof CacheAccessMigrationError
+								? error.problem
+								: 'not-cache-access-migration'
+					};
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			isCacheAccessMigrationError: true,
+			name: 'CacheAccessMigrationError',
+			problem: 'missing-default-lifecycle'
 		});
 	});
 
