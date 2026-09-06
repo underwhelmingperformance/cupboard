@@ -48,6 +48,7 @@ import {
 	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
+import { StoredGrantSpelling } from './stored-grant-spelling.ts';
 import { type TenantIdentityService } from './tenant-identity-service.ts';
 
 const issuerRetryDelayMs = 100;
@@ -58,10 +59,14 @@ export interface OidcTrustRuleSnapshot {
 }
 
 export class OidcTrustService {
+	private readonly grantSpelling: StoredGrantSpelling;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly tenantIdentity: TenantIdentityService
-	) {}
+	) {
+		this.grantSpelling = new StoredGrantSpelling(context);
+	}
 
 	private ownerConfig(
 		database: SchemaWriter = this.context.db
@@ -178,7 +183,7 @@ export class OidcTrustService {
 		return oidcTrustSummaryFromRow(row, canUseLoopbackHttp(this.context.env));
 	}
 
-	addRule(body: OidcTrustAddBody): OidcTrustSummary {
+	async addRule(body: OidcTrustAddBody): Promise<OidcTrustSummary> {
 		if (
 			!isAllowedIssuerTransport(
 				body.issuer,
@@ -190,6 +195,9 @@ export class OidcTrustService {
 
 		const id = trustRuleIdSchema.parse(crypto.randomUUID());
 		const createdAt = isoTimestamp(new Date());
+		const permittedGrantsJson = await this.grantSpelling.permittedGrantsJson(
+			body.permittedGrants
+		);
 
 		this.context.db
 			.insert(schema.oidcTrust)
@@ -198,7 +206,7 @@ export class OidcTrustService {
 				issuer: body.issuer,
 				audience: body.audience,
 				claimsJson: JSON.stringify(body.claims),
-				permittedGrantsJson: JSON.stringify(body.permittedGrants),
+				permittedGrantsJson,
 				displayJson:
 					body.display === undefined ? undefined : JSON.stringify(body.display),
 				createdAt

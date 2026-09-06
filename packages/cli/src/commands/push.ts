@@ -4,8 +4,9 @@ import path from 'node:path';
 
 import { Nix } from '@cupboard/nix';
 import {
+	type CacheScope,
+	identityForCache,
 	type RootName,
-	selectorForCache,
 	storePathSchema,
 	type StorePathString,
 	type TtlSeconds
@@ -201,14 +202,14 @@ export async function observedCopiesFrom(
  */
 export function pushCommandAuthorizationDetails(
 	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
-	cacheSelector: string
+	cache: CacheScope
 ): AuthorizationDetails {
 	if (options.dryRun === true) {
-		return previewAuthorizationDetails({ cacheSelector });
+		return previewAuthorizationDetails({ cache });
 	}
 
 	return pushAuthorizationDetails({
-		cacheSelector,
+		cache,
 		attest: options.attest !== false,
 		...(options.root !== undefined && { root: options.root }),
 		...(options.runRoot !== undefined && { runRoot: options.runRoot })
@@ -502,13 +503,12 @@ export function registerPushCommand(
 				signal: programOptions.signal
 			});
 
-			const cacheSelector = selectorForCache(cache);
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(url),
 				authorizationDetails: pushCommandAuthorizationDetails(
 					options,
-					cacheSelector
+					identityForCache(cache).scope
 				)
 			});
 

@@ -1,6 +1,6 @@
 import { env } from 'node:process';
 
-import { selectorForCache, storePathSchema } from '@cupboard/nix-store/scalars';
+import { identityForCache, storePathSchema } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
@@ -173,7 +173,6 @@ export function registerAttestCommands(
 				cache,
 				signal: programOptions.signal
 			});
-			const cacheSelector = selectorForCache(cache);
 			const resolvedPaths = paths.map((path) =>
 				storePathSchema.parse(resolvePushPath(path))
 			);
@@ -198,7 +197,7 @@ export function registerAttestCommands(
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(url),
 				authorizationDetails: attestAttachAuthorizationDetails({
-					cacheSelector
+					cache: identityForCache(cache).scope
 				})
 			});
 

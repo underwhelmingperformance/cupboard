@@ -5,6 +5,7 @@ import {
 	cacheFromSelector,
 	cacheNameSchema,
 	cachePrioritySchema,
+	cacheScopeSchema,
 	cacheSelectorSchema,
 	compressionSchema,
 	DEFAULT_CACHE,
@@ -23,7 +24,9 @@ import {
 	referencesMaxLength,
 	referencesSchema,
 	rootNameSchema,
+	scopeFromSelector,
 	selectorForCache,
+	selectorForScope,
 	sha256HexDigestSchema,
 	signingKeyIdSchema,
 	type StoredCache,
@@ -625,6 +628,37 @@ describe('private cache identity', () => {
 			'private/builds'
 		);
 	});
+
+	it.each([
+		{
+			name: 'the default cache',
+			scope: { kind: 'default' },
+			access: 'public',
+			selector: DEFAULT_CACHE_SELECTOR
+		},
+		{
+			name: 'a public named cache',
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			selector: 'builds'
+		},
+		{
+			name: 'a private named cache',
+			scope: { kind: 'named', name: 'builds' },
+			access: 'private',
+			selector: '_private-builds'
+		}
+	] as const)(
+		'spells $name with its access as a selector',
+		({ scope, access, selector }) => {
+			const spelled = selectorForScope(cacheScopeSchema.parse(scope), access);
+
+			expect({ spelled, scope: scopeFromSelector(spelled) }).toStrictEqual({
+				spelled: selector,
+				scope
+			});
+		}
+	);
 
 	it.each([
 		{ name: 'a private cache', cache: 'private/builds', localName: 'builds' },

@@ -1,5 +1,12 @@
 import {
+	deploymentPhaseNameSchema,
+	deploymentPhaseRowId,
+	hasReachedPhase
+} from '@cupboard/protocol/deployment';
+import {
+	type CacheAccessLookup,
 	oidcTrustDisplaySchema,
+	permittedGrantsInSelectorSpelling,
 	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
 import {
@@ -186,6 +193,45 @@ export async function getControlTrust(
 	return summaryFromRow(row, canUseLoopbackHttp);
 }
 
+// Whether a deploy has recorded `contracted`. A stored name this build does
+// not define counts as no phase, as the tenant objects' gate treats it.
+async function hasContracted(database: Database): Promise<boolean> {
+	const row = await database
+		.select({ name: d1Schema.deploymentPhase.phase })
+		.from(d1Schema.deploymentPhase)
+		.where(eq(d1Schema.deploymentPhase.id, deploymentPhaseRowId))
+		.get();
+	const parsed = deploymentPhaseNameSchema.safeParse(row?.name);
+
+	return hasReachedPhase(
+		parsed.success ? parsed.data : undefined,
+		'contracted'
+	);
+}
+
+// The control plane cannot resolve a tenant cache's access.
+const noTenantCaches = (): ReturnType<CacheAccessLookup> => undefined;
+
+/**
+ * The stored form of a control rule's grants. Until a deploy records
+ * `contracted`, the previous build's control Worker can still serve after a
+ * rollback, and it parses a rule strictly in the selector spelling; a rule is
+ * stored in that spelling so it keeps reading every rule. From `contracted` on
+ * the scope spelling is stored.
+ */
+async function storedGrantsJson(
+	database: Database,
+	body: OidcTrustAddBody
+): Promise<string> {
+	if (await hasContracted(database)) {
+		return JSON.stringify(body.permittedGrants);
+	}
+
+	return JSON.stringify(
+		permittedGrantsInSelectorSpelling(body.permittedGrants, noTenantCaches)
+	);
+}
+
 export async function addControlTrust(
 	database: Database,
 	body: OidcTrustAddBody,
@@ -204,6 +250,7 @@ export async function addControlTrust(
 	}
 
 	const id = trustRuleIdSchema.parse(crypto.randomUUID());
+	const permittedGrantsJson = await storedGrantsJson(database, body);
 
 	await database
 		.insert(d1Schema.controlTrust)
@@ -212,7 +259,7 @@ export async function addControlTrust(
 			issuer: body.issuer,
 			audience: body.audience,
 			claimsJson: JSON.stringify(body.claims),
-			permittedGrantsJson: JSON.stringify(body.permittedGrants),
+			permittedGrantsJson,
 			displayJson:
 				body.display === undefined ? undefined : JSON.stringify(body.display),
 			createdAt: now

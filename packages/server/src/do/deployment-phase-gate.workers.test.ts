@@ -34,7 +34,8 @@ async function reached(
 	return {
 		current: await gate.hasReached('current'),
 		expanded: await gate.hasReached('expanded'),
-		'native-reads': await gate.hasReached('native-reads')
+		'native-reads': await gate.hasReached('native-reads'),
+		contracted: await gate.hasReached('contracted')
 	};
 }
 
@@ -63,7 +64,8 @@ describe('deployment phase gate', () => {
 		expect(await reached(gate)).toStrictEqual({
 			current: false,
 			expanded: false,
-			'native-reads': false
+			'native-reads': false,
+			contracted: false
 		});
 	});
 
@@ -76,7 +78,8 @@ describe('deployment phase gate', () => {
 		expect(await reached(gate)).toStrictEqual({
 			current: true,
 			expanded: true,
-			'native-reads': false
+			'native-reads': false,
+			contracted: false
 		});
 	});
 
@@ -114,7 +117,8 @@ describe('deployment phase gate', () => {
 		expect(await reached(gate)).toStrictEqual({
 			current: false,
 			expanded: false,
-			'native-reads': false
+			'native-reads': false,
+			contracted: false
 		});
 	});
 

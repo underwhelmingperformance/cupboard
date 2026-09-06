@@ -7,6 +7,7 @@ import {
 	oidcTrustRemoveResponseSchema,
 	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
+import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -15,8 +16,10 @@ import {
 	adminGrants,
 	authorisedFetch,
 	cacheWriteGrants,
+	currentServer,
 	initialise,
 	issueServerSignedToken,
+	recordDeploymentPhase,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -38,7 +41,7 @@ const additionBody: OidcTrustAddBodyInput = {
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 			resources: {
-				cache: { exact: 'owner-ci', validate: 'cacheName' },
+				cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' },
 				root: { equalsResource: 'cache', validate: 'rootName' }
 			}
 		}
@@ -307,5 +310,163 @@ describe('oidc-trust admin API', () => {
 		const response = await addRule(token, body);
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+	});
+});
+
+async function createCache(token: string, selector: string): Promise<void> {
+	const response = await authorisedFetch(`/caches/${selector}`, token, {
+		body: JSON.stringify({ priority: 40 }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+}
+
+// The grants of one rule as the object stores them.
+function storedGrants(id: string): Promise<unknown> {
+	return runInDurableObject(currentServer(), (_instance, state) => {
+		const [row] = state.storage.sql
+			.exec<{ permitted_grants_json: string }>(
+				'SELECT permitted_grants_json FROM oidc_trust WHERE id = ?',
+				id
+			)
+			.toArray();
+		const stored: unknown = JSON.parse(
+			z.string().parse(row?.permitted_grants_json)
+		);
+
+		return stored;
+	});
+}
+
+// The build a rollback lands on parses a stored rule strictly and names a cache
+// by its selector: `_default`, a public cache's name, or `_private-<name>`.
+// Until a deploy records `contracted`, a rule is stored in that spelling, with
+// the access each named cache has now, and is read back in the scope spelling.
+describe('stored spelling of a rule', () => {
+	beforeEach(resetTestServer);
+
+	const permittedGrants: OidcTrustAddBodyInput['permittedGrants'] = [
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { kind: 'default' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
+				root: { equalsResource: 'cache', validate: 'rootName' }
+			}
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { kind: 'named', exact: 'docs', validate: 'cacheName' }
+			}
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { kind: 'named', exact: 'absent', validate: 'cacheName' }
+			}
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: {
+					kind: 'named',
+					equalsTemplate: 'pr-{n}',
+					substitutions: { n: { claim: 'ref' } },
+					validate: 'cacheName'
+				}
+			}
+		},
+		{ type: 'cupboard_domain', actions: ['gc:run'] }
+	];
+	const selectorSpelling = [
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: { exact: '_private-ci', validate: 'cacheName' },
+				root: { equalsResource: 'cache', validate: 'rootName' }
+			}
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: 'docs', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: 'absent', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: '_private-absent', validate: 'cacheName' } }
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: {
+					equalsTemplate: 'pr-{n}',
+					substitutions: { n: { claim: 'ref' } },
+					validate: 'cacheName'
+				}
+			}
+		},
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: {
+				cache: {
+					equalsTemplate: '_private-pr-{n}',
+					substitutions: { n: { claim: 'ref' } },
+					validate: 'cacheName'
+				}
+			}
+		},
+		{ type: 'cupboard_domain', actions: ['gc:run'] }
+	];
+
+	it.each([
+		{
+			name: 'the selector spelling until the deployment is contracted',
+			phase: 'native-reads' as const,
+			stored: selectorSpelling
+		},
+		{
+			name: 'the scope spelling once the deployment is contracted',
+			phase: 'contracted' as const,
+			stored: permittedGrants
+		}
+	])('stores a rule in $name', async ({ phase, stored }) => {
+		await recordDeploymentPhase(phase);
+		const token = await adminToken();
+		await createCache(token, '_private-ci');
+		await createCache(token, 'docs');
+
+		const added = await addRule(token, { ...additionBody, permittedGrants });
+		const { id } = oidcTrustSummarySchema.parse(await added.json());
+		const list = await listRules(token);
+
+		expect({
+			stored: await storedGrants(id),
+			listed: rulesById(await list.json())[id]?.permittedGrants
+		}).toStrictEqual({ stored, listed: permittedGrants });
 	});
 });

@@ -1,4 +1,4 @@
-import { type RootName } from '@cupboard/nix-store/scalars';
+import { type CacheScope, type RootName } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -8,7 +8,7 @@ import {
 // from the operations this push will perform so its token is confined to one
 // cache and does not receive unused authority.
 export interface PushGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 	readonly attest: boolean;
 	readonly root?: RootName;
 	/**
@@ -22,12 +22,12 @@ export interface PushGrantIntent {
 }
 
 export interface RootEnsureGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 	readonly root: RootName;
 }
 
 export interface RootListGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 	/**
 	 * Present for a single root's target listing (`root targets`), absent for a
 	 * cache-wide listing (`root list`). The resource a listing route declares
@@ -38,15 +38,15 @@ export interface RootListGrantIntent {
 }
 
 export interface AttestAttachGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 }
 
 export interface ConfirmGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 }
 
 export interface PreviewGrantIntent {
-	readonly cacheSelector: string;
+	readonly cache: CacheScope;
 }
 
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
@@ -72,7 +72,7 @@ export function pushAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions,
-			cache: intent.cacheSelector,
+			cache: intent.cache,
 			...(intent.root !== undefined && { root: intent.root })
 		},
 		...(intent.runRoot === undefined
@@ -81,7 +81,7 @@ export function pushAuthorizationDetails(
 					{
 						type: 'cupboard_cache',
 						actions: ['root:attach'],
-						cache: intent.cacheSelector,
+						cache: intent.cache,
 						root: intent.runRoot
 					}
 				])
@@ -103,7 +103,7 @@ export function attestAttachAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', ...attestActions],
-			cache: intent.cacheSelector
+			cache: intent.cache
 		}
 	]);
 }
@@ -119,7 +119,7 @@ export function rootEnsureAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['root:set'],
-			cache: intent.cacheSelector,
+			cache: intent.cache,
 			root: intent.root
 		}
 	]);
@@ -138,7 +138,7 @@ export function rootListAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['root:list'],
-			cache: intent.cacheSelector,
+			cache: intent.cache,
 			...(intent.root !== undefined && { root: intent.root })
 		}
 	]);
@@ -158,7 +158,7 @@ export function confirmAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:confirm'],
-			cache: intent.cacheSelector
+			cache: intent.cache
 		}
 	]);
 }
@@ -176,7 +176,7 @@ export function previewAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:preview'],
-			cache: intent.cacheSelector
+			cache: intent.cache
 		}
 	]);
 }

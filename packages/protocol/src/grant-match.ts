@@ -1,5 +1,7 @@
 import {
-	cacheSelectorSchema,
+	cacheNameSchema,
+	type CacheScope,
+	isSameCacheScope,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 
@@ -7,6 +9,7 @@ import { applyTransform } from './capture.ts';
 import {
 	type AuthorizationDetail,
 	isOperationPermittedAtIssuance,
+	isRootOperation,
 	type Operation,
 	type PermittedGrant,
 	type Substitution
@@ -101,28 +104,37 @@ function renderBindingValue(
 function renderCache(
 	binding: CacheBinding,
 	claims: Record<string, string>
-): string | undefined {
+): CacheScope | undefined {
+	if (binding.kind === 'default') {
+		return { kind: 'default' };
+	}
+
 	const raw = renderBindingValue(binding, claims);
 
 	if (raw === undefined) {
 		return undefined;
 	}
 
-	// Use the cache-selector grammar so `_default` can bind the default cache.
-	return cacheSelectorSchema.safeParse(raw).data;
+	const name = cacheNameSchema.safeParse(raw).data;
+
+	return name === undefined ? undefined : { kind: 'named', name };
 }
 
 function renderRoot(
 	binding: RootBinding,
-	cache: string,
+	cache: CacheScope,
 	claims: Record<string, string>
 ): string | undefined {
-	// An `equalsResource` binding uses the cache resolved for this grant as the
-	// root.
-	const raw =
-		binding.equalsResource === 'cache'
-			? cache
-			: renderBindingValue(binding, claims);
+	// An `equalsResource` root binding copies the name of the cache the grant
+	// resolved to. The default cache has no name, so the root renders as
+	// undefined and a request that names a root is refused.
+	if (binding.equalsResource === 'cache') {
+		return cache.kind === 'named'
+			? rootNameSchema.safeParse(cache.name).data
+			: undefined;
+	}
+
+	const raw = renderBindingValue(binding, claims);
 
 	if (raw === undefined) {
 		return undefined;
@@ -193,12 +205,16 @@ function isGrantPermitted(
 
 			const cache = renderCache(permitted.resources.cache, claims);
 
-			if (cache === undefined || requested.cache !== cache) {
+			if (cache === undefined || !isSameCacheScope(requested.cache, cache)) {
 				return false;
 			}
 
-			if (requested.root === undefined) {
+			if (requested.actions.every((operation) => !isRootOperation(operation))) {
 				return true;
+			}
+
+			if (requested.root === undefined) {
+				return permitted.resources.root === undefined;
 			}
 
 			if (permitted.resources.root === undefined) {

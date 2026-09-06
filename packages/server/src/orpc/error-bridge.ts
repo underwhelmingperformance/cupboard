@@ -1,4 +1,5 @@
 import { type Logger } from '@cupboard/logger';
+import { SelectorTemplateUnrepresentableError } from '@cupboard/protocol/grants';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
@@ -44,6 +45,13 @@ export function bridgedError(
 		for (const [name, value] of serverHttpErrorHeaders(error)) {
 			responseHeaders.set(name, value);
 		}
+	}
+
+	if (error instanceof SelectorTemplateUnrepresentableError) {
+		return new ORPCError('CACHE_GRANT_MIGRATION_PENDING', {
+			status: 409,
+			message: error.message
+		});
 	}
 
 	if (error instanceof CacheNotEmptyError) {

@@ -46,11 +46,20 @@ export const currentLocalStep: LocalStep = localStep(1);
  * release that changes what a tenant Durable Object stores adds the phases it
  * needs and reads the recorded one to choose behaviour. A build that needs no
  * such coordination runs in `current`.
+ *
+ * `contracted` is the phase in which a deploy rewrites or removes what the
+ * previous build still reads. A deploy records it only once the new build
+ * serves every request and the contraction has run. From then on a rollback
+ * cannot land on the previous build by redeploying it, so a write that build
+ * cannot parse is safe. This build never records `contracted`; it reads the
+ * phase so that a stored grant keeps the spelling the previous build parses
+ * until a later deploy contracts.
  */
 export const deploymentPhaseNameSchema = z.enum([
 	'current',
 	'expanded',
-	'native-reads'
+	'native-reads',
+	'contracted'
 ]);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
 
