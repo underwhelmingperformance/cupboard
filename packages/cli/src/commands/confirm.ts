@@ -1,5 +1,5 @@
 import {
-	selectorForCache,
+	identityForCache,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -88,7 +88,7 @@ export function registerConfirmCommand(
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: confirmAuthorizationDetails({
-						cacheSelector: selectorForCache(cache)
+						cache: identityForCache(cache).scope
 					})
 				}
 			);

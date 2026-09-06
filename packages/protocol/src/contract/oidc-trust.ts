@@ -26,6 +26,7 @@ export const oidcTrustContract = {
 		.meta({ requires: 'oidc-trust:add' })
 		.route({ method: 'POST', path: '/oidc-trust' })
 		.input(oidcTrustAddBodySchema)
+		.errors({ CACHE_GRANT_MIGRATION_PENDING: { status: 409 } })
 		.output(oidcTrustSummarySchema),
 
 	remove: baseProcedure

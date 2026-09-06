@@ -1,7 +1,8 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
+	type CacheScope,
+	identityForCache,
 	type RootName,
-	selectorForCache,
 	type StoredCache,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
@@ -67,11 +68,11 @@ interface RootListingOptions extends RootOptions {
  * command.
  */
 export function rootListingAuthorizationDetails(
-	cacheSelector: string,
+	cache: CacheScope,
 	root?: RootName
 ): AuthorizationDetails {
 	return rootListAuthorizationDetails({
-		cacheSelector,
+		cache,
 		...(root !== undefined && { root })
 	});
 }
@@ -149,7 +150,7 @@ export function registerRootCommands(
 						githubOidc: options.githubOidc,
 						audience: options.audience ?? audienceSchema.parse(url),
 						authorizationDetails: rootEnsureAuthorizationDetails({
-							cacheSelector: selectorForCache(cache),
+							cache: identityForCache(cache).scope,
 							root: name
 						})
 					}
@@ -243,7 +244,7 @@ export function registerRootCommands(
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: rootListingAuthorizationDetails(
-						selectorForCache(cache)
+						identityForCache(cache).scope
 					)
 				}
 			);
@@ -280,7 +281,7 @@ export function registerRootCommands(
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: rootListingAuthorizationDetails(
-						selectorForCache(cache),
+						identityForCache(cache).scope,
 						name
 					)
 				}

@@ -767,9 +767,9 @@ describe('runGithubCheck', () => {
 				value:
 					'failed: rule branch matches the modelled claims but does not permit ' +
 					'upload:negotiate, upload:status, upload:commit, ' +
-					'attestation:negotiate, attestation:attach, root:set on cache ' +
-					'_default with root github:acme/app/main/target; remove it and ' +
-					're-run setup'
+					'attestation:negotiate, attestation:attach, root:set on the ' +
+					'default cache with root github:acme/app/main/target; remove it ' +
+					'and re-run setup'
 			}
 		});
 	});
@@ -800,7 +800,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:list on cache _default with root github:acme/app/main/target'
+				'root:list on the default cache with root github:acme/app/main/target'
 		},
 		{
 			name: 'branch run-root attachment',
@@ -809,7 +809,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:attach on cache _default with root ' +
+				'root:attach on the default cache with root ' +
 				'github:acme/app/main/_cupboard-run/1'
 		}
 	] as const)(

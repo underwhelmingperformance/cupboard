@@ -117,7 +117,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:commit', 'root:set'],
-					cache: 'builds',
+					cache: { kind: 'named', name: 'builds' },
 					root: 'github:owner/'
 				}
 			])

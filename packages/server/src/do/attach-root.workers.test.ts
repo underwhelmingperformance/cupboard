@@ -1,7 +1,4 @@
-import {
-	DEFAULT_CACHE_SELECTOR,
-	storePathSchema
-} from '@cupboard/nix-store/scalars';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -45,7 +42,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:commit'],
-			cache: DEFAULT_CACHE_SELECTOR
+			cache: { kind: 'default' }
 		},
 		...(attachRootSelector === undefined
 			? []
@@ -53,7 +50,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 					{
 						type: 'cupboard_cache',
 						actions: ['root:attach'],
-						cache: DEFAULT_CACHE_SELECTOR,
+						cache: { kind: 'default' },
 						root: attachRootSelector
 					}
 				])
@@ -261,12 +258,12 @@ describe('negotiate binds the run root', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate', 'upload:commit'],
-					cache: DEFAULT_CACHE_SELECTOR
+					cache: { kind: 'default' }
 				},
 				{
 					type: 'cupboard_cache',
 					actions: ['root:set'],
-					cache: DEFAULT_CACHE_SELECTOR,
+					cache: { kind: 'default' },
 					root: runRootName
 				}
 			])

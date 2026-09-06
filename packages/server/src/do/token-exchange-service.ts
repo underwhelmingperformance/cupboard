@@ -2,7 +2,7 @@ import { type Logger } from '@cupboard/logger';
 import { type TtlSeconds } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	storedAuthorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -70,6 +70,7 @@ import {
 	type OidcTrustRuleSnapshot,
 	type OidcTrustService
 } from './oidc-trust-service.ts';
+import { StoredGrantSpelling } from './stored-grant-spelling.ts';
 
 interface PreparedRefreshToken {
 	readonly token: string;
@@ -106,11 +107,15 @@ type RefreshTokenDatabase = SchemaWriter;
 type RefreshTokenRotationOutcome = 'rotated' | 'rule-changed' | 'stale-member';
 
 export class TokenExchangeService {
+	private readonly grantSpelling: StoredGrantSpelling;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly authKeys: AuthKeysService,
 		private readonly oidcTrust: OidcTrustService
-	) {}
+	) {
+		this.grantSpelling = new StoredGrantSpelling(context);
+	}
 
 	private async exchange(
 		body: ParsedTokenExchangeGrantRequest
@@ -558,7 +563,7 @@ export class TokenExchangeService {
 				generation,
 				ruleId,
 				subject,
-				grantsJson: JSON.stringify(grants),
+				grantsJson: await this.grantSpelling.authorizationDetailsJson(grants),
 				createdAt: current?.createdAt ?? createdAt,
 				expiresAt
 			},
@@ -579,7 +584,9 @@ export class TokenExchangeService {
 		}
 
 		try {
-			return authorizationDetailsSchema.parse(JSON.parse(family.grantsJson));
+			return storedAuthorizationDetailsSchema.parse(
+				JSON.parse(family.grantsJson)
+			);
 		} catch {
 			this.revokeFamily(family.id);
 			throw new StaleRefreshTokenError();

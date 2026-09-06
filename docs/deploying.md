@@ -97,3 +97,38 @@ again.
 A migration that drops a column or a table cannot be undone by redeploying, so a
 release that contracts the schema documents its own recovery here alongside the
 phase that performs it.
+
+### Rolling back with stored cache grants
+
+This release names the cache in a stored grant by its scope,
+`{"kind":"default"}` or `{"kind":"named","name":...}`. The preceding build
+stored a selector string (`_default`, a public cache's name, `_private-<name>`)
+and parses a stored grant strictly, so it cannot read a row in the scope
+spelling. The rows are the trust rules in each tenant's `oidc_trust`, the grants
+each refresh-token family recorded in `refresh_token_family`, and the control
+plane's trust rules in D1 (`control_trust`). This build reads both spellings.
+
+Nothing is rewritten while this build is deployed. Until a deploy records
+`contracted`, a tenant's object stores a new rule or refresh-token family in the
+selector spelling. An existing named cache uses its current access: a private
+cache `ci` is stored as `_private-ci`. A cache that does not yet exist uses both
+`ci` and `_private-ci`, because its eventual access is unknown. Named templates
+also use both selector forms, so the preceding build can match either access
+mode. This build converts both variants back to scopes and deduplicates them.
+
+The control plane uses the same conversion for new control rules. It cannot
+resolve a tenant cache's access, so every named cache uses both selector forms.
+If a template is too long to include the private selector prefix in the
+preceding format, adding the rule returns `CACHE_GRANT_MIGRATION_PENDING` (409).
+Complete the deployment before adding that rule. Rules that can be stored in the
+preceding format remain readable after rollback, with both public and private
+template matches preserved.
+
+The rewrite of the stored rows to the scope spelling is a contraction. It runs
+in the `contracted` phase of this release's deploy, after both Workers serve the
+new build and every active tenant has reached the required step: the D1
+migration that rewrites `control_trust` and the per-object step that rewrites
+`oidc_trust` and `refresh_token_family`. From then on rows are stored in the
+scope spelling only. A rollback after that phase lands on a build that cannot
+read the rows, so recovery is deploying this release again or restoring the
+storage from before it.
