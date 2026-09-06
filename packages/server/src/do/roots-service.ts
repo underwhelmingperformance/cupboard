@@ -25,7 +25,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
-import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { maxBoundParameters } from './bulk.ts';
@@ -62,6 +61,17 @@ type RootWrite =
 	  }
 	| { readonly kind: 'written'; readonly stored: StoredRoot };
 
+function rootExpiry(
+	ttlSeconds: TtlSeconds | undefined,
+	now: Date
+): IsoTimestamp | undefined {
+	if (ttlSeconds === undefined) {
+		return undefined;
+	}
+
+	return isoTimestamp(new Date(now.getTime() + ttlSeconds * 1000));
+}
+
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
@@ -72,13 +82,10 @@ export class RootsService {
 	private writeRoot(cache: ResolvedCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
-		const expiresAt = resolveRootExpiry({
-			explicitTtlSeconds: request.ttlSeconds,
-			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, request.name),
-			name: request.name,
-			coldPathTtlSeconds: coldPathTtlSeconds(this.context.env),
+		const expiresAt = rootExpiry(
+			request.ttlSeconds ?? this.retention.resolveRootTtl(cache, request.name),
 			now
-		});
+		);
 
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
@@ -344,13 +351,10 @@ export class RootsService {
 	): void {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
-		const expiresAt = resolveRootExpiry({
-			explicitTtlSeconds,
-			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, name),
-			name,
-			coldPathTtlSeconds: coldPathTtlSeconds(this.context.env),
+		const expiresAt = rootExpiry(
+			explicitTtlSeconds ?? this.retention.resolveRootTtl(cache, name),
 			now
-		});
+		);
 
 		this.context.db
 			.insert(schema.retentionRoots)

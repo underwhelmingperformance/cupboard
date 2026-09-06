@@ -444,23 +444,27 @@ describe('retention grace deadlines in garbage collection', () => {
 	});
 });
 
-async function addGracePolicy(
-	cachePrefix: string,
-	graceSeconds: number
-): Promise<string> {
-	return runInDurableObject(
-		currentServer(),
-		(instance) =>
-			new RetentionService(instance.context).addGracePolicy({
-				cachePrefix,
-				graceSeconds: graceSecondsSchema.parse(graceSeconds)
-			}).id
-	);
+async function setDefaultCacheGrace(graceSeconds: number): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
+		instance.context.db
+			.update(schema.caches)
+			.set({ graceSeconds: graceSecondsSchema.parse(graceSeconds) })
+			.where(eq(schema.caches.id, cache.id))
+			.run();
+	});
 }
 
-async function removeGracePolicy(id: string): Promise<void> {
+async function clearDefaultCacheGrace(): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
-		new RetentionService(instance.context).removeGracePolicy(id);
+		const cache = resolvedCache(instance.context, defaultCache());
+
+		instance.context.db
+			.update(schema.caches)
+			.set({ graceSeconds: sql`NULL` })
+			.where(eq(schema.caches.id, cache.id))
+			.run();
 	});
 }
 
@@ -525,9 +529,9 @@ describe('retention grace transitions', () => {
 
 		await pushPath(token, kept);
 		await pushPath(token, released);
-		// The policy arrives only after publication, so the replacement below is
+		// Grace is configured only after publication, so the replacement below is
 		// the sole source of any deadline.
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 		await setRoot(token, {
 			name: 'channel',
 			targets: [kept.storePath, released.storePath]
@@ -556,7 +560,7 @@ describe('retention grace transitions', () => {
 		});
 
 		await pushPath(token, released);
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 		await setRoot(token, { name: 'channel', targets: [released.storePath] });
 
 		// Replacing the target set must preserve the root row and its expiry while
@@ -624,7 +628,7 @@ describe('retention grace transitions', () => {
 
 		await pushPath(token, kept);
 		await pushPath(token, deleted);
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 		await setRoot(token, {
 			name: 'channel',
 			targets: [kept.storePath, deleted.storePath]
@@ -656,9 +660,9 @@ describe('retention grace transitions', () => {
 
 		await pushPath(token, first);
 		await pushPath(token, second);
-		// The policy arrives only after publication, so the removal below is the
+		// Grace is configured only after publication, so the removal below is the
 		// sole source of the deadlines.
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 		await setRoot(token, {
 			name: 'channel',
 			targets: [first.storePath, second.storePath]
@@ -683,7 +687,7 @@ describe('retention grace transitions', () => {
 	it('anchors an expiry transition at the nominal expiry, not the collection', async () => {
 		await useTestServer('transition-expiry');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -729,7 +733,7 @@ describe('retention grace transitions', () => {
 		});
 
 		await pushPath(token, path);
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const rootCount = maxRootsExpiredPerRun + 1;
 		const firstExpiry = Date.now() - rootCount * 1000;
@@ -785,7 +789,7 @@ describe('retention grace transitions', () => {
 							.from(schema.retentionRoots)
 							.all().length,
 						continuation: await state.storage.get(gcContinuationKey),
-						policyResolutions: resolveGrace.mock.calls.length
+						graceResolutions: resolveGrace.mock.calls.length
 					};
 
 					await state.storage.deleteAlarm();
@@ -806,7 +810,7 @@ describe('retention grace transitions', () => {
 								.from(schema.retentionGrace)
 								.get()?.retainUntil,
 							continuation: await state.storage.get(gcContinuationKey),
-							policyResolutions: resolveGrace.mock.calls.length
+							graceResolutions: resolveGrace.mock.calls.length
 						}
 					};
 				}
@@ -816,13 +820,13 @@ describe('retention grace transitions', () => {
 				firstPass: {
 					remainingRoots: 1,
 					continuation: [tenantWideContinuation],
-					policyResolutions: 1
+					graceResolutions: 1
 				},
 				settled: {
 					remainingRoots: 0,
 					deadline: finalDeadline,
 					continuation: undefined,
-					policyResolutions: 1
+					graceResolutions: 1
 				}
 			});
 		} finally {
@@ -833,7 +837,7 @@ describe('retention grace transitions', () => {
 	it('continues target batches within a stored root over the protocol limit', async () => {
 		await useTestServer('transition-expiry-target-continuation');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: repeated('0'),
@@ -981,7 +985,7 @@ describe('retention grace transitions', () => {
 	it('marks the cache on a zero grace without granting a deadline', async () => {
 		await useTestServer('transition-zero');
 		const { token } = await bootstrap();
-		await addGracePolicy('', 0);
+		await setDefaultCacheGrace(0);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -999,8 +1003,8 @@ describe('retention grace transitions', () => {
 		}).toStrictEqual({ deadlines: [], graceManaged: true });
 	});
 
-	it('leaves a cache with no matching policy untouched', async () => {
-		await useTestServer('transition-no-policy');
+	it('leaves a cache with no configured grace untouched', async () => {
+		await useTestServer('transition-no-grace');
 		const { token } = await bootstrap();
 
 		const path = uploadMetadata({
@@ -1019,8 +1023,8 @@ describe('retention grace transitions', () => {
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
-	it('resolves the longest matching prefix', async () => {
-		await useTestServer('transition-longest-prefix');
+	it('resolves grace independently for each cache', async () => {
+		await useTestServer('transition-cache-grace');
 		await bootstrap();
 
 		const resolved = await runInDurableObject(currentServer(), (instance) => {
@@ -1033,32 +1037,34 @@ describe('retention grace transitions', () => {
 				buildsCache,
 				'public'
 			);
-			const withoutPolicies = service.resolveGraceSeconds(pr5);
+			const withoutConfiguration = service.resolveGraceSeconds(pr5);
 
-			service.addGracePolicy({
-				cachePrefix: '',
-				graceSeconds: graceSecondsSchema.parse(604_800)
-			});
-			service.addGracePolicy({
-				cachePrefix: 'pr-',
-				graceSeconds: graceSecondsSchema.parse(3600)
-			});
+			instance.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: graceSecondsSchema.parse(3600) })
+				.where(eq(schema.caches.id, pr5.id))
+				.run();
+			instance.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: graceSecondsSchema.parse(604_800) })
+				.where(eq(schema.caches.id, builds.id))
+				.run();
 
 			return {
-				withoutPolicies,
+				withoutConfiguration,
 				prCache: service.resolveGraceSeconds(pr5),
 				otherCache: service.resolveGraceSeconds(builds)
 			};
 		});
 
 		expect(resolved).toStrictEqual({
-			withoutPolicies: undefined,
+			withoutConfiguration: undefined,
 			prCache: 3600,
 			otherCache: 604_800
 		});
 	});
 
-	it('does not apply retention grace policies to a private cache', async () => {
+	it('supports grace on a private cache', async () => {
 		await useTestServer('transition-cache-access');
 		await bootstrap();
 
@@ -1068,34 +1074,31 @@ describe('retention grace transitions', () => {
 				buildsCache,
 				'private'
 			);
-			const tenantCacheCalledPrivate =
-				instance.context.cacheRepository.resolveOrCreate(
-					namedCache('private'),
-					'public'
-				);
+			const publicCache = instance.context.cacheRepository.resolveOrCreate(
+				namedCache('private'),
+				'public'
+			);
 
-			service.addGracePolicy({
-				cachePrefix: '',
-				graceSeconds: graceSecondsSchema.parse(604_800)
-			});
-			service.addGracePolicy({
-				cachePrefix: 'private',
-				graceSeconds: graceSecondsSchema.parse(3600)
-			});
+			instance.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: graceSecondsSchema.parse(604_800) })
+				.where(eq(schema.caches.id, privateCache.id))
+				.run();
+			instance.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: graceSecondsSchema.parse(3600) })
+				.where(eq(schema.caches.id, publicCache.id))
+				.run();
 
 			return {
 				privateCache: service.resolveGraceSeconds(privateCache),
-				privateCoverage: service.graceCoverage(buildsCache),
-				tenantCacheCalledPrivate: service.resolveGraceSeconds(
-					tenantCacheCalledPrivate
-				)
+				publicCache: service.resolveGraceSeconds(publicCache)
 			};
 		});
 
 		expect(resolved).toStrictEqual({
-			privateCache: undefined,
-			privateCoverage: { covered: false },
-			tenantCacheCalledPrivate: 3600
+			privateCache: 604_800,
+			publicCache: 3600
 		});
 	});
 });
@@ -1128,7 +1131,7 @@ describe('retention grace at publication', () => {
 	it('grants the deadline atomically with an immediate publication', async () => {
 		await useTestServer('publication-immediate');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -1155,7 +1158,7 @@ describe('retention grace at publication', () => {
 	it('grants the deadline to a rooted publication too', async () => {
 		await useTestServer('publication-rooted');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -1171,11 +1174,11 @@ describe('retention grace at publication', () => {
 		]);
 	});
 
-	it('keeps the captured grace across policy removal on a deferred upload', async () => {
+	it('keeps the captured grace after grace is cleared on a deferred upload', async () => {
 		await useTestServer('publication-deferred');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		const policyId = await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('grace-deferred');
 		const metadata = uploadMetadata({
@@ -1209,7 +1212,7 @@ describe('retention grace at publication', () => {
 		);
 		const beforeVerification = await graceDeadlineRows(defaultCache());
 
-		await removeGracePolicy(policyId);
+		await clearDefaultCacheGrace();
 		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
@@ -1226,13 +1229,13 @@ describe('retention grace at publication', () => {
 	});
 
 	// Rows written before the grace-decision column was added have NULL in that
-	// column. Verification must treat NULL as no captured policy, even if a
-	// policy now covers the cache.
+	// column. Verification must treat NULL as no captured grace, even if the
+	// cache now has grace configured.
 	it('materialises a pre-decision pending row without granting grace', async () => {
 		await useTestServer('publication-null-decision');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('grace-null-decision');
 		const metadata = uploadMetadata({
@@ -1274,7 +1277,7 @@ describe('retention grace at publication', () => {
 		await useTestServer('publication-mismatch');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const good = await verifiableNar('grace-good');
 		const wrong = await verifiableNar('grace-wrong');
@@ -1305,7 +1308,7 @@ describe('retention grace at publication', () => {
 	it('marks the cache grace-managed at publication on a zero grace', async () => {
 		await useTestServer('publication-zero');
 		const { token } = await bootstrap();
-		await addGracePolicy('', 0);
+		await setDefaultCacheGrace(0);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -1332,8 +1335,8 @@ describe('retention grace at publication', () => {
 		});
 	});
 
-	it('leaves a publication with no matching policy unmanaged', async () => {
-		await useTestServer('publication-no-policy');
+	it('leaves a publication without configured grace unmanaged', async () => {
+		await useTestServer('publication-no-grace');
 		const { token } = await bootstrap();
 
 		const path = uploadMetadata({
@@ -1354,7 +1357,7 @@ describe('retention grace at publication', () => {
 		await useTestServer('publication-stored-maximum');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('publication-stored-maximum');
 		const seed = uploadMetadata({
@@ -1423,7 +1426,7 @@ describe('retention grace at publication', () => {
 	it.each([
 		{
 			id: 'positive',
-			policySeconds: 3600,
+			configuredGraceSeconds: 3600,
 			reportsGrace: true,
 			expectManaged: true,
 			expectRetainUntil: '2026-01-01T01:00:00.000Z',
@@ -1431,7 +1434,7 @@ describe('retention grace at publication', () => {
 		},
 		{
 			id: 'legacy',
-			policySeconds: undefined,
+			configuredGraceSeconds: undefined,
 			reportsGrace: false,
 			expectManaged: false,
 			expectRetainUntil: undefined,
@@ -1439,7 +1442,7 @@ describe('retention grace at publication', () => {
 		},
 		{
 			id: 'zero',
-			policySeconds: 0,
+			configuredGraceSeconds: 0,
 			reportsGrace: true,
 			expectManaged: true,
 			expectRetainUntil: undefined,
@@ -1449,7 +1452,7 @@ describe('retention grace at publication', () => {
 		'applies captured grace to a re-drive concede ($id)',
 		async ({
 			id,
-			policySeconds,
+			configuredGraceSeconds,
 			reportsGrace: shouldReportGrace,
 			expectManaged,
 			expectRetainUntil,
@@ -1458,8 +1461,8 @@ describe('retention grace at publication', () => {
 			await useTestServer(`concede-redrive-${id}`);
 			const { token } = await bootstrap();
 
-			if (policySeconds !== undefined) {
-				await addGracePolicy('', policySeconds);
+			if (configuredGraceSeconds !== undefined) {
+				await setDefaultCacheGrace(configuredGraceSeconds);
 			}
 
 			const nar = await verifiableNar(`concede-redrive-${id}`);
@@ -1538,7 +1541,7 @@ describe('retention grace at publication', () => {
 	it('applies captured grace when a fresh reservation concedes to a committed winner', async () => {
 		await useTestServer('concede-to-winner');
 		const { token } = await bootstrap();
-		await addGracePolicy('', 3600);
+		await setDefaultCacheGrace(3600);
 
 		const nar = await verifiableNar('concede-to-winner');
 		const metadata = uploadMetadata({
@@ -1681,7 +1684,7 @@ describe('retention grace at publication', () => {
 		await useTestServer('grace-recovery');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('grace-recovery');
 		const metadata = uploadMetadata({
@@ -1938,7 +1941,7 @@ describe('retention grace at publication', () => {
 		await useTestServer('recovery-moved-row');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('recovery-moved-row');
 		const metadata = uploadMetadata({
@@ -2191,7 +2194,7 @@ describe('retention grace facts reported to clients', () => {
 	it('keeps legacy decision shapes without the capability, attaching facts with it', async () => {
 		await useTestServer('reported-decisions');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const committed = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2236,7 +2239,7 @@ describe('retention grace facts reported to clients', () => {
 	it('includes the deadline on a settled frame only for a capable upload', async () => {
 		await useTestServer('reported-settled');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('reported-settled');
 		const seed = uploadMetadata({
@@ -2304,7 +2307,7 @@ describe('retention grace facts reported to clients', () => {
 	it('reports the captured grace when deferred and the deadline on the verdict', async () => {
 		await useTestServer('reported-deferred');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const nar = await verifiableNar('reported-deferred');
 		const metadata = uploadMetadata({
@@ -2356,7 +2359,7 @@ describe('retention grace facts reported to clients', () => {
 	it('cannot shorten an already-present deadline on a retried negotiation', async () => {
 		await useTestServer('reported-retry');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2397,7 +2400,7 @@ describe('retention grace facts reported to clients', () => {
 	it('applies grace to several already-present paths in one transaction', async () => {
 		await useTestServer('reported-skip-batch');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const paths = [repeated('y'), repeated('z'), repeated('v')].map(
 			(storePathHash, index) =>
@@ -2452,7 +2455,7 @@ describe('retention grace facts reported to clients', () => {
 	it('plans a path whose row moves during negotiation instead of skipping it', async () => {
 		await useTestServer('reported-skip-moved');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2526,7 +2529,7 @@ describe('retention grace facts reported to clients', () => {
 		await useTestServer('reported-reattach-verdict');
 		await clearBlobStorage();
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		// Seed a canonical blob so the contested upload takes the reuse path.
 		const seed = await verifiableNar('reattach-seed');
@@ -2687,7 +2690,7 @@ describe('retention grace facts reported to clients', () => {
 	it('attaches the durable deadline when a retention-marked commit-batch entry resolves a cleared row', async () => {
 		await useTestServer('reported-reconnect-grace');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2796,10 +2799,10 @@ describe('retention grace facts reported to clients', () => {
 			name: 'reconnect-reports'
 		});
 
-		// Publish before adding the policy so any deadline would prove that this
+		// Publish before configuring grace so any deadline would prove that this
 		// reconnect extended retention.
 		await pushPath(token, metadata);
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const session = await openCommitSession(token);
 		session.send({
@@ -2839,7 +2842,7 @@ describe('retention grace facts reported to clients', () => {
 	it('keeps the legacy shape for a capable reconnect entry with no retention marker', async () => {
 		await useTestServer('reported-reconnect-unmarked');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2887,7 +2890,7 @@ describe('retention grace facts reported to clients', () => {
 	it('attaches the durable deadline when a retention-marked subscribe-identity entry resolves a cleared row', async () => {
 		await useTestServer('reported-reconnect-identity-grace');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3019,7 +3022,7 @@ describe('grace transition atomicity', () => {
 
 	it('rolls back a root deletion together with the grace transition it releases', async () => {
 		await useTestServer('grace-atomic-root-delete');
-		await addGracePolicy('', 3600);
+		await setDefaultCacheGrace(3600);
 
 		const cacheScope = defaultCache();
 		const name = rootNameSchema.parse('channel');
@@ -3117,7 +3120,7 @@ describe('confirming an unretained publication', () => {
 	it('extends a confirmed path to now+grace and reports the deadline', async () => {
 		await useTestServer('confirm-extends');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3146,7 +3149,7 @@ describe('confirming an unretained publication', () => {
 	it('refuses a committed path whose canonical backing is gone', async () => {
 		await useTestServer('confirm-lost-backing');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3187,7 +3190,7 @@ describe('confirming an unretained publication', () => {
 	it('refuses a committed path whose canonical R2 object is gone', async () => {
 		await useTestServer('confirm-lost-r2-backing');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3220,7 +3223,7 @@ describe('confirming an unretained publication', () => {
 	it('heals a missing tenant narinfo object before confirming', async () => {
 		await useTestServer('confirm-heals-narinfo');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3265,7 +3268,7 @@ describe('confirming an unretained publication', () => {
 	it('is idempotent and cannot shorten an already-extended deadline on retry', async () => {
 		await useTestServer('confirm-retry');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3296,10 +3299,10 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	it('marks the cache grace-managed with a zero grace and reports the matched policy', async () => {
+	it('marks the cache grace-managed and reports a configured zero grace', async () => {
 		await useTestServer('confirm-zero');
 		const { token } = await bootstrap();
-		await addGracePolicy('', 0);
+		await setDefaultCacheGrace(0);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3328,8 +3331,8 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	it('leaves the cache unmanaged when no policy matches', async () => {
-		await useTestServer('confirm-no-policy');
+	it('leaves the cache unmanaged when it has no configured grace', async () => {
+		await useTestServer('confirm-no-grace');
 		const { token } = await bootstrap();
 
 		const path = uploadMetadata({
@@ -3356,7 +3359,7 @@ describe('confirming an unretained publication', () => {
 	it('returns false for an uncommitted or reserved path without extending grace', async () => {
 		await useTestServer('confirm-uncommitted');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const untouched = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3398,7 +3401,7 @@ describe('confirming an unretained publication', () => {
 	it('confirms false when the row moves during the shared-fact checks', async () => {
 		await useTestServer('confirm-moved-row');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -3460,7 +3463,7 @@ describe('confirming an unretained publication', () => {
 	it('returns duplicate entries from one batched application', async () => {
 		await useTestServer('confirm-duplicates');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,

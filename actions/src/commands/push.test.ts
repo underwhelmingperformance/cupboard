@@ -810,8 +810,9 @@ describe('pathsMissingGraceDeadline', () => {
 		expect(pathsMissingGraceDeadline(summaryWithPaths([]))).toStrictEqual([]);
 	});
 
-	// A path with no grace fact indicates a cache-level policy failure. Exclude
-	// it from the per-path deadline failures and detect it with `hasUngracedPath`.
+	// A path with no grace fact indicates that the cache has no configured grace.
+	// Exclude it from the per-path deadline failures and detect it with
+	// `hasUngracedPath`.
 	it('reports a path whose grace fact is empty as ungraced, not per-path', () => {
 		const summary = summaryWithPaths([
 			{ storePathHash: storePathHashB, outcome: 'committed', grace: {} }

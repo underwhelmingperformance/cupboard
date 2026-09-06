@@ -56,7 +56,7 @@ inputs:
   no-retain:
     description:
       Push without adding the paths to a retention root or pin. The cache keeps
-      them only while a matching grace policy applies. Conflicts with root and
+      them only while the cache has configured grace. Conflicts with root and
       ttl.
     required: false
     default: 'false'

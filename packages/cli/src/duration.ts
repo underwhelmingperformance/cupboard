@@ -62,7 +62,7 @@ export function parseTtl(input: string): TtlSeconds {
 
 /**
  * Parses a retention-grace duration, sharing the root TTL's upper bound but
- * allowing zero: a grace policy may configure a zero grace, unlike a root TTL,
+ * allowing zero: a cache may configure a zero grace, unlike a root TTL,
  * which cannot be zero.
  */
 export function parseGrace(input: string): GraceSeconds {

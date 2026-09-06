@@ -152,7 +152,7 @@ export interface CommitOutcome {
 	readonly narHash: NixSha256HashString;
 	readonly status: 'committed' | 'pending' | 'already-present';
 	readonly settled: Promise<void>;
-	// The acknowledgement reports the captured policy decision for a pending
+	// The acknowledgement reports the captured grace decision for a pending
 	// outcome and the stored deadline for a final outcome.
 	readonly grace?: UploadGraceFact;
 	// Reads the final grace fact after `settled`. Deferred paths receive their

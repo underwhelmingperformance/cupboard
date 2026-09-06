@@ -390,11 +390,13 @@ One DO SQLite database per deployment.
   - (`cache`, `name`) (PK), `expires_at` (nullable), `created_at`, `updated_at`.
 - `retention_root_target`: the store paths a channel currently keeps.
   - (`cache`, `root_name`, `store_path_hash`) (PK), `store_path`.
-- `retention_policy`: default TTLs supplied to roots created without one.
-  - `id` (PK), `scope` (`cache` or `root-name-prefix`), `pattern`,
-    `default_ttl_seconds`, `created_at`. The most specific match wins.
-- `cache`: the named-cache registry; the empty name is the default cache.
-  - `name` (PK), `priority`, `created_at`.
+- `cache_identity`: the default and named cache registry.
+  - `id` (PK), discriminated `kind` and `name`, `access`, `priority`, nullable
+    `default_root_ttl_seconds` and `grace_seconds`, the sticky `grace_managed`
+    marker, and lifecycle timestamps.
+- `cache_root_ttl_override`: cache-local root-prefix TTL overrides.
+  - (`cache_id`, `root_prefix`) (PK), `ttl_seconds`. The longest matching prefix
+    wins.
 - `verification_cursor`: where the background verify pass last stopped.
   - `id` (PK, single `active` row), `cache`, `last_store_path_hash` (nullable),
     `updated_at`. Holds a composite `(cache, store_path_hash)` position; empty
@@ -447,12 +449,10 @@ and GC routes.
 | PUT       | (presigned R2 URL)                        | URL                | Client uploads blob directly to R2.             |
 | GET (WS)  | `/uploads/<id>/commit`                    | write JWT          | DO. WebSocket; parks until the verdict settles. |
 | POST      | `/gc`                                     | admin JWT          | DO. Runs pending-upload, retention, and R2 GC.  |
-| GET       | `/caches`                                 | admin JWT          | DO. Lists the cache registry with counts.       |
-| PUT       | `/caches/<name>`                          | admin JWT          | DO. Upserts a named cache's priority.           |
+| GET       | `/caches`                                 | admin JWT          | DO. Lists cache state and properties.           |
+| PUT       | `/caches/<name>`                          | admin JWT          | DO. Creates a named cache.                      |
+| PATCH     | `/caches/<name>`                          | admin JWT          | DO. Changes one cache property.                 |
 | DELETE    | `/caches/<name>`                          | admin JWT          | DO. Tears a cache down (`?force` if non-empty). |
-| GET       | `/policies`                               | admin JWT          | DO. Lists retention policies.                   |
-| POST      | `/policies`                               | admin JWT          | DO. Adds a retention policy.                    |
-| DELETE    | `/policies/<id>`                          | admin JWT          | DO. Removes a retention policy.                 |
 | GET       | `/oidc-trust`                             | admin JWT          | DO. Lists OIDC trust rules.                     |
 | POST      | `/oidc-trust`                             | admin JWT          | DO. Adds a write trust rule.                    |
 | DELETE    | `/oidc-trust/<id>`                        | admin JWT          | DO. Soft-disables a trust rule.                 |
@@ -465,9 +465,9 @@ nix-cache-info and pubkey reads and the `stats`, `paths`, `roots`, `uploads` and
 `gc` routes. The bare routes serve the empty default cache. A named cache's
 nix-cache-info is rendered by the DO from its registered priority; its narinfo
 objects are namespaced in R2, while NAR blobs stay shared. The `/token`,
-`/.well-known/*`, `/caches` registry, `/policies`, `/oidc-trust`, `/keys/auth`,
-`/check` and `/verify` routes are deployment-wide and take no prefix; `/check`
-and `/verify` span every cache, since NAR blobs are shared.
+`/.well-known/*`, `/caches` registry, `/oidc-trust`, `/keys/auth`, `/check` and
+`/verify` routes are deployment-wide and take no prefix; `/check` and `/verify`
+span every cache, since NAR blobs are shared.
 
 Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
 request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
@@ -767,12 +767,10 @@ cache.
     the cache-owning tenant entrypoint. Keying cache entries by credential is
     deferred unless a later measured need justifies it.
   - Per-cache private mode is deferred; this is a global toggle first.
-  - Superseded: per-cache privacy is a namespace, not a mode. A private cache
-    has its own identity (stored name `private/<name>`, selector
-    `_private-<name>`) and is read under `/t/<tenant>/private-cache/<name>/`, so
-    visibility is fixed at creation and no cache is ever switched between the
-    two. The tenant-wide toggle described above still governs the public
-    namespace.
+  - Current model: cache identity and access are separate properties. The
+    default cache and each named cache can be public or private, and an access
+    update does not change the cache URL or identity. Named caches use
+    `/t/<tenant>/cache/<name>/`; the bare tenant URL selects the default cache.
 
 - [x] Support one or more named cache paths for organisation:
   - [x] `/cache/:cacheName/nix-cache-info`
@@ -884,22 +882,12 @@ in three increments:
       the resulting expiry.
 - [x] Delete a specific store path (explicit admin `delete`, edge-safe).
       Clearing old entries automatically is retention-based and stays below.
-- [x] Optional retention period for cold paths. "Cold" = a path held only by an
-      implicit `pin:<storePathHash>` root (a plain push), never named by an
-      explicit root. `CUPBOARD_COLD_PATH_TTL_SECONDS` sets a deployment default
-      TTL applied to newly created implicit pins, so casually pushed paths
-      expire if not refreshed or explicitly rooted. Unset keeps the permanent
-      default; explicit roots and pins carrying their own TTL are unaffected. A
-      pure resolver decides the expiry and a thin env boundary reads the var, so
-      the precedence (explicit TTL > matching policy > cold-path default >
-      permanent) is unit-tested directly and the env wiring through an e2e.
-- [x] Retention policies per cache or name prefix. A `retention_policy` set
-      (scope `cache` or `root-name-prefix`, a pattern, a default TTL). When a
-      root is created without an explicit TTL, the most specific matching policy
-      supplies one (e.g. `pr-` → 14 days): a prefix match beats a cache match,
-      and a longer prefix wins. `cupboard policy list/add/remove` and the
-      `/policies` routes manage them. Both scopes apply to named caches and the
-      default cache.
+- [x] Cache-owned retention properties. Each cache has a permanent or timed
+      default root TTL, optional root-prefix TTL overrides, and optional grace.
+      Cache creation accepts the default TTL and grace; `cupboard cache` changes
+      each property later. A root's explicit TTL wins, then the longest matching
+      override, then the cache default. With none configured, the root is
+      permanent. No deployment setting changes this precedence.
 - [x] Repair/check command to compare metadata against R2. The admin
       `GET /check` route and `cupboard check [--deep]` scan the committed
       narinfo rows (bounded, the report flagging an incomplete scan), confirm
@@ -1229,8 +1217,8 @@ Settled decisions:
 
 - **Servability coherence, in two layers.** The serve-time gate is exactly what
   the read path checks: the materialised tenant narinfo R2 object exists (plus
-  admission and `readMode` auth at the edge). Reads run Worker to R2 and the
-  Cache API and never consult D1 or the DO, so this gate is eventually
+  admission and cache access enforcement at the edge). Reads run Worker to R2
+  and the Cache API and never consult D1 or the DO, so this gate is eventually
   consistent with control state, bounded by the narinfo TTL and edge cache. The
   commit-time/maintenance invariant is that a narinfo R2 object is materialised
   only after the registry row is active, the per-narinfo edge exists,
@@ -1289,14 +1277,13 @@ Admission resolves `/t/<slug>/` against a cached, versioned manifest in KV
 (`TENANT_CACHE`), revalidated against a tiny `tenant-manifest:version` key at
 most once per short interval. A slug absent from the manifest is rejected before
 any DO is instantiated; otherwise varying the slug could create unbounded,
-unprovisioned DOs. Each manifest record carries
-`{ status, readMode, configVersion }` and, for private tenants, a per-tenant
-read verifier (a hashed credential, never a DO signing key; plaintext secrets
-stay out of KV). The manifest is therefore the single read-path authority for
-tenancy state: `handleRead` enforces `readMode` from the already-loaded entry
-with no D1 or DO read on the GET path. Unauthenticated control routes return 404
-to avoid a control surface tenant-existence oracle. Public cache reads can still
-reveal a slug once content is known, which is acceptable.
+unprovisioned DOs. Each manifest record carries the tenant status and
+configuration version. D1 stores cache access and the tenant fallback or
+cache-specific read verifier. The edge reads this cache state before serving
+content, while public cache responses can still use the Workers Cache.
+Unauthenticated control routes return 404 to avoid a control surface
+tenant-existence oracle. Public cache reads can still reveal a slug once content
+is known, which is acceptable.
 
 Manifest publication is an ordered D1-then-KV saga (no shared transaction):
 provisioning writes the authoritative D1 `tenant` row first, then the full
@@ -1624,16 +1611,16 @@ collection removes.
 
 Because there is no `servable` flag in any step, "not-servable" is not a stored
 bit. The final serve predicate is simply that the materialised R2 narinfo object
-exists (plus admission/`readMode` at the edge). The collection classifies a
-narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
-object is missing is in-flight or stranded and is resolved by the rest of the
-saga state: (a) no live edge, no `blob_state`, and no live `pending_upload`
-means a crashed pre-reservation commit, so reclaim the row; (b) a live edge plus
-`available` `blob_state` but no R2 object means a crashed pre-materialise commit
-or a demote heal, so re-materialise the object; (c) a live `pending_upload`
-(`verdict = 'pending'`) means it is still verifying, so leave it for the verify
-pass. A row whose R2 object exists is already servable. Servability can
-therefore be derived from the stored state.
+exists (plus admission and cache access enforcement at the edge). The collection
+classifies a narinfo row by its R2 object, edge, and `blob_state`. A row whose
+R2 narinfo object is missing is in-flight or stranded and is resolved by the
+rest of the saga state: (a) no live edge, no `blob_state`, and no live
+`pending_upload` means a crashed pre-reservation commit, so reclaim the row; (b)
+a live edge plus `available` `blob_state` but no R2 object means a crashed
+pre-materialise commit or a demote heal, so re-materialise the object; (c) a
+live `pending_upload` (`verdict = 'pending'`) means it is still verifying, so
+leave it for the verify pass. A row whose R2 object exists is already servable.
+Servability can therefore be derived from the stored state.
 
 A reuse commit (no staging to re-promote) re-heads the canonical object at
 commit and returns a clean, attributable error if it is gone before writing the
@@ -1758,11 +1745,10 @@ issuer.
 
 ### Tenant lifecycle
 
-Tenant creation requires an explicit `readMode: public | private`; private is
-the hosted default. Enforcement reads `readMode` (and the per-tenant read
-verifier) from the KV admission manifest on the read path. A private tenant
-therefore rejects unauthenticated reads from the moment it can be created; the
-default mode never lacks its verifier data.
+Tenant creation requires an explicit access value for its default cache. Each
+named cache also receives an access value when it is created. A private cache
+uses its cache-specific verifier when configured, then the tenant fallback
+verifier. A tenant has no visibility setting of its own.
 
 Suspension stops writes immediately (the Worker's authoritative D1 status read
 before write dispatch) and reads eventually, as described in the admission
@@ -1999,19 +1985,19 @@ together.
    routing/serving lands in step 5.
 5. **Tenant routing + DO identity + per-tenant auth + private reads.** Add
    `/t/<tenant>/` resolution via the manifest, `configure` RPC,
-   `tenant_identity`, per-tenant issuer/AS metadata/JWKS, owner seeding,
-   `readMode`, and private-read enforcement from creation. The Worker admits a
-   slug against the KV manifest before instantiating any DO (an absent slug is a
-   404), enforces `readMode` and the per-tenant read verifier from the manifest
-   entry on the GET path (a private cache with no verifier fails closed). Before
-   a write, the Worker reads the authoritative D1 `tenant.status`; a suspended
-   or offboarding tenant receives a 403. `tenant_identity` is the sole identity
-   source: an unconfigured tenant DO returns 503 for every route rather than
-   minting or verifying under the literal `cupboard` default. The per-tenant
-   read verifier is a hashed credential carried in the manifest, never the
-   global `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a
-   plaintext secret in KV. Writes to any non-default tenant were refused with
-   501 until step 6 plumbed tenant-scoped storage; that gate is now lifted.
+   `tenant_identity`, per-tenant issuer/AS metadata/JWKS, owner seeding, and
+   private-read enforcement from cache creation. The Worker admits a slug
+   against the KV manifest before instantiating any DO (an absent slug is a
+   404), then enforces the selected cache's access and read verifier on the GET
+   path (a private cache with no verifier fails closed). Before a write, the
+   Worker reads the authoritative D1 `tenant.status`; a suspended or offboarding
+   tenant receives a 403. `tenant_identity` is the sole identity source: an
+   unconfigured tenant DO returns 503 for every route rather than minting or
+   verifying under the literal `cupboard` default. The per-tenant read verifier
+   is a hashed credential carried in the manifest, never the global
+   `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a plaintext
+   secret in KV. Writes to any non-default tenant were refused with 501 until
+   step 6 plumbed tenant-scoped storage; that gate is now lifted.
 6. **Multi-tenant upload path + push contract.** The narinfo R2 object key
    (`narInfoObjectKey`) and the read-path edge-cache key now carry a tenant
    segment, so distrusting tenants never collide on `narinfo/<hash>` or the edge
@@ -2549,7 +2535,7 @@ Settled decisions:
 - The public/private distinction is the builder's, carried by the instance it
   signs against: the public good instance with the Rekor log for public
   artifacts, the CI provider's private instance with no public log otherwise.
-  cupboard stores whichever bundle it receives, and `readMode` governs read
+  cupboard stores whichever bundle it receives, and cache access governs read
   access to the stored objects only.
 - Bundles live in the shared CAS, content-addressed by their own digest and
   deduplicated across tenants. A per-path list of descriptors maps a store path
@@ -2590,8 +2576,8 @@ type for a path are expressible.
 
 Discovery is two reads, mirroring the OCI referrers-then-blob shape: fetch the
 list, then fetch the chosen bundles from the CAS. Both reads sit behind the
-tenant's `readMode`, and absent and unauthorised return the same response, so
-the list opens no existence oracle and needs no bucket enumeration.
+selected cache's access, and absent and unauthorised return the same response,
+so the list opens no existence oracle and needs no bucket enumeration.
 
 The consumer's verification chain anchors trust at the `narHash`, not at the
 list:
@@ -2731,8 +2717,8 @@ Each step leaves a working cache.
       lists.
 - [x] **Attach and list materialisation.** Add the authenticated attach
       endpoint, the filing-correctness guard (well-formed bundle, subject equals
-      committed `narHash`), list materialisation from edges, `readMode` on list
-      and bundle reads with absent/unauthorised parity, and the
+      committed `narHash`), list materialisation from edges, cache access on
+      list and bundle reads with absent/unauthorised parity, and the
       existence-oracle-safe own-edges negotiate for bundles. Add crash-point
       coverage for an edge whose descriptor list was not materialised yet;
       recovery re-materialises the list from durable edges.
@@ -2748,8 +2734,8 @@ Each step leaves a working cache.
 - Bundles deduplicate across tenants: one `cas_object`, charged once per tenant.
   The list materialises correct descriptors, including several of one
   `predicateType`.
-- Discovery is two reads under `readMode`; absent and unauthorised are
-  indistinguishable.
+- Discovery is two reads under the selected cache's access control; absent and
+  unauthorised are indistinguishable.
 - The attach guard rejects a bundle whose subject does not equal the committed
   `narHash`; a consumer rejects a bundle whose subject mismatches or whose
   signature fails.
@@ -2949,7 +2935,7 @@ The stored grant-and-binding document is the authority model. The normal CLI
 keeps common CI workflows out of hand-written JSON by providing presets that
 expand to the same stored rule shape. The server stores the expanded rule plus
 optional display metadata. Preset names such as `add-github-pr`, `push`,
-`attest`, `root`, and `same-as-cache` are CLI conveniences.
+`attest`, and `root` are CLI conveniences.
 
 Rules can be added three ways:
 
@@ -2964,7 +2950,7 @@ The first preset is GitHub pull-request caches:
 cupboard oidc-trust add-github-pr https://cupboard.example/t/acme \
   --repo owner/repo \
   --cache-template 'pr-{pull_request_number}' \
-  --root same-as-cache \
+  --root-template 'pr-{pull_request_number}' \
   --allow push \
   --allow attest \
   --allow root
@@ -3032,20 +3018,10 @@ claim, optionally through a transform. The first supported transforms are:
   grammar allows it
 
 Template expansion applies to template-bearing options. In the first
-implementation those are `--cache-template` and `--root-template`.
-`--root same-as-cache` compiles to a relational binding requiring the requested
-root to equal the requested cache.
-
-`same-as-cache` is CLI shorthand. It compiles to a binding that requires the
-requested root to equal the requested cache exactly:
-
-```json
-{
-  "root": {
-    "equalsResource": "cache"
-  }
-}
-```
+implementation those are `--cache-template` and `--root-template`. A rule that
+uses the same rendered value for a cache and root gives both options the same
+template explicitly. The stored grant therefore contains two complete resource
+bindings and does not depend on one resource as a sentinel for the other.
 
 For a job whose verified OIDC token has `ref=refs/pull/123/merge`, the
 `add-github-pr` command above permits cache `pr-123` and root `pr-123`, and
@@ -3072,7 +3048,7 @@ cupboard oidc-trust add https://cupboard.example/t/acme \
   --allow root \
   --cache-template 'pr-{pull_request_number}' \
   --capture 'ref=^refs/pull/(?<pull_request_number>\d+)/merge$' \
-  --root same-as-cache
+  --root-template 'pr-{pull_request_number}'
 ```
 
 `--capture <claim>=<anchored-pattern>` matches a verified claim and exposes each
@@ -3110,7 +3086,7 @@ cupboard oidc-trust add https://cupboard.example/t/acme \
   --allow root \
   --cache-template 'pr-{pull_request_number}' \
   --template-source github-pr \
-  --root same-as-cache
+  --root-template 'pr-{pull_request_number}'
 ```
 
 `--template-source github-pr` expands to the `ref` capture shown above.
@@ -3584,19 +3560,19 @@ describe their real semantics.
 1. Explicit unretained publication. `cupboard push --no-retain` commits paths
    without setting a named root or creating the implicit per-path pins that a
    rootless push creates today. The retention choice is carried through the
-   push, so each successful path with a matching policy establishes its grace
+   push, so each successful path with configured cache grace establishes its
    deadline atomically with publication, including an already-present path that
    the upload negotiation skips. Seed and fallback jobs use it after the
    workflow caller opts into retention-grace mode, so the `_cupboard-seed` root,
    its TTL, and those jobs' `root:set` grant then go away.
 
-2. Retention grace, configured by cache-name prefix. A grace deadline is an
-   internal, expiring reachability source. Every successfully published path
-   receives or refreshes a deadline when its cache has a matching policy,
-   regardless of whether that push also sets a root, and a root target receives
-   one when a root stops retaining it. Applying a grace policy marks the cache
-   as grace-managed; that state is durable and is not undone by later policy
-   removal. GC walks live grace deadlines exactly as it walks root targets, so
+2. Retention grace, configured on each cache. A grace deadline is an internal,
+   expiring reachability source. Every successfully published path receives or
+   refreshes a deadline when its cache has configured grace, regardless of
+   whether that push also sets a root, and a root target receives one when a
+   root stops retaining it. Applying configured grace marks the cache as
+   grace-managed; that state is durable and is not undone if grace is later
+   cleared. GC walks live grace deadlines exactly as it walks root targets, so
    the whole referenced closure remains available for the configured grace
    without pretending that a CI run asked for durable retention.
 
@@ -3649,32 +3625,32 @@ grace facts to prove the path has a positive lifetime. Before a mutating push
 negotiates the real closure, it sends a side-effect-free empty-closure
 negotiation and refuses to publish unless the server acknowledges
 `upload-grace-facts`; a dry run makes the same check through its read-only
-preview request. The grace policy itself applies to every successful publication
-in the cache; `--no-retain` controls root creation and, in grace-mode workflows,
+preview request. The cache's grace applies to every successful publication in
+the cache; `--no-retain` controls root creation and, in grace-mode workflows,
 whether a positive grace deadline is required for success.
 
 Publication and its grace deadline are atomic per path, not across the whole
-multi-path push. Negotiation resolves the matching policy once and records its
+multi-path push. Negotiation resolves the cache's grace once and records its
 grace on a new or deferred commit before the cross-store commit saga proceeds.
 Successful materialisation computes `retain_until` from its materialisation time
 and the captured grace, then extends the deadline inside the same Durable Object
 critical section that finalises the exact narinfo generation. GC therefore
-cannot observe the committed path without its grace deadline. A policy changed
-or removed after acceptance does not weaken that accepted publication; a fresh
-negotiation uses the new policy. The repair path carries the captured grace
-through a crash. Failed verification removes the reservation and its pending
-grace intent without creating a live grace deadline.
+cannot observe the committed path without its grace deadline. Clearing or
+changing grace after acceptance does not weaken that accepted publication; a
+fresh negotiation uses the new configuration. The repair path carries the
+captured grace through a crash. Failed verification removes the reservation and
+its pending grace intent without creating a live grace deadline.
 
 An already-present decision is also a successful publication for this purpose.
-The server resolves the current policy, checks the exact committed narinfo
-generation, marks the cache grace-managed when a policy matched, and extends its
-grace deadline in one gated operation before returning the skip decision. A
+The server resolves the current cache grace, checks the exact committed narinfo
+generation, marks the cache grace-managed when grace is configured, and extends
+its grace deadline in one gated operation before returning the skip decision. A
 retry is idempotent because the extension is monotonic. A push reports the
 effective `retain_until` for each materialised or already-present path, or that
-no positive grace policy matched. A deferred `--no-wait` path instead reports
-its captured grace and pending state because its materialisation time, and
-therefore its exact deadline, is not known yet. A generic unretained push may
-deliberately accept an unmanaged result; retention-grace workflow mode may not.
+the cache has no positive grace. A deferred `--no-wait` path instead reports its
+captured grace and pending state because its materialisation time, and therefore
+its exact deadline, is not known yet. A generic unretained push may deliberately
+accept an unmanaged result; retention-grace workflow mode may not.
 
 Dry-run planning uses a separate, read-only upload preview procedure. It accepts
 the same path metadata needed to classify each path as already present,
@@ -3682,7 +3658,7 @@ reusable, or requiring upload, but it creates no pending upload, issues no
 upload credential, creates no grace deadline, marks no cache grace-managed,
 clears no reaper timer, and queues no reconciliation. The preview shares the
 negotiation classification rules and existence-oracle protections, but returns
-only the actions and policy facts needed for reporting. It requires a distinct
+only the actions and grace facts needed for reporting. It requires a distinct
 cache-scoped `upload:preview` action; that grant cannot call the mutating
 negotiate procedure. `cupboard push --dry-run` uses preview rather than
 negotiation, so previewing an already-present path cannot extend its lifetime.
@@ -3725,7 +3701,7 @@ substitute their results.
 
 A grace deadline is keyed by cache and store-path hash and is stored as
 `retain_until`. It is not a user-visible root and grants no durable-retention
-intent. For a cache with a matching policy:
+intent. For a cache with configured grace:
 
 - Successfully publishing a path extends its grace deadline to at least
   `publication_at + grace`, where `publication_at` is the materialisation time
@@ -3743,19 +3719,19 @@ The root transitions above occur in exactly three places: replacing a root's
 target set, removing a root, and the collector's deletion of expired roots
 before reachability is computed. Pruning an unusable path from every root after
 failed verification is none of them: the path never became servable, and it
-receives no grace deadline. Every transition resolves the policy in force when
-it is processed, since policies keep no history; an expiry's deadline stays
-anchored to the nominal `expires_at` even when the collector runs late, so a
-delayed collection cannot extend retention. Maintenance eligibility already
-wakes the tenant at its earliest root expiry, so processing normally follows the
-expiry closely.
+receives no grace deadline. Every transition resolves the configured grace when
+it is processed, since cache property changes keep no history; an expiry's
+deadline stays anchored to the nominal `expires_at` even when the collector runs
+late, so a delayed collection cannot extend retention. Maintenance eligibility
+already wakes the tenant at its earliest root expiry, so processing normally
+follows the expiry closely.
 
-The first event that applies a matching grace policy also marks the cache as
-grace-managed, including a zero-grace event. This is a one-way safety boundary:
-removing or changing the policy affects future deadlines but does not restore
-the legacy empty-cache guard or cancel captured publication grace and existing
-deadlines. A cache leaves grace-managed state only when the cache itself is
-deleted.
+The first event that applies the cache's configured grace also marks the cache
+as grace-managed, including a zero-grace event. This is a one-way safety
+boundary: clearing or changing grace affects future deadlines but does not
+restore the legacy empty-cache guard or cancel captured publication grace and
+existing deadlines. A cache leaves grace-managed state only when the cache
+itself is deleted.
 
 GC starts its reachability traversal from the targets of live roots and live
 grace deadlines. A grace deadline therefore keeps the same transitive closure
@@ -3770,8 +3746,8 @@ expiry is a retention event, so a grace-managed cache may drain after its last
 deadline expires. The existing empty-cache guard remains only for a cache that
 has never become grace-managed. A configured grace of zero creates no lasting
 deadline, marks the cache as grace-managed, and makes an unreachable path
-immediately collectable. Removing a policy cannot strand a partially drained
-cache by re-enabling the guard between GC continuation runs.
+immediately collectable. Clearing grace cannot strand a partially drained cache
+by re-enabling the guard between GC continuation runs.
 
 Grace deadlines avoid a new first-sight write across every unreachable narinfo.
 Once a deadline expires, deletion uses the existing per-run deletion cap and
@@ -3782,19 +3758,17 @@ existing phases incremental. The earliest `retain_until` participates in
 maintenance eligibility, so a tenant whose only deferred work is a grace
 deadline is woken when it expires.
 
-Retention grace has its own cache-prefix policy rather than sharing the existing
-root-TTL policy. An empty prefix is the tenant default; a longer matching prefix
-wins, so a `pr-` rule applies automatically to implicitly created PR caches.
-Root TTL remains selected by cache and root name and cannot shadow the grace
-accidentally. Updating or removing a policy changes only events accepted after
-that mutation. Pending publications retain the grace they captured at
-negotiation, and existing deadlines remain monotonic.
+Retention grace is a property of each cache, separate from its root TTL.
+Changing or clearing grace affects only events accepted after that mutation.
+Pending publications retain the grace they captured at negotiation, and existing
+deadlines remain monotonic. A newly created cache has no grace unless the
+creator configures one.
 
 The publication protocol also supports confirming an unretained publication by
 store path without uploading bytes. It uses the same exact-generation check and
 atomic grace extension as an already-present push decision, and cannot choose a
-deadline beyond the matching policy. It is a contract procedure guarded by a
-distinct cache-scoped `upload:confirm` action: the grant confines it to the
+deadline beyond the cache's configured grace. It is a contract procedure guarded
+by a distinct cache-scoped `upload:confirm` action: the grant confines it to the
 named destination cache without conferring negotiation or commit authority, and
 it is requested in its own right, since `impliedAtIssuance` relates only
 `upload:preview` to `upload:negotiate`. The planner uses this primitive to
@@ -3832,18 +3806,11 @@ The relative URL is resolved from the reuse view base and must be exercised by a
 real Nix substitution test; reusing the ordinary `URL: nar/...` rendering would
 incorrectly address `/t/<tenant>/reuse/<view>/nar/...`. Content-addressed NAR
 bytes retain their current tenant-scoped ownership check and immutable
-public-cache behaviour; a reuse view does not add a second NAR route. It uses
-the tenant's existing read mode and credential rather than introducing a second
-visibility boundary. A public tenant exposes configured views publicly. A
-private tenant's existing Basic credential guards each view exactly as it guards
-every stored cache.
-
-Superseded in part: private reuse views now use a separate namespace, as private
-caches do. A private view has the stored name `private/<view>` and the contract
-name `_private-<view>`. Clients read it under
-`/t/<tenant>/private-reuse/<view>/`, where every request authenticates with the
-tenant credential. Its selectors resolve against private stored names only.
-Public views keep the behaviour described above.
+public-cache behaviour. A view has its own public or private access property,
+independent of its name and stable `/t/<tenant>/reuse/<view>/` URL. Public views
+select public caches. Private views select private caches and authenticate with
+the tenant fallback credential because one cache-specific credential cannot
+authorise an aggregate view.
 
 Reuse-view `nix-cache-info` and narinfo responses are always `no-store`,
 including for public tenants. An answer can change when the view definition
@@ -3962,16 +3929,15 @@ turn root compatibility mode into unretained publication.
 
 Grace-mode planning fails closed. Every intermediate omitted from the seed
 matrix or published by a seed or fallback job must report a positive effective
-`retain_until`. No matching policy, zero grace, a prefix mismatch, or policy
-removal before a fresh confirmation fails the run rather than silently falling
-back to unretained bytes. The push action enforces the publication half of this
-rule: it reads the push report and fails the job when any path lacks a positive
-deadline, so the CLI needs no workflow-mode flag. Grace mode keeps the default
-wait, since a still-verifying path has no deadline to check. A publication
-accepted before policy removal honours its captured grace. The `root`
-compatibility mode performs none of these checks and continues to use the
-24-hour seed roots, although any matching grace policy still applies normally to
-its successful publications.
+`retain_until`. Missing or zero grace, or clearing grace before a fresh
+confirmation, fails the run rather than silently falling back to unretained
+bytes. The push action enforces the publication half of this rule: it reads the
+push report and fails the job when any path lacks a positive deadline, so the
+CLI needs no workflow-mode flag. Grace mode keeps the default wait, since a
+still-verifying path has no deadline to check. A publication accepted before
+grace is cleared honours its captured value. The `root` compatibility mode
+performs none of these checks and continues to use the 24-hour seed roots,
+although configured grace still applies to its successful publications.
 
 ### PR lifecycle and cache deletion
 
@@ -3983,14 +3949,15 @@ verified paths while those roots remain live and commits them into its
 destination under its own root. They are then durably part of the stable
 publication view.
 
-The PR roots expire through their ordinary TTL. When a matching grace policy is
-still in force as the collector processes the expiry, their former targets
-receive grace deadlines through the expiry transition, keeping the targets and
-their closure for the then-configured grace. An abandoned PR therefore lapses
-after its root TTL plus that grace. If no grace policy matches at that point, it
-may lapse at the root TTL instead. Neither case needs a close workflow, cache
-enumeration, or merge-order dependency. Keeping a merged PR's paths for the
-remainder of their requested TTL is expected retention, not a leak.
+The PR roots expire through their ordinary TTL. When a matching cache grace
+setting is still in force as the collector processes the expiry, their former
+targets receive grace deadlines through the expiry transition, keeping the
+targets and their closure for the then-configured grace. An abandoned PR
+therefore lapses after its root TTL plus that grace. If no cache grace setting
+matches at that point, it may lapse at the root TTL instead. Neither case needs
+a close workflow, cache enumeration, or merge-order dependency. Keeping a merged
+PR's paths for the remainder of their requested TTL is expected retention, not a
+leak.
 
 Cache deletion already exists and is not part of this lifecycle. A genuinely
 isolated cache may still be force-removed through that operation; adding
@@ -4002,13 +3969,12 @@ an administrator later recreates that cache name.
 
 ### Data model
 
-- A separate retention-grace policy stores `cachePrefix` and `graceSeconds`.
-  Prefixes are unique, an empty prefix is permitted, and longest-prefix matching
-  selects the cache's grace.
-- The cache registry records whether each cache is grace-managed. Applying a
-  matching policy to a publication or root transition sets this marker even when
-  grace is zero. It is never cleared independently; deleting the cache deletes
-  the marker with it.
+- The cache registry stores an optional `graceSeconds` value for each cache.
+  `NULL` means no grace, while zero is an explicit duration.
+- The cache registry also records whether each cache is grace-managed. Applying
+  configured grace to a publication or root transition sets this marker even
+  when grace is zero. It is never cleared independently; deleting the cache
+  deletes the marker with it.
 - A `retention_grace` row stores `cache`, `storePathHash`, and `retainUntil`,
   with a primary key on cache and store-path hash and an index on `retainUntil`
   for maintenance eligibility. Deleting a narinfo also deletes its grace
@@ -4016,10 +3982,10 @@ an administrator later recreates that cache name.
 - Every new or deferred commit durably records the grace resolved at negotiation
   before it can be acknowledged. The verification and repair paths consume that
   captured grace when materialising the exact generation, and terminal failure
-  clears it. An absent policy is recorded distinctly from zero grace. A pending
+  clears it. Missing grace is recorded distinctly from zero grace. A pending
   upload with no recorded decision, accepted before this scheme existed, is
-  treated as having matched no policy: it materialises without a grace deadline
-  and marks nothing grace-managed.
+  treated as having no configured grace: it materialises without a grace
+  deadline and marks nothing grace-managed.
 - A `reuse_view` row stores its name, definition revision, and binary-cache
   priority. The revision is issued by a persistent per-name sequence that, like
   `generation_seq`, survives deletion: a view deleted and recreated under the
@@ -4055,9 +4021,9 @@ an administrator later recreates that cache name.
   tenant's existing read boundary.
 - GC stays reachability-based. Grace deadlines are explicit, expiring traversal
   roots; they do not change how references are followed.
-- Once a cache has applied a grace policy, policy removal cannot restore the
+- Once a cache has applied configured grace, clearing it cannot restore the
   legacy empty-cache guard. Existing deadlines and accepted publication grace
-  survive policy changes.
+  survive configuration changes.
 - A writer can influence a reuse view only through a cache selected by that
   view. The administrator chooses those source caches; the reader separately
   chooses whether to consume the view. An exact selector admits only that cache,
@@ -4071,15 +4037,15 @@ an administrator later recreates that cache name.
 
 ### Implementation sequence
 
-1. Add the retention-grace policy and contract-first admin API, durable
+1. Add the cache grace property and contract-first cache API, durable
    grace-managed cache marker, grace table, atomic grace extension,
-   root-transition updates, GC traversal source, zero/no-policy and
-   policy-mutation semantics, and maintenance deadline. A cache that never
-   applies a policy keeps existing root and GC behaviour.
+   root-transition updates, GC traversal source, missing/zero grace and
+   configuration-mutation semantics, and maintenance deadline. A cache that
+   never has configured grace keeps existing root and GC behaviour.
 2. Add `cupboard push --no-retain`, carry the retention plan durably through
    negotiation, commit, deferred verification and repair, and apply matching
    grace deadlines to every successful publication, including rooted and
-   implicit-pin pushes. Cover captured grace across policy changes,
+   implicit-pin pushes. Cover captured grace across configuration changes,
    already-present decisions, the byte-free destination confirmation primitive
    and its `upload:confirm` action, reporting of the effective deadline, and
    both waiting modes. Add the separate read-only preview procedure and distinct
@@ -4133,48 +4099,50 @@ mode without waiting for retention grace.
 - CLI and action tests prove an unretained push writes no roots, requests no
   root grant, rejects `--root` or `--ttl` combinations, and composes with both
   waiting modes. A deferred `--no-wait` commit persists its intent before it is
-  acknowledged, keeps its captured grace across a policy change, and receives
-  its live grace deadline only when it becomes servable. A client that does not
-  offer `upload-grace-facts` receives from a grace-aware server the exact legacy
-  negotiate response and settled, deferred, and verdict frame shapes, proven
-  structurally for immediate, already-present, and deferred publication. Rooted,
-  implicit-pin, and unretained pushes made with an acknowledged capable server
-  all receive a matching publication grace deadline. An already-present decision
-  atomically refreshes its deadline before returning, and a retry cannot shorten
-  it. OIDC tests prove that a mutating push with neither `--root` nor
-  `--no-retain` is rejected before exchange, a named-root push receives only its
-  exact root grant, and an unretained push receives none. Dry-run tests prove
-  that preview requests only `upload:preview`, cannot call negotiate, and
-  creates no pending upload, credential, grace deadline, grace-managed marker,
-  timer change, or reconciliation, including for an already-present path under a
-  positive grace policy. Capability tests prove an old client receives
-  byte-identical legacy negotiate responses and commit frames from a new server,
-  a retained push from a new client falls back to the legacy report from an old
-  server, and an unretained push detects that old server through its negotiate
-  or preview preflight and fails before negotiating or publishing any real path.
-  A trust rule that covers `upload:negotiate` issues an `upload:preview` grant
-  without modification; `upload:confirm` is named by the rule in its own right.
-- Grace tests cover no-policy legacy behaviour, configured zero, a new commit,
-  monotonic extension, root replacement, explicit removal, expiry, a root
-  created and removed between GC collections, transitive reachability,
+  acknowledged, keeps its captured grace across a cache property change, and
+  receives its live grace deadline only when it becomes servable. A client that
+  does not offer `upload-grace-facts` receives from a grace-aware server the
+  exact legacy negotiate response and settled, deferred, and verdict frame
+  shapes, proven structurally for immediate, already-present, and deferred
+  publication. Rooted, implicit-pin, and unretained pushes made with an
+  acknowledged capable server all receive a matching publication grace deadline.
+  An already-present decision atomically refreshes its deadline before
+  returning, and a retry cannot shorten it. OIDC tests prove that a mutating
+  push with neither `--root` nor `--no-retain` is rejected before exchange, a
+  named-root push receives only its exact root grant, and an unretained push
+  receives none. Dry-run tests prove that preview requests only
+  `upload:preview`, cannot call negotiate, and creates no pending upload,
+  credential, grace deadline, grace-managed marker, timer change, or
+  reconciliation, including for an already-present path under a positive cache
+  grace setting. Capability tests prove an old client receives byte-identical
+  legacy negotiate responses and commit frames from a new server, a retained
+  push from a new client falls back to the legacy report from an old server, and
+  an unretained push detects that old server through its negotiate or preview
+  preflight and fails before negotiating or publishing any real path. A trust
+  rule that covers `upload:negotiate` issues an `upload:preview` grant without
+  modification; `upload:confirm` is named by the rule in its own right.
+- Grace tests cover unconfigured legacy behaviour, configured zero, a new
+  commit, monotonic extension, root replacement, explicit removal, expiry, a
+  root created and removed between GC collections, transitive reachability,
   collection after grace expiry, collection from a cache with no roots,
-  cache-prefix selection, and publication of the earliest deadline to
-  maintenance eligibility. Policy-mutation tests prove that removal does not
-  clear existing deadlines, accepted publications retain captured grace, zero
-  grace permanently marks the cache grace-managed, and removal during a capped
-  drain cannot re-enable the empty-cache guard. A pending upload with no
-  recorded grace decision materialises without a deadline and marks nothing
-  grace-managed. Existing GC tests continue to prove that an expired grace
-  deadline with a large closure drains through deletion continuations.
+  independent cache settings, and publication of the earliest deadline to
+  maintenance eligibility. Configuration-mutation tests prove that clearing
+  grace does not clear existing deadlines, accepted publications retain captured
+  grace, zero grace permanently marks the cache grace-managed, and clearing
+  grace during a capped drain cannot re-enable the empty-cache guard. A pending
+  upload with no recorded grace decision materialises without a deadline and
+  marks nothing grace-managed. Existing GC tests continue to prove that an
+  expired grace deadline with a large closure drains through deletion
+  continuations.
 - Action tests cover the safe `root` default and the opt-in `grace` mode,
   including the absence of the seed root and root grant in grace mode. Grace
-  mode fails for an absent, zero, removed, or prefix-mismatched policy, while
-  root mode requires neither a grace policy nor a positive deadline result. The
-  plan action's tests exercise the full four-mode matrix as pure fixture proofs:
-  root or grace retention, each with or without a reuse view, including
-  view-only adoption groups in both retention modes and preservation of the
-  24-hour seed root in root mode. The seed and fallback pushes take their root,
-  TTL, no-retain and require-grace values from matrix entries the plan action
+  mode fails when grace is absent, zero, or cleared, while root mode requires
+  neither configured cache grace nor a positive deadline result. The plan
+  action's tests exercise the full four-mode matrix as pure fixture proofs: root
+  or grace retention, each with or without a reuse view, including view-only
+  adoption groups in both retention modes and preservation of the 24-hour seed
+  root in root mode. The seed and fallback pushes take their root, TTL,
+  no-retain and require-grace values from matrix entries the plan action
   computes, so the same tests cover the exact values the workflow publishes
   with; the yml interpolates them without conditionals and has no test harness
   of its own.
@@ -4276,14 +4244,6 @@ in deep-dive sections far from the commands that depend on them:
   rule that can never match. The exchange then refuses with a flat
   untrusted-token error that names no claim, `oidc-trust list` shows the broken
   rule as present and enabled, and every push is blocked opaquely.
-- The tenant-wide grace policy permanently marks every covered cache
-  grace-managed on its first grace event. The marker survives policy removal,
-  changes how the cache is collected, and is exposed by no contract procedure or
-  CLI column, so it can be neither anticipated at setup nor audited later.
-- Grace mode's fail-closed guarantee runs only on seed and fallback pushes,
-  which exist only when targets share outputs. On a single-target manifest a
-  missing or mis-scoped grace policy yields a fully green run, and a grace
-  period shorter than the run degrades silently to a rebuild.
 - The reuse view's priority must exceed the destination's, but the destination's
   default of 40 is a server constant the operator never sets or sees, so the
   quickstart's `--priority 50` reads as arbitrary.
@@ -4304,20 +4264,18 @@ it, and explain refusals, and move the event arithmetic into the reusable
 workflow.
 
 1. One setup command. `cupboard github setup` writes the whole tenant-side
-   configuration for a repository in a single idempotent invocation: the grace
-   policy, the pull-request reuse view, and both trust rules, with the
-   job-workflow-ref taken from the required `--workflow-ref`, pinned to the
-   release the caller workflow uses. Re-running converges and reports drift
-   instead of duplicating state. Runner choice is operator configuration, so
-   setup writes nothing on GitHub.
+   configuration for a repository in a single idempotent invocation: the
+   pull-request reuse view and both trust rules, with the job-workflow-ref taken
+   from the required `--workflow-ref`, pinned to the release the caller workflow
+   uses. Re-running converges and reports drift instead of duplicating state.
+   Runner choice is operator configuration, so setup writes nothing on GitHub.
 2. One check command. `cupboard github check` verifies, before the first run,
    every invariant that today fails at run time or not at all: that the stored
    trust rules match the claims a real run of this repository will present and
-   their grants cover what the run requests, that the grace policy in force for
-   each destination cache shape clears a stated minimum, that the view's
-   priority strictly exceeds the destination's as actually served, and that the
-   caller's root prefix nests under the granted root. A check that cannot verify
-   something says so; it never passes by omission.
+   their grants cover what the run requests, that the view's priority strictly
+   exceeds the destination's as actually served, and that the caller's root
+   prefix nests under the granted root. A check that cannot verify something
+   says so; it never passes by omission.
 3. Diagnostic refusals. When a token exchange fails and at least one stored rule
    pins the caller's own repository ids, the refusal names that rule and the
    first claim that failed to match. A token from any other repository keeps the
@@ -4332,12 +4290,10 @@ workflow.
    mutually exclusive, so a caller either states the arithmetic or delegates it,
    never half of each. The caller workflow shrinks to the URL, the targets, the
    version pin, and the retention mode.
-5. Grace made visible and pre-checked. The caches contract carries the
-   grace-managed flag and the cache's earliest live grace deadline, and
-   `cache list` and `cache inspect` render them, mirroring how roots surface
-   expiry. In grace mode the plan job verifies up front that a covering policy
-   exists on the destination, failing at plan time even when the run produces no
-   shared intermediate.
+5. Cache retention made visible. The caches contract carries the configured root
+   TTL, grace, prefix overrides, grace-managed flag, and earliest live grace
+   deadline. `cache list` and `cache inspect` render those values, mirroring how
+   roots surface expiry.
 6. Documentation split by audience. `docs/github-actions.md` becomes the
    user-facing guide: the quickstart, the actions, and the common day-2 tasks,
    with every invariant stated beside the command that depends on it, so the
@@ -4349,15 +4305,13 @@ workflow.
 
 ### The setup command
 
-`cupboard github setup <tenant> --repo <owner/name>` performs, in order: add the
-tenant-wide grace policy (default 24 hours, `--grace` to override), define the
-`pull-requests` view over the `pr-` prefix with a priority read from the
-destination's live `nix-cache-info` rather than assumed, and add the
-pull-request and branch trust rules (default branch `main`, `--branch` to
-override) with the job-workflow-ref derived from the pinned cupboard release.
-Everything it writes is tenant state; runner choice and the release pin are
-ordinary values in the operator's own workflow and flake files, so setup touches
-nothing on GitHub.
+`cupboard github setup <tenant> --repo <owner/name>` defines the `pull-requests`
+view over the `pr-` prefix with a priority read from the destination's live
+`nix-cache-info` rather than assumed, and adds the pull-request and branch trust
+rules (default branch `main`, `--branch` to override) with the job-workflow-ref
+derived from the pinned cupboard release. Everything it writes is tenant state;
+runner choice and the release pin are ordinary values in the operator's own
+workflow and flake files, so setup touches nothing on GitHub.
 
 Idempotency is structural: each sub-step compares the stored state against what
 it would write, leaves matching state untouched, and reports any non-matching
@@ -4393,8 +4347,7 @@ degrades by naming what it could not verify.
 4. Add `cupboard github setup`, adding any missing contract read procedures it
    needs for idempotent comparison.
 5. Add `cupboard github check` on the shared matcher and the new read surfaces.
-6. Add the event preset to `cupboard-flake-publish.yml` and the plan job's
-   up-front grace-policy verification.
+6. Add the event preset to `cupboard-flake-publish.yml`.
 
 Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
 4's read procedures. Steps 1, 2, 3, and 6 are independent of each other.
@@ -4414,11 +4367,8 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
 - Preset tests prove the derived cache, root prefix, and TTL for both event
   shapes structurally, and that supplying a preset alongside any input it
   derives is rejected.
-- Plan tests prove grace mode without a covering policy fails at plan time on a
-  single-target manifest, where today's run passes green.
-- Contract tests prove the extended cache summary's grace fields are optional: a
-  summary without them, as an older server sends, still validates, so a newer
-  CLI degrades to rendering no grace state rather than failing the request.
+- Contract tests prove the cache summary always carries explicit retention
+  properties, including the permanent and no-grace cases.
 
 ### Out of scope and risks
 
@@ -5564,8 +5514,8 @@ covers, such as compilers, build tools, and outputs nothing depends on at
 runtime. Those are exactly the paths a later cohort wants to substitute, and no
 reference edge will ever reach them, so the run root's time-to-live is their
 reuse window and the retention decision is the workflow's own rather than a
-policy the run discovers at negotiation. An abandoned run needs no cleanup: its
-root expires and ordinary collection reclaims the orphans.
+configuration the run discovers at negotiation. An abandoned run needs no
+cleanup: its root expires and ordinary collection reclaims the orphans.
 
 Retention grace is not part of this path. It remains what a replacement or an
 expiry hands to the targets it releases, which is where a released path needs a

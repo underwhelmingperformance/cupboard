@@ -654,6 +654,9 @@ describe('private cache access', () => {
 				access: 'private',
 				priority: 40,
 				storePaths: 1,
+				defaultRootTtl: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootTtlOverrides: [],
 				graceManaged: false
 			},
 			removed: {
@@ -667,6 +670,9 @@ describe('private cache access', () => {
 					access: 'public',
 					priority: 41,
 					storePaths: 0,
+					defaultRootTtl: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootTtlOverrides: [],
 					graceManaged: false
 				}
 			],
