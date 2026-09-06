@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { InvalidCacheNameError } from '../../errors.ts';
+
 import {
 	buildCacheGrant,
 	collectSubstitutions,
@@ -8,6 +10,7 @@ import {
 	InvalidCaptureSpecError,
 	jobWorkflowReferenceClaim,
 	parseCapture,
+	RootBindingRequiredError,
 	UnknownAllowError,
 	UnknownTemplateSourceError
 } from './rule-builder.ts';
@@ -141,6 +144,7 @@ describe('buildCacheGrant', () => {
 			],
 			resources: {
 				cache: {
+					kind: 'named',
 					equalsTemplate: 'pr-{pr}',
 					substitutions: {
 						pr: {
@@ -167,7 +171,7 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+			resources: { cache: { kind: 'default' } }
 		});
 	});
 
@@ -184,20 +188,70 @@ describe('buildCacheGrant', () => {
 				'root:attach'
 			],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'default' },
 				root: { validate: 'rootName', exact: 'github:acme/ci/' }
 			}
 		});
 	});
 
 	it('uses the cache binding as the root for an attach-only allowance', () => {
-		expect(buildCacheGrant({ allow: ['attach'] })).toStrictEqual({
+		expect(
+			buildCacheGrant({ cache: 'acme-ci', allow: ['attach'] })
+		).toStrictEqual({
 			type: 'cupboard_cache',
 			actions: ['root:attach'],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'named', exact: 'acme-ci', validate: 'cacheName' },
 				root: { validate: 'rootName', equalsResource: 'cache' }
 			}
+		});
+	});
+
+	it('refuses a root bound to the default cache', () => {
+		expect(() => buildCacheGrant({ allow: ['attach'] })).toThrow(
+			RootBindingRequiredError
+		);
+	});
+
+	it.each([
+		['_private-ci', { kind: 'named', exact: 'ci', validate: 'cacheName' }],
+		['_default', { kind: 'default' }]
+	])('binds the cache the selector %s names', (cache, expected) => {
+		const grant = buildCacheGrant({ cache, allow: ['push'] });
+
+		expect(
+			grant.type === 'cupboard_cache' && grant.resources.cache
+		).toStrictEqual(expected);
+	});
+
+	it('refuses a cache that is not a selector', () => {
+		expect(() =>
+			buildCacheGrant({ cache: 'Bad Name', allow: ['push'] })
+		).toThrow(InvalidCacheNameError);
+	});
+
+	it('stores a private-cache template without its prefix', () => {
+		const grant = buildCacheGrant({
+			cacheTemplate: '_private-pr-{pr}',
+			allow: ['push'],
+			substitutions: collectSubstitutions({
+				templateSource: 'github-pr',
+				captures: []
+			})
+		});
+
+		expect(
+			grant.type === 'cupboard_cache' && grant.resources.cache
+		).toStrictEqual({
+			kind: 'named',
+			equalsTemplate: 'pr-{pr}',
+			substitutions: {
+				pr: {
+					claim: 'ref',
+					capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }
+				}
+			},
+			validate: 'cacheName'
 		});
 	});
 
@@ -212,7 +266,9 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: 'acme-ci', validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: 'acme-ci', validate: 'cacheName' }
+			}
 		});
 	});
 
@@ -231,6 +287,7 @@ describe('buildCacheGrant', () => {
 		expect(
 			grant.type === 'cupboard_cache' && grant.resources.cache
 		).toStrictEqual({
+			kind: 'named',
 			exact: 'fixed',
 			validate: 'cacheName'
 		});

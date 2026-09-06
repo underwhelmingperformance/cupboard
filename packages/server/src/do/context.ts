@@ -65,6 +65,7 @@ import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
+import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
@@ -153,6 +154,9 @@ export class ServerContext {
 	private credentialIssuer: PushCredentialIssuer | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
+	// One gate per object, so every service answers from the same reading of
+	// the deployment phase.
+	readonly phases: DeploymentPhaseGate;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
@@ -186,6 +190,7 @@ export class ServerContext {
 			{ schema }
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
+		this.phases = new DeploymentPhaseGate(this.d1);
 	}
 
 	// Do not let an error escape from `blockConcurrencyWhile`: the runtime would

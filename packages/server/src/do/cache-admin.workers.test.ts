@@ -16,11 +16,6 @@ import {
 	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
-import {
-	currentLocalStep,
-	type DeploymentPhaseName,
-	deploymentPhaseRowId
-} from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -51,6 +46,7 @@ import {
 	provisionFixtureTenant,
 	pushPath,
 	putNarBytes,
+	recordDeploymentPhase,
 	resetTestServer,
 	testBase,
 	testPushId,
@@ -252,22 +248,6 @@ async function policyIdentityRows(): Promise<
 		cacheId: row.cacheId ?? undefined,
 		rootNamePrefix: row.rootNamePrefix ?? undefined
 	}));
-}
-
-async function recordPhase(phase: DeploymentPhaseName): Promise<void> {
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.deploymentPhase)
-		.values({
-			id: deploymentPhaseRowId,
-			phase,
-			requiredLocalStep: currentLocalStep,
-			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-		})
-		.onConflictDoUpdate({
-			target: d1Schema.deploymentPhase.id,
-			set: { phase }
-		})
-		.run();
 }
 
 function wake(): Promise<LocalStepOutcome> {
@@ -1020,7 +1000,7 @@ describe('cache registry admin', () => {
 
 		const legacy = await reads();
 
-		await recordPhase('native-reads');
+		await recordDeploymentPhase('native-reads');
 		// The gate answers from its last reading for `phaseCacheMs`; the first
 		// listing read the phase, so the second reads it again only once the
 		// clock has passed that interval.

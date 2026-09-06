@@ -1,12 +1,14 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	cacheNameSchema,
+	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	DEFAULT_CACHE_SELECTOR,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
 	privateStoredCache,
 	rootNameSchema,
+	scopeFromSelector,
 	type StoredCache,
 	storedCacheSchema,
 	storePathHashSchema,
@@ -2962,7 +2964,7 @@ function confirmOnlyGrants(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:confirm'],
-			cache: cacheSelector
+			cache: scopeFromSelector(cacheSelectorSchema.parse(cacheSelector))
 		}
 	]);
 }

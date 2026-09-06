@@ -16,6 +16,7 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
+	scopeFromSelector,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type SigningKeyId,
@@ -30,6 +31,11 @@ import {
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
+import {
+	currentLocalStep,
+	type DeploymentPhaseName,
+	deploymentPhaseRowId
+} from '@cupboard/protocol/deployment';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema,
@@ -896,16 +902,18 @@ export function cacheWriteGrants(
 	roots: readonly string[] = [],
 	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
+	const cache = scopeFromSelector(cacheSelectorSchema.parse(cacheSelector));
+
 	return authorizationDetailsSchema.parse([
 		{
 			type: 'cupboard_cache',
 			actions: cacheWriteActions,
-			cache: cacheSelector
+			cache
 		},
 		...roots.map((root) => ({
 			type: 'cupboard_cache',
 			actions: ['root:set'],
-			cache: cacheSelector,
+			cache,
 			root
 		}))
 	]);
@@ -3823,6 +3831,28 @@ export function singleDecision(
 
 export function uploadExpiryFromNow(): IsoTimestamp {
 	return isoTimestamp(new Date(Date.now() + 15 * 60 * 1000));
+}
+
+/**
+ * Records the deployment phase as `cupboard deploy` does, in the row the
+ * tenant objects' phase gate reads.
+ */
+export async function recordDeploymentPhase(
+	phase: DeploymentPhaseName
+): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.deploymentPhase)
+		.values({
+			id: deploymentPhaseRowId,
+			phase,
+			requiredLocalStep: currentLocalStep,
+			updatedAt: isoTimestamp(testBase)
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.deploymentPhase.id,
+			set: { phase }
+		})
+		.run();
 }
 
 /**

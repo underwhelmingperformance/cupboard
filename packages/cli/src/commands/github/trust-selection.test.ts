@@ -24,7 +24,7 @@ const rule = oidcTrustSummarySchema.parse({
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'default' },
 				root: {
 					exact: 'github:acme/app/main/target',
 					validate: 'rootName'
@@ -38,7 +38,7 @@ const permitted = authorizationDetailsSchema.parse([
 	{
 		type: 'cupboard_cache',
 		actions: ['upload:commit'],
-		cache: '_default',
+		cache: { kind: 'default' },
 		root: 'github:acme/app/main/target'
 	}
 ]);
@@ -46,13 +46,13 @@ const refused = authorizationDetailsSchema.parse([
 	{
 		type: 'cupboard_cache',
 		actions: ['upload:commit'],
-		cache: 'private'
+		cache: { kind: 'named', name: 'private' }
 	}
 ]);
 const refusedDetail = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['upload:commit'],
-	cache: 'private'
+	cache: { kind: 'named', name: 'private' }
 });
 const otherRule = oidcTrustSummarySchema.parse({ ...rule, id: 'other' });
 const interactiveRule = oidcTrustSummarySchema.parse({
