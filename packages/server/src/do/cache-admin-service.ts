@@ -294,7 +294,7 @@ export class CacheAdminService {
 			.run();
 		this.identities.ensure(cache, priority, now);
 		this.identities.setPriority(cache, priority);
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 
 		return this.cacheSummary(cache, priority);
 	}
@@ -390,7 +390,7 @@ export class CacheAdminService {
 			return;
 		}
 
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 	}
 
 	// Claim one cache marker per alarm so several large teardowns make progress
