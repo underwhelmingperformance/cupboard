@@ -288,7 +288,7 @@ export class CacheAdminService {
 				set: { priority }
 			})
 			.run();
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 
 		return this.cacheSummary(cache, priority);
 	}
@@ -349,15 +349,13 @@ export class CacheAdminService {
 
 	/**
 	 * Registers the cache in the local registry if it is not there already,
-	 * and returns its identity.
+	 * writes its D1 lifecycle row, and returns its identity. This handles the
+	 * first write to a new cache and recreation after deletion, at one D1
+	 * statement per newly registered cache.
 	 *
-	 * Creating a registry row also clears the D1 deletion timestamp. This handles
-	 * the first write to a new cache and recreation after deletion. The transition
-	 * uses one D1 statement per newly registered cache.
-	 *
-	 * The default cache is registered at initialise, is always public, and
-	 * uses only the lifecycle generation for read authorisation, so it has no
-	 * deletion to clear.
+	 * The default cache needs neither write: `migrateAndSeed` registers it
+	 * locally on every initialisation, and a D1 trigger writes its lifecycle
+	 * row when the tenant row is inserted.
 	 */
 	async loadOrCreateCache(cache: StoredCache): Promise<CacheId> {
 		const now = isoTimestamp(new Date());
@@ -385,7 +383,7 @@ export class CacheAdminService {
 			return cacheId;
 		}
 
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 
 		return cacheId;
 	}

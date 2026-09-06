@@ -42,11 +42,10 @@ export interface CacheProjectionOutcome {
  * Writes the missing `cache_lifecycle` rows for this tenant's local caches, up
  * to {@link maxCachesProjectedPerRun} of them per call.
  *
- * The D1 backfill wrote a row for a named cache only where a reference or a
- * credential mentioned it, and registering a cache writes none, so a cache
- * that holds nothing has no row. A missing row reads as a live cache at
- * generation 1, but a release that reads a cache's access from this table
- * needs every cache to have one.
+ * The backfill projects a named cache only where a reference or a credential
+ * mentions it, and a build before this one wrote no row when it registered a
+ * cache, so a cache that holds nothing may have no row. That row is the only
+ * D1 record that the cache exists.
  *
  * A tenant with more caches than fit one call keeps rows to project. The
  * caller then leaves the local step unrecorded, so the control plane wakes
