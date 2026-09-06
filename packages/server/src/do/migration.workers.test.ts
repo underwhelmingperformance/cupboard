@@ -134,11 +134,27 @@ describe('migrations', () => {
 				});
 				database.insert(retentionPolicies).values(policy).run();
 
-				return database.select().from(retentionPolicies).all();
+				return database
+					.select()
+					.from(retentionPolicies)
+					.all()
+					.map((row) => ({
+						...row,
+						kind: row.kind ?? undefined,
+						cacheId: row.cacheId ?? undefined,
+						rootNamePrefix: row.rootNamePrefix ?? undefined
+					}));
 			}
 		);
 
-		expect(rows).toStrictEqual([policy]);
+		expect(rows).toStrictEqual([
+			{
+				...policy,
+				kind: undefined,
+				cacheId: undefined,
+				rootNamePrefix: undefined
+			}
+		]);
 	});
 
 	it('keeps the newest retention policy for each selector', async () => {
@@ -390,11 +406,15 @@ describe('migrations', () => {
 				});
 				database.insert(verificationCursor).values(cursor).run();
 
-				return database.select().from(verificationCursor).all();
+				return database
+					.select()
+					.from(verificationCursor)
+					.all()
+					.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined }));
 			}
 		);
 
-		expect(rows).toStrictEqual([cursor]);
+		expect(rows).toStrictEqual([{ ...cursor, cacheId: undefined }]);
 	});
 
 	it('gains the retention grace policy table at the latest migration', async () => {
@@ -454,7 +474,11 @@ describe('migrations', () => {
 				database.insert(retentionGrace).values(deadline).run();
 
 				return {
-					deadlines: database.select().from(retentionGrace).all(),
+					deadlines: database
+						.select()
+						.from(retentionGrace)
+						.all()
+						.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined })),
 					caches: state.storage.sql
 						.exec('SELECT name, grace_managed FROM cache ORDER BY name')
 						.toArray()
@@ -463,7 +487,7 @@ describe('migrations', () => {
 		);
 
 		expect(migrated).toStrictEqual({
-			deadlines: [deadline],
+			deadlines: [{ ...deadline, cacheId: undefined }],
 			caches: [{ name: 'builds', grace_managed: 0 }]
 		});
 	});
@@ -665,7 +689,11 @@ describe('migrations', () => {
 							'SELECT cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, generation, created_at FROM narinfo'
 						)
 						.toArray(),
-					views: after.select().from(reuseViews).all(),
+					views: after
+						.select()
+						.from(reuseViews)
+						.all()
+						.map((row) => ({ ...row, access: row.access ?? undefined })),
 					selectors: after.select().from(reuseViewSelectors).all(),
 					revisionSeqs: after.select().from(reuseViewRevisionSeq).all(),
 					hasNarinfoIndex: narinfoIndexNames.includes(
@@ -677,7 +705,7 @@ describe('migrations', () => {
 
 		expect(migrated).toStrictEqual({
 			narInfos: [narInfoRow],
-			views: [view],
+			views: [{ ...view, access: undefined }],
 			selectors: [selector],
 			revisionSeqs: [revisionSeq],
 			hasNarinfoIndex: true
