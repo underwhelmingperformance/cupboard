@@ -10,19 +10,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
-import {
-	and,
-	eq,
-	exists,
-	inArray,
-	isNotNull,
-	notExists,
-	sql
-} from 'drizzle-orm';
+import { and, eq, exists, inArray, notExists, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { cacheIdentityColumns } from '../db/cache.ts';
 import {
+	firstCacheGeneration,
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
 	secondCacheGeneration
@@ -986,7 +979,7 @@ export class DeletionQueueService {
 	 * For the private namespace, the deletion timestamp makes content reads
 	 * return absent-object results and makes availability report every requested
 	 * path as missing while path-keyed objects await teardown.
-	 * {@link clearCacheDeletion} removes the timestamp when the cache name is
+	 * {@link recordCacheRegistration} removes the timestamp when the cache name is
 	 * registered again.
 	 */
 	async revokeCacheGeneration(cache: StoredCache): Promise<void> {
@@ -1016,30 +1009,37 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Clears the deletion timestamp when this cache name is registered again.
+	 * Records the lifecycle row for a cache the tenant has just registered,
+	 * clearing the deletion timestamp when the name is registered again.
 	 *
-	 * The generation stays where the deletion left it, so the edges of the
-	 * deleted cache remain revoked while the new cache commits its own.
+	 * The row says the cache exists and how it reads, which is what a request
+	 * naming the cache consults. Writing it here rather than leaving it to the
+	 * projection means a cache is known from its first write.
 	 *
-	 * The filter updates only a row with a deletion timestamp.
+	 * The generation stays where a deletion left it, so the edges of the deleted
+	 * cache remain revoked while the new cache commits its own. An insert starts
+	 * at the first generation.
 	 */
-	async clearCacheDeletion(cache: StoredCache): Promise<void> {
+	async recordCacheRegistration(cache: StoredCache): Promise<void> {
 		const tenant = this.context.requireTenant();
+		const { scope, access } = identityForCache(cache);
+		const identity = cacheIdentityColumns(scope);
+		const now = isoTimestamp(new Date());
 
 		await this.context.d1
-			.update(d1Schema.cacheLifecycle)
-			.set({
-				...cacheIdentityColumns(identityForCache(cache).scope),
-				deletedAt: sql`null`,
-				updatedAt: isoTimestamp(new Date())
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant,
+				cache,
+				...identity,
+				access,
+				generation: firstCacheGeneration,
+				updatedAt: now
 			})
-			.where(
-				and(
-					eq(d1Schema.cacheLifecycle.tenant, tenant),
-					eq(d1Schema.cacheLifecycle.cache, cache),
-					isNotNull(d1Schema.cacheLifecycle.deletedAt)
-				)
-			);
+			.onConflictDoUpdate({
+				target: [d1Schema.cacheLifecycle.tenant, d1Schema.cacheLifecycle.cache],
+				set: { ...identity, access, deletedAt: sql`null`, updatedAt: now }
+			});
 	}
 
 	/**

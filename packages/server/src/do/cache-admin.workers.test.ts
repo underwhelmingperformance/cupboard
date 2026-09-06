@@ -154,6 +154,33 @@ async function projectedCaches(): Promise<number> {
 	return rows.length;
 }
 
+/**
+ * The lifecycle rows a tenant has, by the identity they record.
+ */
+async function lifecycleIdentities(): Promise<
+	{
+		kind: string | undefined;
+		name: string | undefined;
+		access: string | undefined;
+	}[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			kind: d1Schema.cacheLifecycle.cacheKind,
+			name: d1Schema.cacheLifecycle.cacheName,
+			access: d1Schema.cacheLifecycle.access
+		})
+		.from(d1Schema.cacheLifecycle)
+		.orderBy(d1Schema.cacheLifecycle.cache)
+		.all();
+
+	return rows.map((row) => ({
+		kind: row.kind ?? undefined,
+		name: row.name ?? undefined,
+		access: row.access ?? undefined
+	}));
+}
+
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
@@ -553,22 +580,46 @@ describe('cache registry admin', () => {
 		});
 	});
 
+	// A request that names a cache reads this row to learn how the cache reads,
+	// so the row has to exist from the cache's first write rather than waiting
+	// for the projection.
+	it('records how a cache reads when the cache is registered', async () => {
+		await useTestServer('cache-admin-lifecycle-on-registration');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'private/guides'
+		);
+
+		expect(await lifecycleIdentities()).toStrictEqual([
+			{ kind: 'default', name: undefined, access: 'public' },
+			{ kind: 'named', name: 'builds', access: 'public' },
+			{ kind: 'named', name: 'guides', access: 'private' }
+		]);
+	});
+
 	it('finishes projecting more caches than one invocation allows over two wakes', async () => {
 		await useTestServer('cache-admin-identity-projection');
 
 		const init = await bootstrap();
-		// More empty caches than one invocation projects. The backfill sees a
-		// cache only where a reference or credential mentions it, so an empty one
-		// reaches D1 only through this projection.
+		// More caches than one invocation projects.
 		const cacheCount = maxCachesProjectedPerRun + 5;
 
 		for (let index = 0; index < cacheCount; index += 1) {
 			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
 
-		// A commit writes a lifecycle row for the cache it targets, so the count
-		// before the first wake is not zero. Compare the growth rather than the
-		// total.
+		// Registering a cache writes its lifecycle row, so drop every row to leave
+		// the state this projection exists for: caches registered by a release
+		// that wrote no row.
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.cacheLifecycle)
+			.run();
+
 		const beforeWake = await projectedCaches();
 		const first = await wake();
 		const afterFirst = await projectedCaches();
