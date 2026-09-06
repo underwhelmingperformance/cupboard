@@ -162,6 +162,20 @@
 			"when": 1788226761178,
 			"tag": "0022_cache_access_backfill",
 			"breakpoints": true
+		},
+		{
+			"idx": 23,
+			"version": "6",
+			"when": 1788227793001,
+			"tag": "0023_cache_access_contract_assertions",
+			"breakpoints": true
+		},
+		{
+			"idx": 24,
+			"version": "6",
+			"when": 1788235790821,
+			"tag": "0024_cache_access_compatible_contract",
+			"breakpoints": true
 		}
 	]
 }
