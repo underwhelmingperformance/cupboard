@@ -1,27 +1,79 @@
-import { InvalidCacheUrlSegmentError } from './errors.ts';
 import {
-	DEFAULT_CACHE,
-	isPrivateCache,
-	privateCacheLocalName,
-	type StoredCache
-} from './scalars.ts';
+	InvalidCacheUrlSegmentError,
+	InvalidTenantCacheUrlError
+} from './errors.ts';
+import { cacheNameSchema, type CacheScope, tenantIdSchema } from './scalars.ts';
+import { parseBaseUrl } from './url.ts';
 
-export function cacheUrl(baseUrl: URL, cache: StoredCache | undefined): URL {
-	if (cache === undefined || cache === DEFAULT_CACHE) {
+export interface TenantCacheUrl {
+	readonly tenantUrl: URL;
+	readonly cache: CacheScope;
+}
+
+function canonicalPathSegment(encoded: string): string {
+	const decoded = decodeURIComponent(encoded);
+
+	if (encodeURIComponent(decoded) !== encoded) {
+		throw new URIError('Path segment is not canonically encoded');
+	}
+
+	return decoded;
+}
+
+export function cacheUrl(baseUrl: URL, cache: CacheScope): URL {
+	if (cache.kind === 'default') {
 		return new URL(baseUrl);
 	}
 
-	// A private cache uses a separate URL namespace. Appending its stored name as
-	// one path segment would encode the slash as `%2F`.
-	if (isPrivateCache(cache)) {
-		return appendPathSegments(
-			baseUrl,
-			'private-cache',
-			privateCacheLocalName(cache)
-		);
-	}
+	return appendPathSegments(baseUrl, 'cache', cache.name);
+}
 
-	return appendPathSegments(baseUrl, 'cache', cache);
+/**
+ * Separates a tenant cache URL into its tenant URL and cache scope. Only the
+ * canonical tenant path and its named-cache child are accepted.
+ */
+export function parseTenantCacheUrl(value: URL): TenantCacheUrl {
+	const href = value.href;
+
+	try {
+		const url = parseBaseUrl(value);
+		const segments = url.pathname.split('/');
+		const tenantMarker = segments.at(-2);
+		const encodedTenant = segments.at(-1);
+
+		if (tenantMarker === 't' && encodedTenant !== undefined) {
+			tenantIdSchema.parse(canonicalPathSegment(encodedTenant));
+
+			return { tenantUrl: url, cache: { kind: 'default' } };
+		}
+
+		const namedTenantMarker = segments.at(-4);
+		const encodedNamedTenant = segments.at(-3);
+		const cacheMarker = segments.at(-2);
+		const encodedCache = segments.at(-1);
+
+		if (
+			namedTenantMarker !== 't' ||
+			encodedNamedTenant === undefined ||
+			cacheMarker !== 'cache' ||
+			encodedCache === undefined
+		) {
+			throw new InvalidTenantCacheUrlError(href);
+		}
+
+		tenantIdSchema.parse(canonicalPathSegment(encodedNamedTenant));
+		const name = cacheNameSchema.parse(canonicalPathSegment(encodedCache));
+		const tenantUrl = new URL(url);
+		tenantUrl.pathname = segments.slice(0, -2).join('/') || '/';
+
+		return { tenantUrl, cache: { kind: 'named', name } };
+	} catch (error) {
+		if (error instanceof InvalidTenantCacheUrlError) {
+			throw error;
+		}
+
+		throw new InvalidTenantCacheUrlError(href, { cause: error });
+	}
 }
 
 /**
@@ -33,10 +85,9 @@ export interface CacheUrlCredential {
 }
 
 /**
- * Returns a copy of `url` with the credential in its userinfo. A private cache
- * uses the tenant credential unless it has its own credential. When it does,
- * the cache accepts only that credential. Nix resolves netrc entries by host,
- * so a cache-specific credential must be supplied through URL userinfo.
+ * Returns a copy of `url` with the credential in its userinfo. Nix resolves
+ * netrc entries by host, so a cache-specific credential must be supplied
+ * through URL userinfo.
  */
 export function urlWithCredential(
 	url: URL,
@@ -59,10 +110,6 @@ export function tenantUrl(baseUrl: URL, tenant: string): URL {
 
 export function reuseViewUrl(baseUrl: URL, view: string): URL {
 	return appendPathSegments(baseUrl, 'reuse', view);
-}
-
-export function privateReuseViewUrl(baseUrl: URL, view: string): URL {
-	return appendPathSegments(baseUrl, 'private-reuse', view);
 }
 
 export function publicKeyUrl(baseUrl: URL): URL {

@@ -1,11 +1,7 @@
+import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	rootNameSchema
-} from '@cupboard/nix-store/scalars';
-import {
-	type UploadAttachRoot,
-	type UploadNegotiateResponse,
+	type UploadAttachRootInput,
+	type UploadNegotiateResponseInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -17,10 +13,12 @@ import {
 	authorisedFetch,
 	commitUpload,
 	currentServer,
+	defaultCache,
 	initialise,
 	narBytes,
 	putNarBytes,
 	resetTestServer,
+	resolvedCache,
 	runGcResult,
 	setRoot,
 	singleDecision,
@@ -33,26 +31,22 @@ import {
 
 type PendingRow = typeof schema.pendingUploads.$inferSelect;
 
-const runRoot: UploadAttachRoot = { name: 'ci/run-1', ttlSeconds: 3600 };
+const runRoot: UploadAttachRootInput = { name: 'ci/run-1', ttlSeconds: 3600 };
 
 async function negotiateWithRoot(
 	token: string,
 	paths: readonly ReturnType<typeof uploadMetadata>[],
-	attachRoot?: UploadAttachRoot
-): Promise<UploadNegotiateResponse> {
-	const response = await authorisedFetch(
-		`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-		token,
-		{
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path)),
-				...(attachRoot !== undefined && { attachRoot })
-			})
-		}
-	);
+	attachRoot?: UploadAttachRootInput
+): Promise<UploadNegotiateResponseInput> {
+	const response = await authorisedFetch('/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			pushId: testPushId,
+			paths: paths.map((path) => uploadPathNegotiation(path)),
+			...(attachRoot !== undefined && { attachRoot })
+		})
+	});
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -62,7 +56,7 @@ async function negotiateWithRoot(
 async function pushWithRoot(
 	token: string,
 	metadata: ReturnType<typeof uploadMetadata>,
-	attachRoot?: UploadAttachRoot
+	attachRoot?: UploadAttachRootInput
 ): Promise<void> {
 	const decision = singleDecision(
 		await negotiateWithRoot(token, [metadata], attachRoot)
@@ -82,14 +76,15 @@ async function pushWithRoot(
 async function rootTargetRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select({
-				cache: schema.retentionRootTargets.cache,
-				rootName: schema.retentionRootTargets.rootName,
-				storePathHash: schema.retentionRootTargets.storePathHash,
-				storePath: schema.retentionRootTargets.storePath
-			})
+			.select()
 			.from(schema.retentionRootTargets)
 			.all()
+			.map((row) => ({
+				cache: instance.context.cacheRepository.scopeForId(row.cacheId),
+				rootName: row.rootName,
+				storePathHash: row.storePathHash,
+				storePath: row.storePath
+			}))
 			.toSorted((left, right) =>
 				`${left.rootName} ${left.storePathHash}`.localeCompare(
 					`${right.rootName} ${right.storePathHash}`
@@ -105,31 +100,36 @@ async function retentionState(): Promise<{
 }> {
 	return runInDurableObject(currentServer(), (instance) => ({
 		roots: instance.context.db
-			.select({
-				cache: schema.retentionRoots.cache,
-				name: schema.retentionRoots.name,
-				expiresAt: schema.retentionRoots.expiresAt,
-				createdAt: schema.retentionRoots.createdAt,
-				updatedAt: schema.retentionRoots.updatedAt
-			})
+			.select()
 			.from(schema.retentionRoots)
 			.all()
-			.map((row) => ({ ...row, expiresAt: row.expiresAt ?? undefined })),
+			.map((row) => ({
+				cache: instance.context.cacheRepository.scopeForId(row.cacheId),
+				name: row.name,
+				expiresAt: row.expiresAt ?? undefined,
+				createdAt: row.createdAt,
+				updatedAt: row.updatedAt
+			})),
 		grace: instance.context.db
-			.select({
-				cache: schema.retentionGrace.cache,
-				storePathHash: schema.retentionGrace.storePathHash,
-				retainUntil: schema.retentionGrace.retainUntil
-			})
+			.select()
 			.from(schema.retentionGrace)
-			.all(),
+			.all()
+			.map((row) => ({
+				cache: instance.context.cacheRepository.scopeForId(row.cacheId),
+				storePathHash: row.storePathHash,
+				retainUntil: row.retainUntil
+			})),
 		caches: instance.context.db
 			.select({
-				name: schema.caches.name,
+				id: schema.caches.id,
 				graceManaged: schema.caches.graceManaged
 			})
 			.from(schema.caches)
 			.all()
+			.map((row) => ({
+				cache: instance.context.cacheRepository.scopeForId(row.id),
+				graceManaged: row.graceManaged
+			}))
 	}));
 }
 
@@ -184,13 +184,13 @@ describe('root attach at commit', () => {
 
 		expect(await rootTargetRows()).toStrictEqual([
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: fresh.storePathHash,
 				storePath: fresh.storePath
 			},
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: reuse.storePathHash,
 				storePath: reuse.storePath
@@ -210,7 +210,7 @@ describe('root attach at commit', () => {
 		expect(await retentionState()).toStrictEqual({
 			roots: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					name: runRoot.name,
 					expiresAt: '2026-01-01T01:00:00.000Z',
 					createdAt: '2026-01-01T00:00:00.000Z',
@@ -218,7 +218,7 @@ describe('root attach at commit', () => {
 				}
 			],
 			grace: [],
-			caches: [{ name: '', graceManaged: false }]
+			caches: [{ cache: defaultCache(), graceManaged: false }]
 		});
 	});
 
@@ -232,10 +232,12 @@ describe('root attach at commit', () => {
 		// The state an interrupted earlier flush leaves: the target row already
 		// applied while the settle that wrote it never finished.
 		await runInDurableObject(currentServer(), (instance) => {
+			const cacheId = resolvedCache(instance.context).id;
+
 			instance.context.db
 				.insert(schema.retentionRootTargets)
 				.values({
-					cache: DEFAULT_CACHE,
+					cacheId,
 					rootName: rootNameSchema.parse(runRoot.name),
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath
@@ -247,7 +249,7 @@ describe('root attach at commit', () => {
 
 		expect(await rootTargetRows()).toStrictEqual([
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: metadata.storePathHash,
 				storePath: metadata.storePath
@@ -282,7 +284,7 @@ describe('root attach at commit', () => {
 
 		const expected = [
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: metadata.storePathHash,
 				storePath: metadata.storePath
@@ -335,13 +337,13 @@ describe('root attach at commit', () => {
 			},
 			targets: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: runRoot.name,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath
 				},
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: 'ci/run-2',
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath
@@ -374,7 +376,7 @@ describe('root attach at commit', () => {
 
 		const expected = [
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: metadata.storePathHash,
 				storePath: metadata.storePath
@@ -395,7 +397,7 @@ describe('root attach at commit', () => {
 			retention: {
 				roots: [
 					{
-						cache: '',
+						cache: defaultCache(),
 						name: runRoot.name,
 						expiresAt: '2026-01-01T01:00:00.000Z',
 						createdAt: '2026-01-01T00:00:00.000Z',
@@ -403,7 +405,7 @@ describe('root attach at commit', () => {
 					}
 				],
 				grace: [],
-				caches: [{ name: '', graceManaged: false }]
+				caches: [{ cache: defaultCache(), graceManaged: false }]
 			}
 		});
 	});
@@ -480,7 +482,7 @@ describe('root attach at commit', () => {
 			},
 			targets: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: 'main',
 					storePathHash: kept.storePathHash,
 					storePath: kept.storePath

@@ -2,26 +2,22 @@ import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
-import { privateCacheOption } from '../cache-option.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	resolveCacheSelection
-} from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import type { DestinationProbes } from '../plan/availability-partition.ts';
 import {
 	type AvailabilityReprobe,
 	reprobeAvailability
 } from '../plan/availability-reprobe.ts';
-import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
+import type { CohortTarget } from '../plan/cohort-target.ts';
 import { tenantProbesFor } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { readCohortTargets, readCredentials } from './plan-cohort.ts';
 
-export interface PlanReprobeOptions extends CacheSelectionOptions {
+export interface PlanReprobeOptions {
 	readonly targetsFile: string;
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
@@ -29,7 +25,7 @@ export interface PlanReprobeOptions extends CacheSelectionOptions {
 }
 
 export interface PlanReprobeRunOptions {
-	readonly targets: readonly ParsedCohortTarget[];
+	readonly targets: readonly CohortTarget[];
 }
 
 export interface PlanReprobeDependencies {
@@ -49,12 +45,11 @@ export function registerPlanReprobeCommand(
 			'Confirm which planned targets still require realisation immediately before dispatch.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[cache]', 'named cache when the URL does not select one')
 		.requiredOption(
 			'--targets-file <path>',
 			"JSON file describing the build set's targets"
 		)
-		.option('--cache <name>', 'target a named cache rather than the default')
-		.addOption(privateCacheOption('target'))
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to probe for substitutable paths'
@@ -65,20 +60,31 @@ export function registerPlanReprobeCommand(
 			parseReadUser
 		)
 		.option('--read-password <password>', 'password for private cache reads')
-		.action(async (url: URL, options: PlanReprobeOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const targets = await readCohortTargets(options.targetsFile);
-			const credentials = readCredentials(options);
+		.action(
+			async (
+				url: URL,
+				cacheName: string | undefined,
+				options: PlanReprobeOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const targets = await readCohortTargets(options.targetsFile);
+				const credentials = readCredentials(options);
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					cacheName === undefined
+						? urlTarget
+						: cacheTargetWithName(urlTarget, cacheName);
 
-			await runPlanReprobe({ targets }, reporter, {
-				destinationProbes: tenantProbesFor({
-					baseUrl: url,
-					cache: resolveCacheSelection(options),
-					...(options.reuseView !== undefined && { view: options.reuseView }),
-					...(credentials !== undefined && { credentials })
-				})
-			});
-		});
+				await runPlanReprobe({ targets }, reporter, {
+					destinationProbes: tenantProbesFor({
+						baseUrl: target.tenantUrl,
+						cache: target.cache,
+						...(options.reuseView !== undefined && { view: options.reuseView }),
+						...(credentials !== undefined && { credentials })
+					})
+				});
+			}
+		);
 }
 
 /**

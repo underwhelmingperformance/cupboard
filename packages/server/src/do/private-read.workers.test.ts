@@ -1,12 +1,16 @@
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
-	bootstrap,
 	currentNarObjectKey,
+	initialiseViaWorker,
+	namedCache,
 	narBytes,
 	provisionFixtureTenant,
-	pushPath,
+	pushPathToTenant,
+	putWorkerTestCache,
 	readFetch,
 	resetTestServer,
 	uploadMetadata
@@ -15,11 +19,23 @@ import {
 const readUser = 'alice';
 const readPassword = 'secret';
 
-function makePrivate(): Promise<void> {
-	return provisionFixtureTenant({
-		readMode: 'private',
+async function provisionReader(): Promise<void> {
+	await provisionFixtureTenant({
 		read: { user: readUser, password: readPassword }
 	});
+}
+
+async function putCache(
+	token: string,
+	cache: CacheScope,
+	access: 'public' | 'private'
+): Promise<void> {
+	await putWorkerTestCache(token, cache, access);
+}
+
+async function makeDefaultPrivate(token: string): Promise<void> {
+	await provisionReader();
+	await putCache(token, { kind: 'default' }, 'private');
 }
 
 function authorised(): RequestInit {
@@ -28,13 +44,13 @@ function authorised(): RequestInit {
 	};
 }
 
-describe('private-read mode', () => {
+describe('per-cache private reads', () => {
 	beforeEach(resetTestServer);
 
 	it('serves reads publicly when no credential is configured', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata);
+		await pushPathToTenant(fixtureTenant, token, metadata);
 
 		const narinfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
 		const cacheInfo = await readFetch('/nix-cache-info');
@@ -46,10 +62,10 @@ describe('private-read mode', () => {
 	});
 
 	it('requires Basic auth on narinfo, NAR and nix-cache-info', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata);
-		await makePrivate();
+		await pushPathToTenant(fixtureTenant, token, metadata);
+		await makeDefaultPrivate(token);
 		const narinfoPath = `/${metadata.storePathHash}.narinfo`;
 		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
 
@@ -86,10 +102,17 @@ describe('private-read mode', () => {
 	});
 
 	it('forces no-store on an authorised named-cache nix-cache-info', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata, 'builds');
-		await makePrivate();
+		await putCache(token, namedCache('builds'), 'private');
+		await pushPathToTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			undefined,
+			namedCache('builds')
+		);
+		await provisionReader();
 
 		const cacheInfo = await readFetch(
 			'/cache/builds/nix-cache-info',
@@ -102,9 +125,9 @@ describe('private-read mode', () => {
 		}).toStrictEqual({ status: StatusCodes.OK, control: 'no-store' });
 	});
 
-	it('leaves the public routes ungated in private mode', async () => {
-		await bootstrap();
-		await makePrivate();
+	it('leaves tenant-wide public routes ungated when the default cache is private', async () => {
+		const token = await initialiseViaWorker();
+		await makeDefaultPrivate(token);
 
 		const pubkey = await readFetch('/pubkey', {});
 		const health = await readFetch('/_health', {});
@@ -122,7 +145,7 @@ describe('private-read mode', () => {
 	});
 
 	it('makes only public narinfos eligible for Workers Cache', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
 		const privatePath = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: 'a'.repeat(32),
@@ -133,18 +156,24 @@ describe('private-read mode', () => {
 			storePathHash: 'b'.repeat(32),
 			name: 'public'
 		});
-		await pushPath(init.token, privatePath);
-		await pushPath(init.token, publicPath);
+		await putCache(token, namedCache('builds'), 'public');
+		await pushPathToTenant(fixtureTenant, token, privatePath);
+		await pushPathToTenant(
+			fixtureTenant,
+			token,
+			publicPath,
+			undefined,
+			namedCache('builds')
+		);
 
-		await makePrivate();
+		await makeDefaultPrivate(token);
 		const privateResponse = await readFetch(
 			`/${privatePath.storePathHash}.narinfo`,
 			authorised()
 		);
 
-		await provisionFixtureTenant();
 		const publicResponse = await readFetch(
-			`/${publicPath.storePathHash}.narinfo`
+			`/cache/builds/${publicPath.storePathHash}.narinfo`
 		);
 
 		expect({

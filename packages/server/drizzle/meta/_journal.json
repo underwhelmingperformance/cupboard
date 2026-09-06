@@ -309,6 +309,34 @@
 			"when": 1788223229583,
 			"tag": "0043_cache_access_backfill",
 			"breakpoints": true
+		},
+		{
+			"idx": 44,
+			"version": "6",
+			"when": 1788223459193,
+			"tag": "0044_cache_access_assertions",
+			"breakpoints": true
+		},
+		{
+			"idx": 45,
+			"version": "6",
+			"when": 1788223529441,
+			"tag": "0045_cache_access_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 46,
+			"version": "6",
+			"when": 1788223535431,
+			"tag": "0046_cache_access_triggers",
+			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "6",
+			"when": 1788230305329,
+			"tag": "0047_cache_grant_json",
+			"breakpoints": true
 		}
 	]
 }

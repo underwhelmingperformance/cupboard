@@ -7,17 +7,17 @@ import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
-	authorisedWorkerFetch,
-	bootstrap,
 	initialiseViaWorker,
+	namedCache,
 	narBytes,
 	provisionFixtureTenant,
-	pushPath,
+	pushPathToTenant,
+	putWorkerTestCache,
 	readFetch,
 	resetTestServer,
-	uploadMetadata,
-	useTestServer
+	uploadMetadata
 } from '../test-support.ts';
 
 function authorised(): RequestInit {
@@ -28,9 +28,16 @@ describe('named cache reads', () => {
 	beforeEach(resetTestServer);
 
 	it('serves a namespaced narinfo and the shared NAR through the Worker', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, namedCache('builds'));
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata, 'builds');
+		await pushPathToTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			undefined,
+			namedCache('builds')
+		);
 
 		const narinfoResponse = await readFetch(
 			`/cache/builds/${metadata.storePathHash}.narinfo`
@@ -52,6 +59,32 @@ describe('named cache reads', () => {
 		});
 	});
 
+	it('does not authorise one public cache with another public cache reference', async () => {
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, namedCache('builds'));
+		await putWorkerTestCache(token, namedCache('guides'));
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPathToTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			undefined,
+			namedCache('builds')
+		);
+
+		const narinfoResponse = await readFetch(
+			`/cache/builds/${metadata.storePathHash}.narinfo`
+		);
+		const narUrl = NarInfo.parse(await narinfoResponse.text()).url;
+		const builds = await readFetch(`/cache/builds/${narUrl}`);
+		const guides = await readFetch(`/cache/guides/${narUrl}`);
+
+		expect({ builds: builds.status, guides: guides.status }).toStrictEqual({
+			builds: StatusCodes.OK,
+			guides: StatusCodes.NOT_FOUND
+		});
+	});
+
 	it('returns the deployment key set under a cache prefix', async () => {
 		await initialiseViaWorker();
 
@@ -67,14 +100,8 @@ describe('named cache reads', () => {
 	});
 
 	it('renders a named cache nix-cache-info from its registry priority', async () => {
-		await useTestServer('named-cache-info');
 		const token = await initialiseViaWorker();
-		const put = await authorisedWorkerFetch('/caches/builds', token, {
-			body: JSON.stringify({ priority: 30 }),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		});
-		expect(put.status).toBe(StatusCodes.OK);
+		await putWorkerTestCache(token, namedCache('builds'), 'public', 30);
 
 		const named = await readFetch('/cache/builds/nix-cache-info');
 		const namedBody = await named.text();
@@ -93,12 +120,55 @@ describe('named cache reads', () => {
 		});
 	});
 
+	it('renders the default cache priority from its registry row', async () => {
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, { kind: 'default' }, 'public', 30);
+
+		const response = await readFetch('/nix-cache-info');
+		const body = await response.text();
+		const expected = new CacheInfo(
+			servedStoreDirectory,
+			true,
+			cachePrioritySchema.parse(30)
+		);
+
+		expect({
+			status: response.status,
+			body,
+			cacheControl: response.headers.get('cache-control')
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: expected.render(),
+			cacheControl: 'no-store'
+		});
+	});
+
+	it('404s cache metadata for an absent named cache', async () => {
+		await initialiseViaWorker();
+
+		const response = await readFetch('/cache/missing/nix-cache-info');
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control')
+		}).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			cacheControl: 'no-store'
+		});
+	});
+
 	it('gates named-cache reads in private mode', async () => {
-		const init = await bootstrap();
+		const token = await initialiseViaWorker();
+		await putWorkerTestCache(token, namedCache('builds'), 'private');
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata, 'builds');
+		await pushPathToTenant(
+			fixtureTenant,
+			token,
+			metadata,
+			undefined,
+			namedCache('builds')
+		);
 		await provisionFixtureTenant({
-			readMode: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
 		const narinfoPath = `/cache/builds/${metadata.storePathHash}.narinfo`;

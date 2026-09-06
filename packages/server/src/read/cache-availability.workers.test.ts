@@ -1,4 +1,7 @@
-import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -6,10 +9,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
+	defaultCache,
 	handlerFetch,
+	namedCache,
 	narBytes,
 	provisionFixtureTenant,
 	pushPath,
+	putTestCache,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -19,13 +25,23 @@ const missingStorePathHash = storePathHashSchema.parse('2'.repeat(32));
 describe('cache availability query', () => {
 	beforeEach(resetTestServer);
 
-	it.each([
-		{ name: 'the default cache', cache: undefined, path: '' },
-		{ name: 'a named cache', cache: 'builds', path: '/cache/builds' }
+	it.each<{
+		name: string;
+		cache: CacheScope;
+		path: string;
+	}>([
+		{ name: 'the default cache', cache: defaultCache(), path: '' },
+		{
+			name: 'a named cache',
+			cache: namedCache('builds'),
+			path: '/cache/builds'
+		}
 	])(
 		'reports only absent store-path hashes for $name',
 		async ({ cache, path }) => {
-			const init = await bootstrap();
+			const init = await bootstrap({
+				caches: cache.kind === 'named' ? [{ scope: cache }] : []
+			});
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 			await pushPath(init.token, metadata, cache);
 
@@ -54,11 +70,11 @@ describe('cache availability query', () => {
 	);
 
 	it("requires the tenant's Basic credentials when reads are private", async () => {
-		await bootstrap();
+		const { token } = await bootstrap();
 		await provisionFixtureTenant({
-			readMode: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
+		await putTestCache(token, defaultCache(), 'private');
 		const request = {
 			body: JSON.stringify({ storePathHashes: [missingStorePathHash] }),
 			headers: { 'content-type': 'application/json' },

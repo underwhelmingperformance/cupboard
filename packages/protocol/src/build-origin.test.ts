@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	type BuildOriginPredicate,
+	type BuildOriginPredicateInput,
 	buildOriginPredicateSchema,
 	buildOriginSubjectSchema
 } from './build-origin.ts';
@@ -11,7 +11,7 @@ const otherPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 const derivation = '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const narHash = 'aa'.repeat(32);
 
-function localSubject(): BuildOriginPredicate['subjects'][number] {
+function localSubject(): BuildOriginPredicateInput['subjects'][number] {
 	return {
 		origin: 'built',
 		storePath,
@@ -24,7 +24,7 @@ function localSubject(): BuildOriginPredicate['subjects'][number] {
 
 describe('buildOriginPredicateSchema', () => {
 	it('accepts a statement containing the accepted receipt subjects', () => {
-		const predicate: BuildOriginPredicate = {
+		const predicate: BuildOriginPredicateInput = {
 			subjects: [
 				localSubject(),
 				{

@@ -10,7 +10,7 @@ import { InvalidMeasureTargetsFileError } from '../errors.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
 import {
 	measurePlanInputSchema,
-	type ParsedMeasureTarget
+	type MeasureTarget
 } from '../plan/cohort-target.ts';
 import { parseStoreUri } from '../store-uri.ts';
 
@@ -37,7 +37,7 @@ export interface PlanMeasureResult {
 }
 
 export interface PlanMeasureRunOptions {
-	readonly targets: readonly ParsedMeasureTarget[];
+	readonly targets: readonly MeasureTarget[];
 	readonly measureFile: string;
 }
 
@@ -162,7 +162,7 @@ export async function runPlanMeasure(
 
 async function readMeasureTargets(
 	targetsFile: string
-): Promise<readonly ParsedMeasureTarget[]> {
+): Promise<readonly MeasureTarget[]> {
 	let json: unknown;
 
 	try {

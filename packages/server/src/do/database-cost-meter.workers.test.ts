@@ -7,6 +7,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import type { CacheId } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import {
@@ -15,6 +16,7 @@ import {
 	negotiateUploads,
 	negotiateViaInstance,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata
 } from '../test-support.ts';
 
@@ -42,14 +44,15 @@ describe('db cost meter', () => {
 	it('measures the rows a full scan reads as the table grows', async () => {
 		const measured = await runInDurableObject(currentServer(), (instance) => {
 			const { db, dbCost } = instance.context;
+			const cacheId = resolvedCache(instance.context).id;
 
-			insertUploads(db, 0, 3);
+			insertUploads(db, cacheId, 0, 3);
 			dbCost.recordOutstanding();
 			const writesBeforeScan = dbCost.rowsWritten;
 			const smallScan = scanUploads(db, dbCost);
 			const writesWhileScanning = dbCost.rowsWritten - writesBeforeScan;
 
-			insertUploads(db, 3, 7);
+			insertUploads(db, cacheId, 3, 7);
 			dbCost.recordOutstanding();
 			const largeScan = scanUploads(db, dbCost);
 
@@ -66,10 +69,11 @@ describe('db cost meter', () => {
 	it('measures the rows an insert writes', async () => {
 		const measured = await runInDurableObject(currentServer(), (instance) => {
 			const { db, dbCost } = instance.context;
+			const cacheId = resolvedCache(instance.context).id;
 
 			dbCost.recordOutstanding();
 			const before = dbCost.rowsWritten;
-			insertUploads(db, 0, 3);
+			insertUploads(db, cacheId, 0, 3);
 			dbCost.recordOutstanding();
 
 			return dbCost.rowsWritten - before;
@@ -87,7 +91,7 @@ describe('db cost meter', () => {
 			currentServer(),
 			async (instance) => {
 				const { db } = instance.context;
-				insertUploads(db, 0, 4);
+				insertUploads(db, resolvedCache(instance.context).id, 0, 4);
 
 				const scanAll = (): void => {
 					db.select().from(schema.pendingUploads).all();
@@ -153,7 +157,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 15,
+			rowsRead: 16,
 			rowsWritten: 7
 		});
 	});
@@ -194,7 +198,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 15,
+			rowsRead: 16,
 			rowsWritten: 0
 		});
 	});
@@ -211,18 +215,27 @@ function scanUploads(
 	return databaseCost.rowsRead - before;
 }
 
-function insertUploads(database: SchemaWriter, from: number, to: number): void {
+function insertUploads(
+	database: SchemaWriter,
+	cacheId: CacheId,
+	from: number,
+	to: number
+): void {
 	for (let index = from; index < to; index += 1) {
-		database.insert(schema.pendingUploads).values(pendingUpload(index)).run();
+		database
+			.insert(schema.pendingUploads)
+			.values(pendingUpload(cacheId, index))
+			.run();
 	}
 }
 
 function pendingUpload(
+	cacheId: CacheId,
 	index: number
 ): typeof schema.pendingUploads.$inferInsert {
 	return {
 		id: uploadIdSchema.parse(`upload-${String(index)}`),
-		cache: '',
+		cacheId,
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: r2ObjectKeySchema.parse(`staging/upload-${String(index)}`),
 		metadataJson: '{}',

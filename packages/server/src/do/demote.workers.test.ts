@@ -71,7 +71,9 @@ async function isNarInfoPresent(
 	tenant: TenantId,
 	storePathHash: StorePathHash
 ): Promise<boolean> {
-	const object = await env.BLOBS.head(narInfoObjectKey(tenant, storePathHash));
+	const object = await env.BLOBS.head(
+		narInfoObjectKey(tenant, storePathHash, { kind: 'default' })
+	);
 
 	return object !== null;
 }

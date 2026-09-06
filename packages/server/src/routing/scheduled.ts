@@ -66,6 +66,7 @@ type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type TenantCronPass =
 	typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass;
 type MaintainTenant = (logger: Logger, env: Env, id: TenantId) => Promise<void>;
+type MigrateCacheCatalogue = (env: Env, id: TenantId) => Promise<void>;
 type DrainTenant = (
 	logger: Logger,
 	env: Env,
@@ -82,6 +83,7 @@ type MaintenanceQueueDecision =
 			readonly reason: string;
 	  };
 interface ExecuteMaintenanceQueueOptions {
+	readonly migrateCacheCatalogue?: MigrateCacheCatalogue;
 	readonly maintainTenant?: MaintainTenant;
 	readonly verifyTenant?: MaintainTenant;
 	readonly drainTenant?: DrainTenant;
@@ -115,6 +117,10 @@ const objectReaperPhaseSchema = z.enum([
 ]);
 
 const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
+	z.object({
+		kind: z.literal('cache-catalogue-migration'),
+		tenant: tenantIdSchema
+	}),
 	z.object({ kind: z.literal('tenant-maintenance'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('tenant-verify'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('offboard'), tenant: tenantIdSchema }),
@@ -132,6 +138,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 ]);
 
 export type MaintenanceQueueMessage =
+	| { readonly kind: 'cache-catalogue-migration'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
 	| { readonly kind: 'offboard'; readonly tenant: TenantId }
@@ -182,6 +189,10 @@ export async function enqueueMaintenanceJobs(
 	await refreshTenantMembership(env);
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const catalogueTenants = await incompleteCacheCatalogueTenants(
+		database,
+		maintenanceBatchSize
+	);
 	const maintenanceTenants = await overdueActiveTenants(
 		database,
 		maintenanceBatchSize
@@ -191,6 +202,10 @@ export async function enqueueMaintenanceJobs(
 		offboardTenantsPerTick
 	);
 	const messages: MaintenanceQueueMessage[] = [
+		...catalogueTenants.map(({ id }): MaintenanceQueueMessage => ({
+			kind: 'cache-catalogue-migration',
+			tenant: id
+		})),
 		...maintenanceTenants.map(({ id }): MaintenanceQueueMessage => ({
 			kind: 'tenant-maintenance',
 			tenant: id
@@ -284,6 +299,13 @@ export async function executeMaintenanceQueueMessage(
 ): Promise<MaintenanceQueueDecision> {
 	try {
 		switch (message.kind) {
+			case 'cache-catalogue-migration': {
+				await (options.migrateCacheCatalogue ?? migrateCacheCatalogue)(
+					env,
+					message.tenant
+				);
+				return { action: 'ack' };
+			}
 			case 'tenant-maintenance': {
 				return await executeTenantMaintenanceMessage(
 					logger,
@@ -708,6 +730,10 @@ function maintainTenant(logger: Logger, env: Env, id: TenantId): Promise<void> {
 		() => server.runVerification(),
 		() => server.runAuthKeyRetirement()
 	);
+}
+
+function migrateCacheCatalogue(env: Env, id: TenantId): Promise<void> {
+	return tenantServer(env, id).migrateCacheCatalogue(id);
 }
 
 // Bound concurrent decoding so one tenant does not monopolise the queue
@@ -1139,6 +1165,24 @@ async function tenantStatus(
 		.get();
 
 	return row?.status;
+}
+
+function incompleteCacheCatalogueTenants(
+	database: CronDatabase,
+	batchSize: number
+): Promise<{ readonly id: TenantId }[]> {
+	return database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(
+			and(
+				inArray(d1Schema.tenant.status, ['active', 'suspended']),
+				isNull(d1Schema.tenant.cacheCatalogueVersion)
+			)
+		)
+		.orderBy(asc(d1Schema.tenant.id))
+		.limit(batchSize)
+		.all();
 }
 
 // SQLite sorts NULL first in ascending order, so new tenants precede tenants

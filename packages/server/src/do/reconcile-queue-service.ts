@@ -1,8 +1,6 @@
-import {
-	type StoredCache,
-	type StorePathHash
-} from '@cupboard/nix-store/scalars';
+import { type StorePathHash } from '@cupboard/nix-store/scalars';
 
+import type { CacheId } from '../db/cache.ts';
 import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
@@ -10,7 +8,7 @@ import { type ServerContext } from './context.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 
 export interface ReconcileTarget {
-	readonly cache: StoredCache;
+	readonly cacheId: CacheId;
 	readonly storePathHash: StorePathHash;
 }
 
@@ -77,7 +75,7 @@ export class ReconcileQueueService {
 	 * uses this to clear the targets it finished and leave the rest queued.
 	 */
 	entryKey(target: ReconcileTarget): string {
-		return `${reconcileEntryPrefix}${target.cache}:${target.storePathHash}`;
+		return `${reconcileEntryPrefix}${String(target.cacheId)}:${target.storePathHash}`;
 	}
 
 	async enqueue(

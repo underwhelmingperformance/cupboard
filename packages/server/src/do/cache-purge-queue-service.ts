@@ -1,12 +1,12 @@
 import type {
 	NixSha256HashString,
-	StoredCache,
 	StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 
+import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import { narCacheTtlSeconds, narInfoCacheTtlSeconds } from '../http/http.ts';
@@ -59,7 +59,7 @@ export class CachePurgeQueueService {
 	Queues exact narinfo invalidations and schedules the first attempt.
 	*/
 	async enqueueNarInfos(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<void> {
 		if (storePathHashes.length === 0) {
@@ -70,19 +70,22 @@ export class CachePurgeQueueService {
 
 		await this.enqueueTags(
 			storePathHashes.map((storePathHash) =>
-				narInfoCacheTag(tenant, cache, storePathHash)
+				narInfoCacheTag(tenant, cache.scope, storePathHash)
 			),
 			narInfoCacheTtlSeconds
 		);
 	}
 
 	/**
-	 * Queues the invalidation of every cached response for these NAR hashes and
-	 * schedules the first attempt. Call this once the tenant's public caches stop
-	 * referencing a hash, so Workers Cache cannot serve a stored response after
-	 * the reference check would refuse the read.
+	 * Queues the invalidation of this cache's responses for the NAR hashes and
+	 * schedules the first attempt. Call this once the cache stops referencing a
+	 * hash, so Workers Cache cannot serve a response after the exact reference
+	 * check would refuse the read.
 	 */
-	async enqueueNars(narHashes: readonly NixSha256HashString[]): Promise<void> {
+	async enqueueNars(
+		cache: ResolvedCache,
+		narHashes: readonly NixSha256HashString[]
+	): Promise<void> {
 		if (narHashes.length === 0) {
 			return;
 		}
@@ -90,7 +93,7 @@ export class CachePurgeQueueService {
 		const tenant = this.context.requireTenant();
 
 		await this.enqueueTags(
-			narHashes.map((narHash) => narCacheTag(tenant, narHash)),
+			narHashes.map((narHash) => narCacheTag(tenant, cache.scope, narHash)),
 			narCacheTtlSeconds
 		);
 	}

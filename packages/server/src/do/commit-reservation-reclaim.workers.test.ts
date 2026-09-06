@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
@@ -22,17 +24,14 @@ import {
 	initialise,
 	negotiateUploads,
 	resetTestServer,
+	resolvedCache,
 	seedReservedNarInfo,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
 
-import { AttestationCasService } from './attestation-cas-service.ts';
-import { AttestationsService } from './attestations-service.ts';
-import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
-import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -97,7 +96,7 @@ describe('while checking whether a narinfo is committed', () => {
 				const row = await new NarInfoObjectsService(
 					context
 				).committedNarInfoRow(
-					'',
+					resolvedCache(context),
 					storePathHashSchema.parse(metadata.storePathHash)
 				);
 
@@ -111,26 +110,15 @@ describe('while checking whether a narinfo is committed', () => {
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
-	const attestationCas = new AttestationCasService(context);
-	const attestations = new AttestationsService(
-		context,
-		attestationCas,
-		narInfoObjects
-	);
-	const deletionQueue = new DeletionQueueService(
-		context,
-		attestationCas,
-		attestations,
-		narInfoObjects
-	);
 
-	return new CommitPipelineService(
-		context,
-		new CacheAdminService(context, deletionQueue),
-		new SigningKeysService(context, narInfoObjects),
-		new UploadStateService(context),
-		narInfoObjects,
-		new RetentionService(context)
+	return drivenDirectly(
+		new CommitPipelineService(
+			context,
+			new SigningKeysService(context, narInfoObjects),
+			new UploadStateService(context),
+			narInfoObjects,
+			new RetentionService(context)
+		)
 	);
 }
 
@@ -165,7 +153,8 @@ describe('when a commit retry finds an abandoned reservation', () => {
 		);
 
 		await runInDurableObject(currentServer(), async (instance) => {
-			const pipeline = drivenDirectly(pipelineFor(instance.context));
+			const pipeline = pipelineFor(instance.context);
+			const cache = resolvedCache(instance.context);
 			const realD1 = instance.context.d1;
 
 			Object.defineProperty(instance.context, 'd1', {
@@ -182,7 +171,7 @@ describe('when a commit retry finds an abandoned reservation', () => {
 			let didFail = false;
 
 			try {
-				await pipeline.commit(rootLogger(), '', doomed.uploadId);
+				await pipeline.commit(rootLogger(), cache, doomed.uploadId);
 			} catch {
 				didFail = true;
 			}
@@ -207,9 +196,9 @@ describe('when a commit retry finds an abandoned reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				drivenDirectly(pipelineFor(instance.context)).commit(
+				pipelineFor(instance.context).commit(
 					rootLogger(),
-					'',
+					resolvedCache(instance.context),
 					fresh.uploadId
 				)
 		);
@@ -261,9 +250,9 @@ describe('when a commit resumes its existing reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				drivenDirectly(pipelineFor(instance.context)).commit(
+				pipelineFor(instance.context).commit(
 					rootLogger(),
-					'',
+					resolvedCache(instance.context),
 					reuse.uploadId
 				)
 		);
@@ -317,9 +306,9 @@ describe('when another commit holds the reservation', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) =>
-				drivenDirectly(pipelineFor(instance.context)).concedeToWinner(
+				pipelineFor(instance.context).concedeToWinner(
 					rootLogger(),
-					'',
+					resolvedCache(instance.context),
 					reuse.uploadId,
 					second,
 					await currentNarObjectKey(second.narHash)
@@ -343,9 +332,9 @@ async function seedEdge(
 			schema: d1Schema
 		});
 
-		await database.insert(d1Schema.blobReference).values({
+		await database.insert(migrationSchema.blobReferences).values({
 			tenant: instance.context.requireTenant(),
-			cache: '',
+			...cacheMigrationColumns({ kind: 'default' }, 'public'),
 			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
 			generation: narInfoGenerationSchema.parse(generation),
 			narHash
@@ -400,10 +389,12 @@ describe('when reclaiming a row after failed verification', () => {
 
 			await seedReservedNarInfo(metadata, liveGeneration);
 			await runInDurableObject(currentServer(), (instance) => {
+				const cache = resolvedCache(instance.context);
+
 				instance.context.db
 					.insert(schema.retentionGrace)
 					.values({
-						cache: '',
+						cacheId: cache.id,
 						storePathHash: metadata.storePathHash,
 						retainUntil: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z')
 					})
@@ -416,8 +407,8 @@ describe('when reclaiming a row after failed verification', () => {
 
 			const result = await runInDurableObject(currentServer(), (instance) =>
 				instance.context.criticalSection(() =>
-					drivenDirectly(pipelineFor(instance.context)).reclaimReservedRow(
-						'',
+					pipelineFor(instance.context).reclaimReservedRow(
+						resolvedCache(instance.context),
 						metadata.storePathHash,
 						narInfoGenerationSchema.parse(7),
 						metadata.narHash
@@ -462,8 +453,8 @@ describe('when reclaiming a row after failed verification', () => {
 
 		const result = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.criticalSection(() =>
-				drivenDirectly(pipelineFor(instance.context)).reclaimReservedRow(
-					'',
+				pipelineFor(instance.context).reclaimReservedRow(
+					resolvedCache(instance.context),
 					metadata.storePathHash,
 					narInfoGenerationSchema.parse(7),
 					metadata.narHash

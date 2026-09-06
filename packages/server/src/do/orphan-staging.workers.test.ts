@@ -19,6 +19,7 @@ import {
 	initialise,
 	negotiateUploads,
 	resetTestServer,
+	resolvedCache,
 	runGcResult,
 	uploadMetadata,
 	verifiableNar
@@ -136,13 +137,15 @@ describe('orphan staging reconciliation', () => {
 			)
 		);
 		await runInDurableObject(currentServer(), (instance) => {
+			const cacheId = resolvedCache(instance.context).id;
+
 			for (const fixture of fixtures) {
 				if (fixture.kind === 'nar') {
 					instance.context.db
 						.insert(schema.pendingUploads)
 						.values({
 							id: fixture.id,
-							cache: '',
+							cacheId,
 							narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 							r2Key: fixture.key,
 							metadataJson: '{}',
@@ -159,7 +162,7 @@ describe('orphan staging reconciliation', () => {
 					.insert(schema.pendingAttestations)
 					.values({
 						id: fixture.id,
-						cache: '',
+						cacheId,
 						storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 						digest: sha256HexDigestSchema.parse('0'.repeat(64)),
 						r2Key: fixture.key,
@@ -251,7 +254,9 @@ describe('orphan staging reconciliation', () => {
 						}
 					).garbageCollection;
 
-					return await garbageCollection.collectGarbage(rootLogger());
+					return await garbageCollection.collectGarbage(rootLogger(), {
+						scope: 'tenant'
+					});
 				} finally {
 					instance.context.env = original;
 				}
@@ -272,6 +277,7 @@ describe('orphan staging reconciliation', () => {
 	it('checks one listed key at constant cost as the pending backlog grows', async () => {
 		const measured = await runInDurableObject(currentServer(), (instance) => {
 			const { db, dbCost } = instance.context;
+			const cacheId = resolvedCache(instance.context).id;
 			const garbageCollection = (
 				instance as unknown as {
 					garbageCollection: {
@@ -289,7 +295,7 @@ describe('orphan staging reconciliation', () => {
 					db.insert(schema.pendingUploads)
 						.values({
 							id: uploadId,
-							cache: '',
+							cacheId,
 							narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 							r2Key: r2ObjectKeySchema.parse(
 								`staging/push/${uploadId}.nar.zst`
@@ -302,7 +308,7 @@ describe('orphan staging reconciliation', () => {
 					db.insert(schema.pendingAttestations)
 						.values({
 							id: attestationId,
-							cache: '',
+							cacheId,
 							storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 							digest: sha256HexDigestSchema.parse('0'.repeat(64)),
 							r2Key: r2ObjectKeySchema.parse(

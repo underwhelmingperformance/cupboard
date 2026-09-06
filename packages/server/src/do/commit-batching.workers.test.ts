@@ -1,8 +1,4 @@
 import { rootLogger } from '@cupboard/logger';
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR
-} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	uploadCommitDecisionSchema,
@@ -26,6 +22,7 @@ import {
 	commitUpload,
 	countingD1,
 	currentServer,
+	defaultCache,
 	drivenDirectly,
 	expectSingleCommitDecision,
 	initialise,
@@ -33,6 +30,7 @@ import {
 	openCommitSession,
 	provisionFixtureTenant,
 	resetTestServer,
+	resolvedCache,
 	syntheticStorePathHash,
 	testPushId,
 	uploadMetadata,
@@ -41,13 +39,9 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-import { AttestationCasService } from './attestation-cas-service.ts';
-import { AttestationsService } from './attestations-service.ts';
 import { boundedD1 } from './bounded-io.ts';
-import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
-import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -56,22 +50,9 @@ import { UploadStateService } from './upload-state-service.ts';
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
-	const attestationCas = new AttestationCasService(context);
-	const attestations = new AttestationsService(
-		context,
-		attestationCas,
-		narInfoObjects
-	);
-	const deletionQueue = new DeletionQueueService(
-		context,
-		attestationCas,
-		attestations,
-		narInfoObjects
-	);
 
 	return new CommitPipelineService(
 		context,
-		new CacheAdminService(context, deletionQueue),
 		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
@@ -125,6 +106,7 @@ describe('commit batching', () => {
 				currentServer(),
 				async (instance) => {
 					const pipeline = drivenDirectly(pipelineFor(instance.context));
+					const cache = resolvedCache(instance.context);
 					const [head, ...rest] = paths;
 
 					if (head === undefined) {
@@ -157,7 +139,7 @@ describe('commit batching', () => {
 							}
 
 							return pipeline.materialiseBatched(rootLogger(), {
-								cache: '',
+								cache,
 								metadata,
 								generation,
 								probe,
@@ -395,19 +377,15 @@ describe('commit batching', () => {
 
 		await commitPath(token, seed, nar);
 
-		const negotiated = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-			token,
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					pushId: testPushId,
-					paths: attached.map((path) => uploadPathNegotiation(path)),
-					attachRoot
-				})
-			}
-		);
+		const negotiated = await authorisedFetch('/uploads', token, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: attached.map((path) => uploadPathNegotiation(path)),
+				attachRoot
+			})
+		});
 		expect(negotiated.status).toBe(StatusCodes.OK);
 		const decisions = uploadNegotiateResponseSchema
 			.parse(await negotiated.json())
@@ -440,13 +418,17 @@ describe('commit batching', () => {
 		const targets = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.db
 				.select({
-					cache: schema.retentionRootTargets.cache,
+					cacheId: schema.retentionRootTargets.cacheId,
 					rootName: schema.retentionRootTargets.rootName,
 					storePathHash: schema.retentionRootTargets.storePathHash,
 					storePath: schema.retentionRootTargets.storePath
 				})
 				.from(schema.retentionRootTargets)
 				.all()
+				.map(({ cacheId, ...row }) => ({
+					...row,
+					cache: instance.context.cacheRepository.scopeForId(cacheId)
+				}))
 				.toSorted((left, right) =>
 					left.storePathHash.localeCompare(right.storePathHash)
 				)
@@ -455,7 +437,7 @@ describe('commit batching', () => {
 		expect({ frames, targets }).toStrictEqual({
 			frames: ['settled', 'settled', 'settled'],
 			targets: attached.map((path) => ({
-				cache: '',
+				cache: defaultCache(),
 				rootName: attachRoot.name,
 				storePathHash: path.storePathHash,
 				storePath: path.storePath
@@ -551,7 +533,7 @@ async function drivePagedBurst(server: string): Promise<{
 					}
 
 					return pipeline.materialiseBatched(rootLogger(), {
-						cache: DEFAULT_CACHE,
+						cache: resolvedCache(instance.context),
 						metadata,
 						generation,
 						probe,

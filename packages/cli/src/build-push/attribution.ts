@@ -1,7 +1,7 @@
 import { activityLogRecords, type NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
-	BuildSubjectV3,
+	BuildSubjectV3Input,
 	SubjectVerification
 } from '@cupboard/protocol/build';
 import { z } from 'zod';
@@ -92,7 +92,7 @@ export function receiptSubjects(
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>,
 	buildStore: string
-): readonly BuildSubjectV3[] {
+): readonly BuildSubjectV3Input[] {
 	const firstBuild = new Map<string, FirstBuild>();
 
 	for (const attempt of attempts) {
@@ -108,7 +108,7 @@ export function receiptSubjects(
 	}
 
 	return finalInfos
-		.flatMap((info): BuildSubjectV3[] => {
+		.flatMap((info): BuildSubjectV3Input[] => {
 			if (info.deriver === undefined || preExisting.has(info.storePath)) {
 				return [];
 			}

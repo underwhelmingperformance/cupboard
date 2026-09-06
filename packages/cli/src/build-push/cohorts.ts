@@ -1,4 +1,4 @@
-import type { ParsedBuildReceipt } from '@cupboard/protocol/build';
+import type { BuildReceipt } from '@cupboard/protocol/build';
 
 import { isAbortError } from '../abort.ts';
 import { BuildCommandFailedError } from '../errors.ts';
@@ -28,7 +28,7 @@ export interface CohortFailure {
 }
 
 export interface CohortSequenceResult {
-	readonly receipts: readonly ParsedBuildReceipt[];
+	readonly receipts: readonly BuildReceipt[];
 	/**
 	 * Failed cohorts remain in run order. The run exits with the first failure,
 	 * so its child status becomes the run status.
@@ -40,11 +40,11 @@ export interface CohortSequenceDependencies {
 	readonly runCohort: (
 		invocation: BuildInvocation,
 		cohort: number
-	) => Promise<ParsedBuildReceipt>;
+	) => Promise<BuildReceipt>;
 	readonly recoverReceipt?: (
 		error: unknown,
 		cohort: number
-	) => Promise<ParsedBuildReceipt | undefined>;
+	) => Promise<BuildReceipt | undefined>;
 	readonly collect?: () => Promise<void>;
 }
 
@@ -73,7 +73,7 @@ export async function runCohortSequence(
 	options: CohortSequenceOptions,
 	dependencies: CohortSequenceDependencies
 ): Promise<CohortSequenceResult> {
-	const receipts: ParsedBuildReceipt[] = [];
+	const receipts: BuildReceipt[] = [];
 	const failures: CohortFailure[] = [];
 
 	for (const [index, invocation] of options.cohorts.entries()) {

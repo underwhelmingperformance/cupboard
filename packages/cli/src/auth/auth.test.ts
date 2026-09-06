@@ -2,8 +2,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
-	ParsedTokenResponse,
-	TokenResponse
+	TokenResponse,
+	TokenResponseInput
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
@@ -49,26 +49,30 @@ function requestUrl(input: string | URL | Request): string {
 function federatingClient(): CupboardClient {
 	let issued = 0;
 
-	return new CupboardClient(new URL('https://cupboard.test'), (input) => {
-		const url = new URL(requestUrl(input));
+	return new CupboardClient(
+		new URL('https://cupboard.test'),
+		(input) => {
+			const url = new URL(requestUrl(input));
 
-		if (url.origin === 'https://actions.example.com') {
-			issued += 1;
+			if (url.origin === 'https://actions.example.com') {
+				issued += 1;
+
+				return Promise.resolve(
+					Response.json({ value: `subject-${String(issued)}` })
+				);
+			}
 
 			return Promise.resolve(
-				Response.json({ value: `subject-${String(issued)}` })
+				Response.json({
+					access_token: `write-${String(issued)}`,
+					token_type: 'Bearer',
+					expires_in: 900,
+					issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+				} satisfies TokenResponseInput)
 			);
-		}
-
-		return Promise.resolve(
-			Response.json({
-				access_token: `write-${String(issued)}`,
-				token_type: 'Bearer',
-				expires_in: 900,
-				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
-			} satisfies TokenResponse)
-		);
-	});
+		},
+		{ kind: 'default' }
+	);
 }
 
 function renewingClient(): {
@@ -102,9 +106,10 @@ function renewingClient(): {
 					token_type: 'Bearer',
 					expires_in: 900,
 					issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
-				} satisfies TokenResponse)
+				} satisfies TokenResponseInput)
 			);
-		}
+		},
+		{ kind: 'default' }
 	);
 
 	return { client, exchanged: () => subjects };
@@ -282,7 +287,7 @@ function accessToken(name: string, expSeconds: number): string {
 	return jwt({ iss: issuer, aud: issuer, exp: expSeconds, name });
 }
 
-function tokenResponse(name: string): ParsedTokenResponse {
+function tokenResponse(name: string): TokenResponse {
 	return {
 		access_token: accessToken(name, farFuture),
 		token_type: 'Bearer',
@@ -292,11 +297,11 @@ function tokenResponse(name: string): ParsedTokenResponse {
 }
 
 interface FakeSessionClient {
-	readonly tokenRefresh: (refreshToken: string) => Promise<ParsedTokenResponse>;
+	readonly tokenRefresh: (refreshToken: string) => Promise<TokenResponse>;
 	readonly tokenExchange: (
 		subjectToken: string,
 		subjectTokenType: string
-	) => Promise<ParsedTokenResponse>;
+	) => Promise<TokenResponse>;
 }
 
 interface FakeGrantChain {
@@ -433,7 +438,7 @@ describe('cachedOwnerProvider', () => {
 	});
 
 	it('shares one refresh rotation between concurrent callers', async () => {
-		const { promise, resolve } = Promise.withResolvers<ParsedTokenResponse>();
+		const { promise, resolve } = Promise.withResolvers<TokenResponse>();
 		const { harness, sessions } = sessionHarness({
 			accessToken: accessToken('stale', past - 60),
 			refreshToken: 'refresh-stale'
@@ -476,7 +481,7 @@ describe('cachedOwnerProvider', () => {
 	});
 
 	it('serialises rotation between independent provider instances', async () => {
-		const rotation = Promise.withResolvers<ParsedTokenResponse>();
+		const rotation = Promise.withResolvers<TokenResponse>();
 		const bothEntered = Promise.withResolvers<undefined>();
 		const { harness, sessions } = sessionHarness({
 			accessToken: accessToken('stale', past - 60),
@@ -739,7 +744,7 @@ describe('cachedOwnerProvider', () => {
 	);
 
 	it('starts a new rotation after a shared renewal fails', async () => {
-		const failed = Promise.withResolvers<ParsedTokenResponse>();
+		const failed = Promise.withResolvers<TokenResponse>();
 		const failure = new Error('refresh transport failed');
 		const { harness, sessions } = sessionHarness({
 			accessToken: accessToken('stale', past - 60),

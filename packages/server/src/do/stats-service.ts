@@ -1,7 +1,7 @@
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import {
-	type StatsResponse,
-	type UsageResponse
+	type StatsResponseInput,
+	type UsageResponseInput
 } from '@cupboard/protocol/upload';
 import { and, count, eq } from 'drizzle-orm';
 
@@ -13,26 +13,56 @@ import { type ServerContext } from './context.ts';
 export class StatsService {
 	constructor(private readonly context: ServerContext) {}
 
-	async stats(cache: StoredCache): Promise<StatsResponse> {
+	async stats(cacheScope: CacheScope): Promise<StatsResponseInput> {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return {
+				storePaths: 0,
+				narBlobs: 0,
+				narFileSize: 0,
+				casObjects: 0,
+				casFileSize: 0,
+				pendingUploads: 0,
+				totalFileSize: 0
+			};
+		}
+
 		const tenant = this.context.requireTenant();
 		const storePaths = this.context.db
 			.select({ count: count() })
 			.from(schema.narInfos)
-			.where(eq(schema.narInfos.cache, cache))
+			.where(eq(schema.narInfos.cacheId, cache.id))
 			.get();
 		const pending = this.context.db
 			.select({ count: count() })
 			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.cache, cache))
+			.where(eq(schema.pendingUploads.cacheId, cache.id))
 			.get();
 
 		const narFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
-			eq(d1Schema.blobReference.cache, cache)
+			cache.scope.kind === 'default'
+				? and(
+						eq(d1Schema.blobReference.cacheKind, 'default'),
+						eq(d1Schema.blobReference.tenant, tenant)
+					)
+				: and(
+						eq(d1Schema.blobReference.cacheKind, 'named'),
+						eq(d1Schema.blobReference.cacheName, cache.scope.name)
+					)
 		);
 		const casFilter = and(
 			eq(d1Schema.attestationReference.tenant, tenant),
-			eq(d1Schema.attestationReference.cache, cache)
+			cache.scope.kind === 'default'
+				? and(
+						eq(d1Schema.attestationReference.cacheKind, 'default'),
+						eq(d1Schema.attestationReference.tenant, tenant)
+					)
+				: and(
+						eq(d1Schema.attestationReference.cacheKind, 'named'),
+						eq(d1Schema.attestationReference.cacheName, cache.scope.name)
+					)
 		);
 
 		const [narObjects, casObjects] = await this.context.d1.batch([
@@ -79,7 +109,7 @@ export class StatsService {
 		};
 	}
 
-	async usage(): Promise<UsageResponse> {
+	async usage(): Promise<UsageResponseInput> {
 		const tenant = this.context.requireTenant();
 		const usage = await this.context.d1
 			.select({

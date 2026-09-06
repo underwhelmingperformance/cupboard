@@ -6,7 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type BuildSubjectV3,
+	type BuildSubjectV3Input,
 	type NixStoreUri,
 	nixStoreUriSchema
 } from '@cupboard/protocol/build';
@@ -45,11 +45,11 @@ function info(
 function subjectsFor(
 	infos: readonly NixValidPathInfo[],
 	options: {
-		readonly described?: ReadonlyMap<string, BuildSubjectV3>;
+		readonly described?: ReadonlyMap<string, BuildSubjectV3Input>;
 		readonly servable?: ReadonlySet<string>;
 		readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	} = {}
-): readonly BuildSubjectV3[] {
+): readonly BuildSubjectV3Input[] {
 	return publishedSubjects({
 		described: options.described ?? new Map(),
 		infos,
@@ -117,7 +117,7 @@ describe('republishedSubject', () => {
 });
 
 describe('publishedSubjects', () => {
-	const builtSubject: BuildSubjectV3 = {
+	const builtSubject: BuildSubjectV3Input = {
 		origin: 'built',
 		storePath: appPath,
 		narHash: narHash.digestHex(),

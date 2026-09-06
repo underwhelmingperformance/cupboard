@@ -16,8 +16,8 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	reuseViewListResponseSchema,
-	type ReuseViewSelector,
-	type ReuseViewSummary
+	type ReuseViewSelectorInput,
+	type ReuseViewSummaryInput
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
@@ -101,10 +101,13 @@ const branchRule = storedRule(
 );
 
 function pullRequestView(
-	selectors: readonly ReuseViewSelector[] = [{ kind: 'prefix', pattern: 'pr-' }]
-): ReuseViewSummary {
+	selectors: readonly ReuseViewSelectorInput[] = [
+		{ kind: 'prefix', prefix: 'pr-' }
+	]
+): ReuseViewSummaryInput {
 	return {
 		name: 'pull-requests',
+		access: 'public',
 		revision: 1,
 		priority: 50,
 		selectors: [...selectors],
@@ -117,7 +120,7 @@ function checkClient(overrides: {
 	graceSeconds?: number | undefined;
 	extraPolicies?: { cachePrefix: string; graceSeconds: number }[];
 	rules?: OidcTrustSummaryInput[];
-	views?: ReuseViewSummary[];
+	views?: ReuseViewSummaryInput[];
 }): GithubCheckClient {
 	return {
 		policies: {
@@ -361,7 +364,7 @@ describe('runGithubCheck', () => {
 		},
 		{
 			name: 'wrong selector',
-			views: [pullRequestView([{ kind: 'prefix', pattern: 'pull-' }])],
+			views: [pullRequestView([{ kind: 'prefix', prefix: 'pull-' }])],
 			detail:
 				'stored selectors differ from the single pr- prefix setup would write'
 		},
@@ -369,8 +372,8 @@ describe('runGithubCheck', () => {
 			name: 'extra selector',
 			views: [
 				pullRequestView([
-					{ kind: 'prefix', pattern: 'pr-' },
-					{ kind: 'exact', pattern: 'release' }
+					{ kind: 'prefix', prefix: 'pr-' },
+					{ kind: 'named', name: 'release' }
 				])
 			],
 			detail:
@@ -768,7 +771,7 @@ describe('runGithubCheck', () => {
 					'failed: rule branch matches the modelled claims but does not permit ' +
 					'upload:negotiate, upload:status, upload:commit, ' +
 					'attestation:negotiate, attestation:attach, root:set on cache ' +
-					'_default with root github:acme/app/main/target; remove it and ' +
+					'(default) with root github:acme/app/main/target; remove it and ' +
 					're-run setup'
 			}
 		});
@@ -800,7 +803,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:list on cache _default with root github:acme/app/main/target'
+				'root:list on cache (default) with root github:acme/app/main/target'
 		},
 		{
 			name: 'branch run-root attachment',
@@ -809,7 +812,7 @@ describe('runGithubCheck', () => {
 			check: 'main trust rule',
 			row: 1,
 			detail:
-				'root:attach on cache _default with root ' +
+				'root:attach on cache (default) with root ' +
 				'github:acme/app/main/_cupboard-run/1'
 		}
 	] as const)(

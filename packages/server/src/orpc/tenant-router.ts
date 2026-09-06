@@ -1,15 +1,16 @@
 import { type Logger } from '@cupboard/logger';
-import {
-	cacheFromSelector,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
-import { type VerifyReport } from '@cupboard/protocol/reports';
-import { type GcResponse } from '@cupboard/protocol/retention';
-import { reuseViewFromContractName } from '@cupboard/protocol/reuse-views';
-import { uploadGraceFactsCapability } from '@cupboard/protocol/upload';
+import { type VerifyReportInput } from '@cupboard/protocol/reports';
+import { type GcResponseInput } from '@cupboard/protocol/retention';
+import {
+	uploadGraceFactsCapability,
+	type UploadNegotiateRequest,
+	type UploadPreviewRequest
+} from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
+import { type AccessClaims } from '../auth/auth.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import {
 	internalOrigin,
@@ -40,6 +41,7 @@ const os = implement(tenantContract)
 			claims,
 			procedure['~orpc'].meta,
 			input,
+			context.cache,
 			context.services.pendingCache
 		);
 
@@ -56,18 +58,56 @@ export const tenantRouter = os.router({
 		list: os.caches.list.handler(({ context }) =>
 			context.services.cacheAdmin.listCaches()
 		),
-		put: os.caches.put.handler(({ input, context }) =>
-			context.services.cacheAdmin.putCache(
-				cacheFromSelector(input.cacheName),
-				input.priority
+		get: {
+			inDefaultCache: os.caches.get.inDefaultCache.handler(({ context }) =>
+				context.services.cacheAdmin.getCache(context.cache)
+			),
+			inNamedCache: os.caches.get.inNamedCache.handler(({ input, context }) =>
+				context.services.cacheAdmin.getCache({
+					kind: 'named',
+					name: input.cacheName
+				})
 			)
-		),
+		},
+		put: {
+			inDefaultCache: os.caches.put.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.cacheAdmin.createCache(
+						{ kind: 'default' },
+						input.access,
+						input.priority
+					)
+			),
+			inNamedCache: os.caches.put.inNamedCache.handler(({ input, context }) =>
+				context.services.cacheAdmin.createCache(
+					{ kind: 'named', name: input.cacheName },
+					input.access,
+					input.priority
+				)
+			)
+		},
+		update: {
+			inDefaultCache: os.caches.update.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.cacheAdmin.updateCache({ kind: 'default' }, input)
+			),
+			inNamedCache: os.caches.update.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...update } = input;
+
+					return context.services.cacheAdmin.updateCache(
+						{ kind: 'named', name: cacheName },
+						update
+					);
+				}
+			)
+		},
 		remove: os.caches.remove.handler(({ input, context }) => {
 			const origin = requestOriginSchema.parse(
 				new URL(context.request.url).origin
 			);
 			return context.services.cacheAdmin.removeCache(
-				cacheFromSelector(input.params.cacheName),
+				input.params.cacheName,
 				input.query.force,
 				origin
 			);
@@ -119,29 +159,28 @@ export const tenantRouter = os.router({
 		graceRemove: os.policies.graceRemove.handler(({ input, context }) =>
 			context.services.retention.removeGracePolicy(input.id)
 		),
-		graceCoverage: os.policies.graceCoverage.handler(({ input, context }) =>
-			context.services.retention.graceCoverage(
-				cacheFromSelector(input.cacheName)
+		graceCoverage: {
+			inDefaultCache: os.policies.graceCoverage.inDefaultCache.handler(
+				({ context }) => context.services.retention.graceCoverage(context.cache)
+			),
+			inNamedCache: os.policies.graceCoverage.inNamedCache.handler(
+				({ context }) => context.services.retention.graceCoverage(context.cache)
 			)
-		)
+		}
 	},
 	reuseViews: {
 		list: os.reuseViews.list.handler(({ context }) =>
 			context.services.reuseViews.listViews()
 		),
 		set: os.reuseViews.set.handler(({ input, context }) =>
-			context.services.reuseViews.setView(
-				reuseViewFromContractName(input.name),
-				{
-					selectors: input.selectors,
-					...(input.priority !== undefined && { priority: input.priority })
-				}
-			)
+			context.services.reuseViews.setView(input.name, {
+				access: input.access,
+				selectors: input.selectors,
+				...(input.priority !== undefined && { priority: input.priority })
+			})
 		),
 		remove: os.reuseViews.remove.handler(({ input, context }) =>
-			context.services.reuseViews.removeView(
-				reuseViewFromContractName(input.name)
-			)
+			context.services.reuseViews.removeView(input.name)
 		)
 	},
 	oidcTrust: {
@@ -159,9 +198,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	stats: {
-		cache: os.stats.cache.handler(({ input, context }) =>
-			context.services.stats.stats(cacheFromSelector(input.cacheName))
-		),
+		cache: {
+			inDefaultCache: os.stats.cache.inDefaultCache.handler(({ context }) =>
+				context.services.stats.stats(context.cache)
+			),
+			inNamedCache: os.stats.cache.inNamedCache.handler(({ context }) =>
+				context.services.stats.stats(context.cache)
+			)
+		},
 		usage: os.stats.usage.handler(({ context }) =>
 			context.services.stats.usage()
 		)
@@ -172,73 +216,80 @@ export const tenantRouter = os.router({
 		)
 	},
 	roots: {
-		list: os.roots.list.handler(({ input, context }) =>
-			context.services.roots.listRoots(
-				cacheFromSelector(input.params.cacheName),
-				{
-					...(input.query.cursor !== undefined && {
-						cursor: input.query.cursor
-					}),
-					...(input.query.limit !== undefined && { limit: input.query.limit })
-				}
+		list: {
+			inDefaultCache: os.roots.list.inDefaultCache.handler(
+				({ input, context }) => listRoots(context, input)
+			),
+			inNamedCache: os.roots.list.inNamedCache.handler(({ input, context }) =>
+				listRoots(context, input)
 			)
-		),
-		targets: os.roots.targets.handler(({ input, context }) =>
-			context.services.roots.rootTargets(
-				cacheFromSelector(input.params.cacheName),
-				input.params.name,
-				{
-					...(input.query.cursor !== undefined && {
-						cursor: input.query.cursor
-					}),
-					...(input.query.limit !== undefined && { limit: input.query.limit })
-				}
+		},
+		targets: {
+			inDefaultCache: os.roots.targets.inDefaultCache.handler(
+				({ input, context }) => rootTargets(context, input.name, input)
+			),
+			inNamedCache: os.roots.targets.inNamedCache.handler(
+				({ input, context }) => rootTargets(context, input.name, input)
 			)
-		),
-		set: os.roots.set.handler(({ input, context }) =>
-			context.services.roots.setRoot(
-				cacheFromSelector(input.cacheName),
-				input.name,
-				{ targets: input.targets, ttlSeconds: input.ttlSeconds }
+		},
+		set: {
+			inDefaultCache: os.roots.set.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.roots.setRoot(context.cache, input.name, {
+						targets: input.targets,
+						ttlSeconds: input.ttlSeconds
+					})
+			),
+			inNamedCache: os.roots.set.inNamedCache.handler(({ input, context }) =>
+				context.services.roots.setRoot(context.cache, input.name, {
+					targets: input.targets,
+					ttlSeconds: input.ttlSeconds
+				})
 			)
-		),
-		ensure: os.roots.ensure.handler(({ input, context }) =>
-			context.services.roots.ensureRoot(
-				cacheFromSelector(input.cacheName),
-				input.name,
-				{ targets: input.targets, ttlSeconds: input.ttlSeconds }
+		},
+		ensure: {
+			inDefaultCache: os.roots.ensure.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.roots.ensureRoot(context.cache, input.name, {
+						targets: input.targets,
+						ttlSeconds: input.ttlSeconds
+					})
+			),
+			inNamedCache: os.roots.ensure.inNamedCache.handler(({ input, context }) =>
+				context.services.roots.ensureRoot(context.cache, input.name, {
+					targets: input.targets,
+					ttlSeconds: input.ttlSeconds
+				})
 			)
-		),
-		remove: os.roots.remove.handler(({ input, context }) =>
-			context.services.roots.removeRoot(
-				cacheFromSelector(input.cacheName),
-				input.name
+		},
+		remove: {
+			inDefaultCache: os.roots.remove.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.roots.removeRoot(context.cache, input.name)
+			),
+			inNamedCache: os.roots.remove.inNamedCache.handler(({ input, context }) =>
+				context.services.roots.removeRoot(context.cache, input.name)
 			)
-		)
+		}
 	},
 	paths: {
-		remove: os.paths.remove.handler(({ input, context }) => {
-			const origin = requestOriginSchema.parse(
-				new URL(context.request.url).origin
-			);
-			return context.services.deletionQueue.deleteStorePath(
-				cacheFromSelector(input.cacheName),
-				input.hash,
-				origin
-			);
-		})
+		remove: {
+			inDefaultCache: os.paths.remove.inDefaultCache.handler(
+				({ input, context }) => removeStorePath(context, input.hash)
+			),
+			inNamedCache: os.paths.remove.inNamedCache.handler(({ input, context }) =>
+				removeStorePath(context, input.hash)
+			)
+		}
 	},
 	gc: {
 		runAll: os.gc.runAll.handler(({ context }) =>
-			collectGarbage(context.logger, context.request, context.services)
+			collectGarbage(context.logger, context.request, context.services, {
+				scope: 'tenant'
+			})
 		),
-		runCache: os.gc.runCache.handler(({ input, context }) =>
-			collectGarbage(
-				context.logger,
-				context.request,
-				context.services,
-				cacheFromSelector(input.cacheName)
-			)
+		runCache: os.gc.runCache.handler(({ context }) =>
+			collectGarbageForCache(context)
 		)
 	},
 	verify: {
@@ -247,71 +298,186 @@ export const tenantRouter = os.router({
 		)
 	},
 	uploads: {
-		credential: os.uploads.credential.handler(({ input, context }) =>
-			context.services.uploads.issuePushCredential(
-				context.claims.expiresAt,
-				input.pushId
+		credential: {
+			inDefaultCache: os.uploads.credential.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.uploads.issuePushCredential(
+						context.claims.expiresAt,
+						input.pushId
+					)
+			),
+			inNamedCache: os.uploads.credential.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.uploads.issuePushCredential(
+						context.claims.expiresAt,
+						input.pushId
+					)
 			)
-		),
-		negotiate: os.uploads.negotiate.handler(({ input, context }) => {
-			if (input.attachRoot !== undefined) {
-				authoriseAttachRoot(
-					context.claims,
-					input.cacheName,
-					input.attachRoot.name
-				);
-			}
-
-			const origin = requestOriginSchema.parse(
-				new URL(context.request.url).origin
-			);
-			return context.services.uploads.negotiate(
-				cacheFromSelector(input.cacheName),
-				{
-					pushId: input.pushId,
-					paths: input.paths,
-					...(input.attachRoot !== undefined && {
-						attachRoot: input.attachRoot
-					})
-				},
-				origin,
-				context.services.takeNegotiateHints(context.request),
-				hasAcceptedCapability(context.request, uploadGraceFactsCapability)
-			);
-		}),
-		preview: os.uploads.preview.handler(({ input, context }) =>
-			context.services.uploads.preview(
-				cacheFromSelector(input.cacheName),
-				{ paths: input.paths },
-				context.services.takeNegotiateHints(context.request),
-				hasAcceptedCapability(context.request, uploadGraceFactsCapability)
+		},
+		negotiate: {
+			inDefaultCache: os.uploads.negotiate.inDefaultCache.handler(
+				({ input, context }) => negotiateUpload(context, input)
+			),
+			inNamedCache: os.uploads.negotiate.inNamedCache.handler(
+				({ input, context }) => negotiateUpload(context, input)
 			)
-		),
-		confirm: os.uploads.confirm.handler(({ input, context }) =>
-			context.services.uploads.confirmPaths(
-				cacheFromSelector(input.cacheName),
-				input.storePathHashes
+		},
+		preview: {
+			inDefaultCache: os.uploads.preview.inDefaultCache.handler(
+				({ input, context }) => previewUpload(context, input.paths)
+			),
+			inNamedCache: os.uploads.preview.inNamedCache.handler(
+				({ input, context }) => previewUpload(context, input.paths)
 			)
-		),
+		},
+		confirm: {
+			inDefaultCache: os.uploads.confirm.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.uploads.confirmPaths(
+						context.cache,
+						input.storePathHashes
+					)
+			),
+			inNamedCache: os.uploads.confirm.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.uploads.confirmPaths(
+						context.cache,
+						input.storePathHashes
+					)
+			)
+		},
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)
 	},
 	attestations: {
-		negotiate: os.attestations.negotiate.handler(({ input, context }) =>
-			context.services.attestations.negotiate(
-				cacheFromSelector(input.cacheName),
-				{ pushId: input.pushId, bundles: input.bundles }
+		negotiate: {
+			inDefaultCache: os.attestations.negotiate.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.attestations.negotiate(context.cache, {
+						pushId: input.pushId,
+						bundles: input.bundles
+					})
+			),
+			inNamedCache: os.attestations.negotiate.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.attestations.negotiate(context.cache, {
+						pushId: input.pushId,
+						bundles: input.bundles
+					})
 			)
-		),
-		attach: os.attestations.attach.handler(({ input, context }) =>
-			context.services.attestations.attach(
-				cacheFromSelector(input.cacheName),
-				input.id
+		},
+		attach: {
+			inDefaultCache: os.attestations.attach.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.attestations.attach(context.cache, input.id)
+			),
+			inNamedCache: os.attestations.attach.inNamedCache.handler(
+				({ input, context }) =>
+					context.services.attestations.attach(context.cache, input.id)
 			)
-		)
+		}
 	}
 });
+
+interface ListPageQuery {
+	readonly cursor?: string;
+	readonly limit?: number;
+}
+
+function pageOptions(query: ListPageQuery): {
+	cursor?: string;
+	limit?: number;
+} {
+	return {
+		...(query.cursor !== undefined && { cursor: query.cursor }),
+		...(query.limit !== undefined && { limit: query.limit })
+	};
+}
+
+function listRoots(context: TenantOrpcContext, query: ListPageQuery) {
+	return context.services.roots.listRoots(context.cache, pageOptions(query));
+}
+
+function rootTargets(
+	context: TenantOrpcContext,
+	name: RootName,
+	query: ListPageQuery
+) {
+	return context.services.roots.rootTargets(
+		context.cache,
+		name,
+		pageOptions(query)
+	);
+}
+
+function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
+	const origin = requestOriginSchema.parse(new URL(context.request.url).origin);
+
+	return context.services.deletionQueue.deleteStorePath(
+		context.cache,
+		hash,
+		origin
+	);
+}
+
+function negotiateUpload(
+	context: TenantOrpcContext & { readonly claims: AccessClaims },
+	input: UploadNegotiateRequest
+) {
+	if (input.attachRoot !== undefined) {
+		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
+	}
+
+	const origin = requestOriginSchema.parse(new URL(context.request.url).origin);
+
+	return context.services.uploads.negotiate(
+		context.cache,
+		{
+			pushId: input.pushId,
+			paths: input.paths,
+			...(input.attachRoot !== undefined && { attachRoot: input.attachRoot })
+		},
+		origin,
+		context.services.takeNegotiateHints(context.request),
+		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
+	);
+}
+
+function previewUpload(
+	context: TenantOrpcContext,
+	paths: UploadPreviewRequest['paths']
+) {
+	return context.services.uploads.preview(
+		context.cache,
+		{ paths },
+		context.services.takeNegotiateHints(context.request),
+		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
+	);
+}
+
+async function collectGarbageForCache(
+	context: TenantOrpcContext
+): Promise<GcResponseInput> {
+	const cache = context.services.cacheAdmin.resolveCache(context.cache);
+
+	if (cache === undefined) {
+		return {
+			ok: true,
+			pendingUploadsDeleted: 0,
+			pendingAttestationsDeleted: 0,
+			rootsExpired: 0,
+			pathsCollected: 0,
+			narInfosDeleted: 0,
+			orphanStagingDeleted: 0
+		};
+	}
+
+	return collectGarbage(context.logger, context.request, context.services, {
+		scope: 'cache',
+		cache
+	});
+}
 
 // Interactive GC purges this colo's edge cache via the caller's public
 // origin. The cron pass arrives on the internal origin and cannot know the
@@ -321,13 +487,13 @@ async function collectGarbage(
 	logger: Logger,
 	request: Request,
 	services: TenantRpcServices,
-	cache?: StoredCache
-): Promise<GcResponse> {
+	target: Parameters<TenantRpcServices['runGarbageCollection']>[1]
+): Promise<GcResponseInput> {
 	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const outcome = await services.runGarbageCollection(
 		logger,
-		cache,
+		target,
 		purgeOrigin
 	);
 
@@ -351,7 +517,7 @@ async function runVerify(
 	request: Request,
 	services: TenantRpcServices,
 	limit: number | undefined
-): Promise<VerifyReport> {
+): Promise<VerifyReportInput> {
 	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);

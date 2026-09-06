@@ -3,8 +3,8 @@ import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
 import {
+	CacheAlreadyExistsError,
 	CacheNotEmptyError,
-	PrivateViewDefaultSelectorError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -26,7 +26,7 @@ const codeByStatus: Record<number, string> = {
 };
 
 /**
- * Converts `CacheNotEmptyError` to the contract's `CACHE_NOT_EMPTY` error.
+ * Converts cache conflicts to the contract's typed cache errors.
  * Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
  * generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
  * original HTTP status and message remain unchanged.
@@ -54,11 +54,11 @@ export function bridgedError(
 		});
 	}
 
-	if (error instanceof PrivateViewDefaultSelectorError) {
-		return new ORPCError('PRIVATE_VIEW_DEFAULT_SELECTOR', {
+	if (error instanceof CacheAlreadyExistsError) {
+		return new ORPCError('CACHE_ALREADY_EXISTS', {
 			status: error.status,
 			message: error.message,
-			data: { view: error.view }
+			data: { cache: error.cache }
 		});
 	}
 

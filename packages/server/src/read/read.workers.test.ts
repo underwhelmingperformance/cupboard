@@ -1,15 +1,14 @@
 import {
+	type CacheAccessMode,
 	type CacheGeneration,
 	cacheGenerationSchema,
-	cacheNameSchema,
-	DEFAULT_CACHE,
+	type CacheScope,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
-	privateStoredCache,
-	type StoredCache,
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -24,17 +23,17 @@ import { narCacheTag } from '../http/cache-tags.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
-	type ParsedNarName
+	type NarObjectName
 } from '../http/http.ts';
-import { flakyD1 } from '../test-support.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
+import { defaultCache, flakyD1, namedCache } from '../test-support.ts';
 
 import {
 	missingStorePathHashes,
 	type NarAuthority,
 	narInfoReferenceQuery,
 	narReferenceQuery,
-	privateNamespaceNarAuthority,
-	publicNarAuthority,
 	serveNar,
 	serveNarInfo
 } from './read.ts';
@@ -45,26 +44,42 @@ const narBytes = 'nar-bytes';
 const referencingPath = storePathHashSchema.parse(
 	'0123456789abcdfghijklmnpqrsvwxyz'
 );
-const privateCache = privateStoredCache(cacheNameSchema.parse('builds'));
+const privateCache = namedCache('builds');
 
 // The narinfo generation every seeded reference edge records.
 const referencedGeneration = narInfoGenerationSchema.parse(1);
 
-function cacheAuthority(cache: StoredCache): NarAuthority {
-	return { kind: 'cache', cache };
+function cacheAuthority(
+	scope: CacheScope,
+	access: CacheAccessMode = 'public'
+): NarAuthority {
+	return { kind: 'cache', scope, access };
 }
 
-function parsedNar(hash = narHash): ParsedNarName {
+function viewAuthority(
+	access: CacheAccessMode,
+	selectors: readonly ReuseViewSelector[] = [{ kind: 'all' }]
+): NarAuthority {
+	return { kind: 'view', access, selectors };
+}
+
+const defaultPublicAuthority = cacheAuthority(defaultCache());
+
+function parsedNar(hash = narHash): NarObjectName {
 	return { narHash: hash, incarnation: 1 };
 }
 
-async function seedOwnedNar(cache: StoredCache = DEFAULT_CACHE): Promise<void> {
-	await seedOwnedNarReference(cache);
+async function seedOwnedNar(
+	cache: CacheScope = defaultCache(),
+	access: CacheAccessMode = 'public'
+): Promise<void> {
+	await seedOwnedNarReference(cache, access);
 	await env.BLOBS.put(narObjectKey(narHash), narBytes);
 }
 
 async function seedOwnedNarReference(
-	cache: StoredCache = DEFAULT_CACHE,
+	cache: CacheScope = defaultCache(),
+	access: CacheAccessMode = 'public',
 	edgeGeneration?: CacheGeneration
 ): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -80,31 +95,50 @@ async function seedOwnedNarReference(
 		})
 		.onConflictDoNothing();
 	const insertReference = database
-		.insert(d1Schema.blobReference)
+		.insert(migrationSchema.blobReferences)
 		.values({
 			tenant,
-			cache,
+			...cacheMigrationColumns(cache, access),
 			storePathHash: referencingPath,
 			generation: referencedGeneration,
 			narHash,
 			...(edgeGeneration !== undefined && { cacheGeneration: edgeGeneration })
 		})
 		.onConflictDoNothing();
+	const insertLifecycle = database
+		.insert(migrationSchema.cacheLifecycles)
+		.values({
+			tenant,
+			...cacheMigrationColumns(cache, access),
+			access,
+			generation: edgeGeneration ?? firstCacheGeneration,
+			updatedAt: isoTimestamp(new Date())
+		})
+		.onConflictDoNothing();
 
-	await database.batch([insertBlob, insertReference]);
+	await database.batch([insertBlob, insertReference, insertLifecycle]);
 }
 
 function seedCacheGeneration(
-	cache: StoredCache,
-	generation: CacheGeneration
+	cache: CacheScope,
+	generation: CacheGeneration,
+	access: CacheAccessMode = 'public'
 ): Promise<unknown> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.cacheLifecycle)
+		.insert(migrationSchema.cacheLifecycles)
 		.values({
 			tenant,
-			cache,
+			...cacheMigrationColumns(cache, access),
+			access,
 			generation,
 			updatedAt: isoTimestamp(new Date())
+		})
+		.onConflictDoUpdate({
+			target: [
+				migrationSchema.cacheLifecycles.tenant,
+				migrationSchema.cacheLifecycles.legacyCache
+			],
+			set: { access, generation }
 		});
 }
 
@@ -118,7 +152,7 @@ async function serveWithFaults(failures: number): Promise<Response> {
 		faultyEnv,
 		tenant,
 		parsedNar(),
-		publicNarAuthority,
+		defaultPublicAuthority,
 		true
 	);
 	return response;
@@ -135,7 +169,7 @@ describe('NAR serve under shared-fact read faults', () => {
 				env,
 				tenant,
 				parsedNar(absentNarHash),
-				publicNarAuthority,
+				defaultPublicAuthority,
 				true
 			),
 			serveNar(
@@ -143,14 +177,14 @@ describe('NAR serve under shared-fact read faults', () => {
 				env,
 				tenant,
 				parsedNar(),
-				publicNarAuthority,
+				defaultPublicAuthority,
 				true
 			),
 			serveNarInfo(
 				new Request('https://cache.example/0.narinfo'),
 				env,
 				tenant,
-				DEFAULT_CACHE,
+				{ scope: defaultCache(), access: 'public' },
 				referencingPath,
 				true
 			)
@@ -176,7 +210,7 @@ describe('NAR serve under shared-fact read faults', () => {
 			env,
 			tenant,
 			parsedNar(),
-			publicNarAuthority,
+			defaultPublicAuthority,
 			false
 		);
 
@@ -194,7 +228,7 @@ describe('NAR serve under shared-fact read faults', () => {
 			env,
 			tenant,
 			parsedNar(),
-			publicNarAuthority,
+			defaultPublicAuthority,
 			true
 		);
 
@@ -248,60 +282,68 @@ describe('NAR serve under shared-fact read faults', () => {
 });
 
 describe('NAR reference authorisation', () => {
-	const otherPrivateCache = privateStoredCache(cacheNameSchema.parse('guides'));
+	const otherPrivateCache = namedCache('guides');
 
 	const cases: readonly {
 		readonly name: string;
-		readonly cache: StoredCache;
+		readonly cache: CacheScope;
+		readonly access: CacheAccessMode;
 		readonly authority: NarAuthority;
 		readonly isServed: boolean;
 	}[] = [
 		{
-			name: 'a public reference authorises a public read',
-			cache: DEFAULT_CACHE,
-			authority: publicNarAuthority,
+			name: 'a public reference authorises a read of its cache',
+			cache: defaultCache(),
+			access: 'public',
+			authority: defaultPublicAuthority,
 			isServed: true
 		},
 		{
-			name: 'a public reference does not authorise a private cache read',
-			cache: DEFAULT_CACHE,
-			authority: cacheAuthority(privateCache),
+			name: 'a public reference does not authorise another private cache',
+			cache: defaultCache(),
+			access: 'public',
+			authority: cacheAuthority(privateCache, 'private'),
 			isServed: false
 		},
 		{
 			name: 'a public reference does not authorise a private view read',
-			cache: DEFAULT_CACHE,
-			authority: privateNamespaceNarAuthority,
+			cache: defaultCache(),
+			access: 'public',
+			authority: viewAuthority('private'),
 			isServed: false
 		},
 		{
-			name: 'a private reference does not authorise a public read',
+			name: 'a private reference does not authorise a public view read',
 			cache: privateCache,
-			authority: publicNarAuthority,
+			access: 'private',
+			authority: viewAuthority('public'),
 			isServed: false
 		},
 		{
 			name: 'a private reference authorises a read of its own cache',
 			cache: privateCache,
-			authority: cacheAuthority(privateCache),
+			access: 'private',
+			authority: cacheAuthority(privateCache, 'private'),
 			isServed: true
 		},
 		{
 			name: 'a private reference does not authorise a read of another private cache',
 			cache: privateCache,
-			authority: cacheAuthority(otherPrivateCache),
+			access: 'private',
+			authority: cacheAuthority(otherPrivateCache, 'private'),
 			isServed: false
 		},
 		{
 			name: 'a private reference authorises a private view read',
 			cache: privateCache,
-			authority: privateNamespaceNarAuthority,
+			access: 'private',
+			authority: viewAuthority('private'),
 			isServed: true
 		}
 	];
 
-	it.each(cases)('$name', async ({ cache, authority, isServed }) => {
-		await seedOwnedNar(cache);
+	it.each(cases)('$name', async ({ cache, access, authority, isServed }) => {
+		await seedOwnedNar(cache, access);
 
 		const response = await serveNar(
 			new Request('https://cache.example/nar/probe'),
@@ -320,7 +362,10 @@ describe('NAR reference authorisation', () => {
 			isServed
 				? {
 						status: StatusCodes.OK,
-						cacheTag: narCacheTag(tenant, narHash),
+						cacheTag:
+							authority.kind === 'cache'
+								? narCacheTag(tenant, authority.scope, narHash)
+								: undefined,
 						body: narBytes
 					}
 				: {
@@ -381,11 +426,11 @@ describe('NAR reference cache generations', () => {
 	it.each(cases)(
 		'$name',
 		async ({ edgeGeneration, cacheGeneration, isServed }) => {
-			await seedOwnedNarReference(DEFAULT_CACHE, edgeGeneration);
+			await seedOwnedNarReference(defaultCache(), 'public', edgeGeneration);
 			await env.BLOBS.put(narObjectKey(narHash), narBytes);
 
 			if (cacheGeneration !== undefined) {
-				await seedCacheGeneration(DEFAULT_CACHE, cacheGeneration);
+				await seedCacheGeneration(defaultCache(), cacheGeneration);
 			}
 
 			const response = await serveNar(
@@ -393,7 +438,7 @@ describe('NAR reference cache generations', () => {
 				env,
 				tenant,
 				parsedNar(),
-				publicNarAuthority,
+				defaultPublicAuthority,
 				false
 			);
 
@@ -408,9 +453,12 @@ describe('NAR reference index', () => {
 	const planRowSchema = z.object({ detail: z.string() });
 
 	it.each([
-		{ name: 'one private cache', authority: cacheAuthority(privateCache) },
-		{ name: 'the public namespace', authority: publicNarAuthority },
-		{ name: 'the private namespace', authority: privateNamespaceNarAuthority }
+		{
+			name: 'one private cache',
+			authority: cacheAuthority(privateCache, 'private')
+		},
+		{ name: 'a public view', authority: viewAuthority('public') },
+		{ name: 'a private view', authority: viewAuthority('private') }
 	])('seeks the composite index for $name', async ({ authority }) => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		const query = narReferenceQuery(
@@ -436,7 +484,7 @@ describe('NAR reference index', () => {
 		// check remains one statement that never scans.
 		expect({
 			edge: rows.some((row) =>
-				row.detail.includes('blob_ref_tenant_nar_hash_cache_idx')
+				row.detail.includes('blob_ref_tenant_nar_hash_native_idx')
 			),
 			blobState: isIndexSeek('blob_state'),
 			lifecycle: isIndexSeek('cache_lifecycle'),
@@ -489,7 +537,7 @@ async function seedPrivateNarInfoObject(
 	objectMetadata: Record<string, string> | undefined,
 	edgeGeneration?: CacheGeneration
 ): Promise<void> {
-	await seedOwnedNarReference(privateCache, edgeGeneration);
+	await seedOwnedNarReference(privateCache, 'private', edgeGeneration);
 	await env.BLOBS.put(
 		narInfoObjectKey(tenant, referencingPath, privateCache),
 		'narinfo-bytes',
@@ -505,6 +553,7 @@ function seedPrivateNarInfo(edgeGeneration?: CacheGeneration): Promise<void> {
 
 describe('private narinfo reference gate', () => {
 	const secondGeneration = cacheGenerationSchema.parse(2);
+	const privateRead = { scope: privateCache, access: 'private' } as const;
 
 	it.each([
 		{
@@ -532,18 +581,18 @@ describe('private narinfo reference gate', () => {
 			await seedPrivateNarInfo(edgeGeneration);
 
 			if (cacheGeneration !== undefined) {
-				await seedCacheGeneration(privateCache, cacheGeneration);
+				await seedCacheGeneration(privateCache, cacheGeneration, 'private');
 			}
 
 			const response = await serveNarInfo(
 				new Request('https://cache.example/probe.narinfo'),
 				env,
 				tenant,
-				privateCache,
+				privateRead,
 				referencingPath,
 				true
 			);
-			const missing = await missingStorePathHashes(env, tenant, privateCache, [
+			const missing = await missingStorePathHashes(env, tenant, privateRead, [
 				referencingPath
 			]);
 
@@ -582,11 +631,11 @@ describe('private narinfo reference gate', () => {
 				new Request('https://cache.example/probe.narinfo'),
 				env,
 				tenant,
-				privateCache,
+				privateRead,
 				referencingPath,
 				true
 			);
-			const missing = await missingStorePathHashes(env, tenant, privateCache, [
+			const missing = await missingStorePathHashes(env, tenant, privateRead, [
 				referencingPath
 			]);
 
@@ -612,7 +661,7 @@ describe('private narinfo reference gate', () => {
 			new Request('https://cache.example/probe.narinfo'),
 			env,
 			tenant,
-			privateCache,
+			privateRead,
 			referencingPath,
 			true
 		);

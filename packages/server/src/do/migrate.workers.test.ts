@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import migrations from '../../drizzle/migrations.js';
 import {
-	latestMigrationIndex,
+	latestPreContractMigrationIndex,
 	migrateThrough,
 	testServerFor
 } from '../test-support.ts';
@@ -13,7 +13,8 @@ import {
 import {
 	applyMigrations,
 	DurableObjectMigrationError,
-	type MigrationBundle
+	type MigrationBundle,
+	migrationsThrough
 } from './migrate.ts';
 
 type Storage = DurableObjectState['storage'];
@@ -37,7 +38,11 @@ const columnNames = (storage: Storage, table: string): string[] =>
 		.values(sql.raw(`PRAGMA table_info(${table})`))
 		.map((row) => String(row[1]));
 
-const everyTag = migrations.journal.entries
+const preContractMigrations = migrationsThrough(
+	migrations,
+	latestPreContractMigrationIndex
+);
+const everyTag = preContractMigrations.journal.entries
 	.toSorted((a, b) => a.idx - b.idx)
 	.map((entry) => entry.tag);
 
@@ -46,7 +51,7 @@ describe('applyMigrations', () => {
 		const tags = await runInDurableObject(
 			testServerFor('migrate-fresh'),
 			(_instance, state) => {
-				applyMigrations(drizzle(state.storage), migrations);
+				applyMigrations(drizzle(state.storage), preContractMigrations);
 
 				return appliedTags(state.storage);
 			}
@@ -59,11 +64,11 @@ describe('applyMigrations', () => {
 		const result = await runInDurableObject(
 			testServerFor('migrate-idempotent'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 
 				const tablesBefore = tableNames(state.storage);
 
-				applyMigrations(drizzle(state.storage), migrations);
+				applyMigrations(drizzle(state.storage), preContractMigrations);
 
 				return {
 					tags: appliedTags(state.storage),
@@ -97,7 +102,7 @@ describe('applyMigrations', () => {
 					)
 				);
 
-				applyMigrations(database, migrations);
+				applyMigrations(database, preContractMigrations);
 
 				return {
 					tags: appliedTags(state.storage),

@@ -1,7 +1,4 @@
-import {
-	cacheSelectorSchema,
-	rootNameSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, rootNameSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
@@ -59,7 +56,8 @@ function rule(options: {
 				actions: [...(options.actions ?? ['upload:commit'])],
 				resources: {
 					cache: {
-						exact: cacheSelectorSchema.parse(options.cache),
+						exact: cacheNameSchema.parse(options.cache),
+						kind: 'named',
 						validate: 'cacheName'
 					},
 					...(options.root !== undefined && {
@@ -83,7 +81,7 @@ function request(
 		{
 			type: 'cupboard_cache',
 			actions,
-			cache,
+			cache: { kind: 'named', name: cache },
 			...(root !== undefined && { root })
 		}
 	]);

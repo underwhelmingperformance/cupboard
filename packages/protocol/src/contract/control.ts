@@ -30,9 +30,8 @@ import {
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
+	tenantReadCredentialResponseSchema,
 	tenantReadCredentialSchema,
-	tenantReadModeResponseSchema,
-	tenantReadModeSchema,
 	tenantSummarySchema
 } from '../tenants.ts';
 
@@ -120,17 +119,6 @@ export const controlContract = {
 			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantMutateResponseSchema),
 
-		setReadMode: controlProcedure
-			.meta({
-				requires: 'tenant:set-read-mode',
-				resource: { tenant: { field: 'id' } }
-			})
-			.route({ method: 'POST', path: '/tenants/{id}/read-mode' })
-			.input(
-				z.strictObject({ id: tenantIdSchema, readMode: tenantReadModeSchema })
-			)
-			.output(tenantReadModeResponseSchema),
-
 		rotateReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-read-credential',
@@ -140,7 +128,7 @@ export const controlContract = {
 			.input(
 				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
 			)
-			.output(tenantReadModeResponseSchema),
+			.output(tenantReadCredentialResponseSchema),
 
 		clearReadCredential: controlProcedure
 			.meta({
@@ -149,19 +137,30 @@ export const controlContract = {
 			})
 			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
 			.input(z.strictObject({ id: tenantIdSchema }))
-			.output(tenantReadModeResponseSchema),
+			.output(tenantReadCredentialResponseSchema),
 
-		// A private cache may carry a read credential of its own. While that
-		// credential exists it is the only one that opens the cache; clearing it
-		// returns the cache to the tenant credential. `cacheName` is the local name.
-		rotateCacheReadCredential: controlProcedure
+		rotateDefaultCacheReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-cache-read-credential',
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({
 				method: 'POST',
-				path: '/tenants/{id}/private-caches/{cacheName}/read-credential'
+				path: '/tenants/{id}/default-cache/read-credential'
+			})
+			.input(
+				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
+			)
+			.output(cacheReadCredentialResponseSchema),
+
+		rotateNamedCacheReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:rotate-cache-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
+			.route({
+				method: 'POST',
+				path: '/tenants/{id}/caches/{cacheName}/read-credential'
 			})
 			.input(
 				z.strictObject({
@@ -172,14 +171,26 @@ export const controlContract = {
 			)
 			.output(cacheReadCredentialResponseSchema),
 
-		clearCacheReadCredential: controlProcedure
+		clearDefaultCacheReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:clear-cache-read-credential',
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({
 				method: 'DELETE',
-				path: '/tenants/{id}/private-caches/{cacheName}/read-credential'
+				path: '/tenants/{id}/default-cache/read-credential'
+			})
+			.input(z.strictObject({ id: tenantIdSchema }))
+			.output(cacheReadCredentialResponseSchema),
+
+		clearNamedCacheReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:clear-cache-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
+			.route({
+				method: 'DELETE',
+				path: '/tenants/{id}/caches/{cacheName}/read-credential'
 			})
 			.input(z.strictObject({ id: tenantIdSchema, cacheName: cacheNameSchema }))
 			.output(cacheReadCredentialResponseSchema),

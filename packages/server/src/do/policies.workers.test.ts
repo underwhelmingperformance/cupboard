@@ -1,12 +1,12 @@
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import type {
-	GracePolicyListResponse,
-	GracePolicyRemoveResponse,
-	GracePolicySummary,
-	RetentionPolicyAddBody,
-	RetentionPolicySummary,
-	RootSetResponse
+	GracePolicyListResponseInput,
+	GracePolicyRemoveResponseInput,
+	GracePolicySummaryInput,
+	RetentionPolicyAddBodyInput,
+	RetentionPolicySummaryInput,
+	RootSetResponseInput
 } from '@cupboard/protocol/retention';
 import {
 	graceCoverageResponseSchema,
@@ -24,11 +24,15 @@ import { z } from 'zod';
 
 import {
 	authorisedFetch,
+	cacheScopedPath,
 	cacheWriteGrants,
+	defaultCache,
 	initialise,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	pushPath,
+	putTestCache,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -56,8 +60,11 @@ function orpcErrorBodyShape(body: unknown): {
 
 async function addPolicy(
 	token: string,
-	body: RetentionPolicyAddBody
-): Promise<{ readonly status: number; readonly body: RetentionPolicySummary }> {
+	body: RetentionPolicyAddBodyInput
+): Promise<{
+	readonly status: number;
+	readonly body: RetentionPolicySummaryInput;
+}> {
 	const response = await authorisedFetch('/policies', token, {
 		body: JSON.stringify(body),
 		headers: { 'content-type': 'application/json' },
@@ -81,7 +88,10 @@ function addGracePolicyRaw(token: string, body: unknown): Promise<Response> {
 async function addGracePolicy(
 	token: string,
 	body: { readonly cachePrefix: string; readonly graceSeconds: number }
-): Promise<{ readonly status: number; readonly body: GracePolicySummary }> {
+): Promise<{
+	readonly status: number;
+	readonly body: GracePolicySummaryInput;
+}> {
 	const response = await addGracePolicyRaw(token, body);
 
 	return {
@@ -92,7 +102,7 @@ async function addGracePolicy(
 
 async function listGracePolicies(token: string): Promise<{
 	readonly status: number;
-	readonly body: GracePolicyListResponse;
+	readonly body: GracePolicyListResponseInput;
 }> {
 	const response = await authorisedFetch('/policies/grace', token);
 
@@ -107,7 +117,7 @@ async function removeGracePolicy(
 	id: string
 ): Promise<{
 	readonly status: number;
-	readonly body: GracePolicyRemoveResponse;
+	readonly body: GracePolicyRemoveResponseInput;
 }> {
 	const response = await authorisedFetch(
 		`/policies/grace/${encodeURIComponent(id)}`,
@@ -124,9 +134,9 @@ async function removeGracePolicy(
 async function setRoot(
 	token: string,
 	name: string
-): Promise<{ readonly status: number; readonly body: RootSetResponse }> {
+): Promise<{ readonly status: number; readonly body: RootSetResponseInput }> {
 	const response = await authorisedFetch(
-		`/cache/_default/roots/${encodeURIComponent(name)}`,
+		`/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),
@@ -173,26 +183,27 @@ describe('retention policies', () => {
 
 		expect({
 			addStatus: added.status,
-			added: {
-				scope: added.body.scope,
-				pattern: added.body.pattern,
-				ttlSeconds: added.body.ttlSeconds
-			},
+			added: added.body,
 			listStatus: listResponse.status,
-			listPatterns: list.policies.map((policy) => policy.pattern),
+			listed: list.policies,
 			removeStatus: removalResponse.status,
 			removed,
 			afterStatus: afterResponse.status,
-			afterPatterns: after.policies.map((policy) => policy.pattern)
+			after: after.policies
 		}).toStrictEqual({
 			addStatus: StatusCodes.OK,
-			added: { scope: 'root-name-prefix', pattern: 'pr-', ttlSeconds: 604_800 },
+			added: {
+				id: added.body.id,
+				scope: 'root-name-prefix',
+				pattern: 'pr-',
+				ttlSeconds: 604_800
+			},
 			listStatus: StatusCodes.OK,
-			listPatterns: ['pr-'],
+			listed: [added.body],
 			removeStatus: StatusCodes.OK,
 			removed: { id: added.body.id, removed: true },
 			afterStatus: StatusCodes.OK,
-			afterPatterns: []
+			after: []
 		});
 	});
 
@@ -405,10 +416,10 @@ describe('retention grace policies', () => {
 
 async function graceCoverage(
 	token: string,
-	cacheSelector: string
+	cache: CacheScope
 ): Promise<{ readonly status: number; readonly body: unknown }> {
 	const response = await authorisedFetch(
-		`/cache/${encodeURIComponent(cacheSelector)}/grace-coverage`,
+		cacheScopedPath(cache, '/grace-coverage'),
 		token
 	);
 
@@ -420,13 +431,14 @@ describe('grace coverage', () => {
 
 	it('selects the longest matching grace-policy prefix', async () => {
 		const token = await initialise();
+		await putTestCache(token, namedCache('pr-7'));
 		await addGracePolicy(token, { cachePrefix: '', graceSeconds: 86_400 });
 		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });
 
-		const pullRequestCache = await graceCoverage(token, 'pr-7');
-		const defaultCache = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
+		const pullRequestCache = await graceCoverage(token, namedCache('pr-7'));
+		const defaultCoverage = await graceCoverage(token, defaultCache());
 
-		expect({ pullRequestCache, defaultCache }).toStrictEqual({
+		expect({ pullRequestCache, defaultCache: defaultCoverage }).toStrictEqual({
 			pullRequestCache: {
 				status: StatusCodes.OK,
 				body: graceCoverageResponseSchema.parse({
@@ -447,7 +459,7 @@ describe('grace coverage', () => {
 	it('returns covered: false when no grace policy matches', async () => {
 		const token = await initialise();
 
-		const coverage = await graceCoverage(token, DEFAULT_CACHE_SELECTOR);
+		const coverage = await graceCoverage(token, defaultCache());
 
 		expect(coverage).toStrictEqual({
 			status: StatusCodes.OK,
@@ -463,17 +475,14 @@ describe('grace coverage', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					cache: DEFAULT_CACHE_SELECTOR
+					cache: defaultCache()
 				}
 			])
 		);
 		const commitOnlyToken = await issueServerSignedToken(cacheWriteGrants());
 
-		const coverage = await graceCoverage(confirmToken, DEFAULT_CACHE_SELECTOR);
-		const commitOnly = await graceCoverage(
-			commitOnlyToken,
-			DEFAULT_CACHE_SELECTOR
-		);
+		const coverage = await graceCoverage(confirmToken, defaultCache());
+		const commitOnly = await graceCoverage(commitOnlyToken, defaultCache());
 		const refusedList = await authorisedFetch('/policies/grace', confirmToken);
 
 		expect({

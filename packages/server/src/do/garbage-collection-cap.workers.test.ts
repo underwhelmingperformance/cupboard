@@ -1,8 +1,4 @@
-import {
-	DEFAULT_CACHE,
-	narInfoGenerationSchema,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { narInfoGenerationSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -22,6 +18,7 @@ import {
 	narInfoGeneration,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
 	setRoot,
 	syntheticNarHash,
 	syntheticStorePathHash,
@@ -30,6 +27,7 @@ import {
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
+import type { ServerContext } from './context.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
 import {
 	maxPathsCollectedPerRun,
@@ -38,7 +36,6 @@ import {
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
-const defaultCache: StoredCache = DEFAULT_CACHE;
 const tenantWideContinuation = {
 	scope: 'tenant',
 	collectLimit: maxPathsCollectedPerRun
@@ -52,15 +49,16 @@ async function continuation(): Promise<unknown> {
 
 async function seedNarInfoDeletions(count: number): Promise<void> {
 	const createdAt = isoTimestamp(new Date());
-	const rows = Array.from({ length: count }, (_unused, index) => ({
-		cache: defaultCache,
-		storePathHash: syntheticStorePathHash(index),
-		narHash: syntheticNarHash(index),
-		generation: narInfoGenerationSchema.parse(1),
-		createdAt
-	}));
 
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const cacheId = resolvedCache(instance.context).id;
+		const rows = Array.from({ length: count }, (_unused, index) => ({
+			cacheId,
+			storePathHash: syntheticStorePathHash(index),
+			narHash: syntheticNarHash(index),
+			generation: narInfoGenerationSchema.parse(1),
+			createdAt
+		}));
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
 		// Each row binds five parameters, so the insert is chunked under the
@@ -151,13 +149,17 @@ interface ScanProgress {
 	readonly marks: number;
 }
 
-function scanProgress(state: DurableObjectState): ScanProgress | undefined {
+function scanProgress(
+	context: ServerContext,
+	state: DurableObjectState
+): ScanProgress | undefined {
+	const cache = resolvedCache(context);
 	const scan = state.storage.sql
 		.exec<{ phase: string; revision: number; cursor: string }>(
 			`SELECT phase, revision, cursor
 			 FROM garbage_collection_scan
-			 WHERE cache = ?`,
-			DEFAULT_CACHE
+			 WHERE cache_id = ?`,
+			cache.id
 		)
 		.toArray()[0];
 
@@ -168,8 +170,8 @@ function scanProgress(state: DurableObjectState): ScanProgress | undefined {
 	const count = (table: string): number =>
 		state.storage.sql
 			.exec<{ count: number }>(
-				`SELECT count(*) AS count FROM ${table} WHERE cache = ?`,
-				DEFAULT_CACHE
+				`SELECT count(*) AS count FROM ${table} WHERE cache_id = ?`,
+				cache.id
 			)
 			.toArray()[0]?.count ?? 0;
 
@@ -256,7 +258,7 @@ describe('garbage collection cap', () => {
 			currentServer(),
 			async (instance, state) => {
 				await instance.runGarbageCollection(1);
-				const progress = scanProgress(state);
+				const progress = scanProgress(instance.context, state);
 				const refresh = {
 					families:
 						state.storage.sql
@@ -341,15 +343,15 @@ describe('garbage collection cap', () => {
 			currentServer(),
 			async (instance, state) => {
 				await instance.runGarbageCollection(1);
-				const seeded = scanProgress(state);
+				const seeded = scanProgress(instance.context, state);
 				await state.storage.deleteAlarm();
 
 				await instance.alarm();
-				const parentMarked = scanProgress(state);
+				const parentMarked = scanProgress(instance.context, state);
 				await state.storage.deleteAlarm();
 
 				await instance.alarm();
-				const closureMarked = scanProgress(state);
+				const closureMarked = scanProgress(instance.context, state);
 				await state.storage.deleteAlarm();
 
 				return { seeded, parentMarked, closureMarked };
@@ -429,7 +431,7 @@ describe('garbage collection cap', () => {
 			currentServer(),
 			async (instance, state) => {
 				await instance.runGarbageCollection(1);
-				const progress = scanProgress(state);
+				const progress = scanProgress(instance.context, state);
 				parked = await state.storage.get(gcContinuationKey);
 				await state.storage.delete(gcContinuationKey);
 				await state.storage.deleteAlarm();
@@ -453,7 +455,7 @@ describe('garbage collection cap', () => {
 				}
 
 				await instance.alarm();
-				const progress = scanProgress(state);
+				const progress = scanProgress(instance.context, state);
 				parked = await state.storage.get(gcContinuationKey);
 				await state.storage.delete(gcContinuationKey);
 				await state.storage.deleteAlarm();
@@ -522,6 +524,7 @@ describe('garbage collection cap', () => {
 			currentServer(),
 			async (instance, state) => {
 				await instance.runGarbageCollection(5);
+				const cache = resolvedCache(instance.context);
 				const scan = state.storage.sql
 					.exec<{
 						phase: string;
@@ -532,16 +535,16 @@ describe('garbage collection cap', () => {
 						        mark_store_path_hash AS markStorePathHash,
 						        reference_cursor AS referenceCursor
 						 FROM garbage_collection_scan
-						 WHERE cache = ?`,
-						DEFAULT_CACHE
+						 WHERE cache_id = ?`,
+						cache.id
 					)
 					.toArray()[0];
 				const frontier = state.storage.sql
 					.exec<{ count: number }>(
 						`SELECT count(*) AS count
 						 FROM garbage_collection_frontier
-						 WHERE cache = ?`,
-						DEFAULT_CACHE
+						 WHERE cache_id = ?`,
+						cache.id
 					)
 					.toArray()[0]?.count;
 
@@ -591,10 +594,11 @@ describe('garbage collection cap', () => {
 
 			await expect(
 				runInDurableObject(currentServer(), async (instance, state) => {
+					const cache = resolvedCache(instance.context);
 					state.storage.sql.exec(
-						'UPDATE narinfo SET references_json = ? WHERE cache = ? AND store_path_hash = ?',
+						'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?',
 						stored,
-						DEFAULT_CACHE,
+						cache.id,
 						parent.storePathHash
 					);
 

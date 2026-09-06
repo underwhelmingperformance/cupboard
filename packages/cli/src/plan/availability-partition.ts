@@ -18,7 +18,7 @@ import {
 	type UnknownPathCause,
 	type UnknownPathDetail
 } from '@cupboard/protocol/plan';
-import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { CliError, CliUsageError, transientExitCode } from '../errors.ts';
@@ -197,7 +197,7 @@ export interface AvailabilityPartitionOptions {
 	readonly attestedServed?: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
-	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
+	readonly rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>;
 	/**
 	 * Re-queries paths whose availability remained unknown, bypassing any cache
 	 * used by the first query. Called only when at least one path is unknown.
@@ -353,7 +353,7 @@ function shouldQueryAvailabilityForTarget(
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
 	attestedServedPaths: ReadonlySet<StorePathString> | undefined,
-	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
+	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
 ): boolean {
 	if (target.expectedPath === undefined) {
 		return true;
@@ -1240,7 +1240,7 @@ export function classify(
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,
 	substitutableExternal: ReadonlySet<StorePathString>,
-	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
+	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
 ): Classification {
 	const path = target.expectedPath;
 
@@ -1292,7 +1292,7 @@ function addToBucket(
 // target absent from that list is served.
 function isServedByRootEnsure(
 	target: AvailabilityTarget,
-	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
+	rootEnsureResults: ReadonlyMap<RootName, RootEnsureResponse>
 ): boolean {
 	const result = rootEnsureResults.get(target.root);
 

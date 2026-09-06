@@ -6,18 +6,18 @@ import { env } from 'node:process';
 
 import { discoverNixStoreConfig } from '@cupboard/nix';
 import {
+	type CacheScope,
 	rootNameMaxLength,
 	rootNameSchema,
-	type StoredCache,
 	type StoreDirectory,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
-	type ParsedRootEnsureResponse,
-	type ParsedRootTarget,
+	type RootEnsureResponse,
 	rootEnsureResponseSchema,
 	rootSetMaxTargets,
+	type RootTarget,
 	rootTargetSchema
 } from '@cupboard/protocol/retention';
 import {
@@ -60,7 +60,6 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
-	cacheArguments,
 	isEnabled,
 	provided,
 	providedCacheSelection,
@@ -88,6 +87,7 @@ import {
 	type TargetCoverage,
 	type TargetEvaluation
 } from '../publish-plan.ts';
+import { cacheUrlFor } from '../substituters.ts';
 
 export type EnsureRunner = (
 	command: string,
@@ -219,7 +219,6 @@ export interface PlanOptions {
 	readonly targets?: string;
 	readonly url?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
 	readonly rootPrefix?: string;
 	readonly ttl?: string;
 	readonly readUser?: string;
@@ -237,7 +236,7 @@ export interface PlanOptions {
 export interface PlanInputs {
 	readonly targets: readonly PublishTarget[];
 	readonly url: URL;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly rootPrefix: string;
 	readonly ttl: string;
 	readonly readUser: ReadUser | '';
@@ -300,11 +299,10 @@ export function registerPlanCommand(
 			'--root-prefix <prefix>',
 			"prefix used to form each target's retention root"
 		)
-		.option('--cache <name>', 'Inspect and publish to a named public cache.')
-		.option('--private-cache <name>', 'Inspect and publish to a private cache.')
+		.option('--cache <name>', 'Inspect and publish to a named cache.')
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
-		.option('--read-user <user>', 'username for private cache reads')
-		.option('--read-password <password>', 'password for private cache reads')
+		.option('--read-user <user>', 'username for cache reads')
+		.option('--read-password <password>', 'password for cache reads')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--plan-file <path>', 'destination for the detailed JSON plan')
 		.option(
@@ -389,7 +387,7 @@ export function resolvePlanInputs(
 	return {
 		targets,
 		url,
-		cache: providedCacheSelection(options.cache, options.privateCache),
+		cache: providedCacheSelection(options.cache),
 		rootPrefix,
 		ttl: provided(options.ttl) ?? '',
 		readUser,
@@ -764,7 +762,7 @@ async function ensureRoot(
 	storePaths: readonly StorePathString[],
 	runner: EnsureRunner,
 	signal?: AbortSignal
-): Promise<ParsedRootEnsureResponse> {
+): Promise<RootEnsureResponse> {
 	const resultFile = path.join(
 		inputs.temporaryDirectory,
 		`cupboard-root-ensure-${randomUUID()}.jsonl`
@@ -777,7 +775,7 @@ async function ensureRoot(
 		resultFile,
 		'root',
 		'ensure',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
 		...storePaths,
 		'--github-oidc'
@@ -786,8 +784,6 @@ async function ensureRoot(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.ttl !== '') {
 		arguments_.push('--ttl', inputs.ttl);
@@ -830,10 +826,7 @@ function isFileNotFound(error: unknown): boolean {
 	return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
-function ensureResponse(
-	root: string,
-	recorded: string
-): ParsedRootEnsureResponse {
+function ensureResponse(root: string, recorded: string): RootEnsureResponse {
 	let events: readonly ReporterResultEvent[];
 
 	try {
@@ -880,7 +873,7 @@ async function readRootTargets(
 		resultFile,
 		'root',
 		'targets',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
 		'--github-oidc'
 	];
@@ -888,8 +881,6 @@ async function readRootTargets(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	try {
 		await runner(inputs.cupboardPath, arguments_, signal);
@@ -932,7 +923,7 @@ async function readRootTargetsResults(
 function rootTargetsResponse(
 	root: string,
 	recorded: string
-): readonly ParsedRootTarget[] {
+): readonly RootTarget[] {
 	let events: readonly ReporterResultEvent[];
 
 	try {

@@ -1,9 +1,9 @@
 import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import {
-	type AuthKeyListResponse,
-	type AuthKeyRetireResponse,
-	type AuthKeyRotateResponse,
-	type AuthKeySummary
+	type AuthKeyListResponseInput,
+	type AuthKeyRetireResponseInput,
+	type AuthKeyRotateResponseInput,
+	type AuthKeySummaryInput
 } from '@cupboard/protocol/keys';
 import {
 	type OidcAudience,
@@ -144,7 +144,7 @@ export class AuthKeysService {
 		return kid;
 	}
 
-	private async authKeySummaries(): Promise<AuthKeySummary[]> {
+	private async authKeySummaries(): Promise<AuthKeySummaryInput[]> {
 		const active = await this.activeAuthKey();
 		const keys = await this.authKeys();
 
@@ -180,7 +180,7 @@ export class AuthKeysService {
 		};
 	}
 
-	async authKeyList(): Promise<AuthKeyListResponse> {
+	async authKeyList(): Promise<AuthKeyListResponseInput> {
 		return { keys: await this.authKeySummaries() };
 	}
 
@@ -220,7 +220,7 @@ export class AuthKeysService {
 			.map((key) => ({ kid: key.kid, publicJwk: key.publicJwk }));
 	}
 
-	async rotateAuthKey(): Promise<AuthKeyRotateResponse> {
+	async rotateAuthKey(): Promise<AuthKeyRotateResponseInput> {
 		// Generate independent key material before entering the input gate. Read the
 		// outgoing key and insert its replacement atomically with respect to other
 		// rotations and key-set reads.
@@ -257,7 +257,7 @@ export class AuthKeysService {
 		});
 	}
 
-	async retireAuthKey(kid: AuthKeyId): Promise<AuthKeyRetireResponse> {
+	async retireAuthKey(kid: AuthKeyId): Promise<AuthKeyRetireResponseInput> {
 		// Check and retire inside one critical section so concurrent calls cannot
 		// remove the last key. Return refusal from the gate and throw afterwards;
 		// an exception inside `blockConcurrencyWhile` would break the input gate.
