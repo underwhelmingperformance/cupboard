@@ -85,15 +85,15 @@ export function hasReachedPhase(
 	return phaseOrder.indexOf(recorded) >= phaseOrder.indexOf(wanted);
 }
 
-// A deploy of this build ends in this phase. A release that adds phases changes
-// this to the last phase it introduces.
+// A deploy of this build ends in this phase. A release that adds phases
+// changes this to the last phase it introduces.
 //
-// `expanded` means that this build's Workers serve and that every active
-// tenant has recorded local step 1: every registered cache has an identity,
-// and every row present when the tenant was woken carries its `cache_id`
-// beside the stored cache name. A later release reads caches by identity
-// alone, which is safe only once a deploy has recorded this phase.
-export const settledDeploymentPhase: DeploymentPhaseName = 'expanded';
+// `native-reads` says the reads take a cache from its identity columns
+// instead of the legacy name. The deploy records it only after every active
+// tenant has recorded the current local step, whose reconciliation fills the
+// `cache_id` of the rows an earlier build wrote by name alone, so a build
+// that reads this phase finds an identity on every row.
+export const settledDeploymentPhase: DeploymentPhaseName = 'native-reads';
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row.
