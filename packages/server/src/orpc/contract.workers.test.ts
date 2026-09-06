@@ -351,7 +351,9 @@ describe('tenant contract round trip', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+					resources: {
+						cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+					}
 				}
 			]
 		});

@@ -141,6 +141,7 @@ describe('buildCacheGrant', () => {
 			],
 			resources: {
 				cache: {
+					kind: 'named',
 					equalsTemplate: 'pr-{pr}',
 					substitutions: {
 						pr: {
@@ -167,7 +168,7 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+			resources: { cache: { kind: 'default' } }
 		});
 	});
 
@@ -184,7 +185,7 @@ describe('buildCacheGrant', () => {
 				'root:attach'
 			],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'default' },
 				root: { validate: 'rootName', exact: 'github:acme/ci/' }
 			}
 		});
@@ -195,7 +196,7 @@ describe('buildCacheGrant', () => {
 			type: 'cupboard_cache',
 			actions: ['root:attach'],
 			resources: {
-				cache: { exact: '_default', validate: 'cacheName' },
+				cache: { kind: 'default' },
 				root: { validate: 'rootName', equalsResource: 'cache' }
 			}
 		});
@@ -212,7 +213,9 @@ describe('buildCacheGrant', () => {
 				'upload:commit',
 				'upload:confirm'
 			],
-			resources: { cache: { exact: 'acme-ci', validate: 'cacheName' } }
+			resources: {
+				cache: { kind: 'named', exact: 'acme-ci', validate: 'cacheName' }
+			}
 		});
 	});
 
@@ -231,6 +234,7 @@ describe('buildCacheGrant', () => {
 		expect(
 			grant.type === 'cupboard_cache' && grant.resources.cache
 		).toStrictEqual({
+			kind: 'named',
 			exact: 'fixed',
 			validate: 'cacheName'
 		});

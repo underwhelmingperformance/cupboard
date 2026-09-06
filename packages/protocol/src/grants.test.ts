@@ -1,5 +1,6 @@
 import {
-	cacheSelectorSchema,
+	cacheNameSchema,
+	type CacheScope,
 	rootNameSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -25,11 +26,13 @@ interface ResourceFields {
 	tenant?: string;
 }
 
+function namedCache(name: string): CacheScope {
+	return { kind: 'named', name: cacheNameSchema.parse(name) };
+}
+
 function resource(fields: ResourceFields): ResourceRequest {
 	return {
-		...(fields.cache !== undefined && {
-			cache: cacheSelectorSchema.parse(fields.cache)
-		}),
+		...(fields.cache !== undefined && { cache: namedCache(fields.cache) }),
 		...(fields.root !== undefined && {
 			root: rootNameSchema.parse(fields.root)
 		}),
@@ -42,28 +45,28 @@ function resource(fields: ResourceFields): ResourceRequest {
 const cacheGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['upload:commit', 'root:set', 'gc:run'],
-	cache: 'pr-123',
+	cache: namedCache('pr-123'),
 	root: 'pr-123'
 });
 
 const prefixRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:set'],
-	cache: 'main',
+	cache: namedCache('main'),
 	root: 'github:owner/repo/'
 });
 
 const attachRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:attach'],
-	cache: 'main',
+	cache: namedCache('main'),
 	root: 'ci'
 });
 
 const prefixAttachRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:attach'],
-	cache: 'main',
+	cache: namedCache('main'),
 	root: 'github:owner/repo/'
 });
 
@@ -408,7 +411,7 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate'],
-					cache: 'pr-123'
+					cache: namedCache('pr-123')
 				})
 			],
 			'upload:preview',
@@ -421,7 +424,7 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					cache: 'pr-123'
+					cache: namedCache('pr-123')
 				})
 			],
 			'upload:negotiate',
@@ -441,7 +444,7 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					cache: 'pr-123'
+					cache: namedCache('pr-123')
 				})
 			],
 			'upload:commit',
@@ -481,7 +484,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123',
+				cache: namedCache('pr-123'),
 				root: 'pr-123'
 			}),
 			true
@@ -492,7 +495,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['narinfo:delete'],
-				cache: 'pr-123'
+				cache: namedCache('pr-123')
 			}),
 			false
 		],
@@ -502,7 +505,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-999'
+				cache: namedCache('pr-999')
 			}),
 			false
 		],
@@ -537,7 +540,7 @@ describe('authorizationDetailSchema', () => {
 			authorizationDetailSchema.safeParse({
 				type: 'cupboard_cache',
 				actions: [],
-				cache: 'c'
+				cache: namedCache('c')
 			}).success
 		).toBe(false);
 	});
@@ -551,6 +554,7 @@ describe('authorizationDetailSchema', () => {
 
 describe('permittedGrantSchema', () => {
 	const captureBinding = {
+		kind: 'named',
 		equalsTemplate: 'pr-{pull_request_number}',
 		substitutions: {
 			pull_request_number: {
@@ -585,6 +589,7 @@ describe('permittedGrantSchema', () => {
 				actions: ['upload:commit'],
 				resources: {
 					cache: {
+						kind: 'named',
 						equalsTemplate: 'pr-{n}',
 						exact: 'pr-1',
 						substitutions: { n: { claim: 'ref' } },
@@ -600,7 +605,7 @@ describe('permittedGrantSchema', () => {
 				type: 'cupboard_cache',
 				actions: ['root:set'],
 				resources: {
-					cache: { exact: 'pr-1', validate: 'cacheName' },
+					cache: { kind: 'named', exact: 'pr-1', validate: 'cacheName' },
 					root: {
 						equalsTemplate: 'root-{n}',
 						exact: 'root-1',
@@ -642,7 +647,11 @@ describe('permittedGrantSchema', () => {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
 				resources: {
-					cache: { equalsTemplate: 'pr-{missing}', validate: 'cacheName' }
+					cache: {
+						kind: 'named',
+						equalsTemplate: 'pr-{missing}',
+						validate: 'cacheName'
+					}
 				}
 			}).success
 		).toBe(false);
@@ -659,8 +668,13 @@ describe('permittedGrantSchema', () => {
 });
 
 describe('storedPermittedGrantsSchema', () => {
+	// A rule persisted before a cache binding carried a `kind`. Reading it back
+	// adds the kind, so the expectations below differ from the stored value.
 	const cacheResources = {
 		cache: { exact: 'owner-ci', validate: 'cacheName' }
+	};
+	const upgradedCacheResources = {
+		cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
 	};
 
 	it('strips a retired action a rule was persisted with', () => {
@@ -676,7 +690,7 @@ describe('storedPermittedGrantsSchema', () => {
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate', 'upload:commit'],
-				resources: cacheResources
+				resources: upgradedCacheResources
 			}
 		]);
 	});
@@ -699,7 +713,55 @@ describe('storedPermittedGrantsSchema', () => {
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				resources: cacheResources
+				resources: upgradedCacheResources
+			}
+		]);
+	});
+
+	it.each([
+		[
+			'a named cache',
+			{ exact: 'owner-ci', validate: 'cacheName' },
+			{ kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
+		],
+		[
+			'the default cache',
+			{ exact: '_default', validate: 'cacheName' },
+			{ kind: 'default' }
+		],
+		[
+			'a private cache',
+			{ exact: '_private-owner-ci', validate: 'cacheName' },
+			{ kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
+		],
+		[
+			'a templated cache',
+			{
+				equalsTemplate: 'pr-{n}',
+				substitutions: { n: { claim: 'ref' } },
+				validate: 'cacheName'
+			},
+			{
+				kind: 'named',
+				equalsTemplate: 'pr-{n}',
+				substitutions: { n: { claim: 'ref' } },
+				validate: 'cacheName'
+			}
+		]
+	])('upgrades a binding stored for %s', (_name, stored, expected) => {
+		const parsed = storedPermittedGrantsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: { cache: stored }
+			}
+		]);
+
+		expect(parsed).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: { cache: expected }
 			}
 		]);
 	});

@@ -5,7 +5,12 @@ import type {
 	NixStoreConfig,
 	NixStoreKind
 } from '@cupboard/nix';
-import type { CacheSelector, RootName } from '@cupboard/nix-store/scalars';
+import {
+	cacheFromSelector,
+	type CacheSelector,
+	identityForCache,
+	type RootName
+} from '@cupboard/nix-store/scalars';
 import type { InvocationId } from '@cupboard/protocol/build';
 import {
 	type AuthorizationDetail,
@@ -61,7 +66,9 @@ function requireGrant(
 	cache: CacheSelector,
 	root: RootName
 ): void {
-	if (isCoveredByToken(grants, operation, { cache, root })) {
+	const scope = identityForCache(cacheFromSelector(cache)).scope;
+
+	if (isCoveredByToken(grants, operation, { cache: scope, root })) {
 		return;
 	}
 

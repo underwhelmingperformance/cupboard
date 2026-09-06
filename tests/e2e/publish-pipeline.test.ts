@@ -969,7 +969,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						'root:list'
 					],
 					resources: {
-						cache: { exact: '_default', validate: 'cacheName' },
+						cache: { kind: 'default' },
 						root: { exact: rootGrantPrefix, validate: 'rootName' }
 					}
 				}

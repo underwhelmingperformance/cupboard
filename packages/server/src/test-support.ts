@@ -16,6 +16,7 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
+	scopeFromSelector,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type SigningKeyId,
@@ -861,16 +862,18 @@ export function cacheWriteGrants(
 	roots: readonly string[] = [],
 	cacheSelector: string = DEFAULT_CACHE_SELECTOR
 ): AuthorizationDetails {
+	const cache = scopeFromSelector(cacheSelectorSchema.parse(cacheSelector));
+
 	return authorizationDetailsSchema.parse([
 		{
 			type: 'cupboard_cache',
 			actions: cacheWriteActions,
-			cache: cacheSelector
+			cache
 		},
 		...roots.map((root) => ({
 			type: 'cupboard_cache',
 			actions: ['root:set'],
-			cache: cacheSelector,
+			cache,
 			root
 		}))
 	]);

@@ -94,7 +94,11 @@ describe('OIDC federation', () => {
 						type: 'cupboard_cache',
 						actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 						resources: {
-							cache: { exact: 'owner-ci', validate: 'cacheName' },
+							cache: {
+								kind: 'named',
+								exact: 'owner-ci',
+								validate: 'cacheName'
+							},
 							root: { exact: 'github:owner/', validate: 'rootName' }
 						}
 					}
@@ -111,7 +115,7 @@ describe('OIDC federation', () => {
 					{
 						type: 'cupboard_cache',
 						actions: ['root:set'],
-						cache: 'owner-ci',
+						cache: { kind: 'named', name: 'owner-ci' },
 						root: 'github:owner/'
 					}
 				]
@@ -176,7 +180,13 @@ describe('OIDC federation', () => {
 					{
 						type: 'cupboard_cache',
 						actions: ['upload:commit'],
-						resources: { cache: { exact: 'owner-ci', validate: 'cacheName' } }
+						resources: {
+							cache: {
+								kind: 'named',
+								exact: 'owner-ci',
+								validate: 'cacheName'
+							}
+						}
 					}
 				]
 			});

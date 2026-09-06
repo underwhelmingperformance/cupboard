@@ -206,6 +206,17 @@ export const cacheScopeSchema = z.discriminatedUnion('kind', [
 ]);
 export type CacheScope = z.output<typeof cacheScopeSchema>;
 
+/**
+ * Whether two scopes name the same cache.
+ */
+export function isSameCacheScope(left: CacheScope, right: CacheScope): boolean {
+	if (left.kind === 'default' || right.kind === 'default') {
+		return left.kind === right.kind;
+	}
+
+	return left.name === right.name;
+}
+
 // Whether a reader must present a credential for the cache.
 export const cacheAccessModeSchema = z.enum(['public', 'private']);
 export type CacheAccessMode = z.output<typeof cacheAccessModeSchema>;
@@ -369,6 +380,15 @@ export function identityForCache(cache: StoredCache): {
 	}
 
 	return { scope: { kind: 'named', name: cache }, access: 'public' };
+}
+
+/**
+ * The cache a wire selector names, as a scope. A selector spells the access
+ * alongside the identity, and a scope carries only the identity, so a private
+ * cache and a public one of the same name give the same scope.
+ */
+export function scopeFromSelector(selector: CacheSelector): CacheScope {
+	return identityForCache(cacheFromSelector(selector)).scope;
 }
 
 export function selectorForCache(cache: StoredCache): CacheSelector {
