@@ -14,7 +14,6 @@ import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { CacheAccessMigrationError } from '../errors.ts';
 import { migrateLocalCacheAccess } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	latestMigrationIndex,
 	latestPreContractMigrationIndex,
@@ -350,15 +349,14 @@ describe('cache access migration', () => {
 		}
 	);
 
-	it('initialises local cache access through the stale migration RPC', async () => {
+	it('migrates local cache access idempotently', async () => {
 		const tenant = tenantIdSchema.parse('migration-private-tenant');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
@@ -391,8 +389,12 @@ describe('cache access migration', () => {
 			);
 		});
 
-		await server.migrateCacheCatalogue(tenant);
-		await server.migrateCacheCatalogue(tenant);
+		await runInDurableObject(server, async (instance, state) => {
+			await migrateThrough(state, latestPreContractMigrationIndex);
+			await migrateLocalCacheAccess(instance.context, tenant);
+			await migrateLocalCacheAccess(instance.context, tenant);
+			await migrateThrough(state, latestMigrationIndex);
+		});
 
 		const local = await runInDurableObject(server, (_instance, state) => {
 			const cacheRows = state.storage.sql
@@ -413,11 +415,6 @@ describe('cache access migration', () => {
 					.toArray()
 			};
 		});
-		const tenantRow = await d1
-			.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-			.from(migrationSchema.tenants)
-			.where(eq(migrationSchema.tenants.id, tenant))
-			.get();
 		const lifecycleRows = await d1
 			.select({
 				kind: d1Schema.cacheLifecycle.cacheKind,
@@ -436,14 +433,7 @@ describe('cache access migration', () => {
 			access: row.access
 		}));
 
-		expect({
-			local,
-			tenantRow:
-				tenantRow === undefined
-					? undefined
-					: { version: tenantRow.version ?? undefined },
-			lifecycles
-		}).toStrictEqual({
+		expect({ local, lifecycles }).toStrictEqual({
 			local: {
 				caches: [
 					{ cache: { kind: 'default' }, access: 'private', priority: 40 },
@@ -463,9 +453,77 @@ describe('cache access migration', () => {
 					{ name: 'secure', access: 'private' }
 				]
 			},
-			tenantRow: { version: undefined },
 			lifecycles: [{ cache: { kind: 'default' }, access: 'private' }]
 		});
+	});
+
+	it('clears a local deletion tombstone when D1 records the cache as live', async () => {
+		const tenant = tenantIdSchema.parse('migration-restored-cache');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const cacheName = cacheNameSchema.parse('builds');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values([
+			{
+				tenant,
+				cacheKind: 'default',
+				access: 'private',
+				generation: cacheGenerationSchema.parse(1),
+				updatedAt: now
+			},
+			{
+				tenant,
+				cacheKind: 'named',
+				cacheName,
+				access: 'public',
+				generation: cacheGenerationSchema.parse(2),
+				updatedAt: now
+			}
+		]);
+
+		const server = testServerFor(tenant);
+		await runInDurableObject(server, async (_instance, state) => {
+			await migrateThrough(state, 41);
+			state.storage.sql.exec(
+				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?), ('builds', 41, ?)",
+				now,
+				now
+			);
+			state.storage.sql.exec(
+				"INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at) VALUES ('builds', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'sha256:queued', 1, ?)",
+				now
+			);
+			state.storage.sql.exec("DELETE FROM cache WHERE name = 'builds'");
+
+			await migrateThrough(state, latestPreContractMigrationIndex);
+		});
+
+		const result = await runInDurableObject(server, async (instance, state) => {
+			await migrateLocalCacheAccess(instance.context, tenant);
+			await migrateThrough(state, latestMigrationIndex);
+
+			const row = state.storage.sql
+				.exec(
+					"SELECT access, deleted_at FROM cache_identity WHERE kind = 'named' AND name = 'builds'"
+				)
+				.one();
+
+			return {
+				access: row.access,
+				isDeleted: row.deleted_at !== null
+			};
+		});
+
+		expect(result).toStrictEqual({ access: 'public', isDeleted: false });
 	});
 
 	it('reports a missing default lifecycle with a typed migration error', async () => {
@@ -509,10 +567,9 @@ describe('cache access migration', () => {
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
@@ -546,7 +603,11 @@ describe('cache access migration', () => {
 			);
 		});
 
-		await server.migrateCacheCatalogue(tenant);
+		await runInDurableObject(server, async (instance, state) => {
+			await migrateThrough(state, latestPreContractMigrationIndex);
+			await migrateLocalCacheAccess(instance.context, tenant);
+			await migrateThrough(state, latestMigrationIndex);
+		});
 
 		const rows = await d1
 			.select({

@@ -11,11 +11,13 @@ import {
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { and, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
@@ -25,8 +27,6 @@ import {
 	narObjectKey,
 	type NarObjectName
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { defaultCache, flakyD1, namedCache } from '../test-support.ts';
 
 import {
@@ -80,7 +80,7 @@ async function seedOwnedNar(
 async function seedOwnedNarReference(
 	cache: CacheScope = defaultCache(),
 	access: CacheAccessMode = 'public',
-	edgeGeneration?: CacheGeneration
+	edgeGeneration: CacheGeneration = firstCacheGeneration
 ): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const insertBlob = database
@@ -95,23 +95,23 @@ async function seedOwnedNarReference(
 		})
 		.onConflictDoNothing();
 	const insertReference = database
-		.insert(migrationSchema.blobReferences)
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash: referencingPath,
 			generation: referencedGeneration,
 			narHash,
-			...(edgeGeneration !== undefined && { cacheGeneration: edgeGeneration })
+			cacheGeneration: edgeGeneration
 		})
 		.onConflictDoNothing();
 	const insertLifecycle = database
-		.insert(migrationSchema.cacheLifecycles)
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			access,
-			generation: edgeGeneration ?? firstCacheGeneration,
+			generation: edgeGeneration,
 			updatedAt: isoTimestamp(new Date())
 		})
 		.onConflictDoNothing();
@@ -125,21 +125,30 @@ function seedCacheGeneration(
 	access: CacheAccessMode = 'public'
 ): Promise<unknown> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(migrationSchema.cacheLifecycles)
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			access,
 			generation,
 			updatedAt: isoTimestamp(new Date())
 		})
-		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheLifecycles.tenant,
-				migrationSchema.cacheLifecycles.legacyCache
-			],
-			set: { access, generation }
-		});
+		.onConflictDoUpdate(
+			cache.kind === 'default'
+				? {
+						target: [d1Schema.cacheLifecycle.tenant],
+						targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
+						set: { access, generation }
+					}
+				: {
+						target: [
+							d1Schema.cacheLifecycle.tenant,
+							d1Schema.cacheLifecycle.cacheName
+						],
+						targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
+						set: { access, generation }
+					}
+		);
 }
 
 async function serveWithFaults(failures: number): Promise<Response> {
@@ -375,33 +384,55 @@ describe('NAR reference authorisation', () => {
 					}
 		);
 	});
+
+	it('refuses a reference whose cache has no lifecycle', async () => {
+		const orphan = namedCache('orphan');
+		await seedOwnedNar(orphan);
+
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.cacheLifecycle)
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.cacheLifecycle.cacheKind,
+						d1Schema.cacheLifecycle.cacheName,
+						orphan
+					)
+				)
+			)
+			.run();
+
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe'),
+			env,
+			tenant,
+			parsedNar(),
+			cacheAuthority(orphan),
+			false
+		);
+
+		expect({
+			status: response.status,
+			body: await response.text()
+		}).toStrictEqual({ status: StatusCodes.NOT_FOUND, body: 'Not found\n' });
+	});
 });
 
-// A cache belongs to generation 1 while it has no lifecycle row, and an edge
-// belongs to generation 1 while it carries no cache generation. Deleting a
-// cache advances the cache to the next generation, so all of its edges,
-// including those written before the column existed, stop matching.
+// Deleting a cache advances its lifecycle to the next generation, so every
+// earlier edge stops matching.
 describe('NAR reference cache generations', () => {
 	const secondGeneration = cacheGenerationSchema.parse(2);
 	const cases: {
 		readonly name: string;
-		readonly edgeGeneration?: CacheGeneration;
+		readonly edgeGeneration: CacheGeneration;
 		readonly cacheGeneration?: CacheGeneration;
 		readonly isServed: boolean;
 	}[] = [
 		{
-			name: 'an unstamped edge of a cache no deletion has reached',
-			isServed: true
-		},
-		{
-			name: 'a first-generation edge of a cache no deletion has reached',
+			name: 'an edge of a first-generation cache',
 			edgeGeneration: firstCacheGeneration,
 			isServed: true
-		},
-		{
-			name: 'an unstamped edge of a deleted cache',
-			cacheGeneration: secondGeneration,
-			isServed: false
 		},
 		{
 			name: 'a first-generation edge of a deleted cache',
@@ -497,7 +528,7 @@ describe('NAR reference index', () => {
 		});
 	});
 
-	it('seeks the reference primary key for a private narinfo read', async () => {
+	it('seeks the native partial indexes for a private narinfo read', async () => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		const query = narInfoReferenceQuery(database, tenant, privateCache, [
 			referencingPath
@@ -508,18 +539,16 @@ describe('NAR reference index', () => {
 			.bind(...query.params)
 			.all();
 		const rows = z.array(planRowSchema).parse(explained.results);
-		const isIndexSeek = (table: string): boolean =>
-			rows.some(
-				(row) =>
-					row.detail.startsWith(`SEARCH ${table} `) &&
-					row.detail.includes('INDEX')
-			);
 
-		// The reference edge's primary key already leads with the tenant, cache and
-		// store path, so the narinfo check needs no index of its own.
+		// The named-cache indexes lead with the tenant, cache name and store path,
+		// so the query can seek both native identities without a table scan.
 		expect({
-			edge: isIndexSeek('blob_ref'),
-			lifecycle: isIndexSeek('cache_lifecycle'),
+			edge: rows.some((row) =>
+				row.detail.includes('blob_ref_named_identity_idx')
+			),
+			lifecycle: rows.some((row) =>
+				row.detail.includes('cache_lifecycle_named_identity_idx')
+			),
 			scans: rows.filter((row) => row.detail.startsWith('SCAN ')).length
 		}).toStrictEqual({ edge: true, lifecycle: true, scans: 0 });
 	});

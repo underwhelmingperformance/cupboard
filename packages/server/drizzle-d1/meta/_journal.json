@@ -183,6 +183,34 @@
 			"when": 1788237934367,
 			"tag": "0025_retire_tenant_read_mode",
 			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "6",
+			"when": 1788239746690,
+			"tag": "0026_cache_generation_contract_assertions",
+			"breakpoints": true
+		},
+		{
+			"idx": 27,
+			"version": "6",
+			"when": 1788241948840,
+			"tag": "0027_drop_cache_credential_lifecycle_guard",
+			"breakpoints": true
+		},
+		{
+			"idx": 28,
+			"version": "6",
+			"when": 1788241958067,
+			"tag": "0028_cache_access_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 29,
+			"version": "6",
+			"when": 1788241963255,
+			"tag": "0029_cache_credential_lifecycle_guard",
+			"breakpoints": true
 		}
 	]
 }

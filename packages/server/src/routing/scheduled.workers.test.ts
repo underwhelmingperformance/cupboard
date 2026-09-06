@@ -155,41 +155,6 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('does not enqueue catalogue migration for unmarked tenants', async () => {
-		await provisionNamedTenant('active-migration', { configure: false });
-		await provisionNamedTenant('suspended-migration', { configure: false });
-		await provisionNamedTenant('offboarding-migration', { configure: false });
-		await suspendTenant('suspended-migration');
-		await writeEligibility('active-migration', {
-			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-		});
-
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		await database
-			.update(d1Schema.tenant)
-			.set({ status: 'offboarding' })
-			.where(
-				eq(d1Schema.tenant.id, tenantIdSchema.parse('offboarding-migration'))
-			)
-			.run();
-
-		const messages = await enqueueMaintenanceJobs(env, queueCollector([]));
-		const catalogueMessages = messages.filter(
-			(message) => message.kind === 'cache-catalogue-migration'
-		);
-
-		expect(catalogueMessages).toStrictEqual([]);
-	});
-
-	it('acknowledges a stale catalogue migration message without dispatching it', async () => {
-		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
-			kind: 'cache-catalogue-migration',
-			tenant: tenantIdSchema.parse('stale-catalogue')
-		});
-
-		expect(decision).toStrictEqual({ action: 'ack' });
-	});
-
 	it('attempts every batch when an earlier one fails, surfacing a typed error', async () => {
 		const messages: MaintenanceQueueMessage[] = [
 			...Array.from({ length: 120 }, (_, index): MaintenanceQueueMessage => ({
@@ -586,7 +551,6 @@ describe('scheduled tenant pass failure records', () => {
 								errors: [],
 								note: 'No matching discriminator',
 								options: [
-									'cache-catalogue-migration',
 									'tenant-maintenance',
 									'tenant-verify',
 									'offboard',

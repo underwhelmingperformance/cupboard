@@ -29,7 +29,6 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 
 const memberKeyPrefix = 'tenant-member:';
 const filterKey = 'tenant-filter';
-const defaultCacheScope: CacheScope = { kind: 'default' };
 
 // How long a colo trusts its cached filter before refetching. The filter only
 // rejects unknown tenants; it never supplies security-sensitive tenant state.
@@ -41,7 +40,7 @@ const memberKeyCacheTtlSeconds = 60;
 
 /**
  * A read verifier loaded from D1. It can come from the authoritative tenant row
- * or from one private cache's credential row.
+ * or from one cache-specific credential row.
  */
 export interface TenantReadVerifier {
 	readonly user: ReadUser;
@@ -296,9 +295,9 @@ export async function readTenantReadVerifier(
 	return row === undefined ? undefined : entryFromRow(row).readVerifier;
 }
 
-// Tier 3 reads the authoritative tenant row and the credential row for a
-// private cache. It reads D1 directly, so suspension and credential changes
-// take effect as soon as the control API commits them.
+// Tier 3 reads the authoritative tenant row, selected cache lifecycle and
+// cache-specific credential. It reads D1 directly, so lifecycle and credential
+// changes take effect as soon as the control API commits them.
 async function readTenantEntry(
 	env: Env,
 	slug: TenantId,
@@ -332,7 +331,7 @@ export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
 	slug: TenantId,
-	cache: CacheScope = defaultCacheScope
+	cache: CacheScope
 ): Promise<TenantAdmission | undefined> {
 	const filter = await loadMembershipFilter(env, ctx);
 
