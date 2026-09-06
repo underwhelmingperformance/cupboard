@@ -38,7 +38,7 @@ const uncoveredRoot = rootNameSchema.parse('github:other/repo/run-1');
 const grants = authorizationDetailsSchema.parse([
 	{
 		type: 'cupboard_cache',
-		cache: 'ci',
+		cache: { kind: 'named', name: 'ci' },
 		actions: ['upload:negotiate', 'upload:commit', 'root:attach', 'root:set'],
 		root: 'github:acme/repo/'
 	}

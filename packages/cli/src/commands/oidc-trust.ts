@@ -186,10 +186,13 @@ function describeGrant(
 	}
 
 	if (grant.type === 'cupboard_cache') {
+		const binding = grant.resources.cache;
 		const cache =
-			grant.resources.cache.exact ?? grant.resources.cache.equalsTemplate;
+			binding.kind === 'default'
+				? 'the default cache'
+				: (binding.exact ?? binding.equalsTemplate ?? '?');
 
-		return `cache ${cache ?? '?'}: ${grant.actions.join(', ')}`;
+		return `cache ${cache}: ${grant.actions.join(', ')}`;
 	}
 
 	if (grant.type === 'cupboard_tenant') {

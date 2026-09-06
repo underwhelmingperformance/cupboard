@@ -21,6 +21,7 @@ import {
 	currentOrigin,
 	issueControlAdminToken,
 	issueServerSignedToken,
+	recordDeploymentPhase,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -41,6 +42,31 @@ function cacheCredentialGrants(
 		{ type: 'cupboard_tenant', actions, tenant }
 	]);
 }
+
+// A control rule's grants in the scope spelling, as a client sends them.
+const controlRuleGrants = [
+	{
+		type: 'cupboard_cache' as const,
+		actions: ['upload:commit' as const],
+		resources: { cache: { kind: 'default' as const } }
+	},
+	{
+		type: 'cupboard_cache' as const,
+		actions: ['upload:commit' as const],
+		resources: {
+			cache: {
+				kind: 'named' as const,
+				exact: 'ci',
+				validate: 'cacheName' as const
+			}
+		}
+	},
+	{
+		type: 'cupboard_tenant' as const,
+		actions: ['tenant:create' as const],
+		resources: { tenant: { exact: 'acme', validate: 'tenant' as const } }
+	}
+];
 
 function controlClient(token?: string): ControlClient {
 	const link = new OpenAPILink(controlContract, {
@@ -131,6 +157,68 @@ describe('control contract round trip', () => {
 			removed: { id, removed: true },
 			disabledInListing: true
 		});
+	});
+
+	// The previous build's control Worker parses a stored rule strictly and
+	// names a cache by its selector. Until a deploy records `contracted`, a
+	// control rule is stored in that spelling. The control plane cannot resolve
+	// a tenant cache's access, so a named cache uses both selector forms.
+	it.each([
+		{
+			name: 'the selector spelling until the deployment is contracted',
+			phase: 'native-reads' as const,
+			stored: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: '_default', validate: 'cacheName' } }
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: '_private-ci', validate: 'cacheName' } }
+				},
+				{
+					type: 'cupboard_tenant',
+					actions: ['tenant:create'],
+					resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+				}
+			]
+		},
+		{
+			name: 'the scope spelling once the deployment is contracted',
+			phase: 'contracted' as const,
+			stored: controlRuleGrants
+		}
+	])('stores a control rule in $name', async ({ phase, stored }) => {
+		await recordDeploymentPhase(phase);
+		const client = controlClient(await issueControlAdminToken());
+
+		const added = await client.oidcTrust.add({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: 'https://cupboard.example/control',
+			claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+			permittedGrants: controlRuleGrants
+		});
+		const row = await env.CUPBOARD_DB.prepare(
+			'SELECT permitted_grants_json FROM control_trust WHERE id = ?'
+		)
+			.bind(added.id)
+			.first<{ permitted_grants_json: string }>();
+		const storedGrants: unknown = JSON.parse(
+			z.string().parse(row?.permitted_grants_json)
+		);
+		const fetched = await client.oidcTrust.get({ id: added.id });
+
+		expect({
+			stored: storedGrants,
+			read: fetched.permittedGrants
+		}).toStrictEqual({ stored, read: controlRuleGrants });
 	});
 
 	it('refuses a loopback HTTP control issuer outside local development', async () => {

@@ -37,7 +37,6 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
-import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -67,14 +66,12 @@ export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
 	private readonly identities: CacheRepository;
-	private readonly phases: DeploymentPhaseGate;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
 	) {
 		this.identities = new CacheRepository(context.db);
-		this.phases = new DeploymentPhaseGate(context.d1);
 	}
 
 	private teardownKey(cache: StoredCache): string {
@@ -159,7 +156,7 @@ export class CacheAdminService {
 	private async registeredCache(
 		cache: StoredCache
 	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
-		if (await this.phases.hasReached('native-reads')) {
+		if (await this.context.phases.hasReached('native-reads')) {
 			return this.identities.readRegistration(cache);
 		}
 
@@ -181,7 +178,7 @@ export class CacheAdminService {
 	private async registeredCaches(): Promise<
 		{ name: StoredCache; priority: CachePriority; graceManaged: boolean }[]
 	> {
-		if (!(await this.phases.hasReached('native-reads'))) {
+		if (!(await this.context.phases.hasReached('native-reads'))) {
 			return this.context.db.select().from(schema.caches).all();
 		}
 

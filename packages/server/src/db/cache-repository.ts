@@ -159,6 +159,25 @@ export class CacheRepository {
 	}
 
 	/**
+	 * The access of the live identity registered under this scope, or
+	 * undefined when the tenant holds no such cache. A null access, which the
+	 * backfill records for a public named cache, reads as `public`.
+	 */
+	liveAccess(scope: CacheScope): CacheAccessMode | undefined {
+		const row = this.database
+			.select({ access: schema.cacheIdentities.access })
+			.from(schema.cacheIdentities)
+			.where(this.liveName(scope))
+			.get();
+
+		if (row === undefined) {
+			return undefined;
+		}
+
+		return row.access ?? 'public';
+	}
+
+	/**
 	 * The priority and grace flag recorded against this cache's live identity,
 	 * or undefined when the cache has none.
 	 */

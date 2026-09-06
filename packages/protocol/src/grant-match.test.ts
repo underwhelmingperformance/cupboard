@@ -5,7 +5,8 @@ import {
 	type AuthorizationDetail,
 	authorizationDetailSchema,
 	type PermittedGrant,
-	permittedGrantSchema
+	permittedGrantSchema,
+	storedPermittedGrantsSchema
 } from './grants.ts';
 import { type OidcClaims } from './oidc-trust-match.ts';
 
@@ -17,6 +18,10 @@ function request(value: unknown): AuthorizationDetail {
 	return authorizationDetailSchema.parse(value);
 }
 
+function named(name: string): unknown {
+	return { kind: 'named', name };
+}
+
 const wildcard = grant({ type: 'cupboard_wildcard' });
 
 const prCacheGrant = grant({
@@ -24,6 +29,7 @@ const prCacheGrant = grant({
 	actions: ['upload:commit', 'root:set'],
 	resources: {
 		cache: {
+			kind: 'named',
 			equalsTemplate: 'pr-{ref}',
 			substitutions: {
 				ref: {
@@ -61,7 +67,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['gc:run'],
-				cache: 'anything'
+				cache: named('anything')
 			},
 			claims: {},
 			expected: true
@@ -72,7 +78,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: prClaims,
 			expected: true
@@ -83,7 +89,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-456'
+				cache: named('pr-456')
 			},
 			claims: prClaims,
 			expected: false
@@ -94,7 +100,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: { iss: 'x' },
 			expected: false
@@ -105,7 +111,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: { ref: 'refs/heads/main' },
 			expected: false
@@ -116,7 +122,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['gc:run'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: prClaims,
 			expected: false
@@ -127,13 +133,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { kind: 'named', exact: 'pr-123', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:preview'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: {},
 			expected: true
@@ -144,13 +152,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { kind: 'named', exact: 'pr-123', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: {},
 			expected: false
@@ -161,13 +171,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { kind: 'named', exact: 'pr-123', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:confirm'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: {},
 			expected: false
@@ -178,13 +190,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { kind: 'named', exact: 'pr-123', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: named('pr-123')
 			},
 			claims: {},
 			expected: false
@@ -195,7 +209,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['root:set'],
-				cache: 'pr-123',
+				cache: named('pr-123'),
 				root: 'pr-123'
 			},
 			claims: prClaims,
@@ -207,25 +221,25 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['root:set'],
-				cache: 'pr-123',
+				cache: named('pr-123'),
 				root: 'main'
 			},
 			claims: prClaims,
 			expected: false
 		},
 		{
-			name: 'an exact _default binding permits the default cache',
+			name: 'a default binding permits the default cache',
 			permitted: [
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					resources: { cache: { exact: '_default', validate: 'cacheName' } }
+					resources: { cache: { kind: 'default' } }
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: '_default'
+				cache: { kind: 'default' }
 			},
 			claims: {},
 			expected: true
@@ -271,6 +285,7 @@ describe('isGrantPermittedByRule', () => {
 			actions: ['upload:commit'],
 			resources: {
 				cache: {
+					kind: 'named',
 					equalsTemplate: '{name}',
 					substitutions: { name: { claim: 'repository' } },
 					validate: 'cacheName'
@@ -278,16 +293,101 @@ describe('isGrantPermittedByRule', () => {
 			}
 		});
 
+		const requested = request({
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			cache: named('bad-name')
+		});
+
+		expect(
+			isGrantPermittedByRule([verbatimGrant], requested, {
+				repository: 'Bad Name'
+			})
+		).toBe(false);
+	});
+
+	it('permits the cache a stored private-cache template names', () => {
+		const stored = storedPermittedGrantsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: {
+					cache: {
+						equalsTemplate: '_private-pr-{ref}',
+						substitutions: {
+							ref: {
+								claim: 'ref',
+								capture: {
+									pattern: '^refs/pull/(?<ref>[0-9]+)/merge$',
+									group: 'ref'
+								}
+							}
+						},
+						validate: 'cacheName'
+					}
+				}
+			}
+		]);
+
+		const requested = request({
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			cache: named('pr-123')
+		});
+
+		expect(isGrantPermittedByRule(stored, requested, prClaims)).toBe(true);
+	});
+});
+
+describe('root selectors at issuance', () => {
+	it('issues cache-wide root listing when the rule explicitly permits it', () => {
+		const permitted = grant({
+			type: 'cupboard_cache',
+			actions: ['root:list'],
+			resources: { cache: { kind: 'default' } }
+		});
 		expect(
 			isGrantPermittedByRule(
-				[verbatimGrant],
+				[permitted],
 				request({
 					type: 'cupboard_cache',
-					actions: ['upload:commit'],
-					cache: 'bad-name'
+					actions: ['root:list'],
+					cache: { kind: 'default' }
 				}),
-				{ repository: 'Bad Name' }
+				{}
 			)
-		).toBe(false);
+		).toBe(true);
+	});
+
+	it.each([
+		{ actions: ['root:list'], root: undefined, expected: false },
+		{ actions: ['upload:commit'], root: undefined, expected: true },
+		{
+			actions: ['upload:commit', 'root:set'],
+			root: 'github:owner/main/result',
+			expected: true
+		},
+		{ actions: ['upload:commit', 'root:set'], root: undefined, expected: false }
+	])('checks $actions for $root', ({ actions, root, expected }) => {
+		const permitted = grant({
+			type: 'cupboard_cache',
+			actions: ['root:list', 'root:set', 'upload:commit'],
+			resources: {
+				cache: { kind: 'default' },
+				root: { exact: 'github:owner/main/', validate: 'rootName' }
+			}
+		});
+		expect(
+			isGrantPermittedByRule(
+				[permitted],
+				request({
+					type: 'cupboard_cache',
+					actions,
+					cache: { kind: 'default' },
+					...(root !== undefined && { root })
+				}),
+				{}
+			)
+		).toBe(expected);
 	});
 });
