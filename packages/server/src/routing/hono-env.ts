@@ -5,6 +5,7 @@ import {
 	type TenantEntry,
 	type TenantReadVerifier
 } from '../control/tenant-membership.ts';
+import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import { type ReadScope } from '../read/read.ts';
 
 /**
@@ -30,7 +31,11 @@ export interface WorkerHonoEnv {
 		// is the only credential that opens that cache.
 		cacheVerifier?: TenantReadVerifier;
 		// Whether the addressed private cache has been deleted. False for every
-		// request outside the private namespace, which reads no lifecycle state.
+		// request outside the private namespace, which refuses a deleted cache's
+		// reads through the reference check instead.
 		isCacheDeleted: boolean;
+		// The lifecycle version of the addressed cache, loaded by admission and
+		// carried in the Workers Cache key of every read this Worker forwards.
+		cacheVersion: CacheLifecycleVersion;
 	};
 }

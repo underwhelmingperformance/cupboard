@@ -10,6 +10,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { type SchemaWriter } from '../do/context.ts';
 
 import { type CacheId, cacheIdentityCondition } from './cache.ts';
+import { type CacheLifecycleVersion } from './cache-generation.ts';
 import * as schema from './schema.ts';
 
 /**
@@ -127,6 +128,25 @@ export class CacheRepository {
 			priority: cachePrioritySchema.parse(row.priority),
 			graceManaged: row.graceManaged
 		};
+	}
+
+	/**
+	 * Records against the live identity the generation and read revision that
+	 * `cache_lifecycle` published for this cache.
+	 *
+	 * D1 is authoritative for both. Registering a cache name that a deletion
+	 * advanced returns a generation above the default this row was created with,
+	 * so the local incarnation would otherwise claim to be the first one.
+	 */
+	stampVersion(cache: StoredCache, version: CacheLifecycleVersion): void {
+		this.database
+			.update(schema.cacheIdentities)
+			.set({
+				generation: version.generation,
+				readRevision: version.readRevision
+			})
+			.where(this.liveIdentity(cache))
+			.run();
 	}
 
 	setPriority(cache: StoredCache, priority: CachePriority): void {

@@ -1,7 +1,11 @@
 import {
+	cacheFromSelector,
 	cacheNameSchema,
-	type PrivateStoredCache,
+	DEFAULT_CACHE,
 	privateStoredCache,
+	publicCacheSelectorSchema,
+	type StoredCache,
+	storedCacheSchema,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -17,14 +21,12 @@ export type RouteNamespace =
 
 const privateCacheNamespace: RouteNamespace = 'private-cache';
 const privateCachePrefix = `/${privateCacheNamespace}/`;
+const publicCacheNamespace: RouteNamespace = 'cache';
+const publicCachePrefix = `/${publicCacheNamespace}/`;
+const defaultCache = storedCacheSchema.parse(DEFAULT_CACHE);
 
 export interface TenantRoute {
 	readonly tenant: TenantId;
-	readonly rest: string;
-}
-
-export interface PrivateCacheRoute {
-	readonly cache: PrivateStoredCache;
 	readonly rest: string;
 }
 
@@ -76,30 +78,47 @@ export function isLiteralNamespacePath(
 	return rest === prefix || rest.startsWith(`${prefix}/`);
 }
 
-// Splits a leading `/private-cache/<local-name>` prefix from a tenant-relative
-// path. The result contains the stored cache name and the cache-relative
-// remainder. The remainder is `/` when the path ends at the prefix. A path
-// outside the namespace, or one with an empty or malformed name, returns
-// `undefined`.
-export function parsePrivateCachePath(
-	pathname: string
-): PrivateCacheRoute | undefined {
-	if (!pathname.startsWith(privateCachePrefix)) {
+// The name that follows `/<namespace>/` in a tenant-relative path, or undefined
+// when the path is outside that namespace. The name is `''` for a path that
+// stops at the prefix, and no cache name parses from that.
+function namespacedName(pathname: string, prefix: string): string | undefined {
+	if (!pathname.startsWith(prefix)) {
 		return undefined;
 	}
 
-	const remainder = pathname.slice(privateCachePrefix.length);
+	const remainder = pathname.slice(prefix.length);
 	const separator = remainder.indexOf('/');
-	const localName =
-		separator === -1 ? remainder : remainder.slice(0, separator);
-	const name = cacheNameSchema.safeParse(localName);
 
-	if (!name.success) {
-		return undefined;
+	return separator === -1 ? remainder : remainder.slice(0, separator);
+}
+
+/**
+ * The cache a tenant-relative path addresses, taken from its `/cache/<name>` or
+ * `/private-cache/<name>` prefix. A path with neither addresses the default
+ * cache, and so does one whose name is malformed: a later routing stage refuses
+ * that request, and admission must not read another cache's rows for it in the
+ * meantime.
+ *
+ * Admission calls this on the raw path before Hono matches a route, so that the
+ * tenant row and the addressed cache's credential and lifecycle rows come from
+ * one D1 batch.
+ */
+export function addressedCache(pathname: string): StoredCache {
+	const privateName = namespacedName(pathname, privateCachePrefix);
+
+	if (privateName !== undefined) {
+		const name = cacheNameSchema.safeParse(privateName);
+
+		return name.success ? privateStoredCache(name.data) : defaultCache;
 	}
 
-	return {
-		cache: privateStoredCache(name.data),
-		rest: separator === -1 ? '/' : remainder.slice(separator)
-	};
+	const publicName = namespacedName(pathname, publicCachePrefix);
+
+	if (publicName === undefined) {
+		return defaultCache;
+	}
+
+	const selector = publicCacheSelectorSchema.safeParse(publicName);
+
+	return selector.success ? cacheFromSelector(selector.data) : defaultCache;
 }

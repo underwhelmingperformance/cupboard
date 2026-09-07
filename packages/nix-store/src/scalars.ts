@@ -467,6 +467,17 @@ export const cacheGenerationSchema = z
 	.brand('CacheGeneration');
 export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
+// The read-access policy version of one cache. A change of access advances this
+// number, so Workers Cache cannot answer a reader from a response admitted
+// while the cache read differently.
+export const cacheReadRevisionSchema = z
+	.number()
+	.int()
+	.min(1)
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('CacheReadRevision');
+export type CacheReadRevision = z.infer<typeof cacheReadRevisionSchema>;
+
 export const compressionSchema = z.literal('zstd');
 
 export const referencesSchema = z
