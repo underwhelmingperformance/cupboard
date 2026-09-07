@@ -31,10 +31,10 @@ const cacheKeyVersion = '2';
  * Worker and requests that differ only in their credentials share one cache
  * entry.
  *
- * The addressed cache's generation and read revision are part of the key. A
- * cache name can be deleted and created again, and a key made from the path
- * alone would serve the new cache's readers the response the previous cache
- * produced.
+ * The addressed cache's generation and read revision are part of the key, so a
+ * stored response cannot be served after the cache name is deleted and created
+ * again, or after the cache's access changes. A key built from the path alone
+ * would outlive both.
  */
 export function canonicalCacheRequest(
 	request: Request,

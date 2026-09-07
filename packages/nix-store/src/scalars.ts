@@ -343,6 +343,12 @@ export const cacheGenerationSchema = z
 	.brand('CacheGeneration');
 export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
+/**
+ * The generation of a cache that has never been deleted, and the one a reader
+ * assumes for a cache with no lifecycle row.
+ */
+export const firstCacheGeneration = cacheGenerationSchema.parse(1);
+
 // The read revision of one cache: a counter that changes when the cache's read
 // behaviour changes. A deletion advances it. The Workers Cache key includes it,
 // so a response stored under an earlier revision is not served.

@@ -1240,7 +1240,7 @@ describe('cache registry admin', () => {
 		expect(row).toStrictEqual({ cache: 'private/builds', access: 'private' });
 	});
 
-	it('finishes identity backfill and projection over bounded wakes', async () => {
+	it('finishes backfill, projection and object inspection over bounded wakes', async () => {
 		await useTestServer('cache-admin-identity-projection');
 
 		const init = await bootstrap();
@@ -1259,13 +1259,15 @@ describe('cache registry admin', () => {
 			.run();
 
 		const outcomes = [];
-		for (let index = 0; index < 3; index++) {
+		for (let index = 0; index < 5; index++) {
 			const outcome = await wake();
 			outcomes.push({ kind: outcome.kind, projected: await projectedCaches() });
 		}
 		expect(outcomes).toStrictEqual([
 			{ kind: 'incomplete', projected: 0 },
 			{ kind: 'incomplete', projected: maxCachesProjectedPerRun },
+			{ kind: 'incomplete', projected: cacheCount + 1 },
+			{ kind: 'incomplete', projected: cacheCount + 1 },
 			{ kind: 'recorded', projected: cacheCount + 1 }
 		]);
 	});
@@ -1276,9 +1278,9 @@ describe('cache registry admin', () => {
 		for (let index = 0; index < maxCachesProjectedPerRun + 5; index++) {
 			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
-		await wake();
-		await wake();
-		await wake();
+		for (let index = 0; index < 5; index++) {
+			await wake();
+		}
 		expect(await wake()).toStrictEqual({ kind: 'incomplete', projected: 0 });
 	});
 

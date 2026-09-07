@@ -1,8 +1,8 @@
+import { firstCacheGeneration } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
 	type CacheLifecycleVersion,
-	firstCacheGeneration,
 	firstCacheReadRevision,
 	secondCacheGeneration,
 	secondCacheReadRevision

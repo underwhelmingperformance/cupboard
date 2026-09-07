@@ -1,5 +1,6 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	type CacheName,
 	cacheNameSchema,
 	type CacheScope,
@@ -36,13 +37,18 @@ const cacheIdentityRowSchema = z.discriminatedUnion('kind', [
 ]);
 
 /**
- * One cache: its surrogate key, the scope that identifies it, and whether a
- * reader must present a credential for it.
+ * One cache: its surrogate key, the scope that identifies it, whether a reader
+ * must present a credential for it, and which incarnation of the name it is.
+ *
+ * The generation is part of the key of every path-keyed object this cache
+ * writes, so a cache created after a deletion of the same name does not address
+ * the objects its predecessor left.
  */
 export interface ResolvedCache {
 	readonly id: CacheId;
 	readonly scope: CacheScope;
 	readonly access: CacheAccessMode;
+	readonly generation: CacheGeneration;
 }
 
 type CacheIdentityColumns =
