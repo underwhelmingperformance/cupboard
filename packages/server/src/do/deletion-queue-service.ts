@@ -15,10 +15,13 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { type CacheId, cacheIdentityColumns } from '../db/cache.ts';
 import {
+	type CacheLifecycleVersion,
 	firstCacheGeneration,
+	firstCacheReadRevision,
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
-	secondCacheGeneration
+	secondCacheGeneration,
+	secondCacheReadRevision
 } from '../db/cache-generation.ts';
 import { outsidePrivateCaches } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -972,6 +975,10 @@ export class DeletionQueueService {
 	 * path as missing while path-keyed objects await teardown.
 	 * {@link recordCacheRegistration} removes the timestamp when the cache name is
 	 * registered again.
+	 *
+	 * The read revision advances with the generation. Both are in the Workers
+	 * Cache key, so a response the deleted cache produced is not served to a
+	 * reader of the next cache of this name.
 	 */
 	async revokeCacheGeneration(cache: StoredCache): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -985,6 +992,7 @@ export class DeletionQueueService {
 				cache,
 				...identity,
 				generation: secondCacheGeneration,
+				readRevision: secondCacheReadRevision,
 				deletedAt: now,
 				updatedAt: now
 			})
@@ -993,6 +1001,7 @@ export class DeletionQueueService {
 				set: {
 					...identity,
 					generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
+					readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
 					deletedAt: now,
 					updatedAt: now
 				}
@@ -1001,19 +1010,24 @@ export class DeletionQueueService {
 
 	/**
 	 * Writes this cache's lifecycle row when the tenant registers the cache,
-	 * and clears the deletion timestamp when a deleted name is registered
-	 * again.
+	 * clears the deletion timestamp when a deleted name is registered again,
+	 * and returns the row's resulting generation and read revision.
 	 *
-	 * Only the insert sets the generation. A name registered again keeps the
-	 * generation its deletion advanced to, so the deleted cache's reference
-	 * edges stay revoked while the new cache commits its own.
+	 * Only the insert sets the generation and the read revision. A name
+	 * registered again keeps the generation its deletion advanced to, so the
+	 * deleted cache's reference edges stay revoked while the new cache commits
+	 * its own. It keeps the read revision too: advancing it on every
+	 * registration would evict the cache's public responses from Workers Cache
+	 * on each commit.
 	 */
-	async recordCacheRegistration(cache: StoredCache): Promise<void> {
+	async recordCacheRegistration(
+		cache: StoredCache
+	): Promise<CacheLifecycleVersion> {
 		const tenant = this.context.requireTenant();
 		const identity = cacheIdentityColumns(identityForCache(cache).scope);
 		const now = isoTimestamp(new Date());
 
-		await this.context.d1
+		return this.context.d1
 			.insert(d1Schema.cacheLifecycle)
 			.values({
 				tenant,
@@ -1022,12 +1036,18 @@ export class DeletionQueueService {
 				// `access` is omitted so the D1 insert trigger fills it from the
 				// tenant's read mode, as the projection's insert leaves it.
 				generation: firstCacheGeneration,
+				readRevision: firstCacheReadRevision,
 				updatedAt: now
 			})
 			.onConflictDoUpdate({
 				target: [d1Schema.cacheLifecycle.tenant, d1Schema.cacheLifecycle.cache],
 				set: { ...identity, deletedAt: sql`null`, updatedAt: now }
-			});
+			})
+			.returning({
+				generation: d1Schema.cacheLifecycle.generation,
+				readRevision: d1Schema.cacheLifecycle.readRevision
+			})
+			.get();
 	}
 
 	/**

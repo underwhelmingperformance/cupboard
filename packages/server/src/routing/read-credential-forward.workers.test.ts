@@ -7,12 +7,14 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	authorisedFetch,
 	bootstrap,
 	currentOrigin,
 	narBytes,
 	pushPath,
 	resetTestServer,
-	uploadMetadata
+	uploadMetadata,
+	verifiableNar
 } from '../test-support.ts';
 import worker from '../worker.ts';
 
@@ -84,9 +86,56 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			body: forwardedBody,
 			forwarded: [
 				{
-					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2`,
+					url: `${currentOrigin()}/t/${fixtureTenant}/${metadata.storePathHash}.narinfo?cache-key-version=2&cache-generation=1&cache-read-revision=1`,
 					headers: { accept: 'text/x-nix-narinfo' }
 				}
+			]
+		});
+	});
+
+	it('keys a public read by the generation the cache reached after a deletion', async () => {
+		const init = await bootstrap();
+		const previous = uploadMetadata({ fileSize: narBytes.byteLength });
+		// The new cache publishes its own NAR for this path. Reusing a NAR that
+		// deletion teardown is still removing can cause a commit refusal. The
+		// push client handles that refusal by negotiating again.
+		const nar = await verifiableNar('recreated-cache');
+		const current = uploadMetadata({
+			fileSize: nar.narBytes.byteLength,
+			storePathHash: '2'.repeat(32),
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash
+		});
+		await pushPath(init.token, previous, 'builds');
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+		await pushPath(init.token, current, 'builds', nar);
+		const forwarded: Request[] = [];
+		const ctx = createExecutionContext();
+		const request = new Request<unknown, IncomingRequestCfProperties>(
+			new URL(
+				`/t/${fixtureTenant}/cache/builds/${current.storePathHash}.narinfo`,
+				currentOrigin()
+			),
+			{ headers: { accept: 'text/x-nix-narinfo' } }
+		);
+
+		const response = await worker.fetch(
+			request,
+			envWithRecordingTenantWorker(forwarded),
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect({
+			status: response.status,
+			forwarded: forwarded.map((entry) => entry.url)
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			forwarded: [
+				`${currentOrigin()}/t/${fixtureTenant}/cache/builds/${current.storePathHash}.narinfo?cache-key-version=2&cache-generation=2&cache-read-revision=2`
 			]
 		});
 	});

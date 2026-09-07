@@ -18,15 +18,17 @@ import {
 import {
 	cacheInfoResponse,
 	publicNarAuthority,
+	type ReadEnv,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
 
+import { cacheRequestVersion } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { isLiteralNamespacePath, parseTenantPath } from './tenant-routing.ts';
 
 interface TenantReadHonoEnv {
-	Bindings: TenantEnv;
+	Bindings: ReadEnv;
 	Variables: {
 		tenant: TenantId;
 		cache: StoredCache;
@@ -81,15 +83,13 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
-		// Only public caches are mounted here.
 		return serveNarInfo(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
 			context.get('cache'),
 			storePathHash,
-			false,
-			'public'
+			false
 		);
 	});
 
@@ -152,6 +152,15 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 		context.set('cache', DEFAULT_CACHE);
 		context.set('tenantRest', route.rest);
 		await next();
+
+		// A request without a cache version came from a control Worker that does
+		// not add one, so Workers Cache would key its response by path alone.
+		// Serve it, and keep the response out of the cache. Assigning `context.res`
+		// would not do: the setter copies the headers of the response being
+		// replaced, including its `cache-control`, onto the replacement.
+		if (cacheRequestVersion(context.req.raw) === undefined) {
+			context.header('cache-control', 'no-store');
+		}
 	});
 
 	// Only the public namespace is mounted here, and deliberately so: every read
@@ -199,7 +208,7 @@ Serves public cacheable reads after the control Worker admits the tenant.
 */
 export function tenantReadFetch(
 	request: Request,
-	env: TenantEnv,
+	env: ReadEnv,
 	ctx: Parameters<typeof tenantReadApp.fetch>[2]
 ): Promise<Response> {
 	return Promise.resolve(tenantReadApp.fetch(request, env, ctx));
