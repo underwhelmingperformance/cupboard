@@ -31,7 +31,10 @@ export async function cachedTenantRead(
 	// The in-process app takes the same canonical request as the service binding,
 	// so development and tests receive the same environment as the deployed
 	// tenant Worker.
-	const request = canonicalCacheRequest(context.req.raw);
+	const request = canonicalCacheRequest(
+		context.req.raw,
+		context.get('cacheVersion')
+	);
 	const { CUPBOARD_TENANT: service } = context.env as Partial<
 		Pick<Env, 'CUPBOARD_TENANT'>
 	>;
@@ -40,11 +43,7 @@ export async function cachedTenantRead(
 		return service.fetch(request);
 	}
 
-	return tenantReadFetch(
-		request,
-		context.env as unknown as TenantEnv,
-		context.executionCtx
-	);
+	return tenantReadFetch(request, context.env, context.executionCtx);
 }
 
 /**

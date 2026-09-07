@@ -1,5 +1,6 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	type CachePriority,
 	cachePrioritySchema,
 	type CacheScope,
@@ -207,6 +208,20 @@ export class CacheRepository {
 		this.database
 			.update(schema.cacheIdentities)
 			.set({ graceManaged: true })
+			.where(this.liveIdentity(cache))
+			.run();
+	}
+
+	/**
+	 * Records on the live identity the generation `cache_lifecycle` holds for
+	 * this cache. The row is created at the first generation, so a name
+	 * registered again after a deletion has to take the generation the deletion
+	 * advanced.
+	 */
+	stampGeneration(cache: StoredCache, generation: CacheGeneration): void {
+		this.database
+			.update(schema.cacheIdentities)
+			.set({ generation })
 			.where(this.liveIdentity(cache))
 			.run();
 	}
