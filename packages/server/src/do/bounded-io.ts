@@ -1,11 +1,7 @@
-import {
-	StatementParameterLimitError,
-	UnboundableIoError,
-	UncountableStatementError
-} from '../errors.ts';
+import { UnboundableIoError, UncountableStatementError } from '../errors.ts';
 
-import { maxBoundParameters } from './bulk.ts';
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
+import { admitBoundParameters } from './statement-admission.ts';
 import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
 
 function bounded<A extends unknown[], R>(
@@ -100,12 +96,7 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 			switch (property) {
 				case 'bind': {
 					return (...values: unknown[]): D1PreparedStatement => {
-						if (values.length > maxBoundParameters) {
-							throw new StatementParameterLimitError(
-								values.length,
-								maxBoundParameters
-							);
-						}
+						admitBoundParameters(values.length);
 
 						return boundedStatement(target.bind(...values));
 					};

@@ -22,11 +22,15 @@ import { statementsRemaining } from './statement-scope.ts';
 export { chunk } from '@cupboard/shared/collections';
 
 // Cloudflare's D1 and Durable Object SQLite runtimes accept at most 100 bound
-// parameters in one query.
+// parameters in one query. Both bindings refuse a statement above that limit
+// before the runtime receives it; see `admitBoundParameters` in
+// `statement-admission.ts`.
 //
-// Local workerd and test-pool runs use a SQLite build that accepts 32,766
-// parameters, so executing a statement there does not reproduce an overrun.
-// `d1-parameter-guard.test.ts` inspects the generated parameter lists instead.
+// The local runtime enforces 100 as well: under wrangler 4.123.0 and
+// @cloudflare/vitest-pool-workers 0.21.3, D1 and Durable Object SQLite both
+// answer a 101-parameter statement with `too many SQL variables`. SQLite's own
+// default is 32,766, so which limit a build enforces depends on how it was
+// configured and the local agreement with production can drift either way.
 export const maxBoundParameters = 100;
 
 // An `IN (...)` list is chunked below the budget, leaving headroom for the fixed
