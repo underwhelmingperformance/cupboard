@@ -294,7 +294,10 @@ export class CacheAdminService {
 			.run();
 		this.identities.ensure(cache, priority, now);
 		this.identities.setPriority(cache, priority);
-		await this.deletionQueue.recordCacheRegistration(cache);
+		this.identities.stampVersion(
+			cache,
+			await this.deletionQueue.recordCacheRegistration(cache)
+		);
 
 		return this.cacheSummary(cache, priority);
 	}
@@ -356,7 +359,8 @@ export class CacheAdminService {
 	/**
 	 * Registers the cache in the local registry if it is not there already.
 	 *
-	 * Creating a registry row also clears the D1 deletion timestamp. This handles
+	 * Creating a registry row also clears the D1 deletion timestamp and stamps the
+	 * version that registration published onto the local identity. This handles
 	 * the first write to a new cache and recreation after deletion. The transition
 	 * uses one D1 statement per newly registered cache.
 	 *
@@ -390,7 +394,10 @@ export class CacheAdminService {
 			return;
 		}
 
-		await this.deletionQueue.recordCacheRegistration(cache);
+		this.identities.stampVersion(
+			cache,
+			await this.deletionQueue.recordCacheRegistration(cache)
+		);
 	}
 
 	// Claim one cache marker per alarm so several large teardowns make progress

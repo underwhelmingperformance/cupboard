@@ -77,6 +77,13 @@ const fixedWidthSites: readonly (BoundListSite & {
 			'The principal issuer, and the legacy issuer when there is one: two at most.'
 	},
 	{
+		kind: 'inArray',
+		file: 'src/control/tenant-membership.ts',
+		argument: 'credentialCaches',
+		reason:
+			'The addressed cache when it is private, and nothing otherwise: one at most.'
+	},
+	{
 		kind: 'values',
 		file: 'src/do/cache-lifecycle-projection.ts',
 		argument: 'batch.map((cache) => { const { scope, access } = i',

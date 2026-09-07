@@ -1,8 +1,12 @@
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	type CacheGeneration,
+	cacheGenerationSchema,
 	type CacheName,
 	type CachePriority,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type GraceSeconds,
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
@@ -49,6 +53,17 @@ export const cacheIdentities = sqliteTable(
 		name: text('name'),
 		access: text('access', { enum: ['public', 'private'] }),
 		priority: integer('priority').notNull(),
+		// The lifecycle generation and read revision D1 holds for this cache,
+		// stamped on the row whenever registration publishes them. A local
+		// incarnation therefore knows which incarnation of the name it is.
+		generation: integer('generation')
+			.$type<CacheGeneration>()
+			.notNull()
+			.default(cacheGenerationSchema.parse(1)),
+		readRevision: integer('read_revision')
+			.$type<CacheReadRevision>()
+			.notNull()
+			.default(cacheReadRevisionSchema.parse(1)),
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
 			.notNull()
 			.default(false),

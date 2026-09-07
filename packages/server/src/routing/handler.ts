@@ -53,8 +53,8 @@ import {
 	withoutStoring
 } from './tenant-forward.ts';
 import {
+	addressedCache,
 	isLiteralNamespacePath,
-	parsePrivateCachePath,
 	parseTenantPath
 } from './tenant-routing.ts';
 
@@ -145,22 +145,23 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		// A read inside the private namespace needs the addressed cache's read
-		// verifier as well as the tenant row. Pass the parsed cache so admission
-		// loads both in one D1 batch before any route runs.
-		const privateCache = parsePrivateCachePath(route.rest);
+		// Every read needs the addressed cache's lifecycle version, and a read
+		// inside the private namespace needs that cache's read verifier too. Pass
+		// the cache parsed from the raw path so admission reads its rows alongside
+		// the tenant row, in one D1 batch, before any route runs.
 		const admission = await admitTenant(
 			context.env,
 			context.executionCtx,
 			route.tenant,
-			privateCache?.cache
+			addressedCache(route.rest)
 		);
 
 		if (admission === undefined) {
 			return notFoundResponse();
 		}
 
-		const { entry, fresh, cacheVerifier, isCacheDeleted } = admission;
+		const { entry, fresh, cacheVerifier, isCacheDeleted, cacheVersion } =
+			admission;
 
 		if (
 			isTenantRead(context.req.method, route.rest) &&
@@ -175,6 +176,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantRest', route.rest);
 		context.set('readScope', { visibility: 'public', cache: DEFAULT_CACHE });
 		context.set('isCacheDeleted', isCacheDeleted);
+		context.set('cacheVersion', cacheVersion);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
 
 		if (cacheVerifier !== undefined) {

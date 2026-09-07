@@ -1155,6 +1155,56 @@ describe('cache generation gate', () => {
 		});
 	});
 
+	it('refuses the previous public cache narinfo once the name is registered again', async () => {
+		await useTestServer('gen-public-narinfo');
+		const { token } = await bootstrap();
+		const oldNar = await verifiableNar('public-narinfo-old');
+		const newNar = await verifiableNar('public-narinfo-new');
+		const oldPath = indexedMetadata(0, oldNar);
+		const newPath = indexedMetadata(1, newNar);
+
+		await pushPath(token, oldPath, 'builds', oldNar);
+		// Park the drain so the deleted cache's narinfo object survives into the
+		// lifetime of the next cache of the same name. Both incarnations key that
+		// object by the same path in the same cache.
+		await deleteAndParkTeardown(buildsCache);
+		await pushPath(token, newPath, 'builds', newNar);
+
+		const previous = await readFetch(
+			`/cache/builds/${oldPath.storePathHash}.narinfo`
+		);
+		const fresh = await readFetch(
+			`/cache/builds/${newPath.storePathHash}.narinfo`
+		);
+		const availability = await readFetch('/cache/builds/api/v1/missing-paths', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				storePathHashes: [oldPath.storePathHash, newPath.storePathHash]
+			})
+		});
+		const availabilityBody = cacheAvailabilityResponseSchema.parse(
+			await availability.json()
+		);
+
+		expect({
+			previous: previous.status,
+			fresh: fresh.status,
+			missing: availabilityBody.missingStorePathHashes,
+			// The refusal comes from the reference check, not from the drain: the
+			// previous cache's object is still published.
+			previousObject:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, oldPath.storePathHash, buildsCache)
+				)) !== null
+		}).toStrictEqual({
+			previous: StatusCodes.NOT_FOUND,
+			fresh: StatusCodes.OK,
+			missing: [oldPath.storePathHash],
+			previousObject: true
+		});
+	});
+
 	it('serves an unstamped edge, stops at deletion, and does not resume at recreation', async () => {
 		await useTestServer('gen-legacy');
 		const { token } = await bootstrap();
