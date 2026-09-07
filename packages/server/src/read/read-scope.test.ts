@@ -1,4 +1,8 @@
-import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	firstCacheGeneration
+} from '@cupboard/nix-store/scalars';
 import { readUserSchema } from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -19,10 +23,15 @@ const namedCache: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse('builds')
 };
-const publicScope: ReadScope = { scope: defaultCache, access: 'public' };
+const publicScope: ReadScope = {
+	scope: defaultCache,
+	access: 'public',
+	generation: firstCacheGeneration
+};
 const privateScope: ReadScope = {
 	scope: namedCache,
-	access: 'private'
+	access: 'private',
+	generation: firstCacheGeneration
 };
 
 async function verifier(

@@ -1,3 +1,4 @@
+import { firstCacheGeneration } from '@cupboard/nix-store/scalars';
 import {
 	createExecutionContext,
 	waitOnExecutionContext
@@ -6,10 +7,7 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import {
-	firstCacheGeneration,
-	firstCacheReadRevision
-} from '../db/cache-generation.ts';
+import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import { narInfoCacheControl } from '../http/http.ts';
 import {
 	bootstrap,
@@ -43,7 +41,7 @@ async function tenantRead(request: Request): Promise<ReadOutcome> {
 describe('tenant Worker reads', () => {
 	beforeEach(resetTestServer);
 
-	it('serves a request without a cache version and keeps it out of Workers Cache', async () => {
+	it('refuses a request without an admitted cache version and keeps the refusal out of Workers Cache', async () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata);
@@ -63,7 +61,7 @@ describe('tenant Worker reads', () => {
 			unversioned: await tenantRead(unversioned)
 		}).toStrictEqual({
 			versioned: { status: StatusCodes.OK, cacheControl: narInfoCacheControl },
-			unversioned: { status: StatusCodes.OK, cacheControl: 'no-store' }
+			unversioned: { status: StatusCodes.NOT_FOUND, cacheControl: 'no-store' }
 		});
 	});
 });

@@ -65,7 +65,9 @@ import {
 	serverHttpErrorResponse
 } from '../http/error-response.ts';
 import {
+	attestationListObjectPrefix,
 	maxVerificationRpcRows,
+	narInfoObjectPrefix,
 	parseNarInfoName,
 	parseNarName,
 	type R2ObjectKey,
@@ -156,7 +158,6 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
-import { type LegacyObjectFamily } from './legacy-object-move.ts';
 import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
@@ -171,6 +172,7 @@ import {
 	negotiateHintsSchema,
 	type NegotiateHintsToken
 } from './negotiate-hints.ts';
+import { type ObjectFamily } from './object-move.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -1977,20 +1979,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * The object families the move relocates, each with the service that owns
-	 * the objects it holds. A family answers what its own objects record about
-	 * the commit that produced them, so the move never reads either layout
-	 * itself.
+	 * The object families a move relocates, each with the service that owns the
+	 * objects it holds. A family builds its own keys and answers what its own
+	 * objects record about the commit that produced them, so a move never reads
+	 * either layout itself.
 	 */
-	private legacyObjectFamilies(): readonly LegacyObjectFamily[] {
+	private objectFamilies(): readonly ObjectFamily[] {
 		return [
 			{
-				segment: 'narinfo',
+				prefix: narInfoObjectPrefix,
+				key: (cache, storePathHash) =>
+					this.narInfoObjects.objectKey(cache, storePathHash),
 				currentObjects: (cache, objects) =>
 					this.narInfoObjects.currentObjects(cache, objects)
 			},
 			{
-				segment: 'attestations',
+				prefix: attestationListObjectPrefix,
+				key: (cache, storePathHash) =>
+					this.attestations.listKey(cache, storePathHash),
 				currentObjects: (cache, objects) =>
 					this.attestations.currentListObjects(cache, objects)
 			}
@@ -2544,7 +2550,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		return this.runExclusiveMaintenance('local-step', () =>
 			this.metered('local-step', () =>
-				recordLocalStep(this.context, this.legacyObjectFamilies())
+				recordLocalStep(this.context, this.objectFamilies())
 			)
 		);
 	}

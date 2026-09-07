@@ -4,19 +4,13 @@ import {
 	type CacheReadRevision,
 	cacheReadRevisionSchema,
 	type CacheScope,
+	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { and, eq, isNull, not, or, type SQL, sql } from 'drizzle-orm';
 
 import { cacheIdentityCondition } from './cache.ts';
 import * as d1Schema from './d1-schema.ts';
-
-/**
- * The generation used when a cache has no `cache_lifecycle` row or a `blob_ref`
- * row has no `cache_generation` value. This covers caches that have never been
- * deleted and all caches and edges written before the lifecycle table existed.
- */
-export const firstCacheGeneration = cacheGenerationSchema.parse(1);
 
 /**
  * The generation written when a deletion first creates a cache's lifecycle
@@ -28,7 +22,7 @@ export const secondCacheGeneration = cacheGenerationSchema.parse(
 
 /**
  * The read revision a cache starts at, and the one a reader assumes for a cache
- * whose lifecycle row it cannot find.
+ * with no lifecycle row.
  */
 export const firstCacheReadRevision = cacheReadRevisionSchema.parse(1);
 
@@ -51,6 +45,9 @@ export interface CacheLifecycleVersion {
 
 const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, ${firstCacheGeneration})`;
 
+// A cache with no lifecycle row counts as the first generation. Migration
+// `0024_cache_access_backfill` gave a row to every cache with an edge.
+// Registration and projection cover caches that held nothing at the backfill.
 const currentGeneration = sql`coalesce(${d1Schema.cacheLifecycle.generation}, ${firstCacheGeneration})`;
 
 /**
@@ -58,8 +55,11 @@ const currentGeneration = sql`coalesce(${d1Schema.cacheLifecycle.generation}, ${
  * identity. {@link authorisedByCacheGeneration} and
  * {@link revokedByCacheGeneration} rely on this join.
  *
- * Use this condition with `leftJoin`. A cache that has never been deleted has
- * no lifecycle row, so an inner join would drop all of its edges.
+ * Migration `0024_cache_access_backfill` gave every cache appearing in
+ * `blob_ref`, `attestation_ref` or a read credential a lifecycle row, so an
+ * inner join over `blob_ref` drops no edge. `narInfoReferenceQuery` and
+ * `queueRevokedCacheEdges` use `leftJoin`, which also treats an edge without a
+ * lifecycle row as first-generation.
  */
 export function referencedCacheLifecycle(): SQL | undefined {
 	const sameTenant = eq(
@@ -101,7 +101,7 @@ export function authorisedByCacheGeneration(): SQL {
 /**
  * Matches a `blob_ref` row left by a deleted cache. A later cache with the same
  * name uses the generation created by the deletion, so retiring the old row
- * cannot affect its reference edges.
+ * cannot affect the later cache's reference edges.
  *
  * The same join requirement as {@link authorisedByCacheGeneration} applies.
  */
@@ -111,8 +111,8 @@ export function revokedByCacheGeneration(): SQL {
 
 /**
  * Returns the current generation for a statement that inserts a `blob_ref`
- * row. Keeping the lookup inside the insert makes the generation lookup and
- * edge creation one D1 statement.
+ * row. Keeping the subquery inside the insert makes reading the generation and
+ * creating the edge one D1 statement.
  */
 export function currentCacheGeneration(
 	tenant: TenantId,

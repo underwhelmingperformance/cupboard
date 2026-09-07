@@ -13,10 +13,11 @@ import {
 } from './cache-lifecycle-projection.ts';
 import { type ServerContext } from './context.ts';
 import {
-	type LegacyObjectFamily,
 	moveLegacyPrivateObjects,
+	moveObjectsToCacheIncarnation,
+	type ObjectFamily,
 	resetObjectMoves
-} from './legacy-object-move.ts';
+} from './object-move.ts';
 
 /**
  * Matches a tenant row whose object has not recorded the current step. A null
@@ -59,7 +60,7 @@ export type LocalStepOutcome =
  */
 export async function recordLocalStep(
 	context: ServerContext,
-	families: readonly LegacyObjectFamily[]
+	families: readonly ObjectFamily[]
 ): Promise<LocalStepOutcome> {
 	const tenant = context.tenant();
 
@@ -78,10 +79,32 @@ export async function recordLocalStep(
 		return { kind: 'incomplete', projected: projection.projected };
 	}
 
-	const move = await moveLegacyPrivateObjects(context, tenant, families);
+	for (const lifecycle of projection.lifecycles) {
+		if (!lifecycle.isLive) {
+			continue;
+		}
 
-	if (move.hasMore) {
-		return { kind: 'incomplete', projected: move.moved };
+		const cache = context.cacheRepository.resolve(lifecycle.scope);
+
+		if (cache !== undefined && cache.generation < lifecycle.generation) {
+			context.cacheRepository.stampGeneration(cache, lifecycle.generation);
+		}
+	}
+
+	const legacyMove = await moveLegacyPrivateObjects(context, tenant, families);
+
+	if (legacyMove.hasMore) {
+		return { kind: 'incomplete', projected: legacyMove.moved };
+	}
+
+	const incarnationMove = await moveObjectsToCacheIncarnation(
+		context,
+		tenant,
+		families
+	);
+
+	if (incarnationMove.hasMore) {
+		return { kind: 'incomplete', projected: incarnationMove.moved };
 	}
 
 	await context.d1
