@@ -1,6 +1,8 @@
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	type CacheGeneration,
+	cacheGenerationSchema,
 	type CacheName,
 	type CachePriority,
 	type GraceSeconds,
@@ -56,6 +58,12 @@ export const cacheIdentities = sqliteTable(
 		name: text('name'),
 		access: text('access', { enum: ['public', 'private'] }),
 		priority: integer('priority').notNull(),
+		// The generation from `cache_lifecycle` in D1, copied when registration
+		// returns. D1 remains authoritative.
+		generation: integer('generation')
+			.$type<CacheGeneration>()
+			.notNull()
+			.default(cacheGenerationSchema.parse(1)),
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
 			.notNull()
 			.default(false),

@@ -288,7 +288,9 @@ export class CacheAdminService {
 				set: { priority }
 			})
 			.run();
-		await this.deletionQueue.recordCacheRegistration(cache);
+		const { generation } =
+			await this.deletionQueue.recordCacheRegistration(cache);
+		this.identities.stampGeneration(cache, generation);
 
 		return this.cacheSummary(cache, priority);
 	}
@@ -351,7 +353,8 @@ export class CacheAdminService {
 	 * Registers the cache in the local registry if it is not there already,
 	 * writes its D1 lifecycle row, and returns its identity. This handles the
 	 * first write to a new cache and recreation after deletion, at one D1
-	 * statement per newly registered cache.
+	 * statement per newly registered cache. The lifecycle row's generation is
+	 * recorded on the local identity.
 	 *
 	 * The default cache needs neither write: `migrateAndSeed` registers it
 	 * locally on every initialisation, and a D1 trigger writes its lifecycle
@@ -383,7 +386,9 @@ export class CacheAdminService {
 			return cacheId;
 		}
 
-		await this.deletionQueue.recordCacheRegistration(cache);
+		const { generation } =
+			await this.deletionQueue.recordCacheRegistration(cache);
+		this.identities.stampGeneration(cache, generation);
 
 		return cacheId;
 	}

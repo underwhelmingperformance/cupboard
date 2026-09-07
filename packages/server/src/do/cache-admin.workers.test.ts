@@ -19,7 +19,7 @@ import {
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -294,6 +294,46 @@ async function lifecycleIdentities(): Promise<
 
 const buildsCache = cacheNameSchema.parse('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
+
+interface CacheVersion {
+	readonly generation: number;
+	readonly readRevision: number;
+}
+
+// The version D1 publishes for `builds`, which is what a read consults.
+function publishedCacheVersion(): Promise<CacheVersion | undefined> {
+	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			generation: d1Schema.cacheLifecycle.generation,
+			readRevision: d1Schema.cacheLifecycle.readRevision
+		})
+		.from(d1Schema.cacheLifecycle)
+		.where(eq(d1Schema.cacheLifecycle.cache, buildsCache))
+		.get();
+}
+
+// The version D1 publishes for `builds` and the generation its live local
+// identity records. Registration copies the second from the first, so the two
+// agree.
+async function cacheVersions(): Promise<{
+	local: Pick<CacheVersion, 'generation'> | undefined;
+	published: CacheVersion | undefined;
+}> {
+	const local = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({ generation: schema.cacheIdentities.generation })
+			.from(schema.cacheIdentities)
+			.where(
+				and(
+					eq(schema.cacheIdentities.name, buildsCache),
+					isNull(schema.cacheIdentities.deletedAt)
+				)
+			)
+			.get()
+	);
+
+	return { local, published: await publishedCacheVersion() };
+}
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const earlierLiveDeadline = isoTimestampSchema.parse(
@@ -1085,6 +1125,22 @@ describe('cache registry admin', () => {
 			method: 'DELETE'
 		});
 
+		// Retire the old cache's final reference before reusing its NAR hash.
+		// Otherwise teardown can revoke reuse between negotiation and commit.
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () =>
+				(await runInDurableObject(currentServer(), (_instance, state) =>
+					state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+				)) === undefined,
+			3
+		);
+		const teardownMarker = await runInDurableObject(
+			currentServer(),
+			(_instance, state) =>
+				state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+		);
+		expect(teardownMarker).toBeUndefined();
 		const afterDeletion = await cacheIdentities();
 
 		await pushPath(
@@ -1209,6 +1265,46 @@ describe('cache registry admin', () => {
 				identities: [defaultIdentity, { ...builds, deleted: true }],
 				legacyNames: ['']
 			}
+		});
+	});
+
+	it('advances a cache version on deletion and stamps it on the incarnation created next', async () => {
+		await useTestServer('cache-admin-version');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+
+		const created = await cacheVersions();
+
+		// Register the same name again with the same access. The read revision must
+		// stay where it is, or every registration would evict the cache's public
+		// responses from Workers Cache.
+		await putCache(init.token, 'builds', 30);
+
+		const reregistered = await cacheVersions();
+
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+
+		const deleted = await publishedCacheVersion();
+
+		await putCache(init.token, 'builds', 30);
+
+		const first = { generation: 1, readRevision: 1 };
+		const second = { generation: 2, readRevision: 2 };
+
+		expect({
+			created,
+			reregistered,
+			deleted,
+			recreated: await cacheVersions()
+		}).toStrictEqual({
+			created: { local: { generation: 1 }, published: first },
+			reregistered: { local: { generation: 1 }, published: first },
+			deleted: second,
+			recreated: { local: { generation: 2 }, published: second }
 		});
 	});
 
