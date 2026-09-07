@@ -32,7 +32,8 @@ import {
 import {
 	narInfoCacheControl,
 	narInfoObjectKey,
-	narObjectKey
+	narObjectKey,
+	type R2ObjectKey
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
@@ -266,7 +267,7 @@ export class NarInfoObjectsService {
 		}
 
 		const existing = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			this.objectKey(cache, storePathHash)
 		);
 
 		if (
@@ -376,6 +377,17 @@ export class NarInfoObjectsService {
 		});
 	}
 
+	// The cache's generation is part of the key, so a cache created after a
+	// deletion of the same name never writes over what its predecessor left.
+	objectKey(cache: ResolvedCache, storePathHash: StorePathHash): R2ObjectKey {
+		return narInfoObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
+			cache.scope,
+			cache.generation
+		);
+	}
+
 	// Publishes one claimed verification through the ordinary ordered publication
 	// path. The post-publication fence repairs a late write against the current
 	// narinfo row. The caller completes the upload only while it owns the claim.
@@ -426,7 +438,7 @@ export class NarInfoObjectsService {
 		}
 
 		const object = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			this.objectKey(cache, storePathHash)
 		);
 
 		const narInfo = await this.narInfoFromRow(row);
@@ -557,7 +569,7 @@ export class NarInfoObjectsService {
 		await this.materialiseIfRecoverable(cache, storePathHash, committedEdges);
 
 		const object = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache.scope)
+			this.objectKey(cache, storePathHash)
 		);
 
 		return object !== null;
@@ -729,13 +741,12 @@ export class NarInfoObjectsService {
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectMetadata>> {
-		const tenant = this.context.requireTenant();
 		const present = await mapWithConcurrency(
 			[...new Set(storePathHashes)],
 			maxOutgoingConnections,
 			async (storePathHash) => {
 				const object = await this.context.env.BLOBS.head(
-					narInfoObjectKey(tenant, storePathHash, cache.scope)
+					this.objectKey(cache, storePathHash)
 				);
 				const metadata = recordedNarInfoMetadata(object);
 
@@ -890,11 +901,7 @@ export class NarInfoObjectsService {
 		version: NarInfoObjectVersion,
 		narInfo: NarInfo
 	): Promise<void> {
-		const key = narInfoObjectKey(
-			this.context.requireTenant(),
-			storePathHash,
-			cache.scope
-		);
+		const key = this.objectKey(cache, storePathHash);
 
 		await this.context.objectWrites.write([key], () =>
 			this.context.env.BLOBS.put(key, narInfo.render(), {
@@ -914,11 +921,7 @@ export class NarInfoObjectsService {
 		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): Promise<void> {
-		const key = narInfoObjectKey(
-			this.context.requireTenant(),
-			storePathHash,
-			cache.scope
-		);
+		const key = this.objectKey(cache, storePathHash);
 
 		await this.context.objectWrites.write([key], () =>
 			this.context.env.BLOBS.delete(key)
@@ -933,9 +936,8 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		const tenant = this.context.requireTenant();
 		const keys = storePathHashes.map((storePathHash) =>
-			narInfoObjectKey(tenant, storePathHash, cache.scope)
+			this.objectKey(cache, storePathHash)
 		);
 
 		await this.context.objectWrites.write(keys, () =>

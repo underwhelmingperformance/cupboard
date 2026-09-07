@@ -1400,9 +1400,13 @@ The shared CAS has two layers:
   therefore contains only confirmed content.
 - **Per-tenant narinfo layer.** `(cache, storePathHash) -> narHash + signature`
   lives in the tenant DO SQLite database. The materialised R2 object is
-  tenant-namespaced at `t/<tenant>/narinfo/[<cache>/]<storePathHash>`. The
-  signature uses the tenant's own key, so a substituter trusts a tenant only via
-  that tenant's key.
+  tenant-namespaced at
+  `t/<tenant>/narinfo/[generation/<n>/][<cache>/]<storePathHash>`. The
+  generation segment appears from the second generation of a cache name onwards,
+  so a cache that has never been deleted keeps the keys it has, and a cache
+  registered after a deletion of the same name reads none of the objects its
+  predecessor published. The signature uses the tenant's own key, so a
+  substituter trusts a tenant only via that tenant's key.
 
 Cross-tenant dedupe is safe because tenant B never resolves tenant A's narinfos
 and never trusts tenant A's signing key. A write token for A can write only A's
@@ -1922,7 +1926,9 @@ R2 keys:
 
 - `nar/<narHash>.nar.zst` for the shared verified CAS.
 - A per-tenant staging key for unverified uploads.
-- `t/<tenant>/narinfo/[<cache>/]<hash>` for per-tenant narinfo objects.
+- `t/<tenant>/narinfo/[generation/<n>/][<cache>/]<hash>` for per-tenant narinfo
+  objects, with the generation segment present from the second generation of a
+  cache name onwards.
 
 `internalOrigin` purge-skip and `narInfoCachePath` helpers gain the tenant
 segment.

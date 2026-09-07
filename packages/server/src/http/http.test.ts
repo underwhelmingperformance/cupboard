@@ -6,6 +6,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
+import { secondCacheGeneration } from '../db/cache-generation.ts';
+
 import { isNotModified, narInfoObjectKey } from './http.ts';
 
 const tenant = tenantIdSchema.parse('acme');
@@ -152,6 +154,37 @@ describe('narInfoObjectKey', () => {
 		}).toStrictEqual({
 			default: `t/acme/narinfo/${hash}`,
 			named: `t/acme/narinfo/builds/${hash}`
+		});
+	});
+
+	// A cache named `generation` is the one whose first-generation keys start
+	// with the segment a later generation adds. They still cannot be read as
+	// another cache's: a first-generation key has at most two segments below
+	// `narinfo/`, and a later one has at least three.
+	it('separates a later generation from a cache named generation', () => {
+		const generationCache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse('generation')
+		};
+
+		expect({
+			first: narInfoObjectKey(tenant, hash, generationCache),
+			laterDefault: narInfoObjectKey(
+				tenant,
+				hash,
+				{ kind: 'default' },
+				secondCacheGeneration
+			),
+			laterNamed: narInfoObjectKey(
+				tenant,
+				hash,
+				generationCache,
+				secondCacheGeneration
+			)
+		}).toStrictEqual({
+			first: `t/acme/narinfo/generation/${hash}`,
+			laterDefault: `t/acme/narinfo/generation/2/${hash}`,
+			laterNamed: `t/acme/narinfo/generation/2/generation/${hash}`
 		});
 	});
 });

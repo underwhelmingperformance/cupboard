@@ -5,7 +5,8 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type StorePathHash,
-	storePathHashSchema
+	storePathHashSchema,
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
@@ -1495,13 +1496,28 @@ export class VerificationService {
 	// A targeted reconciliation checks a small set of unrelated paths, so probe
 	// each narinfo object directly instead of listing a prefix.
 	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
-		const key = narInfoObjectKey(
+		const key = this.narInfoKey(
 			this.context.requireTenant(),
-			row.storePathHash,
-			this.cache(row.cacheId).scope
+			this.cache(row.cacheId),
+			row.storePathHash
 		);
 
 		return (await this.context.env.BLOBS.head(key)) !== null;
+	}
+
+	// The cache's generation is part of the key, so the objects of a deleted
+	// cache are not at the keys the cache of the same name reads today.
+	private narInfoKey(
+		tenant: TenantId,
+		cache: ResolvedCache,
+		storePathHash: StorePathHash
+	): R2ObjectKey {
+		return narInfoObjectKey(
+			tenant,
+			storePathHash,
+			cache.scope,
+			cache.generation
+		);
 	}
 
 	// Bound the R2 listing by the batch's last key, not by its row count. An orphan
@@ -1523,10 +1539,10 @@ export class VerificationService {
 		let minKey: string | undefined;
 		let lastKey = '';
 		for (const row of rows) {
-			const key = narInfoObjectKey(
+			const key = this.narInfoKey(
 				tenant,
-				row.storePathHash,
-				this.cache(row.cacheId).scope
+				this.cache(row.cacheId),
+				row.storePathHash
 			);
 
 			if (key > lastKey) {
@@ -2362,10 +2378,10 @@ export class VerificationService {
 		const startAfter =
 			resumeCursor === undefined
 				? undefined
-				: narInfoObjectKey(
+				: this.narInfoKey(
 						tenant,
-						resumeCursor.storePathHash,
-						resumeCursor.cache.scope
+						resumeCursor.cache,
+						resumeCursor.storePathHash
 					);
 		const presentObjects = await this.presentNarInfoObjects(
 			logger,
@@ -2376,11 +2392,10 @@ export class VerificationService {
 			presentObjects === undefined
 				? (target: NarInfoRow) => this.headNarInfoObject(target)
 				: (target: NarInfoRow) => {
-						const cache = this.cache(target.cacheId);
-						const key = narInfoObjectKey(
+						const key = this.narInfoKey(
 							tenant,
-							target.storePathHash,
-							cache.scope
+							this.cache(target.cacheId),
+							target.storePathHash
 						);
 
 						return Promise.resolve(presentObjects.has(key));

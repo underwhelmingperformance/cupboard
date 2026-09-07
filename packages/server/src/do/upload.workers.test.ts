@@ -9,11 +9,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import {
-	type DeletePathResponseInput,
-	type UploadId,
-	uploadIdSchema
-} from '@cupboard/protocol/upload';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -3307,40 +3303,47 @@ describe('upload flow', () => {
 		await expect(env.BLOBS.head(objectKey)).resolves.toBeNull();
 	});
 
-	it('refuses the NAR of a deleted path even when its cleanup fails', async () => {
+	// A deletion removes the published object before it retires the reference
+	// edge, so a failed object delete leaves the path exactly as it was: the edge
+	// still authorises the NAR, and the request says so rather than reporting a
+	// deletion that did not take effect. The queue entry stays, and garbage
+	// collection completes it.
+	it('refuses the NAR of a deleted path once collection completes a failed cleanup', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 		const narPath = `/${await currentNarObjectKey(metadata.narHash)}`;
 		const beforeDelete = await readFetch(narPath);
 
-		// The narinfo object survives the failed cleanup and the queue entry stays
-		// for garbage collection, but the reference edge is already retired.
 		const failingDelete = vi
 			.spyOn(env.BLOBS, 'delete')
 			.mockImplementation(() => Promise.reject(new Error('R2 unavailable')));
-		let deleted: DeletePathResponseInput;
+		let refused: Response;
 
 		try {
-			deleted = await deletePath(token, metadata.storePathHash);
+			refused = await authorisedFetch(
+				`/paths/${metadata.storePathHash}`,
+				token,
+				{ method: 'DELETE' }
+			);
 		} finally {
 			failingDelete.mockRestore();
 		}
 
-		const afterDelete = await readFetch(narPath);
+		const afterFailure = await readFetch(narPath);
+		await runGcResult();
+		const afterCollection = await readFetch(narPath);
 
 		expect({
 			beforeDelete: beforeDelete.status,
-			deleted,
-			afterDelete: afterDelete.status
+			refused: refused.status,
+			afterFailure: afterFailure.status,
+			afterCollection: afterCollection.status
 		}).toStrictEqual({
 			beforeDelete: StatusCodes.OK,
-			deleted: {
-				storePathHash: metadata.storePathHash,
-				deleted: true,
-				narScheduledForDeletion: false
-			},
-			afterDelete: StatusCodes.NOT_FOUND
+			refused: StatusCodes.INTERNAL_SERVER_ERROR,
+			afterFailure: StatusCodes.OK,
+			afterCollection: StatusCodes.NOT_FOUND
 		});
 	});
 
@@ -3496,25 +3499,26 @@ describe('upload flow', () => {
 			.spyOn(env.BLOBS, 'delete')
 			.mockRejectedValueOnce(new Error('simulated R2 outage'));
 
-		const deleted = await deletePath(token, metadata.storePathHash);
+		const refused = await authorisedFetch(
+			`/paths/${metadata.storePathHash}`,
+			token,
+			{ method: 'DELETE' }
+		);
 
-		expect(deleted).toStrictEqual({
-			storePathHash: metadata.storePathHash,
-			deleted: true,
-			narScheduledForDeletion: false
-		});
+		expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 
 		deleteSpy.mockRestore();
 
-		// Reproduce a crash after retiring the reference edge, which the deletion
-		// does before it reports success, but before removing the published
-		// narinfo object.
+		// Reproduce a crash after the local row is removed and its deletion queued,
+		// but before the published narinfo object is removed. The reference edge
+		// and the accounting it credits both survive, because the deletion retires
+		// the edge only once the object is gone.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 0,
-			narFileSize: 0,
+			narBlobs: 1,
+			narFileSize: narBytes.byteLength,
 			pendingUploads: 0,
-			totalFileSize: 0
+			totalFileSize: narBytes.byteLength
 		});
 		await expect(
 			env.BLOBS.head(
@@ -3528,8 +3532,15 @@ describe('upload flow', () => {
 		const recovered = await runGcResult();
 
 		// Replaying the deletion marker removes the object the failed pass left
-		// behind.
+		// behind and retires the edge it kept.
 		expect(recovered.narInfosDeleted).toBe(1);
+		await expectStats(token, {
+			storePaths: 0,
+			narBlobs: 0,
+			narFileSize: 0,
+			pendingUploads: 0,
+			totalFileSize: 0
+		});
 		await expect(
 			env.BLOBS.head(
 				narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
@@ -3555,13 +3566,19 @@ describe('upload flow', () => {
 		const deleteSpy = vi
 			.spyOn(env.BLOBS, 'delete')
 			.mockRejectedValueOnce(new Error('simulated R2 outage'));
-		await deletePath(token, metadata.storePathHash);
+		const refused = await authorisedFetch(
+			`/paths/${metadata.storePathHash}`,
+			token,
+			{ method: 'DELETE' }
+		);
+
+		expect(refused.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 		deleteSpy.mockRestore();
 
-		// Recommit the path before deletion-marker replay reaches it. The deletion
-		// retired the tenant's reference to the NAR, so the recommit uploads it
-		// again.
-		await commitPath(token, metadata);
+		// Recommit the path before deletion-marker replay reaches it. The failed
+		// deletion left the tenant's reference to the NAR in place, so the recommit
+		// reuses the bytes already stored.
+		await commitSharedPath(token, metadata);
 
 		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
 

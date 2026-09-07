@@ -1,6 +1,7 @@
 import {
 	type CacheAccessMode,
 	type CacheScope,
+	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
@@ -12,7 +13,6 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { cacheIdentityCondition } from '../db/cache.ts';
 import {
 	type CacheLifecycleVersion,
-	firstCacheGeneration,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -71,9 +71,10 @@ export interface TenantAdmission {
 		readonly isDeleted: boolean;
 	};
 	readonly cacheVerifier?: TenantReadVerifier;
-	// Which incarnation of the addressed cache this request reaches, and under
-	// which read-access policy. The Workers Cache key for a public read carries
-	// both, so no reader receives a response an earlier incarnation produced.
+	// Which incarnation of the addressed cache this request reaches, and which
+	// version of that cache's access. The Workers Cache key for a public read
+	// carries both, so no reader receives a response produced by an earlier
+	// incarnation.
 	readonly cacheVersion: CacheLifecycleVersion;
 }
 

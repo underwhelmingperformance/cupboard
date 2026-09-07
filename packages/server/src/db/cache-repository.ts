@@ -2,12 +2,14 @@ import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
 	cacheAccessModeSchema,
+	type CacheGeneration,
 	type CachePriority,
 	cachePrioritySchema,
-	type CacheScope
+	type CacheScope,
+	firstCacheGeneration
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, gt, isNull } from 'drizzle-orm';
 
 import type { SchemaDatabase } from '../do/context.ts';
 import {
@@ -32,13 +34,15 @@ interface CacheIdentityRow {
 	readonly kind: 'default' | 'named' | null;
 	readonly name: string | null;
 	readonly access: string | null;
+	readonly generation: CacheGeneration;
 }
 
 const identityColumns = {
 	id: schema.cacheIdentities.id,
 	kind: schema.cacheIdentities.kind,
 	name: schema.cacheIdentities.name,
-	access: schema.cacheIdentities.access
+	access: schema.cacheIdentities.access,
+	generation: schema.cacheIdentities.generation
 };
 
 /**
@@ -64,7 +68,8 @@ export class CacheRepository {
 		return {
 			id: row.id,
 			scope: cacheScopeFromRow(row),
-			access: cacheAccessModeSchema.parse(row.access)
+			access: cacheAccessModeSchema.parse(row.access),
+			generation: row.generation
 		};
 	}
 
@@ -204,13 +209,18 @@ export class CacheRepository {
 
 	/**
 	 * Records against the cache's identity the generation and read revision that
-	 * `cache_lifecycle` published for it.
+	 * `cache_lifecycle` published for it, and returns the cache as it now stands.
 	 *
 	 * D1 is authoritative for both. Registering a cache name that a deletion
 	 * advanced returns a generation above the default this row was created with,
-	 * so the local incarnation would otherwise claim to be the first one.
+	 * so the local incarnation would otherwise claim to be the first one. Object
+	 * keys are built from the generation, so a caller that keeps writing through
+	 * the value it passed in would address the previous cache's objects.
 	 */
-	stampVersion(cache: ResolvedCache, version: CacheLifecycleVersion): void {
+	stampVersion(
+		cache: ResolvedCache,
+		version: CacheLifecycleVersion
+	): ResolvedCache {
 		this.database
 			.update(schema.cacheIdentities)
 			.set({
@@ -219,5 +229,25 @@ export class CacheRepository {
 			})
 			.where(eq(schema.cacheIdentities.id, cache.id))
 			.run();
+
+		return { ...cache, generation: version.generation };
+	}
+
+	/**
+	 * Every cache of this tenant above its first generation, deleted ones
+	 * included.
+	 *
+	 * A deleted cache is often the only row left for a name whose registration is
+	 * gone, and the objects that name accumulated before its keys carried a
+	 * generation are still under its first-generation prefix. Leaving those rows
+	 * out would leave the prefix with nothing to name it.
+	 */
+	aboveFirstGeneration(): ResolvedCache[] {
+		return this.database
+			.select(identityColumns)
+			.from(schema.cacheIdentities)
+			.where(gt(schema.cacheIdentities.generation, firstCacheGeneration))
+			.all()
+			.map((row) => this.resolved(row));
 	}
 }

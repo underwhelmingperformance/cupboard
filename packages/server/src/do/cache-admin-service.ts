@@ -319,13 +319,13 @@ export class CacheAdminService {
 				await this.clearCacheReadCredential(scope);
 			}
 
-			const cache = this.context.cacheRepository.create(
+			const created = this.context.cacheRepository.create(
 				scope,
 				access,
 				priority
 			);
+			const cache = this.context.cacheRepository.stampVersion(created, version);
 
-			this.context.cacheRepository.stampVersion(cache, version);
 			this.registerLegacyCache(cache, priority);
 
 			return this.cacheSummary(cache, priority);
@@ -352,7 +352,7 @@ export class CacheAdminService {
 		return this.context.criticalSection(async () => {
 			const existing = this.context.cacheRepository.require(scope);
 			const previous = legacyCacheKey(existing.scope, existing.access);
-			let cache: ResolvedCache;
+			let updated: ResolvedCache;
 			let version: CacheLifecycleVersion;
 
 			if (update.access === 'private') {
@@ -360,14 +360,20 @@ export class CacheAdminService {
 					scope,
 					access: update.access
 				});
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
+				updated = this.context.cacheRepository.setAccess(
+					existing,
+					update.access
+				);
 			} else {
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
-				version = await this.deletionQueue.recordCacheRegistration(cache);
-				await this.clearCacheReadCredential(cache.scope);
+				updated = this.context.cacheRepository.setAccess(
+					existing,
+					update.access
+				);
+				version = await this.deletionQueue.recordCacheRegistration(updated);
+				await this.clearCacheReadCredential(updated.scope);
 			}
 
-			this.context.cacheRepository.stampVersion(cache, version);
+			const cache = this.context.cacheRepository.stampVersion(updated, version);
 
 			const row = this.context.db
 				.select({ priority: schema.cacheIdentities.priority })

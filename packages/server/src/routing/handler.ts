@@ -165,7 +165,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenantRest', route.rest);
 		context.set('readScope', {
 			scope: cacheScope,
-			access: cache?.access ?? 'public'
+			access: cache?.access ?? 'public',
+			generation: cacheVersion.generation
 		});
 		context.set('isCacheDeleted', cache?.isDeleted ?? true);
 		context.set('cacheVersion', cacheVersion);

@@ -3,6 +3,7 @@ import {
 	type CacheGeneration,
 	cacheGenerationSchema,
 	type CacheScope,
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
@@ -16,7 +17,6 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { jsonValueLists } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
@@ -185,7 +185,11 @@ describe('NAR serve under shared-fact read faults', () => {
 				new Request('https://cache.example/0.narinfo'),
 				env,
 				tenant,
-				{ scope: defaultCache(), access: 'public' },
+				{
+					scope: defaultCache(),
+					access: 'public',
+					generation: firstCacheGeneration
+				},
 				referencingPath,
 				true
 			)
@@ -498,7 +502,7 @@ describe('NAR reference index', () => {
 		});
 	});
 
-	it('seeks the reference primary key for a private narinfo read', async () => {
+	it('seeks the cache-identity index for an authenticated narinfo read', async () => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		const [list] = jsonValueLists([referencingPath]);
 
@@ -525,11 +529,11 @@ describe('NAR reference index', () => {
 					row.detail.includes('INDEX')
 			);
 
-		// The reference edge's primary key already leads with the tenant, cache and
-		// store path, so the narinfo check needs no index of its own. The plan also
+		// The identity index leads with the tenant and the cache's identity
+		// columns, so the narinfo check needs no index of its own. The plan also
 		// walks `json_each`, which reads the bound list itself: SQLite probes the
-		// primary key once per store path, so only a scan of a real table would
-		// show that the list had stopped the index being used.
+		// index once per store path, so only a scan of a real table would show
+		// that the list had stopped the index being used.
 		expect({
 			edge: isIndexSeek('blob_ref'),
 			lifecycle: isIndexSeek('cache_lifecycle'),
@@ -570,7 +574,11 @@ function seedPrivateNarInfo(edgeGeneration?: CacheGeneration): Promise<void> {
 
 describe('private narinfo reference gate', () => {
 	const secondGeneration = cacheGenerationSchema.parse(2);
-	const privateRead = { scope: privateCache, access: 'private' } as const;
+	const privateRead = {
+		scope: privateCache,
+		access: 'private',
+		generation: firstCacheGeneration
+	} as const;
 
 	it.each([
 		{

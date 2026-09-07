@@ -186,20 +186,20 @@ export class CacheIdentityMissingError extends ServerHttpError {
 }
 
 /**
- * A stored object key under a private cache's old directory does not name a
- * cache and a store path.
+ * An object move found a stored key that does not name a cache and a store
+ * path.
  *
  * Only this server writes those keys, so a key it cannot read back is a defect
  * in this build rather than an object left by something else. The move refuses
  * the key instead of treating it as an object no cache claims, because that
  * branch deletes.
  */
-export class LegacyObjectKeyInvalidError extends ServerHttpError {
+export class StoredObjectKeyInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(public readonly key: string) {
 		super('A stored object key does not name a cache and a store path');
-		this.name = 'LegacyObjectKeyInvalidError';
+		this.name = 'StoredObjectKeyInvalidError';
 	}
 }
 

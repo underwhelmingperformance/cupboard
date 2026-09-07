@@ -345,9 +345,15 @@ export const cacheGenerationSchema = z
 	.brand('CacheGeneration');
 export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
-// The read-access policy version of one cache. A change of access advances this
-// number, so Workers Cache cannot answer a reader from a response admitted
-// while the cache read differently.
+/**
+ * The generation of a cache that has never been deleted, and the one a reader
+ * assumes for a cache with no lifecycle row.
+ */
+export const firstCacheGeneration = cacheGenerationSchema.parse(1);
+
+// The version of one cache's access. A change of access advances this number,
+// so Workers Cache cannot serve a reader a response stored while the cache had
+// a different access.
 export const cacheReadRevisionSchema = z
 	.number()
 	.int()

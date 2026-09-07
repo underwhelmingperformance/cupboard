@@ -1,5 +1,7 @@
 import {
+	type CacheGeneration,
 	type CacheScope,
+	firstCacheGeneration,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type Sha256HexDigest,
@@ -143,17 +145,19 @@ export function attestationListCachePath(
 	return `/t/${tenant}${suffix}`;
 }
 
+export function attestationListObjectPrefix(tenant: TenantId): string {
+	return `t/${tenant}/attestations/`;
+}
+
 export function attestationListObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: CacheScope
+	cache: CacheScope,
+	generation: CacheGeneration = firstCacheGeneration
 ): R2ObjectKey {
-	const suffix =
-		cache.kind === 'default'
-			? `attestations/${storePathHash}`
-			: `attestations/${cache.name}/${storePathHash}`;
-
-	return r2ObjectKeySchema.parse(`t/${tenant}/${suffix}`);
+	return r2ObjectKeySchema.parse(
+		`${cacheObjectPrefix(attestationListObjectPrefix(tenant), cache, generation)}${storePathHash}`
+	);
 }
 
 // Clients upload to a push-specific staging key. Verification promotes
@@ -192,12 +196,40 @@ export function narInfoObjectPrefix(tenant: TenantId): string {
 export function narInfoObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: CacheScope
+	cache: CacheScope,
+	generation: CacheGeneration = firstCacheGeneration
 ): R2ObjectKey {
-	const suffix =
-		cache.kind === 'default' ? storePathHash : `${cache.name}/${storePathHash}`;
+	return r2ObjectKeySchema.parse(
+		`${cacheObjectPrefix(narInfoObjectPrefix(tenant), cache, generation)}${storePathHash}`
+	);
+}
 
-	return r2ObjectKeySchema.parse(`${narInfoObjectPrefix(tenant)}${suffix}`);
+/**
+ * Where one cache keeps its path-keyed objects of a family, below that family's
+ * own prefix: the cache's generation, then its name.
+ *
+ * A cache that has never been deleted stays at the keys it has always had, so
+ * nothing has to be rewritten for it. From the second generation onwards the
+ * key carries `generation/<n>/`, which is what separates one registration of a
+ * cache name from the next: the objects of a deleted cache are not where its
+ * successor reads.
+ *
+ * The two shapes cannot collide, even for a cache named `generation`. A
+ * first-generation key has at most two segments below the family prefix, and a
+ * later one has at least three.
+ */
+export function cacheObjectPrefix(
+	familyPrefix: string,
+	cache: CacheScope,
+	generation: CacheGeneration = firstCacheGeneration
+): string {
+	const incarnation =
+		generation === firstCacheGeneration
+			? ''
+			: `generation/${String(generation)}/`;
+	const name = cache.kind === 'default' ? '' : `${cache.name}/`;
+
+	return `${familyPrefix}${incarnation}${name}`;
 }
 
 export interface NarObjectName {
