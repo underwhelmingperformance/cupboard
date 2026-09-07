@@ -1196,8 +1196,9 @@ export class UncountableStatementError extends Error {
 }
 
 /**
- * A D1 statement with more bound parameters than the platform accepts. The
- * local binding enforces the production limit during tests.
+ * A statement with more bound parameters than Cloudflare's SQLite accepts.
+ * Both the D1 binding and the Durable Object's storage binding refuse such a
+ * statement before the runtime receives it.
  */
 export class StatementParameterLimitError extends Error {
 	constructor(
@@ -1205,7 +1206,7 @@ export class StatementParameterLimitError extends Error {
 		public readonly limit: number
 	) {
 		super(
-			`A D1 statement bound ${String(parameters)} parameters and the limit is ${String(limit)}`
+			`A statement bound ${String(parameters)} parameters and the limit is ${String(limit)}`
 		);
 		this.name = 'StatementParameterLimitError';
 	}
