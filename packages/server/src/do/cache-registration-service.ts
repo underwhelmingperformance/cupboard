@@ -5,6 +5,7 @@ import {
 	cachePrioritySchema,
 	type CacheReadRevision,
 	type CacheScope,
+	firstCacheGeneration,
 	type StoredCache,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -19,7 +20,6 @@ import {
 } from '../db/cache.ts';
 import {
 	type CacheLifecycleVersion,
-	firstCacheGeneration,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -179,9 +179,15 @@ export class CacheRegistrationService {
 			await this.clearReadCredential(scope);
 		}
 
-		const cache = this.context.cacheRepository.create(scope, access, priority);
-
-		this.context.cacheRepository.stampGeneration(cache, version.generation);
+		const created = this.context.cacheRepository.create(
+			scope,
+			access,
+			priority
+		);
+		const cache = this.context.cacheRepository.stampGeneration(
+			created,
+			version.generation
+		);
 		this.registerLegacy(cache, priority);
 
 		return cache;

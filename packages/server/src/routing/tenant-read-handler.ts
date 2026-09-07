@@ -1,4 +1,5 @@
 import {
+	type CacheGeneration,
 	cacheNameSchema,
 	type CacheScope,
 	type TenantId
@@ -16,6 +17,7 @@ import {
 import {
 	narAuthorityForScope,
 	type ReadEnv,
+	type ReadScope,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
@@ -29,6 +31,9 @@ interface TenantReadHonoEnv {
 	Variables: {
 		tenant: TenantId;
 		cache: CacheScope;
+		// Which incarnation of the cache name admission resolved, taken from the
+		// canonical request. Object keys are built from this generation.
+		generation: CacheGeneration;
 		tenantRest: string;
 	};
 }
@@ -40,6 +45,16 @@ function noStore(response: Response): Response {
 	mutable.headers.set('cache-control', 'no-store');
 
 	return mutable;
+}
+
+// The control Worker forwards only public cache reads here, so every read this
+// app serves has public access.
+function readScope(context: Context<TenantReadHonoEnv>): ReadScope {
+	return {
+		scope: context.get('cache'),
+		access: 'public',
+		generation: context.get('generation')
+	};
 }
 
 function innerRequest(context: Context<TenantReadHonoEnv>): Request {
@@ -71,7 +86,7 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			{ scope: context.get('cache'), access: 'public' },
+			readScope(context),
 			storePathHash,
 			false
 		);
@@ -89,10 +104,7 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.env,
 			context.get('tenant'),
 			nar,
-			narAuthorityForScope({
-				scope: context.get('cache'),
-				access: 'public'
-			}),
+			narAuthorityForScope(readScope(context)),
 			false
 		);
 	});
@@ -128,24 +140,23 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	});
 	app.use('/t/:tenant/*', async (context, next) => {
 		const route = parseTenantPath(new URL(context.req.url).pathname);
+		const version = cacheRequestVersion(context.req.raw);
 
-		if (route === undefined) {
+		// Without the admitted generation, neither the object key nor the Workers
+		// Cache key can distinguish a deleted cache from its replacement.
+		if (route === undefined || version === undefined) {
 			return noStore(notFoundResponse());
 		}
 
 		context.set('tenant', route.tenant);
 		context.set('cache', { kind: 'default' });
+		// A caller who chooses the generation could read a deleted cache's
+		// objects. Only the control Worker's service binding may reach this app,
+		// after admission has read the generation from D1. The tenant Worker's
+		// public entrypoint must continue to refuse requests.
+		context.set('generation', version.generation);
 		context.set('tenantRest', route.rest);
 		await next();
-
-		// A request without a cache version came from a control Worker that does
-		// not add one, so Workers Cache would key its response by path alone.
-		// Serve it, and keep the response out of the cache. Assigning `context.res`
-		// would not do: the setter copies the headers of the response being
-		// replaced, including its `cache-control`, onto the replacement.
-		if (cacheRequestVersion(context.req.raw) === undefined) {
-			context.header('cache-control', 'no-store');
-		}
 	});
 
 	// The control Worker sends only public cache reads here. Private reads remain

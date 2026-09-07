@@ -20,8 +20,13 @@ export class VersionedR2ObjectRollbackGuard extends DurableObject<TenantEnv> {}
 
 export default class TenantWorker extends WorkerEntrypoint<TenantEnv> {
 	/**
-	Refuses requests to the tenant Worker's publicly routable entrypoint.
-	*/
+	 * Refuses requests to the tenant Worker's publicly routable entrypoint.
+	 *
+	 * `CachedTenantReads` takes the addressed cache's generation from the
+	 * request, so a caller that could reach it could read the objects of a
+	 * deleted incarnation. This entrypoint must keep refusing every request: a
+	 * route here would make that generation caller-controlled.
+	 */
 	override fetch(): Response {
 		return new Response(undefined, {
 			status: StatusCodes.NOT_FOUND,

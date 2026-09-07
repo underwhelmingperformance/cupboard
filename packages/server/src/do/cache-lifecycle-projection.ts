@@ -3,6 +3,7 @@ import {
 	cacheAccessModeSchema,
 	type CacheGeneration,
 	type CacheScope,
+	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -10,10 +11,7 @@ import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
-import {
-	firstCacheGeneration,
-	firstCacheReadRevision
-} from '../db/cache-generation.ts';
+import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { readCacheLifecycles } from '../migration/lifecycle-read.ts';

@@ -34,13 +34,12 @@ interrupted run is rerun with no repair step.
 [Workers deployments API]:
   https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/
 
-This build defines two phases, in the order a release records them: `current`
-for a build that needs no such coordination, and `expanded`. `expanded` means
-that every active tenant has recorded local step 1, described below, so every
-registered cache has an identity and every row present when the tenant was woken
-carries its `cache_id` beside the stored cache name. A release that adds a phase
-adds it to that list and documents here how the build behaves while that phase
-is recorded.
+This build settles in `native-reads`: reads use cache identities, and every
+active tenant must have completed the required local data work. It also
+recognises `current`, for builds without phase coordination, and `expanded`,
+which earlier builds recorded after populating the cache identity columns.
+`contracted` is recognised so stored grants can preserve their old spelling
+until the schema contracts; this build does not record that phase.
 
 ## Local steps
 
@@ -54,25 +53,31 @@ every step recorded after about N / 20 ticks, later if some wakes fail.
 of those below it.
 
 The stored step is a watermark: rolling back to a build that defines fewer steps
-does not lower what a newer build recorded. This build defines step 2. Step 1
-gave every registered cache an identity, filled the `cache_id` of every row that
-still refers to its cache by the stored name alone, and wrote the tenant's
-missing `cache_lifecycle` rows to D1, at most 36 per wake. Step 2 repeats that
-work and then moves each private cache's narinfo and attestation-list objects
-from the keys their `private/` name gave them to the keys their name alone gives
-them, at most a hundred objects per wake; a tenant with more records the step on
-a later wake. A private cache serves nothing until its objects have moved, so
-after deploying this build run `localStep.wake` until `localStep.status` reports
-every tenant ready, or wait for the hourly sweep.
+does not lower what a newer build recorded. This build requires step 3. It
+repeats the identity reconciliation and projects missing `cache_lifecycle` rows
+to D1, at most 36 per wake. It then copies live cache generations from D1 to the
+local identities, moves private-cache objects off their old `private/` keys, and
+moves objects of caches above generation 1 to their generation keys. Each object
+move processes at most 100 objects per wake; a tenant with more work records its
+step on a later wake.
+
+A path whose object has not reached its new key returns 404. The move or a new
+push makes it available there. After deploying, run `localStep.wake` until
+`localStep.status` reports every tenant ready, or wait for the hourly sweep.
 
 `cupboard deploy` records a phase only once every active tenant has recorded the
 step the build requires. It checks after both Workers serve the build and stops
 with `LocalStepUnreachedError`, naming up to twenty of the tenants that are
-behind, while any is. The first deploy of a build that raises the step therefore
-always stops there, since no tenant can record the new step before the build
-serves; run it again once `localStep.status` reports none pending.
+behind, while any is. A deploy may stop there while tenants finish the new work.
+Run it again once `localStep.status` reports none pending.
 
 ## Rolling back
+
+Objects moved to generation keys are not moved back by a rollback. The previous
+build cannot read those keys or remove them during teardown. If it publishes
+objects at the old keys, redeploying this build does not automatically move
+them: a tenant already at step 3 is not revisited. Those objects need explicit
+recovery before they can be read at the generation keys.
 
 Rolling back means serving an older build of both Workers, whether by running
 `cupboard deploy` of that build or by the Workers rollback feature. D1, R2 and

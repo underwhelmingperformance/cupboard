@@ -16,8 +16,8 @@ const readRevisionParameter = 'cache-read-revision';
  *
  * Workers Cache keys a stored response by the request path and query. Deploying
  * new code does not remove responses written by an earlier version. Increment
- * this value when a change alters which readers may receive a response, so the
- * a new deployment uses a cache-key format that earlier versions did not
+ * this value when a change alters which readers may receive a response, so a
+ * new deployment uses a cache-key format that earlier versions did not
  * populate.
  */
 const cacheKeyVersion = '2';
@@ -32,10 +32,10 @@ const cacheKeyVersion = '2';
  * Worker and requests that differ only in their credentials share one cache
  * entry.
  *
- * The addressed cache's generation and read revision are part of the key. A
- * cache name can be deleted and created again, and a key made from the path
- * alone would serve the new cache's readers the response the previous cache
- * produced.
+ * The addressed cache's generation and read revision are part of the key, so a
+ * stored response cannot be served after the cache name is deleted and created
+ * again, or after the cache's access changes. A key built from the path alone
+ * would outlive both.
  */
 export function canonicalCacheRequest(
 	request: Request,
@@ -62,9 +62,11 @@ export function canonicalCacheRequest(
  * The cache version {@link canonicalCacheRequest} wrote into a request's key,
  * or undefined when either parameter is absent or malformed.
  *
- * Only the control Worker sends requests to the tenant Worker, so a request
- * without both parameters came from a control Worker that does not add them,
- * and its response must not be stored: the key would name only the path.
+ * The tenant Worker reads the version back from the request it receives. Only
+ * the canonical request reaches that Worker, so a request missing either
+ * parameter did not come through `canonicalCacheRequest`. Serving it would
+ * store a response under a key that no later deletion or access change can
+ * displace.
  */
 export function cacheRequestVersion(
 	request: Request
