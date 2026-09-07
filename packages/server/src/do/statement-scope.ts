@@ -6,6 +6,8 @@ import {
 } from '../errors.ts';
 import { d1StatementsPerInvocation } from '../http/http.ts';
 
+import { wrapDispatchedMethods } from './dispatch-scope.ts';
+
 /**
  * The remaining D1 statement allowance for one invocation, including any
  * amount reserved for work after the current body.
@@ -147,45 +149,8 @@ export function hasStatementAllowance(): boolean {
 
 /**
  * Wraps every method on `prototype` so each dispatch enters the invocation's D1
- * allowance.
- *
- * A Durable Object applies this to its prototype once. The wrapper then covers
- * every method the runtime can dispatch, including requests, alarms, RPCs and
- * methods added later. Each dispatch therefore shares one allowance.
- *
- * A static initialiser wraps every method on the prototype once. A Proxy over
- * each instance would instead intercept every property read, which the commit
- * fan-out performs constantly, so the prototype is the cheaper place to put the
- * wrapper. A method that calls another method of the same object enters a
- * nested allowance, which reuses the enclosing one, so the invocation still has
- * exactly one.
+ * allowance, and so each dispatch shares one allowance.
  */
 export function enterStatementAllowanceOnDispatch(prototype: object): void {
-	for (const property of Object.getOwnPropertyNames(prototype)) {
-		if (property === 'constructor') {
-			continue;
-		}
-
-		const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
-
-		if (descriptor === undefined) {
-			continue;
-		}
-
-		const method: unknown = descriptor.value;
-
-		// Only function-valued data properties represent dispatched methods.
-		if (typeof method !== 'function') {
-			continue;
-		}
-
-		Object.defineProperty(prototype, property, {
-			...descriptor,
-			value: function (this: unknown, ...parameters: unknown[]): unknown {
-				return withStatementAllowance((): unknown =>
-					Reflect.apply(method, this, parameters)
-				);
-			}
-		});
-	}
+	wrapDispatchedMethods(prototype, withStatementAllowance);
 }

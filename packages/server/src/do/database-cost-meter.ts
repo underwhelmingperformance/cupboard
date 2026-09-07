@@ -78,10 +78,11 @@ export async function withRequestCost<T>(
 }
 
 // Keep the platform cursor unchanged. Drizzle consumes it before the next
-// statement, which is when both the lifetime and request meters record it.
+// statement, which is when the lifetime, request and scoped meters record it.
 function meteredSql(
 	sql: SqlStorage,
-	cumulative: DatabaseCostMeter
+	cumulative: DatabaseCostMeter,
+	scoped: () => DatabaseCostMeter | undefined
 ): SqlStorage {
 	return {
 		exec<T extends Record<string, SqlStorageValue>>(
@@ -93,6 +94,7 @@ function meteredSql(
 			const cursor = sql.exec<T>(query, ...bindings);
 			cumulative.track(cursor);
 			requestMeter.getStore()?.track(cursor);
+			scoped()?.track(cursor);
 
 			return cursor;
 		},
@@ -106,11 +108,16 @@ function meteredSql(
 
 // Bind pass-through methods to the platform storage. These host methods depend
 // on their receiver and fail when invoked through an ordinary proxy receiver.
+//
+// `scoped` is looked up per statement rather than passed as a meter, because
+// the meter it returns belongs to whichever budget scope is open when the
+// statement runs, not to the storage wrapper's lifetime.
 export function meteredStorage(
 	storage: DurableObjectStorage,
-	meter: DatabaseCostMeter
+	meter: DatabaseCostMeter,
+	scoped: () => DatabaseCostMeter | undefined = (): undefined => undefined
 ): DurableObjectStorage {
-	const sql = meteredSql(storage.sql, meter);
+	const sql = meteredSql(storage.sql, meter, scoped);
 	const boundMethods = new Map<PropertyKey, unknown>();
 
 	return new Proxy(storage, {

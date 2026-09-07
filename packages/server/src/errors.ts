@@ -1183,6 +1183,21 @@ export class StatementAllowanceExceededError extends Error {
 }
 
 /**
+ * Work that asks how much of the invocation's Durable Object row budget is
+ * left but runs outside a budget scope.
+ *
+ * Every dispatched method opens a budget. This error exposes a pass that runs
+ * outside one, where it would otherwise size itself against a budget nothing
+ * is debiting.
+ */
+export class MissingRowBudgetError extends Error {
+	constructor() {
+		super('This work requires an invocation row budget and none is in force');
+		this.name = 'MissingRowBudgetError';
+	}
+}
+
+/**
  * A D1 call with a statement count that cannot be determined before dispatch.
  * The active allowance requires an exact count.
  */

@@ -66,6 +66,7 @@ import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { boundedSubrequest } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
+import { currentRowBudgetMeter } from './row-budget.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -168,7 +169,10 @@ export class ServerContext {
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
 		});
-		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
+		this.db = drizzle(
+			meteredStorage(ctx.storage, this.dbCost, currentRowBudgetMeter),
+			{ schema }
+		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 	}
 
