@@ -1,4 +1,8 @@
-import { type CacheScope, type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	firstCacheGeneration,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -17,7 +21,6 @@ import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import { cacheIdentityCondition } from '../db/cache.ts';
-import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,

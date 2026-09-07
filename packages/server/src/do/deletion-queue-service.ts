@@ -1,6 +1,7 @@
 import {
 	type CacheReadRevision,
 	type CacheScope,
+	firstCacheGeneration,
 	isSameCacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
@@ -23,7 +24,6 @@ import {
 import {
 	authorisedByCacheGeneration,
 	type CacheLifecycleVersion,
-	firstCacheGeneration,
 	firstCacheReadRevision,
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
@@ -58,6 +58,15 @@ export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
+}
+
+/**
+ * What one queued narinfo deletion retired: the queue entry, and whether a
+ * later commit of the same path owned the published object and so kept it.
+ */
+export interface RetiredNarInfo {
+	readonly queued: typeof schema.narInfoDeletions.$inferSelect;
+	readonly wasNewerCommitted: boolean;
 }
 
 // The paths one retirement chunk covers. A chunk costs the same number of D1
@@ -520,8 +529,8 @@ export class DeletionQueueService {
 	 *
 	 * The bundle route requires both an attestation reference and its matching
 	 * generation-authorised reference edge. Removing references before the rest
-	 * of the chunk therefore reduces access immediately, even if the pass is
-	 * interrupted.
+	 * of the chunk therefore stops the bundle route serving the path
+	 * immediately, even if the pass is interrupted.
 	 */
 	private async retireTornDownChunk(
 		cache: ResolvedCache,
@@ -853,12 +862,27 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Retires the reference edge of one queued narinfo deletion and returns the
-	 * queue entry it retired, or `undefined` when the queue holds no such entry.
+	 * Removes the published narinfo object of one queued deletion and retires its
+	 * reference edge, returning what it retired, or `undefined` when the queue
+	 * holds no such entry.
 	 *
-	 * The reference edge authorises NAR reads through the cache. Retire it before
-	 * deleting objects or updating accounting. A caller that reports a deletion
-	 * to a client must propagate a failure here because the NAR remains readable.
+	 * The object goes first. The public read path serves whatever object is at
+	 * the key without consulting D1, so an object that no reference edge
+	 * authorises would be served by a cache that no longer owns it. That state
+	 * must not arise even for the moment between the two writes.
+	 *
+	 * A crash between them leaves the object gone while the edge remains. A read
+	 * then finds a path D1 still names and no object in R2, and returns 404,
+	 * which is what either order returns for that state.
+	 *
+	 * The edge must still precede {@link blobHashUnreferenced}, which the caller
+	 * runs afterwards: the probe reports whether the NAR has lost its last
+	 * reference, and this edge would still count as a reference.
+	 *
+	 * When a later commit of the same path owns the object at that key, the
+	 * method leaves the object in place and reports that it did so. A caller
+	 * that reports a deletion to a
+	 * client must propagate a failure here because the NAR remains readable.
 	 *
 	 * The caller must hold the critical section.
 	 */
@@ -866,7 +890,7 @@ export class DeletionQueueService {
 		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
-	): Promise<typeof schema.narInfoDeletions.$inferSelect | undefined> {
+	): Promise<RetiredNarInfo | undefined> {
 		const queued = this.context.db
 			.select()
 			.from(schema.narInfoDeletions)
@@ -883,58 +907,6 @@ export class DeletionQueueService {
 			return undefined;
 		}
 
-		await this.retireBlobRefEdge(
-			cache,
-			storePathHash,
-			queued.generation,
-			queued.narHash
-		);
-
-		return queued;
-	}
-
-	// The caller must hold the critical section because the row check, object
-	// deletion, edge retirement, and queue clear span asynchronous operations.
-	async deleteQueuedNarInfo(
-		cache: ResolvedCache,
-		storePathHash: StorePathHash,
-		generation: NarInfoGeneration,
-		origin?: RequestOrigin
-	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
-		const queued = await this.retireQueuedNarInfoEdge(
-			cache,
-			storePathHash,
-			generation
-		);
-
-		if (queued === undefined) {
-			return { objectDeleted: false, narScheduledForDeletion: false };
-		}
-
-		return this.cleanUpQueuedNarInfo(
-			cache,
-			storePathHash,
-			generation,
-			queued,
-			origin
-		);
-	}
-
-	/**
-	 * Removes the published object, cached copies, attestations and queue entry
-	 * for a retired narinfo. The caller must have retired the reference edge and
-	 * must hold the critical section.
-	 *
-	 * A path carrying more attestation references than one invocation may retire
-	 * keeps its queue entry, so garbage collection retires the rest.
-	 */
-	async cleanUpQueuedNarInfo(
-		cache: ResolvedCache,
-		storePathHash: StorePathHash,
-		generation: NarInfoGeneration,
-		queued: typeof schema.narInfoDeletions.$inferSelect,
-		_origin?: RequestOrigin
-	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		const current = this.context.db
 			.select({ generation: schema.narInfos.generation })
 			.from(schema.narInfos)
@@ -947,6 +919,65 @@ export class DeletionQueueService {
 			.get();
 		const wasNewerCommitted =
 			current !== undefined && current.generation !== queued.generation;
+
+		if (!wasNewerCommitted) {
+			await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
+		}
+
+		await this.retireBlobRefEdge(
+			cache,
+			storePathHash,
+			queued.generation,
+			queued.narHash
+		);
+
+		return { queued, wasNewerCommitted };
+	}
+
+	// The caller must hold the critical section because the row check, object
+	// deletion, edge retirement, and queue clear span asynchronous operations.
+	async deleteQueuedNarInfo(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		origin?: RequestOrigin
+	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
+		const retired = await this.retireQueuedNarInfoEdge(
+			cache,
+			storePathHash,
+			generation
+		);
+
+		if (retired === undefined) {
+			return { objectDeleted: false, narScheduledForDeletion: false };
+		}
+
+		return this.cleanUpQueuedNarInfo(
+			cache,
+			storePathHash,
+			generation,
+			retired,
+			origin
+		);
+	}
+
+	/**
+	 * Removes the cached copies, attestations and queue entry for a retired
+	 * narinfo. The caller must have run {@link retireQueuedNarInfoEdge}, which
+	 * removes the published object and the reference edge, and must hold the
+	 * critical section.
+	 *
+	 * A path carrying more attestation references than one invocation may retire
+	 * keeps its queue entry, so garbage collection retires the rest.
+	 */
+	async cleanUpQueuedNarInfo(
+		cache: ResolvedCache,
+		storePathHash: StorePathHash,
+		generation: NarInfoGeneration,
+		retired: RetiredNarInfo,
+		_origin?: RequestOrigin
+	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
+		const { queued, wasNewerCommitted } = retired;
 
 		// A newer generation keeps the path-keyed object and the attestation list
 		// it owns. The captured generation's attestations still need to be retired.
@@ -978,7 +1009,6 @@ export class DeletionQueueService {
 			};
 		}
 
-		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 		await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
 
 		const hasRetiredEveryReference = await this.retireAttestationRefs(
@@ -987,8 +1017,8 @@ export class DeletionQueueService {
 			queued.generation
 		);
 		// This is the latest generation for the path, so remove its list even if an
-		// earlier attempt already removed the reference rows. This also removes the
-		// stale object when replaying after an interruption.
+		// earlier attempt already removed the reference rows. The same call removes
+		// a stale object left by an interrupted replay.
 		await this.attestations.discardLists(cache, [storePathHash]);
 
 		// Re-check the live edges because another path may have committed the same
@@ -1016,15 +1046,16 @@ export class DeletionQueueService {
 	 * A later cache with the same name uses the advanced generation. Its reads
 	 * therefore exclude every edge left by the deleted cache.
 	 *
-	 * For a private cache, the deletion timestamp makes content reads return
-	 * absent-object results and makes availability report every requested path as
-	 * missing while path-keyed objects await teardown.
+	 * For a private cache, the deletion timestamp makes content reads return 404
+	 * and makes availability report every requested path as missing while
+	 * path-keyed objects await teardown.
 	 * {@link recordCacheRegistration} removes the timestamp when the cache name is
 	 * registered again.
 	 *
-	 * The read revision advances with the generation. A public read the deleted
-	 * cache answered can still be held in Workers Cache, and its key carries the
-	 * revision, so the reader of the next cache of this name misses it.
+	 * The read revision advances with the generation. A response the deleted
+	 * cache produced can still be in Workers Cache, and the cache key carries the
+	 * read revision, so a reader of the next cache of this name cannot be served
+	 * that response.
 	 */
 	async revokeCacheGeneration(cache: ResolvedCache): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -1064,9 +1095,10 @@ export class DeletionQueueService {
 	 * clearing the deletion timestamp when the name is registered again, and
 	 * returns the version the row now publishes.
 	 *
-	 * The row says the cache exists and how it reads, which is what a request
-	 * naming the cache consults. Writing it here rather than leaving it to the
-	 * projection means a cache is known from its first write.
+	 * The row records that the cache exists and what access it has. Admission
+	 * reads it for every request that names the cache. Writing it here rather
+	 * than leaving it to the projection means a cache is known from its first
+	 * write.
 	 *
 	 * The upsert also registers a cache that has never been deleted. D1 admission
 	 * therefore has an authoritative access row for empty caches.
@@ -1132,12 +1164,13 @@ export class DeletionQueueService {
 	 * deletion runs in, and it records its local narinfo before that insert, so
 	 * the local transaction that queues every narinfo normally covers every
 	 * committed edge. This sweep finds the revoked edges an interrupted earlier
-	 * deletion left, which would otherwise hold usage against the tenant for
-	 * good.
+	 * deletion left, which would otherwise keep counting towards the tenant's
+	 * usage indefinitely.
 	 *
 	 * The cache-generation predicate excludes the edges of the current cache of
 	 * this name. Retirement then matches the exact narinfo generation, which is a
-	 * separate number, so a queued deletion cannot remove a newer recommit.
+	 * separate number, so a queued deletion cannot remove a newer recommitted
+	 * edge.
 	 *
 	 * Returns the number of edges queued. The caller must hold the critical
 	 * section.
@@ -1299,13 +1332,13 @@ export class DeletionQueueService {
 				);
 			});
 
-			const queued = await this.retireQueuedNarInfoEdge(
+			const retired = await this.retireQueuedNarInfoEdge(
 				cache,
 				storePathHash,
 				row.generation
 			);
 
-			if (queued === undefined) {
+			if (retired === undefined) {
 				return {
 					storePathHash,
 					deleted: true,
@@ -1315,13 +1348,18 @@ export class DeletionQueueService {
 
 			let isNarScheduledForDeletion = false;
 
+			// Only what follows the retirement may fail quietly. By this point the
+			// object and its edge are both gone, so no read can reach the path and
+			// the queue entry is enough to finish the rest. Widening this to cover
+			// the retirement would report a deletion that never happened: a failure
+			// there leaves the edge in place, still authorising the path.
 			try {
 				({ narScheduledForDeletion: isNarScheduledForDeletion } =
 					await this.cleanUpQueuedNarInfo(
 						cache,
 						storePathHash,
 						row.generation,
-						queued,
+						retired,
 						origin
 					));
 			} catch {

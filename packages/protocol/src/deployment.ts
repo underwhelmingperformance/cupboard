@@ -33,12 +33,14 @@ export function localStep(value: number): LocalStep {
  * name alone. A migration cannot do that work, because both builds keep writing
  * such rows while the release is rolling out. Step 2 moves a private cache's
  * stored objects off the keys its old `private/`-prefixed name gave them, which
- * a migration cannot do either, because those objects are in R2.
+ * a migration cannot do either, because those objects are in R2. Step 3 moves
+ * the stored objects of a cache above its first generation onto the keys that
+ * carry that generation.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(2);
+export const currentLocalStep: LocalStep = localStep(3);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a

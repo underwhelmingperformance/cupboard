@@ -1,6 +1,7 @@
 import {
 	type CacheName,
 	cacheNameSchema,
+	firstCacheGeneration,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
@@ -8,8 +9,12 @@ import {
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { type ResolvedCache } from '../db/cache.ts';
-import { LegacyObjectKeyInvalidError } from '../errors.ts';
-import { type R2ObjectKey, r2ObjectKeySchema } from '../http/http.ts';
+import { StoredObjectKeyInvalidError } from '../errors.ts';
+import {
+	cacheObjectPrefix,
+	type R2ObjectKey,
+	r2ObjectKeySchema
+} from '../http/http.ts';
 
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -42,21 +47,23 @@ type CurrentObjects = (
 ) => ReadonlySet<StorePathHash>;
 
 /**
- * One family of path-keyed objects a private cache wrote under its old stored
- * name.
+ * One family of path-keyed objects: where the family keeps everything it
+ * writes, where within that one cache's object for a path belongs, and which
+ * of its stored objects a cache can still serve.
  */
-export interface LegacyObjectFamily {
-	/**
-	 * The key segment that names the family, such as `narinfo`.
-	 */
-	readonly segment: string;
+export interface ObjectFamily {
+	readonly prefix: (tenant: TenantId) => string;
+	readonly key: (
+		cache: ResolvedCache,
+		storePathHash: StorePathHash
+	) => R2ObjectKey;
 	readonly currentObjects: CurrentObjects;
 }
 
 /**
- * One stored object under a private cache's old directory.
+ * One stored object under a prefix a move is emptying.
  */
-interface LegacyObject {
+interface SourceObject {
 	readonly key: R2ObjectKey;
 	readonly storePathHash: StorePathHash;
 	readonly object: R2Object;
@@ -78,25 +85,8 @@ interface MovedObject {
  * under `<family>/private/`, one directory higher, so the prefix alone does not
  * say whose objects a key holds.
  */
-function legacyPrefix(tenant: TenantId, family: LegacyObjectFamily): string {
-	return `t/${tenant}/${family.segment}/${privateSegment}`;
-}
-
-/**
- * Where an object under one private cache's old directory belongs once its
- * access is no longer part of its name.
- *
- * The old directory is the family's own directory plus `private/`, so taking
- * that segment off the front of the key leaves the key the cache's scope alone
- * gives it. A cache named `private` keeps its name in the result, because only
- * the segment the access added comes off.
- */
-function movedKey(legacyFamilyPrefix: string, key: string): R2ObjectKey {
-	const family = legacyFamilyPrefix.slice(0, -privateSegment.length);
-
-	return r2ObjectKeySchema.parse(
-		`${family}${key.slice(legacyFamilyPrefix.length)}`
-	);
+function legacyPrefix(tenant: TenantId, family: ObjectFamily): string {
+	return `${family.prefix(tenant)}${privateSegment}`;
 }
 
 /**
@@ -111,7 +101,7 @@ function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
 	);
 
 	if (!parsed.success) {
-		throw new LegacyObjectKeyInvalidError(directory);
+		throw new StoredObjectKeyInvalidError(directory);
 	}
 
 	return parsed.data;
@@ -124,17 +114,17 @@ function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
  * this build rather than an object another writer left, so it stops the pass
  * instead of reaching the branch that deletes an object no cache claims.
  */
-function legacyObjectsIn(
-	directory: string,
+function sourceObjectsIn(
+	prefix: string,
 	listed: readonly R2Object[]
-): LegacyObject[] {
+): SourceObject[] {
 	return listed.map((object) => {
 		const parsed = storePathHashSchema.safeParse(
-			object.key.slice(directory.length)
+			object.key.slice(prefix.length)
 		);
 
 		if (!parsed.success) {
-			throw new LegacyObjectKeyInvalidError(object.key);
+			throw new StoredObjectKeyInvalidError(object.key);
 		}
 
 		return {
@@ -153,13 +143,13 @@ async function deleteObject(
 }
 
 /**
- * Moves one object to the key its cache's scope alone gives it, and reports
- * whether it wrote the destination.
+ * Moves one object to the key its cache reads today, and reports whether it
+ * wrote the destination.
  *
- * The destination is authoritative once it exists: a commit since the cutover
- * wrote it under the current key, and copying the older object over it would
- * put back what that commit replaced. So an existing destination is left alone
- * and only the older object is removed.
+ * The destination is authoritative once it exists: a commit made after the key
+ * changed wrote it under the current key, and copying the older object over it
+ * would put back what that commit replaced. So an existing destination is left
+ * alone and only the older object is removed.
  *
  * The copy carries the object's metadata across, because the read checks a
  * narinfo's recorded generation and NAR hash against the reference edge and
@@ -208,7 +198,7 @@ async function moveObject(
  */
 async function discardSupersededCopies(
 	context: ServerContext,
-	family: LegacyObjectFamily,
+	family: ObjectFamily,
 	cache: ResolvedCache,
 	moved: ReadonlyMap<StorePathHash, MovedObject>
 ): Promise<void> {
@@ -234,33 +224,29 @@ async function discardSupersededCopies(
 }
 
 /**
- * Relocates the objects a cache can still serve and deletes the rest.
+ * Relocates the objects a cache can still serve from one prefix and deletes the
+ * rest.
  *
- * Nothing writes a legacy key after the cutover, because every key is built
- * from a cache's scope and a scope carries no access. So this decides about a
- * settled directory rather than racing a writer for it, and the local rows are
- * the current answer to what the cache holds.
+ * Nothing writes these keys once the family's keys have moved, so this pass
+ * reads a prefix no writer is still adding to, and the local rows say what the
+ * cache holds.
  *
  * An object whose path has no row, or whose recorded version a later commit
  * superseded, is one no read could serve. Relocating it would put an object at
  * a live key that the reference edge refuses and nothing collects, so it is
- * deleted here instead. Every object of a cache the registry no longer has
- * takes the same branch: a cache torn down and created again under the same
- * name is a different cache with a different identity, and these objects belong
- * to the one that went.
+ * deleted here instead. Every object takes that branch when no cache claims the
+ * prefix at all: a cache torn down and created again under the same name is a
+ * different cache with a different identity, and these objects belong to the
+ * deleted one.
  */
-async function disposeOfDirectory(
+async function disposeOfObjects(
 	context: ServerContext,
-	family: LegacyObjectFamily,
-	legacyFamilyPrefix: string,
-	directory: string,
+	family: ObjectFamily,
+	cache: ResolvedCache | undefined,
+	prefix: string,
 	listed: readonly R2Object[]
 ): Promise<void> {
-	const objects = legacyObjectsIn(directory, listed);
-	const cache = context.cacheRepository.resolve({
-		kind: 'named',
-		name: cacheNameOf(legacyFamilyPrefix, directory)
-	});
+	const objects = sourceObjectsIn(prefix, listed);
 
 	if (cache === undefined) {
 		await mapWithConcurrency(objects, maxOutgoingConnections, (entry) =>
@@ -284,7 +270,7 @@ async function disposeOfDirectory(
 				return;
 			}
 
-			const key = movedKey(legacyFamilyPrefix, entry.key);
+			const key = family.key(cache, entry.storePathHash);
 			const { hasCopied } = await moveObject(context, entry.key, key);
 
 			return hasCopied
@@ -305,9 +291,9 @@ async function disposeOfDirectory(
  * Moves this tenant's private-cache objects off the keys their old stored name
  * gave them.
  *
- * Taking the access out of a cache's name took it out of the keys built from
- * that name, so a private cache does not serve what it already holds until its
- * objects have moved. The work is bounded: at most
+ * A cache's name no longer contains its access, and neither does a key built
+ * from that name, so a private cache cannot serve the objects it already holds
+ * until they have moved. The work is bounded: at most
  * {@link maxObjectsMovedPerRun} objects per invocation, after which the caller
  * leaves the local step unrecorded and the control plane wakes the object
  * again.
@@ -323,7 +309,7 @@ async function disposeOfDirectory(
 export async function moveLegacyPrivateObjects(
 	context: ServerContext,
 	tenant: TenantId,
-	families: readonly LegacyObjectFamily[]
+	families: readonly ObjectFamily[]
 ): Promise<ObjectMoveOutcome> {
 	let moved = 0;
 	let hasMore = false;
@@ -352,10 +338,13 @@ export async function moveLegacyPrivateObjects(
 				include: ['customMetadata']
 			});
 
-			await disposeOfDirectory(
+			await disposeOfObjects(
 				context,
 				family,
-				prefix,
+				context.cacheRepository.resolve({
+					kind: 'named',
+					name: cacheNameOf(prefix, directory)
+				}),
 				directory,
 				listed.objects
 			);
@@ -368,4 +357,102 @@ export async function moveLegacyPrivateObjects(
 	}
 
 	return { moved, hasMore };
+}
+
+/**
+ * Moves the objects of every cache above the first generation onto the keys
+ * that carry its generation.
+ *
+ * A key carries a `generation/<n>/` segment from the second generation onwards,
+ * so a cache that has never been deleted keeps every key it has and is not
+ * listed here at all. A cache whose generation has advanced reads at new keys,
+ * and would serve nothing until its objects arrive there.
+ *
+ * The listing is delimited, so the pass reads only the objects directly under
+ * one cache's first-generation prefix and passes over the directories the later
+ * generations occupy. Without that it would list the keys it has just written
+ * whenever a cache is named `generation`, and a named cache's objects would
+ * consume the default cache's budget.
+ *
+ * The default cache's first-generation prefix is the family's own, so one
+ * listing page there covers that cache's objects together with one entry for
+ * each named cache the tenant has. A page holds a thousand entries, so a tenant
+ * would need that many named caches sorting ahead of its first default-cache
+ * object before a run stopped making progress.
+ *
+ * The work is bounded the same way {@link moveLegacyPrivateObjects} is, and it
+ * spends no D1 statement either.
+ */
+export async function moveObjectsToCacheIncarnation(
+	context: ServerContext,
+	tenant: TenantId,
+	families: readonly ObjectFamily[]
+): Promise<ObjectMoveOutcome> {
+	let moved = 0;
+	let hasMore = false;
+
+	for (const family of families) {
+		for (const [prefix, claimant] of advancedPrefixes(
+			context,
+			tenant,
+			family
+		)) {
+			if (moved >= maxObjectsMovedPerRun) {
+				return { moved, hasMore: true };
+			}
+
+			// The recorded metadata decides each object's fate, and a listing that
+			// carries it costs no more than one that does not.
+			const listed = await context.env.BLOBS.list({
+				prefix,
+				delimiter: '/',
+				include: ['customMetadata']
+			});
+			const page = listed.objects.slice(0, maxObjectsMovedPerRun - moved);
+
+			await disposeOfObjects(context, family, claimant, prefix, page);
+
+			moved += page.length;
+			hasMore ||= listed.truncated || page.length < listed.objects.length;
+		}
+	}
+
+	return { moved, hasMore };
+}
+
+/**
+ * Each first-generation prefix this pass empties, and the cache that still
+ * claims what is under it.
+ *
+ * Every cache wrote to its first-generation prefix before the key carried a
+ * generation, so that prefix holds whatever the last incarnation of the name
+ * left there. Only the live cache of the name has rows that can still claim an
+ * object. A deleted incarnation claims none, so its objects are deleted instead
+ * of being moved to a key nothing reads.
+ *
+ * Two incarnations of one name share the first-generation prefix, so keying the
+ * result by prefix visits it once.
+ */
+function advancedPrefixes(
+	context: ServerContext,
+	tenant: TenantId,
+	family: ObjectFamily
+): ReadonlyMap<string, ResolvedCache | undefined> {
+	const claimants = new Map<string, ResolvedCache | undefined>();
+
+	for (const cache of context.cacheRepository.aboveFirstGeneration()) {
+		const live = context.cacheRepository.resolve(cache.scope);
+
+		// A deletion advanced this name, so a cache that is live under it reads
+		// under a deeper prefix than this one. A cache still on the first
+		// generation would read at this very prefix, and moving an object to the
+		// key it already has would delete it. Skip that prefix.
+		if (live?.generation === firstCacheGeneration) {
+			continue;
+		}
+
+		claimants.set(cacheObjectPrefix(family.prefix(tenant), cache.scope), live);
+	}
+
+	return claimants;
 }

@@ -1,9 +1,11 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	cacheNameSchema,
 	type CacheScope,
 	narInfoGenerationSchema,
-	type StorePathHash
+	type StorePathHash,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
@@ -23,6 +25,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
+import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -336,6 +339,29 @@ async function deleteAndParkTeardown(cache: CacheScope): Promise<void> {
 		await instance.runCacheTeardown(cache, origin);
 		await state.storage.delete(`${teardownEntryPrefix}${String(resolved.id)}`);
 	});
+}
+
+/**
+ * Removes one narinfo object before a case relies on nothing being at its key.
+ *
+ * R2 is one bucket the pool does not roll back between tests, and every server
+ * these cases start is configured with the same tenant, so they address the
+ * same keys. A public read is answered from the object at the key it addresses,
+ * so an object an earlier case left there would be served.
+ */
+async function clearNarInfoObject(
+	cache: CacheScope,
+	storePathHash: string,
+	generation?: CacheGeneration
+): Promise<void> {
+	await env.BLOBS.delete(
+		narInfoObjectKey(
+			fixtureTenant,
+			storePathHashSchema.parse(storePathHash),
+			cache,
+			generation
+		)
+	);
 }
 
 /**
@@ -799,14 +825,15 @@ describe('deleted private cache', () => {
 		});
 	});
 
-	it('refuses a narinfo object the previous cache left behind at a recommitted path', async () => {
+	// The recommitted cache reads at a key the previous incarnation never wrote,
+	// so the object below has to be written to that key to reach the read at all.
+	// What the read then refuses is an object whose recorded generation and NAR
+	// hash belong to a commit the current edge has superseded.
+	it('refuses a narinfo object of a superseded commit at a recommitted path', async () => {
 		const { token, metadata } = await publishPrivatePath('gen-recommit-stale');
-		const narInfoKey = narInfoObjectKey(
-			fixtureTenant,
-			metadata.storePathHash,
-			privateBuilds
+		const previousObject = await env.BLOBS.get(
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, privateBuilds)
 		);
-		const previousObject = await env.BLOBS.get(narInfoKey);
 
 		expect(previousObject).not.toBeNull();
 
@@ -834,14 +861,23 @@ describe('deleted private cache', () => {
 
 		const afterRecommit = await readPrivateNarInfo(metadata.storePathHash);
 
-		// Restore the previous object to model the interval after the new
-		// reference edge is written but before the replacement object is
-		// published.
-		await env.BLOBS.put(narInfoKey, previousBody, {
-			...(previousMetadata !== undefined && {
-				customMetadata: previousMetadata
-			})
-		});
+		// Put the previous object at the recommitted cache's own key, modelling the
+		// interval after the new reference edge is written but before the
+		// replacement object is published.
+		await env.BLOBS.put(
+			narInfoObjectKey(
+				fixtureTenant,
+				metadata.storePathHash,
+				privateBuilds,
+				secondCacheGeneration
+			),
+			previousBody,
+			{
+				...(previousMetadata !== undefined && {
+					customMetadata: previousMetadata
+				})
+			}
+		);
 
 		expect({
 			afterRecommit,
@@ -1276,10 +1312,14 @@ describe('cache generation gate', () => {
 		const oldPath = indexedMetadata(0, oldNar);
 		const newPath = indexedMetadata(1, newNar);
 
+		await clearNarInfoObject(
+			buildsCache,
+			oldPath.storePathHash,
+			secondCacheGeneration
+		);
 		await pushPath(token, oldPath, buildsCache, oldNar);
 		// Park the drain so the deleted cache's narinfo object survives into the
-		// lifetime of the next cache of the same name. Both incarnations key that
-		// object by the same path in the same cache.
+		// lifetime of the next cache of the same name.
 		await deleteAndParkTeardown(buildsCache);
 		await putTestCache(token, buildsCache);
 		await pushPath(token, newPath, buildsCache, newNar);
@@ -1316,6 +1356,60 @@ describe('cache generation gate', () => {
 			fresh: StatusCodes.OK,
 			missing: [oldPath.storePathHash],
 			previousObject: true
+		});
+	});
+
+	// The R2 key carries the generation from the second one onwards, so the two
+	// caches of the name write and read in separate directories. The first cache
+	// keeps the keys it has, which is why nothing it wrote has to be moved.
+	it('keys a re-registered cache away from the objects the previous one left', async () => {
+		await useTestServer('gen-public-incarnation-keys');
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
+		const oldNar = await verifiableNar('incarnation-keys-old');
+		const newNar = await verifiableNar('incarnation-keys-new');
+		const oldPath = indexedMetadata(0, oldNar);
+		const newPath = indexedMetadata(1, newNar);
+
+		await clearNarInfoObject(buildsCache, newPath.storePathHash);
+		await clearNarInfoObject(
+			buildsCache,
+			newPath.storePathHash,
+			secondCacheGeneration
+		);
+		await pushPath(token, oldPath, buildsCache, oldNar);
+		await deleteAndParkTeardown(buildsCache);
+		await putTestCache(token, buildsCache);
+		await pushPath(token, newPath, buildsCache, newNar);
+
+		const fresh = await readFetch(
+			`/cache/builds/${newPath.storePathHash}.narinfo`
+		);
+		const hasObjectAt = async (
+			storePathHash: string,
+			generation?: CacheGeneration
+		): Promise<boolean> =>
+			(await env.BLOBS.head(
+				narInfoObjectKey(
+					fixtureTenant,
+					storePathHashSchema.parse(storePathHash),
+					buildsCache,
+					generation
+				)
+			)) !== null;
+
+		expect({
+			fresh: fresh.status,
+			previousAtFirstGeneration: await hasObjectAt(oldPath.storePathHash),
+			freshAtFirstGeneration: await hasObjectAt(newPath.storePathHash),
+			freshAtSecondGeneration: await hasObjectAt(
+				newPath.storePathHash,
+				secondCacheGeneration
+			)
+		}).toStrictEqual({
+			fresh: StatusCodes.OK,
+			previousAtFirstGeneration: true,
+			freshAtFirstGeneration: false,
+			freshAtSecondGeneration: true
 		});
 	});
 

@@ -1,5 +1,6 @@
 import {
 	DEFAULT_CACHE,
+	firstCacheGeneration,
 	identityForCache,
 	type StoredCache,
 	storedCacheSchema,
@@ -9,7 +10,6 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 
 import { cacheIdentityColumns } from '../db/cache.ts';
-import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 

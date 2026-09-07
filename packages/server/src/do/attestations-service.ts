@@ -63,6 +63,7 @@ import {
 	casObjectKey,
 	isNotModified,
 	parseAttestationDigestName,
+	type R2ObjectKey,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
@@ -574,6 +575,17 @@ export class AttestationsService {
 		);
 	}
 
+	// The cache's generation is part of the key, so a cache created after a
+	// deletion of the same name never writes over what its predecessor left.
+	listKey(cache: ResolvedCache, storePathHash: StorePathHash): R2ObjectKey {
+		return attestationListObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
+			cache.scope,
+			cache.generation
+		);
+	}
+
 	async negotiate(
 		cacheScope: CacheScope,
 		body: AttestationNegotiateRequest
@@ -756,11 +768,7 @@ export class AttestationsService {
 
 		return this.serveTenantObject(
 			request,
-			attestationListObjectKey(
-				this.context.requireTenant(),
-				storePathHash,
-				cache.scope
-			),
+			this.listKey(cache, storePathHash),
 			'application/json; charset=utf-8',
 			'no-store',
 			(object) => isListOfCommittedGeneration(object, cache, committed)
@@ -836,11 +844,7 @@ export class AttestationsService {
 		storePathHash: StorePathHash,
 		generation?: NarInfoGeneration
 	): Promise<void> {
-		const key = attestationListObjectKey(
-			this.context.requireTenant(),
-			storePathHash,
-			cache.scope
-		);
+		const key = this.listKey(cache, storePathHash);
 		const committedRow =
 			generation === undefined
 				? await this.narInfoObjects.committedNarInfoRow(cache, storePathHash)
@@ -899,9 +903,8 @@ export class AttestationsService {
 			return;
 		}
 
-		const tenant = this.context.requireTenant();
 		const keys = [...new Set(storePathHashes)].map((storePathHash) =>
-			attestationListObjectKey(tenant, storePathHash, cache.scope)
+			this.listKey(cache, storePathHash)
 		);
 
 		await this.context.objectWrites.write(keys, () =>
@@ -927,11 +930,7 @@ export class AttestationsService {
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<void> {
-		const key = attestationListObjectKey(
-			this.context.requireTenant(),
-			storePathHash,
-			cache.scope
-		);
+		const key = this.listKey(cache, storePathHash);
 
 		await this.context.objectWrites.write([key], async () => {
 			const object = await this.context.env.BLOBS.head(key);
