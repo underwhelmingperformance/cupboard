@@ -41,7 +41,20 @@ import {
 
 import { withDeadlineBudget } from './deadline.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
-import { SigningKeysService } from './signing-keys-service.ts';
+import {
+	backfillEntriesPerPass,
+	SigningKeysService
+} from './signing-keys-service.ts';
+
+// Store-path hashes are nix-base32, which omits `e`, `o`, `t` and `u`.
+function nixBase32Pair(index: number): string {
+	const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+
+	return (
+		alphabet.charAt(Math.floor(index / alphabet.length)) +
+		alphabet.charAt(index % alphabet.length)
+	);
+}
 
 async function drainKeyBackfill(): Promise<void> {
 	for (let pass = 0; pass < 3; pass += 1) {
@@ -649,6 +662,58 @@ describe('signing key rotation', () => {
 			backfillSorts: false,
 			continuationUsesIndex: true,
 			continuationSorts: false
+		});
+	});
+
+	// A continuation is written once and only shrinks, so its length belongs to
+	// whatever staged it. A pass publishes a row larger than any page it can
+	// afford.
+	it('publishes a continuation longer than one pass can settle', async () => {
+		await bootstrap();
+		const queued = 150;
+		const entries = Array.from({ length: queued }, (_, index) => ({
+			cache: '',
+			storePathHash: `${'0'.repeat(30)}${nixBase32Pair(index)}`,
+			narInfoGeneration: 1,
+			targetGeneration: 2,
+			tag: `narinfo-${String(index)}`
+		}));
+
+		const now = isoTimestamp(new Date());
+		const expiresAt = isoTimestamp(new Date(Date.now() + 3_600_000));
+		const remaining = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				instance.context.db
+					.insert(schema.cachePurgeContinuations)
+					.values({
+						id: 'oversized',
+						kind: 'backfill',
+						entriesJson: JSON.stringify(entries),
+						createdAt: now,
+						expiresAt
+					})
+					.run();
+				const service = new SigningKeysService(
+					instance.context,
+					new NarInfoObjectsService(instance.context)
+				);
+				await asOneInvocation(() => service.runBackfillOnce());
+
+				const row = instance.context.db
+					.select({ entriesJson: schema.cachePurgeContinuations.entriesJson })
+					.from(schema.cachePurgeContinuations)
+					.where(eq(schema.cachePurgeContinuations.id, 'oversized'))
+					.get();
+
+				return row === undefined
+					? undefined
+					: z.array(z.unknown()).parse(JSON.parse(row.entriesJson)).length;
+			}
+		);
+
+		expect({ remaining }).toStrictEqual({
+			remaining: queued - backfillEntriesPerPass
 		});
 	});
 
