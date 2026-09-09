@@ -61,81 +61,9 @@ export async function deleteObjects(
 	}
 }
 
-/**
- * A pending statement that exposes its bound parameters before execution. The
- * caller uses the parameter count to find a safe chunk size.
- */
-export interface InspectableStatement<Result> {
-	toSQL: () => { readonly params: readonly unknown[] };
-	execute: () => Promise<Result>;
-}
-
 export type InspectableBatchItem = BatchItem<'sqlite'> & {
 	toSQL: () => { readonly params: readonly unknown[] };
 };
-
-// Finds the widest chunk that satisfies `maxBoundParameters` by building and
-// measuring the statement. A statement can bind fixed parameters and can bind
-// its list more than once, so the helper narrows the estimate until the measured
-// statement fits.
-function fittedChunkWidth(
-	items: readonly unknown[],
-	parametersFor: (width: number) => number
-): number {
-	let width = items.length;
-
-	for (;;) {
-		const parameters = parametersFor(width);
-
-		if (parameters <= maxBoundParameters) {
-			return width;
-		}
-
-		if (width === 1) {
-			throw new StatementParameterLimitError(parameters, maxBoundParameters);
-		}
-
-		width = Math.max(
-			1,
-			Math.min(width - 1, Math.floor((width * maxBoundParameters) / parameters))
-		);
-	}
-}
-
-/**
- * Runs one statement for each chunk of `items`. Returns the processed prefix
- * and the result of each statement. The caller can defer the unprocessed suffix.
- *
- * Each chunk is as wide as the measured parameter limit allows. Before building
- * another chunk, the function checks that at least one D1 statement remains.
- */
-export async function executeChunkedStatement<Item, Result>(
-	items: readonly Item[],
-	buildStatement: (chunk: readonly Item[]) => InspectableStatement<Result>
-): Promise<{
-	readonly processed: readonly Item[];
-	readonly results: readonly Result[];
-}> {
-	const results: Result[] = [];
-	let processed = 0;
-
-	while (processed < items.length) {
-		if (statementsRemaining() < 1) {
-			break;
-		}
-
-		const rest = items.slice(processed);
-		const width = fittedChunkWidth(
-			rest,
-			(candidate) =>
-				buildStatement(rest.slice(0, candidate)).toSQL().params.length
-		);
-		results.push(await buildStatement(rest.slice(0, width)).execute());
-		processed += width;
-	}
-
-	return { processed: items.slice(0, processed), results };
-}
 
 interface FittedBatch {
 	readonly width: number;
