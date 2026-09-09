@@ -12,11 +12,21 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// A root-set request accepts at most 149 targets. In the worst case the probe
-// makes six D1 and R2 calls per target plus four fixed calls. Other root
-// operations can add targets to the root after the set request.
+// The largest target set one root-set or root-ensure request may carry.
 //
-// The targets bind as one list, so this does not bound statement size.
+// Either request replaces the root's whole target set: a target with no
+// committed row refuses the whole request, the new set is swapped in under the
+// write gate, and the targets it releases enter retention grace. A caller cannot
+// split one set across two requests, because the second would replace the first
+// and the sweep would collect what the missing part protected. A caller with
+// more paths than this splits them across named roots, which
+// `RootTargetLimitError` says.
+//
+// This bounds one request, not a root. A run root grows one target at a time
+// through `attachRoot`, which is additive and unbounded.
+//
+// The probe for a full set is checked against `subrequestsPerInvocation` by
+// `subrequest-budget.test.ts`.
 export const rootSetMaxTargets = 149;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
