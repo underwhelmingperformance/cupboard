@@ -37,7 +37,10 @@ export const internalOrigin = requestOriginSchema.parse(
 );
 
 // `GET /check` is a bounded one-shot scan. Its response reports when more
-// committed narinfos remain.
+// committed narinfos remain. A scan probes every row's narinfo object and every
+// distinct NAR, and a deep scan also reads each NAR back, so a batch of 1,000
+// makes at most 3,000 R2 requests, which `subrequest-budget.test.ts` checks
+// against `subrequestsPerInvocation`.
 export const checkBatchSize = 1000;
 
 // Each `POST /verify` pass advances one cursor batch and wraps after the final
@@ -86,9 +89,16 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export const blobReaperBatchSize = 500;
 
-// Workers Free permits 50 D1 statements in one invocation, counting each
-// statement of a batch. The D1 binding holds every maintenance invocation to
-// this allowance and refuses the statement that would exceed it.
+// Fifty D1 statements in one invocation, counting each statement of a batch.
+// The D1 binding holds every maintenance invocation to this allowance and
+// refuses the statement that would exceed it.
+//
+// Fifty is the Workers Free figure, and this deployment is on a paid plan:
+// both Worker configurations set `limits.cpu_ms` to 300,000, which is the paid
+// maximum, and Cloudflare accepts a `limits` block only on the Standard Usage
+// Model. The allowance is therefore more conservative than the plan requires.
+// Being conservative costs extra invocations and never a failed statement, so
+// it stands until somebody measures what the plan permits.
 export const d1StatementsPerInvocation = 50;
 
 export const objectDeletionBatchSize = d1StatementsPerInvocation - 1;
