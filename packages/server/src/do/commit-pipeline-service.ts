@@ -43,6 +43,7 @@ import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
 	QuotaExceededError,
+	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
@@ -111,9 +112,18 @@ export type CommitOutcome =
 
 export interface TenantAccount {
 	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
+	// Null when the tenant has no `tenant_usage` row.
+	readonly usageTenant: TenantId | null;
 	readonly bytes: number | null;
 	readonly casBytes: number | null;
 	readonly quotaBytes: number | null;
+}
+
+// The columns the charge batch's leading read returns. `TenantAccount` is a
+// superset, so `refuseUnmeteredTenant` accepts either.
+interface ChargeGateRow {
+	readonly status: TenantAccount['status'];
+	readonly usageTenant: TenantId | null;
 }
 
 interface CanonicalBlobFacts {
@@ -174,7 +184,7 @@ interface PendingMaterialise {
 }
 
 // Each materialisation adds five statements, and the charge batch adds one for
-// the tenant status read. A flush also reads the tenant account before it takes
+// its leading tenant read. A flush also reads the tenant account before it takes
 // the gate.
 const statementsPerMaterialise = 5;
 const materialiseFlushOverheadStatements = 2;
@@ -489,6 +499,7 @@ export class CommitPipelineService {
 		return this.context.d1
 			.select({
 				status: d1Schema.tenant.status,
+				usageTenant: d1Schema.tenantUsage.tenant,
 				bytes: d1Schema.tenantUsage.bytes,
 				casBytes: d1Schema.tenantUsage.casBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
@@ -550,7 +561,9 @@ export class CommitPipelineService {
 
 	// Keep the usage updates, reference and ownership inserts, and reaper disarm
 	// in one batch. Their predicates make a replay idempotent and refuse every
-	// write unless the tenant is still active.
+	// write unless the tenant is still active and has a usage row. The inserts
+	// need the usage-row predicate as much as the updates do: without it they
+	// would store an edge the updates never charged.
 	private chargeStatements(
 		tenant: TenantId,
 		cache: StoredCache,
@@ -559,15 +572,22 @@ export class CommitPipelineService {
 		blob: { readonly fileSize: number },
 		now: IsoTimestamp
 	): BatchItem<'sqlite'>[] {
-		const activeTenantFilter = and(
-			eq(d1Schema.tenant.id, tenant),
-			eq(d1Schema.tenant.status, 'active')
+		const usageRowPresent = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant))
 		);
-		const tenantActive = exists(
+		const chargeableTenantFilter = and(
+			eq(d1Schema.tenant.id, tenant),
+			eq(d1Schema.tenant.status, 'active'),
+			usageRowPresent
+		);
+		const tenantChargeable = exists(
 			this.context.d1
 				.select({ one: d1Schema.tenant.id })
 				.from(d1Schema.tenant)
-				.where(activeTenantFilter)
+				.where(chargeableTenantFilter)
 		);
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
@@ -594,16 +614,16 @@ export class CommitPipelineService {
 		const creditNarInfoFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			edgeMissing,
-			tenantActive
+			tenantChargeable
 		);
 		const creditBytesFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceMissing,
-			tenantActive
+			tenantChargeable
 		);
 		const graceClearFilter = and(
 			eq(d1Schema.blobState.narHash, metadata.narHash),
-			tenantActive
+			tenantChargeable
 		);
 
 		return [
@@ -641,7 +661,7 @@ export class CommitPipelineService {
 							)
 						})
 						.from(d1Schema.tenant)
-						.where(activeTenantFilter)
+						.where(chargeableTenantFilter)
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -656,7 +676,7 @@ export class CommitPipelineService {
 							fileSize: sql<number>`${blob.fileSize}`.as('file_size')
 						})
 						.from(d1Schema.tenant)
-						.where(activeTenantFilter)
+						.where(chargeableTenantFilter)
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -666,11 +686,34 @@ export class CommitPipelineService {
 		];
 	}
 
-	private tenantStatusSelect(tenant: TenantId) {
+	// The leading read of a charge batch: the status the statements are gated
+	// on, and whether the usage row they require exists. It selects no counter
+	// column. `verify-fault-isolation.workers.test.ts` matches this statement's
+	// SQL prefix to fail the in-gate read alone, and the prefix differs from
+	// the advisory account read only after the second column.
+	private tenantChargeGateSelect(tenant: TenantId) {
 		return this.context.d1
-			.select({ status: d1Schema.tenant.status })
+			.select({
+				status: d1Schema.tenant.status,
+				usageTenant: d1Schema.tenantUsage.tenant
+			})
 			.from(d1Schema.tenant)
+			.leftJoin(
+				d1Schema.tenantUsage,
+				eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
+			)
 			.where(eq(d1Schema.tenant.id, tenant));
+	}
+
+	// Status keeps precedence: a tenant that is not active is reported as
+	// inactive, not as unmetered.
+	private refuseUnmeteredTenant(
+		tenant: TenantId,
+		gate: ChargeGateRow | undefined
+	): void {
+		if (gate?.status === 'active' && gate.usageTenant === null) {
+			throw new TenantUsageMissingError(tenant);
+		}
 	}
 
 	// The database quota check rolls back the whole charge batch, so an edge
@@ -684,14 +727,14 @@ export class CommitPipelineService {
 	): Promise<ChargeOutcome> {
 		const now = isoTimestamp(new Date());
 
-		let statusRows: { status: TenantAccount['status'] }[];
+		let gateRows: ChargeGateRow[];
 
 		try {
-			const [status] = await this.context.d1.batch([
-				this.tenantStatusSelect(tenant),
+			const [gate] = await this.context.d1.batch([
+				this.tenantChargeGateSelect(tenant),
 				...this.chargeStatements(tenant, cache, metadata, generation, blob, now)
 			]);
-			statusRows = status;
+			gateRows = gate;
 		} catch (error) {
 			// Concurrent commits can both pass the advisory quota check. Re-read
 			// after a failed charge to distinguish that race from a storage fault.
@@ -708,12 +751,14 @@ export class CommitPipelineService {
 			throw error;
 		}
 
-		if (statusRows.at(0)?.status !== 'active') {
+		if (gateRows.at(0)?.status !== 'active') {
 			return {
 				kind: 'tenant-inactive',
-				tenantStatus: statusRows.at(0)?.status
+				tenantStatus: gateRows.at(0)?.status
 			};
 		}
+
+		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
 
 		return { kind: 'charged' };
 	}
@@ -742,24 +787,26 @@ export class CommitPipelineService {
 			)
 		);
 
-		let statusRows: { status: TenantAccount['status'] }[];
+		let gateRows: ChargeGateRow[];
 
 		try {
-			const [status] = await this.context.d1.batch([
-				this.tenantStatusSelect(tenant),
+			const [gate] = await this.context.d1.batch([
+				this.tenantChargeGateSelect(tenant),
 				...statements
 			]);
-			statusRows = status;
+			gateRows = gate;
 		} catch {
 			return { kind: 'retry-individually' };
 		}
 
-		if (statusRows.at(0)?.status !== 'active') {
+		if (gateRows.at(0)?.status !== 'active') {
 			return {
 				kind: 'tenant-inactive',
-				tenantStatus: statusRows.at(0)?.status
+				tenantStatus: gateRows.at(0)?.status
 			};
 		}
+
+		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
 
 		return { kind: 'charged' };
 	}
@@ -1380,6 +1427,14 @@ export class CommitPipelineService {
 			uploadId,
 			pending.metadataJson
 		);
+		const tenant = this.context.requireTenant();
+		const account = advisory?.account ?? (await this.tenantAccount(tenant));
+
+		// Refuse here as well as at the charge. A deferred upload is published or
+		// refused by a later verification pass, which has no verdict for this
+		// refusal; the client would wait until the upload expired.
+		this.refuseUnmeteredTenant(tenant, account);
+
 		const existingNarInfo = this.context.db
 			.select()
 			.from(schema.narInfos)
@@ -1499,14 +1554,12 @@ export class CommitPipelineService {
 		}
 
 		const canonicalKey = narObjectKey(metadata.narHash);
-		const tenant = this.context.requireTenant();
 
-		const [probe, stagedObject, account] = await Promise.all([
+		const [probe, stagedObject] = await Promise.all([
 			this.probeMaterialisation(metadata, advisory?.prefetched),
 			pending.r2Key === canonicalKey
 				? undefined
-				: this.context.env.BLOBS.head(pending.r2Key),
-			advisory?.account ?? this.tenantAccount(tenant)
+				: this.context.env.BLOBS.head(pending.r2Key)
 		]);
 
 		const stagedSize =
