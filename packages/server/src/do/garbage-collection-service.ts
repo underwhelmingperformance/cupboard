@@ -47,30 +47,26 @@ import {
 	jsonValueLists
 } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
-import { isRowBudgetExhausted, rowsRemaining } from './row-budget.ts';
+import { isRowBudgetExhausted } from './row-budget.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 /**
- * How large a page the phase that is due may read.
+ * The items one phase step reads before the pass consults its row budget.
  *
- * The phases of one pass draw on a single row budget in sequence, so a phase
- * can become due with the budget already spent. A page of zero rows would
- * select nothing, record no progress and leave the pass at the same phase
- * boundary on the next invocation, so the due phase always reads at least one
- * row however much that row costs it to process.
+ * The budget decides how much of a backlog one invocation clears. A step
+ * always runs whole, so this decides only by how much a step can overshoot
+ * the budget: a larger step spends fewer statements per item and overshoots
+ * by more.
  *
- * Processing a row costs more rows than reading it, so a full page spends a
- * multiple of what the budget had left. The budget bounds what a pass reads
- * before it defers, not what it spends: a statement's row count is known only
- * once it has run.
+ * Do not size a step from the rows the budget has left. A row is not an
+ * item: each phase spends several rows per item it reads, by a factor that
+ * differs per phase, so a step sized that way spends a multiple of the
+ * budget.
  */
-function phasePageSize(): number {
-	return Math.max(1, rowsRemaining());
-}
+export const phaseStepSize = 128;
 
-// The roots one expiry phase inspects. This is a step size rather than a bound
-// on the statement: the phase reads every root it selects in one query, and the
-// row budget decides when the pass stops.
+// The roots one expiry step inspects. A step size like `phaseStepSize`; the
+// row budget decides how many steps a pass runs.
 export const maxRootsExpiredPerRun = 32;
 
 /**
@@ -268,7 +264,7 @@ export class GarbageCollectionService {
 		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
-		const rootPage = Math.min(phasePageSize(), maxRootsExpiredPerRun);
+		const rootPage = maxRootsExpiredPerRun;
 
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
@@ -298,7 +294,7 @@ export class GarbageCollectionService {
 			)
 		);
 
-		const targetPage = phasePageSize();
+		const targetPage = phaseStepSize;
 
 		// Anchor each target's grace period to the root's recorded expiry. Using the
 		// collection time would extend retention whenever collection runs late.
@@ -408,8 +404,8 @@ export class GarbageCollectionService {
 		cache: StoredCache,
 		phase: 'roots' | 'grace',
 		cursor: string
-	): { readonly complete: boolean } {
-		const page = phasePageSize();
+	): void {
+		const page = phaseStepSize;
 		const rows =
 			phase === 'roots'
 				? this.context.db
@@ -449,15 +445,14 @@ export class GarbageCollectionService {
 			this.updateScan(cache, {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
-			return { complete: false };
+
+			return;
 		}
 
 		this.updateScan(cache, {
 			phase: phase === 'roots' ? 'grace' : 'mark',
 			cursor: ''
 		});
-
-		return { complete: true };
 	}
 
 	private existingMarks(
@@ -620,7 +615,7 @@ export class GarbageCollectionService {
 
 			this.validateReferencesContainer(cache, storePathHash);
 
-			const page = phasePageSize();
+			const page = phaseStepSize;
 
 			const references = this.context.db.all<{
 				referenceIndex: number;
@@ -755,7 +750,7 @@ export class GarbageCollectionService {
 		readonly pathsCollected: number;
 		readonly complete: boolean;
 	} {
-		const page = phasePageSize();
+		const page = phaseStepSize;
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
@@ -852,7 +847,9 @@ export class GarbageCollectionService {
 				const expired = this.expireRoots(cache, now);
 				rootsExpired += expired.rootsExpired;
 				rootTargetsExpired += expired.rootTargetsExpired;
-				hasMoreExpiredRoots ||= expired.hasMoreExpiredRoots;
+				// Report what the last step saw, not what any step saw: a later step
+				// can finish the roots an earlier one left behind.
+				hasMoreExpiredRoots = expired.hasMoreExpiredRoots;
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
 					allowEmptyCollection:
@@ -862,7 +859,7 @@ export class GarbageCollectionService {
 					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
 				});
 
-				if (expired.hasMoreExpiredRoots || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -870,7 +867,7 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'expire-grace') {
-				const page = phasePageSize();
+				const page = phaseStepSize;
 				const candidates = this.context.db
 					.select({ storePathHash: schema.retentionGrace.storePathHash })
 					.from(schema.retentionGrace)
@@ -906,7 +903,7 @@ export class GarbageCollectionService {
 					...(candidates.length <= batch.length && { phase: 'roots' })
 				});
 
-				if (candidates.length > batch.length || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -914,9 +911,9 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				const seeded = this.advanceSeed(cache, scan.phase, scan.cursor);
+				this.advanceSeed(cache, scan.phase, scan.cursor);
 
-				if (!seeded.complete || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -1119,12 +1116,40 @@ export class GarbageCollectionService {
 		return true;
 	}
 
-	// A family can hold more members than one pass can afford. Delete a page from
-	// the oldest expired family and keep the family until every member is gone.
-	private collectExpiredRefreshFamily(
+	/**
+	 * Deletes expired refresh-token families a step at a time until the budget is
+	 * spent or none is left. A family row is deleted only after its last member,
+	 * so a partly deleted family is found again by the next pass without a
+	 * cursor.
+	 */
+	private collectExpiredRefreshFamilies(
 		now: IsoTimestamp
 	): ExpiredRefreshFamilyCollection {
-		const page = phasePageSize();
+		let familiesDeleted = 0;
+		let membersDeleted = 0;
+
+		for (;;) {
+			const step = this.collectExpiredRefreshFamilyStep(now);
+			familiesDeleted += step.familiesDeleted;
+			membersDeleted += step.membersDeleted;
+
+			if (!step.hasMoreWork || isRowBudgetExhausted()) {
+				return {
+					familiesDeleted,
+					membersDeleted,
+					hasMoreWork: step.hasMoreWork
+				};
+			}
+		}
+	}
+
+	// A family can hold more members than one step deletes. Delete a step's worth
+	// from the oldest expired family and keep the family until every member is
+	// gone.
+	private collectExpiredRefreshFamilyStep(
+		now: IsoTimestamp
+	): ExpiredRefreshFamilyCollection {
+		const page = phaseStepSize;
 
 		return this.context.db.transaction((transaction) => {
 			const family = transaction
@@ -1212,7 +1237,7 @@ export class GarbageCollectionService {
 		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
-			const expiredRefreshFamilies = this.collectExpiredRefreshFamily(now);
+			const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
 			if (expiredRefreshFamilies.hasMoreWork) {
 				log.warn(
