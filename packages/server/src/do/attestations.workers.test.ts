@@ -66,6 +66,7 @@ import {
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
+import { maxBoundParameters } from './bulk.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
@@ -597,13 +598,14 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('decides correctly when the bundle count exceeds one chunk width', async () => {
-		// 91 distinct storePathHashes crosses the maxInClauseValues (90) boundary
-		// in narInfoRowsFor, so this pins the chunked DO SQLite read in negotiate.
+	it('decides correctly for more bundles than a statement could bind', async () => {
+		// 101 distinct storePathHashes and the cache would be 102 parameters if
+		// the read bound a value per hash, so this pins the Durable Object read
+		// that negotiate makes from a bound list.
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
 
-		const uncommittedHashes = Array.from({ length: 90 }, () =>
+		const uncommittedHashes = Array.from({ length: maxBoundParameters }, () =>
 			uniqueStorePathHash()
 		);
 		const fakeDigest = sha256HexDigestSchema.parse('ab'.repeat(32));
@@ -641,9 +643,9 @@ describe('attestation attach and reads', () => {
 			uploadCount: uploadDecisions.length,
 			skip: skipDecisions
 		}).toStrictEqual({
-			totalDecisions: 91,
+			totalDecisions: maxBoundParameters + 1,
 			skipCount: 1,
-			uploadCount: 90,
+			uploadCount: maxBoundParameters,
 			skip: [{ action: 'skip', storePathHash: metadata.storePathHash, digest }]
 		});
 	});
@@ -673,12 +675,16 @@ async function committedPathBundle(): Promise<{
 	return { token, nar, metadata, bundle, digest };
 }
 
+// Distinct for 1,024 calls: the cursor's two low base-32 digits vary.
 function uniqueStorePathHash(): string {
-	const digit =
-		'0123456789abcdfghijklmnpqrsvwxyz'[storePathHashCursor.next % 32] ?? '0';
+	const nixBase32 = '0123456789abcdfghijklmnpqrsvwxyz';
+	const index = storePathHashCursor.next;
 	storePathHashCursor.next += 1;
 
-	return digit.repeat(32);
+	const high = nixBase32[Math.floor(index / 32) % 32] ?? '0';
+	const low = nixBase32[index % 32] ?? '0';
+
+	return `${'0'.repeat(30)}${high}${low}`;
 }
 
 async function attachBundle(
