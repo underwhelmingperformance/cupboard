@@ -12,10 +12,13 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// A root can contain at most 1,000 targets. Updating a root probes the narinfo
-// and canonical NAR for each distinct target, then replaces its target rows. The
-// limit bounds both R2 requests and SQL statement size within one Durable Object
-// request.
+// A root can contain at most 1,000 targets. Updating a root probes each distinct
+// target's narinfo object and canonical NAR, repairs a narinfo object that is
+// missing, and probes the repaired objects again: four R2 requests for each
+// target at worst, so 4,000 for a full root.
+//
+// The targets bind as one list, so this does not bound statement size. The R2
+// count is checked against `subrequestsPerInvocation`.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
@@ -73,9 +76,9 @@ export type ParsedRootEnsureResponse = z.output<
 	typeof rootEnsureResponseSchema
 >;
 
-// A target page probes the narinfo object for each distinct path. A page contains
-// at most 200 targets so one request remains below the internal subrequest
-// limit. Root listings use the same page size to bound response size.
+// A target page runs the same four-request probe for each distinct path as
+// `rootSetMaxTargets` describes, so a page of 200 targets makes at most 800 R2
+// requests. Root listings use the same page size to bound response size.
 export const rootListPageSize = 200;
 
 // Clients must return the cursor unchanged to resume a listing. Its contents
