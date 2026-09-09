@@ -49,6 +49,7 @@ import {
 	AttestationUploadNotFoundError,
 	InvalidPushIdError,
 	QuotaExceededError,
+	TenantUsageMissingError,
 	TenantWritesStoppedError
 } from '../errors.ts';
 import {
@@ -173,9 +174,17 @@ export class AttestationsService {
 			throw new TenantWritesStoppedError(tenant, statusRows[0]?.status);
 		}
 
+		const usage = usageRows[0];
+
+		// Refuse before `promoteMeasuredBundle` writes the CAS object.
+		if (usage === undefined) {
+			await this.clearPendingUploadAndStaging(pending);
+			throw new TenantUsageMissingError(tenant);
+		}
+
 		if (
 			this.attestationCas.overQuotaForCharge(
-				usageRows[0],
+				usage,
 				ownedRows.length > 0,
 				measured.size
 			)

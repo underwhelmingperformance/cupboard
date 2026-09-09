@@ -406,6 +406,95 @@ describe('tenant registry', () => {
 		});
 	});
 
+	it('writes no tenant row when the usage row cannot be stored', async () => {
+		// The create schema rejects a negative quota, so the value bypasses it.
+		// The usage insert then violates the quota CHECK, which fails the second
+		// statement of the batch.
+		const body = { ...quotaBody(acme, 0), quotaBytes: -1 };
+
+		const rejected = await rejectedBy(() =>
+			ensureTenant(database(), body, now)
+		);
+		const tenant = await database()
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+
+		expect({
+			failed: rejected !== undefined,
+			tenantStored: tenant !== undefined,
+			usageStored: (await usageRow(acme)) !== undefined
+		}).toStrictEqual({
+			failed: true,
+			tenantStored: false,
+			usageStored: false
+		});
+	});
+
+	it.each([
+		{
+			table: 'tenant_blob',
+			insert:
+				'INSERT INTO tenant_blob (tenant, nar_hash, file_size) VALUES (?, ?, 13)',
+			digest: `sha256:${'0'.repeat(52)}`
+		},
+		{
+			table: 'tenant_cas_blob',
+			insert:
+				'INSERT INTO tenant_cas_blob (tenant, digest, size) VALUES (?, ?, 13)',
+			digest: 'a'.repeat(64)
+		},
+		{
+			table: 'blob_ref',
+			insert:
+				"INSERT INTO blob_ref (tenant, nar_hash, cache, store_path_hash, generation) VALUES (?, ?, '', '00000000000000000000000000000000', 0)",
+			digest: `sha256:${'0'.repeat(52)}`
+		},
+		{
+			table: 'attestation_ref',
+			insert:
+				"INSERT INTO attestation_ref (tenant, digest, cache, store_path_hash, generation, predicate_type) VALUES (?, ?, '', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
+			digest: 'a'.repeat(64)
+		}
+	])(
+		'refuses zero accounting repair when $table already has tenant data',
+		async ({ table, insert, digest }) => {
+			const body = quotaBody(acme, 1000);
+			await ensureTenant(database(), body, now);
+			await env.CUPBOARD_DB.prepare(insert).bind(acme, digest).run();
+			await database()
+				.delete(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, acme));
+			const rowsBefore = await env.CUPBOARD_DB.prepare(
+				`SELECT * FROM ${table} WHERE tenant = ?`
+			)
+				.bind(acme)
+				.all();
+			const rejected = await rejectedBy(() =>
+				ensureTenant(database(), body, now)
+			);
+			const rowsAfter = await env.CUPBOARD_DB.prepare(
+				`SELECT * FROM ${table} WHERE tenant = ?`
+			)
+				.bind(acme)
+				.all();
+			expect({
+				error: rejected === undefined ? undefined : errorFields(rejected),
+				usage: await usageRow(acme),
+				rows: rowsAfter.results
+			}).toStrictEqual({
+				error: {
+					name: 'TenantUsageRepairRequiredError',
+					status: StatusCodes.INTERNAL_SERVER_ERROR,
+					tenant: acme
+				},
+				usage: undefined,
+				rows: rowsBefore.results
+			});
+		}
+	);
+
 	it('rejects a conflicting re-create of a crash residue without writing a usage row', async () => {
 		await database()
 			.insert(d1Schema.tenant)
