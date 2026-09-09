@@ -16,7 +16,7 @@ import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { isPushIdValid } from '../blob/push-id.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty } from '../do/bulk.ts';
-import { jsonValueLists } from '../do/json-list.ts';
+import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
 
 // Hint reads happen before the Durable Object authenticates the request. Bound
@@ -103,8 +103,67 @@ export async function computeNegotiateHints(
 	}
 }
 
+type HintDatabase = ReturnType<typeof drizzleD1<typeof d1Schema>>;
+
+// The three fact reads a negotiation issues. Each binds its list as one
+// parameter. The parameter test imports these builders.
+export function blobStateHintSelect(
+	database: HintDatabase,
+	narHashes: JsonValueList<NixSha256HashString>
+) {
+	return database
+		.select({
+			narHash: d1Schema.blobState.narHash,
+			fileHash: d1Schema.blobState.fileHash,
+			fileSize: d1Schema.blobState.fileSize,
+			compression: d1Schema.blobState.compression,
+			narSize: d1Schema.blobState.narSize,
+			deleteAfter: d1Schema.blobState.deleteAfter
+		})
+		.from(d1Schema.blobState)
+		.where(inArray(d1Schema.blobState.narHash, narHashes));
+}
+
+export function ownedBlobHintSelect(
+	database: HintDatabase,
+	tenant: TenantId,
+	narHashes: JsonValueList<NixSha256HashString>
+) {
+	return database
+		.select({ narHash: d1Schema.tenantBlob.narHash })
+		.from(d1Schema.tenantBlob)
+		.where(
+			and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				inArray(d1Schema.tenantBlob.narHash, narHashes)
+			)
+		);
+}
+
+export function committedEdgeHintSelect(
+	database: HintDatabase,
+	tenant: TenantId,
+	cache: StoredCache,
+	storePathHashes: JsonValueList<StorePathHash>
+) {
+	return database
+		.select({
+			storePathHash: d1Schema.blobReference.storePathHash,
+			generation: d1Schema.blobReference.generation,
+			narHash: d1Schema.blobReference.narHash
+		})
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				eq(d1Schema.blobReference.cache, cache),
+				inArray(d1Schema.blobReference.storePathHash, storePathHashes)
+			)
+		);
+}
+
 async function readHints(
-	database: ReturnType<typeof drizzleD1<typeof d1Schema>>,
+	database: HintDatabase,
 	tenant: TenantId,
 	cache: StoredCache | undefined,
 	narHashes: readonly NixSha256HashString[],
@@ -113,47 +172,16 @@ async function readHints(
 	// Each list is bound as one parameter, so a negotiation of any size reads
 	// each fact with one statement. The queries still go out as one D1 batch.
 	const blobStateQueries = jsonValueLists(narHashes).map((list) =>
-		database
-			.select({
-				narHash: d1Schema.blobState.narHash,
-				fileHash: d1Schema.blobState.fileHash,
-				fileSize: d1Schema.blobState.fileSize,
-				compression: d1Schema.blobState.compression,
-				narSize: d1Schema.blobState.narSize,
-				deleteAfter: d1Schema.blobState.deleteAfter
-			})
-			.from(d1Schema.blobState)
-			.where(inArray(d1Schema.blobState.narHash, list))
+		blobStateHintSelect(database, list)
 	);
 	const ownedQueries = jsonValueLists(narHashes).map((list) =>
-		database
-			.select({ narHash: d1Schema.tenantBlob.narHash })
-			.from(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					inArray(d1Schema.tenantBlob.narHash, list)
-				)
-			)
+		ownedBlobHintSelect(database, tenant, list)
 	);
 	const edgeQueries =
 		cache === undefined
 			? []
 			: jsonValueLists(storePathHashes).map((list) =>
-					database
-						.select({
-							storePathHash: d1Schema.blobReference.storePathHash,
-							generation: d1Schema.blobReference.generation,
-							narHash: d1Schema.blobReference.narHash
-						})
-						.from(d1Schema.blobReference)
-						.where(
-							and(
-								eq(d1Schema.blobReference.tenant, tenant),
-								eq(d1Schema.blobReference.cache, cache),
-								inArray(d1Schema.blobReference.storePathHash, list)
-							)
-						)
+					committedEdgeHintSelect(database, tenant, cache, list)
 				);
 
 	const [blobStatePages, ownedPages, edgePages] = await Promise.all([

@@ -30,11 +30,9 @@ function generatedHash(index: number): string {
 	return prefix.repeat(16);
 }
 
-// A full commit batch's worth: past the per-insert row bound
-// (maxInClauseValues / 3 = 30) and the per-select IN-list bound
-// (maxInClauseValues = 90), so a regression that binds a whole batch in one
-// statement throws against the Durable Object's SQLite bind cap rather than
-// silently passing at a smaller size.
+// A full commit batch's worth, and more values than the 100-parameter limit
+// leaves room for, so a regression that binds a value for each hash is refused
+// at the binding rather than passing quietly at a smaller size.
 const hashCount = 100;
 const hashes = Array.from({ length: hashCount }, (_, index) =>
 	storePathHashSchema.parse(generatedHash(index))
