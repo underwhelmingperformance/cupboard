@@ -57,7 +57,7 @@ import {
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
-import { batchNonEmpty, chunk } from './bulk.ts';
+import { batchNonEmpty } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
@@ -73,10 +73,9 @@ import {
 	storedGraceDeadlines,
 	storedGraceFact
 } from './grace-decision.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
-import { maxRootTargetInsertRows } from './roots-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { affordableOperations } from './statement-scope.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
@@ -1032,10 +1031,17 @@ export class CommitPipelineService {
 				: []
 		);
 
-		for (const batch of chunk(targets, maxRootTargetInsertRows)) {
+		for (const batch of jsonRowLists(targets)) {
 			this.context.db
 				.insert(schema.retentionRootTargets)
-				.values(batch)
+				.select(
+					batch.insertSource([
+						batch.column('cache'),
+						batch.column('rootName'),
+						batch.column('storePathHash'),
+						batch.column('storePath')
+					])
+				)
 				.onConflictDoNothing()
 				.run();
 		}
