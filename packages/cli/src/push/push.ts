@@ -1586,8 +1586,8 @@ export class RootTargetLimitError extends UsageError {
 		public readonly limit: number
 	) {
 		super(
-			`the named root would contain ${String(count)} targets, but a root accepts ` +
-				`at most ${String(limit)}; split the paths across named roots`
+			`the root update would carry ${String(count)} targets, but one update ` +
+				`accepts at most ${String(limit)}; split the paths across named roots`
 		);
 		this.name = 'RootTargetLimitError';
 	}
