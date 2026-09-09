@@ -10,7 +10,8 @@ export const statsContract = {
 	cache: baseProcedure
 		.meta({
 			requires: 'stats:read',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'GET', path: '/cache/{cacheName}/stats' })
 		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
@@ -18,7 +19,7 @@ export const statsContract = {
 
 	// Usage covers the tenant and therefore declares no cache resource.
 	usage: baseProcedure
-		.meta({ requires: 'stats:read' })
+		.meta({ requires: 'stats:read', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/usage' })
 		.output(usageResponseSchema)
 };
