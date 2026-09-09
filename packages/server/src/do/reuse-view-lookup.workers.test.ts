@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
@@ -15,7 +16,8 @@ import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -28,9 +30,10 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-import { reuseCandidateLimit } from './reuse-view-lookup-service.ts';
+import { reuseDistinctNarLimit } from './reuse-view-lookup-service.ts';
 import {
 	committedPath,
+	insertAgreeingCopy,
 	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
@@ -42,6 +45,15 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 function sharedFacts() {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
+
+// The properties a lookup's own log events carry, without the request context
+// the logger adds to every event.
+const reuseLookupEventSchema = z.object({
+	view: z.string(),
+	storePathHash: z.string(),
+	limit: z.number().optional(),
+	caches: z.array(z.string()).optional()
+});
 
 describe('reuse-view narinfo lookup', () => {
 	beforeEach(resetTestServer);
@@ -218,25 +230,24 @@ describe('reuse-view narinfo lookup', () => {
 		});
 	});
 
-	it('misses instead of truncating past the candidate limit', async () => {
-		const path = await committedPath('reuse-limit', 'pr-0', {
+	// Every copy the view selects is compared rather than truncated, so the
+	// number of caches holding a path does not affect whether it is served.
+	it('serves a path that many caches of the view hold', async () => {
+		const copies = 40;
+		const path = await committedPath('reuse-wide', 'pr-0', {
 			storePathHash: '4'.repeat(32)
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		for (let index = 1; index <= reuseCandidateLimit; index += 1) {
-			await insertUnbackedRow(
-				`pr-${String(index)}`,
-				path.storePathHash,
-				path.narHash
-			);
+		for (let index = 1; index <= copies; index += 1) {
+			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
 		}
 
+		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+
 		const response = await readFetch(lookupPath(path.storePathHash));
+		const narInfo = NarInfo.parse(await response.text());
 		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
-			body: JSON.stringify({
-				storePathHashes: [path.storePathHash]
-			}),
+			body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
 			headers: { 'content-type': 'application/json' },
 			method: 'POST'
 		});
@@ -246,38 +257,96 @@ describe('reuse-view narinfo lookup', () => {
 
 		expect({
 			narInfoStatus: response.status,
+			narHash: narInfo.narHash.toString(),
 			availabilityStatus: availability.status,
 			body
 		}).toStrictEqual({
-			narInfoStatus: StatusCodes.NOT_FOUND,
+			narInfoStatus: StatusCodes.OK,
+			narHash: path.narHash,
 			availabilityStatus: StatusCodes.OK,
-			body: { missingStorePathHashes: [path.storePathHash] }
+			body: { missingStorePathHashes: [] }
 		});
 	});
 
-	it('serves at exactly the candidate limit', async () => {
-		const path = await committedPath('reuse-limit-edge', 'pr-0', {
-			storePathHash: 'f4'.repeat(16)
+	// The comparison is what makes serving a wide view safe, so it has to reach
+	// every copy. One cache out of many that disagrees still refuses the path.
+	it('answers a wide view with one disagreeing copy as a miss', async () => {
+		const agreeing = 40;
+		const path = await committedPath('reuse-wide-conflict', 'pr-0', {
+			storePathHash: '7'.repeat(32)
+		});
+
+		for (let index = 1; index <= agreeing; index += 1) {
+			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
+		}
+
+		await committedPath('reuse-wide-other', `pr-${String(agreeing + 1)}`, {
+			storePathHash: path.storePathHash,
+			name: 'divergent'
 		});
 		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		for (let index = 1; index < reuseCandidateLimit; index += 1) {
-			await insertUnbackedRow(
+		const response = await readFetch(lookupPath(path.storePathHash));
+
+		expect(response.status).toBe(StatusCodes.NOT_FOUND);
+	});
+
+	// The probe heads one NAR object for each distinct NAR among the copies. A
+	// path with more distinct NARs than the limit is refused before the probe:
+	// its copies disagree, so the comparison would refuse it in any case.
+	it('refuses a path over the distinct NAR limit before the probe', async () => {
+		const copies = reuseDistinctNarLimit + 1;
+		const storePathHash = '6'.repeat(32);
+
+		for (let index = 1; index <= copies; index += 1) {
+			await committedPath(
+				`reuse-distinct-${String(index)}`,
 				`pr-${String(index)}`,
-				path.storePathHash,
-				path.narHash
+				{
+					storePathHash,
+					name: `copy-${String(index)}`
+				}
 			);
 		}
 
-		const response = await readFetch(lookupPath(path.storePathHash));
-		const narInfo = NarInfo.parse(await response.text());
+		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		expect({
-			status: response.status,
-			narHash: narInfo.narHash.toString()
-		}).toStrictEqual({
-			status: StatusCodes.OK,
-			narHash: path.narHash
+		const heads = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+			vi.spyOn(instance.context.env.BLOBS, 'head')
+		);
+		const capture = startCapture();
+		let status: number;
+		let narHeads: number;
+
+		try {
+			const response = await readFetch(lookupPath(storePathHash));
+			status = response.status;
+			narHeads = heads.mock.calls.filter(([key]) =>
+				key.startsWith('nar/')
+			).length;
+		} finally {
+			capture.stop();
+			heads.mockRestore();
+		}
+
+		const events = capture.logs
+			.filter((entry) => entry.message.startsWith('reuse lookup'))
+			.map((entry) => ({
+				message: entry.message,
+				...reuseLookupEventSchema.parse(entry.properties)
+			}));
+
+		expect({ status, narHeads, events }).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			narHeads: 0,
+			events: [
+				{
+					message: 'reuse lookup exceeded the distinct NAR limit',
+					view: 'reuse',
+					storePathHash,
+					limit: reuseDistinctNarLimit
+				}
+			]
 		});
 	});
 
