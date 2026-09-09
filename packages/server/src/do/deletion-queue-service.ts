@@ -631,18 +631,52 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration,
 		now: IsoTimestamp
 	): void {
-		handle
-			.insert(schema.narInfoDeletions)
-			.values({ cache, storePathHash, narHash, generation, createdAt: now })
-			.onConflictDoUpdate({
-				target: [
-					schema.narInfoDeletions.cache,
-					schema.narInfoDeletions.storePathHash,
-					schema.narInfoDeletions.generation
-				],
-				set: { narHash, createdAt: now }
-			})
-			.run();
+		this.enqueueNarInfoDeletions(
+			handle,
+			cache,
+			[{ storePathHash, narHash, generation }],
+			now
+		);
+	}
+
+	/**
+	 * Queues one page of narinfo versions for deletion in a single statement.
+	 * A version already queued keeps its original timestamp and takes the newer
+	 * NAR hash.
+	 */
+	enqueueNarInfoDeletions(
+		handle: SchemaWriter,
+		cache: StoredCache,
+		entries: readonly TornDownNarInfo[],
+		now: IsoTimestamp
+	): void {
+		for (const rows of jsonRowLists(entries)) {
+			handle
+				.insert(schema.narInfoDeletions)
+				.select(
+					rows.insertSource([
+						sql`${cache}`,
+						rows.column('storePathHash'),
+						rows.column('narHash'),
+						rows.column('generation'),
+						sql`${now}`
+					])
+				)
+				.onConflictDoUpdate({
+					target: [
+						schema.narInfoDeletions.cache,
+						schema.narInfoDeletions.storePathHash,
+						schema.narInfoDeletions.generation
+					],
+					// Keep the original timestamp. The conflict target is the same
+					// logical deletion queued again, and a row that is re-queued has
+					// not been created again. Nothing reads this column today, so this
+					// exists so that anything which later ages the queue by it gets the
+					// age of the deletion rather than of the last re-queue.
+					set: { narHash: sql`excluded.nar_hash` }
+				})
+				.run();
+		}
 	}
 
 	// The caller must hold the critical section. The row cap and the invocation's

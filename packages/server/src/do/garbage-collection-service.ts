@@ -15,6 +15,7 @@ import {
 	inArray,
 	lt,
 	lte,
+	notExists,
 	or,
 	type SQL,
 	sql
@@ -48,7 +49,6 @@ import {
 } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
 import { isRowBudgetExhausted } from './row-budget.ts';
-import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 /**
  * The items one phase step reads before the pass consults its row budget.
@@ -725,60 +725,61 @@ export class GarbageCollectionService {
 		return false;
 	}
 
-	private inFlightHashes(
-		cache: StoredCache,
-		storePathHashes: readonly StorePathHash[]
-	): ReadonlySet<StorePathHash> {
-		if (storePathHashes.length === 0) {
-			return new Set();
-		}
+	// A mark for the path the outer statement is looking at.
+	private markedPath(cache: StoredCache) {
+		return this.context.db
+			.select({ one: sql`1` })
+			.from(schema.garbageCollectionMarks)
+			.where(
+				and(
+					eq(schema.garbageCollectionMarks.cache, cache),
+					eq(
+						schema.garbageCollectionMarks.storePathHash,
+						schema.narInfos.storePathHash
+					)
+				)
+			);
+	}
 
+	/**
+	 * An upload still in flight for the path the outer statement is looking at.
+	 *
+	 * `pending` and `committing` are live commit states: verification may still
+	 * settle them, so a path with such an upload is not collectable. The
+	 * `pending_upload_gc_path_idx` index covers the cache, the store-path hash
+	 * in the metadata and the verdict, so this subquery checks one path without
+	 * scanning the in-flight set. Migration 0032 creates it and `schema.ts` does
+	 * not declare it.
+	 */
+	private inFlightUpload(cache: StoredCache) {
 		const reservedVerdict = or(
 			eq(schema.pendingUploads.verdict, 'committing'),
 			eq(schema.pendingUploads.verdict, 'pending')
 		);
-		const hashes = new Set<StorePathHash>();
+		const uploadPath = sql`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
 
-		for (const list of jsonValueLists(storePathHashes)) {
-			const rows = this.context.db
-				.select({
-					id: schema.pendingUploads.id,
-					metadataJson: schema.pendingUploads.metadataJson
-				})
-				.from(schema.pendingUploads)
-				.where(
-					and(
-						eq(schema.pendingUploads.cache, cache),
-						reservedVerdict,
-						inArray(
-							sql<string>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`,
-							list
-						)
-					)
+		return this.context.db
+			.select({ one: sql`1` })
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					eq(schema.pendingUploads.cache, cache),
+					reservedVerdict,
+					eq(uploadPath, schema.narInfos.storePathHash)
 				)
-				.all();
-
-			for (const row of rows) {
-				let storePathHash: StorePathHash | undefined;
-
-				try {
-					storePathHash = parseStoredUploadPathMetadata(
-						row.id,
-						row.metadataJson
-					).storePathHash;
-				} catch {
-					storePathHash = undefined;
-				}
-
-				if (storePathHash !== undefined) {
-					hashes.add(storePathHash);
-				}
-			}
-		}
-
-		return hashes;
+			);
 	}
 
+	/**
+	 * Collects the unreachable paths of one step.
+	 *
+	 * The step reads a page of paths to bound what it examines, then deletes the
+	 * collectable ones in a single statement: a path survives when it is marked
+	 * or an upload is in flight for it, and both are conditions the delete can
+	 * express. Reading the page first is what bounds the step: a delete that
+	 * searched for collectable paths itself would scan the table until it found
+	 * them, however far that is.
+	 */
 	private advanceCollect(
 		cache: StoredCache,
 		now: IsoTimestamp,
@@ -805,36 +806,38 @@ export class GarbageCollectionService {
 			.limit(page + 1)
 			.all();
 		const batch = rows.slice(0, page);
-		const hashes = batch.map((row) => row.storePathHash);
-		const marked = this.existingMarks(cache, hashes);
-		const inFlight = this.inFlightHashes(cache, hashes);
 		let pathsCollected = 0;
 
-		for (const path of batch) {
-			if (marked.has(path.storePathHash) || inFlight.has(path.storePathHash)) {
-				continue;
-			}
+		for (const paths of jsonRowLists(batch)) {
+			const unmarked = notExists(this.markedPath(cache));
+			const settled = notExists(this.inFlightUpload(cache));
 
+			// Queue exactly the paths the delete removed, so a path kept by the mark
+			// or by an upload in flight is never queued for deletion.
 			this.context.db.transaction((tx) => {
-				tx.delete(schema.narInfos)
+				const collected = tx
+					.delete(schema.narInfos)
 					.where(
 						and(
 							eq(schema.narInfos.cache, cache),
-							eq(schema.narInfos.storePathHash, path.storePathHash),
-							eq(schema.narInfos.generation, path.generation)
+							paths.matches({
+								storePathHash: schema.narInfos.storePathHash,
+								generation: schema.narInfos.generation
+							}),
+							unmarked,
+							settled
 						)
 					)
-					.run();
-				this.deletionQueue.enqueueNarInfoDeletion(
-					tx,
-					cache,
-					path.storePathHash,
-					path.narHash,
-					path.generation,
-					now
-				);
+					.returning({
+						storePathHash: schema.narInfos.storePathHash,
+						narHash: schema.narInfos.narHash,
+						generation: schema.narInfos.generation
+					})
+					.all();
+
+				this.deletionQueue.enqueueNarInfoDeletions(tx, cache, collected, now);
+				pathsCollected += collected.length;
 			});
-			pathsCollected += 1;
 		}
 
 		if (rows.length > batch.length) {
@@ -847,6 +850,60 @@ export class GarbageCollectionService {
 		}
 
 		return { pathsCollected, complete: rows.length <= batch.length };
+	}
+
+	/**
+	 * Deletes one step of the deadlines that have passed.
+	 *
+	 * The delete names its rows through a subquery over the same table, and that
+	 * subquery carries the step's limit, so the delete removes at most one step's
+	 * rows without the pass reading the page first. The step looks for another
+	 * due deadline only when it filled its page.
+	 */
+	private expireGraceStep(
+		cache: StoredCache,
+		now: IsoTimestamp
+	): { readonly hasMoreDeadlines: boolean } {
+		const page = phaseGranule;
+		const due = this.context.db
+			.select({ storePathHash: schema.retentionGrace.storePathHash })
+			.from(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cache, cache),
+					lte(schema.retentionGrace.retainUntil, now)
+				)
+			)
+			.orderBy(asc(schema.retentionGrace.storePathHash))
+			.limit(page);
+		const expired = this.context.db
+			.delete(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cache, cache),
+					inArray(schema.retentionGrace.storePathHash, due)
+				)
+			)
+			.returning({ storePathHash: schema.retentionGrace.storePathHash })
+			.all();
+
+		if (expired.length < page) {
+			return { hasMoreDeadlines: false };
+		}
+
+		const remaining = this.context.db
+			.select({ one: sql`1` })
+			.from(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cache, cache),
+					lte(schema.retentionGrace.retainUntil, now)
+				)
+			)
+			.limit(1)
+			.get();
+
+		return { hasMoreDeadlines: remaining !== undefined };
 	}
 
 	/**
@@ -908,40 +965,13 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'expire-grace') {
-				const page = phaseGranule;
-				const candidates = this.context.db
-					.select({ storePathHash: schema.retentionGrace.storePathHash })
-					.from(schema.retentionGrace)
-					.where(
-						and(
-							eq(schema.retentionGrace.cache, cache),
-							lte(schema.retentionGrace.retainUntil, now)
-						)
-					)
-					.orderBy(asc(schema.retentionGrace.storePathHash))
-					.limit(page + 1)
-					.all();
-				const batch = candidates.slice(0, page);
-
-				const expired = batch.map((row) => row.storePathHash);
-
-				for (const hashes of jsonValueLists(expired)) {
-					this.context.db
-						.delete(schema.retentionGrace)
-						.where(
-							and(
-								eq(schema.retentionGrace.cache, cache),
-								inArray(schema.retentionGrace.storePathHash, hashes)
-							)
-						)
-						.run();
-				}
+				const expired = this.expireGraceStep(cache, now);
 
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
 					allowEmptyCollection:
 						scan.allowEmptyCollection || this.cacheGraceManaged(cache),
-					...(candidates.length <= batch.length && { phase: 'roots' })
+					...(!expired.hasMoreDeadlines && { phase: 'roots' })
 				});
 
 				if (isRowBudgetExhausted()) {
@@ -1301,40 +1331,42 @@ export class GarbageCollectionService {
 			// `pending` and `committing` are live commit states, even after expiry;
 			// verification may still resume them. Reap only uploads without a verdict
 			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
-			const expiredUploadCandidates = this.context.db.all<
+			//
+			// Each delete names its rows through a subquery and reports them with
+			// `RETURNING`, so the pass learns which staging objects to remove
+			// without reading the page first.
+			const expiredUploads = this.context.db.all<
 				Pick<
 					typeof schema.pendingUploads.$inferSelect,
 					'id' | 'narHash' | 'r2Key'
 				>
 			>(
-				sql`SELECT id, nar_hash AS narHash, r2_key AS r2Key
-				    FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
-				    WHERE expires_at < ${now}
-				      AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
-				    ORDER BY expires_at, id
-				    LIMIT ${maxPendingRowsDeletedPerRun + 1}`
+				sql`DELETE FROM pending_upload
+				    WHERE id IN (
+				      SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+				      WHERE expires_at < ${now}
+				        AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+				      ORDER BY expires_at, id
+				      LIMIT ${maxPendingRowsDeletedPerRun}
+				    )
+				    RETURNING id, nar_hash AS narHash, r2_key AS r2Key`
 			);
-			const expiredAttestationCandidates = this.context.db
-				.select({
-					id: schema.pendingAttestations.id,
-					r2Key: schema.pendingAttestations.r2Key
-				})
+			const dueAttestations = this.context.db
+				.select({ id: schema.pendingAttestations.id })
 				.from(schema.pendingAttestations)
 				.where(lt(schema.pendingAttestations.expiresAt, now))
 				.orderBy(asc(schema.pendingAttestations.expiresAt))
-				.limit(maxPendingRowsDeletedPerRun + 1)
+				.limit(maxPendingRowsDeletedPerRun);
+			const expiredAttestations = this.context.db
+				.delete(schema.pendingAttestations)
+				.where(inArray(schema.pendingAttestations.id, dueAttestations))
+				.returning({ r2Key: schema.pendingAttestations.r2Key })
 				.all();
-			const expiredUploads = expiredUploadCandidates.slice(
-				0,
-				maxPendingRowsDeletedPerRun
-			);
-			const expiredAttestations = expiredAttestationCandidates.slice(
-				0,
-				maxPendingRowsDeletedPerRun
-			);
+			// A step that filled its page may have left more behind. The alarm runs
+			// the next one, which stops when it finds nothing.
 			const hasMorePendingRows =
-				expiredUploadCandidates.length > maxPendingRowsDeletedPerRun ||
-				expiredAttestationCandidates.length > maxPendingRowsDeletedPerRun;
+				expiredUploads.length === maxPendingRowsDeletedPerRun ||
+				expiredAttestations.length === maxPendingRowsDeletedPerRun;
 
 			if (hasMorePendingRows) {
 				log.warn('pending staging backlog remains after bounded collection', {
@@ -1351,26 +1383,6 @@ export class GarbageCollectionService {
 					.map((upload) => upload.r2Key),
 				...expiredAttestations.map((upload) => upload.r2Key)
 			];
-
-			const expiredUploadIds = expiredUploads.map((upload) => upload.id);
-
-			for (const ids of jsonValueLists(expiredUploadIds)) {
-				this.context.db
-					.delete(schema.pendingUploads)
-					.where(inArray(schema.pendingUploads.id, ids))
-					.run();
-			}
-
-			const expiredAttestationIds = expiredAttestations.map(
-				(attestation) => attestation.id
-			);
-
-			for (const ids of jsonValueLists(expiredAttestationIds)) {
-				this.context.db
-					.delete(schema.pendingAttestations)
-					.where(inArray(schema.pendingAttestations.id, ids))
-					.run();
-			}
 
 			// Tenant-wide collection advances through registered caches one at a time.
 			// Scoped collection uses only the requested cache. Persistent mark and
