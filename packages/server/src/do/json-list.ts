@@ -9,9 +9,11 @@ import { BoundValueLengthError } from '../errors.ts';
 export type JsonListValue = string | number;
 
 /**
-A row of a list that SQL compares or inserts column by column.
-*/
-export type JsonListRow = Readonly<Record<string, JsonListValue>>;
+ * A row of a list that SQL compares or inserts column by column. The constraint
+ * is written over the row's own keys so that an interface satisfies it, which a
+ * `Record<string, ...>` constraint does not.
+ */
+export type JsonListRow<T> = { readonly [K in keyof T]: JsonListValue };
 
 // Cloudflare documents a maximum string of 2,000,000 bytes for D1 and for
 // Durable Object SQLite. A list travels as one JSON string, so this is the only
@@ -56,6 +58,12 @@ function serialiseLists<T>(values: readonly T[]): readonly SerialisedList<T>[] {
 	];
 }
 
+// The value a row of the list holds under one key. The path travels as a bound
+// value, so a key cannot reach the statement text.
+function rowValue(key: string): SQL {
+	return sql`json_extract(value, ${`$.${key}`})`;
+}
+
 // SQLite reads an `INSERT ... SELECT` that carries an `ON CONFLICT` clause as
 // ambiguous unless the select has a `WHERE`, so every source carries one.
 function insertSource(json: string, columns: readonly SQL[]): SQL {
@@ -97,7 +105,7 @@ class JsonValueList<T extends JsonListValue> implements SQLWrapper {
  * A list of rows bound as one JSON parameter, for a comparison or an insert
  * over several columns at once.
  */
-class JsonRowList<T extends JsonListRow> {
+class JsonRowList<T extends JsonListRow<T>> {
 	constructor(
 		readonly rows: readonly T[],
 		private readonly json: string
@@ -107,7 +115,7 @@ class JsonRowList<T extends JsonListRow> {
 	The row's value for one key.
 	*/
 	column(key: keyof T & string): SQL {
-		return sql`json_extract(value, ${`$.${key}`})`;
+		return rowValue(key);
 	}
 
 	/**
@@ -117,20 +125,21 @@ class JsonRowList<T extends JsonListRow> {
 	matches(
 		columns: Readonly<Partial<Record<keyof T & string, SQLWrapper>>>
 	): SQL {
-		const entries = Object.entries(columns) as readonly [
-			keyof T & string,
-			SQLWrapper
-		][];
-		const compared = sql.join(
-			entries.map(([, column]) => column),
-			sql`, `
-		);
-		const listed = sql.join(
-			entries.map(([key]) => this.column(key)),
-			sql`, `
-		);
+		const compared: SQLWrapper[] = [];
+		const listed: SQL[] = [];
 
-		return sql`(${compared}) in (select ${listed} from json_each(${this.json}))`;
+		for (const [key, column] of Object.entries<SQLWrapper | undefined>(
+			columns
+		)) {
+			if (column === undefined) {
+				continue;
+			}
+
+			compared.push(column);
+			listed.push(rowValue(key));
+		}
+
+		return sql`(${sql.join(compared, sql`, `)}) in (select ${sql.join(listed, sql`, `)} from json_each(${this.json}))`;
 	}
 
 	/**
@@ -162,7 +171,7 @@ export function jsonValueLists<T extends JsonListValue>(
  * one JSON parameter. The result holds one list unless the rows serialise to
  * more than a bound string can carry.
  */
-export function jsonRowLists<T extends JsonListRow>(
+export function jsonRowLists<T extends JsonListRow<T>>(
 	rows: readonly T[]
 ): readonly JsonRowList<T>[] {
 	return serialiseLists(rows).map(

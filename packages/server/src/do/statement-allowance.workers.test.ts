@@ -26,7 +26,6 @@ import {
 
 import {
 	drainStatementBatches,
-	executeChunkedStatement,
 	type InspectableBatchItem,
 	maxBoundParameters
 } from './bulk.ts';
@@ -238,37 +237,6 @@ describe('D1 statement allowance', () => {
 		expect(refused).toStrictEqual({
 			parameters: maxBoundParameters + 1,
 			limit: maxBoundParameters
-		});
-	});
-
-	it('narrows a chunked statement to the parameter limit and stops on the allowance', async () => {
-		const hashes = Array.from({ length: 250 }, (_, index) =>
-			syntheticNarHash(3, index)
-		);
-		const read = await withTenantD1('allowance-chunked', async (d1) =>
-			withStatementAllowance(async () => {
-				const outcome = await executeChunkedStatement(hashes, (chunk) =>
-					d1
-						.select({ narHash: d1Schema.blobState.narHash })
-						.from(d1Schema.blobState)
-						.where(inArray(d1Schema.blobState.narHash, [...chunk]))
-				);
-
-				return {
-					processed: outcome.processed.length,
-					statements: outcome.results.length,
-					remaining: statementsRemaining()
-				};
-			}, 2)
-		);
-
-		// Each chunk binds one parameter for each hash, so it is as wide as the
-		// parameter limit. Two statements cover two of those chunks and the rest of
-		// the list is left for a later invocation.
-		expect(read).toStrictEqual({
-			processed: 2 * maxBoundParameters,
-			statements: 2,
-			remaining: 0
 		});
 	});
 

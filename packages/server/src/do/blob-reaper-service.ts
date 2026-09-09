@@ -18,7 +18,6 @@ import {
 	isNull,
 	lte,
 	notInArray,
-	or,
 	sql
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -43,11 +42,15 @@ import {
 
 import {
 	batchNonEmpty,
-	chunk,
-	maxInClauseValues,
 	maxOutgoingConnections,
 	presentNarObjects
 } from './bulk.ts';
+import {
+	type JsonRowList,
+	jsonRowLists,
+	type JsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 
 export interface DemoteTarget {
 	readonly cache: StoredCache;
@@ -100,14 +103,6 @@ interface ReapObjectsOptions {
 	readonly phase: ObjectReaperPhase;
 }
 
-const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
-
-// The registry update binds each object ID twice: once in the fence inside the
-// `collectable` subquery and once in the outer filter that selects registry rows
-// for retirement. Limit collection chunks to half of `maxInClauseValues` so the
-// update stays within the parameter limit.
-export const maxCollectionChunk = Math.floor(maxInClauseValues / 2);
-
 // Persist the last key scanned. An empty position wraps to the start. Eventual
 // consistency can repeat an idempotent page but cannot skip beyond the stored
 // cursor.
@@ -123,7 +118,7 @@ export interface DemoteCursor {
  */
 export function buildBlobCollection(
 	d1: DrizzleD1Database<typeof d1Schema>,
-	narHashes: readonly NixSha256HashString[],
+	narHashes: JsonValueList<NixSha256HashString>,
 	nowIso: IsoTimestamp
 ) {
 	const referencedHashes = d1
@@ -203,7 +198,7 @@ export function buildBlobCollection(
  */
 export function buildCasCollection(
 	d1: DrizzleD1Database<typeof d1Schema>,
-	digests: readonly Sha256HexDigest[],
+	digests: JsonValueList<Sha256HexDigest>,
 	nowIso: IsoTimestamp
 ) {
 	const referencedDigests = d1
@@ -277,6 +272,94 @@ export function buildCasCollection(
 	};
 }
 
+/**
+One version of a NAR object, as the demote scan captured it.
+*/
+export interface BlobStateVersion {
+	readonly narHash: NixSha256HashString;
+	readonly incarnation: number;
+}
+
+/**
+One version of a content-addressed object, as the demote scan captured it.
+*/
+export interface CasObjectVersion {
+	readonly digest: Sha256HexDigest;
+	readonly incarnation: number;
+}
+
+/**
+ * Builds the registry retirement and the object-state delete for the NAR object
+ * versions a demote scan captured. A later promotion writes a different version
+ * and therefore survives both statements.
+ *
+ * The parameter test imports this builder so it inspects the production
+ * statements.
+ */
+export function fencedBlobStateDeletion(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	rows: JsonRowList<BlobStateVersion>
+) {
+	return {
+		retire: d1
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent', reservationOwner: sql`null` })
+			.where(
+				and(
+					eq(d1Schema.objectIncarnation.kind, 'nar'),
+					eq(d1Schema.objectIncarnation.state, 'live'),
+					rows.matches({
+						narHash: d1Schema.objectIncarnation.objectId,
+						incarnation: d1Schema.objectIncarnation.incarnation
+					})
+				)
+			),
+		remove: d1
+			.delete(d1Schema.blobState)
+			.where(
+				rows.matches({
+					narHash: d1Schema.blobState.narHash,
+					incarnation: d1Schema.blobState.incarnation
+				})
+			)
+			.returning({ narHash: d1Schema.blobState.narHash })
+	};
+}
+
+/**
+ * Builds the registry retirement and the object delete for the CAS object
+ * versions a demote scan captured.
+ */
+export function fencedCasObjectDeletion(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	rows: JsonRowList<CasObjectVersion>
+) {
+	return {
+		retire: d1
+			.update(d1Schema.objectIncarnation)
+			.set({ state: 'absent', reservationOwner: sql`null` })
+			.where(
+				and(
+					eq(d1Schema.objectIncarnation.kind, 'cas'),
+					eq(d1Schema.objectIncarnation.state, 'live'),
+					rows.matches({
+						digest: d1Schema.objectIncarnation.objectId,
+						incarnation: d1Schema.objectIncarnation.incarnation
+					})
+				)
+			),
+		remove: d1
+			.delete(d1Schema.casObject)
+			.where(
+				rows.matches({
+					digest: d1Schema.casObject.digest,
+					incarnation: d1Schema.casObject.incarnation
+				})
+			)
+			.returning({ digest: d1Schema.casObject.digest })
+	};
+}
+
 // The Worker runs this reaper because only it can see reference edges for every
 // tenant. One bounded pass arms unreferenced objects; a later pass removes rows
 // whose grace expired and which remain unreferenced. Atomic compare-and-delete,
@@ -320,10 +403,9 @@ export class BlobReaperService {
 
 		const candidateHashes = batch.map((candidate) => candidate.narHash);
 
-		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
-		// timer is still unset, so a concurrent reference wins.
-		const chunks = chunk(candidateHashes, maxInClauseValues);
-		const queries = chunks.map((hashes) => {
+		// The update arms only rows whose timer is still unset, so a concurrent
+		// reference wins.
+		const queries = jsonValueLists(candidateHashes).map((hashes) => {
 			const fence = and(
 				inArray(d1Schema.blobState.narHash, hashes),
 				isNull(d1Schema.blobState.deleteAfter),
@@ -368,12 +450,9 @@ export class BlobReaperService {
 
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
-		const hashChunks = chunk(
-			batch.map((blob) => blob.narHash),
-			maxCollectionChunk
-		);
+		const hashLists = jsonValueLists(batch.map((blob) => blob.narHash));
 
-		for (const hashes of hashChunks) {
+		for (const hashes of hashLists) {
 			await registerLegacyObjectIncarnations(
 				this.d1,
 				{ kind: 'nar', objectIds: hashes },
@@ -427,10 +506,9 @@ export class BlobReaperService {
 
 		const candidateDigests = batch.map((candidate) => candidate.digest);
 
-		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
-		// timer is still unset, so a concurrent attestation reference wins.
-		const chunks = chunk(candidateDigests, maxInClauseValues);
-		const queries = chunks.map((digests) => {
+		// The update arms only rows whose timer is still unset, so a concurrent
+		// attestation reference wins.
+		const queries = jsonValueLists(candidateDigests).map((digests) => {
 			const fence = and(
 				inArray(d1Schema.casObject.digest, digests),
 				isNull(d1Schema.casObject.deleteAfter),
@@ -472,12 +550,9 @@ export class BlobReaperService {
 
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
-		const digestChunks = chunk(
-			batch.map((object) => object.digest),
-			maxCollectionChunk
-		);
+		const digestLists = jsonValueLists(batch.map((object) => object.digest));
 
-		for (const digests of digestChunks) {
+		for (const digests of digestLists) {
 			await registerLegacyObjectIncarnations(
 				this.d1,
 				{ kind: 'cas', objectIds: digests },
@@ -506,9 +581,9 @@ export class BlobReaperService {
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<string, NarInfoDemotion[]>> {
 		const pages = await mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
+			jsonValueLists(narHashes),
 			maxOutgoingConnections,
-			(batch) =>
+			(list) =>
 				this.d1
 					.selectDistinct({
 						tenant: d1Schema.blobReference.tenant,
@@ -517,7 +592,7 @@ export class BlobReaperService {
 						storePathHash: d1Schema.blobReference.storePathHash
 					})
 					.from(d1Schema.blobReference)
-					.where(inArray(d1Schema.blobReference.narHash, batch))
+					.where(inArray(d1Schema.blobReference.narHash, list))
 					.all()
 		);
 
@@ -599,43 +674,12 @@ export class BlobReaperService {
 	// Delete only the object versions captured by the scan. A later promotion
 	// uses a different version and therefore survives.
 	private async deleteFencedBlobStates(
-		rows: readonly { narHash: NixSha256HashString; incarnation: number }[]
+		rows: readonly BlobStateVersion[]
 	): Promise<number> {
-		const chunks = chunk(rows, maxFencedDeleteRows);
-		const queries = chunks.map((batch) => {
-			const stateMatch = or(
-				...batch.map((row) =>
-					and(
-						eq(d1Schema.blobState.narHash, row.narHash),
-						eq(d1Schema.blobState.incarnation, row.incarnation)
-					)
-				)
-			);
-			const registryMatch = or(
-				...batch.map((row) =>
-					and(
-						eq(d1Schema.objectIncarnation.objectId, row.narHash),
-						eq(d1Schema.objectIncarnation.incarnation, row.incarnation)
-					)
-				)
-			);
+		const queries = jsonRowLists(rows).map((batch) => {
+			const { retire, remove } = fencedBlobStateDeletion(this.d1, batch);
 
-			return [
-				this.d1
-					.update(d1Schema.objectIncarnation)
-					.set({ state: 'absent', reservationOwner: sql`null` })
-					.where(
-						and(
-							eq(d1Schema.objectIncarnation.kind, 'nar'),
-							eq(d1Schema.objectIncarnation.state, 'live'),
-							registryMatch
-						)
-					),
-				this.d1
-					.delete(d1Schema.blobState)
-					.where(stateMatch)
-					.returning({ narHash: d1Schema.blobState.narHash })
-			] as const;
+			return [retire, remove] as const;
 		});
 
 		const results = await batchNonEmpty(this.d1, queries.flat());
@@ -669,43 +713,12 @@ export class BlobReaperService {
 
 	// Delete only the CAS object versions captured by the scan.
 	private async deleteFencedCasObjects(
-		rows: readonly { digest: Sha256HexDigest; incarnation: number }[]
+		rows: readonly CasObjectVersion[]
 	): Promise<number> {
-		const chunks = chunk(rows, maxFencedDeleteRows);
-		const queries = chunks.map((batch) => {
-			const stateMatch = or(
-				...batch.map((row) =>
-					and(
-						eq(d1Schema.casObject.digest, row.digest),
-						eq(d1Schema.casObject.incarnation, row.incarnation)
-					)
-				)
-			);
-			const registryMatch = or(
-				...batch.map((row) =>
-					and(
-						eq(d1Schema.objectIncarnation.objectId, row.digest),
-						eq(d1Schema.objectIncarnation.incarnation, row.incarnation)
-					)
-				)
-			);
+		const queries = jsonRowLists(rows).map((batch) => {
+			const { retire, remove } = fencedCasObjectDeletion(this.d1, batch);
 
-			return [
-				this.d1
-					.update(d1Schema.objectIncarnation)
-					.set({ state: 'absent', reservationOwner: sql`null` })
-					.where(
-						and(
-							eq(d1Schema.objectIncarnation.kind, 'cas'),
-							eq(d1Schema.objectIncarnation.state, 'live'),
-							registryMatch
-						)
-					),
-				this.d1
-					.delete(d1Schema.casObject)
-					.where(stateMatch)
-					.returning({ digest: d1Schema.casObject.digest })
-			] as const;
+			return [retire, remove] as const;
 		});
 
 		const results = await batchNonEmpty(this.d1, queries.flat());
@@ -746,19 +759,16 @@ export class BlobReaperService {
 			objects.map((object) => [object.digest, object.incarnation])
 		);
 		const pages = await mapWithConcurrency(
-			chunk(
-				objects.map((object) => object.digest),
-				maxInClauseValues
-			),
+			jsonValueLists(objects.map((object) => object.digest)),
 			maxOutgoingConnections,
-			(batch) =>
+			(list) =>
 				this.d1
 					.selectDistinct({
 						tenant: d1Schema.attestationReference.tenant,
 						digest: d1Schema.attestationReference.digest
 					})
 					.from(d1Schema.attestationReference)
-					.where(inArray(d1Schema.attestationReference.digest, batch))
+					.where(inArray(d1Schema.attestationReference.digest, list))
 					.all()
 		);
 
