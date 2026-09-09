@@ -1435,118 +1435,110 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
-		// Remove pending rows under the critical section, but delete their staging
-		// objects afterwards so an R2 stall cannot hold the section. The orphan scan
-		// retries objects left by a failed delete.
-		let stagingKeys: R2ObjectKey[] = [];
+		// Every statement from here to the deletion flush is synchronous. Nothing
+		// yields between them, so no other event can interleave whether or not the
+		// input gate is held, and inside the gate they would spend the 25-second gate
+		// budget that the awaited flush needs. The row budget is what keeps this
+		// stretch short, and it comes from the dispatch scope rather than the gate.
+		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
-		const reaped = await this.context.criticalSection(async () => {
-			const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
-
-			if (expiredRefreshFamilies.hasMoreWork) {
-				log.warn(
-					'refresh-token family backlog remains after bounded collection',
-					{
-						membersDeleted: expiredRefreshFamilies.membersDeleted,
-						familiesDeleted: expiredRefreshFamilies.familiesDeleted
-					}
-				);
-			}
-
-			// `pending` and `committing` are live commit states, even after expiry;
-			// verification may still resume them. Reap only uploads without a verdict
-			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
-			//
-			// Each delete names its rows through a subquery and reports them with
-			// `RETURNING`, so the pass learns which staging objects to remove
-			// without reading the page first.
-			const expiredUploads = this.context.db.all<
-				Pick<
-					typeof schema.pendingUploads.$inferSelect,
-					'id' | 'narHash' | 'r2Key'
-				>
-			>(
-				sql`DELETE FROM pending_upload
-				    WHERE id IN (
-				      SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
-				      WHERE expires_at < ${now}
-				        AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
-				      ORDER BY expires_at, id
-				      LIMIT ${maxPendingRowsDeletedPerRun}
-				    )
-				    RETURNING id, nar_hash AS narHash, r2_key AS r2Key`
+		if (expiredRefreshFamilies.hasMoreWork) {
+			log.warn(
+				'refresh-token family backlog remains after bounded collection',
+				{
+					membersDeleted: expiredRefreshFamilies.membersDeleted,
+					familiesDeleted: expiredRefreshFamilies.familiesDeleted
+				}
 			);
-			const dueAttestations = this.context.db
-				.select({ id: schema.pendingAttestations.id })
-				.from(schema.pendingAttestations)
-				.where(lt(schema.pendingAttestations.expiresAt, now))
-				.orderBy(asc(schema.pendingAttestations.expiresAt))
-				.limit(maxPendingRowsDeletedPerRun);
-			const expiredAttestations = this.context.db
-				.delete(schema.pendingAttestations)
-				.where(inArray(schema.pendingAttestations.id, dueAttestations))
-				.returning({ r2Key: schema.pendingAttestations.r2Key })
-				.all();
-			// A step that filled its page may have left more behind. The alarm runs
-			// the next one, which stops when it finds nothing.
-			const hasMorePendingRows =
-				expiredUploads.length === maxPendingRowsDeletedPerRun ||
-				expiredAttestations.length === maxPendingRowsDeletedPerRun;
+		}
 
-			if (hasMorePendingRows) {
-				log.warn('pending staging backlog remains after bounded collection', {
-					uploadsDeleted: expiredUploads.length,
-					attestationsDeleted: expiredAttestations.length
-				});
-			}
+		// `pending` and `committing` are live commit states, even after expiry;
+		// verification may still resume them. Reap only uploads without a verdict
+		// and terminal `servable`, `mismatch`, or `over-quota` uploads.
+		//
+		// Each delete names its rows through a subquery and reports them with
+		// `RETURNING`, so the pass learns which staging objects to remove
+		// without reading the page first.
+		const expiredUploads = this.context.db.all<
+			Pick<
+				typeof schema.pendingUploads.$inferSelect,
+				'id' | 'narHash' | 'r2Key'
+			>
+		>(
+			sql`DELETE FROM pending_upload
+			    WHERE id IN (
+			      SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+			      WHERE expires_at < ${now}
+			        AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+			      ORDER BY expires_at, id
+			      LIMIT ${maxPendingRowsDeletedPerRun}
+			    )
+			    RETURNING id, nar_hash AS narHash, r2_key AS r2Key`
+		);
+		const dueAttestations = this.context.db
+			.select({ id: schema.pendingAttestations.id })
+			.from(schema.pendingAttestations)
+			.where(lt(schema.pendingAttestations.expiresAt, now))
+			.orderBy(asc(schema.pendingAttestations.expiresAt))
+			.limit(maxPendingRowsDeletedPerRun);
+		const expiredAttestations = this.context.db
+			.delete(schema.pendingAttestations)
+			.where(inArray(schema.pendingAttestations.id, dueAttestations))
+			.returning({ r2Key: schema.pendingAttestations.r2Key })
+			.all();
+		// A step that filled its page may have left more behind. The alarm runs
+		// the next one, which stops when it finds nothing.
+		const hasMorePendingRows =
+			expiredUploads.length === maxPendingRowsDeletedPerRun ||
+			expiredAttestations.length === maxPendingRowsDeletedPerRun;
 
-			// Delete only private staging objects here. A reuse upload points at the
-			// shared canonical NAR, whose lifetime is owned by the global reaper.
-			stagingKeys = [
-				...expiredUploads
-					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-					.map((upload) => upload.r2Key),
-				...expiredAttestations.map((upload) => upload.r2Key)
-			];
+		if (hasMorePendingRows) {
+			log.warn('pending staging backlog remains after bounded collection', {
+				uploadsDeleted: expiredUploads.length,
+				attestationsDeleted: expiredAttestations.length
+			});
+		}
 
-			// Tenant-wide collection advances through registered caches one at a time.
-			// Scoped collection uses only the requested cache. Persistent mark and
-			// frontier state resumes each pass without rereading earlier chunks.
-			const collectionCache =
-				target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
-			const collected =
-				collectionCache === undefined
-					? {
-							rootsExpired: 0,
-							pathsCollected: 0,
-							hasMoreExpiredRoots: false,
-							hasMoreWork: false
-						}
-					: this.collectUnreachable(collectionCache, now);
-			const hasMoreCollectionWork =
-				collectionCache !== undefined &&
-				!collected.hasMoreWork &&
-				target.scope === 'tenant'
-					? this.advanceTenantCollection(collectionCache)
-					: collected.hasMoreWork;
-			const hasMoreWork =
-				expiredRefreshFamilies.hasMoreWork ||
-				hasMorePendingRows ||
-				hasMoreCollectionWork;
+		// Delete only private staging objects here. A reuse upload points at the
+		// shared canonical NAR, whose lifetime is owned by the global reaper.
+		const stagingKeys = [
+			...expiredUploads
+				.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
+				.map((upload) => upload.r2Key),
+			...expiredAttestations.map((upload) => upload.r2Key)
+		];
 
-			const narInfosDeleted =
-				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
+		// Tenant-wide collection advances through registered caches one at a time.
+		// Scoped collection uses only the requested cache. Persistent mark and
+		// frontier state resumes each pass without rereading earlier chunks.
+		const collectionCache =
+			target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
+		const collected =
+			collectionCache === undefined
+				? {
+						rootsExpired: 0,
+						pathsCollected: 0,
+						hasMoreExpiredRoots: false,
+						hasMoreWork: false
+					}
+				: this.collectUnreachable(collectionCache, now);
+		const hasMoreCollectionWork =
+			collectionCache !== undefined &&
+			!collected.hasMoreWork &&
+			target.scope === 'tenant'
+				? this.advanceTenantCollection(collectionCache)
+				: collected.hasMoreWork;
+		const hasMoreWork =
+			expiredRefreshFamilies.hasMoreWork ||
+			hasMorePendingRows ||
+			hasMoreCollectionWork;
 
-			return {
-				pendingUploadsDeleted: expiredUploads.length,
-				pendingAttestationsDeleted: expiredAttestations.length,
-				rootsExpired: collected.rootsExpired,
-				pathsCollected: collected.pathsCollected,
-				hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
-				hasMoreWork,
-				narInfosDeleted
-			};
-		});
+		// The flush keeps the gate. Its R2 narinfo-object delete is keyed by path and
+		// nothing heals it on read, so a recommit between the edge retirement and the
+		// object delete would lose the new object.
+		const narInfosDeleted = await this.context.criticalSection(() =>
+			this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
+		);
 
 		// Delete R2 objects outside the critical section. The orphan scan then reads
 		// current pending rows and applies the age fence, so a concurrent upload is
@@ -1569,6 +1561,15 @@ export class GarbageCollectionService {
 			startedAt
 		);
 
-		return { ...reaped, orphanStagingDeleted };
+		return {
+			pendingUploadsDeleted: expiredUploads.length,
+			pendingAttestationsDeleted: expiredAttestations.length,
+			rootsExpired: collected.rootsExpired,
+			pathsCollected: collected.pathsCollected,
+			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
+			hasMoreWork,
+			narInfosDeleted,
+			orphanStagingDeleted
+		};
 	}
 }
