@@ -12,7 +12,11 @@ import type { Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
-import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
+import {
+	type CacheTarget,
+	cacheTargetFromUrl,
+	cacheTargetWithName
+} from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
@@ -43,7 +47,10 @@ interface ConfigOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly cacheCredentials?: string;
+	readonly includeDefaultCache?: boolean;
 }
+
+const defaultCacheScope: CacheScope = { kind: 'default' };
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -144,6 +151,35 @@ export function resolveConfigSubstituters(
 	});
 }
 
+/**
+ * The caches one `config` invocation describes. Positional names select named
+ * caches, and an empty list falls back to the cache the URL addresses.
+ *
+ * The tenant's default cache has its own flag rather than a name in the list,
+ * because a cache may itself be called `default` and a sentinel would make the
+ * two indistinguishable. With the flag set, the tenant's default cache comes
+ * first and is never described twice.
+ */
+export function selectConfigCaches(
+	target: CacheTarget,
+	names: readonly string[],
+	hasDefaultCache: boolean
+): readonly CacheScope[] {
+	const named =
+		names.length === 0
+			? [target.cache]
+			: names.map((name) => cacheTargetWithName(target, name).cache);
+
+	if (!hasDefaultCache) {
+		return named;
+	}
+
+	return [
+		defaultCacheScope,
+		...named.filter((cache) => cache.kind !== 'default')
+	];
+}
+
 export function registerConfigCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -156,6 +192,10 @@ export function registerConfigCommand(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<pubkey>', 'Nix trusted-public-keys entry')
 		.argument('[caches...]', 'named caches; omit them to use the URL target')
+		.option(
+			'--include-default-cache',
+			"also configure the tenant's default cache, alongside any named caches"
+		)
 		.option(
 			'--read-user <user>',
 			'read username (or CUPBOARD_READ_USER)',
@@ -182,10 +222,11 @@ export function registerConfigCommand(
 					options.cacheCredentials ?? env.CUPBOARD_CACHE_CREDENTIALS
 				);
 				const target = cacheTargetFromUrl(url);
-				const selected =
-					names.length === 0
-						? [target.cache]
-						: names.map((name) => cacheTargetWithName(target, name).cache);
+				const selected = selectConfigCaches(
+					target,
+					names,
+					options.includeDefaultCache === true
+				);
 
 				runConfig(
 					{

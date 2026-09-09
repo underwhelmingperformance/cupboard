@@ -42,6 +42,12 @@ inputs:
       Named caches to use at the tenant URL, one per line or comma-separated.
       Leave empty to use the tenant's default cache.
     required: false
+  include-default-cache:
+    description:
+      When true, also configure the tenant's default cache alongside any named
+      caches. The `cache` list cannot name it, because a cache may itself be
+      called `default`.
+    required: false
   cache-credentials:
     description:
       JSON array of cache scopes and cache-specific read credentials. Populate
@@ -172,6 +178,7 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        INCLUDE_DEFAULT_CACHE: ${{ inputs.include-default-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
         DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
         DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
@@ -196,6 +203,7 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --include-default-cache "$INCLUDE_DEFAULT_CACHE"
           --cache-credentials "$CACHE_CREDENTIALS"
           --destination-read-user "$DESTINATION_READ_USER"
           --destination-read-password "$DESTINATION_READ_PASSWORD"

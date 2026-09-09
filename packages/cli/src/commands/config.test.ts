@@ -5,6 +5,8 @@ import type { Reporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
+import { cacheTargetFromUrl } from '../cache-target.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	InvalidCacheCredentialsError,
 	UnknownCacheCredentialError
@@ -15,10 +17,15 @@ import {
 	type ConfigInput,
 	parseCacheCredentials,
 	resolveConfigSubstituters,
-	runConfig
+	runConfig,
+	selectConfigCaches
 } from './config.ts';
 
 const defaultCache: CacheScope = { kind: 'default' };
+const namedCache = (name: string): CacheScope => ({
+	kind: 'named',
+	name: cacheNameSchema.parse(name)
+});
 const buildsCache: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse('builds')
@@ -302,5 +309,44 @@ describe('cacheSubstituterUrl', () => {
 		expect(canonicalHref(substituter)).toBe(
 			'https://alice:p%40ss%20word%2F%3A%25@cupboard.example.workers.dev/t/acme/cache/release'
 		);
+	});
+});
+
+describe('selectConfigCaches', () => {
+	const tenantTarget = cacheTargetFromUrl(
+		parseWorkerUrl('https://cupboard.example.workers.dev/t/acme')
+	);
+
+	it.each([
+		{
+			label: 'the URL target when no name is given',
+			names: [],
+			hasDefaultCache: false,
+			expected: [defaultCache]
+		},
+		{
+			label: 'only the names given',
+			names: ['builds', 'release'],
+			hasDefaultCache: false,
+			expected: [buildsCache, namedCache('release')]
+		},
+		{
+			label: 'the default cache alongside the names given',
+			names: ['builds', 'release'],
+			hasDefaultCache: true,
+			expected: [defaultCache, buildsCache, namedCache('release')]
+		},
+		{
+			// A cache may be called `default`, and it stays addressable by name.
+			// The flag is what selects the tenant's own default cache.
+			label: 'a cache named default beside the tenant default',
+			names: ['default'],
+			hasDefaultCache: true,
+			expected: [defaultCache, namedCache('default')]
+		}
+	])('selects $label', ({ names, hasDefaultCache, expected }) => {
+		expect(
+			selectConfigCaches(tenantTarget, names, hasDefaultCache)
+		).toStrictEqual(expected);
 	});
 });

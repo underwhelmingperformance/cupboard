@@ -86,6 +86,7 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly includeDefaultCache?: string;
 	readonly provisionCache?: string;
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
@@ -206,6 +207,10 @@ export function registerSetupCommand(
 		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+		)
+		.option(
+			'--include-default-cache <boolean>',
+			"Also configure the tenant's default cache, alongside any named caches."
 		)
 		.option(
 			'--destination-read-user <user>',
@@ -383,6 +388,11 @@ function resolveCaches(
 	destinationReadPassword: string
 ): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+	const hasDefaultCache = isEnabled(
+		'include-default-cache',
+		options.includeDefaultCache,
+		false
+	);
 
 	// Two inputs can supply the destination's credential: `cache-credentials`
 	// gives one per cache, and `destination-read-user` is the shorthand for a
@@ -395,7 +405,10 @@ function resolveCaches(
 	}
 
 	const defaultCache: CacheScope = { kind: 'default' };
-	const selected = caches.length === 0 ? [defaultCache] : caches;
+	const named = caches.length === 0 ? [defaultCache] : caches;
+	const selected = hasDefaultCache
+		? [defaultCache, ...named.filter((cache) => cache.kind !== 'default')]
+		: named;
 
 	// The shorthand names no cache, so it can only mean the one destination.
 	if (destinationReadUser !== '' && selected.length !== 1) {

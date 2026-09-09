@@ -149,6 +149,20 @@ CUPBOARD_CACHE_CREDENTIALS=$credentials \
     builds release
 ```
 
+To describe the tenant's default cache and named caches in one snippet, add
+`--include-default-cache`. The default cache comes first, then the names in
+argument order:
+
+```sh
+cupboard config "$url" "$(cupboard pubkey "$url")" \
+  --include-default-cache builds release
+```
+
+The default cache has a flag rather than a name in the list because a cache may
+itself be called `default`. Such a cache stays addressable as a positional name.
+The setup action takes the same selection through its `include-default-cache`
+input.
+
 Write the complete snippet to the destination file. The credentials are a JSON
 array whose entries pair an explicit cache scope with its `user` and `password`.
 Supply it in `CUPBOARD_CACHE_CREDENTIALS` or `--cache-credentials`. The option
