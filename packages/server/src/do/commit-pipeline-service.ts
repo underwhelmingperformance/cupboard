@@ -43,6 +43,7 @@ import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
 	QuotaExceededError,
+	TenantUsageMissingError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
@@ -111,9 +112,20 @@ export type CommitOutcome =
 
 export interface TenantAccount {
 	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
+	// Null when the tenant has no usage row. Nothing then counts the tenant's
+	// storage and no quota applies to it, so every charge statement matches no row.
+	readonly usageTenant: TenantId | null;
 	readonly bytes: number | null;
 	readonly casBytes: number | null;
 	readonly quotaBytes: number | null;
+}
+
+// What a charge batch reads before its own statements run. A `TenantAccount`
+// satisfies this too, so one refusal covers both that read and the advisory read
+// a commit makes before it defers.
+interface ChargeGateRow {
+	readonly status: TenantAccount['status'];
+	readonly usageTenant: TenantId | null;
 }
 
 interface CanonicalBlobFacts {
@@ -489,6 +501,7 @@ export class CommitPipelineService {
 		return this.context.d1
 			.select({
 				status: d1Schema.tenant.status,
+				usageTenant: d1Schema.tenantUsage.tenant,
 				bytes: d1Schema.tenantUsage.bytes,
 				casBytes: d1Schema.tenantUsage.casBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
@@ -550,7 +563,9 @@ export class CommitPipelineService {
 
 	// Keep the usage updates, reference and ownership inserts, and reaper disarm
 	// in one batch. Their predicates make a replay idempotent and refuse every
-	// write unless the tenant is still active.
+	// write unless the tenant is still active and has a usage row. Without that
+	// row the two usage updates would match nothing and the edge would be stored
+	// uncharged, so the row gates the inserts as well as the counters.
 	private chargeStatements(
 		tenant: TenantId,
 		cache: StoredCache,
@@ -559,15 +574,22 @@ export class CommitPipelineService {
 		blob: { readonly fileSize: number },
 		now: IsoTimestamp
 	): BatchItem<'sqlite'>[] {
-		const activeTenantFilter = and(
-			eq(d1Schema.tenant.id, tenant),
-			eq(d1Schema.tenant.status, 'active')
+		const usageRowPresent = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant))
 		);
-		const tenantActive = exists(
+		const chargeableTenantFilter = and(
+			eq(d1Schema.tenant.id, tenant),
+			eq(d1Schema.tenant.status, 'active'),
+			usageRowPresent
+		);
+		const tenantChargeable = exists(
 			this.context.d1
 				.select({ one: d1Schema.tenant.id })
 				.from(d1Schema.tenant)
-				.where(activeTenantFilter)
+				.where(chargeableTenantFilter)
 		);
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
@@ -594,16 +616,16 @@ export class CommitPipelineService {
 		const creditNarInfoFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			edgeMissing,
-			tenantActive
+			tenantChargeable
 		);
 		const creditBytesFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
 			presenceMissing,
-			tenantActive
+			tenantChargeable
 		);
 		const graceClearFilter = and(
 			eq(d1Schema.blobState.narHash, metadata.narHash),
-			tenantActive
+			tenantChargeable
 		);
 
 		return [
@@ -641,7 +663,7 @@ export class CommitPipelineService {
 							)
 						})
 						.from(d1Schema.tenant)
-						.where(activeTenantFilter)
+						.where(chargeableTenantFilter)
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -656,7 +678,7 @@ export class CommitPipelineService {
 							fileSize: sql<number>`${blob.fileSize}`.as('file_size')
 						})
 						.from(d1Schema.tenant)
-						.where(activeTenantFilter)
+						.where(chargeableTenantFilter)
 				)
 				.onConflictDoNothing(),
 			this.context.d1
@@ -666,11 +688,33 @@ export class CommitPipelineService {
 		];
 	}
 
-	private tenantStatusSelect(tenant: TenantId) {
+	// The leading read of a charge batch: the status the charge was gated on, and
+	// whether the tenant has the usage row every charge statement requires. It
+	// reads no counters, because the quota CHECK makes the charge decision itself.
+	private tenantChargeGateSelect(tenant: TenantId) {
 		return this.context.d1
-			.select({ status: d1Schema.tenant.status })
+			.select({
+				status: d1Schema.tenant.status,
+				usageTenant: d1Schema.tenantUsage.tenant
+			})
 			.from(d1Schema.tenant)
+			.leftJoin(
+				d1Schema.tenantUsage,
+				eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
+			)
 			.where(eq(d1Schema.tenant.id, tenant));
+	}
+
+	// A tenant with no usage row cannot be charged: the counters and the quota both
+	// live in that row, and every charge statement requires it. Refuse the write
+	// rather than publish a path that nothing counts and no quota covers.
+	private refuseUnmeteredTenant(
+		tenant: TenantId,
+		gate: ChargeGateRow | undefined
+	): void {
+		if (gate?.usageTenant === null) {
+			throw new TenantUsageMissingError(tenant);
+		}
 	}
 
 	// The database quota check rolls back the whole charge batch, so an edge
@@ -684,14 +728,14 @@ export class CommitPipelineService {
 	): Promise<ChargeOutcome> {
 		const now = isoTimestamp(new Date());
 
-		let statusRows: { status: TenantAccount['status'] }[];
+		let gateRows: ChargeGateRow[];
 
 		try {
-			const [status] = await this.context.d1.batch([
-				this.tenantStatusSelect(tenant),
+			const [gate] = await this.context.d1.batch([
+				this.tenantChargeGateSelect(tenant),
 				...this.chargeStatements(tenant, cache, metadata, generation, blob, now)
 			]);
-			statusRows = status;
+			gateRows = gate;
 		} catch (error) {
 			// Concurrent commits can both pass the advisory quota check. Re-read
 			// after a failed charge to distinguish that race from a storage fault.
@@ -708,12 +752,14 @@ export class CommitPipelineService {
 			throw error;
 		}
 
-		if (statusRows.at(0)?.status !== 'active') {
+		if (gateRows.at(0)?.status !== 'active') {
 			return {
 				kind: 'tenant-inactive',
-				tenantStatus: statusRows.at(0)?.status
+				tenantStatus: gateRows.at(0)?.status
 			};
 		}
+
+		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
 
 		return { kind: 'charged' };
 	}
@@ -742,24 +788,26 @@ export class CommitPipelineService {
 			)
 		);
 
-		let statusRows: { status: TenantAccount['status'] }[];
+		let gateRows: ChargeGateRow[];
 
 		try {
-			const [status] = await this.context.d1.batch([
-				this.tenantStatusSelect(tenant),
+			const [gate] = await this.context.d1.batch([
+				this.tenantChargeGateSelect(tenant),
 				...statements
 			]);
-			statusRows = status;
+			gateRows = gate;
 		} catch {
 			return { kind: 'retry-individually' };
 		}
 
-		if (statusRows.at(0)?.status !== 'active') {
+		if (gateRows.at(0)?.status !== 'active') {
 			return {
 				kind: 'tenant-inactive',
-				tenantStatus: statusRows.at(0)?.status
+				tenantStatus: gateRows.at(0)?.status
 			};
 		}
+
+		this.refuseUnmeteredTenant(tenant, gateRows.at(0));
 
 		return { kind: 'charged' };
 	}
@@ -1519,6 +1567,11 @@ export class CommitPipelineService {
 		if (stagedSize === undefined) {
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
+
+		// Refuse an unmetered tenant here rather than at the charge. A commit that
+		// reaches verification is settled by a later pass, which can record only
+		// the verdicts the client understands, so the refusal would not reach it.
+		this.refuseUnmeteredTenant(tenant, account);
 
 		// Avoid verification when the advisory facts already prove this charge
 		// exceeds quota. An existing canonical encoding can have a different size,

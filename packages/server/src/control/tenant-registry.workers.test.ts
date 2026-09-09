@@ -406,6 +406,32 @@ describe('tenant registry', () => {
 		});
 	});
 
+	it('writes no tenant row when the usage row cannot be stored', async () => {
+		// The create schema rejects a negative quota. Passing one straight to
+		// `ensureTenant` makes the usage insert violate the quota CHECK, which is
+		// the only way a test can fail the second of the two inserts.
+		const body = { ...quotaBody(acme, 0), quotaBytes: -1 };
+
+		const rejected = await rejectedBy(() =>
+			ensureTenant(database(), body, now)
+		);
+		const tenant = await database()
+			.select({ id: d1Schema.tenant.id })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+
+		expect({
+			failed: rejected !== undefined,
+			tenantStored: tenant !== undefined,
+			usageStored: (await usageRow(acme)) !== undefined
+		}).toStrictEqual({
+			failed: true,
+			tenantStored: false,
+			usageStored: false
+		});
+	});
+
 	it('rejects a conflicting re-create of a crash residue without writing a usage row', async () => {
 		await database()
 			.insert(d1Schema.tenant)
