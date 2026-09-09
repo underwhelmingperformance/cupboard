@@ -9,9 +9,13 @@ import {
 } from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
-import { checkBatchSize } from '../http/http.ts';
+// A hash's candidates are the caches of the view that hold it. Their NARs are
+// probed once for each distinct hash, so copies that agree cost one head. This
+// is the number of disagreeing copies one hash is assumed to have at worst; a
+// view whose copies disagree is served as a miss either way.
+const reuseViewCandidateHeads = 17;
 
-import { reuseCandidateLimit } from './reuse-view-lookup-service.ts';
+import { checkBatchSize } from '../http/http.ts';
 
 // Each cap below bounds how many items one request accepts, so that the R2
 // requests the server makes for those items stay under the subrequest ceiling.
@@ -43,9 +47,9 @@ const cappedRequests: readonly CappedRequest[] = [
 	{
 		cap: 'reuseViewAvailabilityMaxPaths',
 		items: reuseViewAvailabilityMaxPaths,
-		requestsPerItem: reuseCandidateLimit + 1,
+		requestsPerItem: reuseViewCandidateHeads,
 		fanOut:
-			'One NAR head for each candidate a hash selects, and the lookup reads one candidate beyond its limit.'
+			"One NAR head for each distinct NAR among a hash's candidates. Copies that agree share one NAR, so this is the count for a hash whose copies disagree."
 	},
 	{
 		cap: 'rootSetMaxTargets',

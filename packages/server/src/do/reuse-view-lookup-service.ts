@@ -4,6 +4,7 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheFromSelector,
 	cacheNameSchema,
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	PRIVATE_STORED_PREFIX,
 	privateStoredCache,
@@ -19,18 +20,8 @@ import {
 	type ReuseViewRevision,
 	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
-import {
-	and,
-	eq,
-	getTableColumns,
-	gte,
-	inArray,
-	lt,
-	lte,
-	or,
-	type SQL,
-	sql
-} from 'drizzle-orm';
+import { and, eq, gte, inArray, lt, or, type SQL, sql } from 'drizzle-orm';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { outsidePrivateCaches } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -48,15 +39,6 @@ import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
-
-/**
- * The most distinct source-cache copies of one store-path hash a lookup will
- * verify. A hash with more copies than this is served as a miss and recorded
- * as a structured event; the candidate set is never truncated. A miss only
- * sends the reader to its next substituter or to a local build, whereas a
- * narinfo computed from a truncated candidate set could hide a conflict.
- */
-export const reuseCandidateLimit = 16;
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
 
@@ -95,6 +77,18 @@ function recordedObjectVersions(
 			? []
 			: [{ narHash: candidate.narHash, incarnation: blob.incarnation }];
 	});
+}
+
+// Bind only the key columns: a candidate row also holds the narinfo's references
+// and signatures, which the list would otherwise carry.
+function candidateVersions(
+	candidates: readonly CandidateRow[]
+): CandidateVersion[] {
+	return candidates.map((candidate) => ({
+		cache: candidate.cache,
+		storePathHash: candidate.storePathHash,
+		generation: candidate.generation
+	}));
 }
 
 function candidateKey(
@@ -204,32 +198,97 @@ function withinSelectorRanges(ranges: JsonRowList<CacheRange>): SQL {
 	);
 }
 
-function selectorCondition(
-	view: StoredReuseView,
-	selector: { kind: 'exact' | 'prefix'; pattern: string }
-): SQL | undefined {
-	if (selector.kind === 'exact') {
-		return eq(
-			schema.narInfos.cache,
-			exactSelectorCache(view, selector.pattern)
-		);
-	}
+/**
+ * One candidate version, as the edge lookup compares it.
+ */
+interface CandidateVersion {
+	readonly cache: StoredCache;
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+}
 
-	if (selector.pattern === '') {
+/**
+ * Builds the query for the committed reference edges of one list of candidate
+ * versions. The versions travel as a row list, so the query binds the same
+ * parameters however many caches hold the path.
+ *
+ * The parameter test imports this builder and inspects the statement it makes.
+ */
+export function reuseEdgeSelect(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	versions: JsonRowList<CandidateVersion>
+) {
+	return database
+		.select({
+			cache: d1Schema.blobReference.cache,
+			storePathHash: d1Schema.blobReference.storePathHash,
+			generation: d1Schema.blobReference.generation,
+			narHash: d1Schema.blobReference.narHash
+		})
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				versions.matches({
+					cache: d1Schema.blobReference.cache,
+					storePathHash: d1Schema.blobReference.storePathHash,
+					generation: d1Schema.blobReference.generation
+				})
+			)
+		);
+}
+
+/**
+ * The condition that matches every cache a view selects.
+ *
+ * A view holds its selectors as exact cache names and as prefix ranges, and each
+ * set travels as one bound list, so the condition binds the same parameters
+ * however many selectors the view holds.
+ */
+function viewCacheFilter(
+	view: StoredReuseView,
+	selectors: readonly {
+		readonly kind: 'exact' | 'prefix';
+		readonly pattern: string;
+	}[]
+): SQL | undefined {
+	// An empty prefix matches every cache of the view's namespace, so its
+	// condition alone covers the other selectors.
+	if (
+		selectors.some(
+			(selector) => selector.kind === 'prefix' && selector.pattern === ''
+		)
+	) {
 		return allCachesCondition(view);
 	}
 
-	if (isPrivateReuseView(view)) {
-		return insidePrivatePrefix(selector.pattern);
-	}
-
-	// Prefix patterns are not complete selectors, so compare them directly with
-	// the stored names in the `cache` column.
-	return and(
-		gte(schema.narInfos.cache, sql`${selector.pattern}`),
-		lt(schema.narInfos.cache, sql`${prefixUpperBound(selector.pattern)}`),
-		outsidePrivateRange()
+	const exactCaches = selectors.flatMap((selector) =>
+		selector.kind === 'exact'
+			? [exactSelectorCache(view, selector.pattern)]
+			: []
 	);
+	const prefixRanges = selectors.flatMap((selector) => {
+		const range =
+			selector.kind === 'prefix'
+				? selectorRange(view, selector.pattern)
+				: undefined;
+
+		return range === undefined ? [] : [range];
+	});
+	const selectorConditions = [
+		...jsonValueLists(exactCaches).map((caches) =>
+			inArray(schema.narInfos.cache, caches)
+		),
+		...jsonRowLists(prefixRanges).map((ranges) => withinSelectorRanges(ranges))
+	];
+	// A public view's selectors match public caches only, so the namespace applies
+	// to the whole selector set rather than to each selector.
+	const namespaceFilter = isPrivateReuseView(view)
+		? undefined
+		: outsidePrivateRange();
+
+	return and(or(...selectorConditions), namespaceFilter);
 }
 
 /**
@@ -262,17 +321,12 @@ function narUrlForView(
  * followed by a synchronous revalidation under the gate.
  */
 export class ReuseViewLookupService {
-	// Planner concurrency can repeat an over-limit lookup many times. Warn once
-	// per view so these configuration warnings do not obscure integrity events.
-	private readonly warnedOverLimitViews = new Set<string>();
-
 	constructor(private readonly context: ServerContext) {}
 
-	// Read the view revision and candidates in one input-gate snapshot. Each
-	// selector uses the (store_path_hash, cache) index and returns a bounded
-	// number of rows.
+	// Read the view revision and candidates in one input-gate snapshot. The
+	// selectors travel as bound lists, so one query returns every copy of the
+	// path the view selects, and the primary key gives at most one row per cache.
 	private snapshotCandidates(
-		logger: Logger,
 		view: StoredReuseView,
 		storePathHash: StorePathHash
 	): GateSnapshot | undefined {
@@ -294,64 +348,26 @@ export class ReuseViewLookupService {
 			.from(schema.reuseViewSelectors)
 			.where(eq(schema.reuseViewSelectors.view, view))
 			.all();
-
-		const byCache = new Map<string, CandidateRow>();
-
-		for (const selector of selectors) {
-			for (const row of this.selectorRows(view, selector, storePathHash)) {
-				byCache.set(row.cache, row);
-			}
-
-			if (byCache.size > reuseCandidateLimit) {
-				if (!this.warnedOverLimitViews.has(view)) {
-					this.warnedOverLimitViews.add(view);
-					logger.warn('reuse lookup exceeded the candidate limit', {
-						view,
-						storePathHash,
-						candidateLimit: reuseCandidateLimit
-					});
-				}
-
-				return undefined;
-			}
-		}
+		const candidates = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.storePathHash, storePathHash),
+					viewCacheFilter(view, selectors)
+				)
+			)
+			.orderBy(schema.narInfos.cache)
+			.all();
 
 		return {
 			tenant: this.context.requireTenant(),
 			revision: viewRow.revision,
-			candidates: byCache.values().toArray()
+			candidates
 		};
 	}
 
-	private selectorRows(
-		view: StoredReuseView,
-		selector: { kind: 'exact' | 'prefix'; pattern: string },
-		storePathHash: StorePathHash
-	): CandidateRow[] {
-		const hashMatch = eq(schema.narInfos.storePathHash, storePathHash);
-
-		if (selector.kind === 'exact') {
-			const cache = exactSelectorCache(view, selector.pattern);
-
-			return this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(and(hashMatch, eq(schema.narInfos.cache, cache)))
-				.all();
-		}
-
-		const cacheRange = selectorCondition(view, selector);
-
-		return this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(and(hashMatch, cacheRange))
-			.limit(reuseCandidateLimit + 1)
-			.all();
-	}
-
 	private snapshotCandidateBatch(
-		logger: Logger,
 		view: StoredReuseView,
 		storePathHashes: readonly StorePathHash[]
 	): GateBatchSnapshot | undefined {
@@ -373,97 +389,15 @@ export class ReuseViewLookupService {
 			.from(schema.reuseViewSelectors)
 			.where(eq(schema.reuseViewSelectors.view, view))
 			.all();
-		const hasAllCacheSelector = selectors.some(
-			(selector) => selector.kind === 'prefix' && selector.pattern === ''
+		const cacheFilter = viewCacheFilter(view, selectors);
+		const candidates = jsonValueLists(storePathHashes).flatMap((hashes) =>
+			this.context.db
+				.select()
+				.from(schema.narInfos)
+				.where(and(inArray(schema.narInfos.storePathHash, hashes), cacheFilter))
+				.orderBy(schema.narInfos.storePathHash, schema.narInfos.cache)
+				.all()
 		);
-		// A view holds its selectors as exact cache names and as prefix ranges, and
-		// each set travels as one bound list, so a query binds the same parameters
-		// however many selectors the view holds.
-		const exactCaches = selectors.flatMap((selector) =>
-			selector.kind === 'exact'
-				? [exactSelectorCache(view, selector.pattern)]
-				: []
-		);
-		const prefixRanges = selectors.flatMap((selector) => {
-			const range =
-				selector.kind === 'prefix'
-					? selectorRange(view, selector.pattern)
-					: undefined;
-
-			return range === undefined ? [] : [range];
-		});
-		const selectorConditions = [
-			...jsonValueLists(exactCaches).map((caches) =>
-				inArray(schema.narInfos.cache, caches)
-			),
-			...jsonRowLists(prefixRanges).map((ranges) =>
-				withinSelectorRanges(ranges)
-			)
-		];
-		// A public view's selectors match public caches only, so the namespace
-		// applies to the whole selector set rather than to each selector.
-		const namespaceFilter = isPrivateReuseView(view)
-			? undefined
-			: outsidePrivateRange();
-		// An empty prefix matches every cache of the view's namespace, so its
-		// condition alone covers the other selectors.
-		const cacheFilter = hasAllCacheSelector
-			? allCachesCondition(view)
-			: and(or(...selectorConditions), namespaceFilter);
-		const rows = jsonValueLists(storePathHashes).flatMap(
-			(storePathHashBatch) => {
-				const hashFilter = inArray(
-					schema.narInfos.storePathHash,
-					storePathHashBatch
-				);
-				const selectedRowsFilter = and(hashFilter, cacheFilter);
-				const ranked = this.context.db.$with('reuse_candidates').as(
-					this.context.db
-						.select({
-							...getTableColumns(schema.narInfos),
-							candidateRank: sql<number>`row_number() over (
-									partition by ${schema.narInfos.storePathHash}
-									order by ${schema.narInfos.cache}
-								)`.as('candidate_rank')
-						})
-						.from(schema.narInfos)
-						.where(selectedRowsFilter)
-				);
-
-				return this.context.db
-					.with(ranked)
-					.select()
-					.from(ranked)
-					.where(lte(ranked.candidateRank, reuseCandidateLimit + 1))
-					.all();
-			}
-		);
-		const candidatesByHash = new Map<StorePathHash, CandidateRow[]>();
-
-		for (const row of rows) {
-			const candidates = candidatesByHash.get(row.storePathHash) ?? [];
-			candidates.push(row);
-			candidatesByHash.set(row.storePathHash, candidates);
-		}
-
-		const candidates: CandidateRow[] = [];
-
-		for (const [storePathHash, selected] of candidatesByHash) {
-			if (selected.length > reuseCandidateLimit) {
-				if (!this.warnedOverLimitViews.has(view)) {
-					this.warnedOverLimitViews.add(view);
-					logger.warn('reuse lookup exceeded the candidate limit', {
-						view,
-						storePathHash,
-						candidateLimit: reuseCandidateLimit
-					});
-				}
-
-				continue;
-			}
-
-			candidates.push(...selected);
-		}
 
 		return {
 			tenant: this.context.requireTenant(),
@@ -485,22 +419,14 @@ export class ReuseViewLookupService {
 			return { candidates: [], blobs: new Map() };
 		}
 
-		const storePathHash = first.storePathHash;
 		const uniqueHashes = [
 			...new Set(candidates.map((candidate) => candidate.narHash))
 		];
-		const edgeQueries = candidates.map((candidate) =>
-			this.context.d1
-				.select({ narHash: d1Schema.blobReference.narHash })
-				.from(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.cache, candidate.cache),
-						eq(d1Schema.blobReference.storePathHash, storePathHash),
-						eq(d1Schema.blobReference.generation, candidate.generation)
-					)
-				)
+		// The whole candidate set travels as one row list, so the statement count
+		// comes from the statement and a path held by many caches costs the
+		// invocation no more than a path held by one.
+		const edgeQueries = jsonRowLists(candidateVersions(candidates)).map(
+			(versions) => reuseEdgeSelect(this.context.d1, tenant, versions)
 		);
 		const [edgeResults, states, owned] = await this.sharedFacts(() =>
 			Promise.all([
@@ -541,11 +467,16 @@ export class ReuseViewLookupService {
 			])
 		);
 
+		// The query returns one row for each committed edge in no guaranteed order,
+		// so match candidates on the full version key. The rows do not line up with
+		// the candidate list by position.
+		const committedVersions = new Set(
+			edgeResults.flat().map((edge) => candidateVersionKey(edge))
+		);
 		const committedCaches = new Set(
 			candidates
-				.filter(
-					(candidate, index) =>
-						edgeResults[index]?.[0]?.narHash === candidate.narHash
+				.filter((candidate) =>
+					committedVersions.has(candidateVersionKey(candidate))
 				)
 				.map((candidate) => candidate.cache)
 		);
@@ -593,34 +524,8 @@ export class ReuseViewLookupService {
 		const uniqueHashes = [
 			...new Set(candidates.map((candidate) => candidate.narHash))
 		];
-		// Bind only the key columns: a candidate row also holds the narinfo's
-		// references and signatures, which the list would otherwise carry.
-		const candidateVersions = candidates.map((candidate) => ({
-			cache: candidate.cache,
-			storePathHash: candidate.storePathHash,
-			generation: candidate.generation
-		}));
-		const edgeQueries = jsonRowLists(candidateVersions).map(
-			(candidateBatch) => {
-				const edgeFilter = and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					candidateBatch.matches({
-						cache: d1Schema.blobReference.cache,
-						storePathHash: d1Schema.blobReference.storePathHash,
-						generation: d1Schema.blobReference.generation
-					})
-				);
-
-				return this.context.d1
-					.select({
-						cache: d1Schema.blobReference.cache,
-						storePathHash: d1Schema.blobReference.storePathHash,
-						generation: d1Schema.blobReference.generation,
-						narHash: d1Schema.blobReference.narHash
-					})
-					.from(d1Schema.blobReference)
-					.where(edgeFilter);
-			}
+		const edgeQueries = jsonRowLists(candidateVersions(candidates)).map(
+			(versions) => reuseEdgeSelect(this.context.d1, tenant, versions)
 		);
 		const stateQueries = jsonValueLists(uniqueHashes).map((narHashes) =>
 			this.context.d1
@@ -927,7 +832,7 @@ export class ReuseViewLookupService {
 		storePathHash: StorePathHash
 	): Promise<NarInfo | undefined> {
 		const snapshot = await this.context.criticalSection(() =>
-			Promise.resolve(this.snapshotCandidates(logger, view, storePathHash))
+			Promise.resolve(this.snapshotCandidates(view, storePathHash))
 		);
 
 		if (snapshot === undefined || snapshot.candidates.length === 0) {
@@ -958,7 +863,7 @@ export class ReuseViewLookupService {
 	): Promise<StorePathHash[]> {
 		const uniqueHashes = [...new Set(storePathHashes)];
 		const snapshot = await this.context.criticalSection(() =>
-			Promise.resolve(this.snapshotCandidateBatch(logger, view, uniqueHashes))
+			Promise.resolve(this.snapshotCandidateBatch(view, uniqueHashes))
 		);
 
 		if (snapshot === undefined || snapshot.candidates.length === 0) {

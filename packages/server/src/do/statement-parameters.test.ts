@@ -64,6 +64,7 @@ import {
 	reuseViewSelectorInsert,
 	type StoredReuseViewSelector
 } from './reuse-view-admin-service.ts';
+import { reuseEdgeSelect } from './reuse-view-lookup-service.ts';
 import { buildLeaseUpdate } from './verification-service.ts';
 
 const throwStub = (): never => {
@@ -382,6 +383,18 @@ function publicReferenceParameters(hashes: number): number {
 		.params.length;
 }
 
+// A path one view holds in many caches reaches the edge lookup as one row list,
+// so the count comes from the statement rather than from the number of caches.
+function reuseEdgeParameters(candidates: number): number {
+	const rows = rowList(candidates, {
+		cache,
+		storePathHash: testStorePathHash,
+		generation: testGeneration
+	});
+
+	return reuseEdgeSelect(database, tenant, rows).toSQL().params.length;
+}
+
 function reuseViewSelectorParameters(selectors: number): number {
 	const rows = rowList<StoredReuseViewSelector>(selectors, {
 		kind: 'prefix',
@@ -504,6 +517,7 @@ const listStatements: readonly {
 		statement: 'reuse view selector INSERT',
 		parameters: reuseViewSelectorParameters
 	},
+	{ statement: 'reuse view edge SELECT', parameters: reuseEdgeParameters },
 	{ statement: 'verification claim lease UPDATE', parameters: leaseParameters },
 	{ statement: 'root target INSERT', parameters: rootTargetInsertParameters },
 	{

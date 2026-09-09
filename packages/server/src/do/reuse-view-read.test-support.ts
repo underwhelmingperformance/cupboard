@@ -111,6 +111,49 @@ export async function insertUnbackedRow(
 }
 
 /**
+ * Publishes the same path to another cache: the committed row copied unchanged
+ * except for its cache, with a committed edge of its own. Several of these are
+ * the shape of one store path published by many branches of a CI setup, whose
+ * copies agree and whose narinfo a view should serve.
+ */
+export async function insertAgreeingCopy(
+	cache: string,
+	committedStorePathHash: string
+): Promise<void> {
+	const targetCache = storedCacheSchema.parse(cache);
+	const hash = storePathHashSchema.parse(committedStorePathHash);
+	const source = await runInDurableObject(fixtureWorkerServer(), (instance) =>
+		instance.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(eq(schema.narInfos.storePathHash, hash))
+			.get()
+	);
+
+	if (source === undefined) {
+		throw new Error('the committed path has no narinfo row to copy');
+	}
+
+	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		instance.context.db
+			.insert(schema.narInfos)
+			.values({ ...source, cache: targetCache })
+			.run();
+	});
+
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.blobReference)
+		.values({
+			tenant: fixtureTenant,
+			cache: targetCache,
+			storePathHash: hash,
+			generation: source.generation,
+			narHash: source.narHash
+		})
+		.run();
+}
+
+/**
  * Inserts a narinfo row for `storePathHash` in `cache` and a matching D1 blob
  * reference. Both records refer to the NAR for `committedStorePathHash`, so
  * lookup tests can distinguish selector filtering from missing backing data.

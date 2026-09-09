@@ -7,9 +7,10 @@ import { z } from 'zod';
 // `packages/server/src/do/subrequest-budget.test.ts`.
 export const cacheAvailabilityMaxPaths = 900;
 
-// The reuse-view route accepts at most 50 requested hashes. After deduplication
-// each hash can select one candidate beyond `reuseCandidateLimit`, and each
-// candidate's NAR is probed, so one request makes at most 850 head requests.
+// The reuse-view route accepts at most 50 requested hashes. A hash's NAR is
+// probed once for each distinct NAR its candidate caches hold, so copies that
+// agree cost one head and only a hash whose copies disagree costs more. The
+// assumed worst case per hash is recorded with the other fan-out figures.
 export const reuseViewAvailabilityMaxPaths = 50;
 
 export const cacheAvailabilityRequestSchema = z.strictObject({
