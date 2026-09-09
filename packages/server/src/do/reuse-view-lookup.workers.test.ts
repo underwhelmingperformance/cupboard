@@ -38,6 +38,7 @@ import {
 	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
+	removeView,
 	setView
 } from './reuse-view-read.test-support.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -48,6 +49,10 @@ function sharedFacts() {
 
 describe('reuse-view narinfo lookup', () => {
 	beforeEach(resetTestServer);
+	// Every case here drives the same fixture tenant, so a view left behind by
+	// the previous case would select the cache this case creates, and creation
+	// would then refuse it.
+	beforeEach(() => removeView());
 
 	it('returns present and missing hashes through the bulk availability route', async () => {
 		const present = await committedPath('reuse-bulk', namedCache('pr-1'));

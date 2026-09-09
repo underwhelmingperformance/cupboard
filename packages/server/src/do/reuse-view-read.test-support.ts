@@ -30,6 +30,23 @@ import {
 } from '../test-support.ts';
 
 /**
+ * Removes the fixture tenant's `name` view, and succeeds when there is none.
+ * Cases in one file share the fixture tenant, so a case that creates a cache
+ * before defining its own view must first clear the previous case's view:
+ * creation refuses a cache that an existing view selects but cannot read.
+ */
+export async function removeView(name = 'reuse'): Promise<void> {
+	const token = await initialiseViaWorker();
+	const response = await authorisedWorkerFetch(
+		`/reuse-views/${encodeURIComponent(name)}`,
+		token,
+		{ method: 'DELETE' }
+	);
+
+	expect([StatusCodes.OK, StatusCodes.NOT_FOUND]).toContain(response.status);
+}
+
+/**
  * Defines or replaces one of the fixture tenant's views through the admin API.
  */
 export async function setView(

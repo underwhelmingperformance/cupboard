@@ -25,6 +25,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -236,6 +237,25 @@ async function putCache(
 	return cacheSummarySchema.parse(await response.json());
 }
 
+async function putReuseView(
+	token: string,
+	name: string,
+	access: CacheAccessMode,
+	prefix: string
+): Promise<void> {
+	const response = await authorisedFetch(`/reuse-views/${name}`, token, {
+		body: JSON.stringify({
+			access,
+			priority: 50,
+			selectors: [{ kind: 'prefix', prefix }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+}
+
 async function getCache(
 	token: string,
 	name: string
@@ -277,6 +297,12 @@ function cacheListRequest(token: string): Request {
 	});
 }
 
+const viewMismatchDataSchema = z.object({ views: z.array(z.string()) });
+const viewMismatchSchema = z.object({
+	code: z.string(),
+	data: viewMismatchDataSchema
+});
+
 describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
 
@@ -314,6 +340,47 @@ describe('cache registry admin', () => {
 				graceManaged: false
 			}
 		]);
+	});
+
+	it('refuses a private cache that a public reuse view selects', async () => {
+		await useTestServer('cache-admin-view-access');
+		const init = await bootstrap();
+		await putReuseView(init.token, 'pull-requests-1', 'public', 'vpr-');
+
+		const refused = await authorisedFetch('/caches/vpr-1', init.token, {
+			body: JSON.stringify({ access: 'private', priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		const refusal = viewMismatchSchema.safeParse(await refused.json());
+
+		const { caches } = await listCaches(init.token);
+
+		expect({
+			status: refused.status,
+			code: refusal.data?.code,
+			views: refusal.data?.data.views,
+			caches: caches.map((summary) => summary.scope)
+		}).toStrictEqual({
+			status: StatusCodes.CONFLICT,
+			code: 'CACHE_VIEW_ACCESS_MISMATCH',
+			views: ['pull-requests-1'],
+			// The tenant still has only its default cache.
+			caches: [defaultCache()]
+		});
+	});
+
+	it('creates a cache whose access matches the selecting view', async () => {
+		await useTestServer('cache-admin-view-access-agrees');
+		const init = await bootstrap();
+		await putReuseView(init.token, 'pull-requests-2', 'public', 'wpr-');
+
+		const created = await putCache(init.token, 'wpr-1', 30, 'public');
+
+		expect({ scope: created.scope, access: created.access }).toStrictEqual({
+			scope: { kind: 'named', name: 'wpr-1' },
+			access: 'public'
+		});
 	});
 
 	it('reports grace management and the earliest live deadline per cache', async () => {

@@ -163,6 +163,30 @@ export class CacheAlreadyExistsError extends ServerHttpError {
 	}
 }
 
+// A view reads only from the caches whose access equals its own, so a cache
+// created with the other access is absent from every lookup that view answers.
+// Refusing at creation is the earliest point at which that is correctable;
+// `cupboard github check` reports it for caches that already exist.
+export class CacheViewAccessMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly cache: CacheScope,
+		public readonly views: readonly string[],
+		public readonly viewAccess: readonly string[]
+	) {
+		const accesses = [...new Set(viewAccess)].join(' and ');
+		const [only] = views;
+
+		super(
+			only !== undefined && views.length === 1
+				? `Reuse view ${only} selects this cache and reads ${accesses} caches, so it could never serve the cache. Create the cache with that access, or narrow the view's selectors.`
+				: `Reuse views ${views.join(', ')} select this cache and read ${accesses} caches, so none of them could serve it. Narrow their selectors, or use another cache name.`
+		);
+		this.name = 'CacheViewAccessMismatchError';
+	}
+}
+
 export class CacheNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

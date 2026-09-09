@@ -1,4 +1,8 @@
-import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheAccessModeSchema,
+	cacheNameSchema,
+	cacheScopeSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -19,6 +23,17 @@ const cacheAlreadyExistsError = {
 	CACHE_ALREADY_EXISTS: {
 		status: 409,
 		data: z.strictObject({ cache: cacheScopeSchema })
+	}
+};
+
+const cacheViewAccessMismatchError = {
+	CACHE_VIEW_ACCESS_MISMATCH: {
+		status: 409,
+		data: z.strictObject({
+			cache: cacheScopeSchema,
+			views: z.array(z.string()),
+			viewAccess: z.array(cacheAccessModeSchema)
+		})
 	}
 };
 
@@ -64,7 +79,7 @@ export const cachesContract = {
 			})
 			.route({ method: 'PUT', path: '/cache' })
 			.input(cachePutBodySchema)
-			.errors(cacheAlreadyExistsError)
+			.errors({ ...cacheAlreadyExistsError, ...cacheViewAccessMismatchError })
 			.output(cacheSummarySchema),
 
 		inNamedCache: baseProcedure
@@ -80,7 +95,7 @@ export const cachesContract = {
 					...cachePutBodySchema.shape
 				})
 			)
-			.errors(cacheAlreadyExistsError)
+			.errors({ ...cacheAlreadyExistsError, ...cacheViewAccessMismatchError })
 			.output(cacheSummarySchema)
 	},
 
