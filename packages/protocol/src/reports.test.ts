@@ -52,11 +52,19 @@ describe('check report schemas', () => {
 		expect(checkDiscrepancySchema.safeParse(value).success).toBe(false);
 	});
 
-	it('accepts a complete report with discrepancies', () => {
+	it.each([
+		{
+			name: 'a report that carries the next cursor',
+			cursor: 'c'.repeat(32),
+			cursorCache: 'builds'
+		},
+		{ name: 'a report at the end of the scan', cursor: '', cursorCache: '' }
+	])('accepts $name', ({ cursor, cursorCache }) => {
 		const value = {
 			narInfosChecked: 12,
 			narBlobsChecked: 10,
-			complete: true,
+			cursor,
+			cursorCache,
 			discrepancies: [discrepancy]
 		};
 
@@ -68,7 +76,8 @@ describe('check report schemas', () => {
 			checkReportSchema.safeParse({
 				narInfosChecked: -1,
 				narBlobsChecked: 0,
-				complete: false,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: []
 			}).success
 		).toBe(false);
