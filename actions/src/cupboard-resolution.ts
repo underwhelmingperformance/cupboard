@@ -1,6 +1,5 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { createOctokitClient } from '@cupboard/shared/octokit';
-import { RequestError } from '@octokit/request-error';
 import { z } from 'zod';
 
 import {
@@ -13,6 +12,7 @@ import {
 	ReleaseDiscoverySearchTooLargeError,
 	WorkflowShaInvalidError
 } from './errors.ts';
+import { requestErrorStatus } from './octokit-request-error.ts';
 import {
 	fetchRelease,
 	fetchTagCommit,
@@ -258,9 +258,11 @@ export async function resolveCupboard(
 			});
 			sourceCommit = await fetchTagCommit(client, owner, name, release.tagName);
 		} catch (error) {
-			if (error instanceof RequestError) {
+			const status = requestErrorStatus(error);
+
+			if (status !== undefined) {
 				throw new GithubApiError('failed to resolve the cupboard release', {
-					status: error.status,
+					status,
 					cause: error
 				});
 			}
@@ -477,7 +479,7 @@ async function fetchReleasePage(
 		});
 	} catch (error) {
 		throw new GithubApiError('failed to discover cupboard releases', {
-			status: error instanceof RequestError ? error.status : undefined,
+			status: requestErrorStatus(error),
 			cause: error
 		});
 	}

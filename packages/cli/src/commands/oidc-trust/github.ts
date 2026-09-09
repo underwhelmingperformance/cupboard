@@ -1,7 +1,7 @@
 import path from 'node:path';
 
 import { createOctokitClient } from '@cupboard/shared/octokit';
-import { RequestError } from '@octokit/request-error';
+import type { RequestError } from '@octokit/request-error';
 import { StatusCodes } from 'http-status-codes';
 import makeFetchHappen from 'make-fetch-happen';
 
@@ -223,15 +223,46 @@ export function isGithubRateLimitResponse(error: unknown): boolean {
 		return true;
 	}
 
-	if (!(error instanceof RequestError) || error.status !== forbiddenStatus) {
+	if (!isStatus(error, forbiddenStatus)) {
 		return false;
 	}
 
-	const headers = error.response?.headers;
+	const headers = requestErrorHeaders(error);
 
 	return (
 		headers?.['x-ratelimit-remaining'] === '0' ||
 		headers?.['retry-after'] !== undefined
+	);
+}
+
+type RequestErrorHeaders = NonNullable<RequestError['response']>['headers'];
+
+function requestErrorHeaders(error: object): RequestErrorHeaders | undefined {
+	if (!('response' in error)) {
+		return undefined;
+	}
+
+	const { response } = error;
+
+	if (
+		typeof response !== 'object' ||
+		response === null ||
+		!('headers' in response) ||
+		!isRequestErrorHeaders(response.headers)
+	) {
+		return undefined;
+	}
+
+	return response.headers;
+}
+
+function isRequestErrorHeaders(value: unknown): value is RequestErrorHeaders {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		Object.values(value).every(
+			(header) => header === undefined || typeof header === 'string'
+		)
 	);
 }
 
@@ -258,7 +289,10 @@ function githubRequestSignal(
 	return controller.signal;
 }
 
-function isStatus(error: unknown, status: number): boolean {
+function isStatus(
+	error: unknown,
+	status: number
+): error is { readonly status: number } {
 	return (
 		typeof error === 'object' &&
 		error !== null &&
