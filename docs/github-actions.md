@@ -71,7 +71,7 @@ accepts explicit API endpoints and workflow identity inputs.
 ## Cache-aware flake publishing quickstart
 
 This is the shortest complete setup for publishing pull-request builds to
-short-lived `pr-<number>` caches, then reusing those builds when `main` is
+short-lived per-pull-request caches, then reusing those builds when `main` is
 published.
 
 The example assumes that cupboard is deployed, the tenant exists, its reads are
@@ -105,7 +105,7 @@ Choose an immutable cupboard release from the [releases page][] and replace
 ### 2. Configure the tenant
 
 One idempotent command writes all tenant configuration required by these runs:
-the `pull-requests` reuse view over the per-PR caches, and trust rules for this
+this repository's reuse view over its per-PR caches, and trust rules for this
 repository's PR and `main` runs:
 
 ```bash
@@ -190,13 +190,30 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
       preset: pull-request-and-branch
-      reuse-view: pull-requests
 ```
 
 The preset derives the cache, root prefix, and TTL from the triggering event. A
-`pull_request` run uses a `pr-<number>` cache with a 14-day TTL. The PR trust
-rule grants access to that cache and its retention root. A run whose ref matches
-the configured `branch` uses the default cache, permanent retention under
+`pull_request` run uses a `gh-<repository-id>-pr-<number>` cache with a 14-day
+TTL. The PR trust rule grants access to that cache and its retention root. It
+also lets a run create the cache, because none exists before a pull request's
+first run, and remove it, because nothing else does when the pull request
+closes. The run creates the cache before it builds, and a run for a closed pull
+request removes it and builds nothing. A pull request abandoned without being
+closed keeps its cache until the 14-day TTL expires its contents.
+
+A pull request from a fork is refused, because GitHub issues it no OIDC token
+and so it could never publish. A repository that accepts external contributions
+should guard the job rather than let every such pull request fail:
+
+```yaml
+if:
+  github.event_name != 'pull_request' || github.event.pull_request.head.repo.id
+  == github.repository_id
+```
+
+[Creating and removing a cache from CI](./trust-rules.md#creating-and-removing-a-cache-from-ci)
+describes the two commands that use those grants. A run whose ref matches the
+configured `branch` uses the default cache, permanent retention under
 `github:<repository>/<branch>`, and the reuse view.
 
 `branch` defaults to `main` and must match the value passed to
@@ -240,12 +257,12 @@ Listing the configuration by hand remains available (`cupboard cache list`,
 `cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
 only that rows exist, not that they will match a real run.
 
-Open a pull request and confirm that the workflow publishes to `pr-<number>`.
-After merging it, the `main` run should plan already-published targets from the
-reuse view and retain them beneath `github:<owner>/<repo>/main` in the default
-cache. If a push is refused anyway, the refusal names the first failing claim
-when the token really is from this repository; compare it against
-[docs/trust-rules.md](./trust-rules.md).
+Open a pull request and confirm that the workflow publishes to its own
+`gh-<repository-id>-pr-<number>` cache. After merging it, the `main` run should
+plan already-published targets from the reuse view and retain them beneath
+`github:<owner>/<repo>/main` in the default cache. If a push is refused anyway,
+the refusal names the first failing claim when the token really is from this
+repository; compare it against [docs/trust-rules.md](./trust-rules.md).
 
 ### Manual configuration
 
@@ -266,8 +283,10 @@ On the tenant, define a view over the PR caches and trust this repository's PR
 and `main` runs when they use cupboard's reusable workflow:
 
 ```bash
-cupboard reuse-view set "$tenant" pull-requests \
-  --select prefix:pr- --priority 50
+# One view per repository, selecting that repository's pull-request caches.
+# `repository_id` is the repository's numeric GitHub id.
+cupboard reuse-view set "$tenant" "pull-requests-$repository_id" \
+  --select "prefix:gh-$repository_id-pr-" --priority 50
 
 cupboard oidc-trust add-github-pr "$tenant" \
   --repo "$repo" \
@@ -708,9 +727,9 @@ jobs:
 
 `cache`, `root`, and `ttl` specify the destination cache, retention root and
 retention duration. In this example every pull request publishes to its own
-`pr-<number>` cache, and the pushed paths expire two weeks after the last push.
-A cache is created the first time something is pushed to it, so per-PR and
-per-release caches need no setup step.
+`pr-<number>` cache named by the caller, and the pushed paths expire two weeks
+after the last push. The cache has to exist before the first push: create it
+with `cupboard cache create`.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
 under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
@@ -1132,10 +1151,17 @@ push, and the existing root-prefix grant covers the new target's root.
 
 ### Add another repository to the same tenant
 
-The `pull-requests` view already covers any number of repositories. Run
-quickstart step 2's `cupboard github setup` for the new repository: it adds that
-repository's trust rules and reports the shared tenant state as unchanged. The
-equivalent individual commands are in
+Run quickstart step 2's `cupboard github setup` for the new repository. It adds
+that repository's trust rules and its own reuse view, and reports the shared
+tenant state as unchanged. Each repository gets its own view, selecting only its
+own pull-request caches, so one repository's `main` build never substitutes
+paths that another repository's pull request produced.
+
+To reuse across repositories deliberately, define a view of your own that
+selects more than one repository's caches, either with a wider prefix or with
+one `prefix:` selector per repository, and name it in the caller's `reuse-view`
+input. That overrides the per-repository view the preset would otherwise derive.
+The equivalent individual commands are in
 [Manual configuration](#manual-configuration).
 
 ### Tighten or audit a trust rule

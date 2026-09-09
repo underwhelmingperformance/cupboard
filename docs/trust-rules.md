@@ -31,9 +31,13 @@ The `add-github-pr` and `add-github-branch` commands assemble these rules for
 the common cases.
 
 `add-github-pr` trusts pull-request builds. It routes each build to its own
-short-lived cache, `pr-<number>`, and to the matching retention root,
-`github:<owner>/<repo>/pr-<number>/`. Both are keyed on the pull-request number,
-so one pull request cannot reach another's paths.
+short-lived cache, `gh-<repository-id>-pr-<number>`, and to the matching
+retention root, `github:<owner>/<repo>/pr-<number>/`. Both are keyed on the
+pull-request number, so one pull request cannot reach another's paths. The cache
+name also includes the repository, because a tenant can serve several
+repositories and their pull-request numbers repeat. The repository component
+comes from `repository_id`, a claim the issuer signs, so the rule renders
+exactly one cache name and a token cannot name another repository's.
 
 `add-github-branch` trusts pushes to one branch and publishes to the tenant's
 default cache, under `github:<owner>/<repo>/<branch>/`, which is the retention
@@ -46,7 +50,7 @@ retention operation a run performs on its roots, and attestation. Pass
 root.
 
 ```bash
-# Per-PR rule: build the pull request, push to its own pr-<n> cache.
+# Per-PR rule: build the pull request, push to its own cache.
 cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
   --repo acme/infra
 
@@ -154,6 +158,50 @@ grant a request that the highest-precedence rules refuse.
 The exchange is all-or-nothing, so a rule that cannot grant both refuses the
 whole exchange. That is the safer failure: the push fails at token exchange
 rather than publishing successfully with no retention.
+
+## Creating and removing a cache from CI
+
+A pull request publishes to a cache named for its repository and its number, and
+no such cache exists before the pull request's first run. The `create` and
+`remove` shorthands grant `cache:create` and `cache:delete` on the cache the
+rule binds, so a run can create the cache it is about to publish to and remove
+it when the pull request closes. The `add-github-pr` preset includes both.
+
+Neither shorthand widens which cache the rule covers. The pull-request preset
+renders its cache name from the `repository_id` and `ref` claims of the verified
+token, so a token for pull request 7 of repository 1234 can create and remove
+`gh-1234-pr-7` and nothing else. When a token's `ref` claim is absent, or does
+not match the capture, the rule renders no cache name and the token endpoint
+returns 400.
+
+```bash
+cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example.workers.dev/t/acme \
+  --template-source github-pr \
+  --cache-template 'gh-{repository_id}-pr-{pr}' \
+  --allow push --allow create --allow remove
+```
+
+The workflow then authenticates the two commands with its own token:
+
+```bash
+cupboard cache create "$tenant" "gh-$repository_id-pr-$number" \
+  --github-oidc --access public --root-ttl 14d
+cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
+  --github-oidc --force --yes
+```
+
+Give the cache a default root TTL when the run creates it. A pull request that
+closes removes its cache promptly, but one that is abandoned never runs its
+closing job. The roots in an abandoned cache reach their TTL and collection
+reclaims the store paths behind them, so the storage is recovered without an
+operator noticing the abandonment. What remains is the empty cache row and its
+name, until an administrator removes them.
+
+Choose the TTL to outlast the pull requests the repository actually keeps open.
+A root refreshed by a later push starts its TTL again, so the roots of an active
+pull request do not expire while it is still being pushed to.
 
 ## The flake publish workflow's grants
 

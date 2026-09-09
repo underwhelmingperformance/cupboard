@@ -2,6 +2,8 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
 	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
@@ -47,21 +49,30 @@ const attestActions = ['attestation:negotiate', 'attestation:attach'];
 // target root's list, reading that list, and attaching to the run root every
 // push binds.
 const rootActions = ['root:set', 'root:list', 'root:attach'];
-const prSubstitutions = {
+// Only the pull-request preset manages the cache itself. Its cache does not
+// exist before the first run and does not outlive the pull request.
+const cacheLifecycleActions = ['cache:create', 'cache:delete'];
+const prCaptureSubstitution = {
 	pr: {
 		claim: 'ref',
 		capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }
 	}
 };
+// The cache is named for the repository as well as the pull request, so its
+// binding renders both claims. The root already names the repository, so it
+// renders only the number.
 const prCacheBinding = {
 	kind: 'named',
-	equalsTemplate: 'pr-{pr}',
-	substitutions: prSubstitutions,
+	equalsTemplate: 'gh-{repository_id}-pr-{pr}',
+	substitutions: {
+		repository_id: { claim: 'repository_id' },
+		...prCaptureSubstitution
+	},
 	validate: 'cacheName'
 };
 const prRootBinding = {
 	equalsTemplate: 'github:acme/infra/pr-{pr}/',
-	substitutions: prSubstitutions,
+	substitutions: prCaptureSubstitution,
 	validate: 'rootName'
 };
 const tagSubstitutions = {
@@ -329,7 +340,12 @@ describe('githubPrAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, ...rootActions],
+					actions: [
+						...uploadActions,
+						...cacheLifecycleActions,
+						...attestActions,
+						...rootActions
+					],
 					resources: { cache: prCacheBinding, root: prRootBinding }
 				}
 			],
@@ -360,7 +376,7 @@ describe('githubPrAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...rootActions],
+					actions: [...uploadActions, ...cacheLifecycleActions, ...rootActions],
 					resources: { cache: prCacheBinding, root: prRootBinding }
 				}
 			],
@@ -552,6 +568,59 @@ describe('githubPrAddBody job_workflow_ref', () => {
 				pattern: String.raw`^acme/infra/\.github/workflows/publish\.yml@.+$`
 			},
 			exactRef: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+		});
+	});
+});
+
+// A tenant can serve several repositories, and their pull-request numbers
+// collide. The rule permits `cache:delete`, so two repositories sharing a name
+// would let one repository's closing run destroy the other's live cache.
+describe('pull-request cache naming across repositories', () => {
+	const first: RepositoryIdentity = {
+		repositoryId: 1234,
+		repositoryOwnerId: 5678,
+		fullName: 'acme/infra'
+	};
+	const second: RepositoryIdentity = {
+		repositoryId: 4321,
+		repositoryOwnerId: 5678,
+		fullName: 'acme/tools'
+	};
+	// The names that either repository might plausibly use for pull request 1.
+	const candidates = ['pr-1', 'gh-1234-pr-1', 'gh-4321-pr-1'];
+
+	function permittedCaches(identity: RepositoryIdentity): string[] {
+		const body = githubPrAddBody(tenantBase, identity, {
+			repo: identity.fullName
+		});
+
+		return candidates.filter((name) =>
+			isGrantPermittedByRule(
+				body.permittedGrants,
+				{
+					type: 'cupboard_cache',
+					actions: ['cache:delete'],
+					cache: { kind: 'named', name: cacheNameSchema.parse(name) }
+				},
+				{
+					iss: 'https://token.actions.githubusercontent.com',
+					aud: tenantUrl,
+					repository_id: String(identity.repositoryId),
+					repository_owner_id: String(identity.repositoryOwnerId),
+					event_name: 'pull_request',
+					ref: 'refs/pull/1/merge'
+				}
+			)
+		);
+	}
+
+	it('gives two repositories different caches for the same pull-request number', () => {
+		expect({
+			first: permittedCaches(first),
+			second: permittedCaches(second)
+		}).toStrictEqual({
+			first: ['gh-1234-pr-1'],
+			second: ['gh-4321-pr-1']
 		});
 	});
 });

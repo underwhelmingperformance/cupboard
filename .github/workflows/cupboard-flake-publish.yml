@@ -326,6 +326,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -417,17 +418,39 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                CACHE="pr-${PR_NUMBER}"
+                # A fork's pull request gets no id-token, so it could never
+                # publish. Refusing here says so, rather than leaving the run to
+                # fail later inside token exchange. A repository that accepts
+                # external contributions should guard its own job with
+                # `github.event.pull_request.head.repo.id == github.repository_id`.
+                if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
+                  echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
+                  exit 1
+                fi
+                # Pull-request numbers repeat across repositories and one
+                # tenant can serve several repositories, so a name without the
+                # repository id would let one repository publish to, and
+                # remove, another repository's cache.
+                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
                 REUSE_VIEW=''
-                ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
+                # The root already names the repository, so it stays keyed on
+                # the pull-request number alone.
+                ROOT_PREFIX="github:${REPOSITORY}/pr-${PR_NUMBER}"
               elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
                 ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
                 PERMANENT=true
+                # `cupboard github setup` writes one pull-request view per
+                # repository, under this name. A caller that passes
+                # `reuse-view` wants a view of its own, so that caller's value
+                # must win.
+                if [ -z "${REUSE_VIEW}" ]; then
+                  REUSE_VIEW="pull-requests-${REPOSITORY_ID}"
+                fi
               else
                 echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
                 exit 1

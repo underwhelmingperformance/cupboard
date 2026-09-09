@@ -12,8 +12,50 @@ import {
 	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
 
-export const pullRequestViewName = 'pull-requests';
-export const pullRequestPrefix = 'pr-';
+// A pull-request cache is named for the repository as well as the pull request,
+// because a tenant can serve several repositories and their pull-request
+// numbers collide. The repository component comes from `repository_id`, a claim
+// the issuer signs, so a rule's binding renders exactly one name and a token
+// cannot reach another repository's cache.
+export function pullRequestCachePrefix(repositoryId: number | string): string {
+	return `gh-${String(repositoryId)}-pr-`;
+}
+
+export function pullRequestCacheName(
+	repositoryId: number | string,
+	pullRequestNumber: number | string
+): string {
+	return `${pullRequestCachePrefix(repositoryId)}${String(pullRequestNumber)}`;
+}
+
+// One view per repository. Views are named per tenant, so a shared name would
+// make the second repository's setup report the first repository's selectors
+// as drift. A branch build reads through this view, so scoping it to the
+// repository keeps one repository's branch build from substituting paths that
+// another repository's pull request produced.
+export function pullRequestViewName(repositoryId: number | string): string {
+	return `pull-requests-${String(repositoryId)}`;
+}
+
+// The template variables a pull-request rule substitutes from verified claims.
+const repositoryVariable = '{repository_id}';
+const pullRequestVariable = '{pr}';
+
+/**
+ * The cache a pull-request rule binds, as a template over verified claims.
+ */
+export function pullRequestCacheTemplate(): string {
+	return pullRequestCacheName(repositoryVariable, pullRequestVariable);
+}
+
+/**
+ * The retention root a pull-request rule binds. The root string already
+ * contains the repository, so the pull-request number alone distinguishes one
+ * root from another and the repository id is not repeated in it.
+ */
+export function pullRequestRootTemplate(repositoryFullName: string): string {
+	return `github:${repositoryFullName}/pr-${pullRequestVariable}/`;
+}
 
 // Grace-managed paths can expire between planning and the final root update.
 // Keep this floor long enough for that interval.

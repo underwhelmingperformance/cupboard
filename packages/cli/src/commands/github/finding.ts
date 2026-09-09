@@ -109,6 +109,26 @@ export class ReuseViewPriorityInsufficientFinding extends FailedCheckFinding {
 	}
 }
 
+// A reuse view aggregates only the caches whose access equals its own, and it
+// returns no error for one that differs. Such a cache is absent from every
+// lookup through the view, so the detail has to name both accesses for the
+// operator to see why.
+export class ReuseViewCacheAccessMismatchFinding extends FailedCheckFinding {
+	constructor(
+		check: string,
+		public readonly viewName: string,
+		public readonly viewAccess: string,
+		public readonly cacheNames: readonly string[],
+		public readonly cacheAccess: string
+	) {
+		super(check);
+	}
+
+	detail(): string {
+		return `${this.cacheNames.join(', ')} ${this.cacheNames.length === 1 ? 'is' : 'are'} ${this.cacheAccess}; the ${this.viewName} view aggregates only ${this.viewAccess} caches, so the view never serves ${this.cacheNames.length === 1 ? 'it' : 'them'}`;
+	}
+}
+
 export class RootPrefixUnspecifiedFinding extends CheckFinding {
 	readonly status = 'unverified' as const;
 
