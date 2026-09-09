@@ -36,11 +36,10 @@ export const internalOrigin = requestOriginSchema.parse(
 	'https://cupboard.local'
 );
 
-// `GET /check` is a bounded one-shot scan. Its response reports when more
-// committed narinfos remain. A scan probes every row's narinfo object and every
-// distinct NAR, and a deep scan also reads each NAR back, so a batch of 1,000
-// makes at most 3,000 R2 requests, which `subrequest-budget.test.ts` checks
-// against `subrequestsPerInvocation`.
+// The narinfo rows one `GET /check` pass examines. A pass probes every row's
+// narinfo object and every distinct NAR, and a deep pass also reads each NAR
+// back, so a pass makes at most 3,000 R2 requests, which
+// `subrequest-budget.test.ts` checks against `subrequestsPerInvocation`.
 export const checkBatchSize = 1000;
 
 // Each `POST /verify` pass advances one cursor batch and wraps after the final
