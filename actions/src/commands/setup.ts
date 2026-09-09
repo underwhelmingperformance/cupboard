@@ -38,6 +38,10 @@ import {
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ProvisionCacheAccessRequiredError,
 	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
@@ -86,6 +90,8 @@ export interface SetupOptions {
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
@@ -202,6 +208,14 @@ export function registerSetupCommand(
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
+			'--destination-read-user <user>',
+			'Username accepted by the single selected destination cache.'
+		)
+		.option(
+			'--destination-read-password <password>',
+			'Password accepted by the single selected destination cache.'
+		)
+		.option(
 			'--provision-cache <name>',
 			"Create this cache with the run's own OIDC token before anything reads it."
 		)
@@ -246,6 +260,16 @@ export function resolveSetupInputs(
 	// part of a credential, so only its complete absence means "not set".
 	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
+	const destinationReadUser = providedReadUser(options.destinationReadUser);
+	const destinationReadPassword = options.destinationReadPassword ?? '';
+
+	if (destinationReadUser !== '' && destinationReadPassword === '') {
+		throw new DestinationReadPasswordRequiredError();
+	}
+
+	if (destinationReadPassword !== '' && destinationReadUser === '') {
+		throw new DestinationReadUserRequiredError();
+	}
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -296,7 +320,11 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options),
+		caches: resolveCaches(
+			options,
+			destinationReadUser,
+			destinationReadPassword
+		),
 		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
@@ -349,20 +377,45 @@ function resolveProvisionCache(
  * Resolves the caches to configure and attaches cache-specific credentials.
  * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+function resolveCaches(
+	options: SetupOptions,
+	destinationReadUser: ReadUser | '',
+	destinationReadPassword: string
+): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+
+	// Two inputs can supply the destination's credential: `cache-credentials`
+	// gives one per cache, and `destination-read-user` is the shorthand for a
+	// single destination. Supplying both is ambiguous.
+	if (
+		destinationReadUser !== '' &&
+		provided(options.cacheCredentials) !== undefined
+	) {
+		throw new DestinationReadCredentialConflictError();
+	}
+
 	const defaultCache: CacheScope = { kind: 'default' };
 	const selected = caches.length === 0 ? [defaultCache] : caches;
+
+	// The shorthand names no cache, so it can only mean the one destination.
+	if (destinationReadUser !== '' && selected.length !== 1) {
+		throw new DestinationReadCredentialCacheCountError(selected.length);
+	}
 
 	const credentials = providedCacheCredentials(
 		options.cacheCredentials,
 		selected
 	);
+	const destinationCredential =
+		destinationReadUser === ''
+			? undefined
+			: { user: destinationReadUser, password: destinationReadPassword };
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
-			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		const credential =
+			destinationCredential ??
+			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
+				?.credential;
 
 		return {
 			cache,

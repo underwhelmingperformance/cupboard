@@ -905,22 +905,31 @@ known-hosts sources, accepts only those pins and offers only the input key;
 input credentials and pins never enter the builder or direct-store
 configuration.
 
-When the destination cache or the reuse view is private, also pass `read_user`
-and `read_password` as workflow secrets. `actions/setup`'s netrc file covers
-only Nix substituter reads. The plan job also probes the cache directly, outside
-Nix, so pass the same credentials separately: `actions/plan` accepts them as
-`read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
-header on every narinfo probe.
+When the destination cache or the reuse view is private, also pass read
+credentials as workflow secrets. There are two pairs, because a destination
+cache and a reuse view can accept different credentials:
+
+- `destination_read_user` and `destination_read_password` are what the cache
+  this run publishes to accepts.
+- `fallback_read_user` and `fallback_read_password` are the tenant's own
+  credential. A reuse view is a tenant-level resource and reads with them, as
+  does a cache that has no verifier of its own.
+
+`actions/setup`'s netrc file covers only Nix substituter reads. The plan job
+also probes the cache directly, outside Nix, so the credentials are passed
+separately: `actions/plan` accepts them as `read-user`/`read-password` and sends
+them as an HTTP `Authorization: Basic` header on every narinfo probe.
 
 To publish to a named cache, set `cache`; omitting it selects the default cache.
 The cache can be public or private. Combining `cache` with `preset` fails
 because a preset chooses the destination. The workflow passes the selection to
 `actions/setup`, `actions/plan`, `actions/build-cohort`, `actions/attest` and
 `actions/attest-attach`, so every job reads and writes the same destination. The
-workflow supplies one `read_user` and `read_password` pair for all authenticated
-reads, so supply the credential that the selected private cache accepts. If the
-cache has its own verifier, the tenant-wide fallback credential is rejected by
-setup's initial cache-info probe, before publication starts.
+workflow sends the destination pair wherever it reads that cache and the
+fallback pair wherever it reads the tenant's reuse view, so supply the
+credential the selected private cache accepts as the destination pair. Supplying
+the fallback where the cache has its own verifier is rejected by setup's initial
+cache-info probe, before publication starts.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter

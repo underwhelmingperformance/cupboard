@@ -16,6 +16,10 @@ import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ProbeTimeoutError,
 	ProvisionCacheAccessRequiredError,
 	ReadPasswordRequiredError,
@@ -1171,6 +1175,79 @@ async function runSetup(options: {
 
 	return { invocations, wroteNixConfigFirst };
 }
+
+// A private destination cache and a private reuse view can accept different
+// credentials. `destination-read-user` names the one the cache accepts; the
+// `read-user` pair remains the tenant fallback a view reads with.
+describe('destination read credentials', () => {
+	const environment = { RUNNER_TEMP: '/runner/temp' };
+
+	it('attaches the destination credential to the single selected cache', () => {
+		const inputs = resolveSetupInputs(
+			{
+				cache: 'builds',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword,
+				readUser: 'tenant',
+				readPassword: 'tenant-secret'
+			},
+			environment
+		);
+
+		expect({
+			caches: inputs.caches,
+			fallbackUser: inputs.readUser
+		}).toStrictEqual({
+			caches: [
+				{
+					cache: namedCache('builds'),
+					credential: { user: 'ci', password: readPassword }
+				}
+			],
+			// The tenant fallback is untouched; a reuse view still reads with it.
+			fallbackUser: 'tenant'
+		});
+	});
+
+	it.each([
+		[
+			'its password is absent',
+			{ destinationReadUser: 'ci' },
+			DestinationReadPasswordRequiredError
+		],
+		[
+			'its user is absent',
+			{ destinationReadPassword: readPassword },
+			DestinationReadUserRequiredError
+		],
+		[
+			'cache-credentials names one too',
+			{
+				cache: 'builds',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword,
+				cacheCredentials: JSON.stringify([
+					{
+						cache: namedCache('builds'),
+						credential: { user: 'other', password: readPassword }
+					}
+				])
+			},
+			DestinationReadCredentialConflictError
+		],
+		[
+			'several caches are selected',
+			{
+				cache: 'builds, archive',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword
+			},
+			DestinationReadCredentialCacheCountError
+		]
+	])('refuses a destination credential when %s', (_name, options, error) => {
+		expect(() => resolveSetupInputs(options, environment)).toThrow(error);
+	});
+});
 
 describe('setupAction cache provisioning', () => {
 	it('creates nothing when no cache is named', async () => {

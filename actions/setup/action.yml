@@ -48,6 +48,14 @@ inputs:
       it from workflow secrets. A cache without an entry uses read-user and
       read-password.
     required: false
+  destination-read-user:
+    description:
+      Username accepted by the single selected destination cache. Use
+      cache-credentials instead when several caches are selected.
+    required: false
+  destination-read-password:
+    description: Password accepted by the single selected destination cache.
+    required: false
   provision-cache:
     description:
       Named cache to create with this run's own OIDC token before anything reads
@@ -165,6 +173,8 @@ runs:
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
+        DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
+        DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
         PROVISION_CACHE: ${{ inputs.provision-cache }}
         PROVISION_CACHE_ACCESS: ${{ inputs.provision-cache-access }}
         PROVISION_CACHE_TTL: ${{ inputs.provision-cache-ttl }}
@@ -187,6 +197,8 @@ runs:
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
           --cache-credentials "$CACHE_CREDENTIALS"
+          --destination-read-user "$DESTINATION_READ_USER"
+          --destination-read-password "$DESTINATION_READ_PASSWORD"
           --provision-cache "$PROVISION_CACHE"
           --provision-cache-access "$PROVISION_CACHE_ACCESS"
           --provision-cache-ttl "$PROVISION_CACHE_TTL"

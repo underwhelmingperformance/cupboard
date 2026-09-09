@@ -37,6 +37,12 @@ inputs:
   read-password:
     description: Password for cache reads.
     required: false
+  fallback-read-user:
+    description: Tenant-fallback username for private reuse-view reads.
+    required: false
+  fallback-read-password:
+    description: Tenant-fallback password for private reuse-view reads.
+    required: false
   max-jobs:
     description:
       Maximum build jobs for the selected store. Leave empty to use that store's
@@ -185,6 +191,8 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
+        FALLBACK_READ_USER: ${{ inputs.fallback-read-user }}
+        FALLBACK_READ_PASSWORD: ${{ inputs.fallback-read-password }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
         PUSH: ${{ inputs.push }}
@@ -212,6 +220,8 @@ runs:
           --audience "$AUDIENCE"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
+          --fallback-read-user "$FALLBACK_READ_USER"
+          --fallback-read-password "$FALLBACK_READ_PASSWORD"
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
           --push "$PUSH"
