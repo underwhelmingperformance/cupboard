@@ -7,6 +7,7 @@ import { and, count, eq } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { TenantUsageMissingError } from '../errors.ts';
 
 import { type ServerContext } from './context.ts';
 
@@ -92,15 +93,19 @@ export class StatsService {
 			.from(d1Schema.tenantUsage)
 			.where(eq(d1Schema.tenantUsage.tenant, tenant))
 			.get();
-		const narFileSize = usage?.bytes ?? 0;
-		const casFileSize = usage?.casBytes ?? 0;
+		if (usage === undefined) {
+			throw new TenantUsageMissingError(tenant);
+		}
+
+		const narFileSize = usage.bytes;
+		const casFileSize = usage.casBytes;
 		const totalFileSize = narFileSize + casFileSize;
-		const quotaBytes = usage?.quotaBytes ?? undefined;
+		const quotaBytes = usage.quotaBytes ?? undefined;
 
 		return {
-			narBlobs: usage?.blobs ?? 0,
+			narBlobs: usage.blobs,
 			narFileSize,
-			casObjects: usage?.casBlobs ?? 0,
+			casObjects: usage.casBlobs,
 			casFileSize,
 			totalFileSize,
 			quotaBytes,

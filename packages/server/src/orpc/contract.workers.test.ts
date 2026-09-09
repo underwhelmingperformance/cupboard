@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
 	cacheWriteGrants,
@@ -55,6 +56,16 @@ function tenantClient(token: string): TenantClient {
 
 describe('tenant contract round trip', () => {
 	beforeEach(resetTestServer);
+
+	it('refuses usage when the accounting row is missing', async () => {
+		const init = await bootstrap();
+		await env.CUPBOARD_DB.prepare('DELETE FROM tenant_usage WHERE tenant = ?')
+			.bind(fixtureTenant)
+			.run();
+		await expect(tenantClient(init.token).stats.usage()).rejects.toMatchObject({
+			status: 500
+		});
+	});
 
 	it('creates, lists, and removes caches through the derived client', async () => {
 		await useTestServer('contract-caches');

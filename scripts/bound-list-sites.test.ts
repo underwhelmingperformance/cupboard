@@ -64,6 +64,12 @@ const fixedWidthSites: readonly (BoundListSite & {
 		reason: 'The two live commit verdicts, written as literals.'
 	},
 	{
+		kind: 'and',
+		file: 'src/control/tenant-registry.ts',
+		argument: 'and(tenantFilter, ...noStoredState)',
+		reason: 'The four ownership and reference tables, written as a fixed array.'
+	},
+	{
 		kind: 'notInArray',
 		file: 'src/control/tenant-registry.ts',
 		argument: "['offboarding', 'offboarded']",

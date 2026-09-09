@@ -17,7 +17,16 @@ import type {
 	ParsedTenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
-import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	ne,
+	notExists,
+	notInArray,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
@@ -26,7 +35,8 @@ import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
-	TenantRetiredError
+	TenantRetiredError,
+	TenantUsageRepairRequiredError
 } from '../errors.ts';
 import {
 	generateReadPasswordSalt,
@@ -163,34 +173,45 @@ export async function ensureTenant(
 	now: IsoTimestamp
 ): Promise<ParsedTenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
-	const inserted = await database
-		.insert(d1Schema.tenant)
-		.values({
-			id: body.id,
-			status: 'active',
-			readMode: body.readMode,
-			ownerIssuer: body.ownerIssuer,
-			ownerSubject: body.ownerSubject,
-			ownerAudience: body.ownerAudience,
-			configVersion: 1,
-			createdAt: now,
-			readUser: verifier.readUser,
-			readPasswordHash: verifier.readPasswordHash,
-			readPasswordSalt: verifier.readPasswordSalt
-		})
-		.onConflictDoNothing()
-		.returning();
-	const row = inserted[0];
 
-	if (row !== undefined) {
-		await ensureUsageRow(database, body, now);
+	// Both inserts go in one batch, which D1 runs as one transaction, so a
+	// tenant row is never stored without its usage row. The batch runs only
+	// for an unclaimed slug: for an existing row the usage insert would store
+	// this body's quota before the configuration has been compared, and a
+	// conflicting body must not write one.
+	if ((await loadTenant(database, body.id)) === undefined) {
+		const [inserted] = await database.batch([
+			database
+				.insert(d1Schema.tenant)
+				.values({
+					id: body.id,
+					status: 'active',
+					readMode: body.readMode,
+					ownerIssuer: body.ownerIssuer,
+					ownerSubject: body.ownerSubject,
+					ownerAudience: body.ownerAudience,
+					configVersion: 1,
+					createdAt: now,
+					readUser: verifier.readUser,
+					readPasswordHash: verifier.readPasswordHash,
+					readPasswordSalt: verifier.readPasswordSalt
+				})
+				.onConflictDoNothing()
+				.returning(),
+			usageRowInsert(database, body, now)
+		]);
+		const row = inserted[0];
 
-		return toSummary(row);
+		if (row !== undefined) {
+			await requireUsage(database, body.id);
+			return toSummary(row);
+		}
 	}
 
-	// Validate the existing configuration before touching usage. Otherwise a
-	// conflicting request could create a usage row with the wrong quota and make a
-	// later matching retry fail.
+	// Either the slug was already claimed, or a concurrent create claimed it
+	// between the read and the insert. Validate the existing configuration before
+	// touching usage. Otherwise a conflicting request could create a usage row
+	// with the wrong quota and make a later matching retry fail.
 	const existing = await loadTenant(database, body.id);
 
 	// Never reuse a slug after offboarding has begun; doing so could restore the
@@ -216,12 +237,13 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	// A crash can leave the tenant row without its usage row. Recreate the usage
-	// row idempotently, but accept an existing row only when its quota matches.
+	// A release that wrote the two rows separately can have left the tenant row
+	// without its usage row. Initialise only an empty tenant, and accept an existing
+	// row only when its quota matches.
 	await ensureUsageRow(database, body, now);
-	const existingQuota = await loadQuota(database, body.id);
+	const usage = await requireUsage(database, body.id);
 
-	if (existingQuota !== body.quotaBytes) {
+	if ((usage.quotaBytes ?? undefined) !== body.quotaBytes) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
@@ -249,25 +271,57 @@ export async function ensureTenant(
 	return toSummary(concurrent);
 }
 
-// The usage row must exist before the tenant accepts writes. Conflict handling
-// preserves any quota already stored during a provisioning retry.
+// The conflict clause keeps any quota already stored, so the same statement
+// serves the creation batch above and the repair below.
+function usageRowInsert(
+	database: Database,
+	body: ParsedTenantCreateBody,
+	now: IsoTimestamp
+) {
+	const noStoredState = [
+		d1Schema.tenantBlob,
+		d1Schema.tenantCasBlob,
+		d1Schema.blobReference,
+		d1Schema.attestationReference
+	].map((table) => {
+		const belongsToTenant = eq(table.tenant, body.id);
+		const rows = database
+			.select({ one: sql`1` })
+			.from(table)
+			.where(belongsToTenant);
+		return notExists(rows);
+	});
+	const tenantFilter = eq(d1Schema.tenant.id, body.id);
+	const emptyTenantFilter = and(tenantFilter, ...noStoredState);
+	const quota = body.quotaBytes ?? sql<null>`null`;
+	const quotaBytes = sql<number | null>`${quota}`.as('quota_bytes');
+	const usageRow = database
+		.select({
+			tenant: d1Schema.tenant.id,
+			bytes: sql<number>`0`.as('bytes'),
+			narinfos: sql<number>`0`.as('narinfos'),
+			blobs: sql<number>`0`.as('blobs'),
+			casBytes: sql<number>`0`.as('cas_bytes'),
+			casBlobs: sql<number>`0`.as('cas_blobs'),
+			quotaBytes,
+			updatedAt: sql<IsoTimestamp>`${now}`.as('updated_at')
+		})
+		.from(d1Schema.tenant)
+		.where(emptyTenantFilter);
+	return database
+		.insert(d1Schema.tenantUsage)
+		.select(usageRow)
+		.onConflictDoNothing();
+}
+
+// Repairs a tenant row that a release which wrote the two rows separately
+// stored without its usage row.
 async function ensureUsageRow(
 	database: Database,
 	body: ParsedTenantCreateBody,
 	now: IsoTimestamp
 ): Promise<void> {
-	await database
-		.insert(d1Schema.tenantUsage)
-		.values({
-			tenant: body.id,
-			bytes: 0,
-			narinfos: 0,
-			blobs: 0,
-			quotaBytes: body.quotaBytes,
-			updatedAt: now
-		})
-		.onConflictDoNothing()
-		.run();
+	await usageRowInsert(database, body, now).run();
 }
 
 async function loadTenant(
@@ -281,17 +335,19 @@ async function loadTenant(
 		.get();
 }
 
-async function loadQuota(
+async function requireUsage(
 	database: Database,
 	id: TenantId
-): Promise<number | undefined> {
+): Promise<{ quotaBytes: number | null }> {
 	const usage = await database
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
 		.from(d1Schema.tenantUsage)
 		.where(eq(d1Schema.tenantUsage.tenant, id))
 		.get();
-
-	return usage?.quotaBytes ?? undefined;
+	if (usage === undefined) {
+		throw new TenantUsageRepairRequiredError(id);
+	}
+	return usage;
 }
 
 export async function listTenants(
