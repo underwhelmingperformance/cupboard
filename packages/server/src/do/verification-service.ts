@@ -496,10 +496,10 @@ function claimableFilter(now: Date) {
 }
 
 /**
- * Builds the update that leases one chunk of pending uploads to a verification
+ * Builds the update that leases one page of pending uploads to a verification
  * pass.
  *
- * The parameter guard imports this builder and inspects the generated SQL
+ * The parameter test imports this builder and inspects the generated SQL
  * without executing it.
  */
 export function buildLeaseUpdate(
@@ -2554,7 +2554,7 @@ export class VerificationService {
 				return settled;
 			}
 
-			// Read the shared blob rows in chunks, then materialise each upload from that
+			// Read the shared blob rows once, then materialise each upload from that
 			// snapshot. The charge transaction remains authoritative, and an over-quota
 			// result triggers a fresh probe.
 			const prefetched = await this.prefetchedFactsFor(logger, ready, signal);
@@ -2762,7 +2762,7 @@ export class VerificationService {
 			return { applied, resolved: discarded + held.length - unresolved };
 		}
 
-		// Read the shared blob rows in chunks, then materialise each surviving upload
+		// Read the shared blob rows once, then materialise each surviving upload
 		// from that snapshot.
 		const prefetched = await this.prefetchedFactsFor(
 			logger,
