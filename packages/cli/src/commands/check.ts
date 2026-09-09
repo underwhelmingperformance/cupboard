@@ -16,7 +16,11 @@ interface CheckOptions {
 }
 
 export interface CheckClient {
-	run(input: { deep: boolean }): Promise<ParsedCheckReport>;
+	run(input: {
+		deep: boolean;
+		cursor: string;
+		cursorCache: string;
+	}): Promise<ParsedCheckReport>;
 }
 
 export function registerCheckCommand(
@@ -25,7 +29,7 @@ export function registerCheckCommand(
 ): void {
 	program
 		.command('check')
-		.description('Check a bounded batch of committed paths and stored objects.')
+		.description('Check every committed path against its stored objects.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
 		.action(async (url: URL, options: CheckOptions) => {
@@ -39,45 +43,60 @@ export function registerCheckCommand(
 		});
 }
 
+/**
+ * Checks every committed path, one page per request.
+ *
+ * The server checks a page and reports the row the next page starts at, so the
+ * command follows the cursor to the end of the scan.
+ */
 export async function runCheck(
 	isDeep: boolean,
 	reporter: Reporter,
 	client: CheckClient
 ): Promise<void> {
-	const report = await reporter.phase('Checking cupboard', () =>
-		client.run({ deep: isDeep })
-	);
+	let cursor = '';
+	let cursorCache = '';
+	let narInfosChecked = 0;
+	let narBlobsChecked = 0;
+	const discrepancies: CheckDiscrepancy[] = [];
+
+	do {
+		const page = await reporter.phase('Checking cupboard', () =>
+			client.run({ deep: isDeep, cursor, cursorCache })
+		);
+
+		narInfosChecked += page.narInfosChecked;
+		narBlobsChecked += page.narBlobsChecked;
+		discrepancies.push(...page.discrepancies);
+		cursor = page.cursor;
+		cursorCache = page.cursorCache;
+	} while (cursor !== '' || cursorCache !== '');
 
 	reporter.result({
 		kind: 'check-report',
-		data: report,
+		data: { narInfosChecked, narBlobsChecked, discrepancies },
 		rows: [
 			{
 				label: 'Narinfos checked',
-				value: formatCount(report.narInfosChecked)
+				value: formatCount(narInfosChecked)
 			},
 			{
 				label: 'NAR blobs checked',
-				value: formatCount(report.narBlobsChecked)
+				value: formatCount(narBlobsChecked)
 			},
-			{ label: 'Complete', value: report.complete ? 'yes' : 'no' },
 			{
 				label: 'Discrepancies',
-				value: formatCount(report.discrepancies.length)
+				value: formatCount(discrepancies.length)
 			}
 		]
 	});
 
-	if (report.discrepancies.length === 0) {
-		reporter.info(
-			report.complete
-				? 'No discrepancies.'
-				: 'No discrepancies in the checked batch; unchecked paths remain.'
-		);
+	if (discrepancies.length === 0) {
+		reporter.info('No discrepancies.');
 		return;
 	}
 
-	for (const discrepancy of report.discrepancies) {
+	for (const discrepancy of discrepancies) {
 		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy));
 	}
 }

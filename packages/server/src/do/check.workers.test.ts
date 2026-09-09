@@ -30,9 +30,29 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-async function runCheck(token: string, isDeep = false): Promise<CheckReport> {
+import { type CheckCursor } from './integrity-check-service.ts';
+
+const startOfScan: CheckCursor = { cache: '', storePathHash: '' };
+
+async function runCheck(
+	token: string,
+	isDeep = false,
+	cursor: CheckCursor = startOfScan
+): Promise<CheckReport> {
+	const query = new URLSearchParams();
+
+	if (isDeep) {
+		query.set('deep', 'true');
+	}
+
+	if (cursor.cache !== '' || cursor.storePathHash !== '') {
+		query.set('cursorCache', cursor.cache);
+		query.set('cursor', cursor.storePathHash);
+	}
+
+	const search = query.toString();
 	const response = await authorisedFetch(
-		isDeep ? '/check?deep=true' : '/check',
+		search === '' ? '/check' : `/check?${search}`,
 		token
 	);
 
@@ -63,11 +83,48 @@ describe('storage check', () => {
 			expect(await runCheck(token, deep)).toStrictEqual({
 				narInfosChecked: 2,
 				narBlobsChecked: 2,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: []
 			});
 		}
 	);
+
+	it('resumes after the row a cursor names', async () => {
+		const token = await initialise();
+		const hashes = ['a', 'b', 'c'] as const;
+
+		for (const letter of hashes) {
+			const { metadata, nar } = await verifiablePath(`resume-${letter}`, {
+				storePathHash: letter.repeat(32),
+				name: `resume-${letter}`
+			});
+			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		}
+
+		const fromStart = await runCheck(token);
+		const afterFirst = await runCheck(token, false, {
+			cache: DEFAULT_CACHE,
+			storePathHash: 'a'.repeat(32)
+		});
+
+		expect({ fromStart, afterFirst }).toStrictEqual({
+			fromStart: {
+				narInfosChecked: 3,
+				narBlobsChecked: 3,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			},
+			afterFirst: {
+				narInfosChecked: 2,
+				narBlobsChecked: 2,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			}
+		});
+	});
 
 	it('reports a missing narinfo R2 object', async () => {
 		const token = await initialise();
@@ -81,7 +138,8 @@ describe('storage check', () => {
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 1,
 			narBlobsChecked: 1,
-			complete: true,
+			cursor: '',
+			cursorCache: '',
 			discrepancies: [
 				{
 					kind: 'missing-narinfo-object',
@@ -113,7 +171,8 @@ describe('storage check', () => {
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 2,
 			narBlobsChecked: 1,
-			complete: true,
+			cursor: '',
+			cursorCache: '',
 			discrepancies: [
 				{
 					kind: 'missing-nar',
@@ -149,13 +208,15 @@ describe('storage check', () => {
 			shallow: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: []
 			},
 			deep: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: [
 					{
 						kind: 'file-hash-mismatch',

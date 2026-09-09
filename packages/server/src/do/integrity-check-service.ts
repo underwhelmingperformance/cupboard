@@ -4,7 +4,7 @@ import {
 	type CheckReport
 } from '@cupboard/protocol/reports';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { asc, count, inArray } from 'drizzle-orm';
+import { asc, inArray, sql } from 'drizzle-orm';
 
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
 import { verifyStoredBlob } from '../blob/upload-verification.ts';
@@ -24,6 +24,15 @@ import {
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+
+/**
+ * Where a pass starts: the row the previous pass stopped at, or two empty
+ * strings for the beginning of the scan.
+ */
+export interface CheckCursor {
+	readonly cache: string;
+	readonly storePathHash: string;
+}
 
 interface BlobFact {
 	fileHash: NixSha256HashString;
@@ -136,16 +145,30 @@ export class IntegrityCheckService {
 		);
 	}
 
-	async check(isDeep: boolean): Promise<CheckReport> {
-		const total =
-			this.context.db.select({ count: count() }).from(schema.narInfos).get()
-				?.count ?? 0;
-		const rows = this.context.db
+	/**
+	 * Checks one page of narinfo rows, starting after the row the caller's cursor
+	 * names.
+	 *
+	 * The page is read in (cache, store path hash) order, and one row beyond it,
+	 * so the report can name where the next page starts.
+	 * A caller checks every path by passing the cursor back until it comes back
+	 * empty.
+	 */
+	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReport> {
+		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
+		const page = this.context.db
 			.select()
 			.from(schema.narInfos)
+			.where(
+				isResuming
+					? sql`(${schema.narInfos.cache}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
+					: undefined
+			)
 			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
-			.limit(checkBatchSize)
+			.limit(checkBatchSize + 1)
 			.all();
+		const rows = page.slice(0, checkBatchSize);
+		const next = page.at(checkBatchSize);
 
 		const discrepancies: CheckDiscrepancy[] = [];
 
@@ -200,7 +223,8 @@ export class IntegrityCheckService {
 		return {
 			narInfosChecked: rows.length,
 			narBlobsChecked,
-			complete: rows.length === total,
+			cursor: next === undefined ? '' : next.storePathHash,
+			cursorCache: next === undefined ? '' : next.cache,
 			discrepancies
 		};
 	}

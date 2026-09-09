@@ -171,6 +171,12 @@ export class ServerContext {
 		// Bound all storage subrequests before a service can use them. Otherwise a
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
+		//
+		// These wrappers reach only the bindings this object holds. Code in the
+		// Worker, such as the availability route in `read/read.ts`, calls
+		// `env.BLOBS` and `env.CUPBOARD_DB` as the runtime supplies them, with no
+		// deadline, no statement allowance and no row meter. Anything said about
+		// storage here holds on one side of the service binding and not the other.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
