@@ -286,7 +286,7 @@ append-only, so a published NAR hash cannot be withdrawn.
 
 ### Attesting to a private cache
 
-`actions/attest` derives its defaults from the destination cache's visibility. A
+`actions/attest` derives its defaults from the destination cache's access. A
 private destination signs in the public-good trust domain with an RFC 3161
 timestamp and no transparency-log entry. It does not record the bundle in the
 repository's attestation store, and it signs a separate statement for each

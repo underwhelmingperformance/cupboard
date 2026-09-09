@@ -159,7 +159,7 @@ function options(
 		predicateFile: files.predicateFile,
 		predicateType: buildOriginPredicateType,
 		githubToken: 'token',
-		destinationVisibility: 'public',
+		destinationAccess: 'public',
 		...overrides
 	};
 }
@@ -267,7 +267,7 @@ describe('resolveAttestSignInputs', () => {
 				predicateFile: '/runner/temp/attestations/build-origin.json',
 				predicateType: buildOriginPredicateType,
 				githubToken: 'token',
-				destinationVisibility: 'public'
+				destinationAccess: 'public'
 			})
 		).toStrictEqual({
 			checksumsFile: '/runner/temp/attestations/subjects.txt',
@@ -289,11 +289,11 @@ describe('resolveAttestSignInputs', () => {
 
 	it.each([
 		{
-			given: { destinationVisibility: 'public' },
+			given: { destinationAccess: 'public' },
 			expected: publicPolicy
 		},
 		{
-			given: { destinationVisibility: 'private' },
+			given: { destinationAccess: 'private' },
 			expected: privatePolicy
 		},
 		{
@@ -302,7 +302,7 @@ describe('resolveAttestSignInputs', () => {
 		},
 		{
 			given: {
-				destinationVisibility: 'private',
+				destinationAccess: 'private',
 				signingProfile: 'rekor-and-tsa'
 			},
 			expected: {
@@ -312,7 +312,7 @@ describe('resolveAttestSignInputs', () => {
 			}
 		},
 		{
-			given: { destinationVisibility: 'private', uploadToGithub: 'true' },
+			given: { destinationAccess: 'private', uploadToGithub: 'true' },
 			expected: {
 				profile: 'tsa-only',
 				uploadToGithub: true,
@@ -320,11 +320,11 @@ describe('resolveAttestSignInputs', () => {
 			}
 		},
 		{
-			given: { destinationVisibility: 'public', signingProfile: 'tsa-only' },
+			given: { destinationAccess: 'public', signingProfile: 'tsa-only' },
 			expected: { profile: 'tsa-only', uploadToGithub: true, grouping: 'run' }
 		},
 		{
-			given: { destinationVisibility: 'public', uploadToGithub: 'false' },
+			given: { destinationAccess: 'public', uploadToGithub: 'false' },
 			expected: {
 				profile: 'sigstore-default',
 				uploadToGithub: false,
@@ -332,7 +332,7 @@ describe('resolveAttestSignInputs', () => {
 			}
 		},
 		{
-			given: { destinationVisibility: 'public', subjectGrouping: 'individual' },
+			given: { destinationAccess: 'public', subjectGrouping: 'individual' },
 			expected: {
 				profile: 'sigstore-default',
 				uploadToGithub: true,
@@ -341,7 +341,7 @@ describe('resolveAttestSignInputs', () => {
 		},
 		{
 			given: {
-				destinationVisibility: '',
+				destinationAccess: '',
 				signingProfile: '',
 				uploadToGithub: ''
 			},
@@ -360,8 +360,8 @@ describe('resolveAttestSignInputs', () => {
 			expected: ChoiceInputInvalidError
 		},
 		{
-			input: 'destination-visibility',
-			given: { destinationVisibility: 'internal' },
+			input: 'destination-access',
+			given: { destinationAccess: 'internal' },
 			expected: ChoiceInputInvalidError
 		},
 		{
@@ -690,7 +690,7 @@ describe('attestSignAction', () => {
 				`${JSON.stringify(runOriginPredicate)}\n`
 			);
 			await attestSignAction(
-				options(files, { destinationVisibility: 'private', ...given }),
+				options(files, { destinationAccess: 'private', ...given }),
 				recordingReporter(reported),
 				recordedSigning(files, []).dependencies
 			);
@@ -712,7 +712,7 @@ describe('attestSignAction', () => {
 		);
 
 		await attestSignAction(
-			options(files, { destinationVisibility: 'private' }),
+			options(files, { destinationAccess: 'private' }),
 			createGithubReporter(),
 			signing.dependencies
 		);
@@ -779,7 +779,7 @@ describe('attestSignAction', () => {
 		);
 
 		await attestSignAction(
-			options(files, { destinationVisibility: 'private' }),
+			options(files, { destinationAccess: 'private' }),
 			createGithubReporter(),
 			signing.dependencies
 		);
@@ -809,7 +809,7 @@ describe('attestSignAction', () => {
 		await expect(
 			attestSignAction(
 				options(files, {
-					destinationVisibility: 'private',
+					destinationAccess: 'private',
 					predicateType: 'https://spdx.dev/Document'
 				}),
 				createGithubReporter(),
@@ -832,7 +832,7 @@ describe('attestSignAction', () => {
 
 		await expect(
 			attestSignAction(
-				options(files, { destinationVisibility: 'private' }),
+				options(files, { destinationAccess: 'private' }),
 				createGithubReporter(),
 				signing.dependencies
 			)

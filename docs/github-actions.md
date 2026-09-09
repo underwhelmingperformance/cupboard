@@ -599,10 +599,10 @@ action does not record the bundles in the repository's attestation store, and it
 signs a separate statement for each subject. Each bundle therefore contains one
 subject.
 
-The action derives all three inputs from the destination cache's visibility
-whenever the workflow leaves them unset. A public destination gets
-`sigstore-default`, `true` and `run`. An unresolved destination uses the private
-defaults because publication cannot be undone.
+The action derives all three inputs from the destination cache's access whenever
+the workflow leaves them unset. A public destination gets `sigstore-default`,
+`true` and `run`. When no destination access reaches the signing step, it uses
+the private defaults, because publication cannot be undone.
 
 Those defaults prevent automatic publication and keep each bundle to one
 subject; they do not make the bundle non-disclosing. Every subject digest in

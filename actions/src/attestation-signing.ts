@@ -181,8 +181,8 @@ export type SigningProfile = (typeof signingProfiles)[number];
 export const subjectGroupings = ['run', 'individual'] as const;
 export type SubjectGrouping = (typeof subjectGroupings)[number];
 
-export const destinationVisibilities = ['public', 'private'] as const;
-export type DestinationVisibility = (typeof destinationVisibilities)[number];
+export const destinationAccessModes = ['public', 'private'] as const;
+export type DestinationAccess = (typeof destinationAccessModes)[number];
 
 export type SigstoreInstance = 'public-good' | 'github';
 
@@ -206,19 +206,16 @@ export function subjectsPerStatement(
 }
 
 /**
- * The default signing policy for each destination visibility. The in-toto
- * subject digest of every statement is the NAR hash, and
- * Rekor and the repository's attestation store are append-only, so a
- * published bundle permanently reveals that each subject path exists and
- * identifies its contents to anyone holding a matching copy. The private
- * defaults omit Rekor and the GitHub attestation upload. They also sign one
- * statement per subject, which prevents a reader of one bundle from
- * enumerating the other subjects in the run.
+ * The default signing policy for each destination access. The in-toto subject
+ * digest of every statement is the NAR hash, and Rekor and the repository's
+ * attestation store are append-only, so a published bundle permanently reveals
+ * that each subject path exists and identifies its contents to anyone holding
+ * a matching copy. The private defaults omit Rekor and the GitHub attestation
+ * upload. They also sign one statement per subject, which prevents a reader of
+ * one bundle from enumerating the other subjects in the run.
  */
-export function defaultSigningPolicy(
-	visibility: DestinationVisibility
-): SigningPolicy {
-	if (visibility === 'private') {
+export function defaultSigningPolicy(access: DestinationAccess): SigningPolicy {
+	if (access === 'private') {
 		return {
 			profile: 'tsa-only',
 			uploadToGithub: false,
