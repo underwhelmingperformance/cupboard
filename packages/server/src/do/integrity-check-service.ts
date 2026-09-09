@@ -21,8 +21,9 @@ import {
 	narObjectKey
 } from '../http/http.ts';
 
-import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
+import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { jsonValueLists } from './json-list.ts';
 
 interface BlobFact {
 	fileHash: NixSha256HashString;
@@ -99,18 +100,16 @@ export class IntegrityCheckService {
 		return undefined;
 	}
 
-	// Fetch the canonical compressed-file facts in bounded batches rather than
-	// issuing one D1 query for each NAR.
+	// Fetch the canonical compressed-file facts in one read rather than issuing
+	// one D1 query for each NAR.
 	private async blobFactsFor(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobFact>> {
-		const hashChunks = chunk(narHashes, maxInClauseValues);
-
 		const pages = await mapWithConcurrency(
-			hashChunks,
+			jsonValueLists(narHashes),
 			maxOutgoingConnections,
-			(narHashBatch) => {
-				const inBatch = inArray(d1Schema.blobState.narHash, narHashBatch);
+			(list) => {
+				const inBatch = inArray(d1Schema.blobState.narHash, list);
 
 				return this.context.d1
 					.select({

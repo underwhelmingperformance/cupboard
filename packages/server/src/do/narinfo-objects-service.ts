@@ -37,14 +37,13 @@ import { parseStored } from '../http/parse.ts';
 
 import {
 	batchNonEmpty,
-	chunk,
 	deleteObjects,
-	maxInClauseValues,
 	maxOutgoingConnections,
 	presentNarObjects,
 	recordedNarObjects
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
@@ -604,7 +603,6 @@ export class NarInfoObjectsService {
 		return this.committedReferencesFrom(edges, rows);
 	}
 
-	// Reads D1 reference edges in chunks that stay below the bound-parameter limit.
 	async committedReferenceEdges(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -615,22 +613,21 @@ export class NarInfoObjectsService {
 
 		const tenant = this.context.requireTenant();
 
-		const queries = chunk(storePathHashes, maxInClauseValues).map(
-			(storePathHashBatch) =>
-				this.context.d1
-					.select({
-						storePathHash: d1Schema.blobReference.storePathHash,
-						generation: d1Schema.blobReference.generation,
-						narHash: d1Schema.blobReference.narHash
-					})
-					.from(d1Schema.blobReference)
-					.where(
-						and(
-							eq(d1Schema.blobReference.tenant, tenant),
-							eq(d1Schema.blobReference.cache, cache),
-							inArray(d1Schema.blobReference.storePathHash, storePathHashBatch)
-						)
+		const queries = jsonValueLists(storePathHashes).map((list) =>
+			this.context.d1
+				.select({
+					storePathHash: d1Schema.blobReference.storePathHash,
+					generation: d1Schema.blobReference.generation,
+					narHash: d1Schema.blobReference.narHash
+				})
+				.from(d1Schema.blobReference)
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						eq(d1Schema.blobReference.cache, cache),
+						inArray(d1Schema.blobReference.storePathHash, list)
 					)
+				)
 		);
 
 		const results = await batchNonEmpty(this.context.d1, queries);
@@ -645,18 +642,17 @@ export class NarInfoObjectsService {
 			return [];
 		}
 
-		return chunk(storePathHashes, maxInClauseValues).flatMap(
-			(storePathHashBatch) =>
-				this.context.db
-					.select()
-					.from(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cache, cache),
-							inArray(schema.narInfos.storePathHash, storePathHashBatch)
-						)
+		return jsonValueLists(storePathHashes).flatMap((list) =>
+			this.context.db
+				.select()
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						inArray(schema.narInfos.storePathHash, list)
 					)
-					.all()
+				)
+				.all()
 		);
 	}
 

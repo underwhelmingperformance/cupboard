@@ -16,6 +16,7 @@ import {
 	rootNameSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StorePathHash,
 	storePathHashSchema,
 	storePathSchema,
 	tenantIdSchema
@@ -48,6 +49,7 @@ import {
 	expiredRootTargetSelect,
 	maxRootsExpiredPerRun
 } from './garbage-collection-service.ts';
+import { jsonValueLists } from './json-list.ts';
 import {
 	attestationReferenceDeleteChunk,
 	type AttestationReferenceKey,
@@ -101,6 +103,95 @@ function digests(count: number): Sha256HexDigest[] {
 	return Array.from({ length: count }, () =>
 		sha256HexDigestSchema.parse('0'.repeat(64))
 	);
+}
+
+function storePathHashes(count: number): StorePathHash[] {
+	return Array.from({ length: count }, () => testStorePathHash);
+}
+
+/**
+Every list here fits one bound string, so it produces exactly one statement.
+*/
+function onlyList<T>(lists: readonly T[]): T {
+	const [list, ...rest] = lists;
+
+	if (list === undefined || rest.length > 0) {
+		throw new Error(`expected one list and received ${String(lists.length)}`);
+	}
+
+	return list;
+}
+
+function narHashList(count: number) {
+	return onlyList(jsonValueLists(narHashes(count)));
+}
+
+function storePathList(count: number) {
+	return onlyList(jsonValueLists(storePathHashes(count)));
+}
+
+// `readHints` issues one query for each fact a negotiation needs. Each binds its
+// list as one parameter, so the count comes from the query and not from the
+// closure being negotiated.
+function blobStateParameters(hashes: number): number {
+	return database
+		.select({
+			narHash: d1Schema.blobState.narHash,
+			fileHash: d1Schema.blobState.fileHash,
+			fileSize: d1Schema.blobState.fileSize,
+			compression: d1Schema.blobState.compression,
+			narSize: d1Schema.blobState.narSize,
+			deleteAfter: d1Schema.blobState.deleteAfter
+		})
+		.from(d1Schema.blobState)
+		.where(inArray(d1Schema.blobState.narHash, narHashList(hashes)))
+		.toSQL().params.length;
+}
+
+function ownedParameters(hashes: number): number {
+	const list = narHashList(hashes);
+
+	return database
+		.select({ narHash: d1Schema.tenantBlob.narHash })
+		.from(d1Schema.tenantBlob)
+		.where(
+			and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				inArray(d1Schema.tenantBlob.narHash, list)
+			)
+		)
+		.toSQL().params.length;
+}
+
+function edgeParameters(paths: number): number {
+	const list = storePathList(paths);
+
+	return database
+		.select({
+			storePathHash: d1Schema.blobReference.storePathHash,
+			generation: d1Schema.blobReference.generation,
+			narHash: d1Schema.blobReference.narHash
+		})
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				eq(d1Schema.blobReference.cache, cache),
+				inArray(d1Schema.blobReference.storePathHash, list)
+			)
+		)
+		.toSQL().params.length;
+}
+
+// The filter binds the tenant, the cache, the store path list and the two
+// generation literals the lifecycle comparison embeds.
+function referenceParameters(paths: number): number {
+	return narInfoReferenceQuery(
+		database,
+		tenant,
+		privateStoredCache(cache),
+		storePathList(paths)
+	).toSQL().params.length;
 }
 
 describe('selected D1 statements', () => {
@@ -266,88 +357,21 @@ describe('selected D1 statements', () => {
 	});
 
 	describe('negotiate hint reads (routing/negotiate-hints)', () => {
-		// computeNegotiateHints in routing/negotiate-hints.ts issues three sets of
-		// chunked queries against D1, each chunk at most maxInClauseValues = 90 wide.
-		// The blobState query binds N params, the owned query binds N+1 (tenant), and
-		// the edge query binds N+2 (tenant + cache).
-
-		it('blob_state SELECT stays within the parameter budget at maxInClauseValues', () => {
-			const query = database
-				.select({
-					narHash: d1Schema.blobState.narHash,
-					fileHash: d1Schema.blobState.fileHash,
-					fileSize: d1Schema.blobState.fileSize,
-					compression: d1Schema.blobState.compression,
-					narSize: d1Schema.blobState.narSize,
-					deleteAfter: d1Schema.blobState.deleteAfter
-				})
-				.from(d1Schema.blobState)
-				.where(
-					inArray(d1Schema.blobState.narHash, narHashes(maxInClauseValues))
-				);
-
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(
-				maxBoundParameters
-			);
-		});
-
-		it('owned-blobs SELECT stays within the parameter budget at maxInClauseValues', () => {
-			const ownedHashes = narHashes(maxInClauseValues);
-			const query = database
-				.select({ narHash: d1Schema.tenantBlob.narHash })
-				.from(d1Schema.tenantBlob)
-				.where(
-					and(
-						eq(d1Schema.tenantBlob.tenant, tenant),
-						inArray(d1Schema.tenantBlob.narHash, ownedHashes)
-					)
-				);
-
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(
-				maxBoundParameters
-			);
-		});
-
-		it('committed-edge SELECT stays within the parameter budget at maxInClauseValues', () => {
-			const storePaths = Array.from(
-				{ length: maxInClauseValues },
-				() => testStorePathHash
-			);
-			const query = database
-				.select({
-					storePathHash: d1Schema.blobReference.storePathHash,
-					generation: d1Schema.blobReference.generation,
-					narHash: d1Schema.blobReference.narHash
-				})
-				.from(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.cache, cache),
-						inArray(d1Schema.blobReference.storePathHash, storePaths)
-					)
-				);
-
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(
-				maxBoundParameters
-			);
-		});
+		it.each([
+			{ statement: 'blob_state SELECT', parameters: blobStateParameters },
+			{ statement: 'owned-blobs SELECT', parameters: ownedParameters },
+			{ statement: 'committed-edge SELECT', parameters: edgeParameters }
+		])(
+			'$statement binds the same parameters for a long list as for one value',
+			({ parameters }) => {
+				expect(parameters(10_000)).toStrictEqual(parameters(1));
+			}
+		);
 	});
 
 	describe('private narinfo authorisation (read/read.ts)', () => {
-		it('reference SELECT stays within the parameter budget at maxInClauseValues', () => {
-			// The filter binds the tenant, the cache, one store path per requested
-			// path, and the two generation literals the lifecycle comparison embeds.
-			const query = narInfoReferenceQuery(
-				database,
-				tenant,
-				privateStoredCache(cache),
-				Array.from({ length: maxInClauseValues }, () => testStorePathHash)
-			);
-
-			expect(query.toSQL().params.length).toBeLessThanOrEqual(
-				maxBoundParameters
-			);
+		it('binds the same parameters for a long path list as for one path', () => {
+			expect(referenceParameters(10_000)).toStrictEqual(referenceParameters(1));
 		});
 	});
 

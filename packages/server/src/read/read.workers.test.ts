@@ -19,6 +19,7 @@ import { z } from 'zod';
 
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { jsonValueLists } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag } from '../http/cache-tags.ts';
 import {
@@ -451,9 +452,18 @@ describe('NAR reference index', () => {
 
 	it('seeks the reference primary key for a private narinfo read', async () => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const query = narInfoReferenceQuery(database, tenant, privateCache, [
-			referencingPath
-		]).toSQL();
+		const [list] = jsonValueLists([referencingPath]);
+
+		if (list === undefined) {
+			throw new Error('one store path produced no bound list');
+		}
+
+		const query = narInfoReferenceQuery(
+			database,
+			tenant,
+			privateCache,
+			list
+		).toSQL();
 		const explained = await env.CUPBOARD_DB.prepare(
 			`EXPLAIN QUERY PLAN ${query.sql}`
 		)
@@ -468,12 +478,19 @@ describe('NAR reference index', () => {
 			);
 
 		// The reference edge's primary key already leads with the tenant, cache and
-		// store path, so the narinfo check needs no index of its own.
+		// store path, so the narinfo check needs no index of its own. The plan also
+		// walks `json_each`, which reads the bound list itself: SQLite probes the
+		// primary key once per store path, so only a scan of a real table would
+		// show that the list had stopped the index being used.
 		expect({
 			edge: isIndexSeek('blob_ref'),
 			lifecycle: isIndexSeek('cache_lifecycle'),
-			scans: rows.filter((row) => row.detail.startsWith('SCAN ')).length
-		}).toStrictEqual({ edge: true, lifecycle: true, scans: 0 });
+			tableScans: rows.filter(
+				(row) =>
+					row.detail.startsWith('SCAN ') &&
+					!row.detail.includes('VIRTUAL TABLE')
+			).length
+		}).toStrictEqual({ edge: true, lifecycle: true, tableScans: 0 });
 	});
 });
 

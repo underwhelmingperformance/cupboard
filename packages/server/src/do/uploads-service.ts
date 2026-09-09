@@ -34,7 +34,6 @@ import {
 } from '../http/http.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
-import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
@@ -43,6 +42,7 @@ import {
 	serialiseGraceDecision,
 	storedGraceDeadlines
 } from './grace-decision.ts';
+import { jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	factsFromHints,
@@ -116,24 +116,21 @@ export class UploadsService {
 		private readonly roots: RootsService
 	) {}
 
-	// D1 caps the number of bound parameters in one statement. Chunk closure
-	// lookups so a large request stays within that limit.
 	private existingNarInfos(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Map<StorePathHash, NarInfoRow> {
-		const rows = chunk(storePathHashes, maxInClauseValues).flatMap(
-			(storePathHashBatch) =>
-				this.context.db
-					.select()
-					.from(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cache, cache),
-							inArray(schema.narInfos.storePathHash, storePathHashBatch)
-						)
+		const rows = jsonValueLists(storePathHashes).flatMap((list) =>
+			this.context.db
+				.select()
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						inArray(schema.narInfos.storePathHash, list)
 					)
-					.all()
+				)
+				.all()
 		);
 
 		return new Map(rows.map((row) => [row.storePathHash, row]));

@@ -27,12 +27,8 @@ import {
 } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
-import {
-	batchNonEmpty,
-	chunk,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from '../do/bulk.ts';
+import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
+import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
@@ -297,7 +293,7 @@ export function narInfoReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: StoredCache,
-	storePathHashes: readonly StorePathHash[]
+	storePathHashes: JsonValueList<StorePathHash>
 ) {
 	return database
 		.select({
@@ -342,8 +338,8 @@ async function authorisedNarInfoVersions(
 		const pages = await readWithOneRetry(() =>
 			batchNonEmpty(
 				database,
-				chunk([...new Set(storePathHashes)], maxInClauseValues).map((batch) =>
-					narInfoReferenceQuery(database, tenant, cache, batch)
+				jsonValueLists([...new Set(storePathHashes)]).map((list) =>
+					narInfoReferenceQuery(database, tenant, cache, list)
 				)
 			)
 		);
