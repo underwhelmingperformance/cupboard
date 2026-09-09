@@ -1,3 +1,21 @@
+// A statement here reads its list with `json_each` rather than binding a
+// parameter for each value. The obvious worry is the query plan: a list the
+// database has to materialise could stop the outer lookup using its index, and
+// a read that scans would cost more than the parameter limit ever did.
+//
+// It does not scan. `EXPLAIN QUERY PLAN` gives the same `SEARCH <table> USING
+// INDEX` line for `column in (select value from json_each(?))` as for
+// `column in (?, ?, …)`, on D1 and on Durable Object SQLite alike. The list
+// appears as a `LIST SUBQUERY` over `SCAN json_each VIRTUAL TABLE` with a bloom
+// filter, and SQLite probes the index once per value. Measured against a
+// 2,000-row table, the plan is the same for a list of 5, 50, 500 and 2,000
+// values, and the rows read stay proportional to the list rather than to the
+// table. The row-value form that `matches` builds plans the same way, and
+// `not in` behaves alike in both forms.
+//
+// The list is not free: SQLite counts each element it reads as a row read, so a
+// lookup of N values reads N rows more than the bound form did. Returning to a
+// chunked list would buy those rows back and nothing else.
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 
 import { BoundValueLengthError } from '../errors.ts';
