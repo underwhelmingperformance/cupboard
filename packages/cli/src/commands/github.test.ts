@@ -276,13 +276,40 @@ describe('runGithubSetup', () => {
 				[
 					{
 						label: 'reuse view',
-						value: 'created: gh-1234-pr- caches at priority 50'
+						value: 'created: public gh-1234-pr- caches at priority 50'
 					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated }
 				]
 			]
 		});
+	});
+
+	// A view aggregates only the caches whose access equals its own, so a public
+	// view over a private tenant's caches would match nothing at all.
+	it('writes a private view for a tenant whose reads need a credential', async () => {
+		const { client, recorded } = setupClient({});
+
+		await runGithubSetup(
+			url,
+			{
+				...options,
+				readUser: readUserInputSchema.parse('reader'),
+				readPassword: 'secret'
+			},
+			reporter([]),
+			client,
+			dependencies
+		);
+
+		expect(recorded.viewSets).toStrictEqual([
+			{
+				access: 'private',
+				name: 'pull-requests-1234',
+				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+				priority: 50
+			}
+		]);
 	});
 
 	it('derives the audience from the tenant URL without its trailing slash', async () => {
@@ -797,7 +824,7 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{
 					label: 'reuse view',
-					value: 'created: gh-1234-pr- caches at priority 50'
+					value: 'created: public gh-1234-pr- caches at priority 50'
 				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated }

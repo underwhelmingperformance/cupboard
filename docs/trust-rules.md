@@ -194,13 +194,14 @@ cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
 
 The reusable flake publish workflow runs both commands itself. The plan job
 creates the cache through the setup action's `provision-cache` input, and a run
-for a closed pull request removes it. It creates the cache private when the
-tenant's reads need a credential and public otherwise, which is the same signal
-`cupboard github setup` uses for the reuse view, so the cache and the view that
-aggregates it always agree. `--if-absent` reports the cache that is already
-there instead of failing, because every push after a pull request's first meets
-the cache the first run created. The caller's `pull_request` trigger has to
-include the `closed` type for the removal to run at all.
+for a closed pull request removes it. The workflow creates the cache private
+when `fallback_read_user` is set and public otherwise. `cupboard github setup`
+uses the same signal for the reuse view, so the cache and the view that
+aggregates it agree without the operator setting both. `--if-absent` reports the
+cache that is already there instead of failing, because every push after a pull
+request's first finds the cache the first run created. The caller's
+`pull_request` trigger has to include the `closed` type for the removal to run
+at all.
 
 Give the cache a default root TTL when the run creates it. A pull request that
 closes removes its cache promptly, but one that is abandoned never runs its

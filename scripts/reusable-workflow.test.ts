@@ -410,7 +410,8 @@ describe('cupboard acquisition', () => {
 		expect(provisioning).toStrictEqual([
 			{
 				'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
-				'provision-cache-access': 'public',
+				'provision-cache-access':
+					"${{ secrets.fallback_read_user != '' && 'private' || 'public' }}",
 				'provision-cache-ttl':
 					'${{ needs.configure.outputs.provision-cache-ttl }}'
 			}

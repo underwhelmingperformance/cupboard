@@ -1,6 +1,9 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { type CachePriority } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	type CachePriority
+} from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
@@ -11,6 +14,7 @@ import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import {
 	isDestinationPreferred,
 	reuseViewNameSchema,
+	type ReuseViewPriority,
 	reuseViewPrioritySchema,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
@@ -563,7 +567,8 @@ interface PlannedSetupStep {
 async function planReuseView(
 	client: GithubSetupClient,
 	identity: RepositoryIdentity,
-	destinationPriority: CachePriority
+	destinationPriority: CachePriority,
+	access: CacheAccessMode
 ): Promise<PlannedSetupStep> {
 	const prefix = pullRequestCachePrefix(identity.repositoryId);
 	const name = reuseViewNameSchema.parse(
@@ -578,12 +583,12 @@ async function planReuseView(
 			step: {
 				step: 'reuse view',
 				outcome: 'created',
-				detail: `${prefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
+				detail: `${access} ${prefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
 			},
 			apply: async () => {
 				await client.reuseViews.set({
 					name,
-					access: 'public',
+					access,
 					selectors,
 					priority: reuseViewPrioritySchema.parse(
 						destinationPriority + viewPriorityMargin
@@ -595,6 +600,7 @@ async function planReuseView(
 
 	if (
 		isDeepEqual([...existing.selectors], selectors) &&
+		existing.access === access &&
 		isDestinationPreferred(destinationPriority, existing.priority)
 	) {
 		return { step: { step: 'reuse view', outcome: 'unchanged' } };
@@ -604,11 +610,39 @@ async function planReuseView(
 		step: {
 			step: 'reuse view',
 			outcome: 'drift',
-			detail: isDestinationPreferred(destinationPriority, existing.priority)
-				? `stored selectors differ from the ${prefix} prefix setup would write`
-				: `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
+			detail: reuseViewDrift({
+				existing,
+				access,
+				prefix,
+				destinationPriority
+			})
 		}
 	};
+}
+
+// A view's access decides which caches it aggregates, so a stored view with the
+// other access is drift rather than something to overwrite: changing it would
+// silently change what the view serves.
+function reuseViewDrift(state: {
+	readonly existing: {
+		readonly access: CacheAccessMode;
+		readonly priority: ReuseViewPriority;
+	};
+	readonly access: CacheAccessMode;
+	readonly prefix: string;
+	readonly destinationPriority: CachePriority;
+}): string {
+	if (state.existing.access !== state.access) {
+		return `stored view is ${state.existing.access}; setup was ${state.access === 'private' ? 'given a read credential' : 'given no read credential'}, so it would write a ${state.access} view`;
+	}
+
+	if (
+		!isDestinationPreferred(state.destinationPriority, state.existing.priority)
+	) {
+		return `stored priority ${String(state.existing.priority)} does not exceed the destination's ${String(state.destinationPriority)}`;
+	}
+
+	return `stored selectors differ from the ${state.prefix} prefix setup would write`;
 }
 
 function planTrustRule(
@@ -762,7 +796,18 @@ export async function runGithubSetup(
 	);
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
-		async () => [await planReuseView(client, identity, destination.priority)]
+		async () => [
+			await planReuseView(
+				client,
+				identity,
+				destination.priority,
+				// A view aggregates only the caches whose access equals its own,
+				// so a public view over a private tenant's caches matches
+				// nothing. The read credential is the only signal setup has
+				// about the tenant's access.
+				options.readUser === undefined ? 'public' : 'private'
+			)
+		]
 	);
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'

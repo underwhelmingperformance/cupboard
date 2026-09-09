@@ -573,9 +573,12 @@ jobs:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
       # The plan job runs before every cohort job, so creating the cache here
-      # puts it in place before anything negotiates an upload against it. The
-      # pull-request reuse view is public, so the cache it aggregates must be
-      # public too.
+      # puts it in place before anything negotiates an upload against it.
+      #
+      # The cache's access has to equal the reuse view's, because a view
+      # aggregates only the caches whose access matches its own. Both are
+      # derived from whether a tenant read credential is present, so they
+      # agree without the operator setting each one.
       - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
@@ -583,7 +586,8 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
-          provision-cache-access: public
+          provision-cache-access:
+            ${{ secrets.fallback_read_user != '' && 'private' || 'public' }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
