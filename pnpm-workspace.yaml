@@ -19,3 +19,5 @@ minimumReleaseAgeExclude:
   # Renovate security update: hono@4.13.5
   - hono@4.12.34 || 4.13.5
   - undici@7.29.0
+  # Renovate security update: vitest@4.1.11
+  - vitest@4.1.11
