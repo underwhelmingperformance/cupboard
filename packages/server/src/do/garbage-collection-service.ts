@@ -770,37 +770,70 @@ export class GarbageCollectionService {
 		}
 	}
 
+	// Whether any marked path of this cache has a narinfo row.
+	private hasRetainedPath(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.narInfos)
+				.innerJoin(
+					schema.garbageCollectionMarks,
+					and(
+						eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
+						eq(
+							schema.garbageCollectionMarks.storePathHash,
+							schema.narInfos.storePathHash
+						)
+					)
+				)
+				.where(eq(schema.narInfos.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	 * Moves a completed mark phase to the collect phase, or ends the scan.
+	 *
+	 * The empty-cache guard belongs to the decision to start collecting, so it
+	 * applies on the first entry to `collect` only. A cursor of '' is what
+	 * identifies that entry: the seed phase left the cursor there when it moved to
+	 * the mark phase, and a cursor written mid-collect is the last hash of a
+	 * non-empty page. The cursor is therefore kept here, so a scan that returned
+	 * to marking resumes the page it had reached.
+	 */
 	private finishMark(
 		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): boolean {
-		const retained = this.context.db
-			.select({ storePathHash: schema.narInfos.storePathHash })
-			.from(schema.narInfos)
-			.innerJoin(
-				schema.garbageCollectionMarks,
-				and(
-					eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
-					eq(
-						schema.garbageCollectionMarks.storePathHash,
-						schema.narInfos.storePathHash
-					)
-				)
-			)
-			.where(eq(schema.narInfos.cacheId, cache.id))
-			.limit(1)
-			.get();
-
-		if (retained === undefined && !scan.allowEmptyCollection) {
+		if (
+			scan.cursor === '' &&
+			!scan.allowEmptyCollection &&
+			!this.hasRetainedPath(cache)
+		) {
 			this.clearScan(cache);
 			return true;
 		}
 
-		this.updateScan(cache, { phase: 'collect', cursor: '' });
+		this.updateScan(cache, { phase: 'collect' });
 		return false;
 	}
 
-	// A mark for the path the outer statement is looking at.
+	// Whether the barrier has queued a path since the mark phase finished. The
+	// collect phase trusts the mark alone, so it must not delete while a queued
+	// path is waiting to be marked.
+	private hasQueuedPaths(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.garbageCollectionFrontier)
+				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	// The mark set of a path the outer statement is looking at.
 	private markedPath(cache: ResolvedCache) {
 		return this.context.db
 			.select({ one: sql`1` })
@@ -886,6 +919,17 @@ export class GarbageCollectionService {
 		for (const paths of jsonRowLists(batch)) {
 			const unmarked = notExists(this.markedPath(cache));
 			const settled = notExists(this.inFlightUpload(cache));
+			// The barrier triggers fill the frontier from commits and root writes, so
+			// an empty frontier is what says the mark holds every reachable path. The
+			// collect branch of `collectUnreachable` returns to marking when a path is
+			// queued; this condition keeps the delete from running against a mark that
+			// is behind even if that branch is ever reordered.
+			const markIsCurrent = notExists(
+				this.context.db
+					.select({ one: sql`1` })
+					.from(schema.garbageCollectionFrontier)
+					.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+			);
 
 			// Queue exactly the paths the delete removed, so a path kept by the mark
 			// or by an upload in flight is never queued for deletion.
@@ -900,7 +944,8 @@ export class GarbageCollectionService {
 								generation: schema.narInfos.generation
 							}),
 							unmarked,
-							settled
+							settled,
+							markIsCurrent
 						)
 					)
 					.returning({
@@ -1109,6 +1154,21 @@ export class GarbageCollectionService {
 				const marked = this.advanceMark(cache, scan);
 
 				if (marked.complete || isRowBudgetExhausted()) {
+					break;
+				}
+
+				scan = this.scanRow(cache);
+				continue;
+			}
+
+			// A path queued since the mark phase finished has to be marked before
+			// anything is deleted, and its closure with it. Return to the mark phase
+			// and leave the collect cursor where it is, so the marks already made
+			// stand and collecting resumes from the page it had reached.
+			if (this.hasQueuedPaths(cache)) {
+				this.updateScan(cache, { phase: 'mark' });
+
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
