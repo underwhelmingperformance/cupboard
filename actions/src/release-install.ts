@@ -48,7 +48,6 @@ import {
 	verifyBundle
 } from '@cupboard/shared/sigstore';
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
-import { RequestError } from '@octokit/request-error';
 import { StatusCodes } from 'http-status-codes';
 import semverLt from 'semver/functions/lt.js';
 import semverValid from 'semver/functions/valid.js';
@@ -95,6 +94,7 @@ import {
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
+import { requestErrorStatus } from './octokit-request-error.ts';
 
 export interface ReleaseAsset {
 	readonly name: string;
@@ -1795,8 +1795,7 @@ async function fetchReleaseByExplicitTag(
 		if (
 			!canUseLegacyPrefix ||
 			prefixedTag === undefined ||
-			!(error instanceof RequestError) ||
-			error.status !== notFoundStatus
+			requestErrorStatus(error) !== notFoundStatus
 		) {
 			throw error;
 		}
@@ -2380,7 +2379,7 @@ async function listAttestations(
 		if (error instanceof ReleaseAttestationSearchTooLargeError) {
 			throw error;
 		}
-		if (error instanceof RequestError && error.status === notFoundStatus) {
+		if (requestErrorStatus(error) === notFoundStatus) {
 			return [];
 		}
 		if (error instanceof z.ZodError) {
@@ -2388,7 +2387,7 @@ async function listAttestations(
 		}
 
 		throw new GithubApiError('failed to fetch attestations', {
-			status: error instanceof RequestError ? error.status : undefined,
+			status: requestErrorStatus(error),
 			cause: error
 		});
 	}
@@ -2478,7 +2477,7 @@ export async function fetchTagCommit(
 		throw new GithubApiError(
 			`could not resolve the commit for tag ${tagName}`,
 			{
-				status: error instanceof RequestError ? error.status : undefined,
+				status: requestErrorStatus(error),
 				cause: error
 			}
 		);
