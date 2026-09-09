@@ -20,6 +20,10 @@ import { wrapDispatchedMethods } from './dispatch-scope.ts';
  * spend as it runs, and the storage binding already counts them for billing.
  * Every Durable Object request logs its `rowsRead` and `rowsWritten`, so
  * production traces are the evidence for changing this number.
+ *
+ * A row is not a fixed amount of work: a list bound as one JSON parameter
+ * costs a row read per element (see `json-list.ts`), so a row count measured
+ * against differently bound statements does not transfer to this number.
  */
 const rowsPerInvocation = 25_000;
 
@@ -43,8 +47,8 @@ class RowBudget {
 	}
 
 	get remaining(): number {
-		// A pass must not begin another unit in a scope that has already been
-		// abandoned, however many rows it has left to spend.
+		// A pass must not begin another step in a scope that has already been
+		// aborted, however many rows it has left to spend.
 		if (currentDeadlineSignal()?.aborted === true) {
 			return 0;
 		}
@@ -86,9 +90,9 @@ export function currentRowBudgetMeter(): DatabaseCostMeter | undefined {
 /**
  * How many rows the current invocation may still read and write.
  *
- * This is a page limit for a pass that has not run yet. It reaches zero once
- * the rows are spent, and also once an enclosing deadline scope has been
- * abandoned, because a pass must not begin another unit there.
+ * This reaches zero once the rows are spent, and also once an enclosing
+ * deadline scope has been aborted, because a pass must not begin another step
+ * there.
  *
  * Callers must run under a dispatched Durable Object method. This throws
  * outside a budget rather than reporting an allowance nothing is debiting.
@@ -104,14 +108,14 @@ export function rowsRemaining(): number {
 }
 
 /**
- * Whether the current invocation has spent its work unit.
+ * Whether the current invocation has spent its row budget.
  *
- * Ask this *after* completing a unit of work, never before starting one.
- * Unlike the D1 statement allowance, a row budget cannot refuse work in
- * advance, because a statement's row count is known only once it has run. So a
- * pass runs a unit, asks this, and stops before starting another.
+ * Ask this *after* completing a step, never before starting one. Unlike the
+ * D1 statement allowance, a row budget cannot refuse work in advance, because
+ * a statement's row count is known only once it has run. So a pass runs a
+ * step, asks this, and stops before starting another.
  *
- * Asking afterwards is also what guarantees forward progress: the first unit
+ * Asking afterwards is also what guarantees forward progress: the first step
  * always runs, so a pass makes progress however little budget it inherits and
  * can never spin without doing work.
  */
