@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import {
+	asOneInvocation,
 	clearBlobStorage,
 	currentServer,
 	initialise,
@@ -251,7 +252,9 @@ describe('orphan staging reconciliation', () => {
 						}
 					).garbageCollection;
 
-					return await garbageCollection.collectGarbage(rootLogger());
+					return await asOneInvocation(() =>
+						garbageCollection.collectGarbage(rootLogger())
+					);
 				} finally {
 					instance.context.env = original;
 				}

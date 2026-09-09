@@ -47,18 +47,31 @@ import {
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { isRowBudgetExhausted, rowsRemaining } from './row-budget.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
-// Bound the paths deleted under one critical section. An alarm resumes a scan
-// that reaches this limit.
-export const maxPathsCollectedPerRun = 1000;
+/**
+ * How large a page the phase that is due may read.
+ *
+ * The phases of one pass draw on a single row budget in sequence, so a phase
+ * can become due with the budget already spent. A page of zero rows would
+ * select nothing, record no progress and leave the pass at the same phase
+ * boundary on the next invocation, so the due phase always reads at least one
+ * row however much that row costs it to process.
+ *
+ * Processing a row costs more rows than reading it, so a full page spends a
+ * small multiple of what the budget had left. The budget bounds what a pass
+ * reads before it defers, not what it spends: a statement's row count is known
+ * only once it has run.
+ */
+function phasePageSize(): number {
+	return Math.max(1, rowsRemaining());
+}
 
-// Keep the root row until every target has entered grace. This bounded batch can
-// then resume without a cursor and without leaving a target unprotected.
-export const maxExpiredRootTargetsPerRun = 1000;
-
-// `expiredRootTargetSelect` binds every root selected by this pass in one query,
-// so this value also limits that query's parameter count.
+// A bound on the query's parameters, not on how much work the phase does: the
+// row budget sizes the page. `expiredRootTargetSelect` binds every root the
+// expiry phase selects in one query, so a page sized only by the budget would
+// build a statement the storage binding refuses.
 export const maxRootsExpiredPerRun = 32;
 
 /**
@@ -74,7 +87,8 @@ export const maxRootsExpiredPerRun = 32;
 export function expiredRootTargetSelect(
 	database: SchemaDatabase,
 	cache: StoredCache,
-	rootNames: readonly RootName[]
+	rootNames: readonly RootName[],
+	limit: number
 ) {
 	return database
 		.select({
@@ -92,18 +106,13 @@ export function expiredRootTargetSelect(
 			asc(schema.retentionRootTargets.rootName),
 			asc(schema.retentionRootTargets.storePathHash)
 		)
-		.limit(maxExpiredRootTargetsPerRun + 1);
+		.limit(limit + 1);
 }
 
 // Delete at most one R2 batch from each pending table. Deleted rows disappear
 // from the next indexed expiry query, so the existing alarm continuation drains
 // the remainder without a separate cursor.
 export const maxPendingRowsDeletedPerRun = 1000;
-
-// A family can contain more members than one deletion pass may process. Delete
-// one chunk from the oldest expired family and retain the family until every
-// member is gone.
-export const maxRefreshTokenMembersDeletedPerRun = 1000;
 
 interface ExpiredRefreshFamilyCollection {
 	readonly familiesDeleted: number;
@@ -261,6 +270,8 @@ export class GarbageCollectionService {
 		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
+		const rootPage = Math.min(phasePageSize(), maxRootsExpiredPerRun);
+
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
 		const expiredRootCandidates = this.context.db
@@ -279,15 +290,17 @@ export class GarbageCollectionService {
 				asc(schema.retentionRoots.expiresAt),
 				asc(schema.retentionRoots.name)
 			)
-			.limit(maxRootsExpiredPerRun + 1)
+			.limit(rootPage + 1)
 			.all();
-		const expiredRoots = expiredRootCandidates.slice(0, maxRootsExpiredPerRun);
+		const expiredRoots = expiredRootCandidates.slice(0, rootPage);
 		const expiredRootNames = expiredRoots.map((root) => root.name);
 		const expiryByRoot = new Map(
 			expiredRoots.flatMap((root) =>
 				root.expiresAt === null ? [] : [[root.name, root.expiresAt] as const]
 			)
 		);
+
+		const targetPage = phasePageSize();
 
 		// Anchor each target's grace period to the root's recorded expiry. Using the
 		// collection time would extend retention whenever collection runs late.
@@ -297,12 +310,10 @@ export class GarbageCollectionService {
 				: expiredRootTargetSelect(
 						this.context.db,
 						cache,
-						expiredRootNames
+						expiredRootNames,
+						targetPage
 					).all();
-		const expiredRootTargets = expiredRootTargetCandidates.slice(
-			0,
-			maxExpiredRootTargetsPerRun
-		);
+		const expiredRootTargets = expiredRootTargetCandidates.slice(0, targetPage);
 		let rootsExpired = 0;
 
 		this.context.db.transaction((tx) => {
@@ -418,9 +429,9 @@ export class GarbageCollectionService {
 	private advanceSeed(
 		cache: StoredCache,
 		phase: 'roots' | 'grace',
-		cursor: string,
-		budget: number
-	): { readonly used: number; readonly complete: boolean } {
+		cursor: string
+	): { readonly complete: boolean } {
+		const page = phasePageSize();
 		const rows =
 			phase === 'roots'
 				? this.context.db
@@ -435,7 +446,7 @@ export class GarbageCollectionService {
 							)
 						)
 						.orderBy(asc(schema.retentionRootTargets.storePathHash))
-						.limit(budget + 1)
+						.limit(page + 1)
 						.all()
 				: this.context.db
 						.select({ storePathHash: schema.retentionGrace.storePathHash })
@@ -447,9 +458,9 @@ export class GarbageCollectionService {
 							)
 						)
 						.orderBy(asc(schema.retentionGrace.storePathHash))
-						.limit(budget + 1)
+						.limit(page + 1)
 						.all();
-		const batch = rows.slice(0, budget);
+		const batch = rows.slice(0, page);
 
 		this.insertFrontier(
 			cache,
@@ -460,7 +471,7 @@ export class GarbageCollectionService {
 			this.updateScan(cache, {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
-			return { used: batch.length, complete: false };
+			return { complete: false };
 		}
 
 		this.updateScan(cache, {
@@ -468,7 +479,7 @@ export class GarbageCollectionService {
 			cursor: ''
 		});
 
-		return { used: batch.length, complete: true };
+		return { complete: true };
 	}
 
 	private existingMarks(
@@ -550,13 +561,11 @@ export class GarbageCollectionService {
 		throw new StoredReferencesNotArrayError(storePathHash);
 	}
 
-	private advanceMark(
-		cache: StoredCache,
-		budget: number
-	): { readonly used: number; readonly complete: boolean } {
-		let used = 0;
-
-		while (used < budget) {
+	// Each iteration is one unit: it pops a path from the frontier and marks it,
+	// or it walks a page of one path's references. The budget is consulted after a
+	// unit, so the first one always runs.
+	private advanceMark(cache: StoredCache): { readonly complete: boolean } {
+		for (;;) {
 			const scan = this.scan(cache);
 			let storePathHash = scan.markStorePathHash;
 			let referenceCursor = scan.referenceCursor;
@@ -573,7 +582,7 @@ export class GarbageCollectionService {
 					.get();
 
 				if (frontier === undefined) {
-					return { used, complete: this.finishMark(cache) };
+					return { complete: this.finishMark(cache) };
 				}
 
 				const row = this.context.db
@@ -614,21 +623,26 @@ export class GarbageCollectionService {
 							.run();
 					}
 				});
-				used += 1;
 
 				if (row === undefined) {
+					if (isRowBudgetExhausted()) {
+						return { complete: false };
+					}
+
 					continue;
 				}
 
 				storePathHash = row.storePathHash;
 				referenceCursor = -1;
 
-				if (used >= budget) {
-					break;
+				if (isRowBudgetExhausted()) {
+					return { complete: false };
 				}
 			}
 
 			this.validateReferencesContainer(cache, storePathHash);
+
+			const page = phasePageSize();
 
 			const references = this.context.db.all<{
 				referenceIndex: number;
@@ -641,9 +655,9 @@ export class GarbageCollectionService {
 				  AND ${schema.narInfos.storePathHash} = ${storePathHash}
 				  AND CAST(json_each.key AS INTEGER) > ${referenceCursor}
 				ORDER BY CAST(json_each.key AS INTEGER)
-				LIMIT ${budget - used + 1}
+				LIMIT ${page + 1}
 			`);
-			const batch = references.slice(0, budget - used);
+			const batch = references.slice(0, page);
 			const hashes = batch.map(({ reference }) =>
 				this.referenceHash(storePathHash, reference)
 			);
@@ -653,22 +667,24 @@ export class GarbageCollectionService {
 				cache,
 				hashes.filter((hash) => hash !== storePathHash && !marked.has(hash))
 			);
-			used += batch.length;
 
 			if (references.length > batch.length) {
 				this.updateScan(cache, {
 					referenceCursor: batch.at(-1)?.referenceIndex ?? referenceCursor
 				});
-				break;
+
+				return { complete: false };
 			}
 
 			this.updateScan(cache, {
 				markStorePathHash: sql`null`,
 				referenceCursor: -1
 			});
-		}
 
-		return { used, complete: false };
+			if (isRowBudgetExhausted()) {
+				return { complete: false };
+			}
+		}
 	}
 
 	private finishMark(cache: StoredCache): boolean {
@@ -756,13 +772,12 @@ export class GarbageCollectionService {
 	private advanceCollect(
 		cache: StoredCache,
 		now: IsoTimestamp,
-		cursor: string,
-		budget: number
+		cursor: string
 	): {
-		readonly used: number;
 		readonly pathsCollected: number;
 		readonly complete: boolean;
 	} {
+		const page = phasePageSize();
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
@@ -777,9 +792,9 @@ export class GarbageCollectionService {
 				)
 			)
 			.orderBy(asc(schema.narInfos.storePathHash))
-			.limit(budget + 1)
+			.limit(page + 1)
 			.all();
-		const batch = rows.slice(0, budget);
+		const batch = rows.slice(0, page);
 		const hashes = batch.map((row) => row.storePathHash);
 		const marked = this.existingMarks(cache, hashes);
 		const inFlight = this.inFlightHashes(cache, hashes);
@@ -821,17 +836,25 @@ export class GarbageCollectionService {
 			this.clearScan(cache);
 		}
 
-		return {
-			used: batch.length,
-			pathsCollected,
-			complete: rows.length <= batch.length
-		};
+		return { pathsCollected, complete: rows.length <= batch.length };
 	}
 
+	/**
+	 * Advances one cache's collection scan until the invocation's row budget is
+	 * spent, leaving the phase it stopped in recorded for the next invocation.
+	 *
+	 * The phases draw on one budget in sequence rather than taking a budget each,
+	 * so an expensive early phase can leave a later one nothing to spend. That
+	 * does not starve the later phase, because the input of each phase drains
+	 * within a scan: a root expires once, a grace row is deleted as it is
+	 * processed, the seed set is fixed when the scan starts, the mark frontier
+	 * shrinks as paths are marked, and a collected path is deleted. The expensive
+	 * phase is therefore cheap on the next invocation, which follows immediately
+	 * because the pass re-arms its alarm while work remains.
+	 */
 	private collectUnreachable(
 		cache: StoredCache,
-		now: IsoTimestamp,
-		budget: number
+		now: IsoTimestamp
 	): {
 		rootsExpired: number;
 		rootTargetsExpired: number;
@@ -839,10 +862,6 @@ export class GarbageCollectionService {
 		hasMoreExpiredRoots: boolean;
 		hasMoreWork: boolean;
 	} {
-		let expiryRemaining = budget;
-		let seedRemaining = budget;
-		let markRemaining = budget;
-		let collectRemaining = budget;
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
@@ -865,7 +884,7 @@ export class GarbageCollectionService {
 					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
 				});
 
-				if (expired.hasMoreExpiredRoots) {
+				if (expired.hasMoreExpiredRoots || isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -873,6 +892,7 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'expire-grace') {
+				const page = phasePageSize();
 				const candidates = this.context.db
 					.select({ storePathHash: schema.retentionGrace.storePathHash })
 					.from(schema.retentionGrace)
@@ -883,9 +903,9 @@ export class GarbageCollectionService {
 						)
 					)
 					.orderBy(asc(schema.retentionGrace.storePathHash))
-					.limit(expiryRemaining + 1)
+					.limit(page + 1)
 					.all();
-				const batch = candidates.slice(0, expiryRemaining);
+				const batch = candidates.slice(0, page);
 
 				const deadlineBatches = chunk(
 					batch.map((row) => row.storePathHash),
@@ -903,7 +923,7 @@ export class GarbageCollectionService {
 						)
 						.run();
 				}
-				expiryRemaining -= batch.length;
+
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
 					allowEmptyCollection:
@@ -911,7 +931,7 @@ export class GarbageCollectionService {
 					...(candidates.length <= batch.length && { phase: 'roots' })
 				});
 
-				if (candidates.length > batch.length) {
+				if (candidates.length > batch.length || isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -919,15 +939,9 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				const seeded = this.advanceSeed(
-					cache,
-					scan.phase,
-					scan.cursor,
-					seedRemaining
-				);
-				seedRemaining -= seeded.used;
+				const seeded = this.advanceSeed(cache, scan.phase, scan.cursor);
 
-				if (seedRemaining === 0 && !seeded.complete) {
+				if (!seeded.complete || isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -935,29 +949,19 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'mark') {
-				const marked = this.advanceMark(cache, markRemaining);
-				markRemaining -= marked.used;
+				const marked = this.advanceMark(cache);
 
-				if (marked.complete) {
-					break;
-				}
-				if (markRemaining === 0) {
+				if (marked.complete || isRowBudgetExhausted()) {
 					break;
 				}
 
 				continue;
 			}
 
-			const collected = this.advanceCollect(
-				cache,
-				now,
-				scan.cursor,
-				collectRemaining
-			);
-			collectRemaining -= collected.used;
+			const collected = this.advanceCollect(cache, now, scan.cursor);
 			pathsCollected += collected.pathsCollected;
 
-			if (collectRemaining === 0 || collected.complete) {
+			if (collected.complete || isRowBudgetExhausted()) {
 				break;
 			}
 		}
@@ -1140,9 +1144,13 @@ export class GarbageCollectionService {
 		return true;
 	}
 
+	// A family can hold more members than one pass can afford. Delete a page from
+	// the oldest expired family and keep the family until every member is gone.
 	private collectExpiredRefreshFamily(
 		now: IsoTimestamp
 	): ExpiredRefreshFamilyCollection {
+		const page = phasePageSize();
+
 		return this.context.db.transaction((transaction) => {
 			const family = transaction
 				.select({ id: schema.refreshTokenFamilies.id })
@@ -1167,7 +1175,7 @@ export class GarbageCollectionService {
 					asc(schema.refreshTokenMembers.generation),
 					asc(schema.refreshTokenMembers.id)
 				)
-				.limit(maxRefreshTokenMembersDeletedPerRun + 1)
+				.limit(page + 1)
 				.all();
 
 			if (candidates.length > 0) {
@@ -1179,7 +1187,7 @@ export class GarbageCollectionService {
 						asc(schema.refreshTokenMembers.generation),
 						asc(schema.refreshTokenMembers.id)
 					)
-					.limit(maxRefreshTokenMembersDeletedPerRun);
+					.limit(page);
 
 				transaction
 					.delete(schema.refreshTokenMembers)
@@ -1187,12 +1195,8 @@ export class GarbageCollectionService {
 					.run();
 			}
 
-			if (candidates.length > maxRefreshTokenMembersDeletedPerRun) {
-				return {
-					familiesDeleted: 0,
-					hasMoreWork: true,
-					membersDeleted: maxRefreshTokenMembersDeletedPerRun
-				};
+			if (candidates.length > page) {
+				return { familiesDeleted: 0, hasMoreWork: true, membersDeleted: page };
 			}
 
 			transaction
@@ -1218,8 +1222,7 @@ export class GarbageCollectionService {
 	async collectGarbage(
 		logger: Logger,
 		cache?: StoredCache,
-		purgeOrigin?: RequestOrigin,
-		collectLimit: number = maxPathsCollectedPerRun
+		purgeOrigin?: RequestOrigin
 	): Promise<GarbageCollectionOutcome> {
 		const log = logger.with({
 			job: 'garbage-collection',
@@ -1336,7 +1339,7 @@ export class GarbageCollectionService {
 							hasMoreExpiredRoots: false,
 							hasMoreWork: false
 						}
-					: this.collectUnreachable(collectionCache, now, collectLimit);
+					: this.collectUnreachable(collectionCache, now);
 			const hasMoreCollectionWork =
 				cache === undefined &&
 				collectionCache !== undefined &&

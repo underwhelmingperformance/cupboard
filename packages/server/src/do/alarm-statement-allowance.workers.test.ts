@@ -75,10 +75,6 @@ const pushConcurrency = 6;
 // statement allowance and later alarms have to resume it.
 const committedPaths = 360;
 
-// The scope a bounded collection pass leaves behind when it runs out of
-// allowance.
-const collectLimit = 100;
-
 type AlarmObservation = MeasuredInvocation<{
 	readonly pass: string;
 	readonly queuedDeletions: number;
@@ -146,9 +142,7 @@ async function driveAlarms(
 		});
 
 		await instance.runCacheTeardown(buildsCache, origin);
-		await state.storage.put(gcContinuationKey, [
-			{ scope: 'tenant', collectLimit }
-		]);
+		await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
 
 		const teardownKey = `${teardownEntryPrefix}${buildsCache}`;
 		const queueDepth = (): number =>

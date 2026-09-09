@@ -12,10 +12,7 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-import {
-	GarbageCollectionService,
-	maxPathsCollectedPerRun
-} from './garbage-collection-service.ts';
+import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { VerificationService } from './verification-service.ts';
 
@@ -29,18 +26,11 @@ const gcOutcome = {
 	narInfosDeleted: 0,
 	orphanStagingDeleted: 0
 };
-const tenantWideContinuation = {
-	scope: 'tenant',
-	collectLimit: maxPathsCollectedPerRun
-};
-const scopedContinuation = (cache: string) => ({
-	scope: 'cache',
-	cache,
-	collectLimit: maxPathsCollectedPerRun
-});
+const tenantWideContinuation = { scope: 'tenant' };
+const scopedContinuation = (cache: string) => ({ scope: 'cache', cache });
 const cappedGcOutcome = {
 	...gcOutcome,
-	pathsCollected: maxPathsCollectedPerRun,
+	pathsCollected: 1,
 	hasMoreWork: true
 };
 
@@ -215,9 +205,7 @@ describe('garbage-collection maintenance serialisation', () => {
 				async (instance, state) => {
 					// A later pass will rediscover the backlog represented by this unsupported
 					// marker, so alarm recovery can discard it.
-					await state.storage.put(gcContinuationKey, [
-						{ scope: 'cache', cache: 'builds', limit: maxPathsCollectedPerRun }
-					]);
+					await state.storage.put(gcContinuationKey, [{ scope: 'cache' }]);
 					await instance.alarm();
 
 					const continuation = await state.storage.get(gcContinuationKey);
@@ -225,12 +213,7 @@ describe('garbage-collection maintenance serialisation', () => {
 
 					return {
 						continuation,
-						calls: collect.mock.calls.map(
-							([_logger, cache, _purgeOrigin, collectLimit]) => ({
-								cache,
-								collectLimit
-							})
-						)
+						calls: collect.mock.calls.map(([_logger, cache]) => ({ cache }))
 					};
 				}
 			);
@@ -285,13 +268,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			expect(observed).toStrictEqual({
 				afterFailure: {
 					status: StatusCodes.INTERNAL_SERVER_ERROR,
-					continuation: [
-						{
-							scope: 'cache',
-							cache: 'builds',
-							collectLimit: maxPathsCollectedPerRun
-						}
-					],
+					continuation: [{ scope: 'cache', cache: 'builds' }],
 					alarmArmed: true
 				},
 				afterRecovery: {

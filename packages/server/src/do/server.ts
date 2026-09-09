@@ -139,10 +139,7 @@ import {
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { currentDeadlineSignal, withDeadlineBudget } from './deadline.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import {
-	GarbageCollectionService,
-	maxPathsCollectedPerRun
-} from './garbage-collection-service.ts';
+import { GarbageCollectionService } from './garbage-collection-service.ts';
 import {
 	capturedGraceFact,
 	parseStoredGraceDecision,
@@ -273,18 +270,9 @@ interface MaintenancePass {
 	readonly run: () => Promise<MaintenanceProgress>;
 }
 
-const garbageCollectionLimitSchema = z.number().int().positive();
-
 const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
-	z.object({
-		scope: z.literal('tenant'),
-		collectLimit: garbageCollectionLimitSchema
-	}),
-	z.object({
-		scope: z.literal('cache'),
-		cache: storedCacheSchema,
-		collectLimit: garbageCollectionLimitSchema
-	})
+	z.object({ scope: z.literal('tenant') }),
+	z.object({ scope: z.literal('cache'), cache: storedCacheSchema })
 ]);
 const garbageCollectionContinuationsSchema = z
 	.array(garbageCollectionContinuationSchema)
@@ -311,12 +299,9 @@ function parseGarbageCollectionContinuations(
 }
 
 function garbageCollectionContinuation(
-	cache: StoredCache | undefined,
-	collectLimit: number
+	cache: StoredCache | undefined
 ): GarbageCollectionContinuation {
-	return cache === undefined
-		? { scope: 'tenant', collectLimit }
-		: { scope: 'cache', cache, collectLimit };
+	return cache === undefined ? { scope: 'tenant' } : { scope: 'cache', cache };
 }
 
 function mergeGarbageCollectionContinuation(
@@ -1525,25 +1510,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Persist the scope and cap while collection or narinfo deletion has more work.
-	// The alarm resumes with the same bounds, leaving the input gate free for
-	// requests between passes.
-	private async collectGarbageOnce(
-		collectLimit: number = maxPathsCollectedPerRun,
-		cache?: StoredCache
-	): Promise<void> {
-		const continuation = garbageCollectionContinuation(cache, collectLimit);
+	// Persist the scope while collection or narinfo deletion has more work. The
+	// alarm resumes that scope under its own row budget, leaving the input gate
+	// free for requests between passes.
+	private async collectGarbageOnce(cache?: StoredCache): Promise<void> {
+		const continuation = garbageCollectionContinuation(cache);
 
 		await this.runGarbagePass(
 			() =>
 				this.metered('garbage-collection', (logger) =>
 					this.withMaintenanceEligibility(() =>
-						this.garbageCollection.collectGarbage(
-							logger,
-							cache,
-							undefined,
-							collectLimit
-						)
+						this.garbageCollection.collectGarbage(logger, cache)
 					)
 				),
 			continuation
@@ -1591,7 +1568,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.runExclusiveMaintenance('gc', () =>
 			this.runGarbagePass(
 				() => this.garbageCollection.collectGarbage(logger, cache, purgeOrigin),
-				garbageCollectionContinuation(cache, maxPathsCollectedPerRun)
+				garbageCollectionContinuation(cache)
 			)
 		);
 	}
@@ -1688,7 +1665,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			await this.collectGarbageOnce(
-				continuation.collectLimit,
 				continuation.scope === 'cache' ? continuation.cache : undefined
 			);
 		});
@@ -2108,10 +2084,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// `/verify` routes run the same passes for manual use. RPC passes cover every
 	// cache and leave stale edge-cache entries to expire under the narinfo TTL and
 	// orphan-blob grace window.
-	async runGarbageCollection(collectLimit?: number): Promise<void> {
+	async runGarbageCollection(): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
-			this.collectGarbageOnce(collectLimit)
+			this.collectGarbageOnce()
 		);
 	}
 
