@@ -50,12 +50,7 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
-import {
-	chunk,
-	executeChunkedStatement,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from './bulk.ts';
+import { maxOutgoingConnections } from './bulk.ts';
 import {
 	type CommitPipelineService,
 	type PrefetchedMaterialisationFacts
@@ -68,6 +63,7 @@ import {
 	parseStoredGraceDecision,
 	storedGraceFact
 } from './grace-decision.ts';
+import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type ReconcileTarget,
@@ -505,7 +501,7 @@ function claimableFilter(now: Date) {
  */
 export function buildLeaseUpdate(
 	database: SchemaDatabase,
-	uploadIds: readonly UploadId[],
+	uploadIds: JsonValueList<UploadId>,
 	claimedAt: IsoTimestamp,
 	owner: string
 ) {
@@ -1592,8 +1588,15 @@ export class VerificationService {
 
 		const tenant = this.context.requireTenant();
 		const hashes = [...new Set(rows.map((row) => row.storePathHash))];
-		const read = await executeChunkedStatement(hashes, (hashChunk) =>
-			this.context.d1
+		const keys = new Set<string>();
+		const covered = new Set<StorePathHash>();
+
+		for (const list of jsonValueLists(hashes)) {
+			if (statementsRemaining() < 1) {
+				break;
+			}
+
+			const edges = await this.context.d1
 				.select({
 					cache: d1Schema.blobReference.cache,
 					storePathHash: d1Schema.blobReference.storePathHash,
@@ -1604,22 +1607,22 @@ export class VerificationService {
 				.where(
 					and(
 						eq(d1Schema.blobReference.tenant, tenant),
-						inArray(d1Schema.blobReference.storePathHash, [...hashChunk])
+						inArray(d1Schema.blobReference.storePathHash, list)
 					)
-				)
-		);
+				);
 
-		const keys = new Set<string>();
-
-		for (const edges of read.results) {
 			for (const edge of edges) {
 				keys.add(
 					edgeKey(edge.cache, edge.storePathHash, edge.generation, edge.narHash)
 				);
 			}
+
+			for (const storePathHash of list.values) {
+				covered.add(storePathHash);
+			}
 		}
 
-		return { keys, covered: new Set(read.processed) };
+		return { keys, covered };
 	}
 
 	// Re-check the generation under the caller's critical section because a commit
@@ -1682,14 +1685,12 @@ export class VerificationService {
 	// synchronous on the single writer, so another pass cannot claim them between
 	// those operations.
 	//
-	// The largest verification page contains `maxVerificationRpcRows` uploads.
-	// Split that page so each update stays within the parameter limit.
 	private leaseRows(
 		uploadIds: readonly UploadId[],
 		now: Date,
 		owner: string
 	): void {
-		for (const ids of chunk(uploadIds, maxInClauseValues)) {
+		for (const ids of jsonValueLists(uploadIds)) {
 			buildLeaseUpdate(this.context.db, ids, isoTimestamp(now), owner).run();
 		}
 	}
@@ -2102,7 +2103,7 @@ export class VerificationService {
 	releaseClaimLeases(owner: string, uploadIds: readonly UploadId[]): void {
 		const distinctIds = [...new Set(uploadIds)];
 
-		for (const ids of chunk(distinctIds, maxInClauseValues)) {
+		for (const ids of jsonValueLists(distinctIds)) {
 			this.context.db
 				.update(schema.pendingUploads)
 				.set({ claimedAt: sql`null`, claimOwner: sql`null` })
@@ -2124,7 +2125,7 @@ export class VerificationService {
 		const distinctIds = [...new Set(uploadIds)];
 		let renewed = 0;
 
-		for (const ids of chunk(distinctIds, maxInClauseValues)) {
+		for (const ids of jsonValueLists(distinctIds)) {
 			renewed += this.context.db
 				.update(schema.pendingUploads)
 				.set({ claimedAt: isoTimestamp(new Date()) })
@@ -2253,11 +2254,9 @@ export class VerificationService {
 		const fromHash = cursor?.lastStorePathHash ?? '';
 
 		// Reserve one probe statement per row, plus the edge query and one removal.
-		// This leaves enough statements to repair at least one row. The page also
-		// fits in one `IN (...)` list, so the edge query requires one statement.
+		// This leaves enough statements to repair at least one row.
 		const pageLimit = Math.min(
 			limit,
-			maxInClauseValues,
 			affordableOperations(
 				statementsPerReconcileProbe,
 				statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval

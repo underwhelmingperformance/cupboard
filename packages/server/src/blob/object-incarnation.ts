@@ -19,6 +19,7 @@ import {
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { type JsonValueList } from '../do/json-list.ts';
 import { blobReaperGraceMs } from '../http/http.ts';
 
 export type SharedObjectKind = 'nar' | 'cas';
@@ -125,11 +126,11 @@ export async function isObjectIncarnationLive(
 type LegacyObjectIncarnations =
 	| {
 			readonly kind: 'nar';
-			readonly objectIds: readonly NixSha256HashString[];
+			readonly objectIds: JsonValueList<NixSha256HashString>;
 	  }
 	| {
 			readonly kind: 'cas';
-			readonly objectIds: readonly Sha256HexDigest[];
+			readonly objectIds: JsonValueList<Sha256HexDigest>;
 	  };
 
 /**
@@ -141,7 +142,7 @@ export async function registerLegacyObjectIncarnations(
 	objects: LegacyObjectIncarnations,
 	updatedAt: IsoTimestamp
 ): Promise<void> {
-	if (objects.objectIds.length === 0) {
+	if (objects.objectIds.values.length === 0) {
 		return;
 	}
 
