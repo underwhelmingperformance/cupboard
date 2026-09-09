@@ -45,13 +45,12 @@ import {
 	syntheticNarHash,
 	syntheticStorePathHash,
 	testServerFor,
+	underOneUnitOfWork,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
-import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
-import { maxPathsCollectedPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const buildsCache = cacheNameSchema.parse('builds');
@@ -281,16 +280,20 @@ describe('named caches', () => {
 		await pushPath(init.token, collectableInB, 'b');
 		await putRoot(init.token, 'a', 'channel', keptInA.storePath);
 		await putRoot(init.token, 'b', 'channel', keptInB.storePath);
-		await seedCollectablePaths('a', maxPathsCollectedPerRun + 1);
+		await seedCollectablePaths('a', 2);
 
 		const observed = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				const response = await instance.fetch(
-					new Request(new URL('/cache/a/gc', internalOrigin), {
-						method: 'POST',
-						headers: { authorization: `Bearer ${init.token}` }
-					})
+				// A budget of one unit of work leaves the scan of cache `a` unfinished,
+				// so the continuation has to name that cache for the alarms to resume.
+				const response = await underOneUnitOfWork(() =>
+					instance.fetch(
+						new Request(new URL('/cache/a/gc', internalOrigin), {
+							method: 'POST',
+							headers: { authorization: `Bearer ${init.token}` }
+						})
+					)
 				);
 				const firstPass = {
 					status: response.status,
@@ -347,17 +350,11 @@ describe('named caches', () => {
 					pendingUploadsDeleted: 0,
 					pendingAttestationsDeleted: 0,
 					rootsExpired: 0,
-					pathsCollected: maxPathsCollectedPerRun,
-					narInfosDeleted: maxNarInfoDeletionsFlushedPerRun,
+					pathsCollected: 0,
+					narInfosDeleted: 0,
 					orphanStagingDeleted: 0
 				},
-				continuation: [
-					{
-						scope: 'cache',
-						cache: 'a',
-						collectLimit: maxPathsCollectedPerRun
-					}
-				]
+				continuation: [{ scope: 'cache', cache: 'a' }]
 			},
 			afterContinuation: {
 				continuation: undefined,
