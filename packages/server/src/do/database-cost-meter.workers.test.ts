@@ -141,7 +141,10 @@ describe('db cost meter', () => {
 		}
 
 		// Assert the exact entrypoint measurement because a positive but incorrect
-		// count would still pass a looser integration check.
+		// count would still pass a looser integration check. Two of the reads
+		// compare a store path against a bound list, and SQLite counts each element
+		// it reads from that list as a row, so a one-path negotiation reads two
+		// rows more than its table rows.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -153,7 +156,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 15,
+			rowsRead: 17,
 			rowsWritten: 7
 		});
 	});
@@ -194,7 +197,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 15,
+			rowsRead: 17,
 			rowsWritten: 0
 		});
 	});

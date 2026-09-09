@@ -57,7 +57,7 @@ import {
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
-import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
+import { batchNonEmpty, chunk } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
@@ -73,6 +73,7 @@ import {
 	storedGraceDeadlines,
 	storedGraceFact
 } from './grace-decision.ts';
+import { jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { maxRootTargetInsertRows } from './roots-service.ts';
@@ -1791,7 +1792,7 @@ export class CommitPipelineService {
 		const blobByHash = new Map<NixSha256HashString, CanonicalBlobFacts>();
 		const ownedHashes = new Set<NixSha256HashString>();
 
-		const blobStateQueries = chunk(unique, maxInClauseValues).map((batch) =>
+		const blobStateQueries = jsonValueLists(unique).map((list) =>
 			this.context.d1
 				.select({
 					narHash: d1Schema.blobState.narHash,
@@ -1801,17 +1802,17 @@ export class CommitPipelineService {
 					incarnation: d1Schema.blobState.incarnation
 				})
 				.from(d1Schema.blobState)
-				.where(inArray(d1Schema.blobState.narHash, batch))
+				.where(inArray(d1Schema.blobState.narHash, list))
 		);
 
-		const tenantBlobQueries = chunk(unique, maxInClauseValues).map((batch) =>
+		const tenantBlobQueries = jsonValueLists(unique).map((list) =>
 			this.context.d1
 				.select({ narHash: d1Schema.tenantBlob.narHash })
 				.from(d1Schema.tenantBlob)
 				.where(
 					and(
 						eq(d1Schema.tenantBlob.tenant, tenant),
-						inArray(d1Schema.tenantBlob.narHash, batch)
+						inArray(d1Schema.tenantBlob.narHash, list)
 					)
 				)
 		);
