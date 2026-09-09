@@ -473,9 +473,11 @@ describe('reuse-view lookup hardening', () => {
 
 		const withBacklog = await lookupCost(path.storePathHash);
 
+		// The row outside the view costs one more read than before: its range test
+		// now runs through `json_each`. Two hundred unrelated rows cost nothing.
 		expect({ baseline, withBacklog }).toStrictEqual({
 			baseline: { status: StatusCodes.OK, rowsRead: 9 },
-			withBacklog: { status: StatusCodes.OK, rowsRead: 10 }
+			withBacklog: { status: StatusCodes.OK, rowsRead: 11 }
 		});
 	});
 });
