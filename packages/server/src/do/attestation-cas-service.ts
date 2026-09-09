@@ -22,6 +22,7 @@ import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
+	TenantUsageMissingError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
 import {
@@ -105,7 +106,13 @@ export class AttestationCasService {
 				.where(this.presenceFilter(tenant, digest))
 		]);
 
-		return this.overQuotaForCharge(usageRows[0], ownedRows.length > 0, size);
+		const usage = usageRows[0];
+
+		if (usage === undefined) {
+			throw new TenantUsageMissingError(tenant);
+		}
+
+		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
 	}
 
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
@@ -315,21 +322,18 @@ export class AttestationCasService {
 		return 'referenced';
 	}
 
+	// Takes the tenant's stored usage. A caller that has no row to pass cannot
+	// decide this, because the quota lives in that row; it must refuse the charge
+	// with `TenantUsageMissingError` instead.
 	overQuotaForCharge(
-		usage:
-			| {
-					readonly bytes: number;
-					readonly casBytes: number;
-					readonly quotaBytes: number | null;
-			  }
-			| undefined,
+		usage: {
+			readonly bytes: number;
+			readonly casBytes: number;
+			readonly quotaBytes: number | null;
+		},
 		isOwned: boolean,
 		size: number
 	): boolean {
-		if (usage === undefined) {
-			return false;
-		}
-
 		if (usage.quotaBytes === null) {
 			return false;
 		}
