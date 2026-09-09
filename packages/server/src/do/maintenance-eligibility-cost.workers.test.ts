@@ -200,6 +200,11 @@ describe('maintenance pass cost', () => {
 
 	// Garbage collection selects expired families through the family-expiry
 	// index. A live-family backlog must not increase the number of rows read.
+	//
+	// Both figures include the schema scan each pass makes to check its
+	// write-barrier triggers. The second reads one row more because the first pass
+	// created workerd's `_cf_KV` table when it armed its continuation. That
+	// difference does not follow the backlog, which is what these tests measure.
 	it('checks for expired refresh-token families without scanning the live backlog', async () => {
 		await initialise();
 
@@ -217,8 +222,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 51,
-			largeBacklogCost: 51
+			smallBacklogCost: 164,
+			largeBacklogCost: 165
 		});
 	});
 
@@ -228,12 +233,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 48,
+				rowsRead: 161,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 48,
+				rowsRead: 161,
 				usesIndex: true,
 				sorts: false
 			}
@@ -270,8 +275,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 46,
-			largeBacklogCost: 46
+			smallBacklogCost: 159,
+			largeBacklogCost: 159
 		});
 	});
 
@@ -302,11 +307,15 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 678, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 678, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 791, rowsWritten: 133 },
+			largeBacklog: { rowsRead: 791, rowsWritten: 133 }
 		});
 	});
 
+	// Both figures include the schema scan each pass makes to check its
+	// write-barrier triggers. The second reads one row more because the first pass
+	// created workerd's `_cf_KV` table when it armed its continuation. That
+	// difference does not follow the backlog, which is what these tests measure.
 	it('finds expired roots without scanning the live-root backlog', async () => {
 		await initialise();
 
@@ -326,8 +335,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 60,
-			largeBacklogCost: 60
+			smallBacklogCost: 173,
+			largeBacklogCost: 174
 		});
 	});
 });

@@ -10,6 +10,7 @@ import {
 	and,
 	asc,
 	eq,
+	getTableName,
 	gt,
 	inArray,
 	lt,
@@ -23,6 +24,7 @@ import {
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
+	GarbageCollectionBarrierMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
@@ -74,6 +76,74 @@ export const phaseGranule = 128;
 // size only because the expiry phase reads every root it selects in one query,
 // and nothing stops it being raised to `phaseGranule`.
 export const maxRootsExpiredPerRun = 32;
+
+/**
+ * The tables the collection scan reads reachability from.
+ *
+ * A path is reachable when one of the seed tables names it, or when a reachable
+ * path with a `narinfo` row references it. Those are the only two relations the
+ * scan reads, so a statement can enlarge the reachable set only by writing one
+ * of these tables.
+ *
+ * The write barrier is a pair of triggers on each of them, named after the
+ * table. This list is what the trigger names are derived from, what
+ * `advanceSeed` reads its seeds from, and what the migration test and
+ * `assertBarrierPresent` check. A seed source added here therefore fails the
+ * migration test until its triggers exist, and no pass runs while one of them
+ * is missing.
+ */
+const reachabilitySources = [
+	{
+		role: 'seed',
+		phase: 'roots',
+		table: schema.retentionRootTargets,
+		cacheId: schema.retentionRootTargets.cacheId,
+		storePathHash: schema.retentionRootTargets.storePathHash
+	},
+	{
+		role: 'seed',
+		phase: 'grace',
+		table: schema.retentionGrace,
+		cacheId: schema.retentionGrace.cacheId,
+		storePathHash: schema.retentionGrace.storePathHash
+	},
+	{
+		// The scan reads every edge from `references_json`, in `advanceMark` and
+		// nowhere else.
+		role: 'edge',
+		table: schema.narInfos
+	}
+] as const;
+
+type SeedSource = Extract<
+	(typeof reachabilitySources)[number],
+	{ role: 'seed' }
+>;
+
+// The seed phases of the scan, in the order the scan runs them.
+const seedSources: readonly SeedSource[] = reachabilitySources.filter(
+	(source): source is SeedSource => source.role === 'seed'
+);
+
+const barrierTriggerPrefix = 'garbage_collection_barrier_';
+
+/**
+ * The barrier triggers, each with the table it fires on.
+ *
+ * Deriving these from {@link reachabilitySources} is what keeps the trigger set
+ * closed under the sources the scan reads: there is no second list to update.
+ */
+export const barrierTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = reachabilitySources.flatMap((source) => {
+	const table = getTableName(source.table);
+
+	return (['insert', 'update'] as const).map((statement) => ({
+		name: `${barrierTriggerPrefix}${table}_${statement}`,
+		table
+	}));
+});
 
 /**
  * Builds one ordered page of targets for roots that have just expired. The
@@ -427,40 +497,27 @@ export class GarbageCollectionService {
 		}
 	}
 
+	// Copies a page of one seed table's store-path hashes onto the frontier. A
+	// root target row exists for each root that names a path, so the page is read
+	// distinct. A grace row is unique per path already.
 	private advanceSeed(
 		cache: ResolvedCache,
-		phase: 'roots' | 'grace',
+		source: SeedSource,
 		cursor: string
 	): void {
 		const page = phaseGranule;
-		const rows =
-			phase === 'roots'
-				? this.context.db
-						.selectDistinct({
-							storePathHash: schema.retentionRootTargets.storePathHash
-						})
-						.from(schema.retentionRootTargets)
-						.where(
-							and(
-								eq(schema.retentionRootTargets.cacheId, cache.id),
-								sql`${schema.retentionRootTargets.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionRootTargets.storePathHash))
-						.limit(page + 1)
-						.all()
-				: this.context.db
-						.select({ storePathHash: schema.retentionGrace.storePathHash })
-						.from(schema.retentionGrace)
-						.where(
-							and(
-								eq(schema.retentionGrace.cacheId, cache.id),
-								sql`${schema.retentionGrace.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionGrace.storePathHash))
-						.limit(page + 1)
-						.all();
+		const rows = this.context.db
+			.selectDistinct({ storePathHash: source.storePathHash })
+			.from(source.table)
+			.where(
+				and(
+					eq(source.cacheId, cache.id),
+					sql`${source.storePathHash} > ${cursor}`
+				)
+			)
+			.orderBy(asc(source.storePathHash))
+			.limit(page + 1)
+			.all();
 		const batch = rows.slice(0, page);
 
 		this.insertFrontier(
@@ -476,10 +533,11 @@ export class GarbageCollectionService {
 			return;
 		}
 
-		this.updateScan(cache, {
-			phase: phase === 'roots' ? 'grace' : 'mark',
-			cursor: ''
-		});
+		// The seed phases run in the order of `reachabilitySources`, and the mark
+		// phase follows the last of them.
+		const next = seedSources[seedSources.indexOf(source) + 1];
+
+		this.updateScan(cache, { phase: next?.phase ?? 'mark', cursor: '' });
 	}
 
 	private existingMarks(
@@ -662,6 +720,11 @@ export class GarbageCollectionService {
 
 			const page = phaseGranule;
 
+			// This statement is the only place the scan reads an edge from. Reading a
+			// second column or table here would put those edges outside the write
+			// barrier, which follows `reachabilitySources`: a new edge source needs an
+			// entry in that list and the pair of triggers derived from it, or the mark
+			// will not follow the edges a commit adds after it.
 			const references = this.context.db.all<{
 				referenceIndex: number;
 				reference: unknown;
@@ -919,6 +982,36 @@ export class GarbageCollectionService {
 	}
 
 	/**
+	 * Refuses the pass while a barrier trigger is missing.
+	 *
+	 * SQLite drops a table's triggers together with the table, and a migration
+	 * that rebuilds one of the tables in {@link reachabilitySources} would not
+	 * re-create them. The mark would then stop following the writes that land
+	 * between invocations, and the collect phase would delete paths those writes
+	 * made reachable. A pass that refuses to run leaves a logged error and a
+	 * re-armed continuation, which is recoverable; a pass that collects against a
+	 * mark the barrier no longer maintains is not.
+	 */
+	private assertBarrierPresent(): void {
+		const present = new Set(
+			this.context.db
+				.all<{ name: string }>(
+					sql`SELECT name FROM sqlite_master
+					    WHERE type = 'trigger'
+					      AND name GLOB ${`${barrierTriggerPrefix}*`}`
+				)
+				.map((row) => row.name)
+		);
+		const missing = barrierTriggers
+			.map((trigger) => trigger.name)
+			.filter((name) => !present.has(name));
+
+		if (missing.length > 0) {
+			throw new GarbageCollectionBarrierMissingError(missing);
+		}
+	}
+
+	/**
 	 * Advances one cache's collection scan until the invocation's row budget is
 	 * spent, leaving the phase it stopped in recorded for the next invocation.
 	 *
@@ -941,6 +1034,8 @@ export class GarbageCollectionService {
 		hasMoreExpiredRoots: boolean;
 		hasMoreWork: boolean;
 	} {
+		this.assertBarrierPresent();
+
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
@@ -994,8 +1089,13 @@ export class GarbageCollectionService {
 				continue;
 			}
 
-			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				this.advanceSeed(cache, scan.phase, scan.cursor);
+			const { phase } = scan;
+			const seedSource = seedSources.find(
+				(candidate) => candidate.phase === phase
+			);
+
+			if (seedSource !== undefined) {
+				this.advanceSeed(cache, seedSource, scan.cursor);
 
 				if (isRowBudgetExhausted()) {
 					break;

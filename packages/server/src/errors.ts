@@ -868,6 +868,23 @@ export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
 	}
 }
 
+/**
+ * A collection pass found one of its write-barrier triggers missing.
+ *
+ * The barrier queues a store path for marking whenever a write can make it
+ * reachable. Without every trigger the mark stops tracking those writes, so the
+ * pass stops before any phase runs rather than collecting against a mark
+ * nothing maintains.
+ */
+export class GarbageCollectionBarrierMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly missingTriggers: readonly string[]) {
+		super('The garbage-collection write barrier is incomplete');
+		this.name = 'GarbageCollectionBarrierMissingError';
+	}
+}
+
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
