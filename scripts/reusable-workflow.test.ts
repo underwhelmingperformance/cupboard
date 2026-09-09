@@ -353,11 +353,15 @@ describe('cupboard acquisition', () => {
 		);
 	}
 
-	it('gives every flake publish job the coordinate configure resolved', async () => {
+	it('gives every publishing flake job the coordinate configure resolved', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const setupInputs = inputsOf(workflow, cupboardAction('setup')).map(
-			(inputs) => selectInputs(inputs, (name) => !provisionInputNames.has(name))
-		);
+		// The removal job reads nothing from the cache, so it passes no
+		// destination. Every job that does read one passes the same coordinate.
+		const setupInputs = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) =>
+				selectInputs(inputs, (name) => !provisionInputNames.has(name))
+			)
+			.filter((inputs) => 'cache-url' in inputs);
 
 		expect({
 			configureOutput: workflow.jobs.configure?.steps.find(
@@ -376,6 +380,19 @@ describe('cupboard acquisition', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
 			}))
 		});
+	});
+
+	// The removal job must not configure a substituter: it runs for a closed
+	// pull request whose cache it is about to remove.
+	it('installs only the binary for the removal job', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const removalSetup = (workflow.jobs['remove-cache']?.steps ?? []).filter(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect(removalSetup.map((step) => step.with)).toStrictEqual([
+			{ cupboard: '${{ needs.configure.outputs.cupboard }}' }
+		]);
 	});
 
 	// The plan job runs before every cohort job, so it is the only job that can
@@ -592,7 +609,10 @@ describe('cohort planning and publication', () => {
 		expect(Object.keys(workflow.jobs)).toStrictEqual([
 			'configure',
 			'plan',
-			'cohort'
+			'cohort',
+			// A closed pull request runs this job alone, and it neither plans nor
+			// builds.
+			'remove-cache'
 		]);
 	});
 
@@ -619,7 +639,9 @@ describe('cohort planning and publication', () => {
 				cupboardAction('setup'),
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
-				cupboardAction('attest-attach')
+				cupboardAction('attest-attach'),
+				// The removal job installs the binary and nothing else.
+				cupboardAction('setup')
 			],
 			artifactSteps: []
 		});

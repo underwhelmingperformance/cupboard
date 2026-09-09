@@ -165,7 +165,10 @@ of rebuilt:
 name: cupboard
 
 on:
+  # The `closed` type is what triggers the run that removes the pull request's
+  # cache. Without that type the cache stays until its retention expires.
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -197,8 +200,9 @@ The preset derives the cache, root prefix, and TTL from the triggering event. A
 TTL. The PR trust rule grants access to that cache and its retention root. It
 also lets a run create the cache, because none exists before a pull request's
 first run, and remove it, because nothing else does when the pull request
-closes. The run creates the cache before it builds. A pull request keeps its
-cache until the 14-day TTL expires its contents.
+closes. The run creates the cache before it builds, and a run for a closed pull
+request removes it and builds nothing. A pull request abandoned without being
+closed keeps its cache until the 14-day TTL expires its contents.
 
 A pull request from a fork is refused, because GitHub issues it no OIDC token
 and so it could never publish. A repository that accepts external contributions

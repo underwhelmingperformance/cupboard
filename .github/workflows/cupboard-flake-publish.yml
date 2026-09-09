@@ -269,6 +269,7 @@ jobs:
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
       provision-cache: ${{ steps.resolve.outputs.provision-cache }}
       provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
+      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -327,6 +328,7 @@ jobs:
           PERMANENT: ${{ inputs.permanent }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
@@ -438,6 +440,12 @@ jobs:
                 # repository id would let one repository publish to, and
                 # remove, another repository's cache.
                 CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
+                # A closed pull request has nothing left to publish, so the run
+                # removes its cache instead of building. Otherwise the cache
+                # would keep its store paths until their retention expired.
+                if [ "${EVENT_ACTION}" = closed ]; then
+                  REMOVE_CACHE="${CACHE}"
+                fi
                 TTL=14d
                 PERMANENT=false
                 # No cache exists before a pull request's first run, so the run
@@ -480,11 +488,14 @@ jobs:
             echo "reuse-view=${REUSE_VIEW}"
             echo "provision-cache=${PROVISION_CACHE:-}"
             echo "provision-cache-ttl=${TTL}"
+            echo "remove-cache=${REMOVE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
     name: Plan the publication
     needs: configure
+    # A run for a closing pull request removes the cache instead of planning.
+    if: needs.configure.outputs.remove-cache == ''
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 30
     permissions:
@@ -790,3 +801,63 @@ jobs:
           if ! nix store gc; then
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
+
+  # A closed pull request will not be pushed to again, so its cache is removed
+  # now rather than left to expire. This job needs no Nix and no build, only
+  # the cupboard binary and the run's own OIDC token.
+  #
+  # The pull-request trust rule renders one cache name from the verified
+  # `repository_id` and `ref` claims, so a run can remove its own cache and no
+  # other, even when another repository on the tenant has the same
+  # pull-request number.
+  remove-cache:
+    name: Remove the pull request's cache
+    needs: configure
+    if: needs.configure.outputs.remove-cache != ''
+    runs-on: ${{ inputs.plan-runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the workflow code that installs cupboard
+      id-token: write # OIDC token for the cache removal
+    steps:
+      # Every job that checks out the workflow source refuses to run when
+      # `.cupboard-workflow` already exists, so that no job can overwrite
+      # caller content. This job would overwrite nothing, but keeping the check
+      # here means no job is an exception.
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      # No cache-url, so setup installs the binary and writes no Nix
+      # configuration. Nothing in this job reads from the cache.
+      - uses: ./.cupboard-workflow/actions/setup
+        id: setup
+        with:
+          cupboard: ${{ needs.configure.outputs.cupboard }}
+
+      - name: Remove the cache
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.remove-cache }}
+        run: |
+          set -euo pipefail
+          # --force because the cache still holds the pull request's paths and
+          # this job exists to delete them. The trust rule renders the one
+          # cache name this run may remove, so `${CACHE}` cannot name another
+          # cache.
+          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
+            --github-oidc --force --yes
