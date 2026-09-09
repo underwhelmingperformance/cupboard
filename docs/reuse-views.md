@@ -76,9 +76,12 @@ private cache selected by the current view definition references its hash. The
 server rechecks the view revision after reading shared state, so a concurrent
 selector change produces a miss.
 
-`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input. Put the
-tenant-wide fallback credential in the URL's userinfo when the selected view is
-private.
+`actions/setup` takes a view name in its `reuse-view` input and builds
+`/reuse/<view>/` from the tenant URL, so there is no URL for the caller to write
+a credential into. Supply the tenant-wide fallback credential through the
+`read-user` and `read-password` inputs when the selected view is private. Setup
+writes it as one netrc entry scoped to the host, so the same entry authenticates
+the view and any destination cache that has no credential of its own.
 
 `cupboard reuse-view remove` removes a view. `cupboard reuse-view list` reports
 each view's access property.

@@ -286,10 +286,17 @@ caches. Knowing the hash does not bypass these checks. Deleting the last path
 that references a NAR in a cache stops that cache serving the NAR before the
 deletion reports success.
 
-All of a tenant's public caches share one authorisation range. A reader admitted
-to one public cache can address every other public cache. A NAR referenced by
-any public cache is served from every public prefix of the tenant, including
-`/t/<tenant>/nar/<hash>.nar.zst`.
+All of a tenant's public caches are read without a credential, so a reader who
+can address one can address any of them. Each still serves only the NARs its own
+paths reference. A NAR request looks for a reference row belonging to the cache
+the route addresses and no other, so `/t/<tenant>/nar/<hash>.nar.zst` serves
+what the default cache references and
+`/t/<tenant>/cache/<name>/nar/<hash>.nar.zst` serves what that cache references.
+
+A reuse view is the route that spans caches. Its NAR route accepts a reference
+row from any cache the view's selectors select, at the view's own access, which
+is why one view route serves the NARs of every cache it selects, while a cache
+route serves only that cache's.
 
 Publishing a NAR hash does not bypass cache authorisation. It does disclose that
 the path exists and identifies its contents to anyone holding a copy from
