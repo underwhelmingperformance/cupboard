@@ -104,10 +104,20 @@ export class UploadStateService {
 		);
 	}
 
-	// Promotion creates the canonical object before `blob_state`; the reaper
-	// removes `blob_state` before the object. The row is therefore positive
-	// evidence that the object is available, so classification needs no R2 head.
-	// Negotiated reconciliation repairs storage drift outside those transitions.
+	// Promotion creates the canonical object before `blob_state`, and the reaper
+	// removes `blob_state` before the object, so a row is evidence that the object
+	// was created and has not yet been deliberately removed. That is weaker than
+	// the object being present: the reaper's own reclaim pass exists to find rows
+	// whose object has gone anyway: `demoteMissingBlobs` heads each row of a page
+	// and demotes the ones it cannot find, which is proof that the window is real.
+	// Classification accepts that window rather than paying an R2 head for each
+	// path, and negotiated reconciliation repairs what falls into it.
+	//
+	// A reader reasoning from this towards another skip decision should check what
+	// a wrong answer costs there. Here it costs a repeated question: the next
+	// negotiate finds no row and uploads. Where the wrong answer would instead
+	// publish something that dangles, the window is not acceptable, which is why
+	// the attestation negotiate still heads each CAS object it records.
 	async presentNarHashes(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Set<NixSha256HashString>> {
