@@ -206,23 +206,36 @@ export class GarbageCollectionService {
 		});
 	}
 
-	private scan(
+	private scanRow(
 		cache: StoredCache
-	): typeof schema.garbageCollectionScans.$inferSelect {
-		const revision = this.currentRevision(cache);
-		const stored = this.context.db
+	): typeof schema.garbageCollectionScans.$inferSelect | undefined {
+		return this.context.db
 			.select()
 			.from(schema.garbageCollectionScans)
 			.where(eq(schema.garbageCollectionScans.cache, cache))
 			.get();
+	}
+
+	/**
+	 * Reads the scan, restarting it when the cache changed under it.
+	 *
+	 * The revision comparison costs two statements beyond the scan row itself,
+	 * and it can only tell a pass something at its start: a cache's revision
+	 * changes through triggers on `narinfo`, `retention_root`,
+	 * `retention_root_target` and `retention_grace`, and within one invocation
+	 * the only writer of those tables is the pass itself, which adopts its own
+	 * revision as it goes. A pass therefore compares once and reads the row with
+	 * {@link scanRow} after that.
+	 */
+	private scan(
+		cache: StoredCache
+	): typeof schema.garbageCollectionScans.$inferSelect {
+		const revision = this.currentRevision(cache);
+		const stored = this.scanRow(cache);
 
 		if (stored?.revision !== revision) {
 			this.resetScan(cache, revision);
-			const reset = this.context.db
-				.select()
-				.from(schema.garbageCollectionScans)
-				.where(eq(schema.garbageCollectionScans.cache, cache))
-				.get();
+			const reset = this.scanRow(cache);
 
 			if (reset === undefined) {
 				throw new Error('garbage-collection scan reset did not persist');
@@ -539,16 +552,29 @@ export class GarbageCollectionService {
 		throw new StoredReferencesNotArrayError(storePathHash);
 	}
 
-	// Each iteration is one unit: it pops a path from the frontier and marks it,
-	// or it walks a page of one path's references. The budget is consulted after a
-	// unit, so the first one always runs.
-	private advanceMark(cache: StoredCache): { readonly complete: boolean } {
-		for (;;) {
-			const scan = this.scan(cache);
-			let storePathHash = scan.markStorePathHash;
-			let referenceCursor = scan.referenceCursor;
+	/**
+	 * Walks the frontier until the budget is spent or the mark completes.
+	 *
+	 * Each iteration is one step: it pops a path from the frontier and marks it,
+	 * or it walks a step of one path's references. The budget is consulted after
+	 * a step, so the first one always runs.
+	 *
+	 * The walk carries the path it is on and how far into its references it has
+	 * reached, rather than reading them back from the scan row each step. It
+	 * wrote them itself, and nothing else can write them while a synchronous
+	 * pass holds the object.
+	 */
+	private advanceMark(
+		cache: StoredCache,
+		scan: typeof schema.garbageCollectionScans.$inferSelect
+	): { readonly complete: boolean } {
+		let pending = scan.markStorePathHash ?? undefined;
+		let referenceCursor = scan.referenceCursor;
 
-			if (!storePathHash) {
+		for (;;) {
+			let storePathHash: StorePathHash;
+
+			if (pending === undefined) {
 				const frontier = this.context.db
 					.select({
 						storePathHash: schema.garbageCollectionFrontier.storePathHash
@@ -560,7 +586,7 @@ export class GarbageCollectionService {
 					.get();
 
 				if (frontier === undefined) {
-					return { complete: this.finishMark(cache) };
+					return { complete: this.finishMark(cache, scan) };
 				}
 
 				const row = this.context.db
@@ -616,6 +642,8 @@ export class GarbageCollectionService {
 				if (isRowBudgetExhausted()) {
 					return { complete: false };
 				}
+			} else {
+				storePathHash = pending;
 			}
 
 			this.validateReferencesContainer(cache, storePathHash);
@@ -658,6 +686,8 @@ export class GarbageCollectionService {
 				markStorePathHash: sql`null`,
 				referenceCursor: -1
 			});
+			pending = undefined;
+			referenceCursor = -1;
 
 			if (isRowBudgetExhausted()) {
 				return { complete: false };
@@ -665,8 +695,10 @@ export class GarbageCollectionService {
 		}
 	}
 
-	private finishMark(cache: StoredCache): boolean {
-		const scan = this.scan(cache);
+	private finishMark(
+		cache: StoredCache,
+		scan: typeof schema.garbageCollectionScans.$inferSelect
+	): boolean {
 		const retained = this.context.db
 			.select({ storePathHash: schema.narInfos.storePathHash })
 			.from(schema.narInfos)
@@ -844,10 +876,13 @@ export class GarbageCollectionService {
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
 		let hasMoreExpiredRoots = false;
+		// Compare the revision once. Nothing outside this pass can write the
+		// tables that change it while the pass runs, and each phase adopts the
+		// revision its own writes produce, so later steps read the row alone.
+		let scan: typeof schema.garbageCollectionScans.$inferSelect | undefined =
+			this.scan(cache);
 
-		for (;;) {
-			const scan = this.scan(cache);
-
+		while (scan !== undefined) {
 			if (scan.phase === 'expire-roots') {
 				const expired = this.expireRoots(cache, now);
 				rootsExpired += expired.rootsExpired;
@@ -868,6 +903,7 @@ export class GarbageCollectionService {
 					break;
 				}
 
+				scan = this.scanRow(cache);
 				continue;
 			}
 
@@ -912,6 +948,7 @@ export class GarbageCollectionService {
 					break;
 				}
 
+				scan = this.scanRow(cache);
 				continue;
 			}
 
@@ -922,16 +959,18 @@ export class GarbageCollectionService {
 					break;
 				}
 
+				scan = this.scanRow(cache);
 				continue;
 			}
 
 			if (scan.phase === 'mark') {
-				const marked = this.advanceMark(cache);
+				const marked = this.advanceMark(cache, scan);
 
 				if (marked.complete || isRowBudgetExhausted()) {
 					break;
 				}
 
+				scan = this.scanRow(cache);
 				continue;
 			}
 
@@ -941,6 +980,8 @@ export class GarbageCollectionService {
 			if (collected.complete || isRowBudgetExhausted()) {
 				break;
 			}
+
+			scan = this.scanRow(cache);
 		}
 
 		return {
