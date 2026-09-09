@@ -140,6 +140,7 @@ import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations } from './do/migrate.ts';
+import { withRowBudget } from './do/row-budget.ts';
 import type { CupboardServer } from './do/server.ts';
 import { withStatementAllowance } from './do/statement-scope.ts';
 import {
@@ -1019,19 +1020,37 @@ export function drivenDirectly<Service extends object>(
 
 			return (...parameters: unknown[]): unknown =>
 				withStatementAllowance((): unknown =>
-					Reflect.apply(value, receiver, parameters)
+					withRowBudget((): unknown =>
+						Reflect.apply(value, receiver, parameters)
+					)
 				);
 		}
 	});
 }
 
 /**
- * Runs `body` under one invocation's D1 statement allowance.
+ * Runs `body` under one invocation's D1 statement allowance and row budget.
  *
  * Use this when a test calls code below the Durable Object dispatch boundary.
+ * A dispatch opens both scopes, and code that consults either one refuses to
+ * run without it.
  */
 export function asOneInvocation<T>(body: () => T): T {
-	return withStatementAllowance(body);
+	return withStatementAllowance(() => withRowBudget(body));
+}
+
+/**
+ * Runs `body` under a Durable Object row budget that its first statement
+ * spends.
+ *
+ * A pass under this budget advances by one unit of work, because the phase that
+ * is due always reads at least one row and the pass stops before starting
+ * another unit. A test can therefore drive a pass one unit at a time. Wrap the
+ * dispatched method: the dispatch wrapper reuses this budget rather than opening
+ * the full one.
+ */
+export function underOneUnitOfWork<T>(body: () => T): T {
+	return withRowBudget(body, 1);
 }
 
 /**
