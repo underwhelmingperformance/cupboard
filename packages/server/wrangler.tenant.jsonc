@@ -76,7 +76,10 @@
 		}
 	},
 	"limits": {
-		"cpu_ms": 300000
+		"cpu_ms": 300000,
+		// Pinned so the request caps are checked against a recorded figure; see
+		// `subrequestsPerInvocation`.
+		"subrequests": 10000
 	},
 	"observability": {
 		"enabled": true,
