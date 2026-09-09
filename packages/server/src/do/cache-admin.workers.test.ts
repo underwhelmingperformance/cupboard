@@ -1,6 +1,8 @@
 import {
 	type CacheAccessMode,
+	cacheGenerationSchema,
 	cachePrioritySchema,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -31,6 +33,7 @@ import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
+import { canonicalCacheRequest } from '../routing/cache-request.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -778,6 +781,49 @@ describe('cache registry admin', () => {
 			reregistered: { local: first, published: first },
 			deleted: second,
 			recreated: { local: second, published: second }
+		});
+	});
+
+	// Changing access does not start a new incarnation, so the generation stays
+	// where it is. The read revision must still be bumped, because responses
+	// served under the old access may still be in Workers Cache and the revision
+	// is part of the key that finds them.
+	it('bumps the read revision when a cache changes access', async () => {
+		await useTestServer('cache-admin-access-revision');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+
+		const before = await cacheVersions();
+
+		await updateCacheAccess(init.token, 'builds', 'private');
+
+		const after = await cacheVersions();
+		const narInfo = new Request('https://cache.example/t/acme/abc.narinfo');
+		const cacheKey = (version: CacheVersion): string =>
+			canonicalCacheRequest(narInfo, {
+				generation: cacheGenerationSchema.parse(version.generation),
+				readRevision: cacheReadRevisionSchema.parse(version.readRevision)
+			}).url;
+
+		expect({
+			before,
+			after,
+			keyMoved:
+				before.published === undefined || after.published === undefined
+					? 'a version was missing'
+					: cacheKey(before.published) !== cacheKey(after.published)
+		}).toStrictEqual({
+			before: {
+				local: { generation: 1, readRevision: 1 },
+				published: { generation: 1, readRevision: 1 }
+			},
+			after: {
+				local: { generation: 1, readRevision: 2 },
+				published: { generation: 1, readRevision: 2 }
+			},
+			keyMoved: true
 		});
 	});
 
