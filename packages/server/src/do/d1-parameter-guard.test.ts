@@ -1,12 +1,12 @@
 // Cloudflare's D1 and Durable Object SQLite runtimes accept at most 100 bound
-// parameters in one query, and both bindings refuse a statement above that. A
-// statement that binds a list as one JSON parameter cannot reach the limit
-// through the list, and these Node tests hold it to that: each builds a
-// production statement from a list of one value and from a list of 10,000, and
-// the two must bind the same parameters.
+// parameters in one query, and both bindings refuse a statement above that.
+// Every statement here works from a list, and binds it as one JSON parameter,
+// so its parameter count belongs to the statement rather than to the list.
 //
-// The remaining cases build a statement that still binds a value per row, at
-// the widest batch it produces, and check that it stays within the limit.
+// Each case builds a production statement from a list of one value and from a
+// list of 10,000 and compares the two counts. A statement that started binding
+// a parameter for each value again would fail the comparison long before it
+// reached the limit itself.
 import {
 	cacheNameSchema,
 	narInfoGenerationSchema,
@@ -22,9 +22,13 @@ import {
 	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	privateStoredReuseView,
+	reuseViewNameSchema
+} from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -40,17 +44,13 @@ import {
 	fencedBlobStateDeletion,
 	fencedCasObjectDeletion
 } from './blob-reaper-service.ts';
-import { maxBoundParameters } from './bulk.ts';
 import {
 	capturedReferenceSelect,
 	fencedEdgeRetirement,
 	publicReferenceSelect,
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
-import {
-	expiredRootTargetSelect,
-	maxRootsExpiredPerRun
-} from './garbage-collection-service.ts';
+import { expiredRootTargetSelect } from './garbage-collection-service.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import {
 	type AttestationReferenceKey,
@@ -60,7 +60,10 @@ import {
 	buildTenantBlobDeleteStatement,
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
-import { maxRootTargetInsertRows } from './roots-service.ts';
+import {
+	reuseViewSelectorInsert,
+	type StoredReuseViewSelector
+} from './reuse-view-admin-service.ts';
 import { buildLeaseUpdate } from './verification-service.ts';
 
 const throwStub = (): never => {
@@ -96,6 +99,9 @@ const testStorePath = storePathSchema.parse(
 const testRootName = rootNameSchema.parse('main');
 const testDigest = sha256HexDigestSchema.parse('0'.repeat(64));
 const testGeneration = narInfoGenerationSchema.parse(0);
+const testReuseView = privateStoredReuseView(
+	reuseViewNameSchema.parse('shared')
+);
 const testUploadId = uploadIdSchema.parse('01J0000000000000000000000A');
 
 function narHashes(count: number): NixSha256HashString[] {
@@ -342,10 +348,54 @@ function tenantCasBlobDeleteParameters(objects: number): number {
 	).toSQL().params.length;
 }
 
+function rootTargetInsertParameters(targets: number): number {
+	const rows = rowList(targets, {
+		storePathHash: testStorePathHash,
+		storePath: testStorePath
+	});
+
+	return doDatabase
+		.insert(schema.retentionRootTargets)
+		.select(
+			rows.insertSource([
+				sql`${cache}`,
+				sql`${testRootName}`,
+				rows.column('storePathHash'),
+				rows.column('storePath')
+			])
+		)
+		.toSQL().params.length;
+}
+
+// A page as large as an ample row budget asks for. The limit binds one
+// parameter whatever its value, so only the root list could grow the count.
+const expiredRootTargetPage = 1000;
+
+function expiredRootTargetParameters(roots: number): number {
+	const list = firstList(jsonValueLists(repeated(roots, testRootName)));
+
+	return expiredRootTargetSelect(
+		doDatabase,
+		cache,
+		list,
+		expiredRootTargetPage
+	).toSQL().params.length;
+}
+
 function leaseParameters(uploads: number): number {
 	const list = firstList(jsonValueLists(repeated(uploads, testUploadId)));
 
 	return buildLeaseUpdate(doDatabase, list, now, 'owner').toSQL().params.length;
+}
+
+function reuseViewSelectorParameters(selectors: number): number {
+	const rows = rowList<StoredReuseViewSelector>(selectors, {
+		kind: 'prefix',
+		pattern: 'builds'
+	});
+
+	return reuseViewSelectorInsert(doDatabase, testReuseView, rows).toSQL().params
+		.length;
 }
 
 // Each statement is built from a list of one value and from a list of 10,000.
@@ -450,7 +500,16 @@ const listStatements: readonly {
 				casObjectVersions(objects)
 			).remove.toSQL().params.length
 	},
-	{ statement: 'verification claim lease UPDATE', parameters: leaseParameters }
+	{ statement: 'verification claim lease UPDATE', parameters: leaseParameters },
+	{ statement: 'root target INSERT', parameters: rootTargetInsertParameters },
+	{
+		statement: 'reuse-view selector INSERT',
+		parameters: reuseViewSelectorParameters
+	},
+	{
+		statement: 'expired root target SELECT',
+		parameters: expiredRootTargetParameters
+	}
 ];
 
 describe('statements built from a list', () => {
@@ -460,36 +519,4 @@ describe('statements built from a list', () => {
 			expect(parameters(10_000)).toStrictEqual(parameters(1));
 		}
 	);
-});
-
-describe('statements that bind a value for each row', () => {
-	it('target INSERT stays within the parameter budget at maxRootTargetInsertRows', () => {
-		const query = database.insert(schema.retentionRootTargets).values(
-			Array.from({ length: maxRootTargetInsertRows }, () => ({
-				cache,
-				rootName: testRootName,
-				storePathHash: testStorePathHash,
-				storePath: testStorePath
-			}))
-		);
-
-		expect(query.toSQL().params.length).toBeLessThanOrEqual(maxBoundParameters);
-	});
-
-	// This list of root names is not chunked; maxRootsExpiredPerRun bounds it.
-	it('target SELECT stays within the parameter budget at maxRootsExpiredPerRun', () => {
-		// A page as large as an ample row budget asks for. The limit binds one
-		// parameter whatever its value, so only the root list can grow the count.
-		const expiredRootTargetPage = 1000;
-		const select = expiredRootTargetSelect(
-			doDatabase,
-			cache,
-			Array.from({ length: maxRootsExpiredPerRun }, () => testRootName),
-			expiredRootTargetPage
-		);
-
-		expect(select.toSQL().params.length).toBeLessThanOrEqual(
-			maxBoundParameters
-		);
-	});
 });
