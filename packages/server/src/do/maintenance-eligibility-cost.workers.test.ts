@@ -214,8 +214,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 37,
-			largeBacklogCost: 37
+			smallBacklogCost: 43,
+			largeBacklogCost: 43
 		});
 	});
 
@@ -225,12 +225,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 36,
+				rowsRead: 40,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 36,
+				rowsRead: 40,
 				usesIndex: true,
 				sorts: false
 			}
@@ -267,8 +267,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 35,
-			largeBacklogCost: 35
+			smallBacklogCost: 39,
+			largeBacklogCost: 39
 		});
 	});
 
@@ -299,8 +299,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 667, rowsWritten: 135 },
-			largeBacklog: { rowsRead: 667, rowsWritten: 135 }
+			smallBacklog: { rowsRead: 671, rowsWritten: 135 },
+			largeBacklog: { rowsRead: 671, rowsWritten: 135 }
 		});
 	});
 
@@ -323,8 +323,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 46,
-			largeBacklogCost: 46
+			smallBacklogCost: 52,
+			largeBacklogCost: 52
 		});
 	});
 });
@@ -369,12 +369,15 @@ async function terminalUploadCollectionCost(
 		return state.storage.sql
 			.exec(
 				`EXPLAIN QUERY PLAN
-				 SELECT id, nar_hash, r2_key
-				 FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
-				 WHERE expires_at < '2026-01-01T00:00:00.000Z'
-				   AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
-				 ORDER BY expires_at, id
-				 LIMIT 1001`
+				 DELETE FROM pending_upload
+				 WHERE id IN (
+				   SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+				   WHERE expires_at < '2026-01-01T00:00:00.000Z'
+				     AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+				   ORDER BY expires_at, id
+				   LIMIT 1000
+				 )
+				 RETURNING id, nar_hash, r2_key`
 			)
 			.toArray();
 	});

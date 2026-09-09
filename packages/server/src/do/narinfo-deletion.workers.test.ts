@@ -177,6 +177,50 @@ describe('narinfo deletion queue', () => {
 		});
 	});
 
+	it('keeps the time a version was first queued when it is queued again', async () => {
+		const first = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const second = isoTimestampSchema.parse('2026-01-02T00:00:00.000Z');
+		const entry: TornDownNarInfo = {
+			storePathHash: syntheticStorePathHash(0),
+			generation: narInfoGenerationSchema.parse(1),
+			narHash: syntheticNarHash(0)
+		};
+		const replacement = syntheticNarHash(1);
+
+		const rows = await runInDurableObject(currentServer(), (instance) => {
+			const queue = buildDeletionQueue(instance.context);
+
+			queue.enqueueNarInfoDeletion(
+				instance.context.db,
+				defaultCache,
+				entry.storePathHash,
+				entry.narHash,
+				entry.generation,
+				first
+			);
+			queue.enqueueNarInfoDeletion(
+				instance.context.db,
+				defaultCache,
+				entry.storePathHash,
+				replacement,
+				entry.generation,
+				second
+			);
+
+			return instance.context.db.select().from(narInfoDeletions).all();
+		});
+
+		expect(rows).toStrictEqual([
+			{
+				cache: defaultCache,
+				storePathHash: entry.storePathHash,
+				narHash: replacement,
+				generation: entry.generation,
+				createdAt: first
+			}
+		]);
+	});
+
 	it('caps a flush at its limit and reports the remaining backlog', async () => {
 		const total = 6;
 		const flushLimit = 4;
