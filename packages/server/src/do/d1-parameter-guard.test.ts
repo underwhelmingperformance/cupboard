@@ -453,11 +453,16 @@ describe('selected D1 statements', () => {
 
 	// This list of root names is not chunked; maxRootsExpiredPerRun bounds it.
 	describe('expired root targets (garbage-collection-service)', () => {
+		// A page as large as an ample row budget asks for. The limit binds one
+		// parameter whatever its value, so only the root list can grow the count.
+		const expiredRootTargetPage = 1000;
+
 		it('target SELECT stays within the parameter budget at maxRootsExpiredPerRun', () => {
 			const select = expiredRootTargetSelect(
 				doDatabase,
 				cache,
-				Array.from({ length: maxRootsExpiredPerRun }, () => testRootName)
+				Array.from({ length: maxRootsExpiredPerRun }, () => testRootName),
+				expiredRootTargetPage
 			);
 
 			expect(select.toSQL().params.length).toBeLessThanOrEqual(

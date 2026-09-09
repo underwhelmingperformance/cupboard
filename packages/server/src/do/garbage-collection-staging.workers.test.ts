@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { pendingAttestations, pendingUploads } from '../db/schema.ts';
 import { stagingObjectKey } from '../http/http.ts';
 import {
+	asOneInvocation,
 	clearBlobStorage,
 	currentServer,
 	initialise,
@@ -144,7 +145,9 @@ describe('garbage collection best-effort staging deletes', () => {
 				);
 
 				return {
-					outcome: await garbageCollection.collectGarbage(rootLogger()),
+					outcome: await asOneInvocation(() =>
+						garbageCollection.collectGarbage(rootLogger())
+					),
 					failedDeletes
 				};
 			}
@@ -236,7 +239,9 @@ describe('garbage collection best-effort staging deletes', () => {
 					deletionQueue,
 					new RetentionService(instance.context)
 				);
-				const first = await garbageCollection.collectGarbage(rootLogger());
+				const first = await asOneInvocation(() =>
+					garbageCollection.collectGarbage(rootLogger())
+				);
 				const remainingAfterFirst = {
 					uploads: drizzle(state.storage, { schema: { pendingUploads } })
 						.select({ id: pendingUploads.id })
@@ -249,7 +254,9 @@ describe('garbage collection best-effort staging deletes', () => {
 						.from(pendingAttestations)
 						.all().length
 				};
-				const second = await garbageCollection.collectGarbage(rootLogger());
+				const second = await asOneInvocation(() =>
+					garbageCollection.collectGarbage(rootLogger())
+				);
 
 				return {
 					first: {
