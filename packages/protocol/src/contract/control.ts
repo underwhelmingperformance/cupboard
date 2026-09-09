@@ -137,10 +137,15 @@ export const controlContract = {
 			)
 			.output(tenantReadModeResponseSchema),
 
+		// Both rotations store a verifier built from the password in the request. A
+		// repeat stores a fresh salt, and the same password still authenticates. The
+		// two clears stay `replay-unsafe`: each deletes by name, and a retry sent
+		// after the credential was set again would clear the new one.
 		rotateReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-read-credential',
-				resource: { tenant: { field: 'id' } }
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
 			.input(
@@ -163,7 +168,8 @@ export const controlContract = {
 		rotateCacheReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-cache-read-credential',
-				resource: { tenant: { field: 'id' } }
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
 			})
 			.route({
 				method: 'POST',

@@ -25,6 +25,11 @@ export const keysContract = {
 			.route({ method: 'GET', path: '/keys' })
 			.output(keyListResponseSchema),
 
+		// Rotation stays `replay-unsafe`. It inserts a key with a new id, advances
+		// the generation sequence and starts a backfill, so a retry either meets
+		// the first attempt's unfinished backfill and returns the conflict below, or
+		// creates a second key once that backfill has completed. Auth-key rotation
+		// has the same shape.
 		rotate: baseProcedure
 			.meta({ requires: 'signing-key:rotate' })
 			.route({ method: 'POST', path: '/keys/rotate' })

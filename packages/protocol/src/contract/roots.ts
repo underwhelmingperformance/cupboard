@@ -75,11 +75,17 @@ export const rootsContract = {
 	// target list clears the targets but keeps the root and its expiry. The CLI's
 	// `root set` and `root ensure` commands require at least one store path, so
 	// clearing a root requires a direct request with an empty list.
+	//
+	// Both writes replace the complete set in one transaction, keep the root's
+	// creation time, and release only the targets the new set drops, so a repeat
+	// releases nothing and stores the same rows. A write that stopped replacing
+	// the whole set would have to give up `replay-safe`.
 	set: baseProcedure
 		.meta({
 			requires: 'root:set',
 			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
-			maintenance: true
+			maintenance: true,
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'PUT', path: '/cache/{cacheName}/roots/{name}' })
 		.input(
@@ -95,7 +101,8 @@ export const rootsContract = {
 		.meta({
 			requires: 'root:set',
 			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
-			maintenance: true
+			maintenance: true,
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'POST', path: '/cache/{cacheName}/roots/{name}/ensure' })
 		.input(
@@ -107,6 +114,8 @@ export const rootsContract = {
 		)
 		.output(rootEnsureResponseSchema),
 
+	// Removal stays `replay-unsafe`. It deletes by name, so a retry sent after the
+	// name was bound to a new root would delete that one instead.
 	remove: baseProcedure
 		.meta({
 			requires: 'root:remove',
