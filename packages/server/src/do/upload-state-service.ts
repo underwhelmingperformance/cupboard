@@ -20,8 +20,9 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
+import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { jsonValueLists } from './json-list.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
@@ -31,22 +32,18 @@ export class UploadStateService {
 
 	// Reuse visibility is tenant-scoped. Joining through `tenant_blob` exposes a
 	// canonical blob only after this tenant has established its own presence edge,
-	// so another tenant's identical bytes cannot become an existence oracle. The
-	// chunked reads also keep large closures within D1's parameter and subrequest
-	// limits.
+	// so another tenant's identical bytes cannot become an existence oracle.
 	private async ownedBlobStates(
 		tenant: TenantId,
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
-		const chunks = chunk(narHashes, maxInClauseValues);
-
 		const batches = await mapWithConcurrency(
-			chunks,
+			jsonValueLists(narHashes),
 			maxOutgoingConnections,
-			(narHashBatch) => {
+			(list) => {
 				const filter = and(
 					eq(d1Schema.tenantBlob.tenant, tenant),
-					inArray(d1Schema.tenantBlob.narHash, narHashBatch)
+					inArray(d1Schema.tenantBlob.narHash, list)
 				);
 
 				const joinOn = eq(
@@ -72,13 +69,13 @@ export class UploadStateService {
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
 		const batches = await mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
+			jsonValueLists(narHashes),
 			maxOutgoingConnections,
-			(narHashBatch) =>
+			(list) =>
 				this.context.d1
 					.select()
 					.from(d1Schema.blobState)
-					.where(inArray(d1Schema.blobState.narHash, narHashBatch))
+					.where(inArray(d1Schema.blobState.narHash, list))
 					.all()
 		);
 
@@ -96,13 +93,13 @@ export class UploadStateService {
 		}
 
 		await mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
+			jsonValueLists(narHashes),
 			maxOutgoingConnections,
-			(narHashBatch) =>
+			(list) =>
 				this.context.d1
 					.update(d1Schema.blobState)
 					.set({ deleteAfter: sql`null` })
-					.where(inArray(d1Schema.blobState.narHash, narHashBatch))
+					.where(inArray(d1Schema.blobState.narHash, list))
 					.run()
 		);
 	}

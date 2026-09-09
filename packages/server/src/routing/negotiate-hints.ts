@@ -15,7 +15,8 @@ import { z } from 'zod';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { isPushIdValid } from '../blob/push-id.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
+import { batchNonEmpty } from '../do/bulk.ts';
+import { jsonValueLists } from '../do/json-list.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
 
 // Hint reads happen before the Durable Object authenticates the request. Bound
@@ -109,9 +110,9 @@ async function readHints(
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {
-	// D1 limits each `IN` clause to 90 parameters. Batch the resulting statements
-	// so a large negotiation still uses one D1 round trip.
-	const blobStateQueries = chunk(narHashes, maxInClauseValues).map((keys) =>
+	// Each list is bound as one parameter, so a negotiation of any size reads
+	// each fact with one statement. The queries still go out as one D1 batch.
+	const blobStateQueries = jsonValueLists(narHashes).map((list) =>
 		database
 			.select({
 				narHash: d1Schema.blobState.narHash,
@@ -122,23 +123,23 @@ async function readHints(
 				deleteAfter: d1Schema.blobState.deleteAfter
 			})
 			.from(d1Schema.blobState)
-			.where(inArray(d1Schema.blobState.narHash, keys))
+			.where(inArray(d1Schema.blobState.narHash, list))
 	);
-	const ownedQueries = chunk(narHashes, maxInClauseValues).map((keys) =>
+	const ownedQueries = jsonValueLists(narHashes).map((list) =>
 		database
 			.select({ narHash: d1Schema.tenantBlob.narHash })
 			.from(d1Schema.tenantBlob)
 			.where(
 				and(
 					eq(d1Schema.tenantBlob.tenant, tenant),
-					inArray(d1Schema.tenantBlob.narHash, keys)
+					inArray(d1Schema.tenantBlob.narHash, list)
 				)
 			)
 	);
 	const edgeQueries =
 		cache === undefined
 			? []
-			: chunk(storePathHashes, maxInClauseValues).map((keys) =>
+			: jsonValueLists(storePathHashes).map((list) =>
 					database
 						.select({
 							storePathHash: d1Schema.blobReference.storePathHash,
@@ -150,7 +151,7 @@ async function readHints(
 							and(
 								eq(d1Schema.blobReference.tenant, tenant),
 								eq(d1Schema.blobReference.cache, cache),
-								inArray(d1Schema.blobReference.storePathHash, keys)
+								inArray(d1Schema.blobReference.storePathHash, list)
 							)
 						)
 				);

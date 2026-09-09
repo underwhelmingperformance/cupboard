@@ -17,6 +17,7 @@ import {
 	type R2ObjectKey
 } from '../http/http.ts';
 
+import { jsonValueLists } from './json-list.ts';
 import { statementsRemaining } from './statement-scope.ts';
 
 export { chunk } from '@cupboard/shared/collections';
@@ -304,15 +305,14 @@ export async function recordedNarObjects(
 		readonly incarnation: number;
 	}[]
 > {
-	const queries = chunk([...new Set(narHashes)], maxInClauseValues).map(
-		(batch) =>
-			database
-				.select({
-					narHash: d1Schema.blobState.narHash,
-					incarnation: d1Schema.blobState.incarnation
-				})
-				.from(d1Schema.blobState)
-				.where(inArray(d1Schema.blobState.narHash, batch))
+	const queries = jsonValueLists([...new Set(narHashes)]).map((list) =>
+		database
+			.select({
+				narHash: d1Schema.blobState.narHash,
+				incarnation: d1Schema.blobState.incarnation
+			})
+			.from(d1Schema.blobState)
+			.where(inArray(d1Schema.blobState.narHash, list))
 	);
 
 	const pages = await batchNonEmpty(database, queries);
