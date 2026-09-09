@@ -125,6 +125,13 @@ function generatedHash(index: number): string {
 	return prefix.repeat(16);
 }
 
+// The lookup also reads blob and presence rows for its candidates. Only the
+// statements that read reference edges are counted below, because a stale
+// backlog can inflate those alone.
+function hasEdgeRead(statement: D1PreparedStatement): boolean {
+	return JSON.stringify(statement).includes('blob_ref');
+}
+
 describe('reuse-view lookup hardening', () => {
 	beforeEach(resetTestServer);
 
@@ -360,11 +367,18 @@ describe('reuse-view lookup hardening', () => {
 			.run();
 
 		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		let edgeBatchCalls = 0;
 		let edgeRowsRead = 0;
 		const batches = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
 			.mockImplementation(async (statements) => {
 				const results = await originalBatch(statements);
+
+				if (statements.every((statement) => !hasEdgeRead(statement))) {
+					return results;
+				}
+
+				edgeBatchCalls += 1;
 				edgeRowsRead += results.reduce(
 					(sum, result) => sum + result.results.length,
 					0
@@ -380,12 +394,12 @@ describe('reuse-view lookup hardening', () => {
 			expect({
 				status: response.status,
 				narHash: narInfo.narHash.toString(),
-				batchCalls: batches.mock.calls.length,
+				edgeBatchCalls,
 				edgeRowsRead
 			}).toStrictEqual({
 				status: StatusCodes.OK,
 				narHash: path.narHash,
-				batchCalls: 1,
+				edgeBatchCalls: 1,
 				edgeRowsRead: 1
 			});
 		} finally {

@@ -13,8 +13,8 @@ import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
 
-import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
 
 // Each pending upload stores the grace policy resolved during negotiation.
@@ -145,11 +145,9 @@ export function confirmGraceBatch(
 			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000));
 	const matched: StorePathHash[] = [];
 
-	// Check identity and apply each chunk's writes in one transaction. A row that
+	// Check identity and apply each list's writes in one transaction. A row that
 	// changes concurrently receives no extension.
-	for (const batch of chunk(entries, maxInClauseValues)) {
-		const batchHashes = batch.map((entry) => entry.storePathHash);
-
+	for (const batch of jsonRowLists(entries)) {
 		context.db.transaction((tx) => {
 			const rows = tx
 				.select({
@@ -161,12 +159,12 @@ export function confirmGraceBatch(
 				.where(
 					and(
 						eq(schema.narInfos.cache, cache),
-						inArray(schema.narInfos.storePathHash, batchHashes)
+						batch.matches({ storePathHash: schema.narInfos.storePathHash })
 					)
 				)
 				.all();
 			const byHash = new Map(rows.map((row) => [row.storePathHash, row]));
-			const chunkMatched = batch
+			const chunkMatched = batch.rows
 				.filter((entry) => {
 					const current = byHash.get(entry.storePathHash);
 
@@ -227,7 +225,7 @@ export function storedGraceDeadlines(
 ): Map<StorePathHash, IsoTimestamp> {
 	const deadlines = new Map<StorePathHash, IsoTimestamp>();
 
-	for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+	for (const hashes of jsonValueLists(storePathHashes)) {
 		const rows = database
 			.select({
 				storePathHash: schema.retentionGrace.storePathHash,
@@ -237,7 +235,7 @@ export function storedGraceDeadlines(
 			.where(
 				and(
 					eq(schema.retentionGrace.cache, cache),
-					inArray(schema.retentionGrace.storePathHash, batch)
+					inArray(schema.retentionGrace.storePathHash, hashes)
 				)
 			)
 			.all();
