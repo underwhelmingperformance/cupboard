@@ -382,6 +382,22 @@ export class ReadUserRequiredError extends UsageError {
 	}
 }
 
+export class ProvisionCacheAccessRequiredError extends UsageError {
+	constructor() {
+		super(
+			'provision-cache-access is required when provision-cache names a cache'
+		);
+		this.name = 'ProvisionCacheAccessRequiredError';
+	}
+}
+
+export class ProvisionCacheUrlRequiredError extends UsageError {
+	constructor() {
+		super('cache-url is required when provision-cache names a cache');
+		this.name = 'ProvisionCacheUrlRequiredError';
+	}
+}
+
 export class InvalidMaxJobsError extends UsageError {
 	constructor(public readonly value: string) {
 		super('max-jobs must be a non-negative 32-bit integer');

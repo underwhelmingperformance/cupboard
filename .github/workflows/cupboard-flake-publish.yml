@@ -267,6 +267,8 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      provision-cache: ${{ steps.resolve.outputs.provision-cache }}
+      provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -318,6 +320,7 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
+          PUSH: ${{ inputs.push }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
@@ -327,6 +330,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -418,10 +422,12 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                # A fork's pull request gets no id-token, so it could never
-                # publish. Refusing here says so, rather than leaving the run to
-                # fail later inside token exchange. A repository that accepts
-                # external contributions should guard its own job with
+                # GitHub withholds `id-token: write` from a fork's pull
+                # request, so such a run cannot exchange a token and cannot
+                # publish. This check does not enforce that; it reports it
+                # before the run derives a cache name and fails inside token
+                # exchange. A repository that accepts external contributions
+                # should guard its own job with
                 # `github.event.pull_request.head.repo.id == github.repository_id`.
                 if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
                   echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
@@ -434,6 +440,11 @@ jobs:
                 CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
+                # No cache exists before a pull request's first run, so the run
+                # creates its own. A run that is not publishing needs none.
+                if [ "${PUSH}" = true ]; then
+                  PROVISION_CACHE="${CACHE}"
+                fi
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
@@ -467,6 +478,8 @@ jobs:
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
+            echo "provision-cache=${PROVISION_CACHE:-}"
+            echo "provision-cache-ttl=${TTL}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
@@ -533,12 +546,20 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
+      # The plan job runs before every cohort job, so creating the cache here
+      # puts it in place before anything negotiates an upload against it. The
+      # pull-request reuse view is public, so the cache it aggregates must be
+      # public too.
       - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          provision-cache: ${{ needs.configure.outputs.provision-cache }}
+          provision-cache-access: public
+          provision-cache-ttl:
+            ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}

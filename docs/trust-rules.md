@@ -187,7 +187,7 @@ The workflow then authenticates the two commands with its own token:
 
 ```bash
 cupboard cache create "$tenant" "gh-$repository_id-pr-$number" \
-  --github-oidc --access public --root-ttl 14d
+  --github-oidc --if-absent --access public --root-ttl 14d
 cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
   --github-oidc --force --yes
 ```

@@ -334,9 +334,30 @@ describe('cupboard acquisition', () => {
 		}
 	);
 
+	// Only the plan job creates the cache, so its inputs are compared without
+	// the provisioning ones. The test below covers those.
+	const provisionInputNames = new Set([
+		'provision-cache',
+		'provision-cache-access',
+		'provision-cache-ttl'
+	]);
+
+	type StepInputs = Record<string, string | number | boolean> | undefined;
+
+	function selectInputs(
+		inputs: StepInputs,
+		isKept: (name: string) => boolean
+	): Record<string, string | number | boolean> {
+		return Object.fromEntries(
+			Object.entries(inputs ?? {}).filter(([name]) => isKept(name))
+		);
+	}
+
 	it('gives every flake publish job the coordinate configure resolved', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const setupInputs = inputsOf(workflow, cupboardAction('setup'));
+		const setupInputs = inputsOf(workflow, cupboardAction('setup')).map(
+			(inputs) => selectInputs(inputs, (name) => !provisionInputNames.has(name))
+		);
 
 		expect({
 			configureOutput: workflow.jobs.configure?.steps.find(
@@ -355,6 +376,26 @@ describe('cupboard acquisition', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
 			}))
 		});
+	});
+
+	// The plan job runs before every cohort job, so it is the only job that can
+	// create the cache before anything negotiates an upload against it.
+	it('creates the pull-request cache from the plan job alone', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const provisioning = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) =>
+				selectInputs(inputs, (name) => provisionInputNames.has(name))
+			)
+			.filter((inputs) => Object.keys(inputs).length > 0);
+
+		expect(provisioning).toStrictEqual([
+			{
+				'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
+				'provision-cache-access': 'public',
+				'provision-cache-ttl':
+					'${{ needs.configure.outputs.provision-cache-ttl }}'
+			}
+		]);
 	});
 
 	it('rebuilds a cached output when the publish workflow attests', async () => {
@@ -814,6 +855,30 @@ describe('resolved publication inputs', () => {
 			defaultCache: '',
 			output: '${{ steps.resolve.outputs.cache }}',
 			written: true
+		});
+	});
+
+	// A fork's pull request gets no id-token, so it cannot publish at all. The
+	// refusal belongs before the cache name is derived, so the run reports the
+	// reason rather than failing later in token exchange.
+	it('refuses a pull request from a fork before deriving anything', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
+		const refusal =
+			'if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then';
+
+		expect({
+			headRepositoryId: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Resolve inputs'
+			)?.env?.HEAD_REPOSITORY_ID,
+			refuses: resolve.includes(refusal),
+			beforeTheCacheName:
+				resolve.indexOf(refusal) <
+				resolve.indexOf('CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"')
+		}).toStrictEqual({
+			headRepositoryId: '${{ github.event.pull_request.head.repo.id }}',
+			refuses: true,
+			beforeTheCacheName: true
 		});
 	});
 

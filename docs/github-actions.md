@@ -197,9 +197,8 @@ The preset derives the cache, root prefix, and TTL from the triggering event. A
 TTL. The PR trust rule grants access to that cache and its retention root. It
 also lets a run create the cache, because none exists before a pull request's
 first run, and remove it, because nothing else does when the pull request
-closes. The run creates the cache before it builds, and a run for a closed pull
-request removes it and builds nothing. A pull request abandoned without being
-closed keeps its cache until the 14-day TTL expires its contents.
+closes. The run creates the cache before it builds. A pull request keeps its
+cache until the 14-day TTL expires its contents.
 
 A pull request from a fork is refused, because GitHub issues it no OIDC token
 and so it could never publish. A repository that accepts external contributions
@@ -729,7 +728,8 @@ jobs:
 retention duration. In this example every pull request publishes to its own
 `pr-<number>` cache named by the caller, and the pushed paths expire two weeks
 after the last push. The cache has to exist before the first push: create it
-with `cupboard cache create`.
+with `cupboard cache create`, or let `actions/setup` create it through
+`provision-cache`.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
 under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
