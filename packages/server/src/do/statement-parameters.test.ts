@@ -28,7 +28,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -36,6 +36,11 @@ import { describe, expect, it } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
+import {
+	blobStateHintSelect,
+	committedEdgeHintSelect,
+	ownedBlobHintSelect
+} from '../routing/negotiate-hints.ts';
 import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
 import {
@@ -154,57 +159,25 @@ function rowList<T extends { readonly [K in keyof T]: string | number }>(
 	return firstList(jsonRowLists(repeated(count, row)));
 }
 
-// `readHints` issues one query for each fact a negotiation needs. Each binds its
-// list as one parameter, so the count comes from the query and not from the
-// closure being negotiated.
+// `readHints` issues one query for each fact a negotiation needs; the builders
+// are the handler's own.
 function blobStateParameters(hashes: number): number {
-	return database
-		.select({
-			narHash: d1Schema.blobState.narHash,
-			fileHash: d1Schema.blobState.fileHash,
-			fileSize: d1Schema.blobState.fileSize,
-			compression: d1Schema.blobState.compression,
-			narSize: d1Schema.blobState.narSize,
-			deleteAfter: d1Schema.blobState.deleteAfter
-		})
-		.from(d1Schema.blobState)
-		.where(inArray(d1Schema.blobState.narHash, narHashList(hashes)))
-		.toSQL().params.length;
+	return blobStateHintSelect(database, narHashList(hashes)).toSQL().params
+		.length;
 }
 
 function ownedParameters(hashes: number): number {
-	const list = narHashList(hashes);
-
-	return database
-		.select({ narHash: d1Schema.tenantBlob.narHash })
-		.from(d1Schema.tenantBlob)
-		.where(
-			and(
-				eq(d1Schema.tenantBlob.tenant, tenant),
-				inArray(d1Schema.tenantBlob.narHash, list)
-			)
-		)
-		.toSQL().params.length;
+	return ownedBlobHintSelect(database, tenant, narHashList(hashes)).toSQL()
+		.params.length;
 }
 
 function edgeParameters(paths: number): number {
-	const list = storePathList(paths);
-
-	return database
-		.select({
-			storePathHash: d1Schema.blobReference.storePathHash,
-			generation: d1Schema.blobReference.generation,
-			narHash: d1Schema.blobReference.narHash
-		})
-		.from(d1Schema.blobReference)
-		.where(
-			and(
-				eq(d1Schema.blobReference.tenant, tenant),
-				eq(d1Schema.blobReference.cache, cache),
-				inArray(d1Schema.blobReference.storePathHash, list)
-			)
-		)
-		.toSQL().params.length;
+	return committedEdgeHintSelect(
+		database,
+		tenant,
+		cache,
+		storePathList(paths)
+	).toSQL().params.length;
 }
 
 // The filter binds the tenant, the cache, the store path list and the two
@@ -367,8 +340,8 @@ function rootTargetInsertParameters(targets: number): number {
 		.toSQL().params.length;
 }
 
-// A page as large as an ample row budget asks for. The limit binds one
-// parameter whatever its value, so only the root list could grow the count.
+// Any page size does here: the limit binds one parameter whatever its value,
+// so only the root list could grow the parameter count.
 const expiredRootTargetPage = 1000;
 
 function expiredRootTargetParameters(roots: number): number {
