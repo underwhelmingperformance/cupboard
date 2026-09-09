@@ -106,7 +106,10 @@ const purgeEntrySchema = z.strictObject({
 });
 type PurgeEntry = z.output<typeof purgeEntrySchema>;
 
-const purgeEntriesSchema = z.array(purgeEntrySchema).min(1).max(100);
+// Do not bound the length. The row is persisted, so a bound here would refuse
+// a row an earlier build wrote larger. A row is never written empty, so an
+// empty array is corrupt.
+const purgeEntriesSchema = z.array(purgeEntrySchema).min(1);
 
 type BackfillRow = typeof schema.signingKeyBackfills.$inferSelect;
 

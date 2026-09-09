@@ -15,8 +15,12 @@ import { armAlarmNoLaterThan, noProgressRetryMs } from './alarm.ts';
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
+// The tags one continuation row holds. `purgeCacheTags` owns the platform's
+// per-request limit, so this sizes the row and nothing else.
 const cachePurgeBatchSize = 100;
-const tagsSchema = z.array(z.string()).min(1).max(cachePurgeBatchSize);
+// Do not bound the length: see `purgeEntriesSchema` in
+// `signing-keys-service.ts`. A row is never written empty.
+const tagsSchema = z.array(z.string()).min(1);
 
 /**
 Persists cache-tag purges so failed requests can be retried.
