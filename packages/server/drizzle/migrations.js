@@ -54,6 +54,7 @@ import m0051 from './0051_cache_identity_contract_assertions.sql';
 import m0052 from './0052_cache_identity_contract.sql';
 import m0053 from './0053_cache_identity_triggers.sql';
 import m0054 from './0054_gc_write_barrier.sql';
+import m0055 from './0055_gc_revision_removal.sql';
 
 export default {
 	journal,
@@ -112,6 +113,7 @@ export default {
 		m0051,
 		m0052,
 		m0053,
-		m0054
+		m0054,
+		m0055
 	}
 };

@@ -202,9 +202,11 @@ describe('maintenance pass cost', () => {
 	// index. A live-family backlog must not increase the number of rows read.
 	//
 	// Both figures include the schema scan each pass makes to check its
-	// write-barrier triggers. The second reads one row more because the first pass
-	// created workerd's `_cf_KV` table when it armed its continuation. That
-	// difference does not follow the backlog, which is what these tests measure.
+	// write-barrier triggers, which reads one row per schema object and so makes
+	// up about a hundred of each figure. The second reads one row more because
+	// the first pass created workerd's `_cf_KV` table when it armed its
+	// continuation. That difference does not follow the backlog, which is what
+	// these tests measure.
 	it('checks for expired refresh-token families without scanning the live backlog', async () => {
 		await initialise();
 
@@ -222,8 +224,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 164,
-			largeBacklogCost: 165
+			smallBacklogCost: 145,
+			largeBacklogCost: 146
 		});
 	});
 
@@ -233,12 +235,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 161,
+				rowsRead: 142,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 161,
+				rowsRead: 142,
 				usesIndex: true,
 				sorts: false
 			}
@@ -275,8 +277,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 159,
-			largeBacklogCost: 159
+			smallBacklogCost: 139,
+			largeBacklogCost: 139
 		});
 	});
 
@@ -307,15 +309,17 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 791, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 791, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 771, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 771, rowsWritten: 131 }
 		});
 	});
 
 	// Both figures include the schema scan each pass makes to check its
-	// write-barrier triggers. The second reads one row more because the first pass
-	// created workerd's `_cf_KV` table when it armed its continuation. That
-	// difference does not follow the backlog, which is what these tests measure.
+	// write-barrier triggers, which reads one row per schema object and so makes
+	// up about a hundred of each figure. The second reads one row more because
+	// the first pass created workerd's `_cf_KV` table when it armed its
+	// continuation. That difference does not follow the backlog, which is what
+	// these tests measure.
 	it('finds expired roots without scanning the live-root backlog', async () => {
 		await initialise();
 
@@ -335,8 +339,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 173,
-			largeBacklogCost: 174
+			smallBacklogCost: 153,
+			largeBacklogCost: 154
 		});
 	});
 });

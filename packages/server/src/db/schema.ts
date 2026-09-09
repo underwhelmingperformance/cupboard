@@ -570,21 +570,8 @@ export const retentionGrace = sqliteTable(
 	]
 );
 
-// A monotonically increasing revision for every cache input that can change
-// reachability. SQLite triggers maintain it independently of the write path, so
-// an incremental garbage-collection scan can detect any mutation between its
-// bounded chunks before it deletes from an obsolete mark set.
-export const garbageCollectionRevisions = sqliteTable(
-	'garbage_collection_revision',
-	{
-		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
-		revision: integer('revision').notNull().default(0)
-	}
-);
-
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
-	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
 	}).notNull(),
@@ -596,6 +583,10 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 		.default(false)
 });
 
+// The paths an incremental scan still has to mark. The collection write barrier
+// adds to this table from triggers whenever a write can make a path reachable,
+// so the mark keeps up with commits and root writes that land between a scan's
+// bounded chunks.
 export const garbageCollectionFrontier = sqliteTable(
 	'garbage_collection_frontier',
 	{

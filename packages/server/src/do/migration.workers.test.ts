@@ -25,7 +25,6 @@ import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts'
 import {
 	beforeCacheIdentityContract,
 	bootstrap,
-	latestMigrationIndex,
 	migrateThrough,
 	migrateThroughConvertedCatalogue,
 	testServerFor,
@@ -629,11 +628,13 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
 	});
 
-	it('migrates a pre-0034 sweep scan to the collect phase', async () => {
+	it('migrates a pre-0034 sweep scan to the collect phase and then clears it', async () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";
+		const selectRenamedScans =
+			'SELECT cache, revision, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
 		const selectScans =
-			'SELECT cache_identity.name, garbage_collection_scan.revision, garbage_collection_scan.phase, garbage_collection_scan.cursor, garbage_collection_scan.allow_empty_collection FROM garbage_collection_scan JOIN cache_identity ON cache_identity.id = garbage_collection_scan.cache_id';
+			'SELECT cache_id, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
 
 		const migrated = await runInDurableObject(
 			testServerFor('migration-collect-phase'),
@@ -642,26 +643,38 @@ describe('migrations', () => {
 				// phase `sweep` and holding its allow-empty flag in
 				// `allow_empty_sweep`. The migration must rename the column and
 				// rewrite the phase, so the interrupted collection resumes where it
-				// stopped. The anchor is fixed so later migrations cannot silently
+				// stopped. The anchors are fixed so later migrations cannot silently
 				// retarget the test.
 				await migrateThrough(state, 33);
 				state.storage.sql.exec(insertCollectingScan);
 
+				await migrateThrough(state, 34);
+				const renamed = state.storage.sql.exec(selectRenamedScans).toArray();
+
+				// The migration that removed the revision also clears the collection
+				// state, because a mark made under the revision regime was not
+				// maintained by the write barrier that replaced it.
 				await migrateThroughConvertedCatalogue(state);
 
-				return state.storage.sql.exec(selectScans).toArray();
+				return {
+					renamed,
+					scans: state.storage.sql.exec(selectScans).toArray()
+				};
 			}
 		);
 
-		expect(migrated).toStrictEqual([
-			{
-				name: 'builds',
-				revision: 7,
-				phase: 'collect',
-				cursor: 'aa',
-				allow_empty_collection: 1
-			}
-		]);
+		expect(migrated).toStrictEqual({
+			renamed: [
+				{
+					cache: 'builds',
+					revision: 7,
+					phase: 'collect',
+					cursor: 'aa',
+					allow_empty_collection: 1
+				}
+			],
+			scans: []
+		});
 	});
 
 	it('fires the collection write barrier for every write that adds reachability', async () => {
@@ -688,7 +701,7 @@ describe('migrations', () => {
 		const clearFrontier =
 			'DELETE FROM garbage_collection_frontier WHERE cache_id = ?';
 		const insertScan =
-			"INSERT INTO garbage_collection_scan (cache_id, revision, phase) VALUES (?, 0, 'mark')";
+			"INSERT INTO garbage_collection_scan (cache_id, phase) VALUES (?, 'mark')";
 		const clearScan = 'DELETE FROM garbage_collection_scan WHERE cache_id = ?';
 		const insertMark =
 			'INSERT INTO garbage_collection_mark (cache_id, store_path_hash) VALUES (?, ?)';
@@ -713,7 +726,7 @@ describe('migrations', () => {
 		const migrated = await runInDurableObject(
 			testServerFor('migration-gc-barrier'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const run = (
 					query: string,
