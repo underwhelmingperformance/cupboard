@@ -212,7 +212,7 @@ export const cacheLifecycle = sqliteTable(
 		//
 		// Private-cache reads consult this column. A deleted cache retains its
 		// published narinfo and attestation state until the teardown drain removes
-		// them, and it retains its read credential indefinitely.
+		// them. Its read credential is deleted with the cache.
 		//
 		// The NAR reference query does not inspect this column. Deletion advances
 		// the lifecycle generation, which invalidates every existing reference
@@ -323,8 +323,9 @@ export const tenant = sqliteTable(
 
 // One cache's own read verifier, keyed by the cache's identity. While this row
 // exists, only credentials that match its verifier can open the cache. Deleting
-// a cache leaves the row in place, so re-creating the cache under the same name
-// preserves the verifier. Finalising an offboarded tenant deletes all of its
+// a cache deletes its row, so a cache created later under the same name has no
+// verifier of its own, and its readers authenticate with the tenant credential
+// until an operator sets one. Finalising an offboarded tenant deletes all of its
 // cache-verifier rows.
 export const tenantCacheReadCredential = sqliteTable(
 	'tenant_cache_read_credential',

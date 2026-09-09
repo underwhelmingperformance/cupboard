@@ -607,7 +607,7 @@ describe('private cache access', () => {
 		}
 	);
 
-	it("creates and removes a private cache without removing another cache or the private cache's read credential", async () => {
+	it("creates and removes a private cache, leaving another cache in place and revoking the removed cache's read credential", async () => {
 		const published = await publishToPrivateCache();
 		const retained = cacheNameSchema.parse('retained');
 		await authorisedWorkerFetch(`/caches/${retained}`, published.token, {
@@ -676,7 +676,39 @@ describe('private cache access', () => {
 					graceManaged: false
 				}
 			],
-			credentials: [{ tenant, cache: privateCache }]
+			credentials: []
+		});
+	});
+
+	it("refuses the removed cache's credential once the name is created again", async () => {
+		const published = await publishToPrivateCache();
+		await setCacheReadCredential(
+			database(),
+			tenant,
+			privateCache,
+			cacheReader,
+			now
+		);
+		const removed = await authorisedWorkerFetch(
+			`/caches/${localName}?force=true`,
+			published.token,
+			{ method: 'DELETE' }
+		);
+		expect(removed.status).toBe(StatusCodes.OK);
+
+		await putNamedCache(published.token, localName, 'private');
+		const path = `${cachePrefix}/nix-cache-info`;
+		const withRemovedCredential = await readFetch(path, basic(cacheReader));
+		const withTenantCredential = await readFetch(path, basic(tenantReader));
+
+		expect({
+			withRemovedCredential: withRemovedCredential.status,
+			withTenantCredential: withTenantCredential.status,
+			credentials: await cacheCredentialRows()
+		}).toStrictEqual({
+			withRemovedCredential: StatusCodes.UNAUTHORIZED,
+			withTenantCredential: StatusCodes.OK,
+			credentials: []
 		});
 	});
 

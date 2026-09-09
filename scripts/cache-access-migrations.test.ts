@@ -632,3 +632,94 @@ describe('cache identity contraction', () => {
 		}).toThrow(/CHECK constraint failed/u);
 	});
 });
+
+// Deleting a cache used to leave the cache's read credential in place, so the
+// credential could open the next cache registered under the same name. The
+// migration removes the rows those deletions left behind.
+describe('cache credential lifecycle', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		applyMigrations(database, '0029_cache_identity_contract.sql');
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	function insertLifecycle(name: string, generation: number): void {
+		database
+			.prepare(
+				`
+					INSERT INTO cache_lifecycle (
+						tenant, cache_kind, cache_name, access, generation, deleted_at,
+						updated_at
+					) VALUES (
+						'alice', 'named', ?, 'private', ?, NULL, '2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(name, generation);
+	}
+
+	function markDeleted(name: string): void {
+		database
+			.prepare(
+				`
+					UPDATE cache_lifecycle
+					SET deleted_at = '2026-01-03T00:00:00.000Z'
+					WHERE tenant = 'alice' AND cache_kind = 'named' AND cache_name = ?
+				`
+			)
+			.run(name);
+	}
+
+	function insertCredential(name: string): void {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant_cache_read_credential (
+						tenant, cache_kind, cache_name, read_user, read_password_hash,
+						read_password_salt, created_at
+					) VALUES (
+						'alice', 'named', ?, 'reader', 'hash', 'salt',
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(name);
+	}
+
+	// `guides` was deleted and registered again: registration cleared the
+	// deletion timestamp and kept the generation the deletion set, and no column
+	// records whether the credential belongs to the earlier cache or to the
+	// current one, so the migration keeps it. `notes` has never been deleted.
+	// `unregistered` has no lifecycle row: the tenant Durable Object has not
+	// registered that cache.
+	it('removes the credential of a deleted cache and keeps the others', () => {
+		insertLifecycle('builds', 2);
+		markDeleted('builds');
+		insertLifecycle('guides', 2);
+		insertLifecycle('notes', 1);
+		insertCredential('builds');
+		insertCredential('guides');
+		insertCredential('notes');
+		insertCredential('unregistered');
+
+		applyMigration(database, '0030_cache_credential_lifecycle.sql');
+
+		expect(
+			database
+				.prepare(
+					'SELECT cache_name FROM tenant_cache_read_credential ORDER BY cache_name'
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{ cache_name: 'guides' },
+			{ cache_name: 'notes' },
+			{ cache_name: 'unregistered' }
+		]);
+	});
+});
