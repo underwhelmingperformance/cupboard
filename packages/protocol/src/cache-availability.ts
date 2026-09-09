@@ -1,17 +1,33 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-// The server deduplicates the request before probing R2, so at most 900 distinct
-// hashes produce at most 900 head requests. Every cap in this file and in
-// `retention.ts` is checked against `subrequestsPerInvocation` by
-// `packages/server/src/do/subrequest-budget.test.ts`.
+// The hashes one availability request carries.
+//
+// Both routes answer a question a caller asks about any number of paths: the
+// CLI chunks at these values in `packages/cli/src/plan/destination-probe.ts`,
+// and the publication planner in `actions/src/publish-plan.ts` chunks at
+// `cacheAvailabilityMaxPaths`, so a plan over ten thousand paths is answered
+// in pages and nothing is refused. These are the page sizes of that paging,
+// not a bound on what a caller may ask for.
+//
+// What bounds a useful page is elapsed time, not the subrequest ceiling: 900
+// narinfo heads is well inside it. The heads run six at a time, which is
+// every simultaneous outgoing connection a request has, so 900 hashes take
+// 150 sequential rounds of R2 latency. That latency has not been measured,
+// and measuring it needs a deployed environment, because the local test pool
+// enforces neither limit. Nothing else constrains the value.
 export const cacheAvailabilityMaxPaths = 900;
 
-// The reuse-view route accepts at most 50 requested hashes. A hash's NAR is
-// probed once for each distinct NAR its candidate caches hold, so copies that
-// agree cost one head and only a hash whose copies disagree costs more. The
-// assumed worst case per hash is recorded with the other fan-out figures.
-export const reuseViewAvailabilityMaxPaths = 50;
+// The same page size, because the two probes now cost the same.
+//
+// A cache probe heads one narinfo for each hash. A view probe heads one NAR for
+// each distinct NAR among a hash's candidate caches, and copies that agree share
+// one NAR, so an agreeing hash costs one head as well. Only a hash whose copies
+// disagree costs more, and such a hash is answered as missing in any case.
+//
+// Derive this from the cache page size rather than restating the number, so
+// that whatever measurement replaces one replaces both.
+export const reuseViewAvailabilityMaxPaths = cacheAvailabilityMaxPaths;
 
 export const cacheAvailabilityRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(cacheAvailabilityMaxPaths)

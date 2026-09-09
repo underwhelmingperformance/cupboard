@@ -26,6 +26,13 @@ import { isoTimestampSchema } from './scalars.ts';
 // and carries no such bound, so a root's total target count is not limited here.
 // A caller replacing more paths than this at once splits them across named
 // roots, which `RootTargetLimitError` says.
+//
+// The number is far above what callers send. A root holds the targets a
+// caller declares, not their closures, because collection reaches everything
+// a target references. A push sends its declared targets alone, and a matrix
+// run declares at most `maximumMatrixJobs` of them, 256, in
+// `actions/src/commands/plan.ts`. So this is about four times the largest set
+// the Action can ask to replace.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);

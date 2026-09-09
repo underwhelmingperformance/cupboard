@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { subrequestsPerInvocation } from './platform.ts';
 import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
@@ -28,7 +29,36 @@ const attestationBundleRequestSchema = z.strictObject({
 	digest: sha256HexDigestSchema
 });
 
-export const attestationNegotiateMaxBundles = 100_000;
+// The subrequests a negotiate spends other than its per-bundle heads: the D1
+// reads for the committed reference edges and for the reference keys already
+// filed. Each binds its list as one parameter, so each is one call per bound
+// list, and a page produces one list. Fifty is the whole D1 statement
+// allowance one Durable Object invocation has, `d1StatementsPerInvocation` in
+// `packages/server/src/http/http.ts`, which the D1 binding refuses to exceed,
+// so reserving that many cannot be overspent however those reads are
+// rearranged. This package cannot import that constant, so the two are held
+// equal by hand. The margin is deliberately larger than the reads it covers.
+const attestationNegotiateOverhead = 50;
+
+/**
+ * The bundles one negotiate request carries.
+ *
+ * A re-run over an unchanged closure sends one bundle for each already-attested
+ * path, and the server heads the CAS object of every one it already records. A
+ * bundle's digest is the hash of its own document, so no two bundles of a closure
+ * share one and deduplicating by digest saves nothing: the cost is one subrequest
+ * per bundle.
+ *
+ * The page size follows from the pinned ceiling, so it moves if the pin moves.
+ * A page above the ceiling cannot be served at all: the head that exceeds it
+ * throws and the caller gets nothing back, so such a page refuses outright
+ * instead of degrading.
+ *
+ * The CLI chunks at this value, so a closure larger than a page is attested in
+ * several pages.
+ */
+export const attestationNegotiateMaxBundles =
+	subrequestsPerInvocation - attestationNegotiateOverhead;
 
 export const attestationNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
