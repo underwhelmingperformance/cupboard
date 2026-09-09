@@ -718,8 +718,8 @@ async function settlePhase(
 }
 
 /**
- * Applies the migrations that remove what the preceding release still writes,
- * but only once that release can no longer be running.
+ * Applies the migrations that remove what the preceding release still writes
+ * or goes on producing, but only once that release can no longer be running.
  *
  * `cutover` is when the deployment entered its settled phase, which is when
  * this build began to serve every request. An invocation that started before
@@ -729,9 +729,11 @@ async function settlePhase(
  *
  * Deferring costs nothing, because the schema between the two sets of
  * migrations is a resting state. The columns those migrations remove are
- * nullable by then, and this build neither reads nor writes them, so a
- * deployment that stops here serves every request correctly and differs from
- * the contracted one only by carrying dead columns.
+ * nullable by then, and this build neither reads nor writes them. The read
+ * credentials they remove belong to caches that earlier releases deleted, and
+ * the preceding release left those rows in place too. A deployment that stops
+ * here therefore keeps working, and differs from the contracted one only by
+ * carrying dead columns and those stale rows.
  */
 async function contractSchema(
 	dependencies: DeployDependencies,

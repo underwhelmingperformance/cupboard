@@ -41,12 +41,18 @@ under its own name.
 because the preceding release keeps serving until the upload finishes and has to
 work against the schema they leave.
 
-A migration that removes something that release still writes cannot run then.
-Those migrations are named in `migrationsAppliedAfterCutover`. They may run only
-once both Workers serve this build and the longest invocation that could have
-started on the preceding one must have ended: a Queue consumer has a
-fifteen-minute wall-time allowance, which is that longest invocation, so the
-window is sixteen minutes from the moment the deploy recorded the phase.
+A migration cannot run then if it removes something that release still writes,
+or if it removes rows that release goes on producing. Those migrations are named
+in `migrationsAppliedAfterCutover`. They may run only once both Workers serve
+this build and the longest invocation that could have started on the preceding
+one must have ended: a Queue consumer has a fifteen-minute wall-time allowance,
+which is that longest invocation, so the window is sixteen minutes from the
+moment the deploy recorded the phase.
+
+Migrations apply in journal order, so the deferred migrations must be the last
+in the journal. A migration added after one that waits has to wait as well.
+Otherwise the deploy would apply it first, against a schema the deferred
+migrations have not yet changed.
 
 A deploy does not wait out that window. It reports the migrations as deferred
 and finishes, and the next deploy applies them, by which time the window is long
@@ -54,12 +60,58 @@ past. The phase row records when the deployment entered its phase rather than
 when the deploy last ran, so a rerun does not push the deadline away.
 
 Deferring is safe because the state between the two sets of migrations is a
-resting state. The columns they remove are nullable by then, and the deployed
-build neither reads nor writes them, so a deployment that is never deployed
-again serves every request correctly and differs only by carrying dead columns.
+resting state. The columns that `0029_cache_identity_contract` drops are
+nullable by then, and the deployed build neither reads nor writes them. The read
+credentials that `0030_cache_credential_lifecycle` removes belong to caches that
+earlier releases deleted, and the preceding release left those rows in place
+too. A deployment that never runs another deploy therefore keeps working: the
+dead columns are ignored, and a stale credential opens a re-created cache
+exactly as it did under the preceding release.
 
-This release contracts the schema. `0029_cache_identity_contract` is the
-migration it defers.
+This release contracts the schema. It defers `0029_cache_identity_contract` and
+`0030_cache_credential_lifecycle`.
+
+### Read credentials to check by hand
+
+`0030_cache_credential_lifecycle` removes the read credential of every cache
+that is deleted at the time it runs. It keeps the credential of a cache that was
+deleted and then registered again under the same name: registration clears the
+deletion timestamp, and no column records whether the operator set the
+credential for the cache that holds the name now or for an earlier cache of that
+name. An operator has to decide that for each such credential. Once
+`0030_cache_credential_lifecycle` has run, list them with:
+
+```sql
+SELECT c.tenant, c.cache_name, c.generation, r.created_at
+FROM cache_lifecycle AS c
+JOIN tenant_cache_read_credential AS r
+	ON r.tenant = c.tenant
+	AND r.cache_kind = c.cache_kind
+	AND r.cache_name IS c.cache_name
+WHERE c.cache_kind = 'named'
+	AND c.deleted_at IS NULL
+	AND c.generation > 1
+ORDER BY c.tenant, c.cache_name;
+```
+
+A generation above one means the name has been deleted at least once, so each
+row is a credential that may belong to an earlier cache. Decide for each row
+which cache the credential belongs to. The credential's `created_at` records
+when it was set, and the tenant can confirm whether that password is the one
+their readers use. A credential the tenant still uses needs no action.
+
+Clear a credential that belongs to an earlier cache with the control plane's
+`DELETE /tenants/{id}/caches/{cacheName}/read-credential`. Do not delete the row
+in D1 by hand. The procedure requires a live tenant in the DELETE statement
+itself, so it refuses a tenant that is offboarding or offboarded; a hand-written
+statement has no such check.
+
+Clearing a credential does not lock the cache. Readers of a private cache with
+no credential of its own authenticate with the tenant credential, so a cleared
+cache stays readable to everyone who holds the tenant credential until a new
+credential is set for it. Set one with
+`POST /tenants/{id}/caches/{cacheName}/read-credential` for a cache that should
+keep a credential of its own.
 
 ## Local steps
 

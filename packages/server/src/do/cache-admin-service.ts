@@ -546,9 +546,13 @@ export class CacheAdminService {
 	 * transaction starts after this statement succeeds. Read queries then exclude
 	 * earlier generations while cleanup continues.
 	 *
-	 * The request runs one D1 statement regardless of the number of committed
-	 * paths. It always writes the teardown marker because the first pass must also
-	 * sweep for edges left by an interrupted earlier deletion.
+	 * The deletion also removes the cache's own read credential. A cache created
+	 * later under the same name is a new cache and starts without one.
+	 *
+	 * The request runs two D1 statements regardless of the number of committed
+	 * paths: the revocation and the credential deletion. It always writes the
+	 * teardown marker because the first pass must also sweep for edges left by an
+	 * interrupted earlier deletion.
 	 *
 	 * The deletion queue is durable, so garbage collection can resume it after a
 	 * crash before the alarm marker is written. The blob reaper later collects
@@ -557,6 +561,11 @@ export class CacheAdminService {
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(async () => {
 			await this.deletionQueue.revokeCacheGeneration(cache);
+			// Readers of a private cache with no credential row of its own
+			// authenticate with the tenant's credential. Delete the row only after
+			// the revocation, or the cache would be readable with the tenant's
+			// credential while it is still live.
+			await this.clearCacheReadCredential(cache.scope);
 
 			const now = isoTimestamp(new Date());
 

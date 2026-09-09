@@ -110,12 +110,19 @@ export const predecessorInvocationLifetimeMs = 16 * 60 * 1000;
  * for the next deploy, which finds {@link predecessorInvocationLifetimeMs} long
  * past. That interval also covers what the cutover cannot say: it is the moment
  * Cloudflare accepted a deployment sending every request to this build, not the
- * moment every colo began serving it. The state between the two sets is a resting state: the columns they
- * remove are nullable by then and this build touches neither, so a deployment
- * that never runs again differs only by carrying dead columns.
+ * moment every colo began serving it.
+ *
+ * The state between the two sets is a resting state. The columns
+ * `0029_cache_identity_contract` removes are nullable by then, and this build
+ * neither reads nor writes them. The credentials
+ * `0030_cache_credential_lifecycle` removes belong to caches that earlier
+ * releases deleted, and the preceding release left those rows in place too, so
+ * until the migration runs a stale credential opens a re-created cache exactly
+ * as it did under that release.
  */
 export const migrationsAppliedAfterCutover: readonly string[] = [
-	'0029_cache_identity_contract.sql'
+	'0029_cache_identity_contract.sql',
+	'0030_cache_credential_lifecycle.sql'
 ];
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
