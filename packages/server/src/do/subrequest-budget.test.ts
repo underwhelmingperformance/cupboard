@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { checkBatchSize } from '../http/http.ts';
 
-import { reuseCandidateLimit } from './reuse-view-lookup-service.ts';
+import { reuseDistinctNarLimit } from './reuse-view-lookup-service.ts';
 
 // Each cap below bounds how many items one request accepts, so that the R2
 // requests the server makes for those items stay under the subrequest ceiling.
@@ -44,9 +44,9 @@ const cappedRequests: readonly CappedRequest[] = [
 	{
 		cap: 'reuseViewAvailabilityMaxPaths',
 		items: reuseViewAvailabilityMaxPaths,
-		requestsPerItem: reuseCandidateLimit,
+		requestsPerItem: reuseDistinctNarLimit,
 		fanOut:
-			'One NAR head for each candidate of a hash. `snapshotCandidateBatch` drops a hash with more candidates than the limit before the probe.'
+			"One NAR head for each distinct NAR among a hash's verified copies; the lookup refuses a hash with more than the limit before the probe."
 	},
 	{
 		cap: 'rootSetMaxTargets',
