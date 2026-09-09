@@ -12,7 +12,7 @@ export const checkContract = {
 	// next call starts after it, so a caller checks every path by passing
 	// `cursor` and `cursorCache` back until the report returns them empty.
 	run: baseProcedure
-		.meta({ requires: 'check:run' })
+		.meta({ requires: 'check:run', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/check' })
 		.input(
 			z.strictObject({

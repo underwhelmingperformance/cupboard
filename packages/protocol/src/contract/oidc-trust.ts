@@ -12,12 +12,12 @@ import { baseProcedure } from './base.ts';
 
 export const oidcTrustContract = {
 	list: baseProcedure
-		.meta({ requires: 'oidc-trust:list' })
+		.meta({ requires: 'oidc-trust:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/oidc-trust' })
 		.output(oidcTrustListResponseSchema),
 
 	get: baseProcedure
-		.meta({ requires: 'oidc-trust:read' })
+		.meta({ requires: 'oidc-trust:read', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/oidc-trust/{id}' })
 		.input(z.strictObject({ id: trustRuleIdSchema }))
 		.output(oidcTrustSummarySchema),
