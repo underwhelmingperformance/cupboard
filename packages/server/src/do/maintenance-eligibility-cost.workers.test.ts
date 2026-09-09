@@ -77,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 15,
-			largeBacklogCost: 15
+			emptyBacklogCost: 17,
+			largeBacklogCost: 17
 		});
 	});
 
