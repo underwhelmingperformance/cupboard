@@ -375,6 +375,28 @@ export class QuotaExceededError extends ServerHttpError {
 	}
 }
 
+// The tenant has a `tenant` row but no `tenant_usage` row. The counters and
+// the quota live in that row, so nothing can charge the tenant.
+export class TenantUsageMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly tenant: TenantId) {
+		super(`Tenant '${tenant}' has no usage row and cannot be charged`);
+		this.name = 'TenantUsageMissingError';
+	}
+}
+
+export class TenantUsageRepairRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly tenant: TenantId) {
+		super(
+			`Tenant '${tenant}' has no usage row and cannot be initialised safely. Reconcile its accounting before retrying creation.`
+		);
+		this.name = 'TenantUsageRepairRequiredError';
+	}
+}
+
 export class ControlKeyMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

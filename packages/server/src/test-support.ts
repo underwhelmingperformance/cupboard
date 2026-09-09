@@ -2602,12 +2602,15 @@ export async function commitUpload(
 
 /**
  * Runs a commit that the server is expected to refuse. Returns the rejection so
- * the test can compare it structurally. Fails if the commit succeeds.
+ * the test can compare it structurally. Fails if the commit succeeds, and a
+ * deferral counts as success: with `wait: false` it is returned as `pending`
+ * without running verification.
  */
 export async function commitUploadRejection(
 	token: string,
 	uploadId: UploadId,
-	cache: string = DEFAULT_CACHE
+	cache: string = DEFAULT_CACHE,
+	options: { readonly wait?: boolean } = {}
 ): Promise<unknown> {
 	let result:
 		| { kind: 'committed'; response: Awaited<ReturnType<typeof commitUpload>> }
@@ -2615,7 +2618,7 @@ export async function commitUploadRejection(
 	try {
 		result = {
 			kind: 'committed',
-			response: await commitUpload(token, uploadId, cache)
+			response: await commitUpload(token, uploadId, cache, options)
 		};
 	} catch (error: unknown) {
 		result = { kind: 'rejected', error };

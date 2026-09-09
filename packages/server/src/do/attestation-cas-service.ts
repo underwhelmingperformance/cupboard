@@ -22,6 +22,8 @@ import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
+	TenantUsageMissingError,
+	TenantWritesStoppedError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
 import {
@@ -105,7 +107,13 @@ export class AttestationCasService {
 				.where(this.presenceFilter(tenant, digest))
 		]);
 
-		return this.overQuotaForCharge(usageRows[0], ownedRows.length > 0, size);
+		const usage = usageRows[0];
+
+		if (usage === undefined) {
+			throw new TenantUsageMissingError(tenant);
+		}
+
+		return this.overQuotaForCharge(usage, ownedRows.length > 0, size);
 	}
 
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
@@ -284,12 +292,46 @@ export class AttestationCasService {
 				.from(d1Schema.tenantCasBlob)
 				.where(this.presenceFilter(tenant, reference.digest))
 		);
+		const usagePresent = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant))
+		);
+		const chargeableTenantFilter = and(
+			eq(d1Schema.tenant.id, tenant),
+			eq(d1Schema.tenant.status, 'active'),
+			usagePresent
+		);
+		const tenantChargeable = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenant)
+				.where(chargeableTenantFilter)
+		);
 		const chargeFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceMissing
+			presenceMissing,
+			tenantChargeable
 		);
 
-		await this.context.d1.batch([
+		const graceClearFilter = and(
+			eq(d1Schema.casObject.digest, reference.digest),
+			tenantChargeable
+		);
+
+		const [gateRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					status: d1Schema.tenant.status,
+					usageTenant: d1Schema.tenantUsage.tenant
+				})
+				.from(d1Schema.tenant)
+				.leftJoin(
+					d1Schema.tenantUsage,
+					eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
+				)
+				.where(eq(d1Schema.tenant.id, tenant)),
 			this.context.d1
 				.update(d1Schema.tenantUsage)
 				.set({
@@ -300,36 +342,67 @@ export class AttestationCasService {
 				.where(chargeFilter),
 			this.context.d1
 				.insert(d1Schema.attestationReference)
-				.values({ tenant, ...reference })
+				.select((qb) =>
+					qb
+						.select({
+							tenant: sql<TenantId>`${tenant}`.as('tenant'),
+							cache: sql<StoredCache>`${reference.cache}`.as('cache'),
+							storePathHash: sql<StorePathHash>`${reference.storePathHash}`.as(
+								'store_path_hash'
+							),
+							generation: sql<NarInfoGeneration>`${reference.generation}`.as(
+								'generation'
+							),
+							predicateType: sql<PredicateType>`${reference.predicateType}`.as(
+								'predicate_type'
+							),
+							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest')
+						})
+						.from(d1Schema.tenant)
+						.where(chargeableTenantFilter)
+				)
 				.onConflictDoNothing(),
 			this.context.d1
 				.insert(d1Schema.tenantCasBlob)
-				.values({ tenant, digest: reference.digest, size })
+				.select((qb) =>
+					qb
+						.select({
+							tenant: sql<TenantId>`${tenant}`.as('tenant'),
+							digest: sql<Sha256HexDigest>`${reference.digest}`.as('digest'),
+							size: sql<number>`${size}`.as('size')
+						})
+						.from(d1Schema.tenant)
+						.where(chargeableTenantFilter)
+				)
 				.onConflictDoNothing(),
 			this.context.d1
 				.update(d1Schema.casObject)
 				.set({ deleteAfter: sql`null` })
-				.where(eq(d1Schema.casObject.digest, reference.digest))
+				.where(graceClearFilter)
 		]);
+
+		const gate = gateRows[0];
+		if (gate?.status !== 'active') {
+			throw new TenantWritesStoppedError(tenant, gate?.status);
+		}
+		if (gate.usageTenant === null) {
+			throw new TenantUsageMissingError(tenant);
+		}
 
 		return 'referenced';
 	}
 
+	// `usage` is required. Without the row there is no quota to compare against,
+	// and the caller refuses with `TenantUsageMissingError`.
 	overQuotaForCharge(
-		usage:
-			| {
-					readonly bytes: number;
-					readonly casBytes: number;
-					readonly quotaBytes: number | null;
-			  }
-			| undefined,
+		usage: {
+			readonly bytes: number;
+			readonly casBytes: number;
+			readonly quotaBytes: number | null;
+		},
 		isOwned: boolean,
 		size: number
 	): boolean {
-		if (usage === undefined) {
-			return false;
-		}
-
 		if (usage.quotaBytes === null) {
 			return false;
 		}
