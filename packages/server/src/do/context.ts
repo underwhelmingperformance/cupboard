@@ -35,6 +35,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
+import { chunk } from '@cupboard/shared/collections';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -67,6 +68,11 @@ import { boundedSubrequest } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 import { currentRowBudgetMeter } from './row-budget.ts';
+
+// Cloudflare accepts at most 100 operations in one purge request, on every
+// plan. See the "Hostname, tag, prefix URL, and purge everything limits" table
+// at https://developers.cloudflare.com/cache/how-to/purge-cache/.
+const tagsPerPurgeRequest = 100;
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -227,6 +233,10 @@ export class ServerContext {
 		return this.credentialIssuer;
 	}
 
+	/**
+	 * Purges every supplied cache tag, in as many requests as the platform limit
+	 * requires. A caller passes the tags it has and does not size its list.
+	 */
 	async purgeCacheTags(tags: readonly string[]): Promise<void> {
 		interface CachePurgeEntrypoint {
 			purgeTags(tags: string[]): Promise<void>;
@@ -235,10 +245,10 @@ export class ServerContext {
 		const { CachedTenantReads: entrypoint } = this.ctx.exports as unknown as {
 			CachedTenantReads: CachePurgeEntrypoint;
 		};
-		await boundedSubrequest(
-			() => entrypoint.purgeTags([...tags]),
-			'cache.purge'
-		);
+
+		for (const batch of chunk(tags, tagsPerPurgeRequest)) {
+			await boundedSubrequest(() => entrypoint.purgeTags(batch), 'cache.purge');
+		}
 	}
 
 	// The tenant this object serves, or undefined before the control plane has
