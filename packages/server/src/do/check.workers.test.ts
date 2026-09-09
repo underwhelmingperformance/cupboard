@@ -2,6 +2,7 @@ import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -15,10 +16,12 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	authorisedFetch,
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	currentNarObjectKey,
+	currentServer,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -30,9 +33,32 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-async function runCheck(token: string, isDeep = false): Promise<CheckReport> {
+import {
+	type CheckCursor,
+	IntegrityCheckService
+} from './integrity-check-service.ts';
+
+const startOfScan: CheckCursor = { cache: '', storePathHash: '' };
+
+async function runCheck(
+	token: string,
+	isDeep = false,
+	cursor: CheckCursor = startOfScan
+): Promise<CheckReport> {
+	const query = new URLSearchParams();
+
+	if (isDeep) {
+		query.set('deep', 'true');
+	}
+
+	if (cursor.cache !== '' || cursor.storePathHash !== '') {
+		query.set('cursorCache', cursor.cache);
+		query.set('cursor', cursor.storePathHash);
+	}
+
+	const search = query.toString();
 	const response = await authorisedFetch(
-		isDeep ? '/check?deep=true' : '/check',
+		search === '' ? '/check' : `/check?${search}`,
 		token
 	);
 
@@ -63,11 +89,99 @@ describe('storage check', () => {
 			expect(await runCheck(token, deep)).toStrictEqual({
 				narInfosChecked: 2,
 				narBlobsChecked: 2,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: []
 			});
 		}
 	);
+
+	it('resumes after the row a cursor names', async () => {
+		const token = await initialise();
+		const hashes = ['a', 'b', 'c'] as const;
+
+		for (const letter of hashes) {
+			const { metadata, nar } = await verifiablePath(`resume-${letter}`, {
+				storePathHash: letter.repeat(32),
+				name: `resume-${letter}`
+			});
+			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		}
+
+		const fromStart = await runCheck(token);
+		const afterFirst = await runCheck(token, false, {
+			cache: DEFAULT_CACHE,
+			storePathHash: 'a'.repeat(32)
+		});
+
+		expect({ fromStart, afterFirst }).toStrictEqual({
+			fromStart: {
+				narInfosChecked: 3,
+				narBlobsChecked: 3,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			},
+			afterFirst: {
+				narInfosChecked: 2,
+				narBlobsChecked: 2,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			}
+		});
+	});
+
+	// The page size is injected so three rows make a two-page scan. The cursor
+	// names the last row checked, so the second pass starts on the row the first
+	// did not reach.
+	it('names the last row checked as the cursor of a page', async () => {
+		const token = await initialise();
+		const hashes = ['a', 'b', 'c'] as const;
+
+		for (const letter of hashes) {
+			const { metadata, nar } = await verifiablePath(`page-${letter}`, {
+				storePathHash: letter.repeat(32),
+				name: `page-${letter}`
+			});
+			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		}
+
+		const passes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const service = new IntegrityCheckService(instance.context, 2);
+				const first = await asOneInvocation(() =>
+					service.check(false, startOfScan)
+				);
+				const second = await asOneInvocation(() =>
+					service.check(false, {
+						cache: first.cursorCache,
+						storePathHash: first.cursor
+					})
+				);
+
+				return { first, second };
+			}
+		);
+
+		expect(passes).toStrictEqual({
+			first: {
+				narInfosChecked: 2,
+				narBlobsChecked: 2,
+				cursor: 'b'.repeat(32),
+				cursorCache: DEFAULT_CACHE,
+				discrepancies: []
+			},
+			second: {
+				narInfosChecked: 1,
+				narBlobsChecked: 1,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			}
+		});
+	});
 
 	it('reports a missing narinfo R2 object', async () => {
 		const token = await initialise();
@@ -81,7 +195,8 @@ describe('storage check', () => {
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 1,
 			narBlobsChecked: 1,
-			complete: true,
+			cursor: '',
+			cursorCache: '',
 			discrepancies: [
 				{
 					kind: 'missing-narinfo-object',
@@ -113,7 +228,8 @@ describe('storage check', () => {
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 2,
 			narBlobsChecked: 1,
-			complete: true,
+			cursor: '',
+			cursorCache: '',
 			discrepancies: [
 				{
 					kind: 'missing-nar',
@@ -149,13 +265,15 @@ describe('storage check', () => {
 			shallow: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: []
 			},
 			deep: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
-				complete: true,
+				cursor: '',
+				cursorCache: '',
 				discrepancies: [
 					{
 						kind: 'file-hash-mismatch',

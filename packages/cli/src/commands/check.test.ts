@@ -87,42 +87,59 @@ function reporter(captured: Captured): Reporter {
 	};
 }
 
+interface CheckCall {
+	readonly deep: boolean;
+	readonly cursor: string;
+	readonly cursorCache: string;
+}
+
+// Answers each call with the next page, so a test states the pages the server
+// would return and the command follows their cursors.
 function checkClient(
-	report: ParsedCheckReport,
-	calls: { deep: boolean }[]
+	pages: readonly ParsedCheckReport[],
+	calls: CheckCall[]
 ): CheckClient {
+	let index = 0;
+
 	return {
 		run(input) {
 			calls.push(input);
+			const page = pages[index];
+			index += 1;
 
-			return Promise.resolve(report);
+			if (page === undefined) {
+				throw new Error('the command asked for more pages than the test has');
+			}
+
+			return Promise.resolve(page);
 		}
 	};
 }
+
+const endOfScan = { cursor: '', cursorCache: '' } as const;
 
 const narHash = `sha256:${'1'.repeat(52)}`;
 
 describe('runCheck', () => {
 	it('reports the counts and a clean bill of health', async () => {
-		const calls: { deep: boolean }[] = [];
+		const calls: CheckCall[] = [];
 		const captured: Captured = { results: [], infos: [], warnings: [] };
 		const report = checkReportSchema.parse({
 			narInfosChecked: 3,
 			narBlobsChecked: 2,
-			complete: true,
+			...endOfScan,
 			discrepancies: []
 		});
 
-		await runCheck(false, reporter(captured), checkClient(report, calls));
+		await runCheck(false, reporter(captured), checkClient([report], calls));
 
 		expect({ calls, captured }).toStrictEqual({
-			calls: [{ deep: false }],
+			calls: [{ deep: false, cursor: '', cursorCache: '' }],
 			captured: {
 				results: [
 					[
 						{ label: 'Narinfos checked', value: '3' },
 						{ label: 'NAR blobs checked', value: '2' },
-						{ label: 'Complete', value: 'yes' },
 						{ label: 'Discrepancies', value: '0' }
 					]
 				],
@@ -132,13 +149,56 @@ describe('runCheck', () => {
 		});
 	});
 
+	// The scan reports where it stopped, and the command follows that cursor
+	// until it comes back empty.
+	it('follows the cursor to the end of the scan', async () => {
+		const calls: CheckCall[] = [];
+		const captured: Captured = { results: [], infos: [], warnings: [] };
+		const pages = [
+			checkReportSchema.parse({
+				narInfosChecked: 1000,
+				narBlobsChecked: 900,
+				cursor: 'c'.repeat(32),
+				cursorCache: 'builds',
+				discrepancies: []
+			}),
+			checkReportSchema.parse({
+				narInfosChecked: 7,
+				narBlobsChecked: 5,
+				...endOfScan,
+				discrepancies: []
+			})
+		];
+
+		await runCheck(false, reporter(captured), checkClient(pages, calls));
+
+		expect({
+			calls,
+			results: captured.results,
+			infos: captured.infos
+		}).toStrictEqual({
+			calls: [
+				{ deep: false, cursor: '', cursorCache: '' },
+				{ deep: false, cursor: 'c'.repeat(32), cursorCache: 'builds' }
+			],
+			results: [
+				[
+					{ label: 'Narinfos checked', value: '1,007' },
+					{ label: 'NAR blobs checked', value: '905' },
+					{ label: 'Discrepancies', value: '0' }
+				]
+			],
+			infos: ['No discrepancies.']
+		});
+	});
+
 	it('forwards a deep check and warns once per discrepancy', async () => {
-		const calls: { deep: boolean }[] = [];
+		const calls: CheckCall[] = [];
 		const captured: Captured = { results: [], infos: [], warnings: [] };
 		const report = checkReportSchema.parse({
 			narInfosChecked: 2,
 			narBlobsChecked: 1,
-			complete: false,
+			...endOfScan,
 			discrepancies: [
 				{
 					kind: 'missing-nar',
@@ -155,16 +215,15 @@ describe('runCheck', () => {
 			]
 		});
 
-		await runCheck(true, reporter(captured), checkClient(report, calls));
+		await runCheck(true, reporter(captured), checkClient([report], calls));
 
 		expect({ calls, captured }).toStrictEqual({
-			calls: [{ deep: true }],
+			calls: [{ deep: true, cursor: '', cursorCache: '' }],
 			captured: {
 				results: [
 					[
 						{ label: 'Narinfos checked', value: '2' },
 						{ label: 'NAR blobs checked', value: '1' },
-						{ label: 'Complete', value: 'no' },
 						{ label: 'Discrepancies', value: '2' }
 					]
 				],
@@ -178,22 +237,5 @@ describe('runCheck', () => {
 				]
 			}
 		});
-	});
-
-	it('qualifies a clean result when unchecked paths remain', async () => {
-		const calls: { deep: boolean }[] = [];
-		const captured: Captured = { results: [], infos: [], warnings: [] };
-		const report = checkReportSchema.parse({
-			narInfosChecked: 1000,
-			narBlobsChecked: 900,
-			complete: false,
-			discrepancies: []
-		});
-
-		await runCheck(false, reporter(captured), checkClient(report, calls));
-
-		expect(captured.infos).toStrictEqual([
-			'No discrepancies in the checked batch; unchecked paths remain.'
-		]);
 	});
 });
