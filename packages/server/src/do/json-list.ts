@@ -1,3 +1,17 @@
+// A statement here reads its list with `json_each` instead of binding a
+// parameter for each value. That does not change the outer lookup's plan:
+// `EXPLAIN QUERY PLAN` gives the same `SEARCH <table> USING INDEX` line for
+// `column in (select value from json_each(?))` as for `column in (?, ?, …)`,
+// on D1 and on Durable Object SQLite alike. The list appears as a `LIST
+// SUBQUERY` over `SCAN json_each VIRTUAL TABLE` with a bloom filter, and
+// SQLite probes the index once per value, so the rows read follow the list,
+// not the table. The row-value form that `matches` builds plans the same
+// way. `read.workers.test.ts` checks the plan of the private reference read.
+//
+// The list is not free: SQLite counts each element it reads from `json_each`
+// as a row read, so a lookup of N values reads N rows more than binding them
+// one by one would. Splitting the list again would save those rows and
+// nothing else, and would bring back a width somebody has to keep right.
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 
 import { BoundValueLengthError } from '../errors.ts';
