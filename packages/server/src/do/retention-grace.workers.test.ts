@@ -93,7 +93,10 @@ import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import { maxRootsExpiredPerRun } from './garbage-collection-service.ts';
+import {
+	maxRootsExpiredPerRun,
+	phaseGranule
+} from './garbage-collection-service.ts';
 import {
 	confirmGraceBatch,
 	parseStoredGraceDecision,
@@ -762,7 +765,9 @@ describe('retention grace transitions', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await instance.runGarbageCollection();
+					// One step expires `maxRootsExpiredPerRun` roots and the budget stops
+					// the pass there, leaving the remainder for the alarm.
+					await underOneUnitOfWork(() => instance.runGarbageCollection());
 
 					const firstPass = {
 						remainingRoots: instance.context.db
@@ -827,9 +832,9 @@ describe('retention grace transitions', () => {
 		await pushPath(token, path);
 		const rootName = rootNameSchema.parse('multi-target');
 		const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
-		// More targets than one unit of work covers, so the first pass leaves the
-		// root in place with targets outstanding.
-		const targetCount = 3;
+		// More targets than one step covers, so the first pass leaves the root in
+		// place with targets outstanding.
+		const targetCount = phaseGranule + 2;
 
 		const observed = await runInDurableObject(
 			currentServer(),
@@ -922,7 +927,7 @@ describe('retention grace transitions', () => {
 		expect(observed).toStrictEqual({
 			firstPass: {
 				roots: 1,
-				targets: targetCount - 1,
+				targets: targetCount - phaseGranule,
 				pathPresent: true,
 				deadlines: 1,
 				continuation: [tenantWideContinuation]
