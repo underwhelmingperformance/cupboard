@@ -22,18 +22,13 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
-import { chunk, maxInClauseValues } from './bulk.ts';
 import {
 	gracePolicySummaryFromRow,
 	policySummaryFromRow,
 	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
-
-// Each extended row binds three columns (cache, storePathHash, retainUntil),
-// so the row count per insert is maxInClauseValues divided by three: the same
-// bound-parameter headroom as a single-column IN-list, spent three at a time.
-const maxGraceDeadlineRowsPerInsert = Math.floor(maxInClauseValues / 3);
+import { jsonRowLists, jsonValueLists } from './json-list.ts';
 
 interface GraceTransition {
 	readonly storePathHash: StorePathHash;
@@ -50,14 +45,14 @@ export class RetentionService {
 	): StorePathHash[] {
 		const backed = new Set<StorePathHash>();
 
-		for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+		for (const hashes of jsonValueLists(storePathHashes)) {
 			const rows = writer
 				.select({ storePathHash: schema.narInfos.storePathHash })
 				.from(schema.narInfos)
 				.where(
 					and(
 						eq(schema.narInfos.cache, cache),
-						inArray(schema.narInfos.storePathHash, batch)
+						inArray(schema.narInfos.storePathHash, hashes)
 					)
 				)
 				.all();
@@ -78,15 +73,15 @@ export class RetentionService {
 		}[],
 		writer: SchemaWriter
 	): void {
-		for (const batch of chunk(entries, maxGraceDeadlineRowsPerInsert)) {
+		for (const rows of jsonRowLists(entries)) {
 			writer
 				.insert(schema.retentionGrace)
-				.values(
-					batch.map(({ storePathHash, retainUntil }) => ({
-						cache,
-						storePathHash,
-						retainUntil
-					}))
+				.select(
+					rows.insertSource([
+						sql`${cache}`,
+						rows.column('storePathHash'),
+						rows.column('retainUntil')
+					])
 				)
 				.onConflictDoUpdate({
 					target: [

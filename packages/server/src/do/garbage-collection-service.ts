@@ -34,18 +34,18 @@ import {
 	stagingPrefix
 } from '../http/http.ts';
 
-import {
-	chunk,
-	deleteObjects,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from './bulk.ts';
+import { deleteObjects, maxOutgoingConnections } from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
 	type SchemaDatabase,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import {
+	jsonRowLists,
+	type JsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
 import { isRowBudgetExhausted, rowsRemaining } from './row-budget.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
@@ -68,10 +68,9 @@ function phasePageSize(): number {
 	return Math.max(1, rowsRemaining());
 }
 
-// A bound on the query's parameters, not on how much work the phase does: the
-// row budget sizes the page. `expiredRootTargetSelect` binds every root the
-// expiry phase selects in one query, so a page sized only by the budget would
-// build a statement the storage binding refuses.
+// The roots one expiry phase inspects. This is a step size rather than a bound
+// on the statement: the phase reads every root it selects in one query, and the
+// row budget decides when the pass stops.
 export const maxRootsExpiredPerRun = 32;
 
 /**
@@ -81,13 +80,12 @@ export const maxRootsExpiredPerRun = 32;
  * give each subset its own page and could omit targets from the first global
  * page.
  *
- * The parameter guard imports this builder and inspects it with
- * `maxRootsExpiredPerRun` root names.
+ * The parameter test imports this builder and inspects the statement it makes.
  */
 export function expiredRootTargetSelect(
 	database: SchemaDatabase,
 	cache: StoredCache,
-	rootNames: readonly RootName[],
+	rootNames: JsonValueList<RootName>,
 	limit: number
 ) {
 	return database
@@ -304,15 +302,11 @@ export class GarbageCollectionService {
 
 		// Anchor each target's grace period to the root's recorded expiry. Using the
 		// collection time would extend retention whenever collection runs late.
-		const expiredRootTargetCandidates =
-			expiredRootNames.length === 0
-				? []
-				: expiredRootTargetSelect(
-						this.context.db,
-						cache,
-						expiredRootNames,
-						targetPage
-					).all();
+		const expiredRootTargetCandidates = jsonValueLists(
+			expiredRootNames
+		).flatMap((names) =>
+			expiredRootTargetSelect(this.context.db, cache, names, targetPage).all()
+		);
 		const expiredRootTargets = expiredRootTargetCandidates.slice(0, targetPage);
 		let rootsExpired = 0;
 
@@ -331,32 +325,18 @@ export class GarbageCollectionService {
 				tx
 			);
 
-			const hashesByRoot = new Map<RootName, StorePathHash[]>();
-
-			for (const target of expiredRootTargets) {
-				const hashes = hashesByRoot.get(target.rootName) ?? [];
-				hashes.push(target.storePathHash);
-				hashesByRoot.set(target.rootName, hashes);
-			}
-
-			for (const [rootName, storePathHashes] of hashesByRoot) {
-				for (const storePathHashBatch of chunk(
-					storePathHashes,
-					maxInClauseValues
-				)) {
-					tx.delete(schema.retentionRootTargets)
-						.where(
-							and(
-								eq(schema.retentionRootTargets.cache, cache),
-								eq(schema.retentionRootTargets.rootName, rootName),
-								inArray(
-									schema.retentionRootTargets.storePathHash,
-									storePathHashBatch
-								)
-							)
+			for (const targets of jsonRowLists(expiredRootTargets)) {
+				tx.delete(schema.retentionRootTargets)
+					.where(
+						and(
+							eq(schema.retentionRootTargets.cache, cache),
+							targets.matches({
+								rootName: schema.retentionRootTargets.rootName,
+								storePathHash: schema.retentionRootTargets.storePathHash
+							})
 						)
-						.run();
-				}
+					)
+					.run();
 			}
 
 			if (expiredRootNames.length === 0) {
@@ -386,12 +366,12 @@ export class GarbageCollectionService {
 				(rootName) => !remainingRoots.has(rootName)
 			);
 
-			for (const rootNameBatch of chunk(completedRoots, maxInClauseValues)) {
+			for (const names of jsonValueLists(completedRoots)) {
 				tx.delete(schema.retentionRoots)
 					.where(
 						and(
 							eq(schema.retentionRoots.cache, cache),
-							inArray(schema.retentionRoots.name, rootNameBatch)
+							inArray(schema.retentionRoots.name, names)
 						)
 					)
 					.run();
@@ -415,12 +395,10 @@ export class GarbageCollectionService {
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
-		const batches = chunk(storePathHashes, Math.floor(maxInClauseValues / 2));
-
-		for (const batch of batches) {
+		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.values(batch.map((storePathHash) => ({ cache, storePathHash })))
+				.select(hashes.insertSource([sql`${cache}`, hashes.element()]))
 				.onConflictDoNothing()
 				.run();
 		}
@@ -488,14 +466,14 @@ export class GarbageCollectionService {
 	): ReadonlySet<StorePathHash> {
 		const marks = new Set<StorePathHash>();
 
-		for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+		for (const hashes of jsonValueLists(storePathHashes)) {
 			const rows = this.context.db
 				.select({ storePathHash: schema.garbageCollectionMarks.storePathHash })
 				.from(schema.garbageCollectionMarks)
 				.where(
 					and(
 						eq(schema.garbageCollectionMarks.cache, cache),
-						inArray(schema.garbageCollectionMarks.storePathHash, batch)
+						inArray(schema.garbageCollectionMarks.storePathHash, hashes)
 					)
 				)
 				.all();
@@ -729,7 +707,7 @@ export class GarbageCollectionService {
 		);
 		const hashes = new Set<StorePathHash>();
 
-		for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+		for (const list of jsonValueLists(storePathHashes)) {
 			const rows = this.context.db
 				.select({
 					id: schema.pendingUploads.id,
@@ -742,7 +720,7 @@ export class GarbageCollectionService {
 						reservedVerdict,
 						inArray(
 							sql<string>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`,
-							batch
+							list
 						)
 					)
 				)
@@ -907,12 +885,9 @@ export class GarbageCollectionService {
 					.all();
 				const batch = candidates.slice(0, page);
 
-				const deadlineBatches = chunk(
-					batch.map((row) => row.storePathHash),
-					maxInClauseValues
-				);
+				const expired = batch.map((row) => row.storePathHash);
 
-				for (const hashes of deadlineBatches) {
+				for (const hashes of jsonValueLists(expired)) {
 					this.context.db
 						.delete(schema.retentionGrace)
 						.where(
@@ -998,16 +973,16 @@ export class GarbageCollectionService {
 			r2ObjectKeySchema.parse(key)
 		);
 
-		for (const keyChunk of chunk(uniqueKeys, maxInClauseValues)) {
+		for (const keys of jsonValueLists(uniqueKeys)) {
 			const uploadMatches = this.context.db
 				.select({ r2Key: schema.pendingUploads.r2Key })
 				.from(schema.pendingUploads)
-				.where(inArray(schema.pendingUploads.r2Key, keyChunk))
+				.where(inArray(schema.pendingUploads.r2Key, keys))
 				.all();
 			const attestationMatches = this.context.db
 				.select({ r2Key: schema.pendingAttestations.r2Key })
 				.from(schema.pendingAttestations)
-				.where(inArray(schema.pendingAttestations.r2Key, keyChunk))
+				.where(inArray(schema.pendingAttestations.r2Key, keys))
 				.all();
 
 			for (const match of [...uploadMatches, ...attestationMatches]) {
@@ -1303,27 +1278,23 @@ export class GarbageCollectionService {
 				...expiredAttestations.map((upload) => upload.r2Key)
 			];
 
-			for (const batch of chunk(expiredUploads, maxInClauseValues)) {
+			const expiredUploadIds = expiredUploads.map((upload) => upload.id);
+
+			for (const ids of jsonValueLists(expiredUploadIds)) {
 				this.context.db
 					.delete(schema.pendingUploads)
-					.where(
-						inArray(
-							schema.pendingUploads.id,
-							batch.map((upload) => upload.id)
-						)
-					)
+					.where(inArray(schema.pendingUploads.id, ids))
 					.run();
 			}
 
-			for (const batch of chunk(expiredAttestations, maxInClauseValues)) {
+			const expiredAttestationIds = expiredAttestations.map(
+				(attestation) => attestation.id
+			);
+
+			for (const ids of jsonValueLists(expiredAttestationIds)) {
 				this.context.db
 					.delete(schema.pendingAttestations)
-					.where(
-						inArray(
-							schema.pendingAttestations.id,
-							batch.map((attestation) => attestation.id)
-						)
-					)
+					.where(inArray(schema.pendingAttestations.id, ids))
 					.run();
 			}
 

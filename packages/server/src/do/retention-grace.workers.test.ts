@@ -3450,9 +3450,9 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	// Chunk the identity checks so a request at the protocol limit stays within
-	// SQLite's bound-parameter limit.
-	it('applies a batch at the request bound through chunked transactions', async () => {
+	// The identity checks bind the whole request as one list, so a request at the
+	// protocol limit is one transaction.
+	it('applies a batch at the request bound in one transaction', async () => {
 		await useTestServer('confirm-at-bound');
 		await bootstrap();
 
@@ -3512,7 +3512,7 @@ describe('confirming an unretained publication', () => {
 			deadlines: deadlines.length
 		}).toStrictEqual({
 			matched: uploadConfirmMaxPaths,
-			transactionCount: 12,
+			transactionCount: 1,
 			deadlines: uploadConfirmMaxPaths
 		});
 	});

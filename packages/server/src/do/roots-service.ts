@@ -19,7 +19,6 @@ import {
 	type RootTargetsPage
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { chunk } from '@cupboard/shared/collections';
 import { and, eq, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -27,9 +26,9 @@ import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
-import { maxBoundParameters } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
+import { jsonRowLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -38,15 +37,6 @@ interface StoredRoot {
 	readonly createdAt: IsoTimestamp;
 	readonly updatedAt: IsoTimestamp;
 }
-
-// Each target row supplies all four columns of `retention_root_target`, so the
-// INSERT binds four parameters per row and nothing else. A full chunk uses all
-// 100 parameters. Update this calculation if the statement gains another column
-// or a fixed parameter.
-const rootTargetInsertColumns = 4;
-export const maxRootTargetInsertRows = Math.floor(
-	maxBoundParameters / rootTargetInsertColumns
-);
 
 // A narinfo row's exact version, snapshotted off-gate so a gated re-check can
 // tell an unchanged row from one a delete-and-recommit replaced.
@@ -137,15 +127,15 @@ export class RootsService {
 				})
 				.run();
 
-			for (const targets of chunk(request.targets, maxRootTargetInsertRows)) {
+			for (const targets of jsonRowLists(request.targets)) {
 				tx.insert(schema.retentionRootTargets)
-					.values(
-						targets.map((target) => ({
-							cache,
-							rootName: request.name,
-							storePathHash: target.storePathHash,
-							storePath: target.storePath
-						}))
+					.select(
+						targets.insertSource([
+							sql`${cache}`,
+							sql`${request.name}`,
+							targets.column('storePathHash'),
+							targets.column('storePath')
+						])
 					)
 					.run();
 			}
@@ -393,16 +383,16 @@ export class RootsService {
 			readonly storePath: StorePathString;
 		}[]
 	): void {
-		for (const batch of chunk(targets, maxRootTargetInsertRows)) {
+		for (const batch of jsonRowLists(targets)) {
 			this.context.db
 				.insert(schema.retentionRootTargets)
-				.values(
-					batch.map((target) => ({
-						cache,
-						rootName: name,
-						storePathHash: target.storePathHash,
-						storePath: target.storePath
-					}))
+				.select(
+					batch.insertSource([
+						sql`${cache}`,
+						sql`${name}`,
+						batch.column('storePathHash'),
+						batch.column('storePath')
+					])
 				)
 				.onConflictDoNothing()
 				.run();
