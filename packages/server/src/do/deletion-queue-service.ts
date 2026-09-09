@@ -15,7 +15,6 @@ import {
 	inArray,
 	isNotNull,
 	notExists,
-	or,
 	sql
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -100,6 +99,66 @@ const maxSinglePathAttestationRetirements = Math.floor(
 	(d1StatementsPerInvocation - statementsPerSinglePathRetirement) /
 		attestationRetirementStatements
 );
+
+/**
+ * Builds the query for the attestation references filed against the exact
+ * narinfo generations of one retirement chunk. The chunk travels as a row
+ * list, so the query binds the same parameters however many paths it covers.
+ *
+ * The parameter test imports this builder and inspects the statement it makes.
+ */
+export function capturedReferenceSelect(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	cache: StoredCache,
+	batch: JsonRowList<TornDownNarInfo>,
+	limit: number
+) {
+	return database
+		.select({
+			cache: d1Schema.attestationReference.cache,
+			storePathHash: d1Schema.attestationReference.storePathHash,
+			generation: d1Schema.attestationReference.generation,
+			predicateType: d1Schema.attestationReference.predicateType,
+			digest: d1Schema.attestationReference.digest
+		})
+		.from(d1Schema.attestationReference)
+		.where(
+			and(
+				eq(d1Schema.attestationReference.tenant, tenant),
+				eq(d1Schema.attestationReference.cache, cache),
+				batch.matches({
+					storePathHash: d1Schema.attestationReference.storePathHash,
+					generation: d1Schema.attestationReference.generation
+				})
+			)
+		)
+		.limit(limit);
+}
+
+/**
+ * Builds the query for the public caches that still reference a retired
+ * chunk's NAR hashes. The hashes travel as a list, so the query binds the same
+ * parameters however many the chunk retired.
+ *
+ * The parameter test imports this builder and inspects the statement it makes.
+ */
+export function publicReferenceSelect(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	narHashes: JsonValueList<NixSha256HashString>
+) {
+	return database
+		.select({ narHash: d1Schema.blobReference.narHash })
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				inArray(d1Schema.blobReference.narHash, narHashes),
+				outsidePrivateCaches(d1Schema.blobReference.cache)
+			)
+		);
+}
 
 /**
  * Builds the usage-credit update and edge delete that retire one chunk of
@@ -308,18 +367,19 @@ export class DeletionQueueService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const publicRows = await this.context.d1
-			.select({ narHash: d1Schema.blobReference.narHash })
-			.from(d1Schema.blobReference)
-			.where(
-				and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					inArray(d1Schema.blobReference.narHash, narHashes),
-					outsidePrivateCaches(d1Schema.blobReference.cache)
-				)
-			)
-			.all();
-		const stillPublic = new Set(publicRows.map((row) => row.narHash));
+		const stillPublic = new Set<NixSha256HashString>();
+
+		for (const list of jsonValueLists(narHashes)) {
+			const publicRows = await publicReferenceSelect(
+				this.context.d1,
+				tenant,
+				list
+			).all();
+
+			for (const row of publicRows) {
+				stillPublic.add(row.narHash);
+			}
+		}
 
 		await this.cachePurges.enqueueNars(
 			narHashes.filter((narHash) => !stillPublic.has(narHash))
@@ -560,37 +620,31 @@ export class DeletionQueueService {
 	// chunk retires. Fetches at most one reference beyond the number the pass can
 	// retire. The surplus row tells the caller to leave the chunk's queue entries
 	// in place.
-	private capturedAttestationReferences(
+	private async capturedAttestationReferences(
 		tenant: TenantId,
 		cache: StoredCache,
 		batch: readonly TornDownNarInfo[],
 		limit: number
 	): Promise<AttestationReference[]> {
-		const pairFilters = batch.map((entry) =>
-			and(
-				eq(d1Schema.attestationReference.storePathHash, entry.storePathHash),
-				eq(d1Schema.attestationReference.generation, entry.generation)
-			)
-		);
+		const references: AttestationReference[] = [];
 
-		return this.context.d1
-			.select({
-				cache: d1Schema.attestationReference.cache,
-				storePathHash: d1Schema.attestationReference.storePathHash,
-				generation: d1Schema.attestationReference.generation,
-				predicateType: d1Schema.attestationReference.predicateType,
-				digest: d1Schema.attestationReference.digest
-			})
-			.from(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
-					or(...pairFilters)
-				)
-			)
-			.limit(limit)
-			.all();
+		for (const entries of jsonRowLists(batch)) {
+			const rows = await capturedReferenceSelect(
+				this.context.d1,
+				tenant,
+				cache,
+				entries,
+				limit - references.length
+			).all();
+
+			references.push(...rows);
+
+			if (references.length >= limit) {
+				break;
+			}
+		}
+
+		return references;
 	}
 
 	/**

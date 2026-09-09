@@ -17,12 +17,46 @@ import {
 	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { PrivateViewDefaultSelectorError } from '../errors.ts';
 
-import { reuseViewSummaryFromRow, type ServerContext } from './context.ts';
+import {
+	reuseViewSummaryFromRow,
+	type SchemaWriter,
+	type ServerContext
+} from './context.ts';
+import { type JsonRowList, jsonRowLists } from './json-list.ts';
+
+// The columns of one selector row, as SQL reads them back from the list.
+export interface StoredReuseViewSelector {
+	readonly kind: ParsedReuseViewSelector['kind'];
+	readonly pattern: string;
+}
+
+/**
+ * Builds the insert that records one list of a view's selectors. The selectors
+ * travel as a row list, so the statement binds the same parameters however many
+ * a request carries.
+ *
+ * The parameter test imports this builder and inspects the statement it makes.
+ */
+export function reuseViewSelectorInsert(
+	handle: SchemaWriter,
+	view: StoredReuseView,
+	selectors: JsonRowList<StoredReuseViewSelector>
+) {
+	return handle
+		.insert(schema.reuseViewSelectors)
+		.select(
+			selectors.insertSource([
+				sql`${view}`,
+				selectors.column('kind'),
+				selectors.column('pattern')
+			])
+		);
+}
 
 function selectorSort(
 	left: ParsedReuseViewSelector,
@@ -185,15 +219,11 @@ export class ReuseViewAdminService {
 			tx.delete(schema.reuseViewSelectors)
 				.where(eq(schema.reuseViewSelectors.view, name))
 				.run();
-			tx.insert(schema.reuseViewSelectors)
-				.values(
-					body.selectors.map((selector) => ({
-						view: name,
-						kind: selector.kind,
-						pattern: selector.pattern
-					}))
-				)
-				.run();
+			for (const selectors of jsonRowLists<StoredReuseViewSelector>(
+				body.selectors
+			)) {
+				reuseViewSelectorInsert(tx, name, selectors).run();
+			}
 
 			return {
 				name: contractNameForReuseView(name),
