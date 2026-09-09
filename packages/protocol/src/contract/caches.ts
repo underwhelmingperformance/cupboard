@@ -20,10 +20,13 @@ export const cachesContract = {
 		.route({ method: 'GET', path: '/caches' })
 		.output(cacheListResponseSchema),
 
+	// `replay-safe` depends on `putCache`: the registry upsert is by name, and
+	// `clearCacheDeletion` matches only a row with a deletion timestamp.
 	put: baseProcedure
 		.meta({
 			requires: 'cache:create',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'PUT', path: '/caches/{cacheName}' })
 		.input(
@@ -34,6 +37,9 @@ export const cachesContract = {
 		)
 		.output(cacheSummarySchema),
 
+	// Removal keeps the default. A retry sent after the name was registered
+	// again would tear down the new cache, and every call advances the cache
+	// lifecycle generation.
 	remove: baseProcedure
 		.meta({
 			requires: 'cache:delete',

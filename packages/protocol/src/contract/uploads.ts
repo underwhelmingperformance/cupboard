@@ -78,11 +78,17 @@ export const uploadsContract = {
 	// committed. A successful confirm extends a grace deadline and can mark the
 	// cache grace-managed, so it mutates retention state and carries
 	// `maintenance: true` like negotiate.
+	//
+	// `replay-safe` depends on `confirmPaths`: a repeat re-probes the same paths
+	// and `extendGraceDeadlines` keeps the later of the stored and the requested
+	// deadline, so a repeat can only move a deadline later. Negotiate creates a
+	// pending upload with a fresh id on every call and keeps the default.
 	confirm: baseProcedure
 		.meta({
 			requires: 'upload:confirm',
 			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
+			maintenance: true,
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/confirm' })
 		.input(
