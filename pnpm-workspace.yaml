@@ -16,5 +16,6 @@ onlyBuiltDependencies:
   - esbuild
   - workerd
 minimumReleaseAgeExclude:
-  - hono@4.12.34
+  # Renovate security update: hono@4.13.5
+  - hono@4.12.34 || 4.13.5
   - undici@7.29.0
