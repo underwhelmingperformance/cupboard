@@ -143,6 +143,15 @@ class JsonRowList<T extends JsonListRow<T>> {
 	}
 
 	/**
+	 * A predicate that holds when `predicate` holds for a row of the list. The
+	 * predicate reads the row's values through {@link column}, so this states a
+	 * comparison that {@link matches} cannot, such as a range.
+	 */
+	anyRow(predicate: SQL): SQL {
+		return sql`exists (select 1 from json_each(${this.json}) where ${predicate})`;
+	}
+
+	/**
 	 * The source of an `INSERT ... SELECT` over the list. Each column is an
 	 * expression: a fixed value the statement binds, or {@link column}.
 	 */
