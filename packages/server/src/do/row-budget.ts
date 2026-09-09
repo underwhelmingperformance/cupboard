@@ -20,6 +20,14 @@ import { wrapDispatchedMethods } from './dispatch-scope.ts';
  * spend as it runs, and the storage binding already counts them for billing.
  * Every Durable Object request logs its `rowsRead` and `rowsWritten`, so
  * production traces are the evidence for changing this number.
+ *
+ * A row is not a fixed amount of work. A statement that binds its list as one
+ * JSON parameter reads it through `json_each`, and SQLite counts every element
+ * as a row read, so a lookup of N values costs N row reads; `json-list.ts`
+ * states that fact where the binding happens. How many rows a pass spends
+ * therefore depends on how its statements bind their lists, which is why a row
+ * count measured against different statements does not transfer to this
+ * number.
  */
 const rowsPerInvocation = 25_000;
 
@@ -43,8 +51,8 @@ class RowBudget {
 	}
 
 	get remaining(): number {
-		// A pass must not begin another unit in a scope that has already been
-		// abandoned, however many rows it has left to spend.
+		// A pass must not begin another step in a scope that has already been
+		// aborted, however many rows it has left to spend.
 		if (currentDeadlineSignal()?.aborted === true) {
 			return 0;
 		}
@@ -86,9 +94,9 @@ export function currentRowBudgetMeter(): DatabaseCostMeter | undefined {
 /**
  * How many rows the current invocation may still read and write.
  *
- * This is a page limit for a pass that has not run yet. It reaches zero once
- * the rows are spent, and also once an enclosing deadline scope has been
- * abandoned, because a pass must not begin another unit there.
+ * This reaches zero once the rows are spent, and also once an enclosing
+ * deadline scope has been aborted, because a pass must not begin another step
+ * there.
  *
  * Callers must run under a dispatched Durable Object method. This throws
  * outside a budget rather than reporting an allowance nothing is debiting.

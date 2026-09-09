@@ -247,9 +247,10 @@ describe('maintenance pass cost', () => {
 			'expired-small',
 			'2020-01-01T00:00:00.000Z'
 		);
-		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
-			currentServer().runGarbageCollection()
-		);
+		// A pass collects families until its budget is spent, so compare passes
+		// that run one step: what must not change with the backlog is the cost of
+		// selecting the family that step collects.
+		const smallBacklog = await oneUnitCollectionCost();
 		await clearRefreshTokenFamilyFixtures();
 
 		await resetTestServer();
@@ -259,24 +260,22 @@ describe('maintenance pass cost', () => {
 			'expired-large',
 			'2020-01-01T00:00:00.000Z'
 		);
-		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
-			currentServer().runGarbageCollection()
-		);
+		const largeBacklog = await oneUnitCollectionCost();
 		await clearRefreshTokenFamilyFixtures();
 
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 54,
-			largeBacklogCost: 54
+			smallBacklogCost: 35,
+			largeBacklogCost: 35
 		});
 	});
 
-	// A family can contain more members than one pass can afford to delete. Both
-	// fixtures hold more than the one-unit budget these passes run under, so the
-	// exact cost must stay the same when the remaining backlog grows from one
-	// member to 4,001 members.
+	// A family can contain more members than one step deletes. Both fixtures hold
+	// more than one step's worth, and these passes run on a one-unit budget that
+	// stops them after that step, so the exact cost must stay the same when the
+	// remaining backlog grows from 1,001 members to 5,001.
 	it('bounds the cost of deleting an oversized refresh-token family', async () => {
 		await initialise();
 
@@ -300,8 +299,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 32, rowsWritten: 8 },
-			largeBacklog: { rowsRead: 32, rowsWritten: 8 }
+			smallBacklog: { rowsRead: 667, rowsWritten: 135 },
+			largeBacklog: { rowsRead: 667, rowsWritten: 135 }
 		});
 	});
 

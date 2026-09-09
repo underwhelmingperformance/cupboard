@@ -47,30 +47,31 @@ import {
 	jsonValueLists
 } from './json-list.ts';
 import { type RetentionService } from './retention-service.ts';
-import { isRowBudgetExhausted, rowsRemaining } from './row-budget.ts';
+import { isRowBudgetExhausted } from './row-budget.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 /**
- * How large a page the phase that is due may read.
+ * The items one phase step reads before the pass consults its row budget.
  *
- * The phases of one pass draw on a single row budget in sequence, so a phase
- * can become due with the budget already spent. A page of zero rows would
- * select nothing, record no progress and leave the pass at the same phase
- * boundary on the next invocation, so the due phase always reads at least one
- * row however much that row costs it to process.
+ * This is a step size and not a cap. A pass runs a step, asks the budget, and
+ * runs another, so the budget decides how much of a backlog one invocation
+ * clears and this decides only how far a step can carry it past that point.
+ * Any value from one upward reaches the same total, because a step always runs
+ * whole and the pass records where it stopped. A larger value spends fewer
+ * statements for the same rows and overshoots the budget by more.
  *
- * Processing a row costs more rows than reading it, so a full page spends a
- * small multiple of what the budget had left. The budget bounds what a pass
- * reads before it defers, not what it spends: a statement's row count is known
- * only once it has run.
+ * Do not size a step from the rows the budget has left. That makes a row an
+ * item: a fresh invocation reads a step of `rowsPerInvocation` items and then
+ * spends several rows processing each one, by a factor that differs per phase.
  */
-function phasePageSize(): number {
-	return Math.max(1, rowsRemaining());
-}
+export const phaseGranule = 128;
 
-// The roots one expiry phase inspects. This is a step size rather than a bound
-// on the statement: the phase reads every root it selects in one query, and the
-// row budget decides when the pass stops.
+// The roots one expiry step inspects. This is a step size like `phaseGranule`
+// and it is chosen: `expiredRootTargetSelect` binds the root list as one JSON
+// parameter, so the statement's parameter count does not follow this value,
+// and the row budget decides how many steps a pass runs. It is a second step
+// size only because the expiry phase reads every root it selects in one query,
+// and nothing stops it being raised to `phaseGranule`.
 export const maxRootsExpiredPerRun = 32;
 
 /**
@@ -268,7 +269,7 @@ export class GarbageCollectionService {
 		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
-		const rootPage = Math.min(phasePageSize(), maxRootsExpiredPerRun);
+		const rootPage = maxRootsExpiredPerRun;
 
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
@@ -298,7 +299,7 @@ export class GarbageCollectionService {
 			)
 		);
 
-		const targetPage = phasePageSize();
+		const targetPage = phaseGranule;
 
 		// Anchor each target's grace period to the root's recorded expiry. Using the
 		// collection time would extend retention whenever collection runs late.
@@ -408,8 +409,8 @@ export class GarbageCollectionService {
 		cache: StoredCache,
 		phase: 'roots' | 'grace',
 		cursor: string
-	): { readonly complete: boolean } {
-		const page = phasePageSize();
+	): void {
+		const page = phaseGranule;
 		const rows =
 			phase === 'roots'
 				? this.context.db
@@ -449,15 +450,14 @@ export class GarbageCollectionService {
 			this.updateScan(cache, {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
-			return { complete: false };
+
+			return;
 		}
 
 		this.updateScan(cache, {
 			phase: phase === 'roots' ? 'grace' : 'mark',
 			cursor: ''
 		});
-
-		return { complete: true };
 	}
 
 	private existingMarks(
@@ -620,7 +620,7 @@ export class GarbageCollectionService {
 
 			this.validateReferencesContainer(cache, storePathHash);
 
-			const page = phasePageSize();
+			const page = phaseGranule;
 
 			const references = this.context.db.all<{
 				referenceIndex: number;
@@ -755,7 +755,7 @@ export class GarbageCollectionService {
 		readonly pathsCollected: number;
 		readonly complete: boolean;
 	} {
-		const page = phasePageSize();
+		const page = phaseGranule;
 		const rows = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
@@ -852,7 +852,9 @@ export class GarbageCollectionService {
 				const expired = this.expireRoots(cache, now);
 				rootsExpired += expired.rootsExpired;
 				rootTargetsExpired += expired.rootTargetsExpired;
-				hasMoreExpiredRoots ||= expired.hasMoreExpiredRoots;
+				// Report what the last step saw, not what any step saw: a later step
+				// can finish the roots an earlier one left behind.
+				hasMoreExpiredRoots = expired.hasMoreExpiredRoots;
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
 					allowEmptyCollection:
@@ -862,7 +864,7 @@ export class GarbageCollectionService {
 					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
 				});
 
-				if (expired.hasMoreExpiredRoots || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -870,7 +872,7 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'expire-grace') {
-				const page = phasePageSize();
+				const page = phaseGranule;
 				const candidates = this.context.db
 					.select({ storePathHash: schema.retentionGrace.storePathHash })
 					.from(schema.retentionGrace)
@@ -906,7 +908,7 @@ export class GarbageCollectionService {
 					...(candidates.length <= batch.length && { phase: 'roots' })
 				});
 
-				if (candidates.length > batch.length || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -914,9 +916,9 @@ export class GarbageCollectionService {
 			}
 
 			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				const seeded = this.advanceSeed(cache, scan.phase, scan.cursor);
+				this.advanceSeed(cache, scan.phase, scan.cursor);
 
-				if (!seeded.complete || isRowBudgetExhausted()) {
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -1119,12 +1121,43 @@ export class GarbageCollectionService {
 		return true;
 	}
 
-	// A family can hold more members than one pass can afford. Delete a page from
-	// the oldest expired family and keep the family until every member is gone.
-	private collectExpiredRefreshFamily(
+	/**
+	 * Deletes expired refresh-token families a step at a time until the budget is
+	 * spent or none is left, keeping a family until every member is gone.
+	 *
+	 * This phase is not part of a cache's collection scan and has no scan row to
+	 * record a phase in, so its steps run here. It resumes without one: a family
+	 * row outlives its members, so a partly deleted family is found again by the
+	 * next pass.
+	 */
+	private collectExpiredRefreshFamilies(
 		now: IsoTimestamp
 	): ExpiredRefreshFamilyCollection {
-		const page = phasePageSize();
+		let familiesDeleted = 0;
+		let membersDeleted = 0;
+
+		for (;;) {
+			const step = this.collectExpiredRefreshFamilyStep(now);
+			familiesDeleted += step.familiesDeleted;
+			membersDeleted += step.membersDeleted;
+
+			if (!step.hasMoreWork || isRowBudgetExhausted()) {
+				return {
+					familiesDeleted,
+					membersDeleted,
+					hasMoreWork: step.hasMoreWork
+				};
+			}
+		}
+	}
+
+	// A family can hold more members than one step deletes. Delete a step's worth
+	// from the oldest expired family and keep the family until every member is
+	// gone.
+	private collectExpiredRefreshFamilyStep(
+		now: IsoTimestamp
+	): ExpiredRefreshFamilyCollection {
+		const page = phaseGranule;
 
 		return this.context.db.transaction((transaction) => {
 			const family = transaction
@@ -1212,7 +1245,7 @@ export class GarbageCollectionService {
 		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
-			const expiredRefreshFamilies = this.collectExpiredRefreshFamily(now);
+			const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
 			if (expiredRefreshFamilies.hasMoreWork) {
 				log.warn(
