@@ -1,4 +1,14 @@
-import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	cachePrioritySchema,
+	cacheSelectorSchema,
+	namedCacheSelectorSchema,
+	rootNameSchema,
+	storePathHashSchema,
+	storePathSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { reuseViewContractNameSchema } from '@cupboard/protocol/reuse-views';
 import { pushIdSchema } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
@@ -74,6 +84,122 @@ const badGateway = (): Response =>
 		status: StatusCodes.BAD_GATEWAY,
 		headers: { 'cf-ray': 'a113b23c78faf6c2' }
 	});
+
+const notImplemented = (): Response =>
+	new Response('Not implemented\n', {
+		status: StatusCodes.NOT_IMPLEMENTED
+	});
+
+const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+// A read password is exactly 43 base64url characters, which this satisfies.
+const readCredential = {
+	user: 'cupboard',
+	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+};
+
+const nonReplayableMutations = [
+	{
+		name: 'a root replacement',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.set({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				name: rootNameSchema.parse('channel'),
+				targets: []
+			})
+	},
+	{
+		name: 'a root ensure',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.ensure({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				name: rootNameSchema.parse('channel'),
+				targets: [storePathSchema.parse(storePath)]
+			})
+	}
+] as const;
+
+// Each of these replaces state the server already holds, so the contract marks it
+// `replay-safe` and a transient failure may be sent again.
+const idempotentMutations = [
+	{
+		name: 'a cache registration',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.caches.put({
+				cacheName: namedCacheSelectorSchema.parse('builds'),
+				priority: cachePrioritySchema.parse(41)
+			})
+	},
+	{
+		name: 'a reuse-view replacement',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.reuseViews.set({
+				name: reuseViewContractNameSchema.parse('shared'),
+				selectors: [{ kind: 'prefix', pattern: 'build' }]
+			})
+	},
+	{
+		name: 'an upload confirmation',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.uploads.confirm({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				storePathHashes: [storePathHashSchema.parse('a'.repeat(32))]
+			})
+	}
+] as const;
+
+// A retry of one of these would delete whatever the name refers to by the time
+// it arrives, so the contract leaves them `replay-unsafe`.
+const deletesByName = [
+	{
+		name: 'a root removal',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.remove({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				name: rootNameSchema.parse('channel')
+			})
+	},
+	{
+		name: 'a cache removal',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.caches.remove({
+				params: { cacheName: namedCacheSelectorSchema.parse('builds') },
+				query: { force: false }
+			})
+	},
+	{
+		name: 'a reuse-view removal',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.reuseViews.remove({
+				name: reuseViewContractNameSchema.parse('shared')
+			})
+	}
+] as const;
+
+// Every GET procedure is read-only, so the contract marks each `replay-safe`
+// and a transient failure is sent again.
+const readOnlyReads = [
+	{
+		name: 'a root listing',
+		response: { roots: [] },
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.roots.list({
+				params: { cacheName: cacheSelectorSchema.parse('_default') },
+				query: {}
+			})
+	},
+	{
+		name: 'a usage read',
+		response: {
+			narBlobs: 0,
+			narFileSize: 0,
+			casObjects: 0,
+			casFileSize: 0,
+			totalFileSize: 0
+		},
+		request: (rpc: ReturnType<typeof tenantRpc>) => rpc.stats.usage()
+	}
+] as const;
 
 const nonIdempotentNegotiations = [
 	{
@@ -388,6 +514,118 @@ describe('tenantRpc', () => {
 		}
 	});
 
+	it.each(
+		nonReplayableMutations.flatMap((mutation) => [
+			{
+				...mutation,
+				failure: 'a lost response',
+				response: (): Response => {
+					throw new TypeError('fetch failed', {
+						cause: { code: 'ECONNRESET' }
+					});
+				}
+			},
+			{ ...mutation, failure: 'a gateway failure', response: badGateway }
+		])
+	)('does not replay $name after $failure', async ({ request, response }) => {
+		vi.useFakeTimers();
+		try {
+			const { fetcher, captured } = capturingFetcher([
+				response,
+				notImplemented
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+			const pending = rejectedBy(() => request(rpc));
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect({
+				rejected: (await pending) !== undefined,
+				attempts: captured.length
+			}).toStrictEqual({ rejected: true, attempts: 1 });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// The fetcher does not retry the second status, so the call ends after exactly
+	// two attempts. Neither response body has to satisfy the contract's output.
+	it.each(idempotentMutations)(
+		'retries $name after a gateway failure',
+		async ({ request }) => {
+			vi.useFakeTimers();
+
+			try {
+				const { fetcher, captured } = capturingFetcher([
+					badGateway,
+					notImplemented
+				]);
+				const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+					credential: 'admin-token',
+					fetcher
+				});
+
+				const pending = rejectedBy(() => request(rpc));
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect({
+					rejection: (await pending) instanceof CupboardHttpError,
+					attempts: captured.length
+				}).toStrictEqual({ rejection: true, attempts: 2 });
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
+	it.each(deletesByName)(
+		'does not replay $name after a gateway failure',
+		async ({ request }) => {
+			const { fetcher, captured } = capturingFetcher([
+				badGateway,
+				() => {
+					throw new Error('the removal was replayed');
+				}
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			await expect(request(rpc)).rejects.toBeInstanceOf(CupboardHttpError);
+			expect(captured).toHaveLength(1);
+		}
+	);
+
+	it.each(readOnlyReads)(
+		'retries $name after a gateway failure',
+		async ({ response, request }) => {
+			vi.useFakeTimers();
+
+			try {
+				const { fetcher, captured } = capturingFetcher([
+					badGateway,
+					() => Response.json(response)
+				]);
+				const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+					credential: 'admin-token',
+					fetcher
+				});
+
+				const pending = request(rpc);
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect({
+					value: await pending,
+					attempts: captured.length
+				}).toStrictEqual({ value: response, attempts: 2 });
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
+
 	it.each(nonIdempotentNegotiations)(
 		'does not replay $name after a gateway failure',
 		async ({ request }) => {
@@ -609,4 +847,96 @@ describe('controlRpc', () => {
 			'https://cupboard.test/control/tenants'
 		]);
 	});
+
+	// A rotation stores the password the request carries, so the server accepts the
+	// same body twice. A clear deletes by name and must not be sent again.
+	const credentialCalls = [
+		{
+			name: 'a tenant read-credential rotation',
+			attempts: 2,
+			request: (rpc: ReturnType<typeof controlRpc>) =>
+				rpc.tenants.rotateReadCredential({
+					id: tenantIdSchema.parse('acme'),
+					read: readCredential
+				})
+		},
+		{
+			name: 'a private-cache read-credential rotation',
+			attempts: 2,
+			request: (rpc: ReturnType<typeof controlRpc>) =>
+				rpc.tenants.rotateCacheReadCredential({
+					id: tenantIdSchema.parse('acme'),
+					cacheName: cacheNameSchema.parse('builds'),
+					read: readCredential
+				})
+		},
+		{
+			name: 'a tenant read-credential clear',
+			attempts: 1,
+			request: (rpc: ReturnType<typeof controlRpc>) =>
+				rpc.tenants.clearReadCredential({ id: tenantIdSchema.parse('acme') })
+		},
+		{
+			name: 'a private-cache read-credential clear',
+			attempts: 1,
+			request: (rpc: ReturnType<typeof controlRpc>) =>
+				rpc.tenants.clearCacheReadCredential({
+					id: tenantIdSchema.parse('acme'),
+					cacheName: cacheNameSchema.parse('builds')
+				})
+		}
+	] as const;
+
+	it('retries a tenant listing after a gateway failure', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const { fetcher, captured } = capturingFetcher([
+				badGateway,
+				() => Response.json({ tenants: [] })
+			]);
+			const rpc = controlRpc(parseWorkerUrl('https://cupboard.test'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const pending = rpc.tenants.list();
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect({
+				listed: await pending,
+				attempts: captured.length
+			}).toStrictEqual({ listed: { tenants: [] }, attempts: 2 });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each(credentialCalls)(
+		'sends $name $attempts times after a gateway failure',
+		async ({ attempts, request }) => {
+			vi.useFakeTimers();
+
+			try {
+				const { fetcher, captured } = capturingFetcher([
+					badGateway,
+					notImplemented
+				]);
+				const rpc = controlRpc(parseWorkerUrl('https://cupboard.test'), {
+					credential: 'admin-token',
+					fetcher
+				});
+
+				const pending = rejectedBy(() => request(rpc));
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect({
+					rejection: (await pending) instanceof CupboardHttpError,
+					attempts: captured.length
+				}).toStrictEqual({ rejection: true, attempts });
+			} finally {
+				vi.useRealTimers();
+			}
+		}
+	);
 });

@@ -58,13 +58,13 @@ const controlProcedure = oc
  */
 export const controlContract = {
 	check: controlProcedure
-		.meta({ requires: 'control:check' })
+		.meta({ requires: 'control:check', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/check' })
 		.output(controlCheckReportSchema),
 
 	instance: {
 		get: controlProcedure
-			.meta({ requires: 'instance:read' })
+			.meta({ requires: 'instance:read', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/instance' })
 			.output(instanceSummarySchema),
 
@@ -77,7 +77,7 @@ export const controlContract = {
 
 	keys: {
 		list: controlProcedure
-			.meta({ requires: 'control-key:list' })
+			.meta({ requires: 'control-key:list', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/keys' })
 			.output(controlKeyListResponseSchema),
 
@@ -95,7 +95,7 @@ export const controlContract = {
 
 	tenants: {
 		list: controlProcedure
-			.meta({ requires: 'tenant:list' })
+			.meta({ requires: 'tenant:list', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/tenants' })
 			.output(tenantListResponseSchema),
 
@@ -137,10 +137,15 @@ export const controlContract = {
 			)
 			.output(tenantReadModeResponseSchema),
 
+		// Both rotations write a verifier built from the password in the request,
+		// with a fresh salt each time, so a repeat leaves the same password valid.
+		// The two clears keep the default: a retry sent after the credential was
+		// set again would clear the new one.
 		rotateReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-read-credential',
-				resource: { tenant: { field: 'id' } }
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
 			.input(
@@ -163,7 +168,8 @@ export const controlContract = {
 		rotateCacheReadCredential: controlProcedure
 			.meta({
 				requires: 'tenant:rotate-cache-read-credential',
-				resource: { tenant: { field: 'id' } }
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
 			})
 			.route({
 				method: 'POST',
@@ -215,7 +221,7 @@ export const controlContract = {
 	// operator reads it from here.
 	deployment: {
 		phase: controlProcedure
-			.meta({ requires: 'deployment:read' })
+			.meta({ requires: 'deployment:read', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/deployment/phase' })
 			.output(deploymentPhaseResponseSchema)
 	},
@@ -226,7 +232,7 @@ export const controlContract = {
 	// that have not; an object records its step only when woken here.
 	localStep: {
 		status: controlProcedure
-			.meta({ requires: 'local-step:read' })
+			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/local-step' })
 			.output(localStepStatusSchema),
 
@@ -242,12 +248,18 @@ export const controlContract = {
 	// rule. Administrators manage additional scoped identities here.
 	oidcTrust: {
 		list: controlProcedure
-			.meta({ requires: 'control-oidc-trust:list' })
+			.meta({
+				requires: 'control-oidc-trust:list',
+				replaySafety: 'replay-safe'
+			})
 			.route({ method: 'GET', path: '/oidc-trust' })
 			.output(oidcTrustListResponseSchema),
 
 		get: controlProcedure
-			.meta({ requires: 'control-oidc-trust:read' })
+			.meta({
+				requires: 'control-oidc-trust:read',
+				replaySafety: 'replay-safe'
+			})
 			.route({ method: 'GET', path: '/oidc-trust/{id}' })
 			.input(z.strictObject({ id: trustRuleIdSchema }))
 			.output(oidcTrustSummarySchema),

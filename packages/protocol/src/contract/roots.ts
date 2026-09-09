@@ -30,7 +30,8 @@ export const rootsContract = {
 	list: baseProcedure
 		.meta({
 			requires: 'root:list',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({
 			method: 'GET',
@@ -53,7 +54,8 @@ export const rootsContract = {
 	targets: baseProcedure
 		.meta({
 			requires: 'root:list',
-			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } }
+			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({
 			method: 'GET',
@@ -72,8 +74,8 @@ export const rootsContract = {
 		.output(rootTargetsPageSchema),
 
 	// The token must grant `root:set` for both this cache and this root. An empty
-	// target list clears the targets but keeps the root and its expiry. The CLI's
-	// `root set` and `root ensure` commands require at least one store path, so
+	// target list clears the targets but keeps the root. The CLI's `root set`
+	// and `root ensure` commands require at least one store path, so
 	// clearing a root requires a direct request with an empty list.
 	set: baseProcedure
 		.meta({
@@ -107,6 +109,8 @@ export const rootsContract = {
 		)
 		.output(rootEnsureResponseSchema),
 
+	// Removal keeps the default. A retry sent after the name was bound to a new
+	// root would delete that one.
 	remove: baseProcedure
 		.meta({
 			requires: 'root:remove',

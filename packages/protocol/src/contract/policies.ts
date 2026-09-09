@@ -17,7 +17,7 @@ import { baseProcedure } from './base.ts';
 
 export const policiesContract = {
 	list: baseProcedure
-		.meta({ requires: 'policy:list' })
+		.meta({ requires: 'policy:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/policies' })
 		.output(retentionPolicyListResponseSchema),
 
@@ -34,7 +34,7 @@ export const policiesContract = {
 		.output(retentionPolicyRemoveResponseSchema),
 
 	graceList: baseProcedure
-		.meta({ requires: 'policy:list' })
+		.meta({ requires: 'policy:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/policies/grace' })
 		.output(gracePolicyListResponseSchema),
 
@@ -56,7 +56,8 @@ export const policiesContract = {
 	graceCoverage: baseProcedure
 		.meta({
 			requires: 'upload:confirm',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'GET', path: '/cache/{cacheName}/grace-coverage' })
 		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
