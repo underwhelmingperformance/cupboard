@@ -5,7 +5,7 @@ import {
 
 import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 
-import { chunk, maxInClauseValues } from './bulk.ts';
+import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 
@@ -37,8 +37,8 @@ const maxStoragePutEntries = 128;
 // incarnation. The subsequent R2 HEAD requests do not use D1.
 export const statementsPerReconcileProbe = 1;
 
-// One query reads the committed reference edges for a whole page. Every page
-// fits in one `IN (...)` list.
+// One query reads the committed reference edges for a whole page, however many
+// paths the page holds.
 export const statementsPerReconcileEdgeQuery = 1;
 
 // Restoring a missing narinfo object re-reads the NAR's incarnation under the
@@ -56,17 +56,13 @@ export const statementsPerReconcileRemoval = 8;
  * The maximum number of queued paths claimed by one alarm.
  *
  * The page reserves one statement per probe, the edge query and one removal.
- * Every pass can therefore repair at least one probed target. The page also
- * fits in one `IN (...)` list, so the edge query requires one statement.
+ * Every pass can therefore repair at least one probed target.
  */
-export const maxPathsReconciledPerRun = Math.min(
-	maxInClauseValues,
-	Math.floor(
-		(maintenancePassStatements -
-			statementsPerReconcileEdgeQuery -
-			statementsPerReconcileRemoval) /
-			statementsPerReconcileProbe
-	)
+export const maxPathsReconciledPerRun = Math.floor(
+	(maintenancePassStatements -
+		statementsPerReconcileEdgeQuery -
+		statementsPerReconcileRemoval) /
+		statementsPerReconcileProbe
 );
 
 export class ReconcileQueueService {
