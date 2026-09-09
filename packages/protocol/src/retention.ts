@@ -75,8 +75,8 @@ export type ParsedRootEnsureResponse = z.output<
 >;
 
 // A target page runs the same probe for each distinct path as
-// `rootSetMaxTargets` describes. Root listings use the same page size to bound
-// response size.
+// `rootSetMaxTargets` describes. A caller follows the cursor to read every
+// target. Root listings use the same page size to bound response size.
 export const rootListPageSize = rootSetMaxTargets;
 
 // Clients must return the cursor unchanged to resume a listing. Its contents
