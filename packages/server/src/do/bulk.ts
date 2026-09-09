@@ -34,11 +34,6 @@ export { chunk } from '@cupboard/shared/collections';
 // configured and the local agreement with production can drift either way.
 export const maxBoundParameters = 100;
 
-// An `IN (...)` list is chunked below the budget, leaving headroom for the fixed
-// parameters that a query also binds, such as a tenant or cache. If a statement
-// binds the list more than once, its caller must use a narrower chunk.
-export const maxInClauseValues = 90;
-
 // Cloudflare allows a Durable Object six simultaneous outgoing connections per
 // request. The commit-batch fan-out runs this many tasks concurrently; after
 // the batch-level prefetch each task holds at most one live connection at a time

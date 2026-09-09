@@ -337,8 +337,8 @@ function rootTargetInsertParameters(targets: number): number {
 		.toSQL().params.length;
 }
 
-// A page as large as an ample row budget asks for. The limit binds one
-// parameter whatever its value, so only the root list could grow the count.
+// Any page size does here: the limit binds one parameter whatever its value,
+// so only the root list could grow the parameter count.
 const expiredRootTargetPage = 1000;
 
 function expiredRootTargetParameters(roots: number): number {

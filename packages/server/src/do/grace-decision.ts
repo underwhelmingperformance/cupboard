@@ -123,8 +123,8 @@ export function confirmGrace(
 }
 
 /**
- * Confirms grace for a closure in bounded chunks. Only rows whose generation
- * and NAR hash still match receive an extension and appear in the result.
+ * Confirms grace for a whole closure. Only rows whose generation and NAR hash
+ * still match receive an extension and appear in the result.
  */
 export function confirmGraceBatch(
 	context: ServerContext,
@@ -164,7 +164,7 @@ export function confirmGraceBatch(
 				)
 				.all();
 			const byHash = new Map(rows.map((row) => [row.storePathHash, row]));
-			const chunkMatched = batch.rows
+			const matchedInList = batch.rows
 				.filter((entry) => {
 					const current = byHash.get(entry.storePathHash);
 
@@ -175,16 +175,16 @@ export function confirmGraceBatch(
 				})
 				.map((entry) => entry.storePathHash);
 
-			matched.push(...chunkMatched);
+			matched.push(...matchedInList);
 
-			if (graceSeconds === undefined || chunkMatched.length === 0) {
+			if (graceSeconds === undefined || matchedInList.length === 0) {
 				return;
 			}
 
 			retention.markCacheGraceManaged(cache, tx);
 
 			if (retainUntil !== undefined) {
-				retention.extendGraceDeadlines(cache, chunkMatched, retainUntil, tx);
+				retention.extendGraceDeadlines(cache, matchedInList, retainUntil, tx);
 			}
 		});
 	}
