@@ -4,7 +4,7 @@ import {
 	type CheckReport
 } from '@cupboard/protocol/reports';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { asc, count, inArray } from 'drizzle-orm';
+import { asc, inArray, sql } from 'drizzle-orm';
 
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
 import { verifyStoredBlob } from '../blob/upload-verification.ts';
@@ -25,6 +25,15 @@ import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
 
+/**
+ * Where a pass starts: the last row the previous pass checked, or two empty
+ * strings for the beginning of the scan.
+ */
+export interface CheckCursor {
+	readonly cache: string;
+	readonly storePathHash: string;
+}
+
 interface BlobFact {
 	fileHash: NixSha256HashString;
 	fileSize: number;
@@ -32,7 +41,10 @@ interface BlobFact {
 }
 
 export class IntegrityCheckService {
-	constructor(private readonly context: ServerContext) {}
+	constructor(
+		private readonly context: ServerContext,
+		private readonly pageSize: number = checkBatchSize
+	) {}
 
 	private async checkNarBlob(
 		row: typeof schema.narInfos.$inferSelect,
@@ -136,16 +148,29 @@ export class IntegrityCheckService {
 		);
 	}
 
-	async check(isDeep: boolean): Promise<CheckReport> {
-		const total =
-			this.context.db.select({ count: count() }).from(schema.narInfos).get()
-				?.count ?? 0;
-		const rows = this.context.db
+	/**
+	 * Checks one page of narinfo rows in (cache, store path hash) order, starting
+	 * after the row the cursor names. The pass reads one row beyond its page;
+	 * when that row exists the report names the last row checked as the cursor,
+	 * and a caller checks every path by passing it back until it comes back
+	 * empty.
+	 */
+	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReport> {
+		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
+		const page = this.context.db
 			.select()
 			.from(schema.narInfos)
+			.where(
+				isResuming
+					? sql`(${schema.narInfos.cache}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
+					: undefined
+			)
 			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
-			.limit(checkBatchSize)
+			.limit(this.pageSize + 1)
 			.all();
+		const rows = page.slice(0, this.pageSize);
+		const hasMore = page.length > this.pageSize;
+		const last = rows.at(-1);
 
 		const discrepancies: CheckDiscrepancy[] = [];
 
@@ -200,7 +225,8 @@ export class IntegrityCheckService {
 		return {
 			narInfosChecked: rows.length,
 			narBlobsChecked,
-			complete: rows.length === total,
+			cursor: hasMore && last !== undefined ? last.storePathHash : '',
+			cursorCache: hasMore && last !== undefined ? last.cache : '',
 			discrepancies
 		};
 	}
