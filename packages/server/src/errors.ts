@@ -1228,6 +1228,23 @@ export class StatementParameterLimitError extends Error {
 }
 
 /**
+ * A single value whose serialised form is longer than the string Cloudflare's
+ * SQLite accepts as a bound parameter. A list is split until each part fits;
+ * one value that does not fit cannot be split any further.
+ */
+export class BoundValueLengthError extends Error {
+	constructor(
+		public readonly bytes: number,
+		public readonly limit: number
+	) {
+		super(
+			`A bound value of ${String(bytes)} bytes exceeds the limit of ${String(limit)}`
+		);
+		this.name = 'BoundValueLengthError';
+	}
+}
+
+/**
  * A batch for one item that exceeds the D1 statement limit for an invocation.
  * The item cannot be split into a narrower chunk, so a later invocation would
  * reach the same limit.
