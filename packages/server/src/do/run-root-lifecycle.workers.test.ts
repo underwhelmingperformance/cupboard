@@ -174,8 +174,9 @@ describe('run root lifecycle', () => {
 			storePathHash: 'b'.repeat(32)
 		});
 
-		// The limit applies to one attachment request, not to the total number of
-		// targets accumulated by a run root.
+		// `rootSetMaxTargets` bounds one root-set request. A run root grows through
+		// `attachRoot`, which carries no such bound, so the targets it accumulates
+		// can pass that number.
 		await seedRunRootTargets(rootSetMaxTargets);
 		await pushWithRoot(token, gated, runRoot);
 
