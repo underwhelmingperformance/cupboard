@@ -39,7 +39,6 @@ import { type NarVerification } from '../blob/nar-verify.ts';
 import {
 	type CacheId,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -586,8 +585,7 @@ export class VerificationService {
 		) => void
 	) {}
 
-	// `cache_id` is still nullable while the expansion runs, so a row that names
-	// no cache is refused here rather than at every call site.
+	// A row that names no cache is refused here rather than at every call site.
 	private cache(cacheId: CacheId | null): ResolvedCache {
 		return this.context.cacheRepository.resolvedForId(cacheId);
 	}
@@ -2478,10 +2476,8 @@ export class VerificationService {
 					.run();
 			} else {
 				// The cursor's cache is a position in the scan order rather than a
-				// reference to a cache. The legacy column still mirrors the identity
-				// so both spellings agree on where the next pass resumes.
+				// reference to a cache.
 				const cursor = {
-					cache: legacyCacheKey(nextCache.scope, nextCache.access),
 					cacheId: nextCursor.cache.id,
 					lastStorePathHash: nextCursor.storePathHash,
 					updatedAt: now

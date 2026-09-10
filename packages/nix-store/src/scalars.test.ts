@@ -6,19 +6,15 @@ import {
 	cachePrioritySchema,
 	cacheScopeSchema,
 	compressionSchema,
-	DEFAULT_CACHE,
-	identityForCache,
 	isSameCacheScope,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	predicateTypeSchema,
-	privateStoredCache,
 	referencesMaxLength,
 	referencesSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
 	signingKeyIdSchema,
-	storedCacheSchema,
 	storeDirectoryMaxLength,
 	storeDirectorySchema,
 	storePathBasenameSchema,
@@ -541,56 +537,5 @@ describe('cache scopes', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(cacheScopeSchema.safeParse(value).success).toBe(false);
-	});
-});
-
-// A legacy cache key spells the scope and the access as one string. Rows carry
-// it beside the identity columns until the contraction drops it, so reading one
-// back has to recover both halves.
-describe('legacy cache keys', () => {
-	const builds = cacheNameSchema.parse('builds');
-
-	it('represents the default cache as the empty string', () => {
-		expect(DEFAULT_CACHE).toBe('');
-	});
-
-	it('prefixes a private cache with its namespace', () => {
-		expect(privateStoredCache(builds)).toBe('private/builds');
-	});
-
-	it.each([
-		{
-			name: 'the default cache',
-			cache: DEFAULT_CACHE,
-			identity: { scope: { kind: 'default' }, access: 'public' }
-		},
-		{
-			name: 'a public named cache',
-			cache: 'builds',
-			identity: { scope: { kind: 'named', name: 'builds' }, access: 'public' }
-		},
-		{
-			name: 'a public cache called private',
-			cache: 'private',
-			identity: { scope: { kind: 'named', name: 'private' }, access: 'public' }
-		},
-		{
-			name: 'a private cache',
-			cache: 'private/builds',
-			identity: { scope: { kind: 'named', name: 'builds' }, access: 'private' }
-		}
-	])('recovers the scope and access of $name', ({ cache, identity }) => {
-		expect(identityForCache(storedCacheSchema.parse(cache))).toStrictEqual(
-			identity
-		);
-	});
-
-	it.each([
-		{ name: 'a name with an upper-case letter', value: 'Builds' },
-		{ name: 'a name beginning with an underscore', value: '_default' },
-		{ name: 'a private name with no local name', value: 'private/' },
-		{ name: 'a name with two path segments', value: 'a/b' }
-	])('rejects $name', ({ value }) => {
-		expect(storedCacheSchema.safeParse(value).success).toBe(false);
 	});
 });

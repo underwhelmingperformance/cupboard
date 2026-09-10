@@ -31,7 +31,7 @@ import { hasSubrequestsFor } from './subrequest-slice.ts';
  * strings for the beginning of the scan.
  */
 export interface CheckCursor {
-	readonly cache: string;
+	readonly cache: number;
 	readonly storePathHash: string;
 }
 
@@ -156,16 +156,16 @@ export class IntegrityCheckService {
 	 * empty.
 	 */
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
-		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
+		const isResuming = cursor.cache !== 0 || cursor.storePathHash !== '';
 		const page = this.context.db
 			.select()
 			.from(schema.narInfos)
 			.where(
 				isResuming
-					? sql`(${schema.narInfos.cache}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
+					? sql`(${schema.narInfos.cacheId}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
 					: undefined
 			)
-			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
 			.limit(checkBatchSize + 1)
 			.all();
 		const rows = page.slice(0, checkBatchSize);
@@ -251,7 +251,7 @@ export class IntegrityCheckService {
 			narInfosChecked: checked,
 			narBlobsChecked,
 			cursor: resumeAt === undefined ? '' : resumeAt.storePathHash,
-			cursorCache: resumeAt === undefined ? '' : resumeAt.cache,
+			cursorCache: resumeAt === undefined ? 0 : resumeAt.cacheId,
 			discrepancies
 		};
 	}

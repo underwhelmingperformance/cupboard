@@ -20,7 +20,8 @@ import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
-import { cacheIdentityCondition } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
+import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -28,11 +29,7 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import {
-	cacheCatalogueVersion,
-	cacheMigrationColumns
-} from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
+import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -290,12 +287,8 @@ function provisioningStatements(
 	verifier: ReadVerifierColumns,
 	now: IsoTimestamp
 ) {
-	const identity = cacheMigrationColumns(
-		{ kind: 'default' },
-		body.defaultCacheAccess
-	);
+	const identity = cacheIdentityColumns({ kind: 'default' });
 	const tenantFilter = liveTenantFilter(body.id);
-	const legacyCache = sql<string>`${identity.legacyCache}`.as('cache');
 	const cacheKind = sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
 		'cache_kind'
 	);
@@ -306,6 +299,9 @@ function provisioningStatements(
 		typeof body.defaultCacheAccess
 	>`${body.defaultCacheAccess}`.as('access');
 	const generation = sql<number>`${firstCacheGeneration}`.as('generation');
+	const readRevision = sql<number>`${firstCacheReadRevision}`.as(
+		'read_revision'
+	);
 	const deletedAt = sql<null>`null`.as('deleted_at');
 	const updatedAt = sql<IsoTimestamp>`${now}`.as('updated_at');
 	const zero = sql<number>`0`;
@@ -314,11 +310,11 @@ function provisioningStatements(
 	const cacheRow = database
 		.select({
 			tenant: d1Schema.tenant.id,
-			legacyCache,
 			cacheKind,
 			cacheName,
 			access: cacheAccess,
 			generation,
+			readRevision,
 			deletedAt,
 			updatedAt
 		})
@@ -340,11 +336,10 @@ function provisioningStatements(
 
 	return {
 		tenant: database
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,
@@ -357,7 +352,7 @@ function provisioningStatements(
 			})
 			.onConflictDoNothing(),
 		cache: database
-			.insert(migrationSchema.cacheLifecycles)
+			.insert(d1Schema.cacheLifecycle)
 			.select(cacheRow)
 			.onConflictDoNothing(),
 		usage: database
@@ -511,15 +506,11 @@ export async function setCacheReadCredential(
 	// Select from a live tenant in the same statement as the upsert. If
 	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
 	// recreate the credential that cleanup deleted.
-	//
-	// A cache credential only ever covers a private cache, so the legacy stored
-	// name written beside the identity columns is the private one.
-	const identity = cacheMigrationColumns(cache, 'private');
-	const insert = database.insert(migrationSchema.cacheReadCredentials).select(
+	const identity = cacheIdentityColumns(cache);
+	const insert = database.insert(d1Schema.tenantCacheReadCredential).select(
 		database
 			.select({
 				tenant: d1Schema.tenant.id,
-				legacyCache: sql<string>`${identity.legacyCache}`.as('cache'),
 				cacheKind: sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
 					'cache_kind'
 				),
@@ -544,15 +535,24 @@ export async function setCacheReadCredential(
 		readPasswordSalt,
 		createdAt: now
 	};
-	const written = await insert
-		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheReadCredentials.tenant,
-				migrationSchema.cacheReadCredentials.legacyCache
-			],
-			set
-		})
-		.run();
+	// Each cache kind has its own partial unique index, so name the matching
+	// conflict target.
+	const written = await (
+		cache.kind === 'default'
+			? insert.onConflictDoUpdate({
+					target: d1Schema.tenantCacheReadCredential.tenant,
+					targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'default'`,
+					set
+				})
+			: insert.onConflictDoUpdate({
+					target: [
+						d1Schema.tenantCacheReadCredential.tenant,
+						d1Schema.tenantCacheReadCredential.cacheName
+					],
+					targetWhere: sql`${d1Schema.tenantCacheReadCredential.cacheKind} = 'named'`,
+					set
+				})
+	).run();
 
 	if (written.meta.changes === 0) {
 		await refuseRetiredTenant(database, id);

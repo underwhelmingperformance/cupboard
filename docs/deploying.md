@@ -25,9 +25,41 @@ repeated rather than repaired.
 [Workers deployments API]:
   https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/
 
-This build defines one phase, `current`, for a build that needs no such
-coordination. A release that adds a phase adds it to that list and documents
+This build defines four phases, in the order a release records them: `current`
+for a build that needs no such coordination, then `expanded`, `native-reads` and
+`contracted`. A release that adds a phase adds it to that list and documents
 here how the build behaves while that phase is recorded.
+
+`contracted` says that the deployed build names a cache by its identity and by
+nothing else: it neither reads nor writes the columns that stored a cache's name
+as one string, every cache records how it reads, and a reuse view is stored
+under its own name.
+
+## Migrations that wait for the preceding release
+
+`cupboard deploy` applies the D1 migrations before it uploads the Workers,
+because the preceding release keeps serving until the upload finishes and has to
+work against the schema they leave.
+
+A migration that removes something that release still writes cannot run then.
+Those migrations are named in `migrationsAppliedAfterCutover`. They may run only
+once both Workers serve this build and the longest invocation that could have
+started on the preceding one must have ended: a Queue consumer has a
+fifteen-minute wall-time allowance, which is that longest invocation, so the
+window is sixteen minutes from the moment the deploy recorded the phase.
+
+A deploy does not wait out that window. It reports the migrations as deferred
+and finishes, and the next deploy applies them, by which time the window is long
+past. The phase row records when the deployment entered its phase rather than
+when the deploy last ran, so a rerun does not push the deadline away.
+
+Deferring is safe because the state between the two sets of migrations is a
+resting state. The columns they remove are nullable by then, and the deployed
+build neither reads nor writes them, so a deployment that is never deployed
+again serves every request correctly and differs only by carrying dead columns.
+
+This release contracts the schema. `0029_cache_identity_contract` is the
+migration it defers.
 
 ## Local steps
 
@@ -38,8 +70,9 @@ otherwise never run, so the control plane lists the tenants that are behind and
 wakes a bounded batch of them, and the hourly cron sweep does the same.
 
 The stored step is a watermark: rolling back to a build that defines fewer steps
-does not lower what a newer build recorded. This build defines one step, 0,
-which an object reaches once its migrations have applied.
+does not lower what a newer build recorded. This build defines steps up to 4.
+Step 0 is reached once an object's migrations have applied; the later steps are
+the per-object work that no migration could do, described in `currentLocalStep`.
 
 A release whose next phase depends on per-object work numbers that work as the
 next step, so the deploy can wait until every active tenant has reached it.
@@ -56,3 +89,16 @@ that defines the phase clears both.
 A migration that drops a column or a table cannot be undone by redeploying, so a
 release that contracts the schema documents its own recovery here alongside the
 phase that performs it.
+
+### Recovering from the `contracted` release
+
+This release drops the columns that stored a cache's name as one string, from D1
+and from every tenant's Durable Object. Nothing reconstructs them, so the
+preceding build cannot serve the contracted schema and rolling the Workers back
+does not restore it. Recovery is a restore of the D1 database and of the Durable
+Object storage from a point before the release, not a Worker rollback.
+
+Each object converts its own cache catalogue before the contraction reaches it,
+reading from D1 the access recorded for its caches. A tenant that nothing has
+woken since an earlier release therefore needs no preparation: its object
+converts and contracts the first time it runs.

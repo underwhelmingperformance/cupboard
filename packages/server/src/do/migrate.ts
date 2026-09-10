@@ -387,6 +387,21 @@ function applyMigration<TSchema extends Record<string, unknown>>(
 	});
 }
 
+// The journal index of the migration with this tag. A caller names a migration
+// rather than a position, because positions move as migrations are added.
+function migrationIndexOf(bundle: MigrationBundle, tag: string): number {
+	const entry = bundle.journal.entries.find((item) => item.tag === tag);
+
+	if (entry === undefined) {
+		throw new DurableObjectMigrationJournalError(
+			tag,
+			'this build carries no migration with that tag'
+		);
+	}
+
+	return entry.idx;
+}
+
 /**
  * Brings a Durable Object's SQLite schema up to the bundled migrations, after
  * {@link admitMigrationSource} has accepted the store's recorded history.
@@ -394,12 +409,26 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  * A migration whose tag is already recorded is skipped. Each migration runs in
  * its own transaction and records the digest it was applied from, so a later
  * build can tell what this store actually ran.
+ *
+ * `stopBefore` names a migration to leave unapplied, along with everything
+ * after it, for a caller with work to do before that migration can run.
+ * Admission still sees the whole bundle, so a store already past that migration
+ * is admitted rather than refused for holding rows this run would not reach.
  */
 export function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,
 	bundle: MigrationBundle,
-	digests: MigrationDigests = new Map()
+	options: {
+		readonly digests?: MigrationDigests;
+		readonly stopBefore?: string;
+	} = {}
 ): void {
+	const digests = options.digests ?? new Map<string, string>();
+	const throughIndex =
+		options.stopBefore === undefined
+			? Number.MAX_SAFE_INTEGER
+			: migrationIndexOf(bundle, options.stopBefore) - 1;
+
 	admitMigrationSource(database, bundle, digests);
 
 	// Admission proved the recorded rows are a prefix of the journal, so the
@@ -408,6 +437,10 @@ export function applyMigrations<TSchema extends Record<string, unknown>>(
 	const entries = bundle.journal.entries.toSorted((a, b) => a.idx - b.idx);
 
 	for (const entry of entries.slice(applied)) {
+		if (entry.idx > throughIndex) {
+			return;
+		}
+
 		applyMigration(
 			database,
 			entry,

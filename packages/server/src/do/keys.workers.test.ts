@@ -634,7 +634,7 @@ describe('signing key rotation', () => {
 		const planRowSchema = z.object({ detail: z.string() });
 		const plans = await runInDurableObject(currentServer(), (instance) => ({
 			backfill: instance.context.db.all(
-				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL ORDER BY signature_generation, cache, store_path_hash LIMIT ${32}`
+				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL ORDER BY signature_generation, cache_id, store_path_hash LIMIT ${32}`
 			),
 			continuation: instance.context.db.all(
 				sql`EXPLAIN QUERY PLAN SELECT * FROM cache_purge_continuation WHERE kind = ${'backfill'} ORDER BY created_at LIMIT ${1}`

@@ -28,10 +28,11 @@ export function localStep(value: number): LocalStep {
  * This build requires every tenant Durable Object to reach this step.
  *
  * A release that needs per-object work after its migrations gives that work the
- * next step number and raises this constant. Step 1 gives every cache an
- * identity and fills the `cache_id` of the rows that still refer to a cache by
- * name alone. A migration cannot do that work, because both builds keep writing
- * such rows while the release is rolling out. Step 2 moves a private cache's
+ * next step number and raises this constant. Step 1 gave every cache an
+ * identity and filled the `cache_id` of the rows that named a cache by string
+ * alone. Migration `0051_cache_identity_contract_assertions` fills those
+ * `cache_id` values, so step 1 runs nothing; the number stays because a
+ * recorded step is a watermark. Step 2 moves a private cache's
  * stored objects off the keys its old `private/`-prefixed name gave them, which
  * a migration cannot do either, because those objects are in R2. Step 3 moves
  * the stored objects of a cache above its first generation onto the keys that
@@ -56,19 +57,66 @@ export const currentLocalStep: LocalStep = localStep(4);
 export const deploymentPhaseNameSchema = z.enum([
 	'current',
 	'expanded',
-	'native-reads'
+	'native-reads',
+	'contracted'
 ]);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
 //
-// `expanded` said that every cache row stores its identity beside the legacy
-// key and that every object had reached the step which fills the rows the
-// forward writes could not. The predecessor release settled there, so every
-// tenant this build meets already holds those rows, and `native-reads` says
-// the reads take a cache from its identity rather than from the legacy key.
-export const settledDeploymentPhase: DeploymentPhaseName = 'native-reads';
+// `expanded` required every cache row to store its identity beside the `cache`
+// column, and every object to have reached the step that filled the rows those
+// writes could not fill. `native-reads` required reads to take a cache from its
+// identity rather than from the `cache` column. `contracted` says this build
+// names a cache by its identity alone: it neither reads nor writes the `cache`
+// column, whether or not the migration that drops it has run.
+export const settledDeploymentPhase: DeploymentPhaseName = 'contracted';
+
+/**
+ * How long a request that started on the preceding release may still be
+ * running.
+ *
+ * A Queue consumer has a fifteen-minute wall-time allowance, which is the
+ * longest-running invocation this Worker has, so an invocation that began
+ * before the cutover can still be writing for that long afterwards. The extra
+ * minute covers clock differences between the deploying machine and the
+ * platform.
+ *
+ * A migration that removes something the preceding release still writes cannot
+ * run until this long after the cutover.
+ * {@link migrationsAppliedAfterCutover} names the migrations of this build that
+ * must wait, and a deploy defers them rather than waiting.
+ */
+export const predecessorInvocationLifetimeMs = 16 * 60 * 1000;
+
+/**
+ * The D1 migrations of this build that must not run until the preceding release
+ * has stopped serving.
+ *
+ * `cupboard deploy` applies every other migration before it uploads the
+ * Workers, because the preceding release must keep working against the schema
+ * they leave. A migration waits here when running it earlier would break that
+ * release, for example by removing a column that release still writes, or when
+ * that release would go on producing the rows the migration removes.
+ *
+ * Migrations apply in journal order, so the migrations named here must be the
+ * last entries in the journal. A later migration that is not listed here would
+ * be applied before these, against a schema they have not yet changed. A deploy
+ * refuses an unlisted migration that sorts at or after these, so adding one
+ * means deciding which side of the cutover it belongs on.
+ *
+ * A deploy does not wait for that release to stop. It leaves these migrations
+ * for the next deploy, which finds {@link predecessorInvocationLifetimeMs} long
+ * past. That interval also covers what the cutover cannot say: it is the moment
+ * Cloudflare accepted a deployment sending every request to this build, not the
+ * moment every colo began serving it. The state between the two sets is a resting state: the columns they
+ * remove are nullable by then and this build touches neither, so a deployment
+ * that never runs again differs only by carrying dead columns.
+ */
+export const migrationsAppliedAfterCutover: readonly string[] = [
+	'0029_cache_identity_contract.sql'
+];
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row and the Workers read it.

@@ -358,6 +358,27 @@
 			"when": 1788783668255,
 			"tag": "0050_cache_retention_migration_rules",
 			"breakpoints": true
+		},
+		{
+			"idx": 51,
+			"version": "6",
+			"when": 1788789420891,
+			"tag": "0051_cache_identity_contract_assertions",
+			"breakpoints": true
+		},
+		{
+			"idx": 52,
+			"version": "6",
+			"when": 1788789575606,
+			"tag": "0052_cache_identity_contract",
+			"breakpoints": true
+		},
+		{
+			"idx": 53,
+			"version": "6",
+			"when": 1788789588287,
+			"tag": "0053_cache_identity_triggers",
+			"breakpoints": true
 		}
 	]
 }

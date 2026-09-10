@@ -35,9 +35,7 @@ interface CacheCreation {
 	readonly graceSeconds?: GraceSeconds;
 }
 
-// The columns that make up a resolved cache. `access` and the identity columns
-// are still nullable while the expansion runs, so a row is only usable once
-// both have been backfilled.
+// The columns that make up a resolved cache.
 interface CacheIdentityRow {
 	readonly id: ResolvedCache['id'];
 	readonly kind: 'default' | 'named' | null;
@@ -57,18 +55,12 @@ const identityColumns = {
 /**
  * Reads and writes the `cache_identity` rows that hold each cache's scope,
  * access and surrogate key.
- *
- * The legacy `cache` table is keyed by the stored name, which ties a cache's
- * identity to its access. Rows elsewhere refer to a cache by `cache_id`
- * instead, and the two are written together until the contraction drops the
- * legacy key.
  */
 export class CacheRepository {
 	constructor(private readonly database: SchemaDatabase) {}
 
-	// A row whose access the reconciliation has not yet supplied cannot say who
-	// may read the cache. Refusing it keeps a half-written row from resolving as
-	// a public cache.
+	// A row with no access cannot say who may read the cache, so refusing it
+	// keeps such a row from resolving as a public cache.
 	private resolved(row: CacheIdentityRow): ResolvedCache {
 		if (row.access === null) {
 			throw new CacheIdentityMissingError({ id: row.id });
@@ -189,12 +181,10 @@ export class CacheRepository {
 	/**
 	 * The cache a row's `cache_id` refers to.
 	 *
-	 * The column is nullable because the expansion added it to populated tables,
-	 * and the contraction tightens it later. Under native reads a null cannot
-	 * occur: the local reconcile fills every row, and the deployment phase does
-	 * not advance until every tenant has run it. Refusing a null therefore
-	 * reports that the phase advanced early, rather than covering for it by
-	 * attributing the row to whichever cache the caller expected.
+	 * Every table that refers to a cache declares `cache_id` as not null, so a
+	 * null cannot reach this method. Refusing one reports that, rather than
+	 * covering for it by attributing the row to whichever cache the caller
+	 * expected.
 	 */
 	resolvedForId(id: ResolvedCache['id'] | null): ResolvedCache {
 		if (id === null) {

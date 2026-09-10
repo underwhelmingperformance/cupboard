@@ -4,6 +4,7 @@ import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema
 } from '@cupboard/nix-store/scalars';
+import { predecessorInvocationLifetimeMs } from '@cupboard/protocol/deployment';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
@@ -36,10 +37,11 @@ export interface ObjectIncarnation {
 // immutable key remains cached.
 export const firstVersionedObjectIncarnation = 2;
 
-// An older Queue Consumer can publish during its 15-minute wall-time allowance.
-// Keep that object's immutable URL available for a full narinfo cache grace
-// after the old invocation must have ended.
-export const lateWriteTombstoneHorizonMs = 16 * 60 * 1000 + blobReaperGraceMs;
+// An invocation that began on the preceding release can still publish. Keep
+// that object's immutable URL available for a full narinfo cache grace after
+// the last such invocation must have ended.
+export const lateWriteTombstoneHorizonMs =
+	predecessorInvocationLifetimeMs + blobReaperGraceMs;
 
 /**
  * Returns a predicate that matches the live registry row for an incarnation.

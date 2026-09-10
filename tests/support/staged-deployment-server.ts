@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { CacheListResponse } from '@cupboard/protocol/caches';
 import {
 	currentLocalStep,
+	migrationsAppliedAfterCutover,
 	type ParsedDeploymentPhaseResponse,
 	type ParsedLocalStepStatus,
 	type ParsedLocalStepWakeResponse
@@ -171,6 +172,9 @@ const predecessorSnapshotSchema = z.strictObject({
 	migrationTags: z.array(z.string()),
 	caches: z.array(z.string()),
 	roots: z.array(z.string())
+});
+const catalogueVersionSchema = z.strictObject({
+	version: z.number().int().nullable()
 });
 const terminalD1SnapshotSchema = z.strictObject({
 	lastD1Migration: z.string(),
@@ -695,6 +699,22 @@ export class StagedDeploymentServer {
 		return migration.name;
 	}
 
+	/**
+	 * The last migration a deploy applies before both Workers serve this build.
+	 * The rest wait for the preceding release to drain.
+	 */
+	get finalPreCutoverD1Migration(): string {
+		const migration = this.artifact.d1Migrations.findLast(
+			(candidate) => !migrationsAppliedAfterCutover.includes(candidate.name)
+		);
+
+		if (migration === undefined) {
+			throw new ArtifactD1MigrationMissingError();
+		}
+
+		return migration.name;
+	}
+
 	get api(): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
 		return {
 			d1QueryBatch: async (id, statements) =>
@@ -858,21 +878,26 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The caches one tenant reports through the admin API, read with the
-	 * operator's credential. The release serves this listing from the Durable
-	 * Object, so it shows the retention each cache holds after the upgrade.
-	 *
-	 * Admission rejects a slug with no membership marker before any tenant route
-	 * runs. The fixture seeds its tenants straight into D1, so this writes the
-	 * marker that tenant creation would have written.
+	 * Writes a tenant's membership marker, which admission requires before any
+	 * tenant route runs. The fixture seeds its tenants straight into D1, so this
+	 * writes the marker that tenant creation would have written.
 	 */
-	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+	async announceTenant(tenant: FixtureTenant): Promise<void> {
 		const members = await this.miniflare.getKVNamespace(
 			tenantCacheBinding,
 			controlScript
 		);
 
 		await members.put(tenantMemberKey(tenantIdSchema.parse(tenant)), '1');
+	}
+
+	/**
+	 * The caches one tenant reports through the admin API, read with the
+	 * operator's credential. The release serves this listing from the Durable
+	 * Object, so it shows the retention each cache holds after the upgrade.
+	 */
+	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+		await this.announceTenant(tenant);
 
 		const rpc = tenantRpc(new URL(`https://cupboard.invalid/t/${tenant}`), {
 			credential: await this.operatorCredential(`/t/${tenant}/token`),
@@ -880,6 +905,23 @@ export class StagedDeploymentServer {
 		});
 
 		return rpc.caches.list();
+	}
+
+	/**
+	 * The catalogue version D1 records for a tenant. Its Durable Object writes it
+	 * at the end of a successful start, so a version here means the object
+	 * applied every migration this build carries.
+	 */
+	async catalogueVersion(tenant: FixtureTenant): Promise<number | null> {
+		const database = await this.database();
+		const row = await database
+			.prepare(
+				'SELECT cache_catalogue_version AS version FROM tenant WHERE id = ?'
+			)
+			.bind(tenant)
+			.first();
+
+		return catalogueVersionSchema.parse(row).version;
 	}
 
 	async dispatch(pathname: string, init?: RequestInit): Promise<Response> {

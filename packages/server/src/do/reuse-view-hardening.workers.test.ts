@@ -1,6 +1,7 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
@@ -19,11 +20,10 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { legacyCacheKey } from '../db/cache.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -364,21 +364,22 @@ describe('reuse-view lookup hardening', () => {
 		// the shape left by an undrained deletion backlog.
 		const staleCount = 20;
 		const d1 = drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReferences: migrationSchema.blobReferences }
+			schema: { blobReference: d1Schema.blobReference }
 		});
 		const staleReferences = Array.from({ length: staleCount }, (_, index) => ({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(pr1Cache, 'public'),
+			...cacheIdentityColumns(pr1Cache),
 			storePathHash: parsedHash,
 			generation: narInfoGenerationSchema.parse(live.generation + index + 1),
-			narHash: parsedNarHash
+			narHash: parsedNarHash,
+			cacheGeneration: firstCacheGeneration
 		}));
 
 		// Each row binds seven parameters, so the insert is chunked under the
 		// driver's bound-parameter limit.
 		for (const references of chunk(staleReferences, 12)) {
 			await d1
-				.insert(migrationSchema.blobReferences)
+				.insert(d1Schema.blobReference)
 				.values([...references])
 				.run();
 		}
@@ -469,7 +470,6 @@ describe('reuse-view lookup hardening', () => {
 				'public'
 			);
 			const unrelated = Array.from({ length: 200 }, (_, index) => ({
-				cache: legacyCacheKey(pr1.scope, pr1.access),
 				cacheId: pr1.id,
 				storePathHash: storePathHashSchema.parse(generatedHash(index)),
 				storePath: storePathSchema.parse(
@@ -492,7 +492,6 @@ describe('reuse-view lookup hardening', () => {
 			instance.context.db
 				.insert(schema.narInfos)
 				.values({
-					cache: legacyCacheKey(outside.scope, outside.access),
 					cacheId: outside.id,
 					storePathHash: storePathHashSchema.parse(path.storePathHash),
 					storePath: storePathSchema.parse(path.storePath),
@@ -507,12 +506,14 @@ describe('reuse-view lookup hardening', () => {
 
 		const withBacklog = await lookupCost(path.storePathHash);
 
-		// The row outside the view costs one read to reject, because the selector
-		// ranges travel as a bound list and SQLite counts the element it reads from
-		// `json_each` to test the range. Two hundred unrelated rows cost nothing.
+		// The row outside the view costs three reads to reject: its narinfo row,
+		// the `cache_identity` row the candidate query joins to it, and the element
+		// the selector's range test reads from `json_each`, because the ranges
+		// travel as a bound list. Two hundred unrelated rows cost nothing, which is
+		// what this comparison protects.
 		expect({ baseline, withBacklog }).toStrictEqual({
-			baseline: { status: StatusCodes.OK, rowsRead: 34 },
-			withBacklog: { status: StatusCodes.OK, rowsRead: 38 }
+			baseline: { status: StatusCodes.OK, rowsRead: 21 },
+			withBacklog: { status: StatusCodes.OK, rowsRead: 24 }
 		});
 	});
 });
