@@ -3,10 +3,10 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NarInfoGeneration,
 	type NixSha256HashString,
-	referencesSchema,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
 	type StoredCache,
+	storedReferencesSchema,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -508,7 +508,7 @@ export class NarInfoObjectsService {
 			NixSha256Hash.parse(row.narHash),
 			row.narSize,
 			parseStored(
-				referencesSchema,
+				storedReferencesSchema,
 				row.referencesJson,
 				(cause) => new StoredReferencesInvalidError(row.storePathHash, cause)
 			),

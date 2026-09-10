@@ -9,8 +9,8 @@ import {
 	PRIVATE_STORED_PREFIX,
 	privateStoredCache,
 	publicCacheSelectorSchema,
-	referencesSchema,
 	type StoredCache,
+	storedReferencesSchema,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -721,7 +721,7 @@ export class ReuseViewLookupService {
 					candidate.narSize,
 					[
 						...parseStored(
-							referencesSchema,
+							storedReferencesSchema,
 							candidate.referencesJson,
 							referencesFault
 						)
@@ -803,7 +803,7 @@ export class ReuseViewLookupService {
 			blob.fileSize,
 			NixSha256Hash.parse(row.narHash),
 			row.narSize,
-			parseStored(referencesSchema, row.referencesJson, referencesFault),
+			parseStored(storedReferencesSchema, row.referencesJson, referencesFault),
 			row.deriver ?? undefined,
 			row.ca ?? undefined,
 			signatures
