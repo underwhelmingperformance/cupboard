@@ -35,7 +35,7 @@ import {
 	tenantSummarySchema
 } from '../tenants.ts';
 
-import { type AuthzMeta } from './base.ts';
+import { type AuthzMeta, cacheNotFoundError } from './base.ts';
 
 const controlProcedure = oc
 	.$meta<AuthzMeta>({ replaySafety: 'replay-unsafe' })
@@ -151,6 +151,7 @@ export const controlContract = {
 			.input(
 				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
 			)
+			.errors(cacheNotFoundError)
 			.output(cacheReadCredentialResponseSchema),
 
 		rotateNamedCacheReadCredential: controlProcedure
@@ -169,6 +170,7 @@ export const controlContract = {
 					read: tenantReadCredentialSchema
 				})
 			)
+			.errors(cacheNotFoundError)
 			.output(cacheReadCredentialResponseSchema),
 
 		clearDefaultCacheReadCredential: controlProcedure
@@ -181,6 +183,7 @@ export const controlContract = {
 				path: '/tenants/{id}/default-cache/read-credential'
 			})
 			.input(z.strictObject({ id: tenantIdSchema }))
+			.errors(cacheNotFoundError)
 			.output(cacheReadCredentialResponseSchema),
 
 		clearNamedCacheReadCredential: controlProcedure
@@ -193,6 +196,7 @@ export const controlContract = {
 				path: '/tenants/{id}/caches/{cacheName}/read-credential'
 			})
 			.input(z.strictObject({ id: tenantIdSchema, cacheName: cacheNameSchema }))
+			.errors(cacheNotFoundError)
 			.output(cacheReadCredentialResponseSchema),
 
 		remove: controlProcedure

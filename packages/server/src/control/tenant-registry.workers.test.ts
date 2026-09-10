@@ -1,7 +1,8 @@
 import {
-	type CacheAccessMode,
+	cacheGenerationSchema,
 	cacheNameSchema,
 	type CacheScope,
+	cacheScopeSchema,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -14,13 +15,17 @@ import {
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { cacheIdentityCondition, cacheScopeFromRow } from '../db/cache.ts';
+import {
+	cacheIdentityColumns,
+	cacheIdentityCondition,
+	cacheScopeFromRow
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -28,7 +33,6 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	hashReadPassword,
 	isReadPasswordMatching,
@@ -155,6 +159,7 @@ async function rejectionFields(
 }
 
 function errorFields(error: unknown): {
+	readonly cache?: CacheScope;
 	readonly name: string;
 	readonly status: number;
 	readonly id?: string;
@@ -162,6 +167,7 @@ function errorFields(error: unknown): {
 } {
 	return z
 		.object({
+			cache: cacheScopeSchema.optional(),
 			name: z.string(),
 			status: z.number(),
 			id: z.string().optional(),
@@ -279,27 +285,7 @@ describe('tenant registry', () => {
 			.from(d1Schema.cacheLifecycle)
 			.where(eq(d1Schema.cacheLifecycle.tenant, acme))
 			.get();
-		const compatibility = await database()
-			.select({
-				readMode: sql<CacheAccessMode | null>`${migrationSchema.tenants.readMode}`,
-				cacheCatalogueVersion: migrationSchema.tenants.cacheCatalogueVersion
-			})
-			.from(migrationSchema.tenants)
-			.where(eq(migrationSchema.tenants.id, acme))
-			.get();
-
-		expect({
-			summary,
-			defaultCache,
-			compatibility:
-				compatibility === undefined
-					? undefined
-					: {
-							readMode: compatibility.readMode ?? undefined,
-							cacheCatalogueVersion:
-								compatibility.cacheCatalogueVersion ?? undefined
-						}
-		}).toStrictEqual({
+		expect({ summary, defaultCache }).toStrictEqual({
 			summary: {
 				id: acme,
 				status: 'active',
@@ -309,11 +295,7 @@ describe('tenant registry', () => {
 				configVersion: 1,
 				createdAt: now
 			},
-			defaultCache: { access: 'private' },
-			compatibility: {
-				readMode: undefined,
-				cacheCatalogueVersion: undefined
-			}
+			defaultCache: { access: 'private' }
 		});
 	});
 
@@ -450,11 +432,10 @@ describe('tenant registry', () => {
 
 	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: acme,
 				status: 'active',
-				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -488,11 +469,10 @@ describe('tenant registry', () => {
 		const body = quotaBody(acme, 1000);
 
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,
@@ -818,6 +798,23 @@ describe('tenant lifecycle operations', () => {
 });
 
 describe('private cache read credentials', () => {
+	async function insertCacheLifecycle(
+		id: TenantId,
+		cache: CacheScope,
+		deletedAt?: typeof now
+	): Promise<void> {
+		await database()
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant: id,
+				...cacheIdentityColumns(cache),
+				access: 'private',
+				generation: cacheGenerationSchema.parse(1),
+				deletedAt,
+				updatedAt: now
+			});
+	}
+
 	const cacheCredentialWrites = [
 		{
 			operation: 'set',
@@ -854,6 +851,7 @@ describe('private cache read credentials', () => {
 
 	it('stores a hashed verifier for the named cache', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 
 		await setCacheReadCredential(
 			database(),
@@ -876,6 +874,7 @@ describe('private cache read credentials', () => {
 
 	it('replaces the verifier so the previous password stops working', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -914,6 +913,8 @@ describe('private cache read credentials', () => {
 
 	it('keeps one cache credential when a sibling cache is cleared', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
+		await insertCacheLifecycle(acme, guides);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -944,6 +945,7 @@ describe('private cache read credentials', () => {
 
 	it('clears a cache that has no credential of its own', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 
 		await clearCacheReadCredential(database(), acme, builds);
 
@@ -952,6 +954,8 @@ describe('private cache read credentials', () => {
 
 	it('deletes every cache credential when the tenant is finalised', async () => {
 		await provision(createBody(acme, 'private'));
+		await insertCacheLifecycle(acme, builds);
+		await insertCacheLifecycle(acme, guides);
 		await setCacheReadCredential(
 			database(),
 			acme,
@@ -981,6 +985,7 @@ describe('private cache read credentials', () => {
 		'refuses to $operation a cache credential for an $status tenant',
 		async ({ retire, run }) => {
 			await ensureTenant(database(), createBody(acme), now);
+			await insertCacheLifecycle(acme, builds);
 			await retire(acme);
 
 			const rejected = await rejectedBy(() => run(acme));
@@ -995,6 +1000,7 @@ describe('private cache read credentials', () => {
 
 	it('rotates a cache credential while the tenant is suspended', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 		await setTenantStatus(database(), acme, 'suspended');
 
 		await setCacheReadCredential(
@@ -1021,6 +1027,7 @@ describe('private cache read credentials', () => {
 	// the insert. This exercises the live-tenant condition in the insert.
 	it('writes no credential when offboarding completes after the status check', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 
 		const rotation = setCacheReadCredential(
 			database(),
@@ -1048,6 +1055,7 @@ describe('private cache read credentials', () => {
 
 	it('writes no credential when the tenant row is deleted after the status check', async () => {
 		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
 
 		const rotation = setCacheReadCredential(
 			database(),
@@ -1067,6 +1075,110 @@ describe('private cache read credentials', () => {
 				name: 'TenantNotFoundError',
 				status: StatusCodes.NOT_FOUND,
 				id: acme
+			},
+			stored: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'missing named cache',
+			cache: builds,
+			prepare: () => Promise.resolve()
+		},
+		{
+			name: 'deleted named cache',
+			cache: builds,
+			prepare: () => insertCacheLifecycle(acme, builds, now)
+		},
+		{
+			name: 'missing default cache',
+			cache: { kind: 'default' } satisfies CacheScope,
+			prepare: () =>
+				database()
+					.delete(d1Schema.cacheLifecycle)
+					.where(eq(d1Schema.cacheLifecycle.tenant, acme))
+					.run()
+		},
+		{
+			name: 'deleted default cache',
+			cache: { kind: 'default' } satisfies CacheScope,
+			prepare: () =>
+				database()
+					.update(d1Schema.cacheLifecycle)
+					.set({ deletedAt: now })
+					.where(eq(d1Schema.cacheLifecycle.tenant, acme))
+					.run()
+		}
+	])('refuses to set a credential for a $name', async ({ cache, prepare }) => {
+		await ensureTenant(database(), createBody(acme), now);
+		await prepare();
+
+		const rejected = await rejectedBy(() =>
+			setCacheReadCredential(
+				database(),
+				acme,
+				cache,
+				readCredential('reader'),
+				now
+			)
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			cache,
+			name: 'CacheNotFoundError',
+			status: StatusCodes.NOT_FOUND
+		});
+	});
+
+	it('refuses to clear a credential for a missing cache', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		const rejected = await rejectedBy(() =>
+			clearCacheReadCredential(database(), acme, builds)
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			cache: builds,
+			name: 'CacheNotFoundError',
+			status: StatusCodes.NOT_FOUND
+		});
+	});
+
+	it('writes no credential when the cache is deleted after the precheck', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+		await insertCacheLifecycle(acme, builds);
+
+		const rotation = setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+		await database()
+			.update(d1Schema.cacheLifecycle)
+			.set({ deletedAt: now })
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, acme),
+					cacheIdentityCondition(
+						d1Schema.cacheLifecycle.cacheKind,
+						d1Schema.cacheLifecycle.cacheName,
+						builds
+					)
+				)
+			)
+			.run();
+
+		expect({
+			error: await rejectionFields(() => rotation),
+			stored: await storedCacheCredentials(acme)
+		}).toStrictEqual({
+			error: {
+				cache: builds,
+				name: 'CacheNotFoundError',
+				status: StatusCodes.NOT_FOUND
 			},
 			stored: []
 		});

@@ -263,10 +263,7 @@ export class CacheAdminService {
 			}
 
 			await this.deletionQueue.clearCacheDeletion({ scope, access });
-
-			if (access === 'public') {
-				await this.clearCacheReadCredential(scope);
-			}
+			await this.clearCacheReadCredential(scope);
 
 			const cache = this.context.cacheRepository.create(
 				scope,
@@ -441,6 +438,7 @@ export class CacheAdminService {
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(async () => {
 			await this.deletionQueue.revokeCacheGeneration(cache);
+			await this.clearCacheReadCredential(cache.scope);
 
 			const now = isoTimestamp(new Date());
 			const pending = this.context.db

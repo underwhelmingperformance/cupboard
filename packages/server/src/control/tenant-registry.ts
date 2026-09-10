@@ -12,7 +12,16 @@ import type {
 	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
-import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	isNull,
+	ne,
+	notInArray,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
@@ -20,6 +29,7 @@ import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	CacheNotFoundError,
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
@@ -429,6 +439,7 @@ export async function setCacheReadCredential(
 	now: IsoTimestamp
 ): Promise<void> {
 	await requireLiveTenant(database, id);
+	await requireLiveCache(database, id, cache);
 
 	const readPasswordSalt = generateReadPasswordSalt();
 	const readPasswordHash = await hashReadPassword(
@@ -459,6 +470,7 @@ export async function setCacheReadCredential(
 				createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
 			})
 			.from(d1Schema.tenant)
+			.innerJoin(d1Schema.cacheLifecycle, liveCacheFilter(id, cache))
 			.where(liveTenantFilter(id))
 	);
 	const set = {
@@ -488,7 +500,8 @@ export async function setCacheReadCredential(
 					.run();
 
 	if (written.meta.changes === 0) {
-		await refuseRetiredTenant(database, id);
+		await requireLiveTenant(database, id);
+		throw new CacheNotFoundError(cache);
 	}
 }
 
@@ -503,14 +516,18 @@ export async function clearCacheReadCredential(
 	cache: CacheScope
 ): Promise<void> {
 	await requireLiveTenant(database, id);
+	await requireLiveCache(database, id, cache);
 
 	const liveTenantRow = database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
 		.where(liveTenantFilter(id));
-	// Require a live tenant in the DELETE itself. If offboarding wins the race
-	// after the precheck, the DELETE changes no rows and the caller checks the
-	// tenant state instead of returning success.
+	const liveCacheRow = database
+		.select({ tenant: d1Schema.cacheLifecycle.tenant })
+		.from(d1Schema.cacheLifecycle)
+		.where(liveCacheFilter(id, cache));
+	// Repeat both guards in the DELETE. If either lifecycle changes after the
+	// precheck, the caller checks the current state instead of returning success.
 	const deleted = await database
 		.delete(d1Schema.tenantCacheReadCredential)
 		.where(
@@ -521,7 +538,8 @@ export async function clearCacheReadCredential(
 					d1Schema.tenantCacheReadCredential.cacheName,
 					cache
 				),
-				exists(liveTenantRow)
+				exists(liveTenantRow),
+				exists(liveCacheRow)
 			)
 		)
 		.run();
@@ -530,9 +548,10 @@ export async function clearCacheReadCredential(
 		return;
 	}
 
-	// A zero-row delete succeeds for a live tenant. Re-read the tenant so a
-	// missing or retired tenant still receives the corresponding error.
+	// A zero-row delete succeeds when the live cache has no credential. Re-read
+	// both guards so a concurrent tenant or cache transition still fails.
 	await requireLiveTenant(database, id);
+	await requireLiveCache(database, id, cache);
 }
 
 // Matches a tenant while its status permits writes. The `offboarding` and
@@ -541,6 +560,18 @@ function liveTenantFilter(id: TenantId): SQL | undefined {
 	return and(
 		eq(d1Schema.tenant.id, id),
 		notInArray(d1Schema.tenant.status, ['offboarding', 'offboarded'])
+	);
+}
+
+function liveCacheFilter(id: TenantId, cache: CacheScope): SQL | undefined {
+	return and(
+		eq(d1Schema.cacheLifecycle.tenant, id),
+		cacheIdentityCondition(
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName,
+			cache
+		),
+		isNull(d1Schema.cacheLifecycle.deletedAt)
 	);
 }
 
@@ -577,8 +608,24 @@ async function requireLiveTenant(
 	}
 }
 
-// A private tenant without a complete read credential fails closed. Do not clear
-// credentials after offboarding has begun.
+async function requireLiveCache(
+	database: Database,
+	id: TenantId,
+	cache: CacheScope
+): Promise<void> {
+	const row = await database
+		.select({ tenant: d1Schema.cacheLifecycle.tenant })
+		.from(d1Schema.cacheLifecycle)
+		.where(liveCacheFilter(id, cache))
+		.get();
+
+	if (row === undefined) {
+		throw new CacheNotFoundError(cache);
+	}
+}
+
+// A tenant without a complete fallback read credential fails closed. Do not
+// clear credentials after offboarding has begun.
 export async function clearTenantReadCredential(
 	database: Database,
 	id: TenantId

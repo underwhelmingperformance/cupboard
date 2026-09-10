@@ -16,9 +16,9 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { expect } from 'vitest';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
@@ -171,11 +171,11 @@ export async function insertBackedRow(
 			.run();
 	});
 
-	await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
-		.insert(migrationSchema.blobReferences)
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash: targetHash,
 			generation,
 			narHash: source.narHash,

@@ -14,7 +14,7 @@ import {
 	cacheUpdateBodySchema
 } from '../caches.ts';
 
-import { baseProcedure } from './base.ts';
+import { baseProcedure, cacheNotFoundError } from './base.ts';
 
 const forceQuerySchema = z
 	.strictObject({ force: z.boolean().default(false) })
@@ -57,6 +57,7 @@ export const cachesContract = {
 				replaySafety: 'replay-safe'
 			})
 			.route({ method: 'GET', path: '/cache' })
+			.errors(cacheNotFoundError)
 			.output(cacheSummarySchema),
 
 		inNamedCache: baseProcedure
@@ -67,6 +68,7 @@ export const cachesContract = {
 			})
 			.route({ method: 'GET', path: '/caches/{cacheName}' })
 			.input(z.strictObject({ cacheName: cacheNameSchema }))
+			.errors(cacheNotFoundError)
 			.output(cacheSummarySchema)
 	},
 
@@ -105,6 +107,7 @@ export const cachesContract = {
 			})
 			.route({ method: 'PATCH', path: '/cache' })
 			.input(cacheUpdateBodySchema)
+			.errors(cacheNotFoundError)
 			.output(cacheSummarySchema),
 
 		inNamedCache: baseProcedure
@@ -114,6 +117,7 @@ export const cachesContract = {
 			})
 			.route({ method: 'PATCH', path: '/caches/{cacheName}' })
 			.input(namedCacheUpdateSchema)
+			.errors(cacheNotFoundError)
 			.output(cacheSummarySchema)
 	},
 

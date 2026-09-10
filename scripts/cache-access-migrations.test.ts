@@ -89,6 +89,15 @@ function applyCompatibleContract(database: DatabaseSync): void {
 	applyMigration(database, '0024_cache_access_compatible_contract.sql');
 }
 
+function applyNativeContract(database: DatabaseSync): void {
+	applyCompatibleContract(database);
+	applyMigration(database, '0025_retire_tenant_read_mode.sql');
+	applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+	applyMigration(database, '0027_drop_cache_credential_lifecycle_guard.sql');
+	applyMigration(database, '0028_cache_access_contract.sql');
+	applyMigration(database, '0029_cache_credential_lifecycle_guard.sql');
+}
+
 describe('cache access expansion', () => {
 	let database: DatabaseSync;
 
@@ -851,5 +860,495 @@ describe('cache access compatible contract', () => {
 				}
 			]
 		});
+	});
+});
+
+describe('cache access native contract', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		prepareContractDatabase(database);
+		markCatalogueComplete(database);
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	it('contracts populated compatibility rows without losing native identities', () => {
+		applyCompatibleContract(database);
+		database.exec(`
+			INSERT INTO blob_ref (
+				tenant, cache, cache_kind, cache_name, store_path_hash,
+				generation, nar_hash, cache_generation
+			) VALUES (
+				'alice', 'guides', 'named', 'guides', 'blob-path', 2,
+				'sha256:blob', NULL
+			);
+			INSERT INTO attestation_ref (
+				tenant, cache, cache_kind, cache_name, store_path_hash,
+				generation, predicate_type, digest
+			) VALUES (
+				'alice', 'private/builds', 'named', 'builds', 'attestation-path',
+				4, 'https://example.test/predicate', 'digest'
+			);
+			INSERT INTO cache_lifecycle (
+				tenant, cache, cache_kind, cache_name, access, generation,
+				deleted_at, updated_at
+			) VALUES
+				(
+					'alice', 'guides', 'named', 'guides', 'public', 3, NULL,
+					'2026-01-02T00:00:00.000Z'
+				),
+				(
+					'alice', 'private/builds', 'named', 'builds', 'private', 4, NULL,
+					'2026-01-03T00:00:00.000Z'
+				);
+			INSERT INTO tenant_cache_read_credential (
+				tenant, cache, cache_kind, cache_name, read_user,
+				read_password_hash, read_password_salt, created_at
+			) VALUES
+				(
+					'alice', 'private/builds', 'named', 'builds', 'reader', 'hash',
+					'salt', '2026-01-01T00:00:00.000Z'
+				),
+				(
+					'alice', 'private/orphan', 'named', 'orphan', 'stale', 'hash',
+					'salt', '2026-01-01T00:00:00.000Z'
+				);
+		`);
+
+		applyMigration(database, '0025_retire_tenant_read_mode.sql');
+		applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+		applyMigration(database, '0027_drop_cache_credential_lifecycle_guard.sql');
+		applyMigration(database, '0028_cache_access_contract.sql');
+		applyMigration(database, '0029_cache_credential_lifecycle_guard.sql');
+
+		const contractedTables = [
+			'attestation_ref',
+			'blob_ref',
+			'cache_lifecycle',
+			'tenant_cache_read_credential'
+		];
+		const retiredColumns = [
+			...contractedTables.flatMap((table) =>
+				database
+					.prepare(`PRAGMA table_info(${table})`)
+					.all()
+					.filter((column) => column.name === 'cache')
+					.map((column) => `${table}.${String(column.name)}`)
+			),
+			...database
+				.prepare('PRAGMA table_info(tenant)')
+				.all()
+				.filter((column) =>
+					['read_mode', 'cache_catalogue_version'].includes(String(column.name))
+				)
+				.map((column) => `tenant.${String(column.name)}`)
+		];
+		const primaryKeys = contractedTables.map((table) => ({
+			table,
+			columns: database
+				.prepare(`PRAGMA table_info(${table})`)
+				.all()
+				.filter((column) => Number(column.pk) > 0)
+				.map((column) => String(column.name))
+		}));
+		const indexes = database
+			.prepare(
+				`SELECT name FROM sqlite_master
+				 WHERE type = 'index'
+					AND tbl_name IN (
+						'attestation_ref', 'blob_ref', 'cache_lifecycle',
+						'tenant_cache_read_credential'
+					)
+				 ORDER BY name`
+			)
+			.all()
+			.map((row) => String(row.name));
+		const cacheGenerationColumn = {
+			...database
+				.prepare(
+					`SELECT name, "notnull" AS required
+					 FROM pragma_table_info('blob_ref')
+					 WHERE name = 'cache_generation'`
+				)
+				.get()
+		};
+
+		expect({
+			retiredColumns,
+			primaryKeys,
+			indexes,
+			cacheGenerationColumn,
+			blob: { ...database.prepare('SELECT * FROM blob_ref').get() },
+			attestation: {
+				...database.prepare('SELECT * FROM attestation_ref').get()
+			},
+			lifecycles: database
+				.prepare(
+					`SELECT cache_kind, cache_name, access, generation
+					 FROM cache_lifecycle ORDER BY cache_kind, cache_name`
+				)
+				.all()
+				.map((row) => ({
+					...row,
+					cache_name: row.cache_name ?? undefined
+				})),
+			credentials: database
+				.prepare(
+					`SELECT cache_kind, cache_name, read_user
+					 FROM tenant_cache_read_credential
+					 ORDER BY cache_kind, cache_name`
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		}).toStrictEqual({
+			retiredColumns: [],
+			primaryKeys: contractedTables.map((table) => ({ table, columns: [] })),
+			indexes: [
+				'attestation_ref_default_identity_idx',
+				'attestation_ref_digest_idx',
+				'attestation_ref_named_identity_idx',
+				'blob_ref_default_identity_idx',
+				'blob_ref_named_identity_idx',
+				'blob_ref_nar_hash_idx',
+				'blob_ref_tenant_nar_hash_native_idx',
+				'cache_lifecycle_default_identity_idx',
+				'cache_lifecycle_named_identity_idx',
+				'tenant_cache_read_credential_default_identity_idx',
+				'tenant_cache_read_credential_named_identity_idx'
+			],
+			cacheGenerationColumn: { name: 'cache_generation', required: 1 },
+			blob: {
+				tenant: 'alice',
+				cache_kind: 'named',
+				cache_name: 'guides',
+				store_path_hash: 'blob-path',
+				generation: 2,
+				nar_hash: 'sha256:blob',
+				cache_generation: 1
+			},
+			attestation: {
+				tenant: 'alice',
+				cache_kind: 'named',
+				cache_name: 'builds',
+				store_path_hash: 'attestation-path',
+				generation: 4,
+				predicate_type: 'https://example.test/predicate',
+				digest: 'digest'
+			},
+			lifecycles: [
+				{
+					cache_kind: 'default',
+					cache_name: undefined,
+					access: 'public',
+					generation: 1
+				},
+				{
+					cache_kind: 'named',
+					cache_name: 'builds',
+					access: 'private',
+					generation: 4
+				},
+				{
+					cache_kind: 'named',
+					cache_name: 'guides',
+					access: 'public',
+					generation: 3
+				}
+			],
+			credentials: [
+				{
+					cache_kind: 'named',
+					cache_name: 'builds',
+					read_user: 'reader'
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			source: 'blob reference',
+			insert: `INSERT INTO blob_ref (
+				tenant, cache, cache_kind, cache_name, store_path_hash,
+				generation, nar_hash, cache_generation
+			) VALUES (
+				'alice', 'orphan', 'named', 'orphan', 'path', 1,
+				'sha256:orphan', NULL
+			)`
+		},
+		{
+			source: 'attestation reference',
+			insert: `INSERT INTO attestation_ref (
+				tenant, cache, cache_kind, cache_name, store_path_hash,
+				generation, predicate_type, digest
+			) VALUES (
+				'alice', 'orphan', 'named', 'orphan', 'path', 1,
+				'https://example.test/predicate', 'digest'
+			)`
+		}
+	])('refuses a $source without a lifecycle', ({ insert }) => {
+		applyCompatibleContract(database);
+		database.exec(insert);
+		applyMigration(database, '0025_retire_tenant_read_mode.sql');
+
+		expect(() => {
+			applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+		}).toThrow(/CHECK constraint failed/u);
+	});
+
+	it.each([
+		{
+			name: 'missing named cache',
+			legacyCache: 'missing',
+			cacheKind: 'named',
+			cacheNameSql: "'missing'"
+		},
+		{
+			name: 'deleted named cache',
+			legacyCache: 'private/deleted',
+			prepare: () => {
+				database.exec(`
+					INSERT INTO cache_lifecycle (
+						tenant, cache, cache_kind, cache_name, access, generation,
+						deleted_at, updated_at
+					) VALUES (
+						'alice', 'private/deleted', 'named', 'deleted', 'private', 2,
+						'2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z'
+					)
+				`);
+			},
+			cacheKind: 'named',
+			cacheNameSql: "'deleted'"
+		},
+		{
+			name: 'missing default cache',
+			legacyCache: '',
+			prepare: () => {
+				database.exec(
+					"DELETE FROM cache_lifecycle WHERE cache_kind = 'default'"
+				);
+			},
+			cacheKind: 'default',
+			cacheNameSql: 'NULL'
+		},
+		{
+			name: 'deleted default cache',
+			legacyCache: '',
+			prepare: () => {
+				database.exec(
+					"UPDATE cache_lifecycle SET deleted_at = '2026-01-02T00:00:00.000Z' WHERE cache_kind = 'default'"
+				);
+			},
+			cacheKind: 'default',
+			cacheNameSql: 'NULL'
+		}
+	])(
+		'blocks the previous writer from creating a credential for a $name',
+		({ prepare, legacyCache, cacheKind, cacheNameSql }) => {
+			applyCompatibleContract(database);
+			prepare?.();
+			applyMigration(database, '0025_retire_tenant_read_mode.sql');
+			applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+
+			expect(() => {
+				database.exec(`
+					INSERT INTO tenant_cache_read_credential (
+						tenant, cache, cache_kind, cache_name, read_user,
+						read_password_hash, read_password_salt, created_at
+					) VALUES (
+						'alice', '${legacyCache}', '${cacheKind}', ${cacheNameSql},
+						'reader', 'hash', 'salt', '2026-01-03T00:00:00.000Z'
+					)
+				`);
+			}).toThrow();
+		}
+	);
+
+	it('removes a credential for a cache deleted before the contract', () => {
+		applyCompatibleContract(database);
+		database.exec(`
+			INSERT INTO cache_lifecycle (
+				tenant, cache, cache_kind, cache_name, access, generation,
+				deleted_at, updated_at
+			) VALUES (
+				'alice', 'private/builds', 'named', 'builds', 'private', 2,
+				'2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z'
+			);
+			INSERT INTO tenant_cache_read_credential (
+				tenant, cache, cache_kind, cache_name, read_user,
+				read_password_hash, read_password_salt, created_at
+			) VALUES (
+				'alice', 'private/builds', 'named', 'builds', 'reader', 'hash',
+				'salt', '2026-01-02T00:00:00.000Z'
+			)
+		`);
+
+		applyMigration(database, '0025_retire_tenant_read_mode.sql');
+		applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+
+		expect(
+			database
+				.prepare('SELECT * FROM tenant_cache_read_credential')
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([]);
+	});
+
+	it('retains the cache credential guard after the structural contract', () => {
+		applyNativeContract(database);
+
+		expect(() => {
+			database.exec(`
+				INSERT INTO tenant_cache_read_credential (
+					tenant, cache_kind, cache_name, read_user,
+					read_password_hash, read_password_salt, created_at
+				) VALUES (
+					'alice', 'named', 'missing', 'reader', 'hash', 'salt',
+					'2026-01-03T00:00:00.000Z'
+				)
+			`);
+		}).toThrow();
+	});
+
+	it('removes credentials written while the structural contract replaces the guard', () => {
+		applyCompatibleContract(database);
+		applyMigration(database, '0025_retire_tenant_read_mode.sql');
+		applyMigration(database, '0026_cache_generation_contract_assertions.sql');
+		applyMigration(database, '0027_drop_cache_credential_lifecycle_guard.sql');
+		applyMigration(database, '0028_cache_access_contract.sql');
+		database.exec(`
+			INSERT INTO tenant_cache_read_credential (
+				tenant, cache_kind, cache_name, read_user,
+				read_password_hash, read_password_salt, created_at
+			) VALUES (
+				'alice', 'named', 'missing', 'reader', 'hash', 'salt',
+				'2026-01-03T00:00:00.000Z'
+			)
+		`);
+
+		applyMigration(database, '0029_cache_credential_lifecycle_guard.sql');
+
+		expect(
+			database
+				.prepare('SELECT * FROM tenant_cache_read_credential')
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([]);
+	});
+
+	it.each([
+		{
+			change: 'tombstoned',
+			mutate: (target: DatabaseSync) => {
+				target.exec(`
+					UPDATE cache_lifecycle
+					SET deleted_at = '2026-01-04T00:00:00.000Z'
+					WHERE tenant = 'alice'
+						AND cache_kind = 'named'
+						AND cache_name = 'builds'
+				`);
+			}
+		},
+		{
+			change: 'deleted',
+			mutate: (target: DatabaseSync) => {
+				target.exec(`
+					DELETE FROM cache_lifecycle
+					WHERE tenant = 'alice'
+						AND cache_kind = 'named'
+						AND cache_name = 'builds'
+				`);
+			}
+		}
+	])(
+		'removes a credential when its cache lifecycle is $change',
+		({ mutate }) => {
+			applyNativeContract(database);
+			database.exec(`
+			INSERT INTO cache_lifecycle (
+				tenant, cache_kind, cache_name, access, generation, updated_at
+			) VALUES (
+				'alice', 'named', 'builds', 'private', 1,
+				'2026-01-03T00:00:00.000Z'
+			);
+			INSERT INTO tenant_cache_read_credential (
+				tenant, cache_kind, cache_name, read_user,
+				read_password_hash, read_password_salt, created_at
+			) VALUES (
+				'alice', 'named', 'builds', 'reader', 'hash', 'salt',
+				'2026-01-03T00:00:00.000Z'
+			)
+		`);
+
+			mutate(database);
+
+			expect(
+				database
+					.prepare('SELECT * FROM tenant_cache_read_credential')
+					.all()
+					.map((row) => ({ ...row }))
+			).toStrictEqual([]);
+		}
+	);
+
+	it('enforces the native default and named cache identities', () => {
+		applyNativeContract(database);
+		const insertDefault = database.prepare(
+			`INSERT INTO blob_ref (
+				tenant, cache_kind, cache_name, store_path_hash, generation,
+				nar_hash, cache_generation
+			) VALUES ('alice', 'default', NULL, ?, 1, ?, 1)`
+		);
+		const insertNamed = database.prepare(
+			`INSERT INTO blob_ref (
+				tenant, cache_kind, cache_name, store_path_hash, generation,
+				nar_hash, cache_generation
+			) VALUES ('alice', 'named', ?, ?, 1, ?, 1)`
+		);
+		const insertInvalidDefault = database.prepare(
+			`INSERT INTO blob_ref (
+				tenant, cache_kind, cache_name, store_path_hash, generation,
+				nar_hash, cache_generation
+			) VALUES ('alice', 'default', 'bad-default', ?, 1, ?, 1)`
+		);
+
+		insertDefault.run('default-path', 'sha256:default');
+		expect(() => {
+			insertDefault.run('default-path', 'sha256:duplicate');
+		}).toThrow(/UNIQUE constraint failed/u);
+
+		insertNamed.run('builds', 'named-path', 'sha256:builds');
+		expect(() => {
+			insertNamed.run('builds', 'named-path', 'sha256:duplicate');
+		}).toThrow(/UNIQUE constraint failed/u);
+		expect(() => {
+			insertNamed.run('guides', 'named-path', 'sha256:guides');
+		}).not.toThrow();
+		expect(() => {
+			insertInvalidDefault.run('invalid-path', 'sha256:invalid');
+		}).toThrow(/CHECK constraint failed/u);
+	});
+
+	it('retains the native NAR-authority query plan', () => {
+		applyNativeContract(database);
+
+		const plan = database
+			.prepare(
+				`EXPLAIN QUERY PLAN
+				 SELECT 1 FROM blob_ref
+				 WHERE tenant = ? AND nar_hash = ?
+					AND cache_kind = ? AND cache_name = ?
+					AND cache_generation = ?`
+			)
+			.all('alice', 'sha256:nar', 'named', 'builds', 1)
+			.map((row) => String(row.detail));
+
+		expect(plan).toStrictEqual([
+			expect.stringContaining('blob_ref_tenant_nar_hash_native_idx')
+		]);
 	});
 });

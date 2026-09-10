@@ -115,10 +115,6 @@ const objectReaperPhaseSchema = z.enum([
 ]);
 
 const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
-	z.object({
-		kind: z.literal('cache-catalogue-migration'),
-		tenant: tenantIdSchema
-	}),
 	z.object({ kind: z.literal('tenant-maintenance'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('tenant-verify'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('offboard'), tenant: tenantIdSchema }),
@@ -136,7 +132,6 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 ]);
 
 export type MaintenanceQueueMessage =
-	| { readonly kind: 'cache-catalogue-migration'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
 	| { readonly kind: 'offboard'; readonly tenant: TenantId }
@@ -289,9 +284,6 @@ export async function executeMaintenanceQueueMessage(
 ): Promise<MaintenanceQueueDecision> {
 	try {
 		switch (message.kind) {
-			case 'cache-catalogue-migration': {
-				return { action: 'ack' };
-			}
 			case 'tenant-maintenance': {
 				return await executeTenantMaintenanceMessage(
 					logger,

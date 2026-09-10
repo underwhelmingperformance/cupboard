@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
+	CacheNotFoundError,
 	CommitSessionLimitError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -66,6 +67,22 @@ describe('bridgedError', () => {
 			code: 'CACHE_ALREADY_EXISTS',
 			status: StatusCodes.CONFLICT,
 			message: 'The requested cache already exists',
+			data: { cache: { kind: 'default' } }
+		});
+		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('returns CACHE_NOT_FOUND with the cache scope', () => {
+		const bridged = bridgedError(
+			rootLogger(),
+			new CacheNotFoundError({ kind: 'default' })
+		);
+
+		expect(bridged).toBeInstanceOf(ORPCError);
+		expect(bridged).toMatchObject({
+			code: 'CACHE_NOT_FOUND',
+			status: StatusCodes.NOT_FOUND,
+			message: 'The requested cache does not exist',
 			data: { cache: { kind: 'default' } }
 		});
 		expect(capture.logs).toStrictEqual([]);

@@ -2593,10 +2593,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	async migrateCacheCatalogue(tenant: TenantId): Promise<void> {
-		await this.initialise(tenant);
-	}
-
 	// The socket attachment preserves cache and session identity across
 	// hibernation. Keepalive pings use the automatic response and never wake the
 	// Durable Object.

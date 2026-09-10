@@ -10,9 +10,7 @@ import { cacheIdentityCondition } from './cache.ts';
 import * as d1Schema from './d1-schema.ts';
 
 /**
- * The generation used when a cache has no `cache_lifecycle` row or a `blob_ref`
- * row has no `cache_generation` value. This covers caches that have never been
- * deleted and all caches and edges written before the lifecycle table existed.
+ * The generation assigned when a cache is first created.
  */
 export const firstCacheGeneration = cacheGenerationSchema.parse(1);
 
@@ -24,31 +22,29 @@ export const secondCacheGeneration = cacheGenerationSchema.parse(
 	firstCacheGeneration + 1
 );
 
-const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, ${firstCacheGeneration})`;
-
-const currentGeneration = sql`coalesce(${d1Schema.cacheLifecycle.generation}, ${firstCacheGeneration})`;
-
 /**
  * Joins each `blob_ref` row to the lifecycle row for the same tenant and cache
  * identity. {@link authorisedByCacheGeneration} and
  * {@link revokedByCacheGeneration} rely on this join.
  *
- * Use this condition with `leftJoin`. A cache that has never been deleted has
- * no lifecycle row, so an inner join would drop all of its edges.
+ * Use this condition with `innerJoin`. Every cache has a lifecycle row, and a
+ * reference without one must not authorise a read.
  */
 export function referencedCacheLifecycle(): SQL | undefined {
 	const sameTenant = eq(
 		d1Schema.cacheLifecycle.tenant,
 		d1Schema.blobReference.tenant
 	);
-	const sameKind = eq(
-		d1Schema.cacheLifecycle.cacheKind,
-		d1Schema.blobReference.cacheKind
+	const defaultCache = and(
+		eq(d1Schema.blobReference.cacheKind, 'default'),
+		eq(d1Schema.cacheLifecycle.cacheKind, 'default')
 	);
-	const defaultCache = eq(d1Schema.blobReference.cacheKind, 'default');
 	const defaultLifecycle = isNull(d1Schema.cacheLifecycle.cacheName);
 	const defaultReference = isNull(d1Schema.blobReference.cacheName);
-	const namedCache = eq(d1Schema.blobReference.cacheKind, 'named');
+	const namedCache = and(
+		eq(d1Schema.blobReference.cacheKind, 'named'),
+		eq(d1Schema.cacheLifecycle.cacheKind, 'named')
+	);
 	const sameName = eq(
 		d1Schema.cacheLifecycle.cacheName,
 		d1Schema.blobReference.cacheName
@@ -60,17 +56,20 @@ export function referencedCacheLifecycle(): SQL | undefined {
 	);
 	const sameNamedCache = and(namedCache, sameName);
 
-	return and(sameTenant, sameKind, or(sameDefaultCache, sameNamedCache));
+	return and(sameTenant, or(sameDefaultCache, sameNamedCache));
 }
 
 /**
  * Matches a `blob_ref` row authorised by the cache's current generation.
  *
- * The statement must left join `cache_lifecycle` to `blob_ref` on
- * {@link referencedCacheLifecycle}.
+ * The statement must join `cache_lifecycle` to `blob_ref` with `innerJoin`
+ * using {@link referencedCacheLifecycle}.
  */
 export function authorisedByCacheGeneration(): SQL {
-	return sql`${edgeGeneration} = ${currentGeneration}`;
+	return eq(
+		d1Schema.blobReference.cacheGeneration,
+		d1Schema.cacheLifecycle.generation
+	);
 }
 
 /**
@@ -87,7 +86,8 @@ export function revokedByCacheGeneration(): SQL {
 /**
  * Returns the current generation for a statement that inserts a `blob_ref`
  * row. Keeping the lookup inside the insert makes the generation lookup and
- * edge creation one D1 statement.
+ * edge creation one D1 statement. The insert fails its non-null constraint if
+ * the cache has no lifecycle row.
  */
 export function currentCacheGeneration(
 	tenant: TenantId,
@@ -99,5 +99,5 @@ export function currentCacheGeneration(
 		cache
 	);
 
-	return sql<CacheGeneration>`coalesce((select ${d1Schema.cacheLifecycle.generation} from ${d1Schema.cacheLifecycle} where ${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${identity}), ${firstCacheGeneration})`;
+	return sql<CacheGeneration>`(select ${d1Schema.cacheLifecycle.generation} from ${d1Schema.cacheLifecycle} where ${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${identity})`;
 }

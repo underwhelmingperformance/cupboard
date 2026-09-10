@@ -21,8 +21,9 @@ export type ReadPasswordHash = z.infer<typeof readPasswordHashSchema>;
 export const readPasswordSaltSchema = z.string().brand('ReadPasswordSalt');
 export type ReadPasswordSalt = z.infer<typeof readPasswordSaltSchema>;
 
-// The Basic user and stored password verifier for a private tenant. The
-// plaintext password is neither persisted nor forwarded to the tenant Worker.
+// The Basic user and stored password verifier for a tenant fallback or
+// cache-specific read credential. The plaintext password is neither persisted
+// nor forwarded to the tenant Worker.
 export interface ReadVerifier {
 	readonly user: ReadUser;
 	readonly passwordHash: ReadPasswordHash;
@@ -30,8 +31,8 @@ export interface ReadVerifier {
 }
 
 /**
- * Creates the verifier stored for a private-read credential. Changing this
- * encoding invalidates existing credentials.
+ * Creates the verifier stored for a read credential. Changing this encoding
+ * invalidates existing credentials.
  *
  * The verifier is a salted digest, so the credential is protected by the
  * password's own entropy. `readPasswordSchema` requires 32 random bytes, which
