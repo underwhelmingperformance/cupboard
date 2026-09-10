@@ -152,15 +152,6 @@ export class InvalidRootNameError extends CliUsageError {
 	}
 }
 
-export class InvalidPolicyScopeError extends CliUsageError {
-	constructor(public readonly value: string) {
-		super(
-			`Invalid policy scope (expected cache or root-name-prefix): ${value}`
-		);
-		this.name = 'InvalidPolicyScopeError';
-	}
-}
-
 export class InvalidAudienceError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --audience (expected a non-empty string): ${value}`);
@@ -839,7 +830,7 @@ export class OidcRetentionChoiceRequiredError extends CliUsageError {
 				'to keep the pushed paths under a named root that this run owns; ' +
 				"choose this for a build's own outputs. Use --no-retain to publish " +
 				"them unretained, kept only by the destination cache's retention " +
-				'grace policy; choose this for intermediates that a later job will ' +
+				'grace; choose this for intermediates that a later job will ' +
 				'substitute and root itself.'
 		);
 		this.name = 'OidcRetentionChoiceRequiredError';
@@ -950,22 +941,6 @@ export class GithubSetupDriftError extends CliError {
 				'it with `cupboard oidc-trust remove`) and re-run setup.'
 		);
 		this.name = 'GithubSetupDriftError';
-	}
-}
-
-/**
- * A grace shorter than the supported minimum risks expiring while a run is
- * still publishing; refused before any policy is stored.
- */
-export class GraceTooShortError extends CliUsageError {
-	constructor(
-		public readonly graceSeconds: number,
-		public readonly minimumSeconds: number
-	) {
-		super(
-			`--grace must be at least ${String(minimumSeconds)} seconds; got ${String(graceSeconds)}`
-		);
-		this.name = 'GraceTooShortError';
 	}
 }
 

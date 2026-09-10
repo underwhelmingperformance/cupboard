@@ -1621,8 +1621,8 @@ export class LegacyPushSummaryError extends CodedError {
 /**
  * A path without a positive grace deadline. `not-present` means the confirm no
  * longer found the path at the destination. `pending` means the upload has not
- * yet produced a deadline. If the cache has no grace policy, the cache-level
- * {@link GracePolicyMissingError} is used instead.
+ * yet produced a deadline. If the cache has no configured grace, the
+ * cache-level {@link CacheGraceMissingError} is used instead.
  */
 export interface MissingGracePath {
 	readonly storePathHash: string;
@@ -1652,11 +1652,11 @@ export class GraceDeadlineMissingError extends CodedError {
 	}
 }
 
-export class GracePolicyMissingError extends CodedError {
+export class CacheGraceMissingError extends CodedError {
 	constructor(public readonly cache: CacheScope) {
 		super(
-			`No grace policy covers ${cache.kind === 'default' ? 'the default cache' : `cache ${cache.name}`}: add one with \`cupboard policy add-grace\` or publish without require-grace`
+			`${cache.kind === 'default' ? 'The default cache' : `Cache ${cache.name}`} has no configured grace: set it with \`cupboard cache set-grace\` or publish without require-grace`
 		);
-		this.name = 'GracePolicyMissingError';
+		this.name = 'CacheGraceMissingError';
 	}
 }

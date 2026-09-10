@@ -448,7 +448,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--no-retain',
-			"publish without any target root; the paths are kept only by the destination cache's retention grace policy, if one covers that cache"
+			"publish without any target root; the paths are kept only by the destination cache's configured retention grace"
 		)
 		.option(
 			'--closure',
@@ -465,7 +465,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--run-root-ttl <duration>',
-			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
+			"expire the run root after this duration (e.g. 7d, 12h); default from the destination cache's root TTL, else permanent",
 			parseTtl
 		)
 		.option(

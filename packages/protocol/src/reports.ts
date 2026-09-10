@@ -113,7 +113,7 @@ export type PushFailure = z.output<typeof pushFailureSchema>;
 // verification completed. `collected` means the store removed an intermediate
 // before its metadata or NAR could be read. `grace` contains `retainUntil` for a
 // committed path or `graceSeconds` while a pending path has no deadline. When
-// grace reporting is enabled, `{}` means that no policy matched. The property is
+// grace reporting is enabled, `{}` means that grace was not configured. The property is
 // omitted for collected paths and for legacy responses that do not report grace
 // facts.
 export const pushSummaryPathSchema = z.strictObject({

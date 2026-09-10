@@ -49,15 +49,6 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
-export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(public readonly value: string) {
-		super('CUPBOARD_COLD_PATH_TTL_SECONDS is not a valid TTL');
-		this.name = 'ColdPathTtlConfigurationInvalidError';
-	}
-}
-
 export type CacheAccessMigrationProblem =
 	'missing-default-lifecycle' | 'invalid-lifecycle';
 
@@ -189,15 +180,6 @@ export class CacheAccessMismatchError extends ServerHttpError {
 	) {
 		super('The cache already exists with a different access mode');
 		this.name = 'CacheAccessMismatchError';
-	}
-}
-
-export class StoredRetentionPolicyInvalidError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(public readonly id: string) {
-		super('The stored retention policy has no valid selector');
-		this.name = 'StoredRetentionPolicyInvalidError';
 	}
 }
 

@@ -47,6 +47,7 @@ import m0044 from './0044_cache_access_assertions.sql';
 import m0045 from './0045_cache_access_contract.sql';
 import m0046 from './0046_cache_access_triggers.sql';
 import m0047 from './0047_cache_grant_json.sql';
+import m0048 from './0048_cache_retention.sql';
 
 export default {
 	journal,
@@ -98,6 +99,7 @@ export default {
 		m0044,
 		m0045,
 		m0046,
-		m0047
+		m0047,
+		m0048
 	}
 };

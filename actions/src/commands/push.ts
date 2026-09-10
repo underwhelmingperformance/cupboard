@@ -30,11 +30,11 @@ import {
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
+	CacheGraceMissingError,
 	CommandFailedError,
 	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
 	GraceDeadlineMissingError,
-	GracePolicyMissingError,
 	GraceWaitConflictError,
 	LegacyPushSummaryError,
 	type MissingGracePath,
@@ -479,10 +479,10 @@ export async function pushAction(
 	await publishPushOutputs(environment, summary);
 
 	if (inputs.requireGrace) {
-		// A missing grace fact means that no policy covers the cache. Report this
-		// at cache level because the remedy is a cache policy change.
+		// A missing grace fact means that the cache has no configured grace. Report
+		// this once for the cache rather than repeating it for every path.
 		if (hasUngracedPath(summary)) {
-			throw new GracePolicyMissingError(inputs.cache);
+			throw new CacheGraceMissingError(inputs.cache);
 		}
 
 		const missing = pathsMissingGraceDeadline(summary);
@@ -673,7 +673,8 @@ export function requireGraceResultProtocol(
 
 /**
  * A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
- * policy. {@link GracePolicyMissingError} reports this cache-level condition.
+ * configuration. {@link CacheGraceMissingError} reports this cache-level
+ * condition.
  */
 export function hasUngracedPath(summary: PushSummary): boolean {
 	return summary.paths.some(
@@ -686,8 +687,9 @@ export function hasUngracedPath(summary: PushSummary): boolean {
 /**
  * Grace mode fails closed unless every reported path has a materialised
  * `retainUntil` value (see PLAN.md, "Planning and destination adoption"). An
- * empty grace fact means that no cache policy matched. A `graceSeconds` value
- * without `retainUntil` means that verification is still pending.
+ * empty grace fact means that the cache has no configured grace. A
+ * `graceSeconds` value without `retainUntil` means that verification is still
+ * pending.
  */
 export function pathsMissingGraceDeadline(
 	summary: PushSummary

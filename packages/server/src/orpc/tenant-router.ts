@@ -72,19 +72,16 @@ export const tenantRouter = os.router({
 		put: {
 			inDefaultCache: os.caches.put.inDefaultCache.handler(
 				({ input, context }) =>
-					context.services.cacheAdmin.createCache(
-						{ kind: 'default' },
-						input.access,
-						input.priority
-					)
+					context.services.cacheAdmin.createCache({ kind: 'default' }, input)
 			),
-			inNamedCache: os.caches.put.inNamedCache.handler(({ input, context }) =>
-				context.services.cacheAdmin.createCache(
-					{ kind: 'named', name: input.cacheName },
-					input.access,
-					input.priority
-				)
-			)
+			inNamedCache: os.caches.put.inNamedCache.handler(({ input, context }) => {
+				const { cacheName, ...configuration } = input;
+
+				return context.services.cacheAdmin.createCache(
+					{ kind: 'named', name: cacheName },
+					configuration
+				);
+			})
 		},
 		update: {
 			inDefaultCache: os.caches.update.inDefaultCache.handler(
@@ -137,34 +134,6 @@ export const tenantRouter = os.router({
 			),
 			retire: os.keys.auth.retire.handler(({ input, context }) =>
 				context.services.authKeys.retireAuthKey(input.kid)
-			)
-		}
-	},
-	policies: {
-		list: os.policies.list.handler(({ context }) =>
-			context.services.retention.listPolicies()
-		),
-		add: os.policies.add.handler(({ input, context }) =>
-			context.services.retention.addPolicy(input)
-		),
-		remove: os.policies.remove.handler(({ input, context }) =>
-			context.services.retention.removePolicy(input.id)
-		),
-		graceList: os.policies.graceList.handler(({ context }) =>
-			context.services.retention.listGracePolicies()
-		),
-		graceAdd: os.policies.graceAdd.handler(({ input, context }) =>
-			context.services.retention.addGracePolicy(input)
-		),
-		graceRemove: os.policies.graceRemove.handler(({ input, context }) =>
-			context.services.retention.removeGracePolicy(input.id)
-		),
-		graceCoverage: {
-			inDefaultCache: os.policies.graceCoverage.inDefaultCache.handler(
-				({ context }) => context.services.retention.graceCoverage(context.cache)
-			),
-			inNamedCache: os.policies.graceCoverage.inNamedCache.handler(
-				({ context }) => context.services.retention.graceCoverage(context.cache)
 			)
 		}
 	},

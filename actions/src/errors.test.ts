@@ -7,6 +7,7 @@ import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
+	CacheGraceMissingError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CacheNameInvalidError,
@@ -24,7 +25,6 @@ import {
 	DuplicateGroupKeyError,
 	ExactReleaseTagRequiredError,
 	GithubApiError,
-	GracePolicyMissingError,
 	InvalidChecksumLineError,
 	InvalidReleaseAssetUrlError,
 	LegacyPushSummaryError,
@@ -207,8 +207,8 @@ describe('action errors', () => {
 			genericExitCode
 		],
 		[
-			'GracePolicyMissingError',
-			new GracePolicyMissingError({ kind: 'default' }),
+			'CacheGraceMissingError',
+			new CacheGraceMissingError({ kind: 'default' }),
 			genericExitCode
 		],
 		[

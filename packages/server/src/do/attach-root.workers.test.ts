@@ -1,14 +1,18 @@
-import { storePathSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	rootNameSchema,
+	storePathSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type UploadAttachRootInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -16,8 +20,10 @@ import * as schema from '../db/schema.ts';
 import {
 	authorisedFetch,
 	currentServer,
+	defaultCache,
 	issueServerSignedToken,
 	resetTestServer,
+	resolvedCache,
 	testPushId,
 	uploadMetadata,
 	uploadPathNegotiation
@@ -113,20 +119,32 @@ async function plannedUploadRows(): Promise<
 	);
 }
 
-async function addRootNamePolicy(
+async function setRootTtlOverride(
 	pattern: string,
 	ttlSeconds: number
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
 		instance.context.db
-			.insert(schema.retentionPolicies)
+			.insert(schema.cacheRootTtlOverrides)
 			.values({
-				id: 'policy-1',
-				kind: 'root-name-prefix',
-				rootNamePrefix: pattern,
-				defaultTtlSeconds: ttlSecondsSchema.parse(ttlSeconds),
-				createdAt: isoTimestamp(new Date())
+				cacheId: cache.id,
+				rootPrefix: rootNameSchema.parse(pattern),
+				ttlSeconds: ttlSecondsSchema.parse(ttlSeconds)
 			})
+			.run();
+	});
+}
+
+async function setDefaultRootTtl(ttlSeconds: number): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
+
+		instance.context.db
+			.update(schema.caches)
+			.set({ defaultRootTtlSeconds: ttlSecondsSchema.parse(ttlSeconds) })
+			.where(eq(schema.caches.id, cache.id))
 			.run();
 	});
 }
@@ -135,6 +153,9 @@ describe('negotiate binds the run root', () => {
 	beforeEach(resetTestServer);
 
 	it('creates the root, resolves its expiry, and stamps every planned row', async () => {
+		await setDefaultRootTtl(1800);
+		await setRootTtlOverride('ci/', 7200);
+		await setRootTtlOverride('ci/run-', 10_800);
 		const token = await issueServerSignedToken(pushGrants('ci/'));
 		const paths = [
 			uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 }),
@@ -215,17 +236,30 @@ describe('negotiate binds the run root', () => {
 	});
 
 	it.each([
-		{ name: 'permanent with no matching policy', expiresAt: undefined },
+		{ name: 'permanent with no cache default', expiresAt: undefined },
 		{
-			name: 'the matching root-name policy ttl',
-			policyTtlSeconds: 7200,
+			name: 'the cache default ttl',
+			defaultTtlSeconds: 3600,
+			expiresAt: oneHourLater
+		},
+		{
+			name: 'the longest matching root-prefix override',
+			defaultTtlSeconds: 1800,
+			overrides: [
+				{ prefix: 'ci/', ttlSeconds: 3600 },
+				{ prefix: 'ci/run-', ttlSeconds: 7200 }
+			],
 			expiresAt: twoHoursLater
 		}
 	])(
 		'resolves an absent ttl to $name',
-		async ({ policyTtlSeconds, expiresAt }) => {
-			if (policyTtlSeconds !== undefined) {
-				await addRootNamePolicy('ci/', policyTtlSeconds);
+		async ({ defaultTtlSeconds, overrides = [], expiresAt }) => {
+			if (defaultTtlSeconds !== undefined) {
+				await setDefaultRootTtl(defaultTtlSeconds);
+			}
+
+			for (const override of overrides) {
+				await setRootTtlOverride(override.prefix, override.ttlSeconds);
 			}
 
 			const token = await issueServerSignedToken(pushGrants('ci/'));

@@ -2654,7 +2654,7 @@ describe('runPush', () => {
 		});
 
 		// Without a root, grace is the only protection from collection. Show the
-		// per-path absence and warn even when no policy matched.
+		// per-path absence and warn even when the cache has no configured grace.
 		expect({ clientCalls, roots, results, warns }).toStrictEqual({
 			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
 			roots: [],
@@ -2667,7 +2667,7 @@ describe('runPush', () => {
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
 						label: StorePath.hash(appPath),
-						value: 'no retention grace policy matched'
+						value: 'no cache retention grace configured'
 					}
 				]
 			],
@@ -2675,7 +2675,7 @@ describe('runPush', () => {
 				{
 					label: 'unretained',
 					value:
-						'no retention grace policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+						'the cache has no retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
 				}
 			]
 		});
@@ -2712,7 +2712,7 @@ describe('runPush', () => {
 				{ label: 'Retention', value: 'none (--no-retain)' },
 				...storePaths.slice(0, 20).map((storePath) => ({
 					label: StorePath.hash(storePath),
-					value: 'no retention grace policy matched'
+					value: 'no cache retention grace configured'
 				})),
 				{
 					label: '…',
@@ -2818,7 +2818,7 @@ describe('runPush', () => {
 					{ label: 'Retention', value: 'none (--no-retain)' },
 					{
 						label: StorePath.hash(appPath),
-						value: 'no retention grace policy matched'
+						value: 'no cache retention grace configured'
 					}
 				]
 			]
@@ -2861,7 +2861,7 @@ describe('runPush', () => {
 						{ label: 'Retention', value: 'none (--no-retain)' },
 						{
 							label: StorePath.hash(appPath),
-							value: 'no retention grace policy matched'
+							value: 'no cache retention grace configured'
 						}
 					]
 				]
@@ -3412,7 +3412,7 @@ describe('runPush', () => {
 					{ label: 'Pinned paths', value: '2' },
 					{ label: 'Pin expiry', value: 'permanent' },
 					{ label: appHash, value: 'kept until 2026-02-01 00:00 UTC' },
-					{ label: runtimeHash, value: 'no retention grace policy matched' }
+					{ label: runtimeHash, value: 'no cache retention grace configured' }
 				]
 			],
 			data: {
@@ -3803,7 +3803,7 @@ describe('runPush', () => {
 		expect(outcome).toStrictEqual({ isWrapped: true });
 	});
 
-	it('with --dry-run --no-retain, reports the policy a skip would extend without the unretained warning', async () => {
+	it('with --dry-run --no-retain, reports the grace a skip would extend without the unretained warning', async () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
@@ -3877,13 +3877,13 @@ describe('runPush', () => {
 				{
 					label: 'unretained',
 					value:
-						'a zero-grace retention policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+						'the cache has zero retention grace; these paths have no retention root or grace deadline, so the next collection can remove them'
 				}
 			],
 			pathRows: [
 				{
 					label: StorePath.hash(appPath),
-					value: 'matched a zero-grace policy; no grace period applies'
+					value: 'configured zero grace; no grace period applies'
 				}
 			]
 		});

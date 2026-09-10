@@ -17,9 +17,9 @@ import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type RetentionService } from './retention-service.ts';
 
-// Each pending upload stores the grace policy resolved during negotiation.
+// Each pending upload stores the cache grace resolved during negotiation.
 // `reportsGrace` records whether the client accepted grace facts. An absent
-// `graceSeconds` means no policy matched; zero marks the cache as grace-managed
+// `graceSeconds` means the cache had no configured grace; zero marks the cache as grace-managed
 // without granting a lasting deadline.
 export const graceDecisionSchema = z.strictObject({
 	reportsGrace: z.boolean(),
@@ -98,7 +98,7 @@ export type ConfirmedGrace =
  * Applies a captured grace decision to the exact committed generation and NAR
  * hash. This also applies the decision after conceding to a concurrent winner,
  * before the pending row that stores it is cleared. The identity check always
- * runs, including when no policy matched, so callers can distinguish a moved
+ * runs, including when grace was not configured, so callers can distinguish a moved
  * row from a matching row that receives no grace.
  */
 export function confirmGrace(
@@ -192,8 +192,8 @@ export function confirmGraceBatch(
 	}
 
 	if (retainUntil === undefined) {
-		// Report a matched zero-grace policy explicitly. An empty fact means no
-		// policy matched.
+		// Report a configured zero grace explicitly. An empty fact means no
+		// grace was configured.
 		const fact: UploadGraceFact =
 			graceSeconds === undefined ? {} : { graceSeconds };
 
@@ -216,7 +216,7 @@ export function confirmGraceBatch(
 
 /**
  * Reads the stored grace deadlines after a monotonic extension. An earlier
- * policy or root transition may already have set a later deadline, so replies
+ * publication or root transition may already have set a later deadline, so replies
  * must report the stored value rather than the latest candidate. Paths without
  * a deadline are absent from the result.
  */

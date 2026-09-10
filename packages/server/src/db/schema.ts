@@ -50,6 +50,10 @@ function cacheNamePrefixConstraint(column: SQLWrapper): SQL {
 	return sql`length(${column}) BETWEEN 1 AND 63 AND substr(${column}, 1, 1) GLOB '[a-z0-9]' AND ${column} NOT GLOB '*[^a-z0-9._-]*'`;
 }
 
+function rootNameConstraint(column: SQLWrapper): SQL {
+	return sql`length(${column}) BETWEEN 1 AND 256 AND instr(${column}, char(0)) = 0 AND ${column} NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || ']*')`;
+}
+
 export const caches = sqliteTable(
 	'cache_identity',
 	{
@@ -60,10 +64,14 @@ export const caches = sqliteTable(
 			.$type<CacheAccessMode>()
 			.notNull(),
 		priority: integer('priority').$type<CachePriority>().notNull(),
-		// Set when the first grace-policy event applies to this cache and never
-		// cleared while the cache exists: the empty-cache collection guard stays off
-		// even if every policy is later removed, so a partially drained cache cannot
-		// strand between continuation runs.
+		defaultRootTtlSeconds: integer(
+			'default_root_ttl_seconds'
+		).$type<TtlSeconds>(),
+		graceSeconds: integer('grace_seconds').$type<GraceSeconds>(),
+		// Set when the first grace-managed release applies to this cache and never
+		// cleared while the cache exists. This keeps the empty-cache collection guard
+		// off if grace is later cleared, so a partially drained cache cannot become
+		// stranded between continuation runs.
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -85,6 +93,26 @@ export const caches = sqliteTable(
 		uniqueIndex('cache_named_name_idx')
 			.on(table.name)
 			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
+	]
+);
+
+export const cacheRootTtlOverrides = sqliteTable(
+	'cache_root_ttl_override',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		rootPrefix: text('root_prefix').$type<RootName>().notNull(),
+		ttlSeconds: integer('ttl_seconds').$type<TtlSeconds>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.cacheId, table.rootPrefix] }),
+		check(
+			'cache_root_ttl_override_prefix_check',
+			rootNameConstraint(table.rootPrefix)
+		),
+		check(
+			'cache_root_ttl_override_ttl_check',
+			sql`${table.ttlSeconds} BETWEEN 1 AND 315360000`
+		)
 	]
 );
 
@@ -188,9 +216,9 @@ export const pendingUploads = sqliteTable(
 		// re-drive clears them to request an immediate retry.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		claimOwner: text('claim_owner'),
-		// Capture the retention decision during negotiation so a later policy change
+		// Capture the retention decision during negotiation so a later cache update
 		// cannot alter this upload. Null also supports rows created before decisions
-		// were stored and is treated as no matching policy.
+		// were stored and means that the cache granted no grace.
 		graceDecisionJson: text('grace_decision_json'),
 		// A commit attaches the path to the run root captured during negotiation.
 		// Null preserves the behaviour of pushes that did not request a root.
@@ -527,49 +555,6 @@ export const garbageCollectionTenantRuns = sqliteTable(
 		id: integer('id').primaryKey(),
 		cacheId: integer('cache_id').$type<CacheId>().notNull()
 	}
-);
-
-export const retentionPolicies = sqliteTable(
-	'retention_policy',
-	{
-		id: text('id').primaryKey(),
-		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }).notNull(),
-		cacheId: integer('cache_id').$type<CacheId>(),
-		rootNamePrefix: text('root_name_prefix'),
-		defaultTtlSeconds: integer('default_ttl_seconds')
-			.$type<TtlSeconds>()
-			.notNull(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
-	},
-	(table) => [
-		check(
-			'retention_policy_identity_check',
-			sql`(${table.kind} = 'cache' AND ${table.cacheId} IS NOT NULL AND ${table.rootNamePrefix} IS NULL) OR (${table.kind} = 'root-name-prefix' AND ${table.cacheId} IS NULL AND ${table.rootNamePrefix} IS NOT NULL)`
-		),
-		uniqueIndex('retention_policy_cache_idx')
-			.on(table.cacheId)
-			.where(sql`${table.kind} = 'cache'`),
-		uniqueIndex('retention_policy_root_name_prefix_idx')
-			.on(table.rootNamePrefix)
-			.where(sql`${table.kind} = 'root-name-prefix'`)
-	]
-);
-
-// A policy applies to each path published to a cache whose name starts with
-// `cache_prefix`; the empty prefix is the tenant-wide default. Prefixes are
-// unique, and the longest matching prefix wins when several policies cover a
-// cache.
-export const retentionGracePolicies = sqliteTable(
-	'retention_grace_policy',
-	{
-		id: text('id').primaryKey(),
-		cachePrefix: text('cache_prefix').notNull(),
-		graceSeconds: integer('grace_seconds').$type<GraceSeconds>().notNull(),
-		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
-	},
-	(table) => [
-		unique('retention_grace_policy_cache_prefix_unique').on(table.cachePrefix)
-	]
 );
 
 // Background verification resumes after this composite cache and store-path

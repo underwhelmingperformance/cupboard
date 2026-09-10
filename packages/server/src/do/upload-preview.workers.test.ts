@@ -1,4 +1,7 @@
-import type { CacheScope } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	graceSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type AuthorizationDetails,
@@ -106,18 +109,16 @@ async function previewUploads(
 	};
 }
 
-async function addGracePolicy(
-	token: string,
-	cachePrefix: string,
-	graceSeconds: number
-): Promise<void> {
-	const response = await authorisedFetch('/policies/grace', token, {
-		body: JSON.stringify({ cachePrefix, graceSeconds }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+async function setDefaultCacheGrace(graceSeconds: number): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, defaultCache());
 
-	expect(response.status).toBe(StatusCodes.OK);
+		instance.context.db
+			.update(schema.caches)
+			.set({ graceSeconds: graceSecondsSchema.parse(graceSeconds) })
+			.where(eq(schema.caches.id, cache.id))
+			.run();
+	});
 }
 
 async function sideEffectSnapshot(cache: CacheScope): Promise<{
@@ -194,7 +195,7 @@ describe('upload preview', () => {
 
 	it('preserves the legacy decision shape without the capability', async () => {
 		const token = await initialise();
-		await addGracePolicy(token, '', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -214,7 +215,7 @@ describe('upload preview', () => {
 
 	it('leaves pending uploads, grace state, and the reconcile queue exactly as before', async () => {
 		const token = await initialise();
-		await addGracePolicy(token, '', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -319,7 +320,7 @@ describe('upload preview', () => {
 
 	it('reports the stored deadline for a skip and the resolved grace for a commit or upload', async () => {
 		const token = await initialise();
-		await addGracePolicy(token, '', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const skipPath = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -366,7 +367,7 @@ describe('upload preview', () => {
 		]);
 	});
 
-	it('reports the resolved policy for a skip with no stored deadline', async () => {
+	it('reports the configured grace for a skip with no stored deadline', async () => {
 		const token = await initialise();
 
 		const path = uploadMetadata({
@@ -375,9 +376,9 @@ describe('upload preview', () => {
 			name: 'skip-ungranted'
 		});
 
-		// Publish before adding the policy so this row has no stored deadline.
+		// Publish before configuring grace so this row has no stored deadline.
 		await pushPath(token, path);
-		await addGracePolicy(token, '', dayGraceSeconds);
+		await setDefaultCacheGrace(dayGraceSeconds);
 
 		const preview = await previewUploads(token, [path]);
 
@@ -391,9 +392,9 @@ describe('upload preview', () => {
 		]);
 	});
 
-	it('reports zero grace when a zero-second policy matches', async () => {
+	it('reports zero grace when the cache has zero-second grace', async () => {
 		const token = await initialise();
-		await addGracePolicy(token, '', 0);
+		await setDefaultCacheGrace(0);
 
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -415,7 +416,7 @@ describe('upload preview', () => {
 		]);
 	});
 
-	it('reports no grace fact when no policy matches', async () => {
+	it('reports no grace fact when the cache has no configured grace', async () => {
 		const token = await initialise();
 		const path = uploadMetadata({
 			fileSize: narBytes.byteLength,

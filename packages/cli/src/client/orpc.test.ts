@@ -563,7 +563,10 @@ describe('tenantRpc', () => {
 					['caches', 0, 'scope'],
 					['caches', 0, 'access'],
 					['caches', 0, 'priority'],
-					['caches', 0, 'storePaths']
+					['caches', 0, 'storePaths'],
+					['caches', 0, 'defaultRootTtl'],
+					['caches', 0, 'grace'],
+					['caches', 0, 'rootTtlOverrides']
 				]
 			});
 		}

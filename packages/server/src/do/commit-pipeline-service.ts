@@ -1008,7 +1008,7 @@ export class CommitPipelineService {
 			);
 
 			// The upsert is monotonic. Report the stored maximum, which may come
-			// from an earlier policy decision or a root transition.
+			// from an earlier grace decision or a root transition.
 			const stored = storedGraceDeadlines(this.context.db, group.cache, hashes);
 
 			for (const entry of group.entries) {

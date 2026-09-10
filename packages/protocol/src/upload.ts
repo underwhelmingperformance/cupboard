@@ -84,7 +84,7 @@ export type SessionId = z.infer<typeof sessionIdSchema>;
 
 // The server closes a commit connection when the access token from its upgrade
 // expires. The client checks both values to distinguish an expired token from
-// another policy failure.
+// another validation failure.
 export const commitAuthenticationExpiredCloseCode = 1008;
 export const commitAuthenticationExpiredCloseReason = 'access token expired';
 
@@ -114,8 +114,8 @@ export type PushCredentialInput = z.input<typeof pushCredentialSchema>;
 export const uploadNegotiateMaxPaths = 100_000;
 
 // `retainUntil` reports the durable deadline after a path was confirmed.
-// `graceSeconds` reports the matched policy when no deadline was written,
-// including a zero-second policy. An empty object means no policy matched.
+// `graceSeconds` reports the configured grace when no deadline was written,
+// including zero seconds. An empty object means grace was not configured.
 export const uploadGraceFactSchema = z
 	.strictObject({
 		retainUntil: z.string().optional(),

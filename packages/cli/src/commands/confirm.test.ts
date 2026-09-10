@@ -83,9 +83,9 @@ describe('runConfirm', () => {
 			row: { label: appHash, value: 'kept until 2026-01-02 00:00 UTC' }
 		},
 		{
-			name: 'a confirmed path with no matching policy',
+			name: 'a confirmed path without cache grace',
 			path: { storePathHash: appHash, confirmed: true, grace: {} },
-			row: { label: appHash, value: 'no retention grace policy matched' }
+			row: { label: appHash, value: 'no cache retention grace configured' }
 		},
 		{
 			name: 'an unconfirmed path',

@@ -112,6 +112,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootTtl: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootTtlOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -119,6 +122,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 1,
+				defaultRootTtl: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootTtlOverrides: [],
 				graceManaged: false
 			}
 		]);
@@ -168,6 +174,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootTtl: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootTtlOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -175,6 +184,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 0,
+				defaultRootTtl: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootTtlOverrides: [],
 				graceManaged: true,
 				earliestGraceDeadline: earlierLiveDeadline
 			}
@@ -349,6 +361,9 @@ describe('cache registry admin', () => {
 					access: 'public',
 					priority: 30,
 					storePaths: 0,
+					defaultRootTtl: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootTtlOverrides: [],
 					graceManaged: false
 				}
 			},

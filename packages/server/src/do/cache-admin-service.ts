@@ -1,13 +1,9 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import {
-	type CacheAccessMode,
-	type CacheName,
-	type CachePriority,
-	type CacheScope
-} from '@cupboard/nix-store/scalars';
+import { type CacheName, type CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type CacheListResponse,
+	type CachePutBody,
 	type CacheRemoveResponse,
 	type CacheSummary,
 	type CacheUpdateBody
@@ -212,6 +208,20 @@ export class CacheAdminService {
 					row.earliest === null ? [] : [[row.cacheId, row.earliest] as const]
 				)
 		);
+		const overrides = new Map<
+			ResolvedCache['id'],
+			(typeof schema.cacheRootTtlOverrides.$inferSelect)[]
+		>();
+
+		for (const override of this.context.db
+			.select()
+			.from(schema.cacheRootTtlOverrides)
+			.all()) {
+			const entries = overrides.get(override.cacheId) ?? [];
+			entries.push(override);
+			overrides.set(override.cacheId, entries);
+		}
+
 		const caches = registered
 			.map((row) => {
 				const earliestGraceDeadline = earliestDeadlines.get(row.id);
@@ -221,6 +231,25 @@ export class CacheAdminService {
 					access: row.access,
 					priority: row.priority,
 					storePaths: counts.get(row.id) ?? 0,
+					defaultRootTtl:
+						row.defaultRootTtlSeconds === null
+							? { kind: 'permanent' as const }
+							: {
+									kind: 'duration' as const,
+									ttlSeconds: row.defaultRootTtlSeconds
+								},
+					grace:
+						row.graceSeconds === null
+							? { kind: 'none' as const }
+							: {
+									kind: 'duration' as const,
+									graceSeconds: row.graceSeconds
+								},
+					rootTtlOverrides: (overrides.get(row.id) ?? [])
+						.map(({ rootPrefix, ttlSeconds }) => ({ rootPrefix, ttlSeconds }))
+						.toSorted((left, right) =>
+							byCodeUnit(left.rootPrefix, right.rootPrefix)
+						),
 					graceManaged: row.graceManaged,
 					...(earliestGraceDeadline !== undefined && {
 						earliestGraceDeadline
@@ -239,39 +268,37 @@ export class CacheAdminService {
 
 	getCache(scope: CacheScope): CacheSummary {
 		const cache = this.context.cacheRepository.require(scope);
-		const row = this.context.db
-			.select({ priority: schema.caches.priority })
-			.from(schema.caches)
-			.where(eq(schema.caches.id, cache.id))
-			.get();
 
-		if (row === undefined) {
-			throw new CacheNotFoundError(scope);
-		}
-
-		return this.cacheSummary(cache, row.priority);
+		return this.cacheSummary(cache);
 	}
 
 	async createCache(
 		scope: CacheScope,
-		access: CacheAccessMode,
-		priority: CachePriority
+		configuration: CachePutBody
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(async () => {
 			if (this.context.cacheRepository.resolve(scope) !== undefined) {
 				throw new CacheAlreadyExistsError(scope);
 			}
 
-			await this.deletionQueue.clearCacheDeletion({ scope, access });
+			await this.deletionQueue.clearCacheDeletion({
+				scope,
+				access: configuration.access
+			});
 			await this.clearCacheReadCredential(scope);
 
-			const cache = this.context.cacheRepository.create(
-				scope,
-				access,
-				priority
-			);
+			const cache = this.context.cacheRepository.create(scope, {
+				access: configuration.access,
+				priority: configuration.priority,
+				...(configuration.defaultRootTtl.kind === 'duration' && {
+					defaultRootTtlSeconds: configuration.defaultRootTtl.ttlSeconds
+				}),
+				...(configuration.grace.kind === 'duration' && {
+					graceSeconds: configuration.grace.graceSeconds
+				})
+			});
 
-			return this.cacheSummary(cache, priority);
+			return this.cacheSummary(cache);
 		});
 	}
 
@@ -279,20 +306,93 @@ export class CacheAdminService {
 		scope: CacheScope,
 		update: CacheUpdateBody
 	): Promise<CacheSummary> {
-		if (update.kind === 'priority') {
-			const cache = this.context.cacheRepository.require(scope);
+		const cache = this.context.cacheRepository.require(scope);
 
+		if (update.kind === 'priority') {
 			this.context.db
 				.update(schema.caches)
 				.set({ priority: update.priority })
 				.where(eq(schema.caches.id, cache.id))
 				.run();
 
-			return this.cacheSummary(cache, update.priority);
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-default-root-ttl') {
+			this.context.db
+				.update(schema.caches)
+				.set({ defaultRootTtlSeconds: update.ttlSeconds })
+				.where(eq(schema.caches.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'clear-default-root-ttl') {
+			this.context.db
+				.update(schema.caches)
+				.set({ defaultRootTtlSeconds: sql`NULL` })
+				.where(eq(schema.caches.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-root-ttl-override') {
+			this.context.db
+				.insert(schema.cacheRootTtlOverrides)
+				.values({
+					cacheId: cache.id,
+					rootPrefix: update.rootPrefix,
+					ttlSeconds: update.ttlSeconds
+				})
+				.onConflictDoUpdate({
+					target: [
+						schema.cacheRootTtlOverrides.cacheId,
+						schema.cacheRootTtlOverrides.rootPrefix
+					],
+					set: { ttlSeconds: update.ttlSeconds }
+				})
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'clear-root-ttl-override') {
+			this.context.db
+				.delete(schema.cacheRootTtlOverrides)
+				.where(
+					and(
+						eq(schema.cacheRootTtlOverrides.cacheId, cache.id),
+						eq(schema.cacheRootTtlOverrides.rootPrefix, update.rootPrefix)
+					)
+				)
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-grace') {
+			this.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: update.graceSeconds })
+				.where(eq(schema.caches.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'clear-grace') {
+			this.context.db
+				.update(schema.caches)
+				.set({ graceSeconds: sql`NULL` })
+				.where(eq(schema.caches.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
 		}
 
 		return this.context.criticalSection(async () => {
-			const existing = this.context.cacheRepository.require(scope);
 			let cache: ResolvedCache;
 
 			if (update.access === 'private') {
@@ -300,24 +400,20 @@ export class CacheAdminService {
 					scope,
 					access: update.access
 				});
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
+				cache = this.context.cacheRepository.setAccess(
+					this.context.cacheRepository.require(scope),
+					update.access
+				);
 			} else {
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
+				cache = this.context.cacheRepository.setAccess(
+					this.context.cacheRepository.require(scope),
+					update.access
+				);
 				await this.deletionQueue.clearCacheDeletion(cache);
 				await this.clearCacheReadCredential(cache.scope);
 			}
 
-			const row = this.context.db
-				.select({ priority: schema.caches.priority })
-				.from(schema.caches)
-				.where(eq(schema.caches.id, cache.id))
-				.get();
-
-			if (row === undefined) {
-				throw new CacheNotFoundError(scope);
-			}
-
-			return this.cacheSummary(cache, row.priority);
+			return this.cacheSummary(cache);
 		});
 	}
 
@@ -358,20 +454,43 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: ResolvedCache, priority: CachePriority): CacheSummary {
-		const managed = this.context.db
-			.select({ graceManaged: schema.caches.graceManaged })
+	cacheSummary(cache: ResolvedCache): CacheSummary {
+		const row = this.context.db
+			.select()
 			.from(schema.caches)
 			.where(eq(schema.caches.id, cache.id))
 			.get();
+
+		if (row === undefined) {
+			throw new CacheNotFoundError(cache.scope);
+		}
+
+		const rootTtlOverrides = this.context.db
+			.select({
+				rootPrefix: schema.cacheRootTtlOverrides.rootPrefix,
+				ttlSeconds: schema.cacheRootTtlOverrides.ttlSeconds
+			})
+			.from(schema.cacheRootTtlOverrides)
+			.where(eq(schema.cacheRootTtlOverrides.cacheId, cache.id))
+			.all()
+			.toSorted((left, right) => byCodeUnit(left.rootPrefix, right.rootPrefix));
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {
 			scope: cache.scope,
 			access: cache.access,
-			priority,
+			priority: row.priority,
 			storePaths: this.cacheStorePathCount(cache),
-			graceManaged: managed?.graceManaged ?? false,
+			defaultRootTtl:
+				row.defaultRootTtlSeconds === null
+					? { kind: 'permanent' }
+					: { kind: 'duration', ttlSeconds: row.defaultRootTtlSeconds },
+			grace:
+				row.graceSeconds === null
+					? { kind: 'none' }
+					: { kind: 'duration', graceSeconds: row.graceSeconds },
+			rootTtlOverrides,
+			graceManaged: row.graceManaged,
 			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
 	}
@@ -493,6 +612,9 @@ export class CacheAdminService {
 				// released paths receive no grace deadline.
 				tx.delete(schema.retentionGrace)
 					.where(eq(schema.retentionGrace.cacheId, cache.id))
+					.run();
+				tx.delete(schema.cacheRootTtlOverrides)
+					.where(eq(schema.cacheRootTtlOverrides.cacheId, cache.id))
 					.run();
 				tx.update(schema.caches)
 					.set({ deletedAt: now })
