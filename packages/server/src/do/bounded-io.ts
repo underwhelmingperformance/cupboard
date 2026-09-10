@@ -3,14 +3,23 @@ import { UnboundableIoError, UncountableStatementError } from '../errors.ts';
 import { boundedSubrequest, perCallCapMs, unboundedCapMs } from './deadline.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
+import { spendSubrequests } from './subrequest-slice.ts';
 
+// Declare the call against the pass's subrequest slice before making it. The
+// slice refuses nothing; a pass asks `hasSubrequestsFor` before a granule and
+// defers when the answer is no. Durable Object storage is deliberately absent:
+// the runtime counts no storage operation, so the row budget measures that work
+// instead and the two do not overlap.
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
 	subrequest: string,
 	capMs?: number
 ): (...arguments_: A) => Promise<R> {
-	return (...arguments_: A) =>
-		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	return (...arguments_: A) => {
+		spendSubrequests(1);
+
+		return boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	};
 }
 
 // Decrement the invocation's statement allowance before calling D1. If the call
