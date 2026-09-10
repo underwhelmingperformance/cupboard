@@ -2,28 +2,36 @@ import { type Logger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	cacheFromSelector,
-	cacheNameSchema,
+	type CacheAccessMode,
+	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
-	PRIVATE_STORED_PREFIX,
-	privateStoredCache,
-	publicCacheSelectorSchema,
-	type StoredCache,
 	storedReferencesSchema,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
-	isPrivateReuseView,
+	type ReuseViewName,
 	type ReuseViewRevision,
-	type StoredReuseView
+	type ReuseViewSelector
 } from '@cupboard/protocol/reuse-views';
-import { and, eq, gte, inArray, lt, or, type SQL, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	getTableColumns,
+	inArray,
+	isNull,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { outsidePrivateCaches } from '../db/cache-range.ts';
+import { cacheSelectorsCondition, type ResolvedCache } from '../db/cache.ts';
+import {
+	authorisedByCacheGeneration,
+	referencedCacheLifecycle
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
@@ -38,6 +46,10 @@ import { parseStored } from '../http/parse.ts';
 import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
+import {
+	legacyReuseViewKeys,
+	reuseViewSelectorsFromRows
+} from './reuse-view-selectors.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
@@ -45,12 +57,14 @@ type CandidateRow = typeof schema.narInfos.$inferSelect;
 interface GateSnapshot {
 	readonly tenant: TenantId;
 	readonly revision: ReuseViewRevision;
+	readonly access: CacheAccessMode;
 	readonly candidates: readonly CandidateRow[];
 }
 
 interface GateBatchSnapshot {
 	readonly tenant: TenantId;
 	readonly revision: number;
+	readonly access: CacheAccessMode;
 	readonly candidates: readonly CandidateRow[];
 }
 
@@ -79,132 +93,48 @@ function recordedObjectVersions(
 	});
 }
 
-// Bind only the key columns: a candidate row also holds the narinfo's references
-// and signatures, which the list would otherwise carry.
-function candidateVersions(
-	candidates: readonly CandidateRow[]
-): CandidateVersion[] {
-	return candidates.map((candidate) => ({
-		cache: candidate.cache,
-		storePathHash: candidate.storePathHash,
-		generation: candidate.generation
-	}));
+/**
+ * One candidate version, as the edge lookup compares it.
+ *
+ * SQL compares a row list column by column, and a comparison against NULL
+ * never holds, so the default cache's absent name travels as an empty string
+ * and the statement reads the column through `coalesce`. A cache name has at
+ * least one character, so no named cache collides with that.
+ */
+interface CandidateVersion {
+	readonly cacheKind: CacheScope['kind'];
+	readonly cacheName: string;
+	readonly storePathHash: StorePathHash;
+	readonly generation: NarInfoGeneration;
+}
+
+function listedCacheName(scope: CacheScope): string {
+	return scope.kind === 'named' ? scope.name : '';
 }
 
 function candidateKey(
-	candidate: Pick<CandidateRow, 'cache' | 'storePathHash'>
+	candidate: Pick<CandidateRow, 'cacheId' | 'storePathHash'>
 ): string {
-	return JSON.stringify([candidate.cache, candidate.storePathHash]);
+	return JSON.stringify([candidate.cacheId, candidate.storePathHash]);
 }
 
-function candidateVersionKey(
-	candidate: Pick<
-		CandidateRow,
-		'cache' | 'storePathHash' | 'generation' | 'narHash'
-	>
-): string {
-	return JSON.stringify([
-		candidate.cache,
-		candidate.storePathHash,
-		candidate.generation,
-		candidate.narHash
-	]);
-}
-
-// Increment the last code unit to form an exclusive upper bound. Cache names
-// are ASCII, so this cannot split or overflow a code point.
-function prefixUpperBound(prefix: string): string {
-	const last = prefix.codePointAt(prefix.length - 1);
-
-	if (last === undefined) {
-		throw new RangeError('prefix must be non-empty');
-	}
-
-	return prefix.slice(0, -1) + String.fromCodePoint(last + 1);
-}
-
-// A public view's prefix selectors match public caches only, so every prefix
-// query excludes the private stored-name range.
-function outsidePrivateRange(): SQL | undefined {
-	return outsidePrivateCaches(schema.narInfos.cache);
-}
-
-// Every private stored name begins with the private prefix, so append the
-// selector pattern to that prefix to form the range bounds. An empty pattern
-// selects the complete private range.
-function insidePrivatePrefix(pattern: string): SQL | undefined {
-	const start = `${PRIVATE_STORED_PREFIX}${pattern}`;
-
-	return and(
-		gte(schema.narInfos.cache, sql`${start}`),
-		lt(schema.narInfos.cache, sql`${prefixUpperBound(start)}`)
-	);
-}
-
-// The condition for every cache in the view's namespace.
-function allCachesCondition(view: StoredReuseView): SQL | undefined {
-	return isPrivateReuseView(view)
-		? insidePrivatePrefix('')
-		: outsidePrivateRange();
-}
-
-// The cache an exact selector names, resolved inside the view's namespace.
-function exactSelectorCache(
-	view: StoredReuseView,
-	pattern: string
-): StoredCache {
-	if (isPrivateReuseView(view)) {
-		return privateStoredCache(cacheNameSchema.parse(pattern));
-	}
-
-	return cacheFromSelector(publicCacheSelectorSchema.parse(pattern));
-}
-
-/**
-The half-open range of stored cache names one prefix selector matches.
-*/
-interface CacheRange {
-	readonly lower: string;
-	readonly upper: string;
-}
-
-/**
- * The range a non-empty prefix selector covers. A private view resolves the
- * pattern inside the private prefix; a public view compares it with the stored
- * names directly, and the caller excludes the private range separately.
- */
-function selectorRange(
-	view: StoredReuseView,
-	pattern: string
-): CacheRange | undefined {
-	if (pattern === '') {
-		return undefined;
-	}
-
-	const lower = isPrivateReuseView(view)
-		? `${PRIVATE_STORED_PREFIX}${pattern}`
-		: pattern;
-
-	return { lower, upper: prefixUpperBound(lower) };
-}
-
-/**
- * Matches a cache against every range in one list, which binds the ranges as
- * one parameter however many selectors a view holds.
- */
-function withinSelectorRanges(ranges: JsonRowList<CacheRange>): SQL {
-	return ranges.anyRow(
-		sql`${schema.narInfos.cache} >= ${ranges.column('lower')} and ${schema.narInfos.cache} < ${ranges.column('upper')}`
-	);
-}
-
-/**
- * One candidate version, as the edge lookup compares it.
- */
-interface CandidateVersion {
-	readonly cache: StoredCache;
+// The identity of one committed version, as an edge row and a candidate row
+// each describe it. A default cache has no stored name, and the key uses an
+// empty string for it so both sides agree.
+function versionKey(version: {
+	readonly cacheKind: CacheScope['kind'] | null;
+	readonly cacheName: string | null;
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
+	readonly narHash: NixSha256HashString;
+}): string {
+	return JSON.stringify([
+		version.cacheKind,
+		version.cacheName ?? '',
+		version.storePathHash,
+		version.generation,
+		version.narHash
+	]);
 }
 
 /**
@@ -217,101 +147,48 @@ interface CandidateVersion {
 export function reuseEdgeSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
+	access: CacheAccessMode,
 	versions: JsonRowList<CandidateVersion>
 ) {
 	return database
 		.select({
-			cache: d1Schema.blobReference.cache,
+			cacheKind: d1Schema.blobReference.cacheKind,
+			cacheName: d1Schema.blobReference.cacheName,
 			storePathHash: d1Schema.blobReference.storePathHash,
 			generation: d1Schema.blobReference.generation,
 			narHash: d1Schema.blobReference.narHash
 		})
 		.from(d1Schema.blobReference)
+		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),
 				versions.matches({
-					cache: d1Schema.blobReference.cache,
+					cacheKind: d1Schema.blobReference.cacheKind,
+					cacheName: sql`coalesce(${d1Schema.blobReference.cacheName}, '')`,
 					storePathHash: d1Schema.blobReference.storePathHash,
 					generation: d1Schema.blobReference.generation
-				})
+				}),
+				eq(d1Schema.cacheLifecycle.access, access),
+				authorisedByCacheGeneration()
 			)
 		);
-}
-
-/**
- * The condition that matches every cache a view selects.
- *
- * A view holds its selectors as exact cache names and as prefix ranges, and each
- * set travels as one bound list, so the condition binds the same parameters
- * however many selectors the view holds.
- */
-function viewCacheFilter(
-	view: StoredReuseView,
-	selectors: readonly {
-		readonly kind: 'exact' | 'prefix';
-		readonly pattern: string;
-	}[]
-): SQL | undefined {
-	// An empty prefix matches every cache of the view's namespace, so its
-	// condition alone covers the other selectors.
-	if (
-		selectors.some(
-			(selector) => selector.kind === 'prefix' && selector.pattern === ''
-		)
-	) {
-		return allCachesCondition(view);
-	}
-
-	const exactCaches = selectors.flatMap((selector) =>
-		selector.kind === 'exact'
-			? [exactSelectorCache(view, selector.pattern)]
-			: []
-	);
-	const prefixRanges = selectors.flatMap((selector) => {
-		const range =
-			selector.kind === 'prefix'
-				? selectorRange(view, selector.pattern)
-				: undefined;
-
-		return range === undefined ? [] : [range];
-	});
-	const selectorConditions = [
-		...jsonValueLists(exactCaches).map((caches) =>
-			inArray(schema.narInfos.cache, caches)
-		),
-		...jsonRowLists(prefixRanges).map((ranges) => withinSelectorRanges(ranges))
-	];
-	// A public view's selectors match public caches only, so the namespace applies
-	// to the whole selector set rather than to each selector.
-	const namespaceFilter = isPrivateReuseView(view)
-		? undefined
-		: outsidePrivateRange();
-
-	return and(or(...selectorConditions), namespaceFilter);
 }
 
 /**
  * The NAR URL a view's narinfo advertises, relative to the base URL the reader
  * addressed the view with.
  *
- * A private view serves its NARs under its own mount so the read remains behind
- * the tenant-credential guard and is authorised over the private cache range. A
- * route outside the view would enter the public namespace, which does not serve
- * a NAR referenced only by private caches.
- *
- * A public view uses the tenant's public NAR route, two segments above the
- * view. A public view can select only the tenant's public caches, and that route
- * serves any NAR those caches reference.
+ * The NAR remains under the view's stable route. The route resolves the view
+ * again and applies the same access check as the narinfo request.
  */
 function narUrlForView(
-	view: StoredReuseView,
 	narHash: NixSha256HashString,
 	incarnation: number
 ): string {
 	const key = narObjectKey(narHash, incarnation);
 
-	return isPrivateReuseView(view) ? key : `../../${key}`;
+	return key;
 }
 
 /**
@@ -323,85 +200,187 @@ function narUrlForView(
 export class ReuseViewLookupService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Read the view revision and candidates in one input-gate snapshot. The
-	// selectors travel as bound lists, so one query returns every copy of the
-	// path the view selects, and the primary key gives at most one row per cache.
-	private snapshotCandidates(
-		view: StoredReuseView,
-		storePathHash: StorePathHash
-	): GateSnapshot | undefined {
-		const viewRow = this.context.db
-			.select({ revision: schema.reuseViews.revision })
-			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, view))
-			.get();
-
-		if (viewRow === undefined) {
-			return undefined;
-		}
-
-		const selectors = this.context.db
-			.select({
-				kind: schema.reuseViewSelectors.kind,
-				pattern: schema.reuseViewSelectors.pattern
-			})
-			.from(schema.reuseViewSelectors)
-			.where(eq(schema.reuseViewSelectors.view, view))
-			.all();
-		const candidates = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.storePathHash, storePathHash),
-					viewCacheFilter(view, selectors)
-				)
-			)
-			.orderBy(schema.narInfos.cache)
-			.all();
-
-		return {
-			tenant: this.context.requireTenant(),
-			revision: viewRow.revision,
-			candidates
-		};
+	/**
+	 * The cache a candidate belongs to.
+	 *
+	 * `narinfo.cache_id` stays nullable until the expansion completes. A
+	 * candidate reached this service through a join on `cache_identity`, so a
+	 * null here means the row refers to no cache and the repository refuses it.
+	 */
+	private candidateCache(
+		candidate: Pick<CandidateRow, 'cacheId'>
+	): ResolvedCache {
+		return this.context.cacheRepository.resolvedForId(candidate.cacheId);
 	}
 
-	private snapshotCandidateBatch(
-		view: StoredReuseView,
-		storePathHashes: readonly StorePathHash[]
-	): GateBatchSnapshot | undefined {
+	private candidateVersionKey(candidate: CandidateRow): string {
+		const scope = this.context.cacheRepository.scopeForId(candidate.cacheId);
+
+		return versionKey({
+			cacheKind: scope.kind,
+			cacheName: listedCacheName(scope),
+			storePathHash: candidate.storePathHash,
+			generation: candidate.generation,
+			narHash: candidate.narHash
+		});
+	}
+
+	// Bind only the key columns: a candidate row also holds the narinfo's
+	// references and signatures, which the list would otherwise carry.
+	private candidateVersions(
+		candidates: readonly CandidateRow[]
+	): CandidateVersion[] {
+		return candidates.map((candidate) => {
+			const scope = this.context.cacheRepository.scopeForId(candidate.cacheId);
+
+			return {
+				cacheKind: scope.kind,
+				cacheName: listedCacheName(scope),
+				storePathHash: candidate.storePathHash,
+				generation: candidate.generation
+			};
+		});
+	}
+
+	/**
+	 * The rows of every cache a view selects that hold the paths `hashFilter`
+	 * names.
+	 *
+	 * The selectors travel as one bound list, so a view of any width reads its
+	 * candidates in one statement, and the primary key gives at most one row per
+	 * cache and path.
+	 */
+	private candidateRows(
+		selectors: readonly ReuseViewSelector[],
+		access: CacheAccessMode,
+		hashFilter: SQL
+	): CandidateRow[] {
+		return this.context.db
+			.select(getTableColumns(schema.narInfos))
+			.from(schema.narInfos)
+			.innerJoin(
+				schema.cacheIdentities,
+				eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
+			)
+			.where(
+				and(
+					hashFilter,
+					eq(schema.cacheIdentities.access, access),
+					isNull(schema.cacheIdentities.deletedAt),
+					cacheSelectorsCondition(
+						schema.cacheIdentities.kind,
+						schema.cacheIdentities.name,
+						selectors
+					)
+				)
+			)
+			.orderBy(schema.narInfos.storePathHash, schema.narInfos.cacheId)
+			.all();
+	}
+
+	/**
+	 * Matches the narinfo row a candidate came from.
+	 *
+	 * `narinfo.cache_id` stays nullable until the expansion completes, and a
+	 * candidate reached this service through a join on `cache_identity`, so its
+	 * id is set. The comparison is written in SQL because a null id must match no
+	 * row, which is what a comparison against NULL already gives.
+	 */
+	private candidateRowFilter(candidate: CandidateRow): SQL | undefined {
+		return and(
+			sql`${schema.narInfos.cacheId} = ${candidate.cacheId}`,
+			eq(schema.narInfos.storePathHash, candidate.storePathHash)
+		);
+	}
+
+	private viewSelectors(
+		view: ReuseViewName,
+		keys: readonly string[]
+	): ReuseViewSelector[] {
+		return reuseViewSelectorsFromRows(
+			view,
+			this.context.db
+				.select({
+					kind: schema.nativeReuseViewSelectors.kind,
+					cacheName: schema.nativeReuseViewSelectors.cacheName,
+					prefix: schema.nativeReuseViewSelectors.prefix
+				})
+				.from(schema.nativeReuseViewSelectors)
+				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.all()
+		);
+	}
+
+	// Read the view revision and candidates in one input-gate snapshot.
+	private snapshotCandidates(
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePathHash: StorePathHash
+	): GateSnapshot | undefined {
+		const keys = legacyReuseViewKeys(view);
 		const viewRow = this.context.db
-			.select({ revision: schema.reuseViews.revision })
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision
+			})
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, view))
+			.where(inArray(schema.reuseViews.name, keys))
 			.get();
 
-		if (viewRow === undefined) {
+		if (viewRow?.access !== access) {
 			return undefined;
 		}
 
-		const selectors = this.context.db
-			.select({
-				kind: schema.reuseViewSelectors.kind,
-				pattern: schema.reuseViewSelectors.pattern
-			})
-			.from(schema.reuseViewSelectors)
-			.where(eq(schema.reuseViewSelectors.view, view))
-			.all();
-		const cacheFilter = viewCacheFilter(view, selectors);
-		const candidates = jsonValueLists(storePathHashes).flatMap((hashes) =>
-			this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(and(inArray(schema.narInfos.storePathHash, hashes), cacheFilter))
-				.orderBy(schema.narInfos.storePathHash, schema.narInfos.cache)
-				.all()
+		const selectors = this.viewSelectors(view, keys);
+		const candidates = this.candidateRows(
+			selectors,
+			viewRow.access,
+			eq(schema.narInfos.storePathHash, storePathHash)
 		);
 
 		return {
 			tenant: this.context.requireTenant(),
 			revision: viewRow.revision,
+			access: viewRow.access,
+			candidates
+		};
+	}
+
+	private snapshotCandidateBatch(
+		view: ReuseViewName,
+		access: CacheAccessMode,
+		storePathHashes: readonly StorePathHash[]
+	): GateBatchSnapshot | undefined {
+		const keys = legacyReuseViewKeys(view);
+		const viewRow = this.context.db
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision
+			})
+			.from(schema.reuseViews)
+			.where(inArray(schema.reuseViews.name, keys))
+			.get();
+
+		if (viewRow?.access !== access) {
+			return undefined;
+		}
+
+		// The guard above narrows the stored access, and a property's narrowing
+		// does not reach inside the callback below, so read it into a local first.
+		const viewAccess = viewRow.access;
+		const selectors = this.viewSelectors(view, keys);
+		const candidates = jsonValueLists(storePathHashes).flatMap((hashes) =>
+			this.candidateRows(
+				selectors,
+				viewAccess,
+				inArray(schema.narInfos.storePathHash, hashes)
+			)
+		);
+
+		return {
+			tenant: this.context.requireTenant(),
+			revision: viewRow.revision,
+			access: viewAccess,
 			candidates
 		};
 	}
@@ -425,8 +404,9 @@ export class ReuseViewLookupService {
 		// The whole candidate set travels as one row list, so the statement count
 		// comes from the statement and a path held by many caches costs the
 		// invocation no more than a path held by one.
-		const edgeQueries = jsonRowLists(candidateVersions(candidates)).map(
-			(versions) => reuseEdgeSelect(this.context.d1, tenant, versions)
+		const edgeQueries = jsonRowLists(this.candidateVersions(candidates)).map(
+			(versions) =>
+				reuseEdgeSelect(this.context.d1, tenant, snapshot.access, versions)
 		);
 		const [edgeResults, states, owned] = await this.sharedFacts(() =>
 			Promise.all([
@@ -471,14 +451,14 @@ export class ReuseViewLookupService {
 		// so match candidates on the full version key. The rows do not line up with
 		// the candidate list by position.
 		const committedVersions = new Set(
-			edgeResults.flat().map((edge) => candidateVersionKey(edge))
+			edgeResults.flat().map((edge) => versionKey(edge))
 		);
 		const committedCaches = new Set(
 			candidates
 				.filter((candidate) =>
-					committedVersions.has(candidateVersionKey(candidate))
+					committedVersions.has(this.candidateVersionKey(candidate))
 				)
-				.map((candidate) => candidate.cache)
+				.map((candidate) => candidate.cacheId)
 		);
 		const blobs = new Map(
 			states.flat().map((state) => [
@@ -494,7 +474,7 @@ export class ReuseViewLookupService {
 		const ownedHashes = new Set(owned.flat().map((row) => row.narHash));
 		const backed = candidates.filter(
 			(candidate) =>
-				committedCaches.has(candidate.cache) &&
+				committedCaches.has(candidate.cacheId) &&
 				blobs.has(candidate.narHash) &&
 				ownedHashes.has(candidate.narHash)
 		);
@@ -515,6 +495,7 @@ export class ReuseViewLookupService {
 
 	private async verifyCandidates(
 		tenant: TenantId,
+		access: CacheAccessMode,
 		candidates: readonly CandidateRow[]
 	): Promise<VerifiedCandidates> {
 		if (candidates.length === 0) {
@@ -524,8 +505,8 @@ export class ReuseViewLookupService {
 		const uniqueHashes = [
 			...new Set(candidates.map((candidate) => candidate.narHash))
 		];
-		const edgeQueries = jsonRowLists(candidateVersions(candidates)).map(
-			(versions) => reuseEdgeSelect(this.context.d1, tenant, versions)
+		const edgeQueries = jsonRowLists(this.candidateVersions(candidates)).map(
+			(versions) => reuseEdgeSelect(this.context.d1, tenant, access, versions)
 		);
 		const stateQueries = jsonValueLists(uniqueHashes).map((narHashes) =>
 			this.context.d1
@@ -559,7 +540,7 @@ export class ReuseViewLookupService {
 		);
 
 		const committedCandidates = new Set(
-			edgePages.flat().map((edge) => candidateVersionKey(edge))
+			edgePages.flat().map((edge) => versionKey(edge))
 		);
 		const blobs = new Map(
 			statePages.flat().map((state) => [
@@ -578,7 +559,7 @@ export class ReuseViewLookupService {
 
 		const backed = candidates.filter(
 			(candidate) =>
-				committedCandidates.has(candidateVersionKey(candidate)) &&
+				committedCandidates.has(this.candidateVersionKey(candidate)) &&
 				blobs.has(candidate.narHash) &&
 				ownedHashes.has(candidate.narHash)
 		);
@@ -605,36 +586,45 @@ export class ReuseViewLookupService {
 	// cannot match a revision captured before deletion.
 	private revalidateSnapshot(
 		snapshot: GateSnapshot,
-		view: StoredReuseView,
+		view: ReuseViewName,
 		verified: VerifiedCandidates
 	): VerifiedCandidates | undefined {
 		const viewRow = this.context.db
-			.select({ revision: schema.reuseViews.revision })
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision
+			})
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, view))
+			.where(inArray(schema.reuseViews.name, legacyReuseViewKeys(view)))
 			.get();
 
-		if (viewRow?.revision !== snapshot.revision) {
+		if (
+			viewRow?.revision !== snapshot.revision ||
+			viewRow.access !== snapshot.access
+		) {
 			return undefined;
 		}
 
 		for (const candidate of verified.candidates) {
 			const current = this.context.db
 				.select({
+					access: schema.cacheIdentities.access,
+					deletedAt: schema.cacheIdentities.deletedAt,
 					generation: schema.narInfos.generation,
 					narHash: schema.narInfos.narHash
 				})
 				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cache, candidate.cache),
-						eq(schema.narInfos.storePathHash, candidate.storePathHash)
-					)
+				.innerJoin(
+					schema.cacheIdentities,
+					eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
 				)
+				.where(this.candidateRowFilter(candidate))
 				.get();
 
 			if (
-				current?.generation !== candidate.generation ||
+				current?.access !== snapshot.access ||
+				current.deletedAt !== null ||
+				current.generation !== candidate.generation ||
 				current.narHash !== candidate.narHash
 			) {
 				return undefined;
@@ -645,17 +635,23 @@ export class ReuseViewLookupService {
 	}
 
 	private revalidateCandidates(
-		revision: number,
-		view: StoredReuseView,
+		snapshot: GateBatchSnapshot,
+		view: ReuseViewName,
 		verified: VerifiedCandidates
 	): VerifiedCandidates | undefined {
 		const viewRow = this.context.db
-			.select({ revision: schema.reuseViews.revision })
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision
+			})
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, view))
+			.where(inArray(schema.reuseViews.name, legacyReuseViewKeys(view)))
 			.get();
 
-		if (viewRow?.revision !== revision) {
+		if (
+			viewRow?.revision !== snapshot.revision ||
+			viewRow.access !== snapshot.access
+		) {
 			return undefined;
 		}
 
@@ -666,12 +662,18 @@ export class ReuseViewLookupService {
 		const currentRows = jsonRowLists(candidatePaths).flatMap((candidateBatch) =>
 			this.context.db
 				.select({
-					cache: schema.narInfos.cache,
+					access: schema.cacheIdentities.access,
+					cacheId: schema.narInfos.cacheId,
+					deletedAt: schema.cacheIdentities.deletedAt,
 					storePathHash: schema.narInfos.storePathHash,
 					generation: schema.narInfos.generation,
 					narHash: schema.narInfos.narHash
 				})
 				.from(schema.narInfos)
+				.innerJoin(
+					schema.cacheIdentities,
+					eq(schema.cacheIdentities.id, schema.narInfos.cacheId)
+				)
 				.where(
 					candidateBatch.matches({
 						cache: schema.narInfos.cache,
@@ -688,7 +690,9 @@ export class ReuseViewLookupService {
 			const current = currentByCandidate.get(candidateKey(candidate));
 
 			if (
-				current?.generation !== candidate.generation ||
+				current?.access !== snapshot.access ||
+				current.deletedAt !== null ||
+				current.generation !== candidate.generation ||
 				current.narHash !== candidate.narHash
 			) {
 				return undefined;
@@ -703,7 +707,7 @@ export class ReuseViewLookupService {
 	// sorted because the fingerprint treats them as a set.
 	private hasSingleSemanticCandidate(
 		logger: Logger,
-		view: StoredReuseView,
+		view: ReuseViewName,
 		storePathHash: StorePathHash,
 		candidates: readonly CandidateRow[]
 	): boolean {
@@ -737,7 +741,10 @@ export class ReuseViewLookupService {
 				view,
 				storePathHash,
 				caches: candidates
-					.map((candidate) => candidate.cache)
+					.map((candidate) =>
+						this.context.cacheRepository.scopeForId(candidate.cacheId)
+					)
+					.map((cache) => JSON.stringify(cache))
 					.toSorted(byCodeUnit)
 			});
 
@@ -749,7 +756,7 @@ export class ReuseViewLookupService {
 
 	private renderSingleCandidate(
 		logger: Logger,
-		view: StoredReuseView,
+		view: ReuseViewName,
 		storePathHash: StorePathHash,
 		settled: VerifiedCandidates
 	): NarInfo | undefined {
@@ -766,9 +773,13 @@ export class ReuseViewLookupService {
 
 		const referencesFault = (cause: Error): StoredReferencesInvalidError =>
 			new StoredReferencesInvalidError(storePathHash, cause);
-		const ordered = settled.candidates.toSorted((left, right) =>
-			byCodeUnit(left.cache, right.cache)
-		);
+		const ordered = settled.candidates
+			.map((candidate) => ({
+				candidate,
+				cacheId: this.candidateCache(candidate).id
+			}))
+			.toSorted((left, right) => left.cacheId - right.cacheId)
+			.map((entry) => entry.candidate);
 		const row = ordered[0];
 
 		if (row === undefined) {
@@ -797,7 +808,7 @@ export class ReuseViewLookupService {
 
 		return new NarInfo(
 			new StorePath(row.storePath),
-			narUrlForView(view, row.narHash, blob.incarnation),
+			narUrlForView(row.narHash, blob.incarnation),
 			blob.compression,
 			NixSha256Hash.parse(blob.fileHash),
 			blob.fileSize,
@@ -828,11 +839,12 @@ export class ReuseViewLookupService {
 	 */
 	async lookup(
 		logger: Logger,
-		view: StoredReuseView,
+		view: ReuseViewName,
+		access: CacheAccessMode,
 		storePathHash: StorePathHash
 	): Promise<NarInfo | undefined> {
 		const snapshot = await this.context.criticalSection(() =>
-			Promise.resolve(this.snapshotCandidates(view, storePathHash))
+			Promise.resolve(this.snapshotCandidates(view, access, storePathHash))
 		);
 
 		if (snapshot === undefined || snapshot.candidates.length === 0) {
@@ -858,12 +870,13 @@ export class ReuseViewLookupService {
 	 */
 	async missingStorePathHashes(
 		logger: Logger,
-		view: StoredReuseView,
+		view: ReuseViewName,
+		access: CacheAccessMode,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<StorePathHash[]> {
 		const uniqueHashes = [...new Set(storePathHashes)];
 		const snapshot = await this.context.criticalSection(() =>
-			Promise.resolve(this.snapshotCandidateBatch(view, uniqueHashes))
+			Promise.resolve(this.snapshotCandidateBatch(view, access, uniqueHashes))
 		);
 
 		if (snapshot === undefined || snapshot.candidates.length === 0) {
@@ -872,12 +885,11 @@ export class ReuseViewLookupService {
 
 		const verified = await this.verifyCandidates(
 			snapshot.tenant,
+			snapshot.access,
 			snapshot.candidates
 		);
 		const settled = await this.context.criticalSection(() =>
-			Promise.resolve(
-				this.revalidateCandidates(snapshot.revision, view, verified)
-			)
+			Promise.resolve(this.revalidateCandidates(snapshot, view, verified))
 		);
 
 		if (settled === undefined) {

@@ -9,17 +9,29 @@ import type {
 	NixSubstitutablePathInfo
 } from '@cupboard/nix';
 import {
-	DEFAULT_CACHE,
+	type CacheScope,
 	rootNameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
+import {
+	type RecordedCall,
+	recordingCacheScopedClient
+} from '../client/cache-scoped.test-support.ts';
 import { InvalidStoreUriError } from '../errors.ts';
+
+const defaultCache: CacheScope = { kind: 'default' };
+
+interface RootEnsureBody {
+	readonly name: string;
+	readonly targets: string[];
+	readonly ttlSeconds?: number;
+}
 import {
 	type AvailabilityPartition,
 	UnknownPathsCeilingError,
@@ -29,8 +41,7 @@ import {
 	defaultHeadroomAbsoluteMinimum,
 	StoreCapacityError
 } from '../plan/capacity.ts';
-import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
-import { cacheScopedDouble } from '../test-support.ts';
+import type { CohortTarget } from '../plan/cohort-target.ts';
 
 import {
 	requeryUnknownWith,
@@ -56,9 +67,7 @@ const otherPath = storePathSchema.parse(
 );
 const appRoot = rootNameSchema.parse('github:owner/repo/main/app');
 
-function target(
-	overrides: Partial<ParsedCohortTarget> = {}
-): ParsedCohortTarget {
+function target(overrides: Partial<CohortTarget> = {}): CohortTarget {
 	return {
 		attr: 'packages.x86_64-linux.app',
 		installable: appPath,
@@ -92,7 +101,7 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 
 function buildRequired(
 	unavailable: readonly StorePathString[]
-): ParsedRootEnsureResponse {
+): RootEnsureResponse {
 	return { status: 'build-required', unavailable: [...unavailable] };
 }
 
@@ -124,22 +133,22 @@ function requeryAnswering(
 
 function rejectingRootClient(): Pick<RootClient, 'ensure'> {
 	return {
-		ensure: cacheScopedDouble(() =>
+		ensure: recordingCacheScopedClient(() =>
 			Promise.reject(new Error('roots.ensure must not be called here'))
 		)
 	};
 }
 
-function recordingRootClient(
-	calls: unknown[],
-	response: ParsedRootEnsureResponse
-): Pick<RootClient, 'ensure'> {
+function recordingRootClient(response: RootEnsureResponse): Pick<
+	RootClient,
+	'ensure'
+> & {
+	readonly ensure: { readonly calls: readonly RecordedCall<RootEnsureBody>[] };
+} {
 	return {
-		ensure: cacheScopedDouble((input) => {
-			calls.push(input);
-
-			return Promise.resolve(response);
-		})
+		ensure: recordingCacheScopedClient((_input: RootEnsureBody) =>
+			Promise.resolve(response)
+		)
 	};
 }
 
@@ -152,7 +161,7 @@ function runOptions(
 ): PlanCohortRunOptions {
 	return {
 		targets: [],
-		cache: DEFAULT_CACHE,
+		cache: defaultCache,
 		storeIdentity: { kind: 'daemon' },
 		plannedSubstitutionPolicy: {
 			kind: 'known',
@@ -219,7 +228,7 @@ function reporter(payloads: ResultPayload[]): Reporter {
 describe('runPlanCohort', () => {
 	it('computes the partition, checks capacity, writes the plan file and reports the result', async () => {
 		const payloads: ResultPayload[] = [];
-		const ensureCalls: unknown[] = [];
+		const rootClient = recordingRootClient(buildRequired([]));
 		const otherTarget = target({
 			attr: 'packages.x86_64-linux.other',
 			installable: otherPath,
@@ -228,7 +237,7 @@ describe('runPlanCohort', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const servedByDestination: PlanCohortDependencies = dependencies({
-			rootClient: recordingRootClient(ensureCalls, buildRequired([])),
+			rootClient,
 			destinationServed: () => Promise.resolve(new Set([appPath, otherPath]))
 		});
 
@@ -239,8 +248,11 @@ describe('runPlanCohort', () => {
 				servedByDestination
 			);
 
-			expect(ensureCalls).toStrictEqual([
-				{ name: appRoot, targets: [appPath, otherPath] }
+			expect(rootClient.ensure.calls).toStrictEqual([
+				{
+					cache: defaultCache,
+					input: { name: appRoot, targets: [appPath, otherPath] }
+				}
 			]);
 
 			const expectedPartition: AvailabilityPartition = {
@@ -292,7 +304,6 @@ describe('runPlanCohort', () => {
 	});
 
 	it('does not partially reconcile a root whose complete target set is unknown', async () => {
-		const ensureCalls: unknown[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const floatingTarget = target({
@@ -300,8 +311,7 @@ describe('runPlanCohort', () => {
 			installable: otherPath,
 			expectedPath: undefined
 		});
-		const rootResponse = buildRequired([]);
-		const rootClient = recordingRootClient(ensureCalls, rootResponse);
+		const rootClient = recordingRootClient(buildRequired([]));
 		const planDependencies = dependencies({
 			rootClient,
 			store: missingStore({
@@ -323,7 +333,7 @@ describe('runPlanCohort', () => {
 			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
 
 			expect({
-				ensureCalls,
+				ensureCalls: rootClient.ensure.calls,
 				plan
 			}).toStrictEqual({
 				ensureCalls: [],
@@ -374,7 +384,7 @@ describe('runPlanCohort', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const payloads: ResultPayload[] = [];
-		const rootClient = recordingRootClient([], buildRequired([appPath]));
+		const rootClient = recordingRootClient(buildRequired([appPath]));
 		const expectedResult = {
 			partition: {
 				attachOnly: [],
@@ -631,7 +641,7 @@ describe('runPlanCohort', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const refusing = dependencies({
-			rootClient: recordingRootClient([], buildRequired([appPath])),
+			rootClient: recordingRootClient(buildRequired([appPath])),
 			store: {
 				queryMissing: () => Promise.resolve(emptyMissing()),
 				querySubstitutablePathInfos: () => Promise.resolve([]),
@@ -688,7 +698,7 @@ describe('runPlanCohort', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const remoteDependencies = dependencies({
-			rootClient: recordingRootClient([], buildRequired([])),
+			rootClient: recordingRootClient(buildRequired([])),
 			destinationServed: () => Promise.resolve(new Set([appPath])),
 			capacityProbe: () =>
 				Promise.reject(
@@ -773,7 +783,7 @@ describe('runPlanCohort', () => {
 		const asked: (readonly StorePathString[])[] = [];
 		const attested = new Set(row.attested);
 		const probing = dependencies({
-			rootClient: recordingRootClient([], buildRequired([appPath])),
+			rootClient: recordingRootClient(buildRequired([appPath])),
 			destinationServed: () => Promise.resolve(new Set([appPath])),
 			attestedServed: (paths) => {
 				asked.push(paths);

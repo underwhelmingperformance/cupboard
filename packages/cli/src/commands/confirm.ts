@@ -1,11 +1,9 @@
 import {
-	identityForCache,
-	type StoredCache,
+	type CacheScope,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedUploadConfirmResponse,
 	type UploadConfirmedPath,
 	uploadConfirmMaxPaths,
 	type UploadConfirmResponse
@@ -21,28 +19,26 @@ import { isAbortError } from '../abort.ts';
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
-import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { ConfirmIncompleteError, PathsNotConfirmedError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface ConfirmOptions extends CacheSelectionOptions {
+interface ConfirmOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 }
 
 export interface ConfirmClient {
 	confirm: CacheScopedClient<
-		{ storePathHashes: StorePathHash[] },
-		ParsedUploadConfirmResponse
+		{
+			storePathHashes: StorePathHash[];
+		},
+		UploadConfirmResponse
 	>;
 }
 
@@ -54,12 +50,10 @@ export function registerConfirmCommand(
 		.command('confirm')
 		.description('Confirm published store paths without uploading their bytes.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<store-paths...>', 'store paths already published to the cache')
-		.option(
-			'--cache <name>',
-			'confirm against a named cache rather than the default'
+		.argument(
+			'<arguments...>',
+			'optional cache name followed by store paths already published to the cache'
 		)
-		.addOption(privateCacheOption('confirm against'))
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -81,28 +75,46 @@ export function registerConfirmCommand(
 		)
 		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cache = resolveCacheSelection(options);
-			const credential = await authenticateForPush(
-				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+			const resolved = await resolveAuthorisedCachePositionals(
+				url,
+				storePaths,
 				{
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails: confirmAuthorizationDetails({
-						cache: identityForCache(cache).scope
-					})
+					minimumPayload: 1,
+					payloadDescription: 'a store path',
+					authorise: (target) =>
+						authenticateForPush(
+							CupboardClient.fromUrl(target.tenantUrl, {
+								cache: target.cache,
+								signal: programOptions.signal
+							}),
+							{
+								githubOidc: options.githubOidc,
+								audience:
+									options.audience ?? audienceSchema.parse(target.tenantUrl),
+								authorizationDetails: confirmAuthorizationDetails({
+									cache: target.cache
+								})
+							}
+						),
+					signal: programOptions.signal
 				}
 			);
-			const rpc = tenantRpc(url, {
-				credential,
+			const rpc = tenantRpc(resolved.target.tenantUrl, {
+				credential: resolved.credential,
 				signal: programOptions.signal
 			});
 
-			await runConfirm(cache, storePaths, reporter, rpc.uploads);
+			await runConfirm(
+				resolved.target.cache,
+				resolved.payload,
+				reporter,
+				rpc.uploads
+			);
 		});
 }
 
 export async function runConfirm(
-	cache: StoredCache,
+	cache: CacheScope,
 	storePaths: readonly string[],
 	reporter: Reporter,
 	client: ConfirmClient
@@ -116,7 +128,7 @@ export async function runConfirm(
 	// The server caps each request, so submit larger sets in order. Report the
 	// completed batches even if a later request fails because their confirmation
 	// results are already durable.
-	const paths: ParsedUploadConfirmResponse['paths'] = [];
+	const paths: UploadConfirmResponse['paths'] = [];
 	const totalBatches = Math.ceil(
 		storePathHashes.length / uploadConfirmMaxPaths
 	);

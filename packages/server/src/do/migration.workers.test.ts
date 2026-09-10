@@ -1,8 +1,6 @@
 import {
 	cacheNameSchema,
-	DEFAULT_CACHE,
 	graceSecondsSchema,
-	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
@@ -16,17 +14,12 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { cacheScopeFromRow } from '../db/cache.ts';
 import {
 	oidcTrust,
 	refreshTokenFamilies,
 	refreshTokenMembers,
-	retentionGrace,
-	retentionGracePolicies,
-	retentionPolicies,
-	reuseViewRevisionSeq,
-	reuseViews,
-	reuseViewSelectors,
-	verificationCursor
+	retentionGracePolicies
 } from '../db/schema.ts';
 import {
 	bootstrap,
@@ -36,7 +29,7 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
-const defaultCache: StoredCache = DEFAULT_CACHE;
+const defaultCache = '';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -46,6 +39,16 @@ const insertSignedNarInfo =
 
 const insertUnsignedNarInfo =
 	"INSERT INTO narinfo (store_path_hash, store_path, nar_hash, nar_size, file_hash, file_size, compression, references_json, created_at) VALUES (?, ?, 'sha256:nar', 10, 'sha256:file', 20, 'zstd', '[]', '2026-01-01T00:00:00.000Z')";
+
+function rootGrantsJson(resources: unknown): string {
+	return JSON.stringify([
+		{ type: 'cupboard_cache', actions: ['root:set'], resources }
+	]);
+}
+
+function insertRootGrantRule(id: string, resources: unknown): string {
+	return `INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES ('${id}', 'https://issuer.example', 'https://cache.example', '{}', '${rootGrantsJson(resources)}', '2026-01-01T00:00:00.000Z')`;
+}
 
 describe('migrations', () => {
 	it('preserves a pre-0007 narinfo through the 0007 and 0008 table recreations', async () => {
@@ -106,13 +109,32 @@ describe('migrations', () => {
 
 		const caches = await runInDurableObject(
 			testServerFor('migration-default-cache'),
-			(_instance, state) =>
-				state.storage.sql
-					.exec('SELECT name, priority FROM cache ORDER BY name')
-					.toArray()
+			(_instance, state) => {
+				const rows = state.storage.sql
+					.exec<{
+						kind: 'default' | 'named';
+						name: string | null;
+						access: string | null;
+						priority: number;
+					}>(
+						'SELECT kind, name, access, priority FROM cache_identity ORDER BY id'
+					)
+					.toArray();
+
+				return rows.map((row) => ({
+					cache: cacheScopeFromRow({
+						kind: row.kind,
+						name: row.name ?? undefined
+					}),
+					access: row.access ?? undefined,
+					priority: row.priority
+				}));
+			}
 		);
 
-		expect(caches).toStrictEqual([{ name: '', priority: 40 }]);
+		expect(caches).toStrictEqual([
+			{ cache: { kind: 'default' }, access: 'public', priority: 40 }
+		]);
 	});
 
 	it('migrates and round-trips a retention policy', async () => {
@@ -129,32 +151,24 @@ describe('migrations', () => {
 			async (_instance, state) => {
 				await migrateThrough(state, latestMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { retentionPolicies }
-				});
-				database.insert(retentionPolicies).values(policy).run();
+				state.storage.sql.exec(
+					'INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
+					policy.id,
+					policy.scope,
+					policy.pattern,
+					policy.defaultTtlSeconds,
+					policy.createdAt
+				);
 
-				return database
-					.select()
-					.from(retentionPolicies)
-					.all()
-					.map((row) => ({
-						...row,
-						kind: row.kind ?? undefined,
-						cacheId: row.cacheId ?? undefined,
-						rootNamePrefix: row.rootNamePrefix ?? undefined
-					}));
+				return state.storage.sql
+					.exec(
+						'SELECT id, scope, pattern, default_ttl_seconds AS defaultTtlSeconds, created_at AS createdAt FROM retention_policy'
+					)
+					.toArray();
 			}
 		);
 
-		expect(rows).toStrictEqual([
-			{
-				...policy,
-				kind: undefined,
-				cacheId: undefined,
-				rootNamePrefix: undefined
-			}
-		]);
+		expect(rows).toStrictEqual([policy]);
 	});
 
 	it('keeps the newest retention policy for each selector', async () => {
@@ -401,20 +415,23 @@ describe('migrations', () => {
 			async (_instance, state) => {
 				await migrateThrough(state, latestMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { verificationCursor }
-				});
-				database.insert(verificationCursor).values(cursor).run();
+				state.storage.sql.exec(
+					'INSERT INTO verification_cursor (id, cache, last_store_path_hash, updated_at) VALUES (?, ?, ?, ?)',
+					cursor.id,
+					cursor.cache,
+					cursor.lastStorePathHash,
+					cursor.updatedAt
+				);
 
-				return database
-					.select()
-					.from(verificationCursor)
-					.all()
-					.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined }));
+				return state.storage.sql
+					.exec(
+						'SELECT id, cache, last_store_path_hash AS lastStorePathHash, updated_at AS updatedAt FROM verification_cursor'
+					)
+					.toArray();
 			}
 		);
 
-		expect(rows).toStrictEqual([{ ...cursor, cacheId: undefined }]);
+		expect(rows).toStrictEqual([cursor]);
 	});
 
 	it('gains the retention grace policy table at the latest migration', async () => {
@@ -468,17 +485,19 @@ describe('migrations', () => {
 
 				await migrateThrough(state, latestMigrationIndex);
 
-				const database = drizzle(state.storage, {
-					schema: { retentionGrace }
-				});
-				database.insert(retentionGrace).values(deadline).run();
+				state.storage.sql.exec(
+					'INSERT INTO retention_grace (cache, store_path_hash, retain_until) VALUES (?, ?, ?)',
+					deadline.cache,
+					deadline.storePathHash,
+					deadline.retainUntil
+				);
 
 				return {
-					deadlines: database
-						.select()
-						.from(retentionGrace)
-						.all()
-						.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined })),
+					deadlines: state.storage.sql
+						.exec(
+							'SELECT cache, store_path_hash AS storePathHash, retain_until AS retainUntil FROM retention_grace'
+						)
+						.toArray(),
 					caches: state.storage.sql
 						.exec('SELECT name, grace_managed FROM cache ORDER BY name')
 						.toArray()
@@ -487,7 +506,7 @@ describe('migrations', () => {
 		);
 
 		expect(migrated).toStrictEqual({
-			deadlines: [{ ...deadline, cacheId: undefined }],
+			deadlines: [deadline],
 			caches: [{ name: 'builds', grace_managed: 0 }]
 		});
 	});
@@ -669,12 +688,25 @@ describe('migrations', () => {
 
 				await migrateThrough(state, latestMigrationIndex);
 
-				const after = drizzle(state.storage, {
-					schema: { reuseViews, reuseViewSelectors, reuseViewRevisionSeq }
-				});
-				after.insert(reuseViews).values(view).run();
-				after.insert(reuseViewSelectors).values(selector).run();
-				after.insert(reuseViewRevisionSeq).values(revisionSeq).run();
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view (name, revision, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+					view.name,
+					view.revision,
+					view.priority,
+					view.createdAt,
+					view.updatedAt
+				);
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view_selector (view, kind, pattern) VALUES (?, ?, ?)',
+					selector.view,
+					selector.kind,
+					selector.pattern
+				);
+				state.storage.sql.exec(
+					'INSERT INTO reuse_view_revision_seq (name, next_revision) VALUES (?, ?)',
+					revisionSeq.name,
+					revisionSeq.nextRevision
+				);
 
 				const narinfoIndexRows = state.storage.sql
 					.exec(
@@ -689,13 +721,19 @@ describe('migrations', () => {
 							'SELECT cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, generation, created_at FROM narinfo'
 						)
 						.toArray(),
-					views: after
-						.select()
-						.from(reuseViews)
-						.all()
-						.map((row) => ({ ...row, access: row.access ?? undefined })),
-					selectors: after.select().from(reuseViewSelectors).all(),
-					revisionSeqs: after.select().from(reuseViewRevisionSeq).all(),
+					views: state.storage.sql
+						.exec(
+							'SELECT name, revision, priority, created_at AS createdAt, updated_at AS updatedAt FROM reuse_view'
+						)
+						.toArray(),
+					selectors: state.storage.sql
+						.exec('SELECT view, kind, pattern FROM reuse_view_selector')
+						.toArray(),
+					revisionSeqs: state.storage.sql
+						.exec(
+							'SELECT name, next_revision AS nextRevision FROM reuse_view_revision_seq'
+						)
+						.toArray(),
 					hasNarinfoIndex: narinfoIndexNames.includes(
 						'narinfo_store_path_hash_cache_idx'
 					)
@@ -705,7 +743,7 @@ describe('migrations', () => {
 
 		expect(migrated).toStrictEqual({
 			narInfos: [narInfoRow],
-			views: [{ ...view, access: undefined }],
+			views: [view],
 			selectors: [selector],
 			revisionSeqs: [revisionSeq],
 			hasNarinfoIndex: true
@@ -900,5 +938,97 @@ describe('migrations', () => {
 				}
 			]
 		});
+	});
+
+	// A root could be bound to the cache the grant names, with
+	// `equalsResource: 'cache'`. That spelling has left the grant grammar, so
+	// 0046 replaces it with the binding it stood for.
+	it('replaces a root bound to the cache with an explicit binding', async () => {
+		const boundRoot = { equalsResource: 'cache', validate: 'rootName' };
+		const substitutions = {
+			ref: {
+				claim: 'ref',
+				capture: { pattern: '^refs/pull/(?<ref>[0-9]+)/merge$', group: 'ref' }
+			}
+		};
+
+		const rewritten = await runInDurableObject(
+			testServerFor('migration-cache-grant-root-binding'),
+			async (_instance, state) => {
+				await migrateThrough(state, 43);
+
+				const statements = [
+					insertRootGrantRule('exact', {
+						cache: { exact: 'ci', validate: 'cacheName' },
+						root: boundRoot
+					}),
+					insertRootGrantRule('default', {
+						cache: { exact: '_default', validate: 'cacheName' },
+						root: boundRoot
+					}),
+					insertRootGrantRule('template', {
+						cache: {
+							equalsTemplate: 'pr-{ref}',
+							substitutions,
+							validate: 'cacheName'
+						},
+						root: boundRoot
+					}),
+					insertRootGrantRule('untouched', {
+						cache: { exact: 'ci', validate: 'cacheName' },
+						root: { exact: 'main', validate: 'rootName' }
+					})
+				];
+
+				for (const statement of statements) {
+					state.storage.sql.exec(statement);
+				}
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				return state.storage.sql
+					.exec('SELECT id, permitted_grants_json FROM oidc_trust ORDER BY id')
+					.toArray();
+			}
+		);
+
+		expect(rewritten).toStrictEqual([
+			{
+				id: 'default',
+				permitted_grants_json: rootGrantsJson({
+					cache: { kind: 'default' }
+				})
+			},
+			{
+				id: 'exact',
+				permitted_grants_json: rootGrantsJson({
+					cache: { exact: 'ci', validate: 'cacheName', kind: 'named' },
+					root: { exact: 'ci', validate: 'rootName' }
+				})
+			},
+			{
+				id: 'template',
+				permitted_grants_json: rootGrantsJson({
+					cache: {
+						equalsTemplate: 'pr-{ref}',
+						substitutions,
+						validate: 'cacheName',
+						kind: 'named'
+					},
+					root: {
+						equalsTemplate: 'pr-{ref}',
+						substitutions,
+						validate: 'rootName'
+					}
+				})
+			},
+			{
+				id: 'untouched',
+				permitted_grants_json: rootGrantsJson({
+					cache: { exact: 'ci', validate: 'cacheName', kind: 'named' },
+					root: { exact: 'main', validate: 'rootName' }
+				})
+			}
+		]);
 	});
 });

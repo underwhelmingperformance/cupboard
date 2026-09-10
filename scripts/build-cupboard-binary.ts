@@ -263,7 +263,7 @@ async function main(): Promise<void> {
 		run(binaryPath, [
 			'--no-colour',
 			'config',
-			'https://cache.example.invalid',
+			'https://cache.example.invalid/t/acme',
 			'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
 		]);
 	}

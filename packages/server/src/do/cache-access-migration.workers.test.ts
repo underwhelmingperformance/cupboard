@@ -1,6 +1,18 @@
+import {
+	cacheGenerationSchema,
+	cacheNameSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
+import { cacheScopeFromRow } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	latestMigrationIndex,
 	migrateThrough,
@@ -32,13 +44,22 @@ describe('cache access migration', () => {
 
 				await migrateThrough(state, latestMigrationIndex);
 				const generationRows = state.storage.sql
-					.exec(
+					.exec<{
+						cache_kind: 'default' | 'named' | null;
+						cache_name: string | null;
+						store_path_hash: string;
+						next_generation: number;
+					}>(
 						'SELECT cache_kind, cache_name, store_path_hash, next_generation FROM generation_seq ORDER BY store_path_hash'
 					)
 					.toArray();
 				const generations = generationRows.map((row) => ({
-					...row,
-					cache_name: row.cache_name ?? undefined
+					cache: cacheScopeFromRow({
+						kind: row.cache_kind,
+						name: row.cache_name
+					}),
+					store_path_hash: row.store_path_hash,
+					next_generation: row.next_generation
 				}));
 
 				return {
@@ -91,14 +112,12 @@ describe('cache access migration', () => {
 			],
 			generations: [
 				{
-					cache_kind: 'default',
-					cache_name: undefined,
+					cache: { kind: 'default' },
 					store_path_hash: '00000000000000000000000000000000',
 					next_generation: 2
 				},
 				{
-					cache_kind: 'named',
-					cache_name: 'releases',
+					cache: { kind: 'named', name: 'releases' },
 					store_path_hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
 					next_generation: 7
 				}
@@ -215,4 +234,176 @@ describe('cache access migration', () => {
 			});
 		}
 	);
+
+	it('reconciles every cache of a legacy private tenant before contraction', async () => {
+		const tenant = tenantIdSchema.parse('migration-private-tenant');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+		await d1.insert(migrationSchema.tenants).values({
+			id: tenant,
+			status: 'active',
+			readMode: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+
+		const server = testServerFor(tenant);
+		await runInDurableObject(server, async (_instance, state) => {
+			await migrateThrough(state, 41);
+			state.storage.sql.exec(
+				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?), ('builds', 41, ?), ('private/releases', 42, ?)",
+				now,
+				now,
+				now
+			);
+			state.storage.sql.exec(
+				"INSERT INTO reuse_view (name, revision, priority, created_at, updated_at) VALUES ('ordinary', 1, 50, ?, ?), ('private/secure', 1, 51, ?, ?)",
+				now,
+				now,
+				now,
+				now
+			);
+		});
+
+		await server.migrateCacheCatalogue(tenant);
+		await server.migrateCacheCatalogue(tenant);
+
+		const local = await runInDurableObject(server, (_instance, state) => {
+			const cacheRows = state.storage.sql
+				.exec<{
+					kind: 'default' | 'named' | null;
+					name: string | null;
+					access: string | null;
+					priority: number;
+				}>(
+					'SELECT kind, name, access, priority FROM cache_identity ORDER BY id'
+				)
+				.toArray();
+			const caches = cacheRows.map((row) => ({
+				cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+				access: row.access,
+				priority: row.priority
+			}));
+
+			return {
+				caches,
+				views: state.storage.sql
+					.exec('SELECT name, access FROM reuse_view ORDER BY name')
+					.toArray()
+			};
+		});
+		const tenantRow = await d1
+			.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant))
+			.get();
+		const lifecycleRows = await d1
+			.select({
+				kind: d1Schema.cacheLifecycle.cacheKind,
+				name: d1Schema.cacheLifecycle.cacheName,
+				access: d1Schema.cacheLifecycle.access
+			})
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
+			.all();
+		const lifecycles = lifecycleRows.map((row) => ({
+			cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+			access: row.access
+		}));
+
+		expect({ local, tenantRow, lifecycles }).toStrictEqual({
+			local: {
+				caches: [
+					{ cache: { kind: 'default' }, access: 'private', priority: 40 },
+					{
+						cache: { kind: 'named', name: 'builds' },
+						access: 'private',
+						priority: 41
+					},
+					{
+						cache: { kind: 'named', name: 'releases' },
+						access: 'private',
+						priority: 42
+					}
+				],
+				views: [
+					{ name: 'ordinary', access: 'private' },
+					{ name: 'private/secure', access: 'private' }
+				]
+			},
+			tenantRow: { version: 1 },
+			lifecycles: [
+				{ cache: { kind: 'default' }, access: 'private' },
+				{ cache: { kind: 'named', name: 'builds' }, access: 'private' },
+				{ cache: { kind: 'named', name: 'releases' }, access: 'private' }
+			]
+		});
+	});
+
+	it('revokes a live D1 cache absent from the Durable Object catalogue', async () => {
+		const tenant = tenantIdSchema.parse('migration-phantom-cache');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+		await d1.insert(migrationSchema.tenants).values({
+			id: tenant,
+			status: 'active',
+			readMode: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(migrationSchema.cacheLifecycles).values({
+			tenant,
+			legacyCache: 'phantom',
+			cacheKind: 'named',
+			cacheName: cacheNameSchema.parse('phantom'),
+			access: 'public',
+			generation: cacheGenerationSchema.parse(4),
+			updatedAt: now
+		});
+
+		const server = testServerFor(tenant);
+		await runInDurableObject(server, async (_instance, state) => {
+			await migrateThrough(state, 41);
+			state.storage.sql.exec(
+				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?)",
+				now
+			);
+		});
+
+		await server.migrateCacheCatalogue(tenant);
+
+		const rows = await d1
+			.select({
+				kind: d1Schema.cacheLifecycle.cacheKind,
+				name: d1Schema.cacheLifecycle.cacheName,
+				generation: d1Schema.cacheLifecycle.generation,
+				deletedAt: d1Schema.cacheLifecycle.deletedAt
+			})
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
+			.all();
+
+		expect(
+			rows.map((row) => ({
+				cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+				generation: row.generation,
+				isDeleted: row.deletedAt !== null
+			}))
+		).toStrictEqual([
+			{ cache: { kind: 'default' }, generation: 1, isDeleted: false },
+			{
+				cache: { kind: 'named', name: cacheNameSchema.parse('phantom') },
+				generation: 5,
+				isDeleted: true
+			}
+		]);
+	});
 });

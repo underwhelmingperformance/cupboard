@@ -37,12 +37,7 @@ inputs:
     description: Directory for the downloaded cupboard binary.
     required: false
   cache:
-    description: Public cache to receive the paths.
-    required: false
-  private-cache:
-    description:
-      Private cache to receive the paths. Set either cache or private-cache, not
-      both.
+    description: Named cache to receive the paths. Leave empty for the default.
     required: false
   store:
     description: >-
@@ -193,7 +188,6 @@ runs:
         EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         CACHE: ${{ inputs.cache }}
-        PRIVATE_CACHE: ${{ inputs.private-cache }}
         STORE: ${{ inputs.store }}
         AUDIENCE: ${{ inputs.audience }}
         ROOT: ${{ inputs.root }}
@@ -226,7 +220,6 @@ runs:
           --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
           --install-dir "$INSTALL_DIR"
           --cache "$CACHE"
-          --private-cache "$PRIVATE_CACHE"
           --store "$STORE"
           --audience "$AUDIENCE"
           --root "$ROOT"

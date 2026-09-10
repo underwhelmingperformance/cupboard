@@ -14,7 +14,7 @@ import {
 	rootNameSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
-import { Command, CommanderError } from 'commander';
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -23,7 +23,7 @@ import {
 	BuildStoreRequiresAlreadyHeldError,
 	BuildStoreRequiresClaimableError,
 	CliAbortError,
-	EmptyPublicationError,
+	CommandPayloadRequiredError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
@@ -426,7 +426,7 @@ describe('push command', () => {
 			'--dry-run'
 		]);
 
-		expect(result).toBeInstanceOf(EmptyPublicationError);
+		expect(result).toBeInstanceOf(CommandPayloadRequiredError);
 	});
 
 	it('accepts an empty named-root replacement past publication validation', async () => {
@@ -440,30 +440,11 @@ describe('push command', () => {
 		expect(result).toBeInstanceOf(CliAbortError);
 	});
 
-	it('refuses --cache together with --private-cache', async () => {
-		const result = await parsePush([
-			'https://cache.example.workers.dev/t/acme',
-			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-			'--cache',
-			'builds',
-			'--private-cache',
-			'release'
-		]);
-
-		expect(result).toBeInstanceOf(CommanderError);
-
-		if (result instanceof CommanderError) {
-			expect(result.code).toBe('commander.conflictingOption');
-		}
-	});
-
-	it('accepts --private-cache before authentication starts', async () => {
+	it('accepts a named cache URL before authentication starts', async () => {
 		const result = await parsePush(
 			[
-				'https://cache.example.workers.dev/t/acme',
-				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-				'--private-cache',
-				'release'
+				'https://cache.example.workers.dev/t/acme/cache/release',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
 			],
 			interrupted
 		);

@@ -1,25 +1,12 @@
 import { type Logger } from '@cupboard/logger';
-import {
-	cacheFromSelector,
-	identityForCache,
-	type RootName,
-	selectorForCache,
-	type StoredCache,
-	type StorePathHash
-} from '@cupboard/nix-store/scalars';
+import { type RootName, type StorePathHash } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
-import { type VerifyReport } from '@cupboard/protocol/reports';
+import { type VerifyReportInput } from '@cupboard/protocol/reports';
+import { type GcResponseInput } from '@cupboard/protocol/retention';
 import {
-	type GcResponse,
-	type ParsedRootEnsureBody,
-	type ParsedRootSetBody
-} from '@cupboard/protocol/retention';
-import { reuseViewFromContractName } from '@cupboard/protocol/reuse-views';
-import {
-	type ParsedUploadConfirmRequest,
-	type ParsedUploadNegotiateRequest,
-	type ParsedUploadPreviewRequest,
-	uploadGraceFactsCapability
+	uploadGraceFactsCapability,
+	type UploadNegotiateRequest,
+	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
@@ -54,7 +41,7 @@ const os = implement(tenantContract)
 			claims,
 			procedure['~orpc'].meta,
 			input,
-			selectorForCache(context.cache),
+			context.cache,
 			context.services.pendingCache
 		);
 
@@ -71,18 +58,56 @@ export const tenantRouter = os.router({
 		list: os.caches.list.handler(({ context }) =>
 			context.services.cacheAdmin.listCaches()
 		),
-		put: os.caches.put.handler(({ input, context }) =>
-			context.services.cacheAdmin.putCache(
-				cacheFromSelector(input.cacheName),
-				input.priority
+		get: {
+			inDefaultCache: os.caches.get.inDefaultCache.handler(({ context }) =>
+				context.services.cacheAdmin.getCache(context.cache)
+			),
+			inNamedCache: os.caches.get.inNamedCache.handler(({ input, context }) =>
+				context.services.cacheAdmin.getCache({
+					kind: 'named',
+					name: input.cacheName
+				})
 			)
-		),
+		},
+		put: {
+			inDefaultCache: os.caches.put.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.cacheAdmin.createCache(
+						{ kind: 'default' },
+						input.access,
+						input.priority
+					)
+			),
+			inNamedCache: os.caches.put.inNamedCache.handler(({ input, context }) =>
+				context.services.cacheAdmin.createCache(
+					{ kind: 'named', name: input.cacheName },
+					input.access,
+					input.priority
+				)
+			)
+		},
+		update: {
+			inDefaultCache: os.caches.update.inDefaultCache.handler(
+				({ input, context }) =>
+					context.services.cacheAdmin.updateCache({ kind: 'default' }, input)
+			),
+			inNamedCache: os.caches.update.inNamedCache.handler(
+				({ input, context }) => {
+					const { cacheName, ...update } = input;
+
+					return context.services.cacheAdmin.updateCache(
+						{ kind: 'named', name: cacheName },
+						update
+					);
+				}
+			)
+		},
 		remove: os.caches.remove.handler(({ input, context }) => {
 			const origin = requestOriginSchema.parse(
 				new URL(context.request.url).origin
 			);
 			return context.services.cacheAdmin.removeCache(
-				cacheFromSelector(input.params.cacheName),
+				input.params.cacheName,
 				input.query.force,
 				origin
 			);
@@ -136,10 +161,10 @@ export const tenantRouter = os.router({
 		),
 		graceCoverage: {
 			inDefaultCache: os.policies.graceCoverage.inDefaultCache.handler(
-				({ context }) => graceCoverage(context)
+				({ context }) => context.services.retention.graceCoverage(context.cache)
 			),
 			inNamedCache: os.policies.graceCoverage.inNamedCache.handler(
-				({ context }) => graceCoverage(context)
+				({ context }) => context.services.retention.graceCoverage(context.cache)
 			)
 		}
 	},
@@ -148,18 +173,14 @@ export const tenantRouter = os.router({
 			context.services.reuseViews.listViews()
 		),
 		set: os.reuseViews.set.handler(({ input, context }) =>
-			context.services.reuseViews.setView(
-				reuseViewFromContractName(input.name),
-				{
-					selectors: input.selectors,
-					...(input.priority !== undefined && { priority: input.priority })
-				}
-			)
+			context.services.reuseViews.setView(input.name, {
+				access: input.access,
+				selectors: input.selectors,
+				...(input.priority !== undefined && { priority: input.priority })
+			})
 		),
 		remove: os.reuseViews.remove.handler(({ input, context }) =>
-			context.services.reuseViews.removeView(
-				reuseViewFromContractName(input.name)
-			)
+			context.services.reuseViews.removeView(input.name)
 		)
 	},
 	oidcTrust: {
@@ -216,26 +237,41 @@ export const tenantRouter = os.router({
 		},
 		set: {
 			inDefaultCache: os.roots.set.inDefaultCache.handler(
-				({ input, context }) => setRoot(context, input)
+				({ input, context }) =>
+					context.services.roots.setRoot(context.cache, input.name, {
+						targets: input.targets,
+						ttlSeconds: input.ttlSeconds
+					})
 			),
 			inNamedCache: os.roots.set.inNamedCache.handler(({ input, context }) =>
-				setRoot(context, input)
+				context.services.roots.setRoot(context.cache, input.name, {
+					targets: input.targets,
+					ttlSeconds: input.ttlSeconds
+				})
 			)
 		},
 		ensure: {
 			inDefaultCache: os.roots.ensure.inDefaultCache.handler(
-				({ input, context }) => ensureRoot(context, input)
+				({ input, context }) =>
+					context.services.roots.ensureRoot(context.cache, input.name, {
+						targets: input.targets,
+						ttlSeconds: input.ttlSeconds
+					})
 			),
 			inNamedCache: os.roots.ensure.inNamedCache.handler(({ input, context }) =>
-				ensureRoot(context, input)
+				context.services.roots.ensureRoot(context.cache, input.name, {
+					targets: input.targets,
+					ttlSeconds: input.ttlSeconds
+				})
 			)
 		},
 		remove: {
 			inDefaultCache: os.roots.remove.inDefaultCache.handler(
-				({ input, context }) => removeRoot(context, input.name)
+				({ input, context }) =>
+					context.services.roots.removeRoot(context.cache, input.name)
 			),
 			inNamedCache: os.roots.remove.inNamedCache.handler(({ input, context }) =>
-				removeRoot(context, input.name)
+				context.services.roots.removeRoot(context.cache, input.name)
 			)
 		}
 	},
@@ -251,15 +287,12 @@ export const tenantRouter = os.router({
 	},
 	gc: {
 		runAll: os.gc.runAll.handler(({ context }) =>
-			collectGarbage(context.logger, context.request, context.services)
+			collectGarbage(context.logger, context.request, context.services, {
+				scope: 'tenant'
+			})
 		),
 		runCache: os.gc.runCache.handler(({ context }) =>
-			collectGarbage(
-				context.logger,
-				context.request,
-				context.services,
-				context.cache
-			)
+			collectGarbageForCache(context)
 		)
 	},
 	verify: {
@@ -302,10 +335,18 @@ export const tenantRouter = os.router({
 		},
 		confirm: {
 			inDefaultCache: os.uploads.confirm.inDefaultCache.handler(
-				({ input, context }) => confirmPaths(context, input.storePathHashes)
+				({ input, context }) =>
+					context.services.uploads.confirmPaths(
+						context.cache,
+						input.storePathHashes
+					)
 			),
 			inNamedCache: os.uploads.confirm.inNamedCache.handler(
-				({ input, context }) => confirmPaths(context, input.storePathHashes)
+				({ input, context }) =>
+					context.services.uploads.confirmPaths(
+						context.cache,
+						input.storePathHashes
+					)
 			)
 		},
 		status: os.uploads.status.handler(({ input, context }) =>
@@ -342,17 +383,6 @@ export const tenantRouter = os.router({
 	}
 });
 
-// Each cache-scoped operation has a default-cache route and a named-cache
-// route. Both handlers take the cache from `context.cache`, so the helpers
-// below never read a cache from their input.
-
-function graceCoverage(context: TenantOrpcContext) {
-	return context.services.retention.graceCoverage(
-		context.cache,
-		identityForCache(context.cache).access
-	);
-}
-
 interface ListPageQuery {
 	readonly cursor?: string;
 	readonly limit?: number;
@@ -384,50 +414,11 @@ function rootTargets(
 	);
 }
 
-function setRoot(
-	context: TenantOrpcContext,
-	input: ParsedRootSetBody & { readonly name: RootName }
-) {
-	return context.services.roots.setRoot(
-		context.cache,
-		identityForCache(context.cache).access,
-		input.name,
-		{
-			targets: input.targets,
-			ttlSeconds: input.ttlSeconds
-		}
-	);
-}
-
-function ensureRoot(
-	context: TenantOrpcContext,
-	input: ParsedRootEnsureBody & { readonly name: RootName }
-) {
-	return context.services.roots.ensureRoot(
-		context.cache,
-		identityForCache(context.cache).access,
-		input.name,
-		{
-			targets: input.targets,
-			ttlSeconds: input.ttlSeconds
-		}
-	);
-}
-
-function removeRoot(context: TenantOrpcContext, name: RootName) {
-	return context.services.roots.removeRoot(
-		context.cache,
-		identityForCache(context.cache).access,
-		name
-	);
-}
-
 function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
 	const origin = requestOriginSchema.parse(new URL(context.request.url).origin);
 
 	return context.services.deletionQueue.deleteStorePath(
 		context.cache,
-		identityForCache(context.cache).access,
 		hash,
 		origin
 	);
@@ -435,7 +426,7 @@ function removeStorePath(context: TenantOrpcContext, hash: StorePathHash) {
 
 function negotiateUpload(
 	context: TenantOrpcContext & { readonly claims: AccessClaims },
-	input: ParsedUploadNegotiateRequest
+	input: UploadNegotiateRequest
 ) {
 	if (input.attachRoot !== undefined) {
 		authoriseAttachRoot(context.claims, context.cache, input.attachRoot.name);
@@ -445,7 +436,6 @@ function negotiateUpload(
 
 	return context.services.uploads.negotiate(
 		context.cache,
-		identityForCache(context.cache).access,
 		{
 			pushId: input.pushId,
 			paths: input.paths,
@@ -459,26 +449,37 @@ function negotiateUpload(
 
 function previewUpload(
 	context: TenantOrpcContext,
-	paths: ParsedUploadPreviewRequest['paths']
+	paths: UploadPreviewRequest['paths']
 ) {
 	return context.services.uploads.preview(
 		context.cache,
-		identityForCache(context.cache).access,
 		{ paths },
 		context.services.takeNegotiateHints(context.request),
 		hasAcceptedCapability(context.request, uploadGraceFactsCapability)
 	);
 }
 
-function confirmPaths(
-	context: TenantOrpcContext,
-	storePathHashes: ParsedUploadConfirmRequest['storePathHashes']
-) {
-	return context.services.uploads.confirmPaths(
-		context.cache,
-		identityForCache(context.cache).access,
-		storePathHashes
-	);
+async function collectGarbageForCache(
+	context: TenantOrpcContext
+): Promise<GcResponseInput> {
+	const cache = context.services.cacheAdmin.resolveCache(context.cache);
+
+	if (cache === undefined) {
+		return {
+			ok: true,
+			pendingUploadsDeleted: 0,
+			pendingAttestationsDeleted: 0,
+			rootsExpired: 0,
+			pathsCollected: 0,
+			narInfosDeleted: 0,
+			orphanStagingDeleted: 0
+		};
+	}
+
+	return collectGarbage(context.logger, context.request, context.services, {
+		scope: 'cache',
+		cache
+	});
 }
 
 // Interactive GC purges this colo's edge cache via the caller's public
@@ -489,13 +490,13 @@ async function collectGarbage(
 	logger: Logger,
 	request: Request,
 	services: TenantRpcServices,
-	cache?: StoredCache
-): Promise<GcResponse> {
+	target: Parameters<TenantRpcServices['runGarbageCollection']>[1]
+): Promise<GcResponseInput> {
 	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const outcome = await services.runGarbageCollection(
 		logger,
-		cache,
+		target,
 		purgeOrigin
 	);
 
@@ -519,7 +520,7 @@ async function runVerify(
 	request: Request,
 	services: TenantRpcServices,
 	limit: number | undefined
-): Promise<VerifyReport> {
+): Promise<VerifyReportInput> {
 	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);

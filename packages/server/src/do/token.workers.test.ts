@@ -1,6 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -10,7 +10,7 @@ import {
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType,
-	type TokenResponse,
+	type TokenResponseInput,
 	tokenResponseSchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
@@ -54,6 +54,7 @@ import {
 	latestMigrationIndex,
 	migrateThrough,
 	provisionNamedTenant,
+	putTestCache,
 	readFetch,
 	resetTestServer,
 	testPushId,
@@ -500,8 +501,12 @@ describe('POST /token', () => {
 		});
 	});
 
-	it('refuses an existing loopback HTTP trust row in production', async () => {
-		const error = await runInDurableObject(
+	// A rule the server cannot read is left out of the enumeration a token
+	// exchange selects from, so it can never authorise anything, and the
+	// exchange still answers with its ordinary refusal. The administrative read
+	// reports the fault so the row can be found and corrected.
+	it('leaves an existing loopback HTTP trust row out of issuance', async () => {
+		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
 				await migrateThrough(state, latestMigrationIndex);
@@ -519,16 +524,42 @@ describe('POST /token', () => {
 
 				const tenantIdentity = new TenantIdentityService(instance.context);
 				const service = new OidcTrustService(instance.context, tenantIdentity);
+				const capture = startCapture();
+				let enabled: readonly { readonly id: string }[];
 
 				try {
-					service.enabledOidcTrustRules();
-				} catch (error_) {
-					return error_;
+					enabled = service
+						.enabledOidcTrustRules(rootLogger())
+						.map((rule) => ({ id: rule.id }));
+				} finally {
+					capture.stop();
 				}
+
+				let readError: unknown;
+				try {
+					service.getRule(trustRuleIdSchema.parse('legacy-http'));
+				} catch (error_: unknown) {
+					readError = error_;
+				}
+
+				return {
+					enabled,
+					skipped: capture.logs
+						.filter(
+							(entry) => entry.message === 'stored OIDC trust rule skipped'
+						)
+						.map((entry) => entry.level),
+					readRefused: readError instanceof StoredOidcTrustInvalidError
+				};
 			}
 		);
 
-		expect(error).toBeInstanceOf(StoredOidcTrustInvalidError);
+		expect(outcome).toStrictEqual({
+			// The tenant's own owner rule remains; only the unreadable row is left out.
+			enabled: [{ id: 'owner' }],
+			skipped: ['error'],
+			readRefused: true
+		});
 	});
 
 	it('retries one issuer fetch failure and completes the exchange', async () => {
@@ -575,19 +606,19 @@ const trustClassGrants = {
 			}
 		}
 	],
-	'private-write': [
+	'release-write': [
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
 			resources: {
-				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' }
+				cache: { kind: 'named', exact: 'release', validate: 'cacheName' }
 			}
 		}
 	]
 } as const;
 
 async function installTrustedIdp(
-	scope: 'admin' | 'write' | 'private-write',
+	scope: 'admin' | 'write' | 'release-write',
 	options: {
 		failFirstFetches?: number;
 		protectedType?: string;
@@ -706,7 +737,7 @@ async function installTrustedOwner(): Promise<string> {
 	return subjectToken;
 }
 
-type SuccessfulTokenExchange = TokenResponse & { readonly status: number };
+type SuccessfulTokenExchange = TokenResponseInput & { readonly status: number };
 
 async function exchange(
 	subjectToken: string,
@@ -737,11 +768,11 @@ const ciRequest = [
 	}
 ];
 
-const privateCiRequest = [
+const releaseRequest = [
 	{
 		type: 'cupboard_cache',
 		actions: ['upload:negotiate'],
-		cache: namedCache('ci')
+		cache: namedCache('release')
 	}
 ];
 
@@ -849,6 +880,28 @@ describe('refresh grant', () => {
 			rotated: true,
 			subject: 'alice',
 			grantsClaim: [{ type: 'cupboard_wildcard' }]
+		});
+	});
+
+	// The cache-scope migration discards every refresh-token family, because a
+	// stored family carries the grants it was issued with and those name their
+	// cache in the retired grammar. A client presenting a token from before the
+	// cutover must therefore be told its grant is invalid, which is the signal
+	// that sends it back to the identity-token exchange.
+	it('refuses a refresh token whose family the cutover discarded', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const refreshToken = exchanged.refresh_token ?? '';
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec('DELETE FROM refresh_token_member');
+			state.storage.sql.exec('DELETE FROM refresh_token_family');
+		});
+
+		expect(await staleRefreshOutcome(refreshToken)).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_grant',
+			problem: 'stale-refresh-token'
 		});
 	});
 
@@ -2130,28 +2183,26 @@ describe('requested grants', () => {
 		});
 	});
 
-	// A grant names a cache and says nothing about its access, and a tenant
-	// cannot hold a public and a private cache of the same name. A rule bound to
-	// cache `ci` therefore issues one grant, which opens `ci` and no other cache.
+	// A grant names a cache and says nothing about its access. A rule bound to
+	// cache `release` therefore issues one grant, which opens `release` and no
+	// other cache.
 	it('confines a grant to the cache it names', async () => {
-		const subjectToken = await installTrustedIdp('private-write');
-		const issued = await exchange(subjectToken, privateCiRequest);
-		const otherRequest = [
-			{
-				type: 'cupboard_cache',
-				actions: ['upload:negotiate'],
-				cache: namedCache('other')
-			}
-		];
+		await putTestCache(
+			await issueServerSignedToken(adminGrants()),
+			{ kind: 'named', name: cacheNameSchema.parse('release') },
+			'public'
+		);
+		const subjectToken = await installTrustedIdp('release-write');
+		const issued = await exchange(subjectToken, releaseRequest);
 		const refused = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenTypeIdToken,
-			authorization_details: JSON.stringify(otherRequest)
+			authorization_details: JSON.stringify(ciRequest)
 		});
 		const refusedBody = oauthErrorShape(await refused.json());
-		const negotiated = await negotiateFor(issued.access_token, 'ci');
-		const denied = await negotiateFor(issued.access_token, 'other');
+		const negotiated = await negotiateFor(issued.access_token, 'release');
+		const denied = await negotiateFor(issued.access_token, 'ci');
 
 		expect({
 			granted: issued.authorization_details,
@@ -2160,7 +2211,7 @@ describe('requested grants', () => {
 			negotiated: negotiated.status,
 			denied: denied.status
 		}).toStrictEqual({
-			granted: privateCiRequest,
+			granted: releaseRequest,
 			refusedStatus: StatusCodes.BAD_REQUEST,
 			refusedProblem: 'not-permitted',
 			negotiated: StatusCodes.OK,

@@ -323,6 +323,13 @@
 			"when": 1788742676636,
 			"tag": "0045_cache_incarnation_expand",
 			"breakpoints": true
+		},
+		{
+			"idx": 46,
+			"version": "6",
+			"when": 1788761562035,
+			"tag": "0046_cache_grant_root_binding",
+			"breakpoints": true
 		}
 	]
 }

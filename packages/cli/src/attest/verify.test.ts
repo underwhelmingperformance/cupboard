@@ -2,11 +2,7 @@ import { createPublicKey } from 'node:crypto';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import {
-	cacheNameSchema,
-	privateStoredCache,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { readUserInputSchema } from '@cupboard/shared/http';
@@ -602,7 +598,7 @@ describe('remote attestation verification', () => {
 		const results = await verifyRemoteAttestations(
 			{
 				url: new URL('https://cupboard.test/t/acme'),
-				cache: storedCacheSchema.parse('builds'),
+				cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
 				storePathHash,
 				readUser: readUserInputSchema.parse('reader'),
 				readPassword: 'secret',
@@ -668,7 +664,7 @@ describe('remote attestation verification', () => {
 	// would record along with the path.
 	it('reads a private cache with a credential the URL does not carry', async () => {
 		const narInfo = await signedNarInfo();
-		const base = 'https://cupboard.test/t/acme/private-cache/ci';
+		const base = 'https://cupboard.test/t/acme/cache/ci';
 		const recordedCalls: {
 			readonly url: string;
 			readonly authorisation?: string;
@@ -703,7 +699,7 @@ describe('remote attestation verification', () => {
 		await verifyRemoteAttestations(
 			{
 				url: new URL('https://cupboard.test/t/acme'),
-				cache: privateStoredCache(cacheNameSchema.parse('ci')),
+				cache: { kind: 'named', name: cacheNameSchema.parse('ci') },
 				storePathHash,
 				readUser: readUserInputSchema.parse('reader'),
 				readPassword: 'secret',
@@ -788,6 +784,7 @@ describe('remote attestation verification', () => {
 			{
 				url: new URL('https://cupboard.test/t/acme'),
 				storePathHash,
+				cache: { kind: 'default' },
 				predicateType,
 				trustedPublicKey: signed.publicKey,
 				certificateIdentity: policy.identity,
@@ -867,6 +864,7 @@ describe('remote attestation verification', () => {
 					{
 						url: new URL('https://cupboard.test/t/acme'),
 						storePathHash,
+						cache: { kind: 'default' },
 						predicateType,
 						trustedPublicKey: signed.publicKey,
 						certificateIdentity: policy.identity,
@@ -912,6 +910,7 @@ describe('remote attestation verification', () => {
 					{
 						url: new URL('https://cupboard.test/t/acme'),
 						storePathHash,
+						cache: { kind: 'default' },
 						predicateType,
 						trustedPublicKey: replayedNarInfo.publicKey,
 						certificateIdentity: policy.identity,

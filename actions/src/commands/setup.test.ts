@@ -4,12 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
@@ -21,7 +16,6 @@ import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
-	PrivateCacheCredentialMissingError,
 	ProbeTimeoutError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
@@ -42,6 +36,11 @@ import {
 
 const alice = readUserInputSchema.parse('alice');
 const cacheName = (value: string) => cacheNameSchema.parse(value);
+const defaultCache: CacheScope = { kind: 'default' };
+const namedCache = (value: string): CacheScope => ({
+	kind: 'named',
+	name: cacheName(value)
+});
 const readPassword = 'A'.repeat(43);
 
 async function isPathPresent(candidate: string): Promise<boolean> {
@@ -271,7 +270,7 @@ describe('resolveSetupInputs', () => {
 		installDirectory: '/runner/temp/cupboard-bin',
 		addToPath: true,
 		cacheUrl: undefined,
-		caches: [{ cache: DEFAULT_CACHE }],
+		caches: [{ cache: defaultCache }],
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -298,30 +297,30 @@ describe('resolveSetupInputs', () => {
 		expect(resolveSetupInputs(blanked, environment)).toStrictEqual(defaults);
 	});
 
-	it('resolves the public caches, then the private ones, in the order named', () => {
+	it('resolves caches and their explicit credentials in input order', () => {
+		const staging = namedCache('staging');
 		const inputs = resolveSetupInputs(
 			{
 				...baseOptions,
-				cache: 'builds, docs',
-				privateCache: 'release\nstaging',
+				cache: 'builds, docs, release, staging',
 				readUser: 'alice',
 				readPassword: 'secret',
-				privateCacheCredentials: JSON.stringify({
-					staging: { user: 'ci', password: readPassword }
-				})
+				cacheCredentials: JSON.stringify([
+					{
+						cache: staging,
+						credential: { user: 'ci', password: readPassword }
+					}
+				])
 			},
 			environment
 		);
 
 		expect(inputs.caches).toStrictEqual([
-			{ cache: cacheName('builds') },
-			{ cache: cacheName('docs') },
+			{ cache: namedCache('builds') },
+			{ cache: namedCache('docs') },
+			{ cache: namedCache('release') },
 			{
-				cache: privateStoredCache(cacheName('release')),
-				credential: { user: alice, password: 'secret' }
-			},
-			{
-				cache: privateStoredCache(cacheName('staging')),
+				cache: staging,
 				credential: {
 					user: readUserInputSchema.parse('ci'),
 					password: readPassword
@@ -329,21 +328,6 @@ describe('resolveSetupInputs', () => {
 			}
 		]);
 	});
-
-	it.each([
-		{ name: 'an ordinary name', cache: 'release' },
-		{
-			name: 'a name that is a property of Object.prototype',
-			cache: 'constructor'
-		}
-	])(
-		'requires a read credential for a private cache with $name',
-		({ cache }) => {
-			expect(() =>
-				resolveSetupInputs({ ...baseOptions, privateCache: cache }, environment)
-			).toThrow(PrivateCacheCredentialMissingError);
-		}
-	);
 
 	it('does not require RUNNER_TEMP when install-dir is explicit', () => {
 		const inputs = resolveSetupInputs(
@@ -487,7 +471,7 @@ function stubFetch(
 describe('resolveSubstituters', () => {
 	const baseOptions: Omit<ResolveSubstitutersOptions, 'reuseView'> = {
 		cacheUrl: new URL('https://cache.example.test'),
-		caches: [{ cache: storedCacheSchema.parse(DEFAULT_CACHE) }],
+		caches: [{ cache: defaultCache }],
 		readUser: '',
 		readPassword: ''
 	};
@@ -671,9 +655,9 @@ describe('resolveSubstituters', () => {
 			{
 				...baseOptions,
 				caches: [
-					{ cache: cacheName('builds') },
+					{ cache: namedCache('builds') },
 					{
-						cache: privateStoredCache(cacheName('release')),
+						cache: namedCache('release'),
 						credential: { user: alice, password: 'secret' }
 					}
 				],
@@ -684,7 +668,7 @@ describe('resolveSubstituters', () => {
 
 		expect(substituters.map((url) => canonicalHref(url))).toStrictEqual([
 			'https://cache.example.test/cache/builds',
-			'https://alice:secret@cache.example.test/private-cache/release',
+			'https://alice:secret@cache.example.test/cache/release',
 			'https://cache.example.test/reuse/reuse'
 		]);
 	});
@@ -708,9 +692,9 @@ describe('resolveSubstituters', () => {
 			{
 				...baseOptions,
 				caches: [
-					{ cache: cacheName('builds') },
+					{ cache: namedCache('builds') },
 					{
-						cache: privateStoredCache(cacheName('release')),
+						cache: namedCache('release'),
 						credential: {
 							user: readUserInputSchema.parse('ci'),
 							password: readPassword
@@ -732,7 +716,7 @@ describe('resolveSubstituters', () => {
 				authorization: `Basic ${Buffer.from('alice:secret').toString('base64')}`
 			},
 			{
-				url: 'https://cache.example.test/private-cache/release/nix-cache-info',
+				url: 'https://cache.example.test/cache/release/nix-cache-info',
 				authorization: `Basic ${Buffer.from(`ci:${readPassword}`).toString('base64')}`
 			},
 			{
@@ -851,14 +835,15 @@ describe('fetchCachePublicKeyAt', () => {
 	});
 });
 
-describe('setupAction private-cache masking', () => {
-	it('registers both forms of every private credential before it writes anything', async () => {
+describe('setupAction cache-credential masking', () => {
+	it('registers both forms of every cache credential before it writes anything', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-mask-')
 		);
 		const environmentFile = path.join(directory, 'github-env');
 		const outputFile = path.join(directory, 'github-output');
 		const netrcFile = path.join(directory, 'cupboard-netrc');
+		const archivePassword = 'B'.repeat(43);
 		const masked: Record<string, unknown>[] = [];
 		let probes = 0;
 
@@ -867,14 +852,20 @@ describe('setupAction private-cache masking', () => {
 				installDir: path.join(directory, 'bin'),
 				addToPath: 'false',
 				cacheUrl: 'https://cache.example.test/t/acme',
-				privateCache: 'release, archive',
-				privateCacheCredentials: JSON.stringify({
-					release: { user: 'ci', password: readPassword }
-				}),
-				readUser: 'alice',
-				// The tenant password is taken verbatim, so percent-encoding it into
-				// the userinfo of a substituter URL changes it.
-				readPassword: 's3cr%t/pass',
+				cache: 'release, archive',
+				cacheCredentials: JSON.stringify([
+					{
+						cache: namedCache('release'),
+						credential: { user: 'ci', password: readPassword }
+					},
+					{
+						cache: namedCache('archive'),
+						credential: {
+							user: 'alice smith',
+							password: archivePassword
+						}
+					}
+				]),
 				reuseView: 'pr-view',
 				trustedPublicKey: 'acme:AAAA'
 			},
@@ -921,14 +912,13 @@ describe('setupAction private-cache masking', () => {
 			throw new Error('setup did not output the generated Nix config path');
 		}
 
-		const releaseUrl = `https://ci:${readPassword}@cache.example.test/t/acme/private-cache/release`;
-		const archiveUrl =
-			'https://alice:s3cr%25t%2Fpass@cache.example.test/t/acme/private-cache/archive';
+		const releaseUrl = `https://ci:${readPassword}@cache.example.test/t/acme/cache/release`;
+		const archiveUrl = `https://alice%20smith:${archivePassword}@cache.example.test/t/acme/cache/archive`;
 		const nixConfig = await readFile(generatedConfigFile, 'utf8');
 		const [substituters] = nixConfig.split('\n', 1);
 
 		expect({ masked, substituters }).toStrictEqual({
-			masked: [readPassword, releaseUrl, 's3cr%t/pass', archiveUrl].map(
+			masked: [readPassword, releaseUrl, archivePassword, archiveUrl].map(
 				(value) => ({
 					value,
 					probes: 0,
@@ -943,7 +933,7 @@ describe('setupAction private-cache masking', () => {
 });
 
 describe('setupAction Nix configuration', () => {
-	it('keeps private credentials in a protected file and includes it by path', async () => {
+	it('keeps cache credentials in a protected file and includes it by path', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-setup-config-')
 		);
@@ -957,8 +947,10 @@ describe('setupAction Nix configuration', () => {
 				installDir: path.join(directory, 'bin'),
 				addToPath: 'false',
 				cacheUrl: 'https://cache.example.test/t/acme',
-				privateCache: 'release',
-				privateCacheCredentials: JSON.stringify({ release: credential }),
+				cache: 'release',
+				cacheCredentials: JSON.stringify([
+					{ cache: namedCache('release'), credential }
+				]),
 				trustedPublicKey: 'acme:AAAA',
 				nixConfigFile: callerConfigFile
 			},
@@ -986,7 +978,7 @@ describe('setupAction Nix configuration', () => {
 			throw new Error('setup did not output the generated Nix config path');
 		}
 
-		const credentialUrl = `https://${credential.user}:${credential.password}@cache.example.test/t/acme/private-cache/release`;
+		const credentialUrl = `https://${credential.user}:${credential.password}@cache.example.test/t/acme/cache/release`;
 		const generatedConfig = await readFile(generatedConfigFile, 'utf8');
 		const environmentConfig = await readEnvironmentValue(
 			environmentFile,

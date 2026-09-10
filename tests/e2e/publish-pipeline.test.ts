@@ -10,7 +10,7 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	autoBuildStore,
 	buildReceiptV3Schema,
-	type ParsedBuildSubjectV3
+	type BuildSubjectV3
 } from '@cupboard/protocol/build';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -686,7 +686,7 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 }
 
 function recordedAttribution(
-	subjects: readonly ParsedBuildSubjectV3[]
+	subjects: readonly BuildSubjectV3[]
 ): RecordedAttribution {
 	const built = subjects.filter((subject) => subject.origin === 'built');
 

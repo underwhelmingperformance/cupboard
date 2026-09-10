@@ -9,11 +9,11 @@
 // reached the limit itself.
 import {
 	cacheNameSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
-	privateStoredCache,
 	rootNameSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
@@ -33,6 +33,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import { drizzle as drizzleDurable } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoReferenceQuery } from '../read/read.ts';
@@ -45,9 +46,9 @@ import {
 	fencedCasObjectDeletion
 } from './blob-reaper-service.ts';
 import {
+	cacheReferenceSelect,
 	capturedReferenceSelect,
 	fencedEdgeRetirement,
-	publicReferenceSelect,
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
 import { expiredRootTargetSelect } from './garbage-collection-service.ts';
@@ -85,6 +86,8 @@ const database = drizzle(stubD1, { schema: d1Schema });
 const doDatabase = drizzleDurable({ exec: throwStub } as never, { schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
 const cache = cacheNameSchema.parse('builds');
+const cacheScope: CacheScope = { kind: 'named', name: cache };
+const cacheId = cacheIdSchema.parse(1);
 const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
 const testNarHash = nixSha256HashSchema.parse(
@@ -214,7 +217,7 @@ function referenceParameters(paths: number): number {
 	return narInfoReferenceQuery(
 		database,
 		tenant,
-		privateStoredCache(cache),
+		cacheScope,
 		storePathList(paths)
 	).toSQL().params.length;
 }
@@ -257,7 +260,7 @@ function edgeCreditParameters(paths: number): number {
 	return fencedEdgeRetirement(
 		database,
 		tenant,
-		cache,
+		cacheScope,
 		retiredEdges(paths),
 		now
 	).creditUpdate.toSQL().params.length;
@@ -267,7 +270,7 @@ function edgeDeleteParameters(paths: number): number {
 	return fencedEdgeRetirement(
 		database,
 		tenant,
-		cache,
+		cacheScope,
 		retiredEdges(paths),
 		now
 	).edgeDelete.toSQL().params.length;
@@ -275,7 +278,8 @@ function edgeDeleteParameters(paths: number): number {
 
 function blobReferenceDeleteParameters(edges: number): number {
 	const rows = rowList<BlobReferenceKey>(edges, {
-		cache,
+		cacheKind: 'named',
+		cacheName: cache,
 		storePathHash: testStorePathHash,
 		generation: testGeneration
 	});
@@ -290,7 +294,8 @@ function blobReferenceDeleteParameters(edges: number): number {
 
 function attestationReferenceDeleteParameters(references: number): number {
 	const rows = rowList<AttestationReferenceKey>(references, {
-		cache,
+		cacheKind: 'named',
+		cacheName: cache,
 		storePathHash: testStorePathHash,
 		generation: testGeneration,
 		predicateType: predicateTypeSchema.parse('https://slsa.dev/provenance/v1'),
@@ -360,7 +365,7 @@ function expiredRootTargetParameters(roots: number): number {
 
 	return expiredRootTargetSelect(
 		doDatabase,
-		cache,
+		cacheId,
 		list,
 		expiredRootTargetPage
 	).toSQL().params.length;
@@ -372,33 +377,40 @@ function capturedReferenceParameters(paths: number): number {
 	return capturedReferenceSelect(
 		database,
 		tenant,
-		privateStoredCache(cache),
+		cacheScope,
 		retiredEdges(paths),
 		46
 	).toSQL().params.length;
 }
 
-function publicReferenceParameters(hashes: number): number {
-	return publicReferenceSelect(database, tenant, narHashList(hashes)).toSQL()
-		.params.length;
+function cacheReferenceParameters(hashes: number): number {
+	return cacheReferenceSelect(
+		database,
+		tenant,
+		cacheScope,
+		narHashList(hashes)
+	).toSQL().params.length;
 }
 
 // A path one view holds in many caches reaches the edge lookup as one row list,
 // so the count comes from the statement rather than from the number of caches.
 function reuseEdgeParameters(candidates: number): number {
 	const rows = rowList(candidates, {
-		cache,
+		cacheKind: 'named' as const,
+		cacheName: cache,
 		storePathHash: testStorePathHash,
 		generation: testGeneration
 	});
 
-	return reuseEdgeSelect(database, tenant, rows).toSQL().params.length;
+	return reuseEdgeSelect(database, tenant, 'public', rows).toSQL().params
+		.length;
 }
 
 function reuseViewSelectorParameters(selectors: number): number {
 	const rows = rowList<StoredReuseViewSelector>(selectors, {
 		kind: 'prefix',
-		pattern: 'builds'
+		cacheName: '',
+		prefix: 'builds'
 	});
 
 	return reuseViewSelectorInsert(doDatabase, testReuseView, rows).toSQL().params
@@ -510,8 +522,8 @@ const listStatements: readonly {
 		parameters: capturedReferenceParameters
 	},
 	{
-		statement: 'teardown public-reference SELECT',
-		parameters: publicReferenceParameters
+		statement: 'teardown cache-reference SELECT',
+		parameters: cacheReferenceParameters
 	},
 	{
 		statement: 'reuse view selector INSERT',

@@ -8,6 +8,7 @@ import {
 	InvalidCaptureSpecError,
 	jobWorkflowReferenceClaim,
 	parseCapture,
+	RootBindingRequiredError,
 	UnknownAllowError,
 	UnknownTemplateSourceError
 } from './rule-builder.ts';
@@ -116,7 +117,7 @@ describe('collectSubstitutions', () => {
 });
 
 describe('buildCacheGrant', () => {
-	it('builds a per-PR cache grant with a same-as-cache root', () => {
+	it('builds a per-PR cache grant with an explicit root template', () => {
 		const substitutions = collectSubstitutions({
 			templateSource: 'github-pr',
 			captures: []
@@ -126,7 +127,7 @@ describe('buildCacheGrant', () => {
 			buildCacheGrant({
 				cacheTemplate: 'pr-{pr}',
 				allow: ['push', 'root'],
-				root: 'same-as-cache',
+				rootTemplate: 'pr-{pr}',
 				substitutions
 			})
 		).toStrictEqual({
@@ -154,7 +155,19 @@ describe('buildCacheGrant', () => {
 					},
 					validate: 'cacheName'
 				},
-				root: { validate: 'rootName', equalsResource: 'cache' }
+				root: {
+					equalsTemplate: 'pr-{pr}',
+					substitutions: {
+						pr: {
+							claim: 'ref',
+							capture: {
+								pattern: '^refs/pull/(?<pr>[0-9]+)/merge$',
+								group: 'pr'
+							}
+						}
+					},
+					validate: 'rootName'
+				}
 			}
 		});
 	});
@@ -191,15 +204,10 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
-	it('uses the cache binding as the root for an attach-only allowance', () => {
-		expect(buildCacheGrant({ allow: ['attach'] })).toStrictEqual({
-			type: 'cupboard_cache',
-			actions: ['root:attach'],
-			resources: {
-				cache: { kind: 'default' },
-				root: { validate: 'rootName', equalsResource: 'cache' }
-			}
-		});
+	it('requires an explicit root for operations that manage roots', () => {
+		expect(() => buildCacheGrant({ allow: ['attach'] })).toThrow(
+			RootBindingRequiredError
+		);
 	});
 
 	it('builds an exact cache grant', () => {

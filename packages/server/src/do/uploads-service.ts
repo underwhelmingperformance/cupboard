@@ -1,31 +1,31 @@
 import {
-	type CacheAccessMode,
+	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type ParsedUploadGraceFact,
-	type ParsedUploadNegotiateRequest,
-	type ParsedUploadPathMetadata,
-	type ParsedUploadPathNegotiation,
-	type ParsedUploadPreviewRequest,
-	type PushCredential,
+	type PushCredentialInput,
 	type PushId,
 	type UploadConfirmResponse,
 	type UploadDecision,
+	type UploadGraceFact,
 	type UploadId,
 	uploadIdSchema,
+	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
+	type UploadPathMetadata,
+	type UploadPathNegotiation,
+	type UploadPreviewDecision,
+	type UploadPreviewRequest,
 	type UploadPreviewResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
-import { CacheRepository } from '../db/cache-repository.ts';
+import { legacyCacheKey, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { InvalidPushIdError } from '../errors.ts';
@@ -77,7 +77,7 @@ interface ClosureClassification {
 }
 
 interface ClosureRequest {
-	readonly paths: readonly ParsedUploadPathNegotiation[];
+	readonly paths: readonly UploadPathNegotiation[];
 }
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
@@ -119,7 +119,7 @@ export class UploadsService {
 	) {}
 
 	private existingNarInfos(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Map<StorePathHash, NarInfoRow> {
 		const rows = jsonValueLists(storePathHashes).flatMap((list) =>
@@ -128,7 +128,7 @@ export class UploadsService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						inArray(schema.narInfos.storePathHash, list)
 					)
 				)
@@ -141,9 +141,9 @@ export class UploadsService {
 	// A fresh upload uses a private staging key. Reuse records the canonical key but
 	// gives the client no write access to the shared object.
 	private planUpload(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		pushId: PushId,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		existingBlob: ReusableBlob | undefined,
 		graceDecision: GraceDecision,
 		attachRootName: RootName | undefined
@@ -151,8 +151,7 @@ export class UploadsService {
 		const uploadId = uploadIdSchema.parse(crypto.randomUUID());
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + uploadTtlMs);
-		const pendingMetadata:
-			ParsedUploadPathNegotiation | ParsedUploadPathMetadata =
+		const pendingMetadata: UploadPathNegotiation | UploadPathMetadata =
 			existingBlob === undefined
 				? metadata
 				: {
@@ -173,8 +172,8 @@ export class UploadsService {
 				id: uploadId,
 				// Commit accepts only the upload identifier, so the cache recorded
 				// here is what prevents cross-cache redirection.
-				cache,
-				cacheId: new CacheRepository(this.context.db).find(cache),
+				cache: legacyCacheKey(cache.scope, cache.access),
+				cacheId: cache.id,
 				narHash: metadata.narHash,
 				r2Key,
 				metadataJson: JSON.stringify(pendingMetadata),
@@ -235,7 +234,7 @@ export class UploadsService {
 	// availability comes from the D1 reference and blob indexes. Preview must use
 	// the non-claiming lookup because classification must not clear reaper timers.
 	private async classifyClosure(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
 		shouldClaim: boolean
@@ -295,9 +294,8 @@ export class UploadsService {
 	}
 
 	async negotiate(
-		cache: StoredCache,
-		access: CacheAccessMode,
-		body: ParsedUploadNegotiateRequest,
+		cacheScope: CacheScope,
+		body: UploadNegotiateRequest,
 		origin: RequestOrigin,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
@@ -308,11 +306,17 @@ export class UploadsService {
 
 		requireServedStorePaths(body.paths.map((path) => path.storePath));
 
+		if (body.paths.length === 0 && body.attachRoot === undefined) {
+			return { uploads: [] };
+		}
+
+		const cache = this.context.cacheRepository.require(cacheScope);
+
 		// Reject paths from another store directory before creating or extending the
 		// run root. Each pending upload then records the root its commit must attach
 		// to.
 		if (body.attachRoot !== undefined) {
-			await this.roots.bindRunRoot(
+			this.roots.bindRunRoot(
 				cache,
 				body.attachRoot.name,
 				body.attachRoot.ttlSeconds
@@ -336,17 +340,14 @@ export class UploadsService {
 		// change cannot alter the decision before commit finishes. Attach grace facts
 		// only when the client requested them, so a client that did not ask still
 		// receives the legacy response shape.
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
-			cache,
-			access
-		);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 		const graceDecision: GraceDecision = {
 			reportsGrace: shouldReportGrace,
 			...(resolvedGraceSeconds !== undefined && {
 				graceSeconds: resolvedGraceSeconds
 			})
 		};
-		const plannedGraceFact: ParsedUploadGraceFact =
+		const plannedGraceFact: UploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
@@ -440,7 +441,10 @@ export class UploadsService {
 
 		await this.reconcileQueue.enqueue(
 			origin,
-			skippableRows.map((row) => ({ cache, storePathHash: row.storePathHash }))
+			skippableRows.map((row) => ({
+				cacheId: cache.id,
+				storePathHash: row.storePathHash
+			}))
 		);
 
 		return { uploads };
@@ -451,9 +455,8 @@ export class UploadsService {
 	// stored deadline; commit and upload actions report the policy that a new
 	// publication would capture.
 	async preview(
-		cache: StoredCache,
-		access: CacheAccessMode,
-		body: ParsedUploadPreviewRequest,
+		cacheScope: CacheScope,
+		body: UploadPreviewRequest,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
 	): Promise<UploadPreviewResponse> {
@@ -462,14 +465,44 @@ export class UploadsService {
 		}
 
 		requireServedStorePaths(body.paths.map((path) => path.storePath));
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+		const resolvedGraceSeconds =
+			cache === undefined
+				? undefined
+				: this.retention.resolveGraceSeconds(cache);
+
+		if (cache === undefined) {
+			const facts = hints === undefined ? undefined : factsFromHints(hints);
+			const reusableByNarHash =
+				facts?.reusableByNarHash ??
+				(await this.uploadState.peekReusableBlobs(
+					body.paths.map((path) => path.narHash)
+				));
+			const plannedGraceFact: UploadGraceFact =
+				resolvedGraceSeconds === undefined
+					? {}
+					: { graceSeconds: resolvedGraceSeconds };
+
+			return {
+				uploads: body.paths.map((metadata): UploadPreviewDecision => {
+					const decision: UploadPreviewDecision = {
+						action: reusableByNarHash.has(metadata.narHash)
+							? 'commit'
+							: 'upload',
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash
+					};
+
+					return shouldReportGrace
+						? { ...decision, grace: plannedGraceFact }
+						: decision;
+				})
+			};
+		}
 
 		const { existingByStorePathHash, skippable, reusableByNarHash } =
 			await this.classifyClosure(cache, body, hints, false);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
-			cache,
-			access
-		);
-		const plannedGraceFact: ParsedUploadGraceFact =
+		const plannedGraceFact: UploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
@@ -486,19 +519,19 @@ export class UploadsService {
 		);
 
 		return {
-			uploads: body.paths.map((metadata) => {
+			uploads: body.paths.map((metadata): UploadPreviewDecision => {
 				const existing = existingByStorePathHash.get(metadata.storePathHash);
 
 				if (existing !== undefined && skippable.has(metadata.storePathHash)) {
 					const retainUntil = storedDeadlines.get(metadata.storePathHash);
 
-					// A skip without a stored deadline reports the current policy. An
-					// empty grace fact means that no policy matched.
-					const decision = {
+					// A skip without a stored deadline reports the current cache grace. An
+					// empty grace fact means that grace was not configured.
+					const decision: UploadPreviewDecision = {
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
 						narHash: existing.narHash
-					} as const;
+					};
 
 					return shouldReportGrace
 						? {
@@ -509,11 +542,11 @@ export class UploadsService {
 						: decision;
 				}
 
-				const decision = {
+				const decision: UploadPreviewDecision = {
 					action: reusableByNarHash.has(metadata.narHash) ? 'commit' : 'upload',
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash
-				} as const;
+				};
 
 				return shouldReportGrace
 					? { ...decision, grace: plannedGraceFact }
@@ -526,12 +559,22 @@ export class UploadsService {
 	// same narinfo identity when grace is applied. If any condition fails, the path
 	// is reported as unconfirmed and receives no grace extension.
 	async confirmPaths(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cacheScope: CacheScope,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<UploadConfirmResponse> {
 		if (storePathHashes.length === 0) {
 			return { paths: [] };
+		}
+
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return {
+				paths: storePathHashes.map((storePathHash) => ({
+					storePathHash,
+					confirmed: false
+				}))
+			};
 		}
 
 		// Deduplicate the storage queries without removing duplicate response entries.
@@ -542,10 +585,7 @@ export class UploadsService {
 			this.narInfoObjects.servableStorePathHashes(cache, uniqueHashes),
 			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
 		]);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
-			cache,
-			access
-		);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 
 		const confirmable = uniqueHashes.flatMap((storePathHash) => {
 			const existing = existingByStorePathHash.get(storePathHash);
@@ -594,7 +634,7 @@ export class UploadsService {
 	async issuePushCredential(
 		tokenExpiresAt: Date,
 		pushId?: PushId
-	): Promise<PushCredential> {
+	): Promise<PushCredentialInput> {
 		const now = new Date();
 		const ttlSeconds = pushCredentialTtlSeconds(tokenExpiresAt, now);
 		const issuer = this.context.pushCredentials();

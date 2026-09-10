@@ -1,10 +1,9 @@
 import {
-	identityForCache,
+	type CacheScope,
 	type NarInfoGeneration,
 	type PredicateType,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -20,7 +19,7 @@ import {
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
-import { cacheIdentityColumns } from '../db/cache.ts';
+import { cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
@@ -32,6 +31,8 @@ import {
 	maxAttestationBundleBytes,
 	type R2ObjectKey
 } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 
 import { type ServerContext } from './context.ts';
 
@@ -42,7 +43,7 @@ export interface MeasuredAttestationBundle {
 }
 
 export interface AttestationReference {
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly predicateType: PredicateType;
@@ -120,7 +121,11 @@ export class AttestationCasService {
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
 		return and(
 			eq(d1Schema.attestationReference.tenant, tenant),
-			eq(d1Schema.attestationReference.cache, reference.cache),
+			cacheIdentityCondition(
+				d1Schema.attestationReference.cacheKind,
+				d1Schema.attestationReference.cacheName,
+				reference.cache
+			),
 			eq(d1Schema.attestationReference.storePathHash, reference.storePathHash),
 			eq(d1Schema.attestationReference.generation, reference.generation),
 			eq(d1Schema.attestationReference.predicateType, reference.predicateType),
@@ -287,8 +292,8 @@ export class AttestationCasService {
 		}
 
 		const now = isoTimestamp(new Date());
-		const { scope } = identityForCache(reference.cache);
-		const identity = cacheIdentityColumns(scope);
+		const cache = this.context.cacheRepository.require(reference.cache);
+		const cacheIdentity = cacheMigrationColumns(cache.scope, cache.access);
 		const presenceMissing = notExists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -310,8 +315,15 @@ export class AttestationCasService {
 				})
 				.where(chargeFilter),
 			this.context.d1
-				.insert(d1Schema.attestationReference)
-				.values({ tenant, ...reference, ...identity })
+				.insert(migrationSchema.attestationReferences)
+				.values({
+					tenant,
+					...cacheIdentity,
+					storePathHash: reference.storePathHash,
+					generation: reference.generation,
+					predicateType: reference.predicateType,
+					digest: reference.digest
+				})
 				.onConflictDoNothing(),
 			this.context.d1
 				.insert(d1Schema.tenantCasBlob)

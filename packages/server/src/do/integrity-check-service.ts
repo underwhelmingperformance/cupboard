@@ -1,7 +1,7 @@
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import {
-	type CheckDiscrepancy,
-	type CheckReport
+	type CheckDiscrepancyInput,
+	type CheckReportInput
 } from '@cupboard/protocol/reports';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { asc, inArray, sql } from 'drizzle-orm';
@@ -48,7 +48,7 @@ export class IntegrityCheckService {
 		row: typeof schema.narInfos.$inferSelect,
 		isDeep: boolean,
 		blobFacts: Map<NixSha256HashString, BlobFact>
-	): Promise<CheckDiscrepancy['kind'] | undefined> {
+	): Promise<CheckDiscrepancyInput['kind'] | undefined> {
 		const blobFact = blobFacts.get(row.narHash);
 
 		if (blobFact === undefined) {
@@ -155,7 +155,7 @@ export class IntegrityCheckService {
 	 * A caller checks every path by passing the cursor back until it comes back
 	 * empty.
 	 */
-	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReport> {
+	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
 		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
 		const page = this.context.db
 			.select()
@@ -171,14 +171,14 @@ export class IntegrityCheckService {
 		const rows = page.slice(0, checkBatchSize);
 		const next = page.at(checkBatchSize);
 
-		const discrepancies: CheckDiscrepancy[] = [];
+		const discrepancies: CheckDiscrepancyInput[] = [];
 
 		// NAR blobs are content-addressed and shared, so check each distinct hash
 		// once but attribute a fault to every narinfo that depends on it: the
 		// operator sees each affected store path.
 		const blobVerdicts = new Map<
 			string,
-			CheckDiscrepancy['kind'] | undefined
+			CheckDiscrepancyInput['kind'] | undefined
 		>();
 		let narBlobsChecked = 0;
 
@@ -200,14 +200,15 @@ export class IntegrityCheckService {
 				break;
 			}
 
+			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 			const narInfoObject = await this.context.env.BLOBS.head(
-				narInfoObjectKey(tenant, row.storePathHash, row.cache)
+				narInfoObjectKey(tenant, row.storePathHash, cache.scope)
 			);
 
 			if (narInfoObject === null) {
 				discrepancies.push({
 					kind: 'missing-narinfo-object',
-					cache: row.cache,
+					cache: cache.scope,
 					storePathHash: row.storePathHash,
 					narHash: row.narHash
 				});
@@ -226,7 +227,7 @@ export class IntegrityCheckService {
 			if (blobVerdict !== undefined) {
 				discrepancies.push({
 					kind: blobVerdict,
-					cache: row.cache,
+					cache: cache.scope,
 					storePathHash: row.storePathHash,
 					narHash: row.narHash
 				});

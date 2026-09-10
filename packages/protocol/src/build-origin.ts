@@ -32,9 +32,7 @@ export const buildOriginSubjectSchema = z.discriminatedUnion('origin', [
 		...republishedOriginFields
 	})
 ]);
-export type ParsedBuildOriginSubject = z.output<
-	typeof buildOriginSubjectSchema
->;
+export type BuildOriginSubject = z.output<typeof buildOriginSubjectSchema>;
 
 // With run grouping, one statement contains every receipt subject accepted by
 // the attestation step. A reader who verifies the statement for one subject can
@@ -43,9 +41,9 @@ export type ParsedBuildOriginSubject = z.output<
 export const buildOriginPredicateSchema = z.strictObject({
 	subjects: z.array(buildOriginSubjectSchema).min(1)
 });
-export type ParsedBuildOriginPredicate = z.output<
+export type BuildOriginPredicate = z.output<typeof buildOriginPredicateSchema>;
+
+export type BuildOriginSubjectInput = z.input<typeof buildOriginSubjectSchema>;
+export type BuildOriginPredicateInput = z.input<
 	typeof buildOriginPredicateSchema
 >;
-
-export type BuildOriginSubject = z.input<typeof buildOriginSubjectSchema>;
-export type BuildOriginPredicate = z.input<typeof buildOriginPredicateSchema>;

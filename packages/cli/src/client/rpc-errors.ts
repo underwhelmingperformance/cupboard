@@ -11,8 +11,9 @@ import {
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
-Whether an oRPC procedure reports that its route or requested resource is absent.
-*/
+ * Whether an oRPC procedure reports that its route or requested resource is
+ * absent.
+ */
 export function isRpcNotFoundError(
 	error: unknown
 ): error is ORPCError<'NOT_FOUND', unknown> {

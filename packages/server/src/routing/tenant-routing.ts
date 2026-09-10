@@ -1,11 +1,6 @@
 import {
-	cacheFromSelector,
 	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	publicCacheSelectorSchema,
-	type StoredCache,
-	storedCacheSchema,
+	type CacheScope,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -16,17 +11,17 @@ const tenantPrefix = '/t/';
  * Namespace segments followed by a cache or reuse-view name on routes that
  * require literal spelling.
  */
-export type RouteNamespace =
-	'cache' | 'private-cache' | 'private-reuse' | 'reuse';
+export type RouteNamespace = 'cache' | 'reuse';
 
-const privateCacheNamespace: RouteNamespace = 'private-cache';
-const privateCachePrefix = `/${privateCacheNamespace}/`;
-const publicCacheNamespace: RouteNamespace = 'cache';
-const publicCachePrefix = `/${publicCacheNamespace}/`;
-const defaultCache = storedCacheSchema.parse(DEFAULT_CACHE);
+const namedCachePrefix = '/cache/';
 
 export interface TenantRoute {
 	readonly tenant: TenantId;
+	readonly rest: string;
+}
+
+export interface NamedCacheRoute {
+	readonly scope: CacheScope & { readonly kind: 'named' };
 	readonly rest: string;
 }
 
@@ -61,12 +56,10 @@ export function parseTenantPath(pathname: string): TenantRoute | undefined {
  * and `name` is the decoded route parameter.
  *
  * Hono decodes unreserved percent escapes during route matching and parameter
- * extraction. Admission instead parses the raw path to load a private cache's
- * read verifier, and the Workers Cache key also retains the raw path. For
- * `/private%2Dcache/%62uilds`, Hono selects the private-cache route and returns
- * `builds`, but admission finds no literal private-cache prefix and loads no
- * cache verifier. Namespace and resource names contain only unreserved
- * characters, so the raw and decoded spellings must match.
+ * extraction. Admission instead parses the raw path to select the cache before
+ * authentication, and the Workers Cache key retains the raw path. Namespace
+ * and resource names contain only unreserved characters, so the raw and
+ * decoded spellings must match.
  */
 export function isLiteralNamespacePath(
 	rest: string,
@@ -78,47 +71,34 @@ export function isLiteralNamespacePath(
 	return rest === prefix || rest.startsWith(`${prefix}/`);
 }
 
-// The name that follows `/<namespace>/` in a tenant-relative path, or undefined
-// when the path is outside that namespace. The name is `''` for a path that
-// stops at the prefix, and no cache name parses from that.
-function namespacedName(pathname: string, prefix: string): string | undefined {
-	if (!pathname.startsWith(prefix)) {
+/**
+ * Splits a leading `/cache/<name>` prefix from a tenant-relative path. The
+ * remainder is `/` when the path ends at the prefix. A path outside the cache
+ * namespace, or one with an empty or malformed name, returns `undefined`.
+ *
+ * Admission calls this on the raw path before Hono matches a route, so that the
+ * tenant row and the addressed cache's identity, credential and lifecycle rows
+ * come from one D1 batch.
+ */
+export function parseNamedCachePath(
+	pathname: string
+): NamedCacheRoute | undefined {
+	if (!pathname.startsWith(namedCachePrefix)) {
 		return undefined;
 	}
 
-	const remainder = pathname.slice(prefix.length);
+	const remainder = pathname.slice(namedCachePrefix.length);
 	const separator = remainder.indexOf('/');
+	const localName =
+		separator === -1 ? remainder : remainder.slice(0, separator);
+	const name = cacheNameSchema.safeParse(localName);
 
-	return separator === -1 ? remainder : remainder.slice(0, separator);
-}
-
-/**
- * The cache a tenant-relative path addresses, taken from its `/cache/<name>` or
- * `/private-cache/<name>` prefix. A path with neither addresses the default
- * cache, and so does one whose name is malformed: a later routing stage refuses
- * that request, and admission must not read another cache's rows for it in the
- * meantime.
- *
- * Admission calls this on the raw path before Hono matches a route, so that the
- * tenant row and the addressed cache's credential and lifecycle rows come from
- * one D1 batch.
- */
-export function addressedCache(pathname: string): StoredCache {
-	const privateName = namespacedName(pathname, privateCachePrefix);
-
-	if (privateName !== undefined) {
-		const name = cacheNameSchema.safeParse(privateName);
-
-		return name.success ? privateStoredCache(name.data) : defaultCache;
+	if (!name.success) {
+		return undefined;
 	}
 
-	const publicName = namespacedName(pathname, publicCachePrefix);
-
-	if (publicName === undefined) {
-		return defaultCache;
-	}
-
-	const selector = publicCacheSelectorSchema.safeParse(publicName);
-
-	return selector.success ? cacheFromSelector(selector.data) : defaultCache;
+	return {
+		scope: { kind: 'named', name: name.data },
+		rest: separator === -1 ? '/' : remainder.slice(separator)
+	};
 }

@@ -18,6 +18,7 @@ export function registerPubkeyCommand(
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
+				cache: { kind: 'default' },
 				signal: programOptions.signal
 			});
 			const publicKey = await reporter.phase('Reading public key', () =>

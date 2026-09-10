@@ -288,7 +288,19 @@ describe('oidc trust schemas', () => {
 						},
 						validate: 'cacheName'
 					},
-					root: { equalsResource: 'cache', validate: 'rootName' }
+					root: {
+						equalsTemplate: 'pr-{ref}',
+						substitutions: {
+							ref: {
+								claim: 'ref',
+								capture: {
+									pattern: '^refs/pull/(?<ref>[0-9]+)/merge$',
+									group: 'ref'
+								}
+							}
+						},
+						validate: 'rootName'
+					}
 				}
 			}
 		],

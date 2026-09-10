@@ -45,6 +45,7 @@ import m0042 from './0042_cache_access_expand.sql';
 import m0043 from './0043_cache_access_backfill.sql';
 import m0044 from './0044_cache_grant_json.sql';
 import m0045 from './0045_cache_incarnation_expand.sql';
+import m0046 from './0046_cache_grant_root_binding.sql';
 
 export default {
 	journal,
@@ -94,6 +95,7 @@ export default {
 		m0042,
 		m0043,
 		m0044,
-		m0045
+		m0045,
+		m0046
 	}
 };

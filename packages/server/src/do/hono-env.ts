@@ -1,5 +1,5 @@
 import type { Logger } from '@cupboard/logger';
-import type { CacheAccessMode, StoredCache } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 
 import type { AccessClaims } from '../auth/auth.ts';
 
@@ -10,17 +10,14 @@ import type { RuntimeEnv } from './context.ts';
  * authenticated routes. `cache` is the cache addressed by the request: the
  * default cache unless a `/cache/:cacheName/` prefix selects another one.
  *
- * `cacheAccess` is that cache's access mode. The middleware that resolves the
- * cache sets it, because the selector it parses is what says which cache the
- * request means. A route passes it to whatever needs it rather than reading it
- * back out of the stored name.
+ * The path names the cache but not its access. A route that needs the access
+ * resolves the cache through the catalogue.
  */
 export interface TenantHonoEnv {
 	Bindings: RuntimeEnv;
 	Variables: {
 		logger: Logger;
 		claims: AccessClaims;
-		cache: StoredCache;
-		cacheAccess: CacheAccessMode;
+		cache: CacheScope;
 	};
 }

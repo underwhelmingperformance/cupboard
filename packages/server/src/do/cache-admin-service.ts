@@ -1,25 +1,39 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CacheAccessMode,
+	type CacheName,
 	type CachePriority,
 	cachePrioritySchema,
-	DEFAULT_CACHE,
-	identityForCache,
-	type StoredCache,
-	storedCacheSchema
+	type CacheScope,
+	type StoredCache
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type CacheListResponse,
 	type CacheRemoveResponse,
-	type CacheSummary
+	type CacheSummary,
+	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
 
-import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
-import { CacheRepository } from '../db/cache-repository.ts';
+import {
+	type CacheId,
+	cacheIdentityCondition,
+	cacheIdSchema,
+	cacheScopeFromRow,
+	legacyCacheKey,
+	type ResolvedCache
+} from '../db/cache.ts';
+import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { CacheNotEmptyError } from '../errors.ts';
+import {
+	CacheAlreadyExistsError,
+	CacheIdentityMissingError,
+	CacheNotEmptyError,
+	CacheNotFoundError
+} from '../errors.ts';
 import {
 	narObjectKey,
 	type RequestOrigin,
@@ -33,7 +47,6 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
-import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -62,26 +75,20 @@ export const maxPathsTornDownPerRun =
 export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
-	private readonly identities: CacheRepository;
-	private readonly phases: DeploymentPhaseGate;
-
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
-	) {
-		this.identities = new CacheRepository(context.db);
-		this.phases = new DeploymentPhaseGate(context.d1);
+	) {}
+
+	private teardownKey(cache: ResolvedCache): string {
+		return `${teardownEntryPrefix}${String(cache.id)}`;
 	}
 
-	private teardownKey(cache: StoredCache): string {
-		return `${teardownEntryPrefix}${cache}`;
-	}
-
-	private hasQueuedDeletions(cache: StoredCache): boolean {
+	private hasQueuedDeletions(cache: ResolvedCache): boolean {
 		const row = this.context.db
-			.select({ cache: schema.narInfoDeletions.cache })
+			.select({ cacheId: schema.narInfoDeletions.cacheId })
 			.from(schema.narInfoDeletions)
-			.where(eq(schema.narInfoDeletions.cache, cache))
+			.where(eq(schema.narInfoDeletions.cacheId, cache.id))
 			.limit(1)
 			.get();
 
@@ -100,7 +107,7 @@ export class CacheAdminService {
 	// the drain because the last full chunk may have emptied it. A missed sweep
 	// would leave the storage and tenant charge in place indefinitely.
 	private async drainTeardownChunk(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		origin: RequestOrigin,
 		limit: number
 	): Promise<void> {
@@ -111,18 +118,11 @@ export class CacheAdminService {
 				narHash: schema.narInfoDeletions.narHash
 			})
 			.from(schema.narInfoDeletions)
-			.where(eq(schema.narInfoDeletions.cache, cache))
+			.where(eq(schema.narInfoDeletions.cacheId, cache.id))
 			.limit(limit)
 			.all();
 
-		// A pass claims its cache from a teardown marker rather than from a
-		// request's selector, so the access comes from stored state too.
-		await this.deletionQueue.retireTornDownNarInfos(
-			cache,
-			identityForCache(cache).access,
-			queued,
-			origin
-		);
+		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
 
 		if (this.hasQueuedDeletions(cache)) {
 			return;
@@ -133,7 +133,7 @@ export class CacheAdminService {
 
 	// Canonical UTC timestamps sort chronologically as strings.
 	private earliestLiveGraceDeadline(
-		cache: StoredCache
+		cache: ResolvedCache
 	): IsoTimestamp | undefined {
 		const now = isoTimestamp(new Date());
 		const row = this.context.db
@@ -141,7 +141,7 @@ export class CacheAdminService {
 			.from(schema.retentionGrace)
 			.where(
 				and(
-					eq(schema.retentionGrace.cache, cache),
+					eq(schema.retentionGrace.cacheId, cache.id),
 					gt(schema.retentionGrace.retainUntil, now)
 				)
 			)
@@ -150,205 +150,292 @@ export class CacheAdminService {
 		return row?.earliest ?? undefined;
 	}
 
-	/**
-	 * What is registered against one cache, read either from the legacy table or
-	 * from the identity table. Both hold the same values while a deployment
-	 * stores each cache twice.
-	 */
-	private async registeredCache(
-		cache: StoredCache
-	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
-		if (await this.phases.hasReached('native-reads')) {
-			return this.identities.readRegistration(cache);
-		}
+	private async clearCacheReadCredential(scope: CacheScope): Promise<void> {
+		const tenant = this.context.requireTenant();
 
-		return this.context.db
-			.select({
-				priority: schema.caches.priority,
-				graceManaged: schema.caches.graceManaged
+		await this.context.d1
+			.delete(d1Schema.tenantCacheReadCredential)
+			.where(
+				and(
+					eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.tenantCacheReadCredential.cacheKind,
+						d1Schema.tenantCacheReadCredential.cacheName,
+						scope
+					)
+				)
+			)
+			.run();
+	}
+
+	// The legacy registration table is still written so its rows stay in step
+	// with the identities. It is keyed by the cache's stored name, which encodes
+	// the access, so changing the access replaces the row rather than updating
+	// it.
+	private registerLegacyCache(
+		cache: ResolvedCache,
+		priority: CachePriority
+	): void {
+		this.context.db
+			.insert(schema.caches)
+			.values({
+				name: legacyCacheKey(cache.scope, cache.access),
+				priority,
+				createdAt: isoTimestamp(new Date())
 			})
-			.from(schema.caches)
+			.onConflictDoUpdate({
+				target: schema.caches.name,
+				set: { priority }
+			})
+			.run();
+	}
+
+	private removeLegacyCache(cache: StoredCache): void {
+		this.context.db
+			.delete(schema.caches)
 			.where(eq(schema.caches.name, cache))
-			.get();
+			.run();
 	}
 
-	/**
-	 * The registered caches, read either from the legacy table or from the
-	 * identity table.
-	 *
-	 * Both hold the same caches while a deployment stores each one twice, so the
-	 * two readings agree. Which one runs follows the recorded phase, and that is
-	 * what makes the cutover reversible: rolling back to the earlier phase sends
-	 * the read to the legacy table again.
-	 */
-	private async registeredCaches(): Promise<
-		{ name: StoredCache; priority: CachePriority; graceManaged: boolean }[]
-	> {
-		if (!(await this.phases.hasReached('native-reads'))) {
-			return this.context.db.select().from(schema.caches).all();
+	cacheInfoBody(scope: CacheScope): string {
+		const cache = this.context.cacheRepository.require(scope);
+		const row = this.context.db
+			.select({ priority: schema.cacheIdentities.priority })
+			.from(schema.cacheIdentities)
+			.where(eq(schema.cacheIdentities.id, cache.id))
+			.get();
+
+		if (row === undefined) {
+			throw new CacheNotFoundError(scope);
 		}
 
-		return this.context.db
-			.select({
-				kind: schema.cacheIdentities.kind,
-				name: schema.cacheIdentities.name,
-				access: schema.cacheIdentities.access,
-				priority: schema.cacheIdentities.priority,
-				graceManaged: schema.cacheIdentities.graceManaged
-			})
-			.from(schema.cacheIdentities)
-			.where(isNull(schema.cacheIdentities.deletedAt))
-			.all()
-			.flatMap((row) => {
-				const scope = cacheScopeFromRow({
-					kind: row.kind,
-					name: row.name ?? undefined
-				});
-
-				// The legacy table never holds the default cache, so the two readings
-				// agree only if this one leaves it out too.
-				if (scope === undefined || scope.kind === 'default') {
-					return [];
-				}
-
-				return [
-					{
-						name: storedCacheSchema.parse(
-							legacyCacheKey(scope, row.access ?? 'public')
-						),
-						priority: cachePrioritySchema.parse(row.priority),
-						graceManaged: row.graceManaged
-					}
-				];
-			});
-	}
-
-	async cacheInfoBody(cache: StoredCache): Promise<string> {
-		const row = await this.registeredCache(cache);
 		const info = new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
-			row?.priority ?? CacheInfo.default.priority
+			cachePrioritySchema.parse(row.priority)
 		);
 
 		return info.render();
 	}
 
-	async listCaches(): Promise<CacheListResponse> {
-		const registered = await this.registeredCaches();
+	listCaches(): CacheListResponse {
+		const registered = this.context.db
+			.select()
+			.from(schema.cacheIdentities)
+			.where(isNull(schema.cacheIdentities.deletedAt))
+			.all();
 		const counts = new Map(
 			this.context.db
-				.select({ cache: schema.narInfos.cache, count: count() })
+				.select({ cacheId: schema.narInfos.cacheId, count: count() })
 				.from(schema.narInfos)
-				.groupBy(schema.narInfos.cache)
+				.groupBy(schema.narInfos.cacheId)
 				.all()
-				.map((row) => [row.cache, row.count])
+				.map((row) => [row.cacheId, row.count])
 		);
 		const now = isoTimestamp(new Date());
-		const earliestDeadlines = new Map(
-			this.context.db
-				.select({
-					cache: schema.retentionGrace.cache,
-					earliest: min(schema.retentionGrace.retainUntil)
-				})
-				.from(schema.retentionGrace)
-				.where(gt(schema.retentionGrace.retainUntil, now))
-				.groupBy(schema.retentionGrace.cache)
-				.all()
-				.flatMap((row) =>
-					row.earliest === null ? [] : [[row.cache, row.earliest] as const]
-				)
-		);
+		const earliestDeadlines = new Map<CacheId, IsoTimestamp>();
+		const deadlineRows = this.context.db
+			.select({
+				cacheId: schema.retentionGrace.cacheId,
+				earliest: min(schema.retentionGrace.retainUntil)
+			})
+			.from(schema.retentionGrace)
+			.where(gt(schema.retentionGrace.retainUntil, now))
+			.groupBy(schema.retentionGrace.cacheId)
+			.all();
+
+		for (const row of deadlineRows) {
+			if (row.earliest === null) {
+				continue;
+			}
+
+			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
+
+			earliestDeadlines.set(cache.id, row.earliest);
+		}
 		const caches = registered
-			.map((row) => {
-				const earliestGraceDeadline = earliestDeadlines.get(row.name);
+			.map((row): CacheSummary => {
+				// A row whose access the reconciliation has not supplied cannot say
+				// who may read the cache, so it is refused rather than listed as
+				// public.
+				if (row.access === null) {
+					throw new CacheIdentityMissingError({ id: row.id });
+				}
+
+				const earliestGraceDeadline = earliestDeadlines.get(row.id);
 
 				return {
-					name: row.name,
-					priority: row.priority,
-					storePaths: counts.get(row.name) ?? 0,
+					scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+					access: row.access,
+					priority: cachePrioritySchema.parse(row.priority),
+					storePaths: counts.get(row.id) ?? 0,
 					graceManaged: row.graceManaged,
 					...(earliestGraceDeadline !== undefined && {
 						earliestGraceDeadline
 					})
 				};
 			})
-			.toSorted((left, right) => byCodeUnit(left.name, right.name));
+			.toSorted((left, right) =>
+				byCodeUnit(
+					left.scope.kind === 'default' ? '' : left.scope.name,
+					right.scope.kind === 'default' ? '' : right.scope.name
+				)
+			);
 
 		return { caches };
 	}
 
-	async putCache(
-		cache: StoredCache,
+	getCache(scope: CacheScope): CacheSummary {
+		const cache = this.context.cacheRepository.require(scope);
+		const row = this.context.db
+			.select({ priority: schema.cacheIdentities.priority })
+			.from(schema.cacheIdentities)
+			.where(eq(schema.cacheIdentities.id, cache.id))
+			.get();
+
+		if (row === undefined) {
+			throw new CacheNotFoundError(scope);
+		}
+
+		return this.cacheSummary(cache, cachePrioritySchema.parse(row.priority));
+	}
+
+	async createCache(
+		scope: CacheScope,
+		access: CacheAccessMode,
 		priority: CachePriority
 	): Promise<CacheSummary> {
-		const now = isoTimestamp(new Date());
+		return this.context.criticalSection(async () => {
+			if (this.context.cacheRepository.resolve(scope) !== undefined) {
+				throw new CacheAlreadyExistsError(scope);
+			}
 
-		this.context.db
-			.insert(schema.caches)
-			.values({ name: cache, priority, createdAt: now })
-			.onConflictDoUpdate({
-				target: schema.caches.name,
-				set: { priority }
-			})
-			.run();
-		this.identities.ensure(cache, priority, now);
-		this.identities.setPriority(cache, priority);
-		this.identities.stampVersion(
-			cache,
-			await this.deletionQueue.recordCacheRegistration(cache)
-		);
+			const version = await this.deletionQueue.recordCacheRegistration({
+				scope,
+				access
+			});
 
-		return this.cacheSummary(cache, priority);
+			if (access === 'public') {
+				await this.clearCacheReadCredential(scope);
+			}
+
+			const cache = this.context.cacheRepository.create(
+				scope,
+				access,
+				priority
+			);
+
+			this.context.cacheRepository.stampVersion(cache, version);
+			this.registerLegacyCache(cache, priority);
+
+			return this.cacheSummary(cache, priority);
+		});
+	}
+
+	async updateCache(
+		scope: CacheScope,
+		update: CacheUpdateBody
+	): Promise<CacheSummary> {
+		if (update.kind === 'priority') {
+			const cache = this.context.cacheRepository.require(scope);
+
+			this.context.db
+				.update(schema.cacheIdentities)
+				.set({ priority: update.priority })
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+			this.registerLegacyCache(cache, update.priority);
+
+			return this.cacheSummary(cache, update.priority);
+		}
+
+		return this.context.criticalSection(async () => {
+			const existing = this.context.cacheRepository.require(scope);
+			const previous = legacyCacheKey(existing.scope, existing.access);
+			let cache: ResolvedCache;
+			let version: CacheLifecycleVersion;
+
+			if (update.access === 'private') {
+				version = await this.deletionQueue.recordCacheRegistration({
+					scope,
+					access: update.access
+				});
+				cache = this.context.cacheRepository.setAccess(existing, update.access);
+			} else {
+				cache = this.context.cacheRepository.setAccess(existing, update.access);
+				version = await this.deletionQueue.recordCacheRegistration(cache);
+				await this.clearCacheReadCredential(cache.scope);
+			}
+
+			this.context.cacheRepository.stampVersion(cache, version);
+
+			const row = this.context.db
+				.select({ priority: schema.cacheIdentities.priority })
+				.from(schema.cacheIdentities)
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.get();
+
+			if (row === undefined) {
+				throw new CacheNotFoundError(scope);
+			}
+
+			const priority = cachePrioritySchema.parse(row.priority);
+
+			this.removeLegacyCache(previous);
+			this.registerLegacyCache(cache, priority);
+
+			return this.cacheSummary(cache, priority);
+		});
 	}
 
 	async removeCache(
-		cache: StoredCache,
+		name: CacheName,
 		shouldForce: boolean,
 		origin: RequestOrigin
 	): Promise<CacheRemoveResponse> {
-		const committedCount = this.cacheStorePathCount(cache);
+		const scope: CacheScope = { kind: 'named', name };
+		const cache = this.context.cacheRepository.resolve(scope);
+		const committedCount =
+			cache === undefined ? 0 : this.cacheStorePathCount(cache);
 
 		if (!shouldForce && committedCount > 0) {
-			throw new CacheNotEmptyError(cache);
+			throw new CacheNotEmptyError(scope);
 		}
 
-		const isRegistered =
-			this.context.db
-				.select()
-				.from(schema.caches)
-				.where(eq(schema.caches.name, cache))
-				.get() !== undefined;
-		await this.tearDownCache(cache, origin);
+		if (cache !== undefined) {
+			await this.tearDownCache(cache, origin);
+		}
 
 		// Report the number removed from the registry, even when object and edge
 		// cleanup continues across later alarms.
 		return {
-			name: cache,
-			removed: isRegistered || committedCount > 0,
+			scope,
+			removed: cache !== undefined,
 			storePathsRemoved: committedCount
 		};
 	}
 
-	cacheStorePathCount(cache: StoredCache): number {
+	cacheStorePathCount(cache: ResolvedCache): number {
 		const result = this.context.db
 			.select({ count: count() })
 			.from(schema.narInfos)
-			.where(eq(schema.narInfos.cache, cache))
+			.where(eq(schema.narInfos.cacheId, cache.id))
 			.get();
 
 		return result?.count ?? 0;
 	}
 
-	async cacheSummary(
-		cache: StoredCache,
-		priority: CachePriority
-	): Promise<CacheSummary> {
-		const managed = await this.registeredCache(cache);
+	cacheSummary(cache: ResolvedCache, priority: CachePriority): CacheSummary {
+		const managed = this.context.db
+			.select({ graceManaged: schema.cacheIdentities.graceManaged })
+			.from(schema.cacheIdentities)
+			.where(eq(schema.cacheIdentities.id, cache.id))
+			.get();
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {
-			name: cache,
+			scope: cache.scope,
+			access: cache.access,
 			priority,
 			storePaths: this.cacheStorePathCount(cache),
 			graceManaged: managed?.graceManaged ?? false,
@@ -356,54 +443,18 @@ export class CacheAdminService {
 		};
 	}
 
-	/**
-	 * Registers the cache in the local registry if it is not there already.
-	 *
-	 * Creating a registry row also clears the D1 deletion timestamp and stamps the
-	 * version that registration published onto the local identity. This handles
-	 * the first write to a new cache and recreation after deletion. The transition
-	 * uses one D1 statement per newly registered cache.
-	 *
-	 * The default cache is always public and uses only the lifecycle generation
-	 * for read authorisation.
-	 */
-	async loadOrCreateCache(cache: StoredCache): Promise<void> {
-		const now = isoTimestamp(new Date());
-		const defaultPriority = cachePrioritySchema.parse(
-			CacheInfo.default.priority
-		);
+	resolveCache(scope: CacheScope): ResolvedCache | undefined {
+		return this.context.cacheRepository.resolve(scope);
+	}
 
-		this.identities.ensure(cache, defaultPriority, now);
-
-		if (cache === DEFAULT_CACHE) {
-			return;
-		}
-
-		const created = this.context.db
-			.insert(schema.caches)
-			.values({
-				name: cache,
-				priority: defaultPriority,
-				createdAt: now
-			})
-			.onConflictDoNothing()
-			.returning({ name: schema.caches.name })
-			.all();
-
-		if (created.length === 0) {
-			return;
-		}
-
-		this.identities.stampVersion(
-			cache,
-			await this.deletionQueue.recordCacheRegistration(cache)
-		);
+	requireCache(scope: CacheScope): ResolvedCache {
+		return this.context.cacheRepository.require(scope);
 	}
 
 	// Claim one cache marker per alarm so several large teardowns make progress
 	// independently.
 	async claimTeardown(): Promise<
-		{ cache: StoredCache; origin: RequestOrigin } | undefined
+		{ cache: ResolvedCache; origin: RequestOrigin } | undefined
 	> {
 		const entries = await this.context.ctx.storage.list<string>({
 			prefix: teardownEntryPrefix,
@@ -411,8 +462,12 @@ export class CacheAdminService {
 		});
 
 		for (const [key, origin] of entries) {
+			const cacheId = cacheIdSchema.parse(
+				Number(key.slice(teardownEntryPrefix.length))
+			);
+
 			return {
-				cache: storedCacheSchema.parse(key.slice(teardownEntryPrefix.length)),
+				cache: this.context.cacheRepository.resolvedForId(cacheId),
 				origin: requestOriginSchema.parse(origin)
 			};
 		}
@@ -447,25 +502,24 @@ export class CacheAdminService {
 	 * crash before the alarm marker is written. The blob reaper later collects
 	 * unreferenced canonical objects.
 	 */
-	tearDownCache(cache: StoredCache, origin: RequestOrigin): Promise<void> {
+	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(async () => {
 			await this.deletionQueue.revokeCacheGeneration(cache);
 
 			const now = isoTimestamp(new Date());
 
-			this.identities.markDeleted(cache, now);
 			const pending = this.context.db
 				.select({
 					r2Key: schema.pendingUploads.r2Key,
 					narHash: schema.pendingUploads.narHash
 				})
 				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.cache, cache))
+				.where(eq(schema.pendingUploads.cacheId, cache.id))
 				.all();
 			const pendingAttestations = this.context.db
 				.select({ r2Key: schema.pendingAttestations.r2Key })
 				.from(schema.pendingAttestations)
-				.where(eq(schema.pendingAttestations.cache, cache))
+				.where(eq(schema.pendingAttestations.cacheId, cache.id))
 				.all();
 
 			await deleteObjects(
@@ -484,33 +538,39 @@ export class CacheAdminService {
 			// deletion cannot remove.
 			this.context.db.transaction((tx) => {
 				tx.run(
-					sql`INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache, store_path_hash, nar_hash, generation, ${now}
-						FROM narinfo WHERE cache = ${cache}
+					sql`INSERT INTO narinfo_deletion (cache, cache_id, store_path_hash, nar_hash, generation, created_at)
+						SELECT cache, cache_id, store_path_hash, nar_hash, generation, ${now}
+						FROM narinfo WHERE cache_id = ${cache.id}
 						ON CONFLICT (cache, store_path_hash, generation)
 						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
 				);
 				tx.delete(schema.narInfos)
-					.where(eq(schema.narInfos.cache, cache))
+					.where(eq(schema.narInfos.cacheId, cache.id))
+					.run();
+				tx.delete(schema.verificationCursor)
+					.where(eq(schema.verificationCursor.cacheId, cache.id))
 					.run();
 				tx.delete(schema.retentionRootTargets)
-					.where(eq(schema.retentionRootTargets.cache, cache))
+					.where(eq(schema.retentionRootTargets.cacheId, cache.id))
 					.run();
 				tx.delete(schema.retentionRoots)
-					.where(eq(schema.retentionRoots.cache, cache))
+					.where(eq(schema.retentionRoots.cacheId, cache.id))
 					.run();
 				// Deleting the cache is the only transition out of grace-managed state;
 				// released paths receive no grace deadline.
 				tx.delete(schema.retentionGrace)
-					.where(eq(schema.retentionGrace.cache, cache))
+					.where(eq(schema.retentionGrace.cacheId, cache.id))
 					.run();
-				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
+				tx.update(schema.cacheIdentities)
+					.set({ deletedAt: now })
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.run();
 				// Remove in-flight uploads so a later commit cannot recreate the cache.
 				tx.delete(schema.pendingUploads)
-					.where(eq(schema.pendingUploads.cache, cache))
+					.where(eq(schema.pendingUploads.cacheId, cache.id))
 					.run();
 				tx.delete(schema.pendingAttestations)
-					.where(eq(schema.pendingAttestations.cache, cache))
+					.where(eq(schema.pendingAttestations.cacheId, cache.id))
 					.run();
 			});
 
@@ -522,7 +582,7 @@ export class CacheAdminService {
 	// Retire one more chunk from an alarm. The caller re-arms the alarm while any
 	// cache marker remains.
 	async resumeTeardownPass(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		origin: RequestOrigin,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
@@ -535,6 +595,11 @@ export class CacheAdminService {
 			// generation again.
 			if (!this.hasQueuedDeletions(cache)) {
 				await this.context.ctx.storage.delete(this.teardownKey(cache));
+				this.context.db
+					.delete(schema.cacheIdentities)
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.run();
+				this.removeLegacyCache(legacyCacheKey(cache.scope, cache.access));
 			}
 		});
 	}

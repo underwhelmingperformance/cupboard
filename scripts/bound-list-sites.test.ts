@@ -77,13 +77,6 @@ const fixedWidthSites: readonly (BoundListSite & {
 			'The principal issuer, and the legacy issuer when there is one: two at most.'
 	},
 	{
-		kind: 'inArray',
-		file: 'src/control/tenant-membership.ts',
-		argument: 'credentialCaches',
-		reason:
-			'The addressed cache when it is private, and nothing otherwise: one at most.'
-	},
-	{
 		kind: 'values',
 		file: 'src/do/cache-lifecycle-projection.ts',
 		argument: 'batch.map((cache) => { const { scope, access } = i',
@@ -92,10 +85,38 @@ const fixedWidthSites: readonly (BoundListSite & {
 	},
 	{
 		kind: 'or',
-		file: 'src/do/reuse-view-lookup-service.ts',
-		argument: 'or(...selectorConditions)',
+		file: 'src/db/cache.ts',
+		argument: 'or( ...jsonRowLists( selectors.map((selector) => l',
 		reason:
 			'One disjunct per bound list, not per selector. A view with more selectors produces longer lists, not more disjuncts.'
+	},
+	// The four entries below hold only while both spellings of a reuse view are
+	// stored. Each list is the legacy and the native name of one view, so it has
+	// two entries at most. The contraction drops the legacy spelling and these
+	// entries go with it.
+	{
+		kind: 'inArray',
+		file: 'src/do/reuse-view-admin-service.ts',
+		argument: 'keys',
+		reason: 'The legacy and native spellings of one view: two at most.'
+	},
+	{
+		kind: 'inArray',
+		file: 'src/do/reuse-view-lookup-service.ts',
+		argument: 'keys',
+		reason: 'The legacy and native spellings of one view: two at most.'
+	},
+	{
+		kind: 'inArray',
+		file: 'src/do/reuse-view-lookup-service.ts',
+		argument: 'legacyReuseViewKeys(view)',
+		reason: 'The legacy and native spellings of one view: two at most.'
+	},
+	{
+		kind: 'inArray',
+		file: 'src/routing/scheduled.ts',
+		argument: "['active', 'suspended']",
+		reason: 'The two tenant statuses a sweep visits, written as literals.'
 	},
 	{
 		kind: 'values',

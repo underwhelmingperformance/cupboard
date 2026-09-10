@@ -13,36 +13,36 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
-	AttestationAttachResponse,
-	AttestationNegotiateRequest,
-	AttestationNegotiateResponse
+	AttestationAttachResponseInput,
+	AttestationNegotiateRequestInput,
+	AttestationNegotiateResponseInput
 } from '@cupboard/protocol/attestations';
 import {
+	type BuildReceiptV3,
 	buildReceiptV3Schema,
-	type BuildSubjectV3,
-	type NixStoreUri,
-	type ParsedBuildReceiptV3
+	type BuildSubjectV3Input,
+	type NixStoreUri
 } from '@cupboard/protocol/build';
 import {
-	type PushSummaryPath,
+	type PushSummaryPathInput,
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import {
-	type RootSetBody,
+	type RootSetBodyInput,
 	rootSetMaxTargets,
-	type RootSetResponse,
-	type RootSummary
+	type RootSetResponseInput,
+	type RootSummaryInput
 } from '@cupboard/protocol/retention';
 import {
-	type ParsedUploadDecision,
-	type ParsedUploadNegotiateResponse,
-	type ParsedUploadPreviewDecision,
-	type ParsedUploadPreviewResponse,
-	type UploadAttachRoot,
-	type UploadNegotiateRequest,
+	type UploadAttachRootInput,
+	type UploadDecision,
+	type UploadNegotiateRequestInput,
+	type UploadNegotiateResponse,
 	type UploadPathNegotiationFields,
-	type UploadPreviewRequest
+	type UploadPreviewDecision,
+	type UploadPreviewRequestInput,
+	type UploadPreviewResponse
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
@@ -124,7 +124,7 @@ export interface PushDependencies {
 	// Attach each committed path to this run root during negotiation. Run-root
 	// retention is independent of target `root` and `retain`, so an unretained
 	// push can still contribute paths to its run root.
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	// Unless this is false, retain targets under the named root or under one
 	// implicit pin per path. `--no-retain` makes no root requests, so only the
 	// cache's grace policy can protect a published path from collection.
@@ -190,10 +190,10 @@ export const defaultUploadConcurrency = 6;
  */
 export interface PushClient {
 	negotiate(
-		body: Omit<UploadNegotiateRequest, 'pushId'>
-	): Promise<ParsedUploadNegotiateResponse>;
+		body: Omit<UploadNegotiateRequestInput, 'pushId'>
+	): Promise<UploadNegotiateResponse>;
 	// Preview creates no upload state or credentials.
-	preview(body: UploadPreviewRequest): Promise<ParsedUploadPreviewResponse>;
+	preview(body: UploadPreviewRequestInput): Promise<UploadPreviewResponse>;
 	// The no-path probe creates no upload state.
 	probeUploadGraceFacts?(kind: 'negotiate' | 'preview'): Promise<boolean>;
 	// Whether the most recent upload response acknowledged grace-aware
@@ -210,10 +210,10 @@ export interface PushClient {
 	// the per-path `commit` operation instead.
 	openCommitSession?(options: CommitOptions): Promise<CommitSession>;
 	negotiateAttestations?(
-		body: Omit<AttestationNegotiateRequest, 'pushId'>
-	): Promise<AttestationNegotiateResponse>;
-	attachAttestation?(uploadId: string): Promise<AttestationAttachResponse>;
-	setRoot(name: string, body: RootSetBody): Promise<RootSetResponse>;
+		body: Omit<AttestationNegotiateRequestInput, 'pushId'>
+	): Promise<AttestationNegotiateResponseInput>;
+	attachAttestation?(uploadId: string): Promise<AttestationAttachResponseInput>;
+	setRoot(name: string, body: RootSetBodyInput): Promise<RootSetResponseInput>;
 }
 
 const defaultWaitTimeoutSeconds = waitTimeoutSecondsSchema.parse(600);
@@ -223,8 +223,8 @@ export type PushNarArchive =
 
 export type CompressNar = (nar: PushNarArchive) => NarUploadStream;
 
-type UploadDecisionOf<A extends ParsedUploadDecision['action']> = Extract<
-	ParsedUploadDecision,
+type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
+	UploadDecision,
 	{ action: A }
 >;
 
@@ -262,9 +262,9 @@ async function requireUploadGraceFacts(
 
 async function negotiateUpload(
 	client: PushClient,
-	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths'],
-	attachRoot?: UploadAttachRoot
-): Promise<ParsedUploadNegotiateResponse> {
+	paths: Omit<UploadNegotiateRequestInput, 'pushId'>['paths'],
+	attachRoot?: UploadAttachRootInput
+): Promise<UploadNegotiateResponse> {
 	const response = await client.negotiate({
 		paths,
 		...(attachRoot !== undefined && { attachRoot })
@@ -286,8 +286,8 @@ async function negotiateUpload(
 // as too old. Otherwise preserve the original preview error.
 async function previewUpload(
 	client: PushClient,
-	paths: UploadPreviewRequest['paths']
-): Promise<ParsedUploadPreviewResponse> {
+	paths: UploadPreviewRequestInput['paths']
+): Promise<UploadPreviewResponse> {
 	try {
 		const response = await client.preview({ paths });
 
@@ -336,7 +336,7 @@ export async function runPush(
 	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushDependencies
-): Promise<ParsedBuildReceiptV3 | undefined> {
+): Promise<BuildReceiptV3 | undefined> {
 	// Validate the retention before any upload work: an invalid root name or
 	// target must fail fast, not after NARs are built and committed. Only the
 	// declared targets are retained; intermediates join no root or pin.
@@ -387,7 +387,7 @@ interface PushRuntimeDependencies {
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
 	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	readonly attest?: boolean;
 	readonly attestations?: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
@@ -565,7 +565,7 @@ interface ReceiptClaims {
 function builtSubject(
 	claims: ReceiptClaims,
 	pathInfo: NixValidPathInfo
-): BuildSubjectV3 | undefined {
+): BuildSubjectV3Input | undefined {
 	if (pathInfo.deriver === undefined) {
 		return undefined;
 	}
@@ -606,8 +606,8 @@ function builtSubject(
 function reconciledReceipt(
 	claims: ReceiptClaims,
 	resolved: readonly ResolvedPushPath[],
-	summaryPaths: readonly PushSummaryPath[]
-): ParsedBuildReceiptV3 {
+	summaryPaths: readonly PushSummaryPathInput[]
+): BuildReceiptV3 {
 	const servable = new Set<string>();
 	const published = new Set<string>();
 
@@ -628,7 +628,7 @@ function reconciledReceipt(
 	const infos = resolved.flatMap((path) =>
 		path.source === 'local' ? [path.pathInfo] : []
 	);
-	const described = new Map<string, BuildSubjectV3>();
+	const described = new Map<string, BuildSubjectV3Input>();
 
 	for (const pathInfo of infos) {
 		const subject = builtSubject(claims, pathInfo);
@@ -667,7 +667,7 @@ async function runPushFlow(
 	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushRuntimeDependencies
-): Promise<ParsedBuildReceiptV3 | undefined> {
+): Promise<BuildReceiptV3 | undefined> {
 	const {
 		nix,
 		client,
@@ -902,7 +902,7 @@ async function runPushFlow(
 	// A re-drive can change the action, for example when a reused blob is
 	// collected and the next negotiation requests an upload. Keep only the
 	// latest action for the summary counts.
-	const effectiveActions = new Map<string, ParsedUploadDecision['action']>(
+	const effectiveActions = new Map<string, UploadDecision['action']>(
 		negotiation.uploads.map((decision) => [
 			decision.storePathHash,
 			decision.action
@@ -1107,7 +1107,7 @@ async function runPushFlow(
 		const failedStorePathHashes = new Set(
 			failures.map((failure) => failure.storePathHash)
 		);
-		const summaryPaths: PushSummaryPath[] = [
+		const summaryPaths: PushSummaryPathInput[] = [
 			...negotiation.uploads
 				.filter((decision) => isSkip(decision))
 				.map((decision) => ({
@@ -1270,7 +1270,7 @@ function graceRetainUntilRow(retainUntil: string): string {
 	return `kept until ${formatTimestamp(retainUntil)}`;
 }
 
-function pushSummaryPathRow(path: PushSummaryPath): ResultRow {
+function pushSummaryPathRow(path: PushSummaryPathInput): ResultRow {
 	if (path.outcome === 'collected') {
 		return {
 			label: path.storePathHash,
@@ -1312,7 +1312,7 @@ function pushSummaryPathRow(path: PushSummaryPath): ResultRow {
 // policy for every path. An unretained push always shows the rows because grace
 // is its only possible retention. JSON output always includes every path fact.
 function pushSummaryPathRows(
-	paths: readonly PushSummaryPath[],
+	paths: readonly PushSummaryPathInput[],
 	retention: RetentionPlan
 ): readonly ResultRow[] {
 	if (
@@ -1390,7 +1390,7 @@ function hasGraceFact(
 // capture. A `skip` refers to a path already in the cache, so it can report the
 // current stored deadline. It does not include the extension that a real push
 // would apply.
-function previewPathRow(decision: ParsedUploadPreviewDecision): ResultRow {
+function previewPathRow(decision: UploadPreviewDecision): ResultRow {
 	if (decision.grace?.retainUntil !== undefined) {
 		return {
 			label: decision.storePathHash,
@@ -1422,7 +1422,7 @@ function previewPathRow(decision: ParsedUploadPreviewDecision): ResultRow {
 
 // An unretained plan always shows per-path grace results.
 function previewPathRows(
-	decisions: readonly ParsedUploadPreviewDecision[],
+	decisions: readonly UploadPreviewDecision[],
 	retention: RetentionPlan
 ): readonly ResultRow[] {
 	if (
@@ -1443,7 +1443,7 @@ function committedOrPendingPath(
 	outcome: CommitOutcome,
 	shouldWait: boolean,
 	storePathByHash: ReadonlyMap<StorePathHash, string>
-): PushSummaryPath {
+): PushSummaryPathInput {
 	const isFinal = outcome.status !== 'pending' || shouldWait;
 	const grace = isFinal
 		? (outcome.verdictGrace?.() ?? outcome.grace)
@@ -1577,7 +1577,7 @@ function attestationResultRows(
 
 interface RootRequest {
 	readonly name: string;
-	readonly body: RootSetBody;
+	readonly body: RootSetBodyInput;
 }
 
 export class RootTargetLimitError extends UsageError {
@@ -1683,7 +1683,7 @@ async function recordRetention(
 	// they are sent concurrently under the same limit as blob uploads. The
 	// expiry summary sorts the results, so the order they arrive in does not
 	// affect it.
-	const summaries: RootSummary[] = [];
+	const summaries: RootSummaryInput[] = [];
 
 	await mapWithConcurrency(
 		retention.requests,
@@ -1703,13 +1703,13 @@ async function recordRetention(
 	];
 }
 
-function formatExpiry(summary: RootSummary): string {
+function formatExpiry(summary: RootSummaryInput): string {
 	return summary.expiresAt === undefined
 		? 'permanent'
 		: `expires ${formatTimestamp(summary.expiresAt)}`;
 }
 
-function describePinExpiry(summaries: readonly RootSummary[]): string {
+function describePinExpiry(summaries: readonly RootSummaryInput[]): string {
 	// The comparison below is on the rendered timestamps, so expiries that differ
 	// only below the displayed minute report as one value rather than as a range
 	// between two identical timestamps.
@@ -1769,9 +1769,9 @@ interface CommitContext {
 	readonly options: CommitOptions;
 	readonly hasGraceFacts: boolean;
 	// Re-drives must attach the replacement pending row to the same run root.
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	readonly onBytes: (count: number) => void;
-	readonly onRedriven: (fresh: ParsedUploadDecision) => void;
+	readonly onRedriven: (fresh: UploadDecision) => void;
 }
 
 // A minimal client that opens no shared session uses its per-path commit.
@@ -1934,7 +1934,7 @@ function verifyNarMetadata(
 
 function divergentSkips(
 	resolved: readonly ResolvedPushPath[],
-	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
+	decisions: readonly (UploadDecision | UploadPreviewDecision)[]
 ): ReadonlyMap<StorePathHash, DivergentSkip> {
 	const byStorePathHash = new Map<StorePathHash, ResolvedPushPath>(
 		resolved.map((path) => [StorePath.hash(resolvedStorePath(path)), path])
@@ -2025,19 +2025,19 @@ function findNegotiatedPath(
 }
 
 function isSkip(
-	decision: ParsedUploadDecision
-): decision is Extract<ParsedUploadDecision, { action: 'skip' }> {
+	decision: UploadDecision
+): decision is Extract<UploadDecision, { action: 'skip' }> {
 	return decision.action === 'skip';
 }
 
 function isUpload(
-	decision: ParsedUploadDecision
-): decision is Extract<ParsedUploadDecision, { action: 'upload' }> {
+	decision: UploadDecision
+): decision is Extract<UploadDecision, { action: 'upload' }> {
 	return decision.action === 'upload';
 }
 
 function isReusedBlobCommit(
-	decision: ParsedUploadDecision
-): decision is Extract<ParsedUploadDecision, { action: 'commit' }> {
+	decision: UploadDecision
+): decision is Extract<UploadDecision, { action: 'commit' }> {
 	return decision.action === 'commit';
 }
