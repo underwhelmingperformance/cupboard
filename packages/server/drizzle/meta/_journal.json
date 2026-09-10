@@ -330,6 +330,34 @@
 			"when": 1788761562035,
 			"tag": "0046_cache_grant_root_binding",
 			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "6",
+			"when": 1788783632109,
+			"tag": "0047_cache_retention_expand",
+			"breakpoints": true
+		},
+		{
+			"idx": 48,
+			"version": "6",
+			"when": 1788783645087,
+			"tag": "0048_cache_retention_empty_rule_set",
+			"breakpoints": true
+		},
+		{
+			"idx": 49,
+			"version": "6",
+			"when": 1788783659640,
+			"tag": "0049_cache_retention_migration_state",
+			"breakpoints": true
+		},
+		{
+			"idx": 50,
+			"version": "6",
+			"when": 1788783668255,
+			"tag": "0050_cache_retention_migration_rules",
+			"breakpoints": true
 		}
 	]
 }

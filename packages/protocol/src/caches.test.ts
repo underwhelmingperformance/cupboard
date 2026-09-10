@@ -13,7 +13,10 @@ describe('cache schemas', () => {
 		scope: { kind: 'named', name: 'builds' },
 		access: 'public',
 		priority: 30,
-		storePaths: 5
+		storePaths: 5,
+		defaultRootRetention: { kind: 'permanent' },
+		grace: { kind: 'none' },
+		rootRetentionOverrides: []
 	};
 
 	it.each([
@@ -28,13 +31,29 @@ describe('cache schemas', () => {
 				scope: { kind: 'default' },
 				access: 'private',
 				priority: 40,
-				storePaths: 0
+				storePaths: 0,
+				defaultRootRetention: { kind: 'duration', seconds: 86_400 },
+				grace: { kind: 'duration', graceSeconds: 3600 },
+				rootRetentionOverrides: [
+					{
+						rootPrefix: 'release-',
+						retention: { kind: 'duration', seconds: 604_800 }
+					}
+				]
 			},
 			expected: {
 				scope: { kind: 'default' },
 				access: 'private',
 				priority: 40,
-				storePaths: 0
+				storePaths: 0,
+				defaultRootRetention: { kind: 'duration', seconds: 86_400 },
+				grace: { kind: 'duration', graceSeconds: 3600 },
+				rootRetentionOverrides: [
+					{
+						rootPrefix: 'release-',
+						retention: { kind: 'duration', seconds: 604_800 }
+					}
+				]
 			}
 		},
 		{
@@ -84,30 +103,45 @@ describe('cache schemas', () => {
 		expect(cacheSummarySchema.safeParse(value).success).toBe(false);
 	});
 
-	it('accepts the list, put-body, update-body and remove responses', () => {
+	it('accepts the list, put body, every update and remove response', () => {
 		const remove = {
 			scope: { kind: 'named', name: 'builds' },
 			removed: true,
 			storePathsRemoved: 5
 		};
 
+		const updates = [
+			{ kind: 'access', access: 'private' },
+			{ kind: 'priority', priority: 40 },
+			{
+				kind: 'set-default-root-ttl',
+				retention: { kind: 'duration', seconds: 86_400 }
+			},
+			{ kind: 'set-default-root-ttl', retention: { kind: 'permanent' } },
+			{
+				kind: 'set-root-ttl-override',
+				rootPrefix: 'release-',
+				retention: { kind: 'duration', seconds: 604_800 }
+			},
+			{ kind: 'clear-root-ttl-override', rootPrefix: 'release-' },
+			{ kind: 'set-grace', graceSeconds: 3600 },
+			{ kind: 'clear-grace' }
+		];
+
 		expect({
 			list: cacheListResponseSchema.parse({ caches: [summary] }),
 			put: cachePutBodySchema.parse({ access: 'public', priority: 30 }),
-			accessUpdate: cacheUpdateBodySchema.parse({
-				kind: 'access',
-				access: 'private'
-			}),
-			priorityUpdate: cacheUpdateBodySchema.parse({
-				kind: 'priority',
-				priority: 40
-			}),
+			updates: updates.map((update) => cacheUpdateBodySchema.parse(update)),
 			remove: cacheRemoveResponseSchema.parse(remove)
 		}).toStrictEqual({
 			list: { caches: [summary] },
-			put: { access: 'public', priority: 30 },
-			accessUpdate: { kind: 'access', access: 'private' },
-			priorityUpdate: { kind: 'priority', priority: 40 },
+			put: {
+				access: 'public',
+				priority: 30,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' }
+			},
+			updates,
 			remove
 		});
 	});

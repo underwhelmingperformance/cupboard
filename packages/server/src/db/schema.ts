@@ -19,7 +19,8 @@ import {
 	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
-	type TenantId
+	type TenantId,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
@@ -29,7 +30,7 @@ import type {
 } from '@cupboard/protocol/reuse-views';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
-import { sql } from 'drizzle-orm';
+import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
 	check,
 	index,
@@ -44,6 +45,14 @@ import {
 import type { R2ObjectKey } from '../http/http.ts';
 
 import { type CacheId } from './cache.ts';
+import {
+	emptyRootRetentionRuleSetId,
+	type RootRetentionRuleSetId
+} from './retention-rule.ts';
+
+function rootNameConstraint(column: SQLWrapper): SQL {
+	return sql`length(${column}) BETWEEN 1 AND 256 AND instr(${column}, char(0)) = 0 AND ${column} NOT GLOB ('*[' || char(1) || '-' || char(31) || char(127) || ']*')`;
+}
 
 export const cacheIdentities = sqliteTable(
 	'cache_identity',
@@ -64,6 +73,18 @@ export const cacheIdentities = sqliteTable(
 			.$type<CacheReadRevision>()
 			.notNull()
 			.default(cacheReadRevisionSchema.parse(1)),
+		rootRetentionRuleSetId: integer('root_retention_rule_set_id')
+			.$type<RootRetentionRuleSetId>()
+			.notNull()
+			.default(emptyRootRetentionRuleSetId),
+		defaultRootTtlSeconds: integer(
+			'default_root_ttl_seconds'
+		).$type<TtlSeconds>(),
+		graceSeconds: integer('grace_seconds').$type<GraceSeconds>(),
+		// Set when the first grace-managed release applies to this cache and never
+		// cleared while the cache exists. This keeps the empty-cache collection guard
+		// off if grace is later cleared, so a partially drained cache cannot become
+		// stranded between continuation runs.
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -81,6 +102,86 @@ export const cacheIdentities = sqliteTable(
 		uniqueIndex('cache_identity_name_idx')
 			.on(table.name)
 			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
+	]
+);
+
+export const rootRetentionRuleSets = sqliteTable(
+	'root_retention_rule_set',
+	{
+		id: integer('id')
+			.$type<RootRetentionRuleSetId>()
+			.primaryKey({ autoIncrement: true }),
+		contentHash: text('content_hash').$type<Sha256HexDigest>().notNull()
+	},
+	(table) => [
+		index('root_retention_rule_set_content_hash_idx').on(table.contentHash)
+	]
+);
+
+export const rootRetentionRules = sqliteTable(
+	'root_retention_rule',
+	{
+		ruleSetId: integer('rule_set_id').$type<RootRetentionRuleSetId>().notNull(),
+		rootPrefix: text('root_prefix').$type<RootName>().notNull(),
+		kind: text('kind', { enum: ['permanent', 'duration'] }).notNull(),
+		ttlSeconds: integer('ttl_seconds').$type<TtlSeconds>()
+	},
+	(table) => [
+		primaryKey({ columns: [table.ruleSetId, table.rootPrefix] }),
+		check(
+			'root_retention_rule_prefix_check',
+			rootNameConstraint(table.rootPrefix)
+		),
+		check(
+			'root_retention_rule_value_check',
+			sql`(${table.kind} = 'permanent' AND ${table.ttlSeconds} IS NULL) OR (${table.kind} = 'duration' AND ${table.ttlSeconds} BETWEEN 1 AND 315360000)`
+		)
+	]
+);
+
+export const retentionMigrationState = sqliteTable(
+	'retention_migration_state',
+	{
+		id: integer('id').primaryKey(),
+		status: text('status', {
+			enum: ['pending', 'complete']
+		})
+			.notNull()
+			.default('pending'),
+		ruleCursor: text('rule_cursor'),
+		cacheCursor: integer('cache_cursor').notNull().default(0),
+		ruleSetId: integer('rule_set_id').$type<RootRetentionRuleSetId>(),
+		discardedRuleCount: integer('discarded_rule_count').notNull().default(0)
+	},
+	(table) => [
+		check('retention_migration_singleton_check', sql`${table.id} = 1`),
+		check(
+			'retention_migration_cache_cursor_nonnegative',
+			sql`${table.cacheCursor} >= 0`
+		),
+		check(
+			'retention_migration_discarded_nonnegative',
+			sql`${table.discardedRuleCount} >= 0`
+		)
+	]
+);
+
+export const retentionMigrationRules = sqliteTable(
+	'retention_migration_rule',
+	{
+		sourceId: text('source_id').primaryKey(),
+		rootPrefix: text('root_prefix').$type<RootName>().notNull(),
+		ttlSeconds: integer('ttl_seconds').$type<TtlSeconds>().notNull()
+	},
+	(table) => [
+		check(
+			'retention_migration_rule_prefix_check',
+			rootNameConstraint(table.rootPrefix)
+		),
+		check(
+			'retention_migration_rule_ttl_check',
+			sql`${table.ttlSeconds} BETWEEN 1 AND 315360000`
+		)
 	]
 );
 
@@ -176,9 +277,9 @@ export const pendingUploads = sqliteTable(
 		// re-drive clears them to request an immediate retry.
 		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		claimOwner: text('claim_owner'),
-		// Capture the retention decision during negotiation so a later policy change
+		// Capture the retention decision during negotiation so a later cache update
 		// cannot alter this upload. Null also supports rows created before decisions
-		// were stored and is treated as no matching policy.
+		// were stored and means that the cache granted no grace.
 		graceDecisionJson: text('grace_decision_json'),
 		// A commit attaches the path to the run root captured during negotiation.
 		// Null preserves the behaviour of pushes that did not request a root.
@@ -542,7 +643,10 @@ export const caches = sqliteTable('cache', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
-export const retentionPolicies = sqliteTable(
+// The staged retention migrator is the only caller of these legacy tables.
+// Keep their schema in the released artifact until every supported deployment
+// has migrated and the retention contract removes the old representation.
+export const legacyRetentionPolicies = sqliteTable(
 	'retention_policy',
 	{
 		id: text('id').primaryKey(),
@@ -551,7 +655,9 @@ export const retentionPolicies = sqliteTable(
 		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }),
 		cacheId: integer('cache_id').$type<CacheId>(),
 		rootNamePrefix: text('root_name_prefix'),
-		defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
+		defaultTtlSeconds: integer('default_ttl_seconds')
+			.$type<TtlSeconds>()
+			.notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -562,11 +668,7 @@ export const retentionPolicies = sqliteTable(
 	]
 );
 
-// A policy applies to each path published to a cache whose name starts with
-// `cache_prefix`; the empty prefix is the tenant-wide default. Prefixes are
-// unique, and the longest matching prefix wins when several policies cover a
-// cache.
-export const retentionGracePolicies = sqliteTable(
+export const legacyRetentionGracePolicies = sqliteTable(
 	'retention_grace_policy',
 	{
 		id: text('id').primaryKey(),

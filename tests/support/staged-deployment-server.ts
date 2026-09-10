@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import type { CacheListResponse } from '@cupboard/protocol/caches';
 import {
 	currentLocalStep,
 	type ParsedDeploymentPhaseResponse,
@@ -17,7 +18,7 @@ import type { TenantStatus } from '@cupboard/protocol/tenants';
 import { Miniflare, type MiniflareOptions } from 'miniflare';
 import { z } from 'zod';
 
-import { controlRpc } from '../../packages/cli/src/client/orpc.ts';
+import { controlRpc, tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import type { DeploymentArtifact } from '../../packages/cli/src/deploy/artifact.ts';
 import { buildArtifactFromTree } from '../../packages/cli/src/deploy/artifact.ts';
 import { createEsbuildBundler } from '../../packages/cli/src/deploy/bundle.ts';
@@ -29,6 +30,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '../../packages/nix-store/src/scalars.ts';
+import { tenantMemberKey } from '../../packages/server/src/control/tenant-member-key.ts';
 import {
 	type FixtureTenant,
 	fixtureTenants,
@@ -47,6 +49,7 @@ const blobsBinding = 'BLOBS';
 const blobsBucket = 'cupboard-upgrade-blobs';
 const recoveryBucket = 'cupboard-upgrade-recovery';
 const maintenanceQueue = 'cupboard-upgrade-maintenance';
+const tenantCacheBinding = 'TENANT_CACHE';
 const pathHash = storePathHashSchema.parse('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 const legacyCacheName = cacheNameSchema.parse('builds');
 const attestationDigest = 'a'.repeat(64);
@@ -359,7 +362,7 @@ function currentOptions(
 					DEPLOYMENT_RECOVERY: recoveryBucket
 				},
 				kvNamespaces: {
-					TENANT_CACHE: 'cupboard-upgrade-tenant-cache',
+					[tenantCacheBinding]: 'cupboard-upgrade-tenant-cache',
 					CRON_STATE: 'cupboard-upgrade-cron-state'
 				},
 				queueProducers: {
@@ -445,12 +448,12 @@ export class StagedDeploymentServer {
 		private persistedRuntime: PersistedRuntime
 	) {}
 
-	private async connectDeploymentClient(): Promise<DeploymentClient> {
+	private async operatorCredential(tokenPath = '/token'): Promise<string> {
 		const externalToken = this.issuer.sign({
 			aud: operatorAudience,
 			sub: operatorSubject
 		});
-		const response = await this.workerFetch('/token', {
+		const response = await this.workerFetch(tokenPath, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({
@@ -468,9 +471,13 @@ export class StagedDeploymentServer {
 		}
 
 		const value: unknown = await response.json();
-		const token = tokenResponseSchema.parse(value);
+
+		return tokenResponseSchema.parse(value).access_token;
+	}
+
+	private async connectDeploymentClient(): Promise<DeploymentClient> {
 		const rpc = controlRpc(new URL('https://cupboard.invalid'), {
-			credential: token.access_token,
+			credential: await this.operatorCredential(),
 			fetcher: (input, init) => this.workerFetch(input, init)
 		});
 
@@ -705,7 +712,17 @@ export class StagedDeploymentServer {
 				continue;
 			}
 
-			await this.expectOk(`/fixture/tenant/${tenant}/seed`, { method: 'POST' });
+			await this.expectOk(`/fixture/tenant/${tenant}/seed`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					owner: {
+						issuer: this.issuer.issuer,
+						subject: operatorSubject,
+						audience: operatorAudience
+					}
+				})
+			});
 		}
 
 		await this.seedLegacyR2Object();
@@ -838,6 +855,31 @@ export class StagedDeploymentServer {
 				return client.wakeLocalStep(limit);
 			}
 		};
+	}
+
+	/**
+	 * The caches one tenant reports through the admin API, read with the
+	 * operator's credential. The release serves this listing from the Durable
+	 * Object, so it shows the retention each cache holds after the upgrade.
+	 *
+	 * Admission rejects a slug with no membership marker before any tenant route
+	 * runs. The fixture seeds its tenants straight into D1, so this writes the
+	 * marker that tenant creation would have written.
+	 */
+	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+		const members = await this.miniflare.getKVNamespace(
+			tenantCacheBinding,
+			controlScript
+		);
+
+		await members.put(tenantMemberKey(tenantIdSchema.parse(tenant)), '1');
+
+		const rpc = tenantRpc(new URL(`https://cupboard.invalid/t/${tenant}`), {
+			credential: await this.operatorCredential(`/t/${tenant}/token`),
+			fetcher: (input, init) => this.workerFetch(input, init)
+		});
+
+		return rpc.caches.list();
 	}
 
 	async dispatch(pathname: string, init?: RequestInit): Promise<Response> {

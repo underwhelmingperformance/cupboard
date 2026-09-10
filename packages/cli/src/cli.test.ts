@@ -397,25 +397,10 @@ describe('command help', () => {
 		expect(helpFor([])).toContain('cupboard login');
 	});
 
-	it('lists the retention grace subcommands under policy', () => {
-		const help = helpFor(['policy']);
-
-		expect(help).toContain('add-grace');
-		expect(help).toContain('remove-grace');
-	});
-
 	it('describes immediate read and write suspension', () => {
 		expect(helpFor(['tenant', 'suspend'])).toContain(
 			'Suspend a tenant: new reads and writes stop immediately.'
 		);
-	});
-
-	it('shows the cache-prefix and grace options for policy add-grace', () => {
-		const help = helpFor(['policy', 'add-grace']);
-
-		expect(help).toContain('--cache-prefix');
-		expect(help).toContain('--grace');
-		expect(help).toContain('Example:');
 	});
 
 	it('shows the auth options and an example for confirm', () => {
@@ -441,11 +426,16 @@ describe('command help', () => {
 		expect(help).toContain('create');
 		expect(help).toContain('set-access');
 		expect(help).toContain('set-priority');
+		expect(help).toContain('set-root-ttl');
+		expect(help).toContain('clear-root-ttl');
+		expect(help).toContain('set-grace');
+		expect(help).toContain('clear-grace');
 	});
 
 	it.each([
 		['set-access', '--access <mode>'],
-		['set-priority', '--priority <n>']
+		['set-priority', '--priority <n>'],
+		['set-grace', '--grace <duration>']
 	])('requires the new value for cache %s', async (command, option) => {
 		expect(helpFor(['cache', command])).toContain(option);
 		await expect(
@@ -460,12 +450,37 @@ describe('command help', () => {
 		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
 	});
 
+	it('requires one retention value for cache set-root-ttl', async () => {
+		expect(helpFor(['cache', 'set-root-ttl'])).toContain(
+			'--root-ttl <duration>'
+		);
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'cache',
+				'set-root-ttl',
+				'https://cupboard.example/t/acme',
+				'builds'
+			])
+		).rejects.toThrow('Specify exactly one of --root-ttl or --permanent.');
+	});
+
 	it('requires cache create to select a named cache', () => {
 		const help = helpFor(['cache', 'create']);
 
 		expect(help).toContain('Create a named cache.');
 		expect(help).toContain('cache name when the URL does not select one');
+		expect(help).toContain('--root-ttl <duration>');
+		expect(help).toContain('--grace <duration>');
 	});
+
+	it.each(['set-root-ttl', 'clear-root-ttl'])(
+		'shows the optional root prefix for cache %s',
+		(command) => {
+			expect(helpFor(['cache', command])).toContain('--root-prefix <prefix>');
+		}
+	);
 
 	it('shows the selector, priority and access options and examples for reuse-view set', () => {
 		const help = helpFor(['reuse-view', 'set']);

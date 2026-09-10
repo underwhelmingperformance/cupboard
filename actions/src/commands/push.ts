@@ -30,25 +30,28 @@ import {
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
+	CacheGraceMissingError,
 	CommandFailedError,
 	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
 	GraceDeadlineMissingError,
-	GracePolicyMissingError,
 	GraceWaitConflictError,
 	LegacyPushSummaryError,
 	type MissingGracePath,
 	MissingInputError,
+	PermanentRetentionConflictError,
 	PushPathsMissingError,
 	PushSummaryMissingError,
 	PushSummaryResponseError,
 	ReferenceSourcePairingError,
+	RetentionChoiceConflictError,
 	RootGroupsJsonInvalidError,
 	RootGroupsPathsConflictError,
 	RootGroupsRetentionConflictError,
 	RootGroupsRootConflictError,
 	RootGroupsSchemaError,
 	RootRetentionConflictError,
+	RunRootPermanentRequiredError,
 	RunRootRequiredError,
 	TtlRetentionConflictError
 } from '../errors.ts';
@@ -95,6 +98,7 @@ export interface PushOptions {
 	readonly audience?: string;
 	readonly root?: string;
 	readonly ttl?: string;
+	readonly permanent?: string;
 	readonly retain?: string;
 	readonly wait?: string;
 	readonly requireGrace?: string;
@@ -105,6 +109,7 @@ export interface PushOptions {
 	readonly referenceSource?: string;
 	readonly runRoot?: string;
 	readonly runRootTtl?: string;
+	readonly runRootPermanent?: string;
 	readonly rootGroups?: string;
 }
 
@@ -123,6 +128,7 @@ export interface PushInputs {
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
+	readonly permanent: boolean;
 	readonly retain: boolean;
 	readonly wait: boolean;
 	readonly waitTimeout: string;
@@ -133,6 +139,7 @@ export interface PushInputs {
 	readonly referenceSource: string;
 	readonly runRoot: string;
 	readonly runRootTtl: string;
+	readonly runRootPermanent: boolean;
 	readonly rootGroups: readonly RootGroup[];
 }
 
@@ -167,6 +174,7 @@ interface PushArgumentsOptions {
 	readonly cache: CacheScope;
 	readonly store: string;
 	readonly ttl: string;
+	readonly permanent: boolean;
 	readonly retain: boolean;
 	readonly wait: boolean;
 	readonly waitTimeout: string;
@@ -176,6 +184,7 @@ interface PushArgumentsOptions {
 	readonly referenceSource: string;
 	readonly runRoot: string;
 	readonly runRootTtl: string;
+	readonly runRootPermanent: boolean;
 }
 
 export function registerPushCommand(
@@ -230,6 +239,10 @@ export function registerPushCommand(
 		.option('--root <root>', 'retention root to update with the pushed paths')
 		.option('--ttl <ttl>', 'retention TTL such as 7d or 12h')
 		.option(
+			'--permanent <value>',
+			'retain the target root permanently: true or false'
+		)
+		.option(
 			'--retain <value>',
 			'add the pushed paths to the retention root: true or false'
 		)
@@ -265,6 +278,10 @@ export function registerPushCommand(
 		)
 		.option('--run-root <name>', 'add every committed path to this run root')
 		.option('--run-root-ttl <ttl>', 'expire the run root after this duration')
+		.option(
+			'--run-root-permanent <value>',
+			'retain the run root permanently: true or false'
+		)
 		.option(
 			'--root-groups <json>',
 			'JSON array of {root, paths} groups; replaces paths and root and runs one push per group'
@@ -320,6 +337,16 @@ export function resolvePushInputs(
 		throw new TtlRetentionConflictError();
 	}
 
+	const isPermanent = isEnabled('permanent', options.permanent, false);
+
+	if (!isRetained && isPermanent) {
+		throw new PermanentRetentionConflictError();
+	}
+
+	if (explicitTtl !== undefined && isPermanent) {
+		throw new RetentionChoiceConflictError('ttl', 'permanent');
+	}
+
 	const shouldWait = isEnabled('wait', options.wait, true);
 	const requiresGrace = isEnabled('require-grace', options.requireGrace, false);
 
@@ -341,6 +368,23 @@ export function resolvePushInputs(
 
 	if (runRootTtl !== undefined && runRoot === undefined) {
 		throw new RunRootRequiredError(runRootTtl);
+	}
+
+	const isRunRootPermanent = isEnabled(
+		'run-root-permanent',
+		options.runRootPermanent,
+		false
+	);
+
+	if (isRunRootPermanent && runRoot === undefined) {
+		throw new RunRootPermanentRequiredError();
+	}
+
+	if (runRootTtl !== undefined && isRunRootPermanent) {
+		throw new RetentionChoiceConflictError(
+			'run-root-ttl',
+			'run-root-permanent'
+		);
 	}
 
 	const cupboardPath = provided(options.cupboardPath) ?? '';
@@ -386,6 +430,7 @@ export function resolvePushInputs(
 				`github:${requireEnvironment(environment, 'GITHUB_REPOSITORY')}/${requireEnvironment(environment, 'GITHUB_REF_NAME')}`)
 			: '',
 		ttl: explicitTtl ?? '',
+		permanent: isPermanent,
 		retain: isRetained,
 		wait: shouldWait,
 		waitTimeout: provided(options.waitTimeout) ?? '10m',
@@ -396,6 +441,7 @@ export function resolvePushInputs(
 		referenceSource: referenceSource ?? '',
 		runRoot: runRoot ?? '',
 		runRootTtl: runRootTtl ?? '',
+		runRootPermanent: isRunRootPermanent,
 		rootGroups
 	};
 }
@@ -479,10 +525,10 @@ export async function pushAction(
 	await publishPushOutputs(environment, summary);
 
 	if (inputs.requireGrace) {
-		// A missing grace fact means that no policy covers the cache. Report this
-		// at cache level because the remedy is a cache policy change.
+		// A missing grace fact means that the cache has no configured grace. Report
+		// this once for the cache rather than repeating it for every path.
 		if (hasUngracedPath(summary)) {
-			throw new GracePolicyMissingError(inputs.cache);
+			throw new CacheGraceMissingError(inputs.cache);
 		}
 
 		const missing = pathsMissingGraceDeadline(summary);
@@ -673,7 +719,8 @@ export function requireGraceResultProtocol(
 
 /**
  * A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
- * policy. {@link GracePolicyMissingError} reports this cache-level condition.
+ * configuration. {@link CacheGraceMissingError} reports this cache-level
+ * condition.
  */
 export function hasUngracedPath(summary: PushSummary): boolean {
 	return summary.paths.some(
@@ -686,8 +733,9 @@ export function hasUngracedPath(summary: PushSummary): boolean {
 /**
  * Grace mode fails closed unless every reported path has a materialised
  * `retainUntil` value (see PLAN.md, "Planning and destination adoption"). An
- * empty grace fact means that no cache policy matched. A `graceSeconds` value
- * without `retainUntil` means that verification is still pending.
+ * empty grace fact means that the cache has no configured grace. A
+ * `graceSeconds` value without `retainUntil` means that verification is still
+ * pending.
  */
 export function pathsMissingGraceDeadline(
 	summary: PushSummary
@@ -781,6 +829,10 @@ export function buildPushArguments(
 		arguments_.push('--ttl', options.ttl);
 	}
 
+	if (options.permanent) {
+		arguments_.push('--permanent');
+	}
+
 	if (!options.retain) {
 		arguments_.push('--no-retain');
 	}
@@ -817,6 +869,10 @@ export function buildPushArguments(
 		arguments_.push('--run-root-ttl', options.runRootTtl);
 	}
 
+	if (options.runRootPermanent) {
+		arguments_.push('--run-root-permanent');
+	}
+
 	return arguments_;
 }
 
@@ -833,6 +889,7 @@ export function pushArgumentsForInvocations(
 		| 'cache'
 		| 'store'
 		| 'ttl'
+		| 'permanent'
 		| 'retain'
 		| 'wait'
 		| 'waitTimeout'
@@ -842,6 +899,7 @@ export function pushArgumentsForInvocations(
 		| 'referenceSource'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 	>,
 	pushes: readonly PushInvocation[]
 ): readonly (readonly string[])[] {
@@ -854,6 +912,7 @@ export function pushArgumentsForInvocations(
 			cache: inputs.cache,
 			store: inputs.store,
 			ttl: inputs.ttl,
+			permanent: inputs.permanent,
 			retain: inputs.retain,
 			wait: inputs.wait,
 			waitTimeout: inputs.waitTimeout,
@@ -862,7 +921,8 @@ export function pushArgumentsForInvocations(
 			referencePathsFile: index === 0 ? inputs.referencePathsFile : '',
 			referenceSource: index === 0 ? inputs.referenceSource : '',
 			runRoot: inputs.runRoot,
-			runRootTtl: inputs.runRootTtl
+			runRootTtl: inputs.runRootTtl,
+			runRootPermanent: inputs.runRootPermanent
 		})
 	);
 }

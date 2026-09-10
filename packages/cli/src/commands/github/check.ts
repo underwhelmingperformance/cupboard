@@ -36,20 +36,16 @@ import {
 	lookupRepository,
 	type RepositoryIdentity
 } from '../oidc-trust/github.ts';
-import { type PolicyClient } from '../policy.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
 import { githubBranchClaims, githubPullRequestClaims } from './claims.ts';
 import {
-	minimumGraceSeconds,
 	parseExactWorkflowReference,
 	pullRequestPrefix,
 	pullRequestViewName
 } from './convention.ts';
 import {
 	CheckFinding,
-	GracePolicyMissingFinding,
-	GracePolicyTooShortFinding,
 	PassedCheckFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
@@ -78,7 +74,6 @@ export interface GithubCheckOptions {
 }
 
 export interface GithubCheckClient {
-	readonly policies: Pick<PolicyClient, 'graceList'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list'>;
 	readonly oidcTrust: {
 		list(): Promise<{ rules: OidcTrustSummary[] }>;
@@ -186,98 +181,6 @@ function checkTrustRule(
 
 		if (finding !== undefined) {
 			return finding;
-		}
-	}
-
-	return new PassedCheckFinding(check);
-}
-
-// Mirror the server's policy selection. The longest cache-name prefix wins,
-// and the empty prefix supplies the tenant default.
-function effectiveGraceSeconds(
-	policies: readonly { cachePrefix: string; graceSeconds: number }[],
-	cache: CacheScope
-): number | undefined {
-	if (cache.kind === 'default') {
-		return policies.find((policy) => policy.cachePrefix.length === 0)
-			?.graceSeconds;
-	}
-
-	return policies
-		.filter((policy) => cache.name.startsWith(policy.cachePrefix))
-		.toSorted(
-			(left, right) => right.cachePrefix.length - left.cachePrefix.length
-		)
-		.at(0)?.graceSeconds;
-}
-
-function gracePolicyCaches(
-	policies: readonly { cachePrefix: string }[]
-): readonly CacheScope[] {
-	const cacheNames = new Set<string>([`${pullRequestPrefix}1`]);
-	const pullRequestNumberPattern = /^[1-9][0-9]*$/u;
-	const firstDigits = '123456789';
-	const laterDigits = '0123456789';
-
-	for (const { cachePrefix } of policies) {
-		const pullRequestNumber = cachePrefix.slice(pullRequestPrefix.length);
-
-		if (
-			cachePrefix.startsWith(pullRequestPrefix) &&
-			pullRequestNumberPattern.test(pullRequestNumber)
-		) {
-			cacheNames.add(cachePrefix);
-			cacheNames.add(`${cachePrefix}0`);
-
-			let index = 0;
-			for (const digit of pullRequestNumber) {
-				const alternatives = index === 0 ? firstDigits : laterDigits;
-				const prefix = pullRequestNumber.slice(0, index);
-
-				for (const alternative of alternatives) {
-					if (alternative !== digit) {
-						cacheNames.add(`${pullRequestPrefix}${prefix}${alternative}`);
-					}
-				}
-
-				index += 1;
-			}
-		}
-	}
-
-	return [
-		{ kind: 'default' },
-		...[...cacheNames].map((name) => ({
-			kind: 'named' as const,
-			name: cacheNameSchema.parse(name)
-		}))
-	];
-}
-
-// A covering policy can be shadowed by any longer prefix that names a real PR
-// cache. Each such prefix is itself a representative destination for the
-// policy it introduces.
-async function checkGracePolicy(
-	client: GithubCheckClient
-): Promise<CheckFinding> {
-	const check = 'grace policy';
-	const { policies } = await client.policies.graceList();
-
-	for (const cache of gracePolicyCaches(policies)) {
-		const graceSeconds = effectiveGraceSeconds(policies, cache);
-		const label = cache.kind === 'default' ? 'default' : cache.name;
-
-		if (graceSeconds === undefined) {
-			return new GracePolicyMissingFinding(check, label);
-		}
-
-		if (graceSeconds < minimumGraceSeconds) {
-			return new GracePolicyTooShortFinding(
-				check,
-				label,
-				graceSeconds,
-				minimumGraceSeconds
-			);
 		}
 	}
 
@@ -471,7 +374,6 @@ export async function runGithubCheck(
 				}),
 				branchRequests
 			),
-			await checkGracePolicy(client),
 			await checkReuseView(url, client, dependencies.fetchCacheInfo),
 			checkRootPrefix(options, identity)
 		]
