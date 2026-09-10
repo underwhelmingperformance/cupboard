@@ -4,7 +4,6 @@ import { gcContract } from './gc.ts';
 import { keysContract } from './keys.ts';
 import { oidcTrustContract } from './oidc-trust.ts';
 import { pathsContract } from './paths.ts';
-import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
 import { reuseViewsContract } from './reuse-views.ts';
 import { rootsContract } from './roots.ts';
@@ -20,7 +19,6 @@ import { verifyContract } from './verify.ts';
 export const tenantContract = {
 	caches: cachesContract,
 	keys: keysContract,
-	policies: policiesContract,
 	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,

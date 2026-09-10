@@ -20,7 +20,10 @@ import {
 	type PlanStore,
 	type UnknownPathDetail
 } from '@cupboard/protocol/plan';
-import type { RootEnsureResponse } from '@cupboard/protocol/retention';
+import type {
+	RootEnsureResponse,
+	RootRetentionRequest
+} from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -38,7 +41,8 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import {
 	InvalidCohortTargetsFileError,
-	ReadCredentialPairError
+	ReadCredentialPairError,
+	RootRetentionOptionConflictError
 } from '../errors.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
 import {
@@ -170,6 +174,7 @@ export interface PlanCohortOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly ttl?: TtlSeconds;
+	readonly permanent?: boolean;
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly planFile?: string;
@@ -253,7 +258,7 @@ export interface PlanCohortRunOptions {
 	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
 	readonly plannedLocalOutputs?: readonly PlannedLocalOutput[];
 	readonly cache: CacheScope;
-	readonly ttlSeconds?: TtlSeconds;
+	readonly retention: RootRetentionRequest;
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
@@ -312,6 +317,7 @@ export function registerPlanCommands(
 			'retention TTL refreshed when a target is already retained',
 			parseTtl
 		)
+		.option('--permanent', 'retain refreshed roots permanently')
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -436,12 +442,21 @@ export function registerPlanCommands(
 					)
 				});
 
+				if (options.ttl !== undefined && options.permanent === true) {
+					throw new RootRetentionOptionConflictError('--ttl', '--permanent');
+				}
+
 				await runPlanCohort(
 					{
 						targets,
 						cache,
 						plannedSubstitutionPolicy,
-						...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+						retention:
+							options.ttl === undefined
+								? options.permanent === true
+									? { kind: 'permanent' }
+									: { kind: 'inherit' }
+								: { kind: 'duration', seconds: options.ttl },
 						storeIdentity: {
 							kind: nix.storeKind,
 							...(options.store !== undefined && { uri: options.store })
@@ -535,7 +550,7 @@ export async function runPlanCohort(
 			ensureCohortRoots(
 				options.targets,
 				options.cache,
-				options.ttlSeconds,
+				options.retention,
 				dependencies.rootClient
 			)
 	);
@@ -766,7 +781,7 @@ async function checkLocalCapacity(
 async function ensureCohortRoots(
 	targets: readonly CohortTarget[],
 	cache: CacheScope,
-	ttlSeconds: TtlSeconds | undefined,
+	retention: RootRetentionRequest,
 	client: Pick<RootClient, 'ensure'>
 ): Promise<ReadonlyMap<RootName, RootEnsureResponse>> {
 	const targetsByRoot = new Map<RootName, StorePathString[]>();
@@ -802,7 +817,7 @@ async function ensureCohortRoots(
 			const response = await callInCache(client.ensure, cache, {
 				name: root,
 				targets: [...storePaths],
-				...(ttlSeconds !== undefined && { ttlSeconds })
+				retention
 			});
 
 			return [root, response];

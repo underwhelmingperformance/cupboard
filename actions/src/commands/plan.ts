@@ -50,6 +50,7 @@ import {
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteOutputPathUnknownDuringPlanningError,
+	RetentionChoiceConflictError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
@@ -221,6 +222,7 @@ export interface PlanOptions {
 	readonly cache?: string;
 	readonly rootPrefix?: string;
 	readonly ttl?: string;
+	readonly permanent?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly audience?: string;
@@ -239,6 +241,7 @@ export interface PlanInputs {
 	readonly cache: CacheScope;
 	readonly rootPrefix: string;
 	readonly ttl: string;
+	readonly permanent: boolean;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 	readonly audience: string;
@@ -301,6 +304,11 @@ export function registerPlanCommand(
 		)
 		.option('--cache <name>', 'Inspect and publish to a named cache.')
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
+		.option(
+			'--permanent <value>',
+			'retain cached targets permanently: true or false',
+			'false'
+		)
 		.option('--read-user <user>', 'username for cache reads')
 		.option('--read-password <password>', 'password for cache reads')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
@@ -384,12 +392,20 @@ export function resolvePlanInputs(
 		false
 	);
 
+	const ttl = provided(options.ttl) ?? '';
+	const isPermanent = isEnabled('permanent', options.permanent, false);
+
+	if (ttl !== '' && isPermanent) {
+		throw new RetentionChoiceConflictError('ttl', 'permanent');
+	}
+
 	return {
 		targets,
 		url,
 		cache: providedCacheSelection(options.cache),
 		rootPrefix,
-		ttl: provided(options.ttl) ?? '',
+		ttl,
+		permanent: isPermanent,
 		readUser,
 		readPassword,
 		audience: provided(options.audience) ?? '',
@@ -787,6 +803,10 @@ async function ensureRoot(
 
 	if (inputs.ttl !== '') {
 		arguments_.push('--ttl', inputs.ttl);
+	}
+
+	if (inputs.permanent) {
+		arguments_.push('--permanent');
 	}
 
 	try {

@@ -24,6 +24,10 @@ inputs:
   ttl:
     description: TTL applied when retaining an already cached target.
     required: false
+  permanent:
+    description: Retain an already cached target permanently.
+    required: false
+    default: 'false'
   audience:
     description: GitHub OIDC audience. Defaults to url.
     required: false
@@ -78,6 +82,10 @@ inputs:
   run-root-ttl:
     description: Expire the run root after this duration, such as 2d.
     required: false
+  run-root-permanent:
+    description: Retain the run root permanently.
+    required: false
+    default: 'false'
   receipt-file:
     description: >-
       Where to write the cohort's build receipt. Defaults to a runner-local path
@@ -173,6 +181,7 @@ runs:
         CACHE: ${{ inputs.cache }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TTL: ${{ inputs.ttl }}
+        PERMANENT: ${{ inputs.permanent }}
         AUDIENCE: ${{ inputs.audience }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
@@ -184,6 +193,7 @@ runs:
         GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
         RUN_ROOT: ${{ inputs.run-root }}
         RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
+        RUN_ROOT_PERMANENT: ${{ inputs.run-root-permanent }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         TARGET_PATHS_FILE: ${{ inputs.target-paths-file }}
         INTERMEDIATE_PATHS_FILE: ${{ inputs.intermediate-paths-file }}
@@ -198,6 +208,7 @@ runs:
           --cache "$CACHE"
           --reuse-view "$REUSE_VIEW"
           --ttl "$TTL"
+          --permanent "$PERMANENT"
           --audience "$AUDIENCE"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
@@ -209,6 +220,7 @@ runs:
           --gc-between-cohorts "$GC_BETWEEN_COHORTS"
           --run-root "$RUN_ROOT"
           --run-root-ttl "$RUN_ROOT_TTL"
+          --run-root-permanent "$RUN_ROOT_PERMANENT"
           --receipt-file "$RECEIPT_FILE"
           --target-paths-file "$TARGET_PATHS_FILE"
           --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"

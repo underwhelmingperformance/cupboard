@@ -6,7 +6,9 @@ import {
 	type CachePriority,
 	cachePrioritySchema,
 	type CacheScope,
-	firstCacheGeneration
+	firstCacheGeneration,
+	type GraceSeconds,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, gt, isNull } from 'drizzle-orm';
@@ -25,6 +27,13 @@ import {
 } from './cache.ts';
 import { type CacheLifecycleVersion } from './cache-generation.ts';
 import * as schema from './schema.ts';
+
+interface CacheCreation {
+	readonly access: CacheAccessMode;
+	readonly priority: CachePriority;
+	readonly defaultRootTtlSeconds?: TtlSeconds;
+	readonly graceSeconds?: GraceSeconds;
+}
 
 // The columns that make up a resolved cache. `access` and the identity columns
 // are still nullable while the expansion runs, so a row is only usable once
@@ -109,18 +118,16 @@ export class CacheRepository {
 		return cache;
 	}
 
-	create(
-		scope: CacheScope,
-		access: CacheAccessMode,
-		priority: CachePriority
-	): ResolvedCache {
+	create(scope: CacheScope, configuration: CacheCreation): ResolvedCache {
 		const created = this.database
 			.insert(schema.cacheIdentities)
 			.values({
 				kind: scope.kind,
 				...(scope.kind === 'named' && { name: scope.name }),
-				access,
-				priority,
+				access: configuration.access,
+				priority: configuration.priority,
+				defaultRootTtlSeconds: configuration.defaultRootTtlSeconds,
+				graceSeconds: configuration.graceSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()

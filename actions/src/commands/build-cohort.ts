@@ -88,7 +88,9 @@ import {
 	type RemoteCohortBuildFailure,
 	RemoteCohortProtocolError,
 	RemotePublicationTargetUnresolvedError,
+	RetentionChoiceConflictError,
 	ReuseViewRequiredError,
+	RunRootPermanentRequiredError,
 	RunRootRequiredError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
@@ -360,6 +362,7 @@ export interface BuildCohortOptions {
 	readonly cache?: string;
 	readonly reuseView?: string;
 	readonly ttl?: string;
+	readonly permanent?: string;
 	readonly audience?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -371,6 +374,7 @@ export interface BuildCohortOptions {
 	readonly gcBetweenCohorts?: string;
 	readonly runRoot?: string;
 	readonly runRootTtl?: string;
+	readonly runRootPermanent?: string;
 	readonly receiptFile?: string;
 	readonly targetPathsFile?: string;
 	readonly intermediatePathsFile?: string;
@@ -386,6 +390,7 @@ export interface BuildCohortInputs {
 	readonly cache: CacheScope;
 	readonly reuseView: string;
 	readonly ttl: string;
+	readonly permanent: boolean;
 	readonly audience: string;
 	readonly readUser: string;
 	readonly readPassword: string;
@@ -397,6 +402,7 @@ export interface BuildCohortInputs {
 	readonly gcBetweenCohorts: boolean;
 	readonly runRoot: string;
 	readonly runRootTtl: string;
+	readonly runRootPermanent: boolean;
 	readonly receiptFile: string;
 	readonly targetPathsFile: string;
 	readonly intermediatePathsFile: string;
@@ -471,6 +477,30 @@ export function resolveBuildCohortInputs(
 		throw new RunRootRequiredError(runRootTtl);
 	}
 
+	const isRunRootPermanent = isEnabled(
+		'run-root-permanent',
+		options.runRootPermanent,
+		false
+	);
+
+	if (isRunRootPermanent && runRoot === '') {
+		throw new RunRootPermanentRequiredError();
+	}
+
+	if (runRootTtl !== '' && isRunRootPermanent) {
+		throw new RetentionChoiceConflictError(
+			'run-root-ttl',
+			'run-root-permanent'
+		);
+	}
+
+	const ttl = provided(options.ttl) ?? '';
+	const isPermanent = isEnabled('permanent', options.permanent, false);
+
+	if (ttl !== '' && isPermanent) {
+		throw new RetentionChoiceConflictError('ttl', 'permanent');
+	}
+
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	// The composite action passes every file option, so an unset workflow
 	// input arrives as the empty string, and `path.resolve('')` is the
@@ -488,7 +518,8 @@ export function resolveBuildCohortInputs(
 		cupboardPath,
 		cache: providedCacheSelection(options.cache),
 		reuseView: provided(options.reuseView) ?? '',
-		ttl: provided(options.ttl) ?? '',
+		ttl,
+		permanent: isPermanent,
 		audience: provided(options.audience) ?? '',
 		readUser,
 		readPassword,
@@ -508,6 +539,7 @@ export function resolveBuildCohortInputs(
 		),
 		runRoot,
 		runRootTtl,
+		runRootPermanent: isRunRootPermanent,
 		receiptFile: outputPath('receipt.json', options.receiptFile),
 		targetPathsFile: outputPath('target-paths.txt', options.targetPathsFile),
 		intermediatePathsFile: outputPath(
@@ -558,6 +590,11 @@ export function registerBuildCohortCommand(
 			'--ttl <ttl>',
 			'TTL applied when retaining an already cached target'
 		)
+		.option(
+			'--permanent <value>',
+			'retain an already cached target permanently: true or false',
+			'false'
+		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--read-user <user>', 'username for cache reads')
 		.option('--read-password <password>', 'password for cache reads')
@@ -591,6 +628,11 @@ export function registerBuildCohortCommand(
 			'run root every published path joins as it commits'
 		)
 		.option('--run-root-ttl <ttl>', 'expire the run root after this duration')
+		.option(
+			'--run-root-permanent <value>',
+			'retain the run root permanently: true or false',
+			'false'
+		)
 		.option(
 			'--receipt-file <path>',
 			'where to write the cupboard build-push receipt'
@@ -1512,6 +1554,7 @@ export function cohortBuildPushArguments(
 		| 'gcBetweenCohorts'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 		| 'receiptFile'
 		| 'allBestEffort'
 	>,
@@ -1548,6 +1591,10 @@ export function cohortBuildPushArguments(
 
 	if (inputs.runRootTtl !== '') {
 		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	if (inputs.runRootPermanent) {
+		arguments_.push('--run-root-permanent');
 	}
 
 	return arguments_;
@@ -1607,6 +1654,7 @@ export function cohortReceiptPushArguments(
 		| 'store'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 		| 'receiptFile'
 	>,
 	paths: readonly string[],
@@ -1645,6 +1693,10 @@ export function cohortReceiptPushArguments(
 
 	if (inputs.runRootTtl !== '') {
 		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	if (inputs.runRootPermanent) {
+		arguments_.push('--run-root-permanent');
 	}
 
 	return arguments_;
@@ -1804,8 +1856,10 @@ export function cohortPushArguments(
 		| 'cache'
 		| 'store'
 		| 'ttl'
+		| 'permanent'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 		| 'readUser'
 		| 'readPassword'
 	>,
@@ -1831,6 +1885,10 @@ export function cohortPushArguments(
 
 	if (inputs.ttl !== '' && group.complete) {
 		arguments_.push('--ttl', inputs.ttl);
+	}
+
+	if (inputs.permanent && group.complete) {
+		arguments_.push('--permanent');
 	}
 
 	if (extras.intermediatePathsFile !== '') {
@@ -1861,6 +1919,10 @@ export function cohortPushArguments(
 
 	if (inputs.runRootTtl !== '') {
 		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	if (inputs.runRootPermanent) {
+		arguments_.push('--run-root-permanent');
 	}
 
 	return arguments_;
@@ -2343,6 +2405,10 @@ async function planCohort(
 
 	if (inputs.ttl !== '') {
 		arguments_.push('--ttl', inputs.ttl);
+	}
+
+	if (inputs.permanent) {
+		arguments_.push('--permanent');
 	}
 
 	if (inputs.readUser !== '') {

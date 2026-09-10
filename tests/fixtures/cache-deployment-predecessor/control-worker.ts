@@ -10,11 +10,22 @@ interface FixtureEnvironment {
 
 const operationSchema = z.enum(['seed', 'late-write', 'snapshot']);
 
+// A seed request carries the tenant owner the harness's stub issuer will sign
+// for, so the seeded object accepts an owner token once the release serves it.
+const seedBodySchema = z.strictObject({
+	owner: z.strictObject({
+		issuer: z.string().min(1),
+		subject: z.string().min(1),
+		audience: z.string().min(1)
+	})
+});
+
 function tenantRequest(
 	env: FixtureEnvironment,
 	tenant: string,
 	operation: z.infer<typeof operationSchema>,
-	request: Request
+	request: Request,
+	seedBody: z.infer<typeof seedBodySchema> | undefined
 ): Promise<Response> {
 	if (tenant === 'upgrade-offboarded' || !isFixtureTenant(tenant)) {
 		return Promise.resolve(
@@ -24,7 +35,10 @@ function tenantRequest(
 
 	const stub = env.CUPBOARD_DO.get(env.CUPBOARD_DO.idFromName(tenant));
 	const method = operation === 'snapshot' ? 'GET' : 'POST';
-	const body = operation === 'seed' ? JSON.stringify({ tenant }) : undefined;
+	const body =
+		seedBody === undefined
+			? undefined
+			: JSON.stringify({ tenant, owner: seedBody.owner });
 
 	return stub.fetch(
 		new Request(`https://fixture.invalid/fixture/${operation}`, {
@@ -65,6 +79,11 @@ export default {
 			return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
 		}
 
-		return tenantRequest(env, tenant, operation.data, request);
+		const seedBody =
+			operation.data === 'seed'
+				? seedBodySchema.parse(await request.json())
+				: undefined;
+
+		return tenantRequest(env, tenant, operation.data, request, seedBody);
 	}
 };

@@ -22,8 +22,8 @@ on:
           cache with a 14-day TTL. A run on the configured branch uses the
           default cache. Both roots start with github:<repository>; other refs
           are rejected before planning. Only branch runs use reuse-view. This
-          input is mutually exclusive with cache, root-prefix, and ttl; leave it
-          empty to use those explicit inputs.
+          input is mutually exclusive with cache, root-prefix, ttl, and
+          permanent; leave it empty to use those explicit inputs.
         required: false
         default: ''
         type: string
@@ -54,10 +54,16 @@ on:
         type: string
       ttl:
         description:
-          Retention TTL such as 14d. Leave empty to retain permanently.
+          Retention TTL such as 14d. Leave empty to inherit the selected cache's
+          retention policy unless permanent is true.
         required: false
         default: ''
         type: string
+      permanent:
+        description: Retain every target root permanently.
+        required: false
+        default: false
+        type: boolean
       run-root-ttl:
         description:
           TTL for the per-run root that every cohort push attaches, such as 7d
@@ -66,6 +72,13 @@ on:
         required: false
         default: '24h'
         type: string
+      run-root-permanent:
+        description:
+          Retain the per-run root permanently. Set run-root-ttl to an empty
+          string when enabling this input.
+        required: false
+        default: false
+        type: boolean
       reuse-view:
         description:
           Named tenant reuse view for shared intermediates missing from the
@@ -252,6 +265,7 @@ jobs:
       cache: ${{ steps.resolve.outputs.cache }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
+      permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
     steps:
       - name: Require GitHub Cloud workflow identity
@@ -307,6 +321,7 @@ jobs:
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
+          PERMANENT: ${{ inputs.permanent }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -397,13 +412,14 @@ jobs:
               fi
               ;;
             pull-request-and-branch)
-              if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then
-                echo '::error::preset is mutually exclusive with cache, root-prefix and ttl'
+              if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ] || [ "${PERMANENT}" = true ]; then
+                echo '::error::preset is mutually exclusive with cache, root-prefix, ttl and permanent'
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
                 CACHE="pr-${PR_NUMBER}"
                 TTL=14d
+                PERMANENT=false
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
@@ -411,6 +427,7 @@ jobs:
                 ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
               elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
                 ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
+                PERMANENT=true
               else
                 echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
                 exit 1
@@ -425,6 +442,7 @@ jobs:
             echo "cache=${CACHE}"
             echo "root-prefix=${ROOT_PREFIX}"
             echo "ttl=${TTL}"
+            echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -529,6 +547,7 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
+          permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
@@ -639,6 +658,7 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
+          permanent: ${{ needs.configure.outputs.permanent }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           store: ${{ inputs.store }}
@@ -654,6 +674,7 @@ jobs:
             ${{ format('{0}/_cupboard-run/{1}',
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
+          run-root-permanent: ${{ inputs.run-root-permanent }}
 
       # A streamed cohort derives its receipt from the supervised build. A
       # remote-store cohort records only the queryable outputs that Nix reports

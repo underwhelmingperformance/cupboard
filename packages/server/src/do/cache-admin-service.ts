@@ -1,6 +1,5 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	type CacheAccessMode,
 	type CacheName,
 	type CachePriority,
 	cachePrioritySchema,
@@ -10,6 +9,7 @@ import {
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type CacheListResponse,
+	type CachePutBody,
 	type CacheRemoveResponse,
 	type CacheSummary,
 	type CacheUpdateBody
@@ -48,6 +48,7 @@ import {
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
+import { RetentionRuleService } from './retention-rule-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
 // statements a single Worker invocation may run.
@@ -75,10 +76,14 @@ export const maxPathsTornDownPerRun =
 export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
+	private readonly retentionRules: RetentionRuleService;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
-	) {}
+	) {
+		this.retentionRules = new RetentionRuleService(context);
+	}
 
 	private teardownKey(cache: ResolvedCache): string {
 		return `${teardownEntryPrefix}${String(cache.id)}`;
@@ -253,6 +258,19 @@ export class CacheAdminService {
 
 			earliestDeadlines.set(cache.id, row.earliest);
 		}
+		const overrides = new Map<
+			(typeof schema.cacheIdentities.$inferSelect)['rootRetentionRuleSetId'],
+			CacheSummary['rootRetentionOverrides']
+		>();
+
+		const registeredRuleSets = new Set(
+			registered.map((row) => row.rootRetentionRuleSetId)
+		);
+
+		for (const ruleSet of registeredRuleSets) {
+			overrides.set(ruleSet, [...this.retentionRules.listForRuleSet(ruleSet)]);
+		}
+
 		const caches = registered
 			.map((row): CacheSummary => {
 				// A row whose access the reconciliation has not supplied cannot say
@@ -269,6 +287,22 @@ export class CacheAdminService {
 					access: row.access,
 					priority: cachePrioritySchema.parse(row.priority),
 					storePaths: counts.get(row.id) ?? 0,
+					defaultRootRetention:
+						row.defaultRootTtlSeconds === null
+							? { kind: 'permanent' }
+							: {
+									kind: 'duration',
+									seconds: row.defaultRootTtlSeconds
+								},
+					grace:
+						row.graceSeconds === null
+							? { kind: 'none' }
+							: {
+									kind: 'duration',
+									graceSeconds: row.graceSeconds
+								},
+					rootRetentionOverrides:
+						overrides.get(row.rootRetentionRuleSetId) ?? [],
 					graceManaged: row.graceManaged,
 					...(earliestGraceDeadline !== undefined && {
 						earliestGraceDeadline
@@ -287,23 +321,13 @@ export class CacheAdminService {
 
 	getCache(scope: CacheScope): CacheSummary {
 		const cache = this.context.cacheRepository.require(scope);
-		const row = this.context.db
-			.select({ priority: schema.cacheIdentities.priority })
-			.from(schema.cacheIdentities)
-			.where(eq(schema.cacheIdentities.id, cache.id))
-			.get();
 
-		if (row === undefined) {
-			throw new CacheNotFoundError(scope);
-		}
-
-		return this.cacheSummary(cache, cachePrioritySchema.parse(row.priority));
+		return this.cacheSummary(cache);
 	}
 
 	async createCache(
 		scope: CacheScope,
-		access: CacheAccessMode,
-		priority: CachePriority
+		configuration: CachePutBody
 	): Promise<CacheSummary> {
 		return this.context.criticalSection(async () => {
 			if (this.context.cacheRepository.resolve(scope) !== undefined) {
@@ -312,23 +336,28 @@ export class CacheAdminService {
 
 			const version = await this.deletionQueue.recordCacheRegistration({
 				scope,
-				access
+				access: configuration.access
 			});
 
-			if (access === 'public') {
+			if (configuration.access === 'public') {
 				await this.clearCacheReadCredential(scope);
 			}
 
-			const created = this.context.cacheRepository.create(
-				scope,
-				access,
-				priority
-			);
+			const created = this.context.cacheRepository.create(scope, {
+				access: configuration.access,
+				priority: configuration.priority,
+				...(configuration.defaultRootRetention.kind === 'duration' && {
+					defaultRootTtlSeconds: configuration.defaultRootRetention.seconds
+				}),
+				...(configuration.grace.kind === 'duration' && {
+					graceSeconds: configuration.grace.graceSeconds
+				})
+			});
 			const cache = this.context.cacheRepository.stampVersion(created, version);
 
-			this.registerLegacyCache(cache, priority);
+			this.registerLegacyCache(cache, configuration.priority);
 
-			return this.cacheSummary(cache, priority);
+			return this.cacheSummary(cache);
 		});
 	}
 
@@ -336,9 +365,9 @@ export class CacheAdminService {
 		scope: CacheScope,
 		update: CacheUpdateBody
 	): Promise<CacheSummary> {
-		if (update.kind === 'priority') {
-			const cache = this.context.cacheRepository.require(scope);
+		const cache = this.context.cacheRepository.require(scope);
 
+		if (update.kind === 'priority') {
 			this.context.db
 				.update(schema.cacheIdentities)
 				.set({ priority: update.priority })
@@ -346,7 +375,65 @@ export class CacheAdminService {
 				.run();
 			this.registerLegacyCache(cache, update.priority);
 
-			return this.cacheSummary(cache, update.priority);
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-default-root-ttl') {
+			this.context.db
+				.update(schema.cacheIdentities)
+				.set({
+					defaultRootTtlSeconds:
+						update.retention.kind === 'duration'
+							? update.retention.seconds
+							: sql`NULL`
+				})
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-root-ttl-override') {
+			await this.context.criticalSection(() =>
+				this.retentionRules.setRule(
+					this.context.cacheRepository.require(scope),
+					update.rootPrefix,
+					update.retention
+				)
+			);
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'clear-root-ttl-override') {
+			await this.context.criticalSection(() =>
+				this.retentionRules.removeRule(
+					this.context.cacheRepository.require(scope),
+					update.rootPrefix
+				)
+			);
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'set-grace') {
+			this.context.db
+				.update(schema.cacheIdentities)
+				.set({ graceSeconds: update.graceSeconds })
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
+		}
+
+		if (update.kind === 'clear-grace') {
+			this.context.db
+				.update(schema.cacheIdentities)
+				.set({ graceSeconds: sql`NULL` })
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+
+			return this.cacheSummary(cache);
 		}
 
 		return this.context.criticalSection(async () => {
@@ -374,23 +461,12 @@ export class CacheAdminService {
 			}
 
 			const cache = this.context.cacheRepository.stampVersion(updated, version);
-
-			const row = this.context.db
-				.select({ priority: schema.cacheIdentities.priority })
-				.from(schema.cacheIdentities)
-				.where(eq(schema.cacheIdentities.id, cache.id))
-				.get();
-
-			if (row === undefined) {
-				throw new CacheNotFoundError(scope);
-			}
-
-			const priority = cachePrioritySchema.parse(row.priority);
+			const summary = this.cacheSummary(cache);
 
 			this.removeLegacyCache(previous);
-			this.registerLegacyCache(cache, priority);
+			this.registerLegacyCache(cache, summary.priority);
 
-			return this.cacheSummary(cache, priority);
+			return summary;
 		});
 	}
 
@@ -431,20 +507,37 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: ResolvedCache, priority: CachePriority): CacheSummary {
-		const managed = this.context.db
-			.select({ graceManaged: schema.cacheIdentities.graceManaged })
+	cacheSummary(cache: ResolvedCache): CacheSummary {
+		const row = this.context.db
+			.select()
 			.from(schema.cacheIdentities)
 			.where(eq(schema.cacheIdentities.id, cache.id))
 			.get();
+
+		if (row === undefined) {
+			throw new CacheNotFoundError(cache.scope);
+		}
+
+		const rootRetentionOverrides = [
+			...this.retentionRules.listForRuleSet(row.rootRetentionRuleSetId)
+		];
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {
 			scope: cache.scope,
 			access: cache.access,
-			priority,
+			priority: cachePrioritySchema.parse(row.priority),
 			storePaths: this.cacheStorePathCount(cache),
-			graceManaged: managed?.graceManaged ?? false,
+			defaultRootRetention:
+				row.defaultRootTtlSeconds === null
+					? { kind: 'permanent' }
+					: { kind: 'duration', seconds: row.defaultRootTtlSeconds },
+			grace:
+				row.graceSeconds === null
+					? { kind: 'none' }
+					: { kind: 'duration', graceSeconds: row.graceSeconds },
+			rootRetentionOverrides,
+			graceManaged: row.graceManaged,
 			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
 	}

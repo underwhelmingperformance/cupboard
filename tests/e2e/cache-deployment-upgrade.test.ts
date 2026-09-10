@@ -173,3 +173,78 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 		await server.stop();
 	}
 });
+
+it('gives each cache the retention its legacy policies granted it', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+
+		await client.wakeLocalStep(wakeLimit);
+
+		// The predecessor seeded a cache policy for the default cache and for
+		// `builds`, one `pr/` prefix policy, and grace policies on the empty and
+		// `builds` cache prefixes. Each cache should now hold the retention its
+		// matching policies gave it, and every cache should refer to the single
+		// rule set built from the prefix policy.
+		expect(await server.tenantCaches('upgrade-active')).toStrictEqual({
+			caches: [
+				{
+					scope: { kind: 'default' },
+					access: 'public',
+					priority: 40,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'duration', seconds: 1_209_600 },
+					grace: { kind: 'duration', graceSeconds: 3600 },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 86_400 }
+						}
+					],
+					graceManaged: true
+				},
+				{
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 30,
+					storePaths: 1,
+					defaultRootRetention: { kind: 'duration', seconds: 604_800 },
+					grace: { kind: 'duration', graceSeconds: 7200 },
+					// The grace deadline the predecessor recorded for this cache's one
+					// path, which the retention move leaves alone.
+					earliestGraceDeadline: '2099-01-01T00:00:00.000Z',
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 86_400 }
+						}
+					],
+					graceManaged: true
+				},
+				{
+					scope: { kind: 'named', name: 'secrets' },
+					access: 'private',
+					priority: 20,
+					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					// A private cache took no grace from a cache-prefix policy, so it
+					// keeps none here.
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [
+						{
+							rootPrefix: 'pr/',
+							retention: { kind: 'duration', seconds: 86_400 }
+						}
+					],
+					graceManaged: true
+				}
+			]
+		});
+	} finally {
+		await server.stop();
+	}
+});
