@@ -48,15 +48,6 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
-export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
-	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
-
-	constructor(public readonly value: string) {
-		super('CUPBOARD_COLD_PATH_TTL_SECONDS is not a valid TTL');
-		this.name = 'ColdPathTtlConfigurationInvalidError';
-	}
-}
-
 export type CacheCatalogueMigrationProblem =
 	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
 
@@ -219,6 +210,17 @@ export class StoredObjectKeyInvalidError extends ServerHttpError {
 	constructor(public readonly key: string) {
 		super('A stored object key does not name a cache and a store path');
 		this.name = 'StoredObjectKeyInvalidError';
+	}
+}
+
+export class CacheRetentionMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			"The cache's retention is still being migrated; retry after the tenant has completed its local step"
+		);
+		this.name = 'CacheRetentionMigrationPendingError';
 	}
 }
 

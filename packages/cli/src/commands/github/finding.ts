@@ -42,34 +42,6 @@ export class PassedCheckFinding extends CheckFinding {
 	}
 }
 
-export class GracePolicyMissingFinding extends FailedCheckFinding {
-	constructor(
-		check: string,
-		public readonly cache: string
-	) {
-		super(check);
-	}
-
-	detail(): string {
-		return `no grace policy covers the ${this.cache} cache; a push with require-grace would fail because no policy would retain its paths`;
-	}
-}
-
-export class GracePolicyTooShortFinding extends FailedCheckFinding {
-	constructor(
-		check: string,
-		public readonly cache: string,
-		public readonly graceSeconds: number,
-		public readonly requiredGraceSeconds: number
-	) {
-		super(check);
-	}
-
-	detail(): string {
-		return `the ${this.cache} cache has ${String(this.graceSeconds)}s of grace; GitHub publication requires at least ${String(this.requiredGraceSeconds)}s`;
-	}
-}
-
 export class ReuseViewMissingFinding extends FailedCheckFinding {
 	constructor(
 		check: string,

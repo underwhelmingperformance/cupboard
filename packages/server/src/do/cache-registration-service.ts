@@ -1,6 +1,5 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	type CacheAccessMode,
 	type CachePriority,
 	cachePrioritySchema,
 	type CacheReadRevision,
@@ -22,6 +21,7 @@ import {
 	type CacheLifecycleVersion,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
+import { type CacheCreation } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
@@ -166,29 +166,27 @@ export class CacheRegistrationService {
 	 */
 	async createInSection(
 		scope: CacheScope,
-		access: CacheAccessMode,
-		priority: CachePriority
+		configuration: CacheCreation
 	): Promise<ResolvedCache> {
 		if (this.context.cacheRepository.resolve(scope) !== undefined) {
 			throw new CacheAlreadyExistsError(scope);
 		}
 
-		const version = await this.recordLifecycle({ scope, access });
+		const version = await this.recordLifecycle({
+			scope,
+			access: configuration.access
+		});
 
-		if (access === 'public') {
+		if (configuration.access === 'public') {
 			await this.clearReadCredential(scope);
 		}
 
-		const created = this.context.cacheRepository.create(
-			scope,
-			access,
-			priority
-		);
+		const created = this.context.cacheRepository.create(scope, configuration);
 		const cache = this.context.cacheRepository.stampGeneration(
 			created,
 			version.generation
 		);
-		this.registerLegacy(cache, priority);
+		this.registerLegacy(cache, configuration.priority);
 
 		return cache;
 	}
@@ -217,11 +215,10 @@ export class CacheRegistrationService {
 
 		try {
 			return await this.context.criticalSection(() =>
-				this.createInSection(
-					scope,
+				this.createInSection(scope, {
 					access,
-					cachePrioritySchema.parse(CacheInfo.default.priority)
-				)
+					priority: cachePrioritySchema.parse(CacheInfo.default.priority)
+				})
 			);
 		} catch (error) {
 			// Another write created the cache while this one waited at the gate.

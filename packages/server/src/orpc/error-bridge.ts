@@ -7,6 +7,7 @@ import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
+	CacheRetentionMigrationPendingError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -51,6 +52,13 @@ export function bridgedError(
 	if (error instanceof SelectorTemplateUnrepresentableError) {
 		return new ORPCError('CACHE_GRANT_MIGRATION_PENDING', {
 			status: 409,
+			message: error.message
+		});
+	}
+
+	if (error instanceof CacheRetentionMigrationPendingError) {
+		return new ORPCError('CACHE_RETENTION_MIGRATION_PENDING', {
+			status: error.status,
 			message: error.message
 		});
 	}

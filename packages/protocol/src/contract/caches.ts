@@ -1,9 +1,4 @@
-import {
-	cacheAccessModeSchema,
-	cacheNameSchema,
-	cachePrioritySchema,
-	cacheScopeSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -20,6 +15,10 @@ const forceQuerySchema = z
 	.strictObject({ force: z.boolean().default(false) })
 	.default({ force: false });
 
+const retentionMigrationPendingError = {
+	CACHE_RETENTION_MIGRATION_PENDING: { status: 409 }
+};
+
 const cacheAlreadyExistsError = {
 	CACHE_ALREADY_EXISTS: {
 		status: 409,
@@ -27,22 +26,10 @@ const cacheAlreadyExistsError = {
 	}
 };
 
-const namedCacheAccessUpdateSchema = z.strictObject({
-	cacheName: cacheNameSchema,
-	kind: z.literal('access'),
-	access: cacheAccessModeSchema
-});
-
-const namedCachePriorityUpdateSchema = z.strictObject({
-	cacheName: cacheNameSchema,
-	kind: z.literal('priority'),
-	priority: cachePrioritySchema
-});
-
-const namedCacheUpdateSchema = z.discriminatedUnion('kind', [
-	namedCacheAccessUpdateSchema,
-	namedCachePriorityUpdateSchema
-]);
+const namedCacheUpdateSchema = z.intersection(
+	cacheUpdateBodySchema,
+	z.strictObject({ cacheName: cacheNameSchema })
+);
 
 export const cachesContract = {
 	list: baseProcedure
@@ -78,7 +65,7 @@ export const cachesContract = {
 			})
 			.route({ method: 'PUT', path: '/cache' })
 			.input(cachePutBodySchema)
-			.errors(cacheAlreadyExistsError)
+			.errors({ ...cacheAlreadyExistsError, ...retentionMigrationPendingError })
 			.output(cacheSummarySchema),
 
 		inNamedCache: baseProcedure
@@ -93,7 +80,7 @@ export const cachesContract = {
 					...cachePutBodySchema.shape
 				})
 			)
-			.errors(cacheAlreadyExistsError)
+			.errors({ ...cacheAlreadyExistsError, ...retentionMigrationPendingError })
 			.output(cacheSummarySchema)
 	},
 
@@ -106,6 +93,7 @@ export const cachesContract = {
 			.route({ method: 'PATCH', path: '/cache' })
 			.input(cacheUpdateBodySchema)
 			.errors({
+				...retentionMigrationPendingError,
 				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
 			})
 			.output(cacheSummarySchema),
@@ -118,6 +106,7 @@ export const cachesContract = {
 			.route({ method: 'PATCH', path: '/caches/{cacheName}' })
 			.input(namedCacheUpdateSchema)
 			.errors({
+				...retentionMigrationPendingError,
 				CACHE_ACCESS_MIGRATION_PENDING: { status: 409 }
 			})
 			.output(cacheSummarySchema)

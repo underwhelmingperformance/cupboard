@@ -30,6 +30,8 @@ import {
 	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
+	RootRetentionOptionConflictError,
+	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 
@@ -119,6 +121,30 @@ describe('parsePathFile', () => {
 describe('validateRetentionChoice', () => {
 	it.each([
 		{
+			name: '--no-retain combined with --permanent',
+			options: { retain: false, permanent: true },
+			error: NoRetainConflictError
+		},
+		{
+			name: '--ttl combined with --permanent',
+			options: { ttl: ttlSecondsSchema.parse(3600), permanent: true },
+			error: RootRetentionOptionConflictError
+		},
+		{
+			name: '--run-root-permanent without --run-root',
+			options: { runRootPermanent: true },
+			error: RunRootRetentionWithoutRunRootError
+		},
+		{
+			name: '--run-root-ttl combined with --run-root-permanent',
+			options: {
+				runRoot: rootName('ci/run-1'),
+				runRootTtl: ttlSecondsSchema.parse(3600),
+				runRootPermanent: true
+			},
+			error: RootRetentionOptionConflictError
+		},
+		{
 			name: '--no-retain combined with --root',
 			options: { retain: false, root: rootName('main') },
 			error: NoRetainConflictError
@@ -146,6 +172,15 @@ describe('validateRetentionChoice', () => {
 
 	it.each([
 		{ name: 'a named root', options: { root: rootName('main') } },
+		{
+			name: 'permanent publication and run roots',
+			options: {
+				root: rootName('main'),
+				permanent: true,
+				runRoot: rootName('ci/run-1'),
+				runRootPermanent: true
+			}
+		},
 		{ name: 'explicit unretained publication', options: { retain: false } },
 		{
 			name: 'a GitHub OIDC dry run naming neither',
