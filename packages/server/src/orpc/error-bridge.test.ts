@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
+	CacheRetentionRuleLimitExceededError,
 	CommitSessionLimitError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -67,6 +68,21 @@ describe('bridgedError', () => {
 			status: StatusCodes.CONFLICT,
 			message: 'The requested cache already exists',
 			data: { cache: { kind: 'default' } }
+		});
+		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('returns a typed error when a cache exceeds the retention rule limit', () => {
+		const bridged = bridgedError(
+			rootLogger(),
+			new CacheRetentionRuleLimitExceededError(4096)
+		);
+
+		expect(bridged).toMatchObject({
+			code: 'CACHE_RETENTION_RULE_LIMIT_EXCEEDED',
+			status: StatusCodes.CONFLICT,
+			message:
+				'A cache supports at most 4096 root retention overrides. Remove an override before adding another.'
 		});
 		expect(capture.logs).toStrictEqual([]);
 	});

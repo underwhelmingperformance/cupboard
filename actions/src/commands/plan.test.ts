@@ -24,6 +24,7 @@ import {
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteOutputPathUnknownDuringPlanningError,
+	RetentionChoiceConflictError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
@@ -313,6 +314,27 @@ describe('planAction', () => {
 
 describe('resolvePlanInputs', () => {
 	const environment = { RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' };
+
+	it('resolves explicit permanent retention', () => {
+		const inputs = resolvePlanInputs(
+			{ ...baseOptions, permanent: 'true' },
+			environment
+		);
+
+		expect({ ttl: inputs.ttl, permanent: inputs.permanent }).toStrictEqual({
+			ttl: '',
+			permanent: true
+		});
+	});
+
+	it('rejects a TTL with explicit permanent retention', () => {
+		expect(() =>
+			resolvePlanInputs(
+				{ ...baseOptions, ttl: '7d', permanent: 'true' },
+				environment
+			)
+		).toThrow(RetentionChoiceConflictError);
+	});
 
 	it('rejects a target whose root may receive too many outputs', () => {
 		const outputs = Array.from(
@@ -910,6 +932,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		cache: { kind: 'default' },
 		rootPrefix: 'github:owner/repo/main',
 		ttl: '',
+		permanent: false,
 		readUser: '',
 		readPassword: '',
 		audience: 'https://cupboard.example/t/acme',

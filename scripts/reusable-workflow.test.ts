@@ -425,6 +425,21 @@ describe('cupboard acquisition', () => {
 		});
 	});
 
+	it('lets a publish workflow TTL override its permanent default', async () => {
+		const workflow = await loadWorkflow(publishWorkflow);
+		expect(
+			inputsOf(workflow, cupboardAction('push')).map((inputs) => ({
+				ttl: inputs?.ttl,
+				permanent: inputs?.permanent
+			}))
+		).toStrictEqual([
+			{
+				ttl: '${{ inputs.ttl }}',
+				permanent: "${{ inputs.ttl == '' && inputs.permanent }}"
+			}
+		]);
+	});
+
 	it('resolves a release for a caller that names no version', async () => {
 		const caller = await readFile(legacyPublishCaller, 'utf8');
 		const callerWorkflow = workflowSchema.parse(parse(caller));
@@ -567,6 +582,7 @@ describe('cohort planning and publication', () => {
 				cache: '${{ needs.configure.outputs.cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
+				permanent: '${{ needs.configure.outputs.permanent }}',
 				optimise: '${{ inputs.push }}',
 				'read-user': '${{ secrets.read_user }}',
 				'read-password': '${{ secrets.read_password }}',
@@ -629,6 +645,7 @@ describe('cohort planning and publication', () => {
 				cache: '${{ needs.configure.outputs.cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
+				permanent: '${{ needs.configure.outputs.permanent }}',
 				'read-user': '${{ secrets.read_user }}',
 				'read-password': '${{ secrets.read_password }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
@@ -641,7 +658,8 @@ describe('cohort planning and publication', () => {
 					"${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}",
 				'run-root':
 					"${{ format('{0}/_cupboard-run/{1}', needs.configure.outputs.root-prefix, github.run_id) }}",
-				'run-root-ttl': '${{ inputs.run-root-ttl }}'
+				'run-root-ttl': '${{ inputs.run-root-ttl }}',
+				'run-root-permanent': '${{ inputs.run-root-permanent }}'
 			}
 		]);
 	});
@@ -871,7 +889,8 @@ describe('resolved publication inputs', () => {
 	it.each([
 		{
 			name: 'a preset alongside an explicit cache selection',
-			condition: 'if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then'
+			condition:
+				'if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ] || [ "${PERMANENT}" = true ]; then'
 		},
 		{
 			name: 'a direct store together with classic builders',

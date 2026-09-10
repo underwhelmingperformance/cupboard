@@ -31,7 +31,10 @@ import {
 
 type PendingRow = typeof schema.pendingUploads.$inferSelect;
 
-const runRoot: UploadAttachRootInput = { name: 'ci/run-1', ttlSeconds: 3600 };
+const runRoot: UploadAttachRootInput = {
+	name: 'ci/run-1',
+	retention: { kind: 'duration', seconds: 3600 }
+};
 
 async function negotiateWithRoot(
 	token: string,
@@ -312,7 +315,7 @@ describe('root attach at commit', () => {
 		const loser = singleDecision(
 			await negotiateWithRoot(token, [metadata], {
 				name: 'ci/run-2',
-				ttlSeconds: 3600
+				retention: { kind: 'duration', seconds: 3600 }
 			})
 		);
 

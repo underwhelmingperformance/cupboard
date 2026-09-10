@@ -160,6 +160,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { LegacyRetentionService } from './legacy-retention-service.ts';
 import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
@@ -455,6 +456,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
+	private readonly legacyRetention: LegacyRetentionService;
 	private readonly reuseViews: ReuseViewAdminService;
 	private readonly reuseLookup: ReuseViewLookupService;
 	private readonly integrityCheck: IntegrityCheckService;
@@ -502,6 +504,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.stats = new StatsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
+		this.legacyRetention = new LegacyRetentionService(this.context);
 		this.reuseViews = new ReuseViewAdminService(this.context);
 		this.reuseLookup = new ReuseViewLookupService(this.context);
 		this.integrityCheck = new IntegrityCheckService(this.context);
@@ -1317,6 +1320,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
 			retention: this.retention,
+			legacyRetention: this.legacyRetention,
 			reuseViews: this.reuseViews,
 			oidcTrust: this.oidcTrust,
 			stats: this.stats,
