@@ -36,11 +36,13 @@ export function localStep(value: number): LocalStep {
  * name gave them, which a migration cannot do because those objects are in R2.
  * Step 3 moves the objects of a cache above its first generation onto keys
  * that carry that generation.
+ * Step 4 imports the tenant's retention and grace policies onto its caches
+ * in bounded batches, resuming from a stored cursor between wakes.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(3);
+export const currentLocalStep: LocalStep = localStep(4);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a

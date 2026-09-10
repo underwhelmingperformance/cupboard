@@ -32,8 +32,8 @@ These commands address the tenant through a URL that includes its slug:
 
 - `cupboard push` uploads store paths (their complete closure with `--closure`)
   and optionally pins them.
-- `cupboard cache`, `cupboard policy`, and `cupboard root` manage named caches
-  and what is kept.
+- `cupboard cache` manages named caches and their retention settings.
+  `cupboard root` manages the roots and store paths retained by a cache.
 - `cupboard key` rotates a tenant's narinfo signing keys and reports background
   re-signing progress. `cupboard auth-key` rotates its access-token keys.
 - `cupboard oidc-trust` configures which CI workflows may push.

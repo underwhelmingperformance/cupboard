@@ -15,10 +15,6 @@ import {
 export const pullRequestViewName = 'pull-requests';
 export const pullRequestPrefix = 'pr-';
 
-// Grace-managed paths can expire between planning and the final root update.
-// Keep this floor long enough for that interval.
-export const minimumGraceSeconds = 3600;
-
 // Branches, pull-request merge refs and abbreviated commit ids can resolve to
 // different workflow contents later. The GitHub commands therefore accept
 // only full commit ids and tag refs. Tags require a separate GitHub lookup to

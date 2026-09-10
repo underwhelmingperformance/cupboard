@@ -14,8 +14,14 @@ const pathHash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const storePath = `/nix/store/${pathHash}-predecessor`;
 const narHash = 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347';
 
+const ownerSchema = z.strictObject({
+	issuer: z.string().min(1),
+	subject: z.string().min(1),
+	audience: z.string().min(1)
+});
 const seedRequestSchema = z.strictObject({
-	tenant: z.enum(seededFixtureTenants)
+	tenant: z.enum(seededFixtureTenants),
+	owner: ownerSchema
 });
 const migrationTagRowSchema = z.strictObject({ hash: z.string() });
 const migrationJournalRowSchema = z.strictObject({
@@ -124,7 +130,10 @@ function sleepingMigrationIndex(
 }
 
 export class CupboardServer extends DurableObject<FixtureEnvironment> {
-	private seed(tenant: z.infer<typeof seedRequestSchema>['tenant']): void {
+	private seed(
+		tenant: z.infer<typeof seedRequestSchema>['tenant'],
+		owner: z.infer<typeof ownerSchema>
+	): void {
 		const sleepingWatermark = sleepingMigrationIndex(tenant);
 		applyHistoricalMigrations(
 			this.ctx.storage,
@@ -136,9 +145,12 @@ export class CupboardServer extends DurableObject<FixtureEnvironment> {
 		// well as its schema. Only the data below depends on how far it got.
 		this.ctx.storage.sql.exec(
 			`INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version)
-			 VALUES ('singleton', ?, 'cupboard', 'cupboard', 'https://issuer.invalid', 'owner', 'owner-client', 1)
+			 VALUES ('singleton', ?, 'cupboard', 'cupboard', ?, ?, ?, 1)
 			 ON CONFLICT (id) DO NOTHING`,
-			tenant
+			tenant,
+			owner.issuer,
+			owner.subject,
+			owner.audience
 		);
 
 		if (sleepingWatermark !== undefined) {
@@ -249,9 +261,9 @@ export class CupboardServer extends DurableObject<FixtureEnvironment> {
 
 		if (request.method === 'POST' && url.pathname === '/fixture/seed') {
 			const input: unknown = await request.json();
-			const { tenant } = seedRequestSchema.parse(input);
+			const { tenant, owner } = seedRequestSchema.parse(input);
 
-			this.seed(tenant);
+			this.seed(tenant, owner);
 
 			return json({ tenant, seeded: true });
 		}
