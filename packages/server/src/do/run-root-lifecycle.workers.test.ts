@@ -87,7 +87,12 @@ async function pushWithRoot(
 async function rootTargetRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select()
+			.select({
+				cache: schema.retentionRootTargets.cache,
+				rootName: schema.retentionRootTargets.rootName,
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				storePath: schema.retentionRootTargets.storePath
+			})
 			.from(schema.retentionRootTargets)
 			.all()
 			.toSorted((left, right) =>
@@ -101,7 +106,13 @@ async function rootTargetRows(): Promise<readonly unknown[]> {
 async function retentionRootRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select()
+			.select({
+				cache: schema.retentionRoots.cache,
+				name: schema.retentionRoots.name,
+				expiresAt: schema.retentionRoots.expiresAt,
+				createdAt: schema.retentionRoots.createdAt,
+				updatedAt: schema.retentionRoots.updatedAt
+			})
 			.from(schema.retentionRoots)
 			.all()
 			.map((row) => ({ ...row, expiresAt: row.expiresAt ?? undefined }))
@@ -180,7 +191,15 @@ describe('run root lifecycle', () => {
 		await pushWithRoot(token, gated, runRoot);
 
 		const rows = await runInDurableObject(currentServer(), (instance) =>
-			instance.context.db.select().from(schema.retentionRootTargets).all()
+			instance.context.db
+				.select({
+					cache: schema.retentionRootTargets.cache,
+					rootName: schema.retentionRootTargets.rootName,
+					storePathHash: schema.retentionRootTargets.storePathHash,
+					storePath: schema.retentionRootTargets.storePath
+				})
+				.from(schema.retentionRootTargets)
+				.all()
 		);
 		const gatedRows = rows.filter(
 			(row) => row.storePathHash === gated.storePathHash

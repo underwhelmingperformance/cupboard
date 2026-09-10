@@ -1629,7 +1629,14 @@ export async function blobReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
-		.select()
+		.select({
+			tenant: blobReference.tenant,
+			cache: blobReference.cache,
+			storePathHash: blobReference.storePathHash,
+			generation: blobReference.generation,
+			narHash: blobReference.narHash,
+			cacheGeneration: blobReference.cacheGeneration
+		})
 		.from(blobReference)
 		.all();
 
@@ -1685,7 +1692,14 @@ export async function attestationReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.select()
+		.select({
+			tenant: d1Schema.attestationReference.tenant,
+			cache: d1Schema.attestationReference.cache,
+			storePathHash: d1Schema.attestationReference.storePathHash,
+			generation: d1Schema.attestationReference.generation,
+			predicateType: d1Schema.attestationReference.predicateType,
+			digest: d1Schema.attestationReference.digest
+		})
 		.from(d1Schema.attestationReference)
 		.all();
 

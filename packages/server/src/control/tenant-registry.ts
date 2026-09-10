@@ -433,6 +433,8 @@ export async function setCacheReadCredential(
 				.select({
 					tenant: d1Schema.tenant.id,
 					cache: sql<PrivateStoredCache>`${cache}`.as('cache'),
+					cacheKind: sql<null>`null`.as('cache_kind'),
+					cacheName: sql<null>`null`.as('cache_name'),
 					readUser: sql<ReadUser>`${read.user}`.as('read_user'),
 					readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
 						'read_password_hash'

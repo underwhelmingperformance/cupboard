@@ -439,7 +439,12 @@ describe('commit batching', () => {
 
 		const targets = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.db
-				.select()
+				.select({
+					cache: schema.retentionRootTargets.cache,
+					rootName: schema.retentionRootTargets.rootName,
+					storePathHash: schema.retentionRootTargets.storePathHash,
+					storePath: schema.retentionRootTargets.storePath
+				})
 				.from(schema.retentionRootTargets)
 				.all()
 				.toSorted((left, right) =>
