@@ -348,7 +348,6 @@ describe('cupboard acquisition', () => {
 			setupInputs: setupInputs.map(() => ({
 				'cache-url': '${{ inputs.url }}',
 				cache: '${{ needs.configure.outputs.cache }}',
-				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
 				'read-user': '${{ secrets.read_user }}',
@@ -532,7 +531,6 @@ describe('cohort planning and publication', () => {
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				cache: '${{ needs.configure.outputs.cache }}',
-				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				'root-prefix': '${{ needs.configure.outputs.root-prefix }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				optimise: '${{ inputs.push }}',
@@ -595,7 +593,6 @@ describe('cohort planning and publication', () => {
 				url: '${{ inputs.url }}',
 				'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 				cache: '${{ needs.configure.outputs.cache }}',
-				'private-cache': '${{ needs.configure.outputs.private-cache }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				'read-user': '${{ secrets.read_user }}',
@@ -676,7 +673,6 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'private-cache': '${{ needs.configure.outputs.private-cache }}',
 					'read-user': '${{ secrets.read_user }}',
 					'read-password': '${{ secrets.read_password }}'
 				}
@@ -720,7 +716,6 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'private-cache': '${{ needs.configure.outputs.private-cache }}',
 					'read-user': '${{ secrets.read_user }}',
 					'read-password': '${{ secrets.read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
@@ -784,7 +779,7 @@ describe('resolved publication inputs', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
 		const validation =
-			'for name in PRESET CACHE PRIVATE_CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
+			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
 
 		expect({
 			validation: resolve.includes(validation),
@@ -809,17 +804,12 @@ describe('resolved publication inputs', () => {
 		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
 
 		expect({
-			publicDefault: workflow.on.workflow_call?.inputs.cache?.default,
-			privateDefault:
-				workflow.on.workflow_call?.inputs['private-cache']?.default,
-			publicOutput: workflow.jobs.configure?.outputs?.cache,
-			privateOutput: workflow.jobs.configure?.outputs?.['private-cache'],
-			written: resolve.includes('echo "private-cache=${PRIVATE_CACHE}"')
+			defaultCache: workflow.on.workflow_call?.inputs.cache?.default,
+			output: workflow.jobs.configure?.outputs?.cache,
+			written: resolve.includes('echo "cache=${CACHE}"')
 		}).toStrictEqual({
-			publicDefault: '',
-			privateDefault: '',
-			publicOutput: '${{ steps.resolve.outputs.cache }}',
-			privateOutput: '${{ steps.resolve.outputs.private-cache }}',
+			defaultCache: '',
+			output: '${{ steps.resolve.outputs.cache }}',
 			written: true
 		});
 	});
@@ -846,13 +836,8 @@ describe('resolved publication inputs', () => {
 	// actions/prepare against real inputs.
 	it.each([
 		{
-			name: 'a public and a private destination cache together',
-			condition: 'if [ -n "${CACHE}" ] && [ -n "${PRIVATE_CACHE}" ]; then'
-		},
-		{
 			name: 'a preset alongside an explicit cache selection',
-			condition:
-				'if [ -n "${CACHE}${PRIVATE_CACHE}${ROOT_PREFIX}${TTL}" ]; then'
+			condition: 'if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then'
 		},
 		{
 			name: 'a direct store together with classic builders',

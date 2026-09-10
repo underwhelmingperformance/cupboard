@@ -8,12 +8,12 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
-import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import type { R2CredentialCheck } from '@cupboard/protocol/reports';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
-import type { ParsedSignupResponse } from '@cupboard/protocol/signup';
+import type { SignupResponse } from '@cupboard/protocol/signup';
 import type {
-	ParsedMembershipRebuildResponse,
-	ParsedTenantSummary
+	MembershipRebuildResponse,
+	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ProgressHandle, StepLog } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
@@ -425,11 +425,10 @@ const claimable = {
 	idToken: 'id-token-1'
 } as const;
 
-function tenantSummary(id: string): ParsedTenantSummary {
+function tenantSummary(id: string): TenantSummary {
 	return {
 		id: tenantIdSchema.parse(id),
 		status: 'active',
-		readMode: 'public',
 		ownerIssuer: oidcIssuerSchema.parse(owner.issuer),
 		ownerSubject: oidcSubjectSchema.parse(owner.subject),
 		ownerAudience: oidcAudienceSchema.parse(owner.audience),
@@ -484,11 +483,11 @@ function orpcRejection(status: number): Error {
 
 interface ClientScript {
 	readonly versions?: Scripted<string>[];
-	readonly signup?: Scripted<ParsedSignupResponse>[];
-	readonly lists?: Scripted<ParsedTenantSummary[]>[];
-	readonly creates?: Scripted<ParsedTenantSummary>[];
-	readonly rebuilds?: Scripted<ParsedMembershipRebuildResponse>[];
-	readonly controlChecks?: Scripted<ParsedR2CredentialCheck>[];
+	readonly signup?: Scripted<SignupResponse>[];
+	readonly lists?: Scripted<TenantSummary[]>[];
+	readonly creates?: Scripted<TenantSummary>[];
+	readonly rebuilds?: Scripted<MembershipRebuildResponse>[];
+	readonly controlChecks?: Scripted<R2CredentialCheck>[];
 	readonly publicKeys?: Scripted<string>[];
 	readonly instanceName?: InstanceName;
 	readonly instanceConfigured?: boolean;
@@ -752,7 +751,7 @@ describe('onboardDeployment', () => {
 			createdBodies: [
 				{
 					id: 'builds',
-					readMode: 'public',
+					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
 					ownerAudience: owner.audience
@@ -799,7 +798,7 @@ describe('onboardDeployment', () => {
 			createdBodies: [
 				{
 					id: 'builds',
-					readMode: 'public',
+					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
 					ownerAudience: owner.audience
@@ -978,7 +977,7 @@ describe('onboardDeployment', () => {
 			createdBodies: [
 				{
 					id: 'builds',
-					readMode: 'public',
+					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
 					ownerAudience: owner.audience

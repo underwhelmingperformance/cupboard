@@ -2,26 +2,21 @@ import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	type CacheName,
 	cacheNameSchema,
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	isPrivateCache,
+	type CacheScope,
 	type NixSha256HashString,
-	privateCacheLocalName,
-	privateStoredCache,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
-	type ParsedTokenResponse,
 	refreshTokenGrantType,
 	tokenExchangeGrantType,
+	type TokenResponse,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import {
-	type ParsedSignupResponse,
 	type SignupRequest,
+	type SignupResponse,
 	signupResponseSchema
 } from '@cupboard/protocol/signup';
 import {
@@ -62,20 +57,12 @@ const maximumErrorResponseBytes = 64 * 1024;
 const maximumClientResponseBytes = 16 * 1024 * 1024;
 
 export class CupboardClient {
-	static fromUrl(
-		value: URL,
-		options: string | CupboardClientOptions = DEFAULT_CACHE
-	): CupboardClient {
-		const resolved =
-			typeof options === 'string'
-				? { cache: storedCacheFor(options) }
-				: options;
-
+	static fromUrl(value: URL, options: CupboardClientOptions): CupboardClient {
 		return new CupboardClient(
 			new URL(value),
 			fetch,
-			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
-			resolved.signal
+			options.cache,
+			options.signal
 		);
 	}
 
@@ -86,9 +73,9 @@ export class CupboardClient {
 	constructor(
 		public readonly baseUrl: URL,
 		public readonly fetcher: typeof fetch = fetch,
-		// Keep the cache selector separate from `baseUrl`. Resolving an absolute
+		// Keep the cache scope separate from `baseUrl`. Resolving an absolute
 		// route can discard the base path, including a tenant prefix.
-		public readonly cachePrefix = '',
+		public readonly cache: CacheScope,
 		public readonly signal?: AbortSignal,
 		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
 	) {
@@ -126,12 +113,12 @@ export class CupboardClient {
 		return body.trimEnd();
 	}
 
-	// Contract routes require an explicit cache selector, including `_default`
-	// for the tenant's default cache.
 	private selectorScoped(path: string): string {
-		return this.cachePrefix === ''
-			? `/cache/${DEFAULT_CACHE_SELECTOR}${path}`
-			: `${this.cachePrefix}${path}`;
+		if (this.cache.kind === 'default') {
+			return path;
+		}
+
+		return `/cache/${this.cache.name}${path}`;
 	}
 
 	// Append routes to the complete base path. `new URL('/path', base)` would
@@ -330,7 +317,7 @@ export class CupboardClient {
 	 * external OIDC subject token is the credential, which the server evaluates
 	 * against the deployment's signup gate) and takes a urlencoded body.
 	 */
-	async signup(request: SignupRequest): Promise<ParsedSignupResponse> {
+	async signup(request: SignupRequest): Promise<SignupResponse> {
 		throwIfAborted(this.signal);
 
 		const url = this.resolve('/signup');
@@ -374,7 +361,7 @@ export class CupboardClient {
 		subjectToken: string,
 		subjectTokenType: string,
 		authorizationDetails?: AuthorizationDetails
-	): Promise<ParsedTokenResponse> {
+	): Promise<TokenResponse> {
 		const response = await this.postTokenForm({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
@@ -396,7 +383,7 @@ export class CupboardClient {
 	async tokenExchangeAttenuate(
 		currentToken: string,
 		authorizationDetails: AuthorizationDetails
-	): Promise<ParsedTokenResponse> {
+	): Promise<TokenResponse> {
 		return this.tokenExchange(
 			currentToken,
 			issuedAccessTokenType,
@@ -410,7 +397,7 @@ export class CupboardClient {
 	 * rotates it on every use: the response returns its successor, and the
 	 * presented token is spent whether or not the caller stores the replacement.
 	 */
-	async tokenRefresh(refreshToken: string): Promise<ParsedTokenResponse> {
+	async tokenRefresh(refreshToken: string): Promise<TokenResponse> {
 		const response = await this.postTokenForm({
 			grant_type: refreshTokenGrantType,
 			refresh_token: refreshToken
@@ -421,7 +408,7 @@ export class CupboardClient {
 }
 
 export interface CupboardClientOptions {
-	readonly cache?: StoredCache;
+	readonly cache: CacheScope;
 	readonly signal?: AbortSignal;
 }
 
@@ -464,17 +451,6 @@ function rayOf(response: Response): string | undefined {
 	return response.headers.get('cf-ray') ?? undefined;
 }
 
-// Resolves a caller's optional cache option to its stored name, rejecting a
-// malformed name so the CLI reports it before a request is built. An absent
-// option and the default alias both resolve to the default cache.
-export function storedCacheFor(cache: string | undefined): StoredCache {
-	if (cache === undefined || cache === DEFAULT_CACHE) {
-		return DEFAULT_CACHE;
-	}
-
-	return cacheNameFor(cache);
-}
-
 /**
  * Parses a local cache name before the CLI constructs a request.
  */
@@ -488,47 +464,6 @@ export function cacheNameFor(name: string): CacheName {
 	return parsed.data;
 }
 
-/**
- * Converts a local private-cache name to its stored form. This applies the same
- * validation as `storedCacheFor`.
- */
-export function privateStoredCacheFor(name: string): StoredCache {
-	return privateStoredCache(cacheNameFor(name));
-}
-
-/**
- * The cache-selection options for a command that targets one cache. Commander
- * rejects a command line that sets both options.
- */
-export interface CacheSelectionOptions {
-	readonly cache?: string;
-	readonly privateCache?: string;
-}
-
-/**
- * Resolves the cache targeted by a single-target command. If both options are
- * empty, the command targets the tenant's default cache.
- */
-export function resolveCacheSelection(
-	options: CacheSelectionOptions
-): StoredCache {
-	if (options.privateCache !== undefined) {
-		return privateStoredCacheFor(options.privateCache);
-	}
-
-	return storedCacheFor(options.cache);
-}
-
-export function cachePrefixFor(cache: StoredCache): string {
-	if (cache === DEFAULT_CACHE) {
-		return '';
-	}
-
-	// Private-cache routes use the local name as one path segment. The stored name
-	// contains a slash, so it cannot be used in that segment.
-	if (isPrivateCache(cache)) {
-		return `/private-cache/${privateCacheLocalName(cache)}`;
-	}
-
-	return `/cache/${cache}`;
+export function cacheLabel(cache: CacheScope): string {
+	return cache.kind === 'default' ? '(default)' : cache.name;
 }

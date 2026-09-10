@@ -12,6 +12,7 @@ import { decodeProtectedHeader, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	accessTokenType,
 	AccessTokenVerificationError,
 	type AuthPublicKey,
 	bearerToken,
@@ -117,7 +118,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:commit', 'root:set'],
-					cache: 'builds',
+					cache: { kind: 'named', name: 'builds' },
 					root: 'github:owner/'
 				}
 			])
@@ -187,7 +188,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 		expect(decodeProtectedHeader(token)).toStrictEqual({
 			alg: 'EdDSA',
-			typ: 'cupboard-access+jwt',
+			typ: accessTokenType,
 			kid
 		});
 	});
@@ -398,7 +399,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({});
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: accessTokenType, kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -421,7 +422,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					authorization_details: [{ type: 'unknown_grant' }]
 				});
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: accessTokenType, kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -445,7 +446,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
 				return jwt
-					.setProtectedHeader({ alg: 'HS256', typ: 'cupboard-access+jwt', kid })
+					.setProtectedHeader({ alg: 'HS256', typ: accessTokenType, kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -466,7 +467,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: accessTokenType, kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setIssuedAt(issuedAt)

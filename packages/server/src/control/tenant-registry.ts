@@ -1,9 +1,4 @@
-import {
-	type CacheName,
-	type PrivateStoredCache,
-	privateStoredCache,
-	type TenantId
-} from '@cupboard/nix-store/scalars';
+import { type CacheScope, type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -12,15 +7,17 @@ import {
 import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
-	ParsedTenantCreateBody,
-	ParsedTenantReadCredential,
-	ParsedTenantSummary
+	TenantCreateBody,
+	TenantReadCredential,
+	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
 import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
+import { cacheIdentityCondition } from '../db/cache.ts';
+import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -28,6 +25,11 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
+import {
+	cacheCatalogueVersion,
+	cacheMigrationColumns
+} from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -47,7 +49,7 @@ interface ReadVerifierColumns {
 }
 
 async function readVerifierColumnsForInsert(
-	read: ParsedTenantCreateBody['read']
+	read: TenantCreateBody['read']
 ): Promise<ReadVerifierColumns> {
 	if (read === undefined) {
 		return {
@@ -66,11 +68,10 @@ async function readVerifierColumnsForInsert(
 	};
 }
 
-function toSummary(row: TenantRow): ParsedTenantSummary {
+function toSummary(row: TenantRow): TenantSummary {
 	return {
 		id: row.id,
 		status: row.status,
-		readMode: row.readMode,
 		ownerIssuer: oidcIssuerSchema.parse(row.ownerIssuer),
 		ownerSubject: oidcSubjectSchema.parse(row.ownerSubject),
 		ownerAudience: oidcAudienceSchema.parse(row.ownerAudience),
@@ -80,13 +81,28 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 }
 
 async function hasSameConfigExceptIssuer(
+	database: Database,
 	row: TenantRow,
-	body: ParsedTenantCreateBody
+	body: TenantCreateBody
 ): Promise<boolean> {
 	const isReadMatching = await hasSameReadVerifier(row, body.read);
+	const defaultCache = await database
+		.select({ access: d1Schema.cacheLifecycle.access })
+		.from(d1Schema.cacheLifecycle)
+		.where(
+			and(
+				eq(d1Schema.cacheLifecycle.tenant, row.id),
+				cacheIdentityCondition(
+					d1Schema.cacheLifecycle.cacheKind,
+					d1Schema.cacheLifecycle.cacheName,
+					{ kind: 'default' }
+				)
+			)
+		)
+		.get();
 
 	return (
-		row.readMode === body.readMode &&
+		defaultCache?.access === body.defaultCacheAccess &&
 		row.ownerSubject === body.ownerSubject &&
 		row.ownerAudience === body.ownerAudience &&
 		isReadMatching
@@ -96,14 +112,14 @@ async function hasSameConfigExceptIssuer(
 async function repairLegacyOwnerIssuer(
 	database: Database,
 	row: TenantRow,
-	body: ParsedTenantCreateBody
+	body: TenantCreateBody
 ): Promise<TenantRow | undefined> {
 	const legacyIssuer = legacyNormalisedIssuer(body.ownerIssuer);
 
 	if (
 		legacyIssuer === undefined ||
 		row.ownerIssuer !== legacyIssuer ||
-		!(await hasSameConfigExceptIssuer(row, body))
+		!(await hasSameConfigExceptIssuer(database, row, body))
 	) {
 		return undefined;
 	}
@@ -128,7 +144,7 @@ async function repairLegacyOwnerIssuer(
 
 async function hasSameReadVerifier(
 	row: TenantRow,
-	read: ParsedTenantCreateBody['read']
+	read: TenantCreateBody['read']
 ): Promise<boolean> {
 	if (read === undefined) {
 		return (
@@ -153,44 +169,88 @@ async function hasSameReadVerifier(
 	);
 }
 
-// Write the authoritative tenant row before configuring the Durable Object and
-// publishing membership hints. Requests therefore cannot reach an unconfigured
-// object. A matching retry can repeat the remaining provisioning steps; another
-// configuration for the same slug is a conflict.
+// Create the tenant, its default cache and its usage counter in one D1 batch.
+// A concurrent matching request is idempotent; a different configuration for
+// the same slug is a conflict after the stored rows are compared.
 export async function ensureTenant(
 	database: Database,
-	body: ParsedTenantCreateBody,
+	body: TenantCreateBody,
 	now: IsoTimestamp
-): Promise<ParsedTenantSummary> {
+): Promise<TenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
-	const inserted = await database
-		.insert(d1Schema.tenant)
-		.values({
-			id: body.id,
-			status: 'active',
-			readMode: body.readMode,
-			ownerIssuer: body.ownerIssuer,
-			ownerSubject: body.ownerSubject,
-			ownerAudience: body.ownerAudience,
-			configVersion: 1,
-			createdAt: now,
-			readUser: verifier.readUser,
-			readPasswordHash: verifier.readPasswordHash,
-			readPasswordSalt: verifier.readPasswordSalt
+	const identity = cacheMigrationColumns(
+		{ kind: 'default' },
+		body.defaultCacheAccess
+	);
+	const tenantFilter = liveTenantFilter(body.id);
+	const legacyCache = sql<string>`${identity.legacyCache}`.as('cache');
+	const cacheKind = sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
+		'cache_kind'
+	);
+	const cacheName = sql<typeof identity.cacheName>`${identity.cacheName}`.as(
+		'cache_name'
+	);
+	const cacheAccess = sql<
+		typeof body.defaultCacheAccess
+	>`${body.defaultCacheAccess}`.as('access');
+	const generation = sql<number>`${firstCacheGeneration}`.as('generation');
+	const deletedAt = sql<null>`null`.as('deleted_at');
+	const updatedAt = sql<IsoTimestamp>`${now}`.as('updated_at');
+	const zero = sql<number>`0`;
+	const quota = body.quotaBytes ?? sql<null>`null`;
+	const quotaBytes = sql<number | null>`${quota}`.as('quota_bytes');
+	const cacheRow = database
+		.select({
+			tenant: d1Schema.tenant.id,
+			legacyCache,
+			cacheKind,
+			cacheName,
+			access: cacheAccess,
+			generation,
+			deletedAt,
+			updatedAt
 		})
-		.onConflictDoNothing()
-		.returning();
-	const row = inserted[0];
+		.from(d1Schema.tenant)
+		.where(tenantFilter);
+	const usageRow = database
+		.select({
+			tenant: d1Schema.tenant.id,
+			bytes: zero.as('bytes'),
+			narinfos: zero.as('narinfos'),
+			blobs: zero.as('blobs'),
+			casBytes: zero.as('cas_bytes'),
+			casBlobs: zero.as('cas_blobs'),
+			quotaBytes,
+			updatedAt
+		})
+		.from(d1Schema.tenant)
+		.where(tenantFilter);
 
-	if (row !== undefined) {
-		await ensureUsageRow(database, body, now);
+	await database.batch([
+		database
+			.insert(migrationSchema.tenants)
+			.values({
+				id: body.id,
+				status: 'active',
+				readMode: body.defaultCacheAccess,
+				ownerIssuer: body.ownerIssuer,
+				ownerSubject: body.ownerSubject,
+				ownerAudience: body.ownerAudience,
+				configVersion: 1,
+				cacheCatalogueVersion,
+				createdAt: now,
+				readUser: verifier.readUser,
+				readPasswordHash: verifier.readPasswordHash,
+				readPasswordSalt: verifier.readPasswordSalt
+			})
+			.onConflictDoNothing(),
+		database
+			.insert(migrationSchema.cacheLifecycles)
+			.select(cacheRow)
+			.onConflictDoNothing(),
+		database.insert(d1Schema.tenantUsage).select(usageRow).onConflictDoNothing()
+	]);
 
-		return toSummary(row);
-	}
-
-	// Validate the existing configuration before touching usage. Otherwise a
-	// conflicting request could create a usage row with the wrong quota and make a
-	// later matching retry fail.
 	const existing = await loadTenant(database, body.id);
 
 	// Never reuse a slug after offboarding has begun; doing so could restore the
@@ -203,7 +263,7 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	if (!(await hasSameConfigExceptIssuer(existing, body))) {
+	if (!(await hasSameConfigExceptIssuer(database, existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
@@ -216,9 +276,6 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	// A crash can leave the tenant row without its usage row. Recreate the usage
-	// row idempotently, but accept an existing row only when its quota matches.
-	await ensureUsageRow(database, body, now);
 	const existingQuota = await loadQuota(database, body.id);
 
 	if (existingQuota !== body.quotaBytes) {
@@ -241,33 +298,12 @@ export async function ensureTenant(
 
 	if (
 		concurrent?.ownerIssuer !== body.ownerIssuer ||
-		!(await hasSameConfigExceptIssuer(concurrent, body))
+		!(await hasSameConfigExceptIssuer(database, concurrent, body))
 	) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
 	return toSummary(concurrent);
-}
-
-// The usage row must exist before the tenant accepts writes. Conflict handling
-// preserves any quota already stored during a provisioning retry.
-async function ensureUsageRow(
-	database: Database,
-	body: ParsedTenantCreateBody,
-	now: IsoTimestamp
-): Promise<void> {
-	await database
-		.insert(d1Schema.tenantUsage)
-		.values({
-			tenant: body.id,
-			bytes: 0,
-			narinfos: 0,
-			blobs: 0,
-			quotaBytes: body.quotaBytes,
-			updatedAt: now
-		})
-		.onConflictDoNothing()
-		.run();
 }
 
 async function loadTenant(
@@ -296,7 +332,7 @@ async function loadQuota(
 
 export async function listTenants(
 	database: Database
-): Promise<ParsedTenantSummary[]> {
+): Promise<TenantSummary[]> {
 	const rows = await database
 		.select()
 		.from(d1Schema.tenant)
@@ -313,7 +349,7 @@ export async function setTenantStatus(
 	database: Database,
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
-): Promise<ParsedTenantSummary> {
+): Promise<TenantSummary> {
 	// The conditional update cannot move an offboarded tenant back to offboarding.
 	// If it matches no row, the following read distinguishes a missing tenant from
 	// an offboarded one.
@@ -348,7 +384,7 @@ export async function setTenantStatus(
 export async function resumeTenant(
 	database: Database,
 	id: TenantId
-): Promise<ParsedTenantSummary> {
+): Promise<TenantSummary> {
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status: 'active' })
@@ -376,24 +412,13 @@ export async function resumeTenant(
 }
 
 /**
-Changes the read mode only while the tenant is active or suspended.
-*/
-export async function setTenantReadMode(
-	database: Database,
-	id: TenantId,
-	readMode: 'public' | 'private'
-): Promise<ParsedTenantSummary> {
-	return updateLiveTenant(database, id, { readMode });
-}
-
-/**
 Replaces the read credential only while the tenant is active or suspended.
 */
 export async function setTenantReadCredential(
 	database: Database,
 	id: TenantId,
-	read: ParsedTenantReadCredential
-): Promise<ParsedTenantSummary> {
+	read: TenantReadCredential
+): Promise<TenantSummary> {
 	const readPasswordSalt = generateReadPasswordSalt();
 
 	return updateLiveTenant(database, id, {
@@ -404,15 +429,15 @@ export async function setTenantReadCredential(
 }
 
 /**
- * Replaces one private cache's own read credential, only while the tenant is
- * active or suspended. While the row exists, only the cache-specific credential
- * authenticates reads of that cache.
+ * Replaces one cache's read credential while the tenant is active or
+ * suspended. While the row exists, it takes precedence over the tenant
+ * fallback credential.
  */
 export async function setCacheReadCredential(
 	database: Database,
 	id: TenantId,
-	cacheName: CacheName,
-	read: ParsedTenantReadCredential,
+	cache: CacheScope,
+	read: TenantReadCredential,
 	now: IsoTimestamp
 ): Promise<void> {
 	await requireLiveTenant(database, id);
@@ -422,42 +447,46 @@ export async function setCacheReadCredential(
 		read.password,
 		readPasswordSalt
 	);
-	const cache = privateStoredCache(cacheName);
 	// Select from a live tenant in the same statement as the upsert. If
 	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
 	// recreate the credential that cleanup deleted.
-	const written = await database
-		.insert(d1Schema.tenantCacheReadCredential)
-		.select(
-			database
-				.select({
-					tenant: d1Schema.tenant.id,
-					cache: sql<PrivateStoredCache>`${cache}`.as('cache'),
-					cacheKind: sql<null>`null`.as('cache_kind'),
-					cacheName: sql<null>`null`.as('cache_name'),
-					readUser: sql<ReadUser>`${read.user}`.as('read_user'),
-					readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
-						'read_password_hash'
-					),
-					readPasswordSalt: sql<ReadPasswordSalt>`${readPasswordSalt}`.as(
-						'read_password_salt'
-					),
-					createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
-				})
-				.from(d1Schema.tenant)
-				.where(liveTenantFilter(id))
-		)
+	const identity = cacheMigrationColumns(cache, 'private');
+	const insert = database.insert(migrationSchema.cacheReadCredentials).select(
+		database
+			.select({
+				tenant: d1Schema.tenant.id,
+				legacyCache: sql<string>`${identity.legacyCache}`.as('cache'),
+				cacheKind: sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
+					'cache_kind'
+				),
+				cacheName: sql<typeof identity.cacheName>`${identity.cacheName}`.as(
+					'cache_name'
+				),
+				readUser: sql<ReadUser>`${read.user}`.as('read_user'),
+				readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
+					'read_password_hash'
+				),
+				readPasswordSalt: sql<ReadPasswordSalt>`${readPasswordSalt}`.as(
+					'read_password_salt'
+				),
+				createdAt: sql<IsoTimestamp>`${now}`.as('created_at')
+			})
+			.from(d1Schema.tenant)
+			.where(liveTenantFilter(id))
+	);
+	const set = {
+		readUser: read.user,
+		readPasswordHash,
+		readPasswordSalt,
+		createdAt: now
+	};
+	const written = await insert
 		.onConflictDoUpdate({
 			target: [
-				d1Schema.tenantCacheReadCredential.tenant,
-				d1Schema.tenantCacheReadCredential.cache
+				migrationSchema.cacheReadCredentials.tenant,
+				migrationSchema.cacheReadCredentials.legacyCache
 			],
-			set: {
-				readUser: read.user,
-				readPasswordHash,
-				readPasswordSalt,
-				createdAt: now
-			}
+			set
 		})
 		.run();
 
@@ -467,18 +496,17 @@ export async function setCacheReadCredential(
 }
 
 /**
- * Removes one private cache's own read credential, only while the tenant is
- * active or suspended. Readers of that cache then authenticate with the tenant
- * credential. The operation is idempotent.
+ * Removes one cache's read credential while the tenant is active or suspended.
+ * Readers of a private cache then authenticate with the tenant credential. The
+ * operation is idempotent.
  */
 export async function clearCacheReadCredential(
 	database: Database,
 	id: TenantId,
-	cacheName: CacheName
+	cache: CacheScope
 ): Promise<void> {
 	await requireLiveTenant(database, id);
 
-	const cache = privateStoredCache(cacheName);
 	const liveTenantRow = database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
@@ -491,7 +519,11 @@ export async function clearCacheReadCredential(
 		.where(
 			and(
 				eq(d1Schema.tenantCacheReadCredential.tenant, id),
-				eq(d1Schema.tenantCacheReadCredential.cache, cache),
+				cacheIdentityCondition(
+					d1Schema.tenantCacheReadCredential.cacheKind,
+					d1Schema.tenantCacheReadCredential.cacheName,
+					cache
+				),
 				exists(liveTenantRow)
 			)
 		)
@@ -553,7 +585,7 @@ async function requireLiveTenant(
 export async function clearTenantReadCredential(
 	database: Database,
 	id: TenantId
-): Promise<ParsedTenantSummary> {
+): Promise<TenantSummary> {
 	return updateLiveTenant(database, id, {
 		readUser: sql`null`,
 		readPasswordHash: sql`null`,
@@ -565,7 +597,7 @@ async function updateLiveTenant(
 	database: Database,
 	id: TenantId,
 	set: SQLiteUpdateSetSource<typeof d1Schema.tenant>
-): Promise<ParsedTenantSummary> {
+): Promise<TenantSummary> {
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set(set)

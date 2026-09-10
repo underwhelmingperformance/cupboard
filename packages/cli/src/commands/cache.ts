@@ -1,17 +1,16 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CacheAccessMode,
 	type CachePriority,
 	cachePrioritySchema,
-	DEFAULT_CACHE,
-	selectorForCache,
-	storedCacheSchema
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import type {
+	CacheListResponse,
+	CacheRemoveResponse,
 	CacheSummary,
-	ParsedCacheListResponse,
-	ParsedCacheRemoveResponse,
-	ParsedCacheSummary
+	CacheUpdateBody
 } from '@cupboard/protocol/caches';
 import {
 	formatCount,
@@ -22,14 +21,31 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import { parseCacheAccess } from '../cache-access.ts';
+import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
+import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { InvalidCachePriorityError } from '../errors.ts';
+import {
+	InvalidCachePriorityError,
+	NamedCacheTargetRequiredError
+} from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CacheCreateOptions {
+	readonly access?: CacheAccessMode;
 	readonly priority?: CachePriority;
+}
+
+interface CacheSetAccessOptions {
+	readonly access: CacheAccessMode;
+}
+
+interface CacheSetPriorityOptions {
+	readonly priority: CachePriority;
 }
 
 interface CacheRemoveOptions {
@@ -38,15 +54,20 @@ interface CacheRemoveOptions {
 }
 
 export interface CacheClient {
-	list(): Promise<ParsedCacheListResponse>;
-	put(input: {
-		cacheName: string;
-		priority: number;
-	}): Promise<ParsedCacheSummary>;
+	list(): Promise<CacheListResponse>;
+	get: CacheScopedClient<Record<never, never>, CacheSummary>;
+	put: CacheScopedClient<
+		{
+			access: CacheAccessMode;
+			priority: number;
+		},
+		CacheSummary
+	>;
+	update: CacheScopedClient<CacheUpdateBody, CacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
 		query?: { force?: boolean };
-	}): Promise<ParsedCacheRemoveResponse>;
+	}): Promise<CacheRemoveResponse>;
 }
 
 export function parsePriority(value: string): CachePriority {
@@ -71,16 +92,21 @@ export function registerCacheCommands(
 ): void {
 	const cache = program
 		.command('cache')
-		.description('Manage named caches: list, create, inspect and remove.');
+		.description(
+			'Manage caches: list, create, inspect, update properties and remove.'
+		);
 
 	cache
 		.command('list')
 		.description('List the caches, their priority and their store-path count.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
+			const { tenantUrl } = cacheTargetFromUrl(url);
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(tenantUrl, {
+				credential: cachedOwnerProvider(tenantUrl, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 
@@ -89,59 +115,181 @@ export function registerCacheCommands(
 
 	cache
 		.command('create')
-		.description('Create or update a named cache with the given priority.')
+		.description('Create a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'cache name')
+		.argument('[name]', 'cache name when the URL does not select one')
+		.option(
+			'--access <mode>',
+			'read access: public or private',
+			parseCacheAccess
+		)
 		.option(
 			'--priority <n>',
 			'Nix substituter priority (lower is preferred)',
 			parsePriority
 		)
-		.action(async (url: URL, name: string, options: CacheCreateOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheCreateOptions
+			) => {
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
 
-			await runCacheCreate(
-				name,
-				options.priority ?? CacheInfo.default.priority,
-				reporter,
-				rpc.caches
-			);
-		});
+				if (target.cache.kind === 'default') {
+					throw new NamedCacheTargetRequiredError('Cache creation');
+				}
+
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential: cachedOwnerProvider(target.tenantUrl, {
+						signal: programOptions.signal
+					}),
+					signal: programOptions.signal
+				});
+
+				await runCacheCreate(
+					target.cache,
+					options.access ?? 'public',
+					options.priority ?? CacheInfo.default.priority,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
+		.command('set-access')
+		.description("Set a cache's read access.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.requiredOption(
+			'--access <mode>',
+			'read access: public or private',
+			parseCacheAccess
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheSetAccessOptions
+			) => {
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential: cachedOwnerProvider(target.tenantUrl, {
+						signal: programOptions.signal
+					}),
+					signal: programOptions.signal
+				});
+
+				await runCacheSetAccess(
+					target.cache,
+					options.access,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
+		.command('set-priority')
+		.description("Set a cache's Nix substituter priority.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.requiredOption(
+			'--priority <n>',
+			'Nix substituter priority (lower is preferred)',
+			parsePriority
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheSetPriorityOptions
+			) => {
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential: cachedOwnerProvider(target.tenantUrl, {
+						signal: programOptions.signal
+					}),
+					signal: programOptions.signal
+				});
+
+				await runCacheSetPriority(
+					target.cache,
+					options.priority,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
 
 	cache
 		.command('remove')
 		.description('Remove a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'cache name')
+		.argument('[name]', 'cache name when the URL does not select one')
 		.option('--force', 'remove even when the cache still holds store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: URL, name: string, options: CacheRemoveOptions) => {
-			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheRemoveOptions
+			) => {
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
 
-			await runCacheRemove(name, options.force ?? false, ui, rpc.caches);
-		});
+				if (target.cache.kind === 'default') {
+					throw new NamedCacheTargetRequiredError('Cache removal');
+				}
+
+				const ui = commandUi(program, programOptions, {
+					assumeYes: options.yes
+				});
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential: cachedOwnerProvider(target.tenantUrl, {
+						signal: programOptions.signal
+					}),
+					signal: programOptions.signal
+				});
+
+				await runCacheRemove(
+					target.cache.name,
+					options.force ?? false,
+					ui,
+					rpc.caches
+				);
+			}
+		);
 
 	cache
 		.command('inspect')
 		.description("Show one cache's priority and store-path count.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'cache name')
-		.action(async (url: URL, name: string) => {
+		.argument('[name]', 'named cache; omit it for the default cache')
+		.action(async (url: URL, name: string | undefined) => {
+			const urlTarget = cacheTargetFromUrl(url);
+			const target =
+				name === undefined ? urlTarget : cacheTargetWithName(urlTarget, name);
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(target.tenantUrl, {
+				credential: cachedOwnerProvider(target.tenantUrl, {
+					signal: programOptions.signal
+				}),
 				signal: programOptions.signal
 			});
 
-			await runCacheInspect(name, reporter, rpc.caches);
+			await runCacheInspect(target.cache, reporter, rpc.caches);
 		});
 }
 
@@ -162,13 +310,43 @@ export async function runCacheList(
 }
 
 export async function runCacheCreate(
-	name: string,
+	cache: Extract<CacheScope, { readonly kind: 'named' }>,
+	access: CacheAccessMode,
 	priority: CachePriority,
 	reporter: Reporter,
 	client: Pick<CacheClient, 'put'>
 ): Promise<void> {
 	const summary = await reporter.phase('Creating cache', () =>
-		client.put({ cacheName: name, priority })
+		callInCache(client.put, cache, {
+			access,
+			priority
+		})
+	);
+
+	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheSetAccess(
+	cache: CacheScope,
+	access: CacheAccessMode,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	const summary = await reporter.phase('Setting cache access', () =>
+		callInCache(client.update, cache, { kind: 'access', access })
+	);
+
+	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheSetPriority(
+	cache: CacheScope,
+	priority: CachePriority,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'update'>
+): Promise<void> {
+	const summary = await reporter.phase('Setting cache priority', () =>
+		callInCache(client.update, cache, { kind: 'priority', priority })
 	);
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
@@ -181,7 +359,7 @@ export async function runCacheRemove(
 	client: CacheClient
 ): Promise<void> {
 	const outcome = await ui.confirm({
-		message: `Remove cache ${cacheLabel(name)}?`,
+		message: `Remove cache ${name}?`,
 		detail: shouldForce
 			? 'With --force this removes the cache and every store path it holds.'
 			: 'The cache must be empty; pass --force to remove one that still holds paths.'
@@ -204,7 +382,7 @@ export async function runCacheRemove(
 		kind: 'cache',
 		data: result,
 		rows: [
-			{ label: 'Cache', value: cacheLabel(result.name) },
+			{ label: 'Cache', value: cacheLabel(result.scope) },
 			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' },
 			{
 				label: 'Store paths removed',
@@ -215,27 +393,44 @@ export async function runCacheRemove(
 }
 
 export async function runCacheInspect(
-	name: string,
+	cache: CacheScope,
 	reporter: Reporter,
-	client: Pick<CacheClient, 'list'>
+	client: Pick<CacheClient, 'get'>
 ): Promise<void> {
-	const { caches } = await reporter.phase('Inspecting cache', () =>
-		client.list()
-	);
-	const summary = caches.find(
-		(candidate) => cacheSelector(candidate.name) === name
+	const summary = await reporter.phase('Inspecting cache', () =>
+		exactCache(client.get, cache)
 	);
 
 	if (summary === undefined) {
-		reporter.info(`No cache named ${name}.`);
+		reporter.info(
+			cache.kind === 'default'
+				? 'The default cache does not exist.'
+				: `No cache named ${cache.name}.`
+		);
 		return;
 	}
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
 }
 
+async function exactCache(
+	client: CacheClient['get'],
+	cache: CacheScope
+): Promise<CacheSummary | undefined> {
+	try {
+		return await callInCache(client, cache, {});
+	} catch (error) {
+		if (isRpcNotFoundError(error)) {
+			return undefined;
+		}
+
+		throw error;
+	}
+}
+
 function cacheRow(summary: CacheSummary): ResultRow {
 	const parts = [
+		summary.access,
 		`priority ${String(summary.priority)}`,
 		`${formatCount(summary.storePaths)} path(s)`
 	];
@@ -251,7 +446,7 @@ function cacheRow(summary: CacheSummary): ResultRow {
 	}
 
 	return {
-		label: cacheLabel(summary.name),
+		label: cacheLabel(summary.scope),
 		value: parts.join('; ')
 	};
 }
@@ -260,7 +455,8 @@ function cacheRow(summary: CacheSummary): ResultRow {
 // from a server that predates it lists without them.
 function summaryRows(summary: CacheSummary): ResultRow[] {
 	const rows: ResultRow[] = [
-		{ label: 'Cache', value: cacheLabel(summary.name) },
+		{ label: 'Cache', value: cacheLabel(summary.scope) },
+		{ label: 'Access', value: summary.access },
 		{ label: 'Priority', value: String(summary.priority) },
 		{ label: 'Store paths', value: formatCount(summary.storePaths) }
 	];
@@ -280,16 +476,4 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 	}
 
 	return rows;
-}
-
-// Cache summaries contain stored names; CLI arguments and output use
-// selectors.
-function cacheSelector(name: string): string {
-	const cache = storedCacheSchema.safeParse(name);
-
-	return cache.success ? selectorForCache(cache.data) : name;
-}
-
-function cacheLabel(name: string): string {
-	return name === DEFAULT_CACHE ? '(default)' : cacheSelector(name);
 }

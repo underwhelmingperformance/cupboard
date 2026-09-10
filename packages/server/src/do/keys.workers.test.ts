@@ -1,9 +1,9 @@
 import { signingKeyGenerationSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
-	KeyAbortResponse,
-	KeyRetireResponse,
-	KeyRotateResponse
+	KeyAbortResponseInput,
+	KeyRetireResponseInput,
+	KeyRotateResponseInput
 } from '@cupboard/protocol/keys';
 import {
 	keyAbortResponseSchema,
@@ -51,7 +51,7 @@ async function drainKeyBackfill(): Promise<void> {
 
 async function rotate(
 	token: string
-): Promise<{ readonly status: number; readonly body: KeyRotateResponse }> {
+): Promise<{ readonly status: number; readonly body: KeyRotateResponseInput }> {
 	const response = await authorisedFetch('/keys/rotate', token, {
 		method: 'POST'
 	});
@@ -65,7 +65,7 @@ async function rotate(
 async function retire(
 	token: string,
 	id: string
-): Promise<{ readonly status: number; readonly body: KeyRetireResponse }> {
+): Promise<{ readonly status: number; readonly body: KeyRetireResponseInput }> {
 	const response = await authorisedFetch(`/keys/retire/${id}`, token, {
 		method: 'POST'
 	});
@@ -79,7 +79,7 @@ async function retire(
 async function abort(
 	token: string,
 	id: string
-): Promise<{ readonly status: number; readonly body: KeyAbortResponse }> {
+): Promise<{ readonly status: number; readonly body: KeyAbortResponseInput }> {
 	const response = await authorisedFetch(`/keys/abort/${id}`, token, {
 		method: 'POST'
 	});
@@ -276,7 +276,9 @@ describe('signing key rotation', () => {
 					.run();
 			});
 			await env.BLOBS.put(
-				narInfoObjectKey(fixtureTenant, before.storePathHash),
+				narInfoObjectKey(fixtureTenant, before.storePathHash, {
+					kind: 'default'
+				}),
 				oldNarInfo.render(),
 				{
 					customMetadata: {
@@ -484,7 +486,7 @@ describe('signing key rotation', () => {
 					message: 'purge unavailable'
 				}
 			},
-			purgeCalls: [[[`narinfo:v1:_default:${before.storePathHash}`]]],
+			purgeCalls: [[[`narinfo:v1:default:${before.storePathHash}`]]],
 			retryAlarmAt: Date.now() + 30_000
 		});
 	});
@@ -618,7 +620,7 @@ describe('signing key rotation', () => {
 		const planRowSchema = z.object({ detail: z.string() });
 		const plans = await runInDurableObject(currentServer(), (instance) => ({
 			backfill: instance.context.db.all(
-				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL ORDER BY signature_generation, cache, store_path_hash LIMIT ${32}`
+				sql`EXPLAIN QUERY PLAN SELECT * FROM narinfo WHERE signature_generation < ${2} AND pending_signature_generation IS NULL ORDER BY signature_generation, cache_id, store_path_hash LIMIT ${32}`
 			),
 			continuation: instance.context.db.all(
 				sql`EXPLAIN QUERY PLAN SELECT * FROM cache_purge_continuation WHERE kind = ${'backfill'} ORDER BY created_at LIMIT ${1}`

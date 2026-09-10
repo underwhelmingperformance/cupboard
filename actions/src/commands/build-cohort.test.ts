@@ -16,8 +16,7 @@ import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
+	type CacheScope,
 	storeDirectorySchema,
 	storePathBasenameSchema,
 	storePathSchema,
@@ -40,7 +39,6 @@ import {
 } from '../child-process.ts';
 import { runCupboard } from '../cupboard-run.ts';
 import {
-	CacheSelectionConflictError,
 	CohortJsonInvalidError,
 	CohortJsonSchemaError,
 	CohortPlanCommandError,
@@ -113,20 +111,13 @@ const floatingDevelopmentPath =
 	'/nix/store/8123456789abcdfghijklmnpqrsvwxyz-float-dev';
 const referencePath = '/nix/store/5123456789abcdfghijklmnpqrsvwxyz-ref';
 const leftUpstreamPath = '/nix/store/6123456789abcdfghijklmnpqrsvwxyz-up';
-const publicCache = cacheNameSchema.parse('builds');
-const privateCache = privateStoredCache(cacheNameSchema.parse('release'));
-
-/**
- * The cache-selecting flag and its value in one cupboard argv. An argv that
- * names no cache addresses the tenant's default cache and yields `[]`.
- */
-function cacheSelectionOf(argv: readonly string[]): readonly string[] {
-	const index = argv.findIndex(
-		(argument) => argument === '--cache' || argument === '--private-cache'
-	);
-
-	return index === -1 ? [] : argv.slice(index, index + 2);
-}
+const defaultCache = { kind: 'default' } as const satisfies CacheScope;
+const namedCache = (value: string) =>
+	({
+		kind: 'named',
+		name: cacheNameSchema.parse(value)
+	}) as const satisfies CacheScope;
+const buildsCache = namedCache('builds');
 
 function argumentValue(
 	argv: readonly string[],
@@ -394,7 +385,7 @@ describe('resolveBuildCohortInputs', () => {
 			],
 			url: 'https://cache.example.test/t/acme',
 			cupboardPath: '/opt/cupboard/cupboard',
-			cache: '',
+			cache: defaultCache,
 			reuseView: '',
 			ttl: '',
 			readUser: '',
@@ -405,16 +396,11 @@ describe('resolveBuildCohortInputs', () => {
 	});
 
 	it.each([
-		{ name: 'no cache input', options: {}, expected: DEFAULT_CACHE },
+		{ name: 'no cache input', options: {}, expected: defaultCache },
 		{
 			name: 'the cache input',
 			options: { cache: 'builds' },
-			expected: publicCache
-		},
-		{
-			name: 'the private-cache input',
-			options: { privateCache: 'release' },
-			expected: privateCache
+			expected: buildsCache
 		}
 	])('resolves the destination named by $name', ({ options, expected }) => {
 		const inputs = resolveBuildCohortInputs(
@@ -424,16 +410,7 @@ describe('resolveBuildCohortInputs', () => {
 			}
 		);
 
-		expect(inputs.cache).toBe(expected);
-	});
-
-	it('refuses a public and a private destination together', () => {
-		expect(() =>
-			resolveBuildCohortInputs(
-				{ ...baseOptions(), cache: 'builds', privateCache: 'release' },
-				{ RUNNER_TEMP: '/tmp' }
-			)
-		).toThrow(CacheSelectionConflictError);
+		expect(inputs.cache).toStrictEqual(expected);
 	});
 
 	it('enables the uniform typed build-failure boundary explicitly', () => {
@@ -4312,9 +4289,9 @@ describe('planReprobeArguments', () => {
 		readonly extra: readonly string[];
 	}>([
 		{
-			name: 'a public cache on this runner asks for nothing more',
+			name: 'the default cache on this runner asks for nothing more',
 			inputs: {
-				cache: DEFAULT_CACHE,
+				cache: defaultCache,
 				reuseView: '',
 				readUser: '',
 				readPassword: ''
@@ -4324,14 +4301,12 @@ describe('planReprobeArguments', () => {
 		{
 			name: 'a named cache, view and credential all travel',
 			inputs: {
-				cache: publicCache,
+				cache: buildsCache,
 				reuseView: 'pr-view',
 				readUser: 'reader',
 				readPassword: 'secret'
 			},
 			extra: [
-				'--cache',
-				'builds',
 				'--reuse-view',
 				'pr-view',
 				'--read-user',
@@ -4339,32 +4314,20 @@ describe('planReprobeArguments', () => {
 				'--read-password',
 				'secret'
 			]
-		},
-		{
-			name: 'a private cache travels by its local name',
-			inputs: {
-				cache: privateCache,
-				reuseView: '',
-				readUser: 'reader',
-				readPassword: 'secret'
-			},
-			extra: [
-				'--private-cache',
-				'release',
-				'--read-user',
-				'reader',
-				'--read-password',
-				'secret'
-			]
 		}
 	])('$name', ({ inputs, extra }) => {
+		const cacheTarget =
+			inputs.cache.kind === 'default'
+				? canonicalHref(url)
+				: `${canonicalHref(url)}/cache/${inputs.cache.name}`;
+
 		expect(
 			planReprobeArguments({ url, ...inputs }, '/tmp/targets.json')
 		).toStrictEqual([
 			'--no-colour',
 			'plan',
 			'reprobe',
-			canonicalHref(url),
+			cacheTarget,
 			'--targets-file',
 			'/tmp/targets.json',
 			...extra
@@ -4389,10 +4352,10 @@ describe('cohortReceiptPushArguments', () => {
 		readonly extra: readonly string[];
 	}>([
 		{
-			name: 'a public default cache asks for nothing more',
+			name: 'the default cache asks for nothing more',
 			inputs: {
 				audience: '',
-				cache: DEFAULT_CACHE,
+				cache: defaultCache,
 				runRoot: '',
 				runRootTtl: ''
 			},
@@ -4406,7 +4369,7 @@ describe('cohortReceiptPushArguments', () => {
 			name: 'a path the store already held is named as claimed by nothing',
 			inputs: {
 				audience: '',
-				cache: DEFAULT_CACHE,
+				cache: defaultCache,
 				runRoot: '',
 				runRootTtl: ''
 			},
@@ -4420,34 +4383,18 @@ describe('cohortReceiptPushArguments', () => {
 			name: 'the audience, cache and run root all travel',
 			inputs: {
 				audience: 'https://cache.example.test',
-				cache: publicCache,
+				cache: buildsCache,
 				runRoot: 'github:owner/repo/_cupboard-run/1',
 				runRootTtl: '2d'
 			},
 			extra: [
 				'--audience',
 				'https://cache.example.test',
-				'--cache',
-				'builds',
 				'--run-root',
 				'github:owner/repo/_cupboard-run/1',
 				'--run-root-ttl',
 				'2d'
 			],
-			alreadyHeld: [],
-			held: ['--no-already-held'],
-			claimable: [],
-			evidence: ['--no-claimable']
-		},
-		{
-			name: 'a private destination travels by its local name',
-			inputs: {
-				audience: '',
-				cache: privateCache,
-				runRoot: '',
-				runRootTtl: ''
-			},
-			extra: ['--private-cache', 'release'],
 			alreadyHeld: [],
 			held: ['--no-already-held'],
 			claimable: [],
@@ -4470,7 +4417,9 @@ describe('cohortReceiptPushArguments', () => {
 		).toStrictEqual([
 			'--no-colour',
 			'push',
-			canonicalHref(url),
+			inputs.cache.kind === 'default'
+				? canonicalHref(url)
+				: `${canonicalHref(url)}/cache/${inputs.cache.name}`,
 			...paths,
 			'--github-oidc',
 			'--no-retain',
@@ -5060,16 +5009,15 @@ describe('cohort pushes accepted by the real CLI parser', () => {
 			options: {}
 		},
 		{
-			name: 'private-destination',
+			name: 'named-destination',
 			group: {
 				root: 'github:owner/repo/main/app',
 				paths: [],
 				referencePaths: [appPath],
 				complete: false
 			},
-			referenceSource:
-				'https://cache.example.test/t/acme/private-cache/release',
-			options: { privateCache: 'release' }
+			referenceSource: 'https://cache.example.test/t/acme/cache/release',
+			options: { cache: 'release' }
 		}
 	])(
 		'accepts the zero-positional $name form',
@@ -5733,6 +5681,7 @@ describe('buildCohortAction publication', () => {
 			`cupboard-build-cohorts-${cohortKey}.json`
 		);
 		const [plan, reprobe, ...publication] = run.calls;
+		const cacheUrl = `${url}/cache/builds`;
 
 		expect({
 			planCommand: plan?.slice(1, 3),
@@ -5747,11 +5696,9 @@ describe('buildCohortAction publication', () => {
 				'--no-colour',
 				'plan',
 				'reprobe',
-				url,
+				cacheUrl,
 				'--targets-file',
 				path.join(directory, `cupboard-plan-reprobe-targets-${cohortKey}.json`),
-				'--cache',
-				'builds',
 				'--reuse-view',
 				'pr-view'
 			],
@@ -5759,7 +5706,7 @@ describe('buildCohortAction publication', () => {
 				[
 					'--no-colour',
 					'build-push',
-					url,
+					cacheUrl,
 					'--github-oidc',
 					'--no-retain',
 					'--cohorts-file',
@@ -5767,8 +5714,6 @@ describe('buildCohortAction publication', () => {
 					'--receipt-file',
 					receiptFile,
 					'--aggregate-receipt-v3',
-					'--cache',
-					'builds',
 					'--gc-between-cohorts',
 					'--run-root',
 					runRoot,
@@ -5778,12 +5723,10 @@ describe('buildCohortAction publication', () => {
 				[
 					'--no-colour',
 					'push',
-					url,
+					cacheUrl,
 					'--github-oidc',
 					'--root',
 					'github:owner/repo/main/app',
-					'--cache',
-					'builds',
 					'--ttl',
 					'7d',
 					'--reference-paths-file',
@@ -5798,13 +5741,11 @@ describe('buildCohortAction publication', () => {
 				[
 					'--no-colour',
 					'push',
-					url,
+					cacheUrl,
 					libraryBuiltPath,
 					'--github-oidc',
 					'--root',
 					'github:owner/repo/main/lib',
-					'--cache',
-					'builds',
 					'--ttl',
 					'7d',
 					'--run-root',
@@ -5815,13 +5756,11 @@ describe('buildCohortAction publication', () => {
 				[
 					'--no-colour',
 					'push',
-					url,
+					cacheUrl,
 					floatingBuiltPath,
 					'--github-oidc',
 					'--root',
 					'github:owner/repo/main/floating',
-					'--cache',
-					'builds',
 					'--ttl',
 					'7d',
 					'--run-root',
@@ -5862,7 +5801,7 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('addresses a private destination in every cupboard invocation', async () => {
+	it('addresses a named cache in every cupboard invocation', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
 			cohortJson: cohortJson({
@@ -5870,7 +5809,7 @@ describe('buildCohortAction publication', () => {
 			}),
 			push: 'true',
 			reuseView: 'pr-view',
-			privateCache: 'release',
+			cache: 'release',
 			ttl: '7d',
 			runRoot: 'github:owner/repo/_cupboard-run/1',
 			runRootTtl: '2d',
@@ -5880,23 +5819,32 @@ describe('buildCohortAction publication', () => {
 		expect(
 			run.calls.map((call) => ({
 				invocation: call.slice(1, 3),
-				selection: cacheSelectionOf(call),
+				cacheTarget: call.find((argument) => argument.startsWith(url)),
 				referenceSource: argumentValue(call, '--reference-source')
 			}))
 		).toStrictEqual(
 			[
 				{ invocation: ['plan', 'cohort'], referenceSource: undefined },
 				{ invocation: ['plan', 'reprobe'], referenceSource: undefined },
-				{ invocation: ['build-push', url], referenceSource: undefined },
 				{
-					invocation: ['push', url],
-					referenceSource: `${url}/private-cache/release`
+					invocation: ['build-push', `${url}/cache/release`],
+					referenceSource: undefined
 				},
-				{ invocation: ['push', url], referenceSource: undefined },
-				{ invocation: ['push', url], referenceSource: undefined }
+				{
+					invocation: ['push', `${url}/cache/release`],
+					referenceSource: `${url}/cache/release`
+				},
+				{
+					invocation: ['push', `${url}/cache/release`],
+					referenceSource: undefined
+				},
+				{
+					invocation: ['push', `${url}/cache/release`],
+					referenceSource: undefined
+				}
 			].map((call) => ({
 				...call,
-				selection: ['--private-cache', 'release']
+				cacheTarget: `${url}/cache/release`
 			}))
 		);
 	});

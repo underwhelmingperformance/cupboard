@@ -1,12 +1,13 @@
 import type { Logger } from '@cupboard/logger';
-import type { StoredCache } from '@cupboard/nix-store/scalars';
-import type { VerifyReport } from '@cupboard/protocol/reports';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
+import type { VerifyReportInput } from '@cupboard/protocol/reports';
 
 import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
 import type { GarbageCollectionOutcome } from '../do/context.ts';
+import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
@@ -52,7 +53,7 @@ export interface TenantRpcServices {
 	// origin.
 	runGarbageCollection(
 		logger: Logger,
-		cache: StoredCache | undefined,
+		target: GarbageCollectionTarget,
 		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;
@@ -63,12 +64,13 @@ export interface TenantRpcServices {
 		logger: Logger,
 		purgeOrigin: RequestOrigin | undefined,
 		limit: number
-	): Promise<VerifyReport>;
+	): Promise<VerifyReportInput>;
 }
 
 export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;
+	readonly cache: CacheScope;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;
 }

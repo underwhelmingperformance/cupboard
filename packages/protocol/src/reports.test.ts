@@ -14,7 +14,7 @@ const narHash = `sha256:${'1'.repeat(52)}`;
 describe('check report schemas', () => {
 	const discrepancy = {
 		kind: 'missing-nar',
-		cache: 'builds',
+		cache: { kind: 'named', name: 'builds' },
 		storePathHash,
 		narHash
 	};
@@ -84,7 +84,7 @@ describe('verifyReportSchema', () => {
 				narInfoObjectsRestored: 2,
 				danglingNarInfosRemoved: 1,
 				cursor: 'a'.repeat(32),
-				cursorCache: 'builds',
+				cursorCache: { kind: 'named', name: 'builds' },
 				wrapped: false
 			},
 			expected: {
@@ -92,26 +92,22 @@ describe('verifyReportSchema', () => {
 				narInfoObjectsRestored: 2,
 				danglingNarInfosRemoved: 1,
 				cursor: 'a'.repeat(32),
-				cursorCache: 'builds',
+				cursorCache: { kind: 'named', name: 'builds' },
 				wrapped: false
 			}
 		},
 		{
-			name: 'a wrapped pass with an empty cursor',
+			name: 'a wrapped pass without a cursor',
 			value: {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			expected: {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			}
 		}
@@ -126,8 +122,6 @@ describe('verifyReportSchema', () => {
 				scanned: -1,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			}
 		},
@@ -137,7 +131,7 @@ describe('verifyReportSchema', () => {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
+				cursor: 'a'.repeat(32),
 				wrapped: true
 			}
 		},
@@ -148,7 +142,7 @@ describe('verifyReportSchema', () => {
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
 				cursor: 1,
-				cursorCache: '',
+				cursorCache: { kind: 'default' },
 				wrapped: true
 			}
 		},
@@ -158,8 +152,6 @@ describe('verifyReportSchema', () => {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true,
 				surprise: true
 			}

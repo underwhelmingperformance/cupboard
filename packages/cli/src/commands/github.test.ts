@@ -19,10 +19,10 @@ import {
 	oidcTrustSummarySchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
-import type { GracePolicyAddBody } from '@cupboard/protocol/retention';
+import type { GracePolicyAddBodyInput } from '@cupboard/protocol/retention';
 import {
 	reuseViewListResponseSchema,
-	type ReuseViewSelector,
+	type ReuseViewSelectorInput,
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
@@ -103,10 +103,10 @@ function storedRule(id: string, body: OidcTrustAddBodyInput) {
 }
 
 interface Recorded {
-	readonly graceAdds: GracePolicyAddBody[];
+	readonly graceAdds: GracePolicyAddBodyInput[];
 	readonly viewSets: {
 		name: string;
-		selectors: readonly ReuseViewSelector[];
+		selectors: readonly ReuseViewSelectorInput[];
 		priority?: number;
 	}[];
 	readonly ruleAdds: OidcTrustAddBodyInput[];
@@ -118,7 +118,7 @@ interface Stored {
 	readonly views?: {
 		name: string;
 		priority: number;
-		selectors: readonly ReuseViewSelector[];
+		selectors: readonly ReuseViewSelectorInput[];
 	}[];
 	readonly rules?: OidcTrustSummary[];
 }
@@ -160,6 +160,7 @@ function setupClient(stored: Stored): {
 				Promise.resolve(
 					reuseViewListResponseSchema.parse({
 						views: (stored.views ?? []).map((view, index) => ({
+							access: 'public',
 							revision: index + 1,
 							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 							updatedAt: '2026-01-01T00:00:00.000Z',
@@ -174,6 +175,7 @@ function setupClient(stored: Stored): {
 				return Promise.resolve(
 					reuseViewSummarySchema.parse({
 						name: input.name,
+						access: input.access,
 						revision: 1,
 						priority: input.priority ?? 50,
 						selectors: [...input.selectors],
@@ -288,8 +290,9 @@ describe('runGithubSetup', () => {
 				graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
 				viewSets: [
 					{
+						access: 'public',
 						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', pattern: 'pr-' }],
+						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
 						priority: 50
 					}
 				],
@@ -315,7 +318,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -422,7 +425,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -464,7 +467,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -551,7 +554,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -703,7 +706,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [dispatch]
@@ -757,7 +760,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [dispatch]
@@ -843,8 +846,9 @@ describe('runGithubSetup', () => {
 				graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
 				viewSets: [
 					{
+						access: 'public',
 						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', pattern: 'pr-' }],
+						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
 						priority: 50
 					}
 				],
@@ -876,7 +880,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -911,7 +915,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [conflict, storedRule('branch', branchBody)]
@@ -969,8 +973,9 @@ describe('runGithubSetup', () => {
 			graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			viewSets: [
 				{
+					access: 'public',
 					name: 'pull-requests',
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }],
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }],
 					priority: 50
 				}
 			],
@@ -996,7 +1001,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -1067,7 +1072,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [legacy]
@@ -1148,7 +1153,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [legacy]
@@ -1202,7 +1207,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -1271,7 +1276,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 40,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -1333,7 +1338,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 40,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [
@@ -1415,7 +1420,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [exactRule]
@@ -1489,7 +1494,7 @@ describe('runGithubSetup', () => {
 					{
 						name: 'pull-requests',
 						priority: 50,
-						selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+						selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 					}
 				],
 				rules: [previousRule]
@@ -1536,7 +1541,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			]
 		});
@@ -1591,7 +1596,7 @@ describe('runGithubSetup', () => {
 				{
 					name: 'pull-requests',
 					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 				}
 			],
 			rules: [

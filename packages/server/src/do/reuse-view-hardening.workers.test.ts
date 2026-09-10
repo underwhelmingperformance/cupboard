@@ -1,7 +1,6 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	cacheNameSchema,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
@@ -20,9 +19,10 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { rootLogger } from '../observability/logging.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -31,10 +31,14 @@ import {
 	flakyD1,
 	type FlakyD1Plan,
 	flakyR2,
+	namedCache,
 	readFetch,
-	resetTestServer
+	resetTestServer,
+	resolvedCache,
+	workerFetch
 } from '../test-support.ts';
 
+import { chunkByStatementParameters } from './bulk.ts';
 import { ServerContext } from './context.ts';
 import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
@@ -47,8 +51,8 @@ import {
 import { type CupboardServer } from './server.ts';
 
 const viewName = reuseViewNameSchema.parse('reuse');
-const pr1Cache = cacheNameSchema.parse('pr-1');
-const pr2Cache = cacheNameSchema.parse('pr-2');
+const pr1Cache = namedCache('pr-1');
+const pr2Cache = namedCache('pr-2');
 
 async function lookupWithPlan(
 	storePathHash: string,
@@ -63,7 +67,7 @@ async function lookupWithPlan(
 		});
 		const service = new ReuseViewLookupService(context);
 
-		return service.lookup(rootLogger(), viewName, parsed);
+		return service.lookup(rootLogger(), viewName, 'public', parsed);
 	});
 }
 
@@ -129,10 +133,11 @@ describe('reuse-view lookup hardening', () => {
 	beforeEach(resetTestServer);
 
 	it('misses when a recommit lands between the gates', async () => {
-		const path = await committedPath('harden-recommit', 'pr-1', {
-			storePathHash: 'a1'.repeat(16)
+		const path = await committedPath('harden-recommit', pr1Cache, {
+			storePathHash: 'a1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		const parsed = storePathHashSchema.parse(path.storePathHash);
 
 		const served = await lookupWithPlan(path.storePathHash, (instance) =>
@@ -149,22 +154,25 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('serves when a discarded sibling row is deleted between the gates', async () => {
-		const path = await committedPath('harden-discarded', 'pr-1', {
-			storePathHash: 'f1'.repeat(16)
+		const path = await committedPath('harden-discarded', pr1Cache, {
+			storePathHash: 'f1'.repeat(16),
+			access: 'public'
 		});
 		const parsed = storePathHashSchema.parse(path.storePathHash);
-		await insertUnbackedRow('pr-2', path.storePathHash, path.narHash);
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await insertUnbackedRow(pr2Cache, path.storePathHash, path.narHash);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		// The pr-2 row has no committed edge. Its removal between the gates must
 		// not invalidate the surviving candidate.
 		const served = await lookupWithPlan(path.storePathHash, (instance) =>
 			betweenGates(() => {
+				const cache = resolvedCache(instance.context, pr2Cache);
+
 				instance.context.db
 					.delete(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, pr2Cache),
+							eq(schema.narInfos.cacheId, cache.id),
 							eq(schema.narInfos.storePathHash, parsed)
 						)
 					)
@@ -176,12 +184,14 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('misses when the view is deleted and recreated between the gates', async () => {
-		const path = await committedPath('harden-recreate', 'pr-1', {
-			storePathHash: 'b1'.repeat(16)
+		const path = await committedPath('harden-recreate', pr1Cache, {
+			storePathHash: 'b1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		const body = reuseViewSetBodySchema.parse({
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 
 		const served = await lookupWithPlan(path.storePathHash, (instance) => {
@@ -197,12 +207,14 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('misses when the view definition is replaced between the gates', async () => {
-		const path = await committedPath('harden-redefine', 'pr-1', {
-			storePathHash: 'c1'.repeat(16)
+		const path = await committedPath('harden-redefine', pr1Cache, {
+			storePathHash: 'c1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		const body = reuseViewSetBodySchema.parse({
-			selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+			access: 'public',
+			selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 		});
 
 		const served = await lookupWithPlan(path.storePathHash, (instance) => {
@@ -217,10 +229,11 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('serves through one transient shared-fact fault', async () => {
-		const path = await committedPath('harden-transient', 'pr-1', {
-			storePathHash: 'd1'.repeat(16)
+		const path = await committedPath('harden-transient', pr1Cache, {
+			storePathHash: 'd1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 
 		const served = await lookupWithPlan(path.storePathHash, () => ({
 			failures: 1,
@@ -232,17 +245,16 @@ describe('reuse-view lookup hardening', () => {
 			url: served?.url
 		}).toStrictEqual({
 			narHash: path.narHash,
-			url: `../../${await currentNarObjectKey(
-				nixSha256HashSchema.parse(path.narHash)
-			)}`
+			url: await currentNarObjectKey(nixSha256HashSchema.parse(path.narHash))
 		});
 	});
 
 	it('refuses retryably under a persistent shared-fact fault', async () => {
-		const path = await committedPath('harden-persistent', 'pr-1', {
-			storePathHash: 'f1'.repeat(16)
+		const path = await committedPath('harden-persistent', pr1Cache, {
+			storePathHash: 'f1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 
 		await expect(
 			lookupWithPlan(path.storePathHash, () => ({
@@ -253,10 +265,11 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('returns a retryable 503 when the canonical-object probe fails', async () => {
-		const path = await committedPath('harden-probe', 'pr-1', {
-			storePathHash: 'g1'.repeat(16)
+		const path = await committedPath('harden-probe', pr1Cache, {
+			storePathHash: 'g1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
 			instance.context.env = {
 				...instance.context.env,
@@ -285,10 +298,11 @@ describe('reuse-view lookup hardening', () => {
 	// that stored it would keep serving the error long after the row is
 	// repaired or recommitted.
 	it('returns an uncached server error for a corrupt stored row', async () => {
-		const path = await committedPath('harden-corrupt', 'pr-1', {
-			storePathHash: 'h1'.repeat(16)
+		const path = await committedPath('harden-corrupt', pr1Cache, {
+			storePathHash: 'h1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
 			instance.context.db
 				.update(schema.narInfos)
@@ -319,10 +333,11 @@ describe('reuse-view lookup hardening', () => {
 	// must key on the exact candidate generation, not just the candidate cache,
 	// or such a backlog inflates the read past the candidate bound.
 	it('serves correctly and reads exactly one edge row per candidate despite an undrained stale-generation backlog', async () => {
-		const path = await committedPath('harden-backlog', 'pr-1', {
-			storePathHash: 'i1'.repeat(16)
+		const path = await committedPath('harden-backlog', pr1Cache, {
+			storePathHash: 'i1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		const parsedHash = storePathHashSchema.parse(path.storePathHash);
 		const parsedNarHash = nixSha256HashSchema.parse(path.narHash);
 
@@ -342,22 +357,28 @@ describe('reuse-view lookup hardening', () => {
 		// the shape left by an undrained deletion backlog.
 		const staleCount = 20;
 		const d1 = drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReference: d1Schema.blobReference }
+			schema: { blobReferences: migrationSchema.blobReferences }
 		});
-		await d1
-			.insert(d1Schema.blobReference)
-			.values(
-				Array.from({ length: staleCount }, (_, index) => ({
-					tenant: fixtureTenant,
-					cache: pr1Cache,
-					storePathHash: parsedHash,
-					generation: narInfoGenerationSchema.parse(
-						live.generation + index + 1
-					),
-					narHash: parsedNarHash
-				}))
-			)
-			.run();
+		const staleReferences = Array.from({ length: staleCount }, (_, index) => ({
+			tenant: fixtureTenant,
+			...cacheMigrationColumns(pr1Cache, 'public'),
+			storePathHash: parsedHash,
+			generation: narInfoGenerationSchema.parse(live.generation + index + 1),
+			narHash: parsedNarHash
+		}));
+
+		const referenceChunks = chunkByStatementParameters(
+			staleReferences,
+			(references) =>
+				d1.insert(migrationSchema.blobReferences).values([...references])
+		);
+
+		for (const references of referenceChunks) {
+			await d1
+				.insert(migrationSchema.blobReferences)
+				.values([...references])
+				.run();
+		}
 
 		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
 		let edgeRowsRead = 0;
@@ -374,7 +395,7 @@ describe('reuse-view lookup hardening', () => {
 			});
 
 		try {
-			const response = await readFetch(lookupPath(path.storePathHash));
+			const response = await workerFetch(lookupPath(path.storePathHash));
 			const narInfo = NarInfo.parse(await response.text());
 
 			expect({
@@ -393,12 +414,19 @@ describe('reuse-view lookup hardening', () => {
 		}
 	});
 
-	it('range-scans prefix selectors on the composite narinfo index', async () => {
+	it('uses the composite narinfo index for prefix selectors', async () => {
 		const planRowSchema = z.object({ detail: z.string() });
 		const hash = 'h1'.repeat(16);
 		const rows = await runInDurableObject(fixtureWorkerServer(), (instance) =>
 			instance.context.db.all(
-				sql`EXPLAIN QUERY PLAN SELECT cache FROM narinfo WHERE store_path_hash = ${hash} AND cache >= ${'pr-'} AND cache < ${'pr.'}`
+				sql`EXPLAIN QUERY PLAN
+					SELECT narinfo.cache_id
+					FROM narinfo
+					INNER JOIN cache_identity ON cache_identity.id = narinfo.cache_id
+					WHERE narinfo.store_path_hash = ${hash}
+						AND cache_identity.kind = 'named'
+						AND cache_identity.name >= ${'pr-'}
+						AND cache_identity.name < ${'pr.'}`
 			)
 		);
 		const details = z.array(planRowSchema).parse(rows);
@@ -411,20 +439,27 @@ describe('reuse-view lookup hardening', () => {
 	});
 
 	it('reads a bounded row count that does not scale with unrelated rows', async () => {
-		const path = await committedPath('harden-cost-a', 'pr-1', {
-			storePathHash: 'j1'.repeat(16)
+		const path = await committedPath('harden-cost-a', pr1Cache, {
+			storePathHash: 'j1'.repeat(16),
+			access: 'public'
 		});
-		await committedPath('harden-cost-a', 'pr-2', {
-			storePathHash: 'j1'.repeat(16)
+		await committedPath('harden-cost-a', pr2Cache, {
+			storePathHash: 'j1'.repeat(16),
+			access: 'public'
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const baseline = await lookupCost(path.storePathHash);
 
 		const narHash = nixSha256HashSchema.parse(path.narHash);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
+			const pr1 = resolvedCache(instance.context, pr1Cache);
+			const outside = instance.context.cacheRepository.resolveOrCreate(
+				namedCache('zz-outside'),
+				'public'
+			);
 			const unrelated = Array.from({ length: 200 }, (_, index) => ({
-				cache: pr1Cache,
+				cacheId: pr1.id,
 				storePathHash: storePathHashSchema.parse(generatedHash(index)),
 				storePath: storePathSchema.parse(
 					`/nix/store/${generatedHash(index)}-other`
@@ -445,7 +480,7 @@ describe('reuse-view lookup hardening', () => {
 			instance.context.db
 				.insert(schema.narInfos)
 				.values({
-					cache: cacheNameSchema.parse('zz-outside'),
+					cacheId: outside.id,
 					storePathHash: storePathHashSchema.parse(path.storePathHash),
 					storePath: storePathSchema.parse(path.storePath),
 					narHash,
@@ -460,8 +495,8 @@ describe('reuse-view lookup hardening', () => {
 		const withBacklog = await lookupCost(path.storePathHash);
 
 		expect({ baseline, withBacklog }).toStrictEqual({
-			baseline: { status: StatusCodes.OK, rowsRead: 9 },
-			withBacklog: { status: StatusCodes.OK, rowsRead: 10 }
+			baseline: { status: StatusCodes.OK, rowsRead: 17 },
+			withBacklog: { status: StatusCodes.OK, rowsRead: 19 }
 		});
 	});
 });

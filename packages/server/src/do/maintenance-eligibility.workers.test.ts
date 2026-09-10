@@ -23,8 +23,13 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { r2ObjectKeySchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
-import { currentServer, resetTestServer } from '../test-support.ts';
+import {
+	currentServer,
+	resetTestServer,
+	resolvedCache
+} from '../test-support.ts';
 
+import type { ServerContext } from './context.ts';
 import {
 	MaintenanceEligibilityService,
 	withMaintenanceEligibility
@@ -112,6 +117,7 @@ describe('maintenance eligibility projection', () => {
 						.insert(schema.pendingUploads)
 						.values(
 							pendingUpload(
+								instance.context,
 								'verify-after-failed-refresh',
 								isoTimestamp(now),
 								'pending'
@@ -169,6 +175,7 @@ describe('maintenance eligibility projection', () => {
 								.insert(schema.pendingUploads)
 								.values(
 									pendingUpload(
+										instance.context,
 										'verify-after-failed-invalidation',
 										isoTimestamp(now),
 										'pending'
@@ -209,15 +216,18 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.pendingUploads)
 				.values([
 					pendingUpload(
+						instance.context,
 						'waiting-bytes',
 						isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 					),
 					pendingUpload(
+						instance.context,
 						'verify-a',
 						isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
 						'pending'
 					),
 					pendingUpload(
+						instance.context,
 						'verify-b',
 						isoTimestampSchema.parse('2026-01-04T00:00:00.000Z'),
 						'committing'
@@ -227,7 +237,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.narInfoDeletions)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					generation: narInfoGenerationSchema.parse(0),
@@ -237,7 +247,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					name: rootNameSchema.parse('release'),
 					expiresAt: isoTimestampSchema.parse('2026-01-05T00:00:00.000Z'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
@@ -263,6 +273,7 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.pendingUploads)
 				.values(
 					pendingUpload(
+						instance.context,
 						'terminal',
 						isoTimestampSchema.parse('2026-01-04T00:00:00.000Z')
 					)
@@ -271,7 +282,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					name: rootNameSchema.parse('release'),
 					expiresAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
@@ -297,6 +308,7 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.pendingAttestations)
 				.values(
 					pendingAttestation(
+						instance.context,
 						'attestation-upload',
 						isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 					)
@@ -320,7 +332,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					retainUntil: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 				})
@@ -343,7 +355,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					retainUntil: isoTimestampSchema.parse('2026-01-05T00:00:00.000Z')
 				})
@@ -351,7 +363,7 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
-					cache: '',
+					cacheId: resolvedCache(instance.context).id,
 					name: rootNameSchema.parse('release'),
 					expiresAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
@@ -476,13 +488,15 @@ describe('maintenance wake conflict resolution', () => {
 			if (work === 'immediate') {
 				instance.context.db
 					.insert(schema.pendingUploads)
-					.values(pendingUpload('incoming', farFuture, 'pending'))
+					.values(
+						pendingUpload(instance.context, 'incoming', farFuture, 'pending')
+					)
 					.run();
 			} else if (work !== 'none') {
 				instance.context.db
 					.insert(schema.retentionRoots)
 					.values({
-						cache: '',
+						cacheId: resolvedCache(instance.context).id,
 						name: rootNameSchema.parse('incoming'),
 						expiresAt: work.future,
 						createdAt: earlier,
@@ -523,13 +537,14 @@ async function seedEligibility(
 }
 
 function pendingUpload(
+	context: ServerContext,
 	id: string,
 	expiresAt: IsoTimestamp,
 	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
 ): typeof schema.pendingUploads.$inferInsert {
 	return {
 		id: uploadIdSchema.parse(id),
-		cache: '',
+		cacheId: resolvedCache(context).id,
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: r2ObjectKeySchema.parse(`staging/${id}`),
 		metadataJson: '{}',
@@ -540,12 +555,13 @@ function pendingUpload(
 }
 
 function pendingAttestation(
+	context: ServerContext,
 	id: string,
 	expiresAt: IsoTimestamp
 ): typeof schema.pendingAttestations.$inferInsert {
 	return {
 		id: uploadIdSchema.parse(id),
-		cache: '',
+		cacheId: resolvedCache(context).id,
 		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 		digest: sha256HexDigestSchema.parse('b'.repeat(64)),
 		r2Key: r2ObjectKeySchema.parse(`staging/attestations/${id}`),

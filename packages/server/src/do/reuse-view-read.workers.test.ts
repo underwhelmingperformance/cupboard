@@ -23,14 +23,17 @@ function authorised(): RequestInit {
 	return { headers: { authorization: `Basic ${btoa('alice:secret')}` } };
 }
 
-async function makePrivate(): Promise<void> {
+async function provisionReader(): Promise<void> {
 	await provisionFixtureTenant({
-		readMode: 'private',
 		read: { user: 'alice', password: 'secret' }
 	});
 }
 
-async function setView(name: string, priority: number): Promise<Response> {
+async function setView(
+	name: string,
+	priority: number,
+	access: 'public' | 'private' = 'public'
+): Promise<Response> {
 	const token = await initialiseViaWorker();
 
 	return authorisedWorkerFetch(
@@ -38,7 +41,8 @@ async function setView(name: string, priority: number): Promise<Response> {
 		token,
 		{
 			body: JSON.stringify({
-				selectors: [{ kind: 'prefix', pattern: '' }],
+				access,
+				selectors: [{ kind: 'all' }],
 				priority
 			}),
 			headers: { 'content-type': 'application/json' },
@@ -118,9 +122,9 @@ describe('reuse-view nix-cache-info', () => {
 		});
 	});
 
-	it('gates a private tenant, serving no-store once authorised', async () => {
-		await setView('reuse', 50);
-		await makePrivate();
+	it('gates a private view, serving no-store once authorised', async () => {
+		await setView('reuse', 50, 'private');
+		await provisionReader();
 
 		const unauthorised = await readFetch('/reuse/reuse/nix-cache-info', {});
 		const authorisedResponse = await readFetch(
@@ -139,13 +143,23 @@ describe('reuse-view nix-cache-info', () => {
 		});
 	});
 
-	it('gates every other path under a private tenant reuse subtree', async () => {
-		await setView('reuse', 50);
-		await makePrivate();
+	it('returns 404 for an unimplemented path under a private view', async () => {
+		await setView('reuse', 50, 'private');
+		await provisionReader();
 
-		const response = await readFetch('/reuse/reuse/anything', {});
+		const anonymous = await readFetch('/reuse/reuse/anything');
+		const authenticated = await readFetch(
+			'/reuse/reuse/anything',
+			authorised()
+		);
 
-		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
+		expect({
+			anonymous: anonymous.status,
+			authenticated: authenticated.status
+		}).toStrictEqual({
+			anonymous: StatusCodes.NOT_FOUND,
+			authenticated: StatusCodes.NOT_FOUND
+		});
 	});
 
 	it('404s every unimplemented path under a public tenant reuse subtree, no-store', async () => {
@@ -178,7 +192,8 @@ describe('reuse-view nix-cache-info', () => {
 
 		const put = await handlerFetch('/t/acme/reuse-views/reuse', {
 			body: JSON.stringify({
-				selectors: [{ kind: 'prefix', pattern: '' }],
+				access: 'public',
+				selectors: [{ kind: 'all' }],
 				priority: 55
 			}),
 			headers: {

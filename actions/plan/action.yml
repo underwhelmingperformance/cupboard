@@ -16,21 +16,17 @@ inputs:
     description: Prefix used to form each target's retention root.
     required: true
   cache:
-    description: Named public cache to inspect and publish to.
-    required: false
-  private-cache:
     description:
-      Private cache to inspect and publish to. Set either cache or
-      private-cache, not both.
+      Named cache to inspect and publish to. Empty selects the default cache.
     required: false
   ttl:
     description: TTL applied when retaining an already cached target.
     required: false
   read-user:
-    description: Username for private cache reads.
+    description: Username for cache reads.
     required: false
   read-password:
-    description: Password for private cache reads.
+    description: Password for cache reads.
     required: false
   audience:
     description: GitHub OIDC audience. Defaults to url.
@@ -145,7 +141,6 @@ runs:
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         ROOT_PREFIX: ${{ inputs.root-prefix }}
         CACHE: ${{ inputs.cache }}
-        PRIVATE_CACHE: ${{ inputs.private-cache }}
         TTL: ${{ inputs.ttl }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
@@ -163,7 +158,6 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --root-prefix "$ROOT_PREFIX"
           --cache "$CACHE"
-          --private-cache "$PRIVATE_CACHE"
           --ttl "$TTL"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"

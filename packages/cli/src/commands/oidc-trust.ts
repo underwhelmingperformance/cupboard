@@ -178,6 +178,19 @@ function grantRows(grants: OidcTrustSummary['permittedGrants']): ResultRow[] {
 	}));
 }
 
+function describeCacheBinding(
+	binding: Extract<
+		OidcTrustSummary['permittedGrants'][number],
+		{ type: 'cupboard_cache' }
+	>['resources']['cache']
+): string {
+	if (binding.kind === 'default') {
+		return '(default)';
+	}
+
+	return binding.exact ?? binding.equalsTemplate ?? '?';
+}
+
 function describeGrant(
 	grant: OidcTrustSummary['permittedGrants'][number]
 ): string {
@@ -186,10 +199,7 @@ function describeGrant(
 	}
 
 	if (grant.type === 'cupboard_cache') {
-		const cache =
-			grant.resources.cache.exact ?? grant.resources.cache.equalsTemplate;
-
-		return `cache ${cache ?? '?'}: ${grant.actions.join(', ')}`;
+		return `cache ${describeCacheBinding(grant.resources.cache)}: ${grant.actions.join(', ')}`;
 	}
 
 	if (grant.type === 'cupboard_tenant') {
@@ -494,10 +504,7 @@ function buildOidcTrustCommands(
 			'--cache-template <template>',
 			'a cache template such as "pr-{pr}", rendered from captures'
 		)
-		.option(
-			'--root <name>',
-			'a root the grant may set, or "same-as-cache" to tie it to the cache'
-		)
+		.option('--root <name>', 'an exact root the grant may set')
 		.option(
 			'--root-template <template>',
 			'a root template rendered from captures'
@@ -528,7 +535,7 @@ function buildOidcTrustCommands(
 				'    --audience https://cupboard.example.workers.dev/t/acme \\',
 				'    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \\',
 				'    --allow push --allow root --template-source github-pr \\',
-				'    --cache-template pr-{pr} --root same-as-cache'
+				'    --cache-template pr-{pr} --root-template pr-{pr}'
 			].join('\n')
 		)
 		.action(async (url: URL, options: OidcTrustAddOptions) => {

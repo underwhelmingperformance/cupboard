@@ -788,7 +788,7 @@ async function runCancelledBuildCohort(
 
 				const roots = await tenantRpc(server.tenantUrl, {
 					credential: token
-				}).roots.list({ params: { cacheName: '_default' } });
+				}).roots.list.inDefaultCache({});
 				const validPaths = await withSshOptions(sshOptions, () => {
 					const reconnected = Nix.openForAvailability(undefined, {
 						storeUri: store.transportConfiguredStoreUri,
@@ -938,16 +938,12 @@ async function runAlreadyValidPublication(
 					JSON.parse(await readFile(receiptFile, 'utf8'))
 				);
 				const rpc = tenantRpc(server.tenantUrl, { credential: token });
-				const roots = await rpc.roots.list({
-					params: { cacheName: '_default' }
+				const roots = await rpc.roots.list.inDefaultCache({});
+				const rootTargets = await rpc.roots.targets.inDefaultCache({
+					name: member.root
 				});
-				const rootTargets = await rpc.roots.targets({
-					params: { cacheName: '_default', name: member.root },
-					query: {}
-				});
-				const coldRootTargets = await rpc.roots.targets({
-					params: { cacheName: '_default', name: coldMember.root },
-					query: {}
+				const coldRootTargets = await rpc.roots.targets.inDefaultCache({
+					name: coldMember.root
 				});
 				const served = await Promise.all(
 					members.map(({ output }) =>
@@ -1519,14 +1515,11 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 				store = undefined;
 
 				const rpc = tenantRpc(activeServer.tenantUrl, { credential: token });
-				const roots = await rpc.roots.list({
-					params: { cacheName: '_default' }
-				});
+				const roots = await rpc.roots.list.inDefaultCache({});
 				const ownedTargets = await Promise.all(
 					members.map(async (member) => {
-						const rootTargets = await rpc.roots.targets({
-							params: { cacheName: '_default', name: member.root },
-							query: {}
+						const rootTargets = await rpc.roots.targets.inDefaultCache({
+							name: member.root
 						});
 
 						return {
@@ -1778,12 +1771,9 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 					JSON.parse(await readFile(receiptFile, 'utf8'))
 				);
 				const rpc = tenantRpc(server.tenantUrl, { credential: token });
-				const roots = await rpc.roots.list({
-					params: { cacheName: '_default' }
-				});
-				const rootTargets = await rpc.roots.targets({
-					params: { cacheName: '_default', name: successful.root },
-					query: {}
+				const roots = await rpc.roots.list.inDefaultCache({});
+				const rootTargets = await rpc.roots.targets.inDefaultCache({
+					name: successful.root
 				});
 				const successfulNarInfo = server.tenantPath(
 					`/${StorePath.hash(successful.output)}.narinfo`
@@ -2244,7 +2234,7 @@ function attestationCupboard(
 		);
 		const pathInfos = await readCommittedAttestationPathInfos(paths, {
 			url: plan.server.tenantUrl,
-			cache: ''
+			cache: { kind: 'default' }
 		});
 		const results: ReporterResultEvent[] = [];
 		const reporter = {

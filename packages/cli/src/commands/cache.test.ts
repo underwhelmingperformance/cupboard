@@ -2,16 +2,23 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheName,
+	cacheNameSchema,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import {
 	cacheListResponseSchema,
-	type CacheRemoveResponse,
+	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
 import type { ResultRow } from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidCachePriorityError } from '../errors.ts';
+
+const cacheName = (value: string): CacheName => cacheNameSchema.parse(value);
 
 import {
 	type CacheClient,
@@ -19,22 +26,68 @@ import {
 	runCacheCreate,
 	runCacheInspect,
 	runCacheList,
-	runCacheRemove
+	runCacheRemove,
+	runCacheSetAccess,
+	runCacheSetPriority
 } from './cache.ts';
 
 function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 	return {
 		list: () => Promise.resolve({ caches: [] }),
-		put: ({ cacheName, priority }) =>
-			Promise.resolve(
-				cacheSummarySchema.parse({ name: cacheName, priority, storePaths: 0 })
-			),
+		get: {
+			inDefaultCache: () =>
+				Promise.reject(new ORPCError('NOT_FOUND', { status: 404 })),
+			inNamedCache: () =>
+				Promise.reject(new ORPCError('NOT_FOUND', { status: 404 }))
+		},
+		put: {
+			inDefaultCache: ({ access, priority }) =>
+				Promise.resolve(
+					cacheSummarySchema.parse({
+						scope: { kind: 'default' },
+						access,
+						priority,
+						storePaths: 0
+					})
+				),
+			inNamedCache: ({ cacheName, access, priority }) =>
+				Promise.resolve(
+					cacheSummarySchema.parse({
+						scope: { kind: 'named', name: cacheName },
+						access,
+						priority,
+						storePaths: 0
+					})
+				)
+		},
+		update: {
+			inDefaultCache: (input) =>
+				Promise.resolve(
+					cacheSummarySchema.parse({
+						scope: { kind: 'default' },
+						access: input.kind === 'access' ? input.access : 'public',
+						priority: input.kind === 'priority' ? input.priority : 40,
+						storePaths: 0
+					})
+				),
+			inNamedCache: (input) =>
+				Promise.resolve(
+					cacheSummarySchema.parse({
+						scope: { kind: 'named', name: input.cacheName },
+						access: input.kind === 'access' ? input.access : 'public',
+						priority: input.kind === 'priority' ? input.priority : 40,
+						storePaths: 0
+					})
+				)
+		},
 		remove: ({ params }) =>
-			Promise.resolve({
-				name: params.cacheName,
-				removed: false,
-				storePathsRemoved: 0
-			}),
+			Promise.resolve(
+				cacheRemoveResponseSchema.parse({
+					scope: { kind: 'named', name: params.cacheName },
+					removed: false,
+					storePathsRemoved: 0
+				})
+			),
 		...overrides
 	};
 }
@@ -57,15 +110,28 @@ describe('runCacheList', () => {
 		const results: ResultRow[][] = [];
 		const response = cacheListResponseSchema.parse({
 			caches: [
-				{ name: '', priority: 40, storePaths: 0, graceManaged: false },
 				{
-					name: 'builds',
+					scope: { kind: 'default' },
+					access: 'private',
+					priority: 40,
+					storePaths: 0,
+					graceManaged: false
+				},
+				{
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
 					priority: 30,
 					storePaths: 5,
 					graceManaged: true,
 					earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
 				},
-				{ name: 'drained', priority: 45, storePaths: 0, graceManaged: true }
+				{
+					scope: { kind: 'named', name: 'drained' },
+					access: 'private',
+					priority: 45,
+					storePaths: 0,
+					graceManaged: true
+				}
 			]
 		});
 
@@ -75,23 +141,36 @@ describe('runCacheList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: '(default)', value: 'priority 40; 0 path(s)' },
+				{ label: '(default)', value: 'private; priority 40; 0 path(s)' },
 				{
 					label: 'builds',
 					value:
-						'priority 30; 5 path(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
+						'public; priority 30; 5 path(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
 				},
-				{ label: 'drained', value: 'priority 45; 0 path(s); grace-managed' }
+				{
+					label: 'drained',
+					value: 'private; priority 45; 0 path(s); grace-managed'
+				}
 			]
 		]);
 	});
 
-	it('lists a private cache under the selector that addresses it', async () => {
+	it('lists access independently from the cache name', async () => {
 		const results: ResultRow[][] = [];
 		const response = cacheListResponseSchema.parse({
 			caches: [
-				{ name: 'private/builds', priority: 30, storePaths: 5 },
-				{ name: 'builds', priority: 40, storePaths: 1 }
+				{
+					scope: { kind: 'named', name: 'release' },
+					access: 'private',
+					priority: 30,
+					storePaths: 5
+				},
+				{
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 40,
+					storePaths: 1
+				}
 			]
 		});
 
@@ -101,8 +180,8 @@ describe('runCacheList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: '_private-builds', value: 'priority 30; 5 path(s)' },
-				{ label: 'builds', value: 'priority 40; 1 path(s)' }
+				{ label: 'release', value: 'private; priority 30; 5 path(s)' },
+				{ label: 'builds', value: 'public; priority 40; 1 path(s)' }
 			]
 		]);
 	});
@@ -124,32 +203,38 @@ describe('runCacheList', () => {
 });
 
 describe('runCacheCreate', () => {
-	it('upserts the cache priority and reports the summary', async () => {
+	it('creates the cache and reports the summary', async () => {
 		const calls: { cacheName: string; priority: number }[] = [];
 		const results: ResultRow[][] = [];
 		const summary = cacheSummarySchema.parse({
-			name: 'builds',
+			scope: { kind: 'named', name: 'builds' },
+			access: 'private',
 			priority: 30,
 			storePaths: 0
 		});
 
 		await runCacheCreate(
-			'builds',
+			{ kind: 'named', name: cacheName('builds') },
+			'private',
 			cachePrioritySchema.parse(30),
 			reporter(results),
-			{
-				put(input) {
-					calls.push(input);
-					return Promise.resolve(summary);
+			cacheClient({
+				put: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
 				}
-			}
+			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ cacheName: 'builds', priority: 30 }],
+			calls: [{ cacheName: 'builds', access: 'private', priority: 30 }],
 			results: [
 				[
 					{ label: 'Cache', value: 'builds' },
+					{ label: 'Access', value: 'private' },
 					{ label: 'Priority', value: '30' },
 					{ label: 'Store paths', value: '0' }
 				]
@@ -158,18 +243,76 @@ describe('runCacheCreate', () => {
 	});
 });
 
+describe('cache property updates', () => {
+	it('sets only the selected cache access property', async () => {
+		const calls: unknown[] = [];
+		const summary = cacheSummarySchema.parse({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'private',
+			priority: 40,
+			storePaths: 0
+		});
+
+		await runCacheSetAccess(
+			{ kind: 'named', name: cacheName('builds') },
+			'private',
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([
+			{ cacheName: 'builds', kind: 'access', access: 'private' }
+		]);
+	});
+
+	it('sets only the selected cache priority property', async () => {
+		const calls: unknown[] = [];
+		const summary = cacheSummarySchema.parse({
+			scope: { kind: 'default' },
+			access: 'public',
+			priority: 30,
+			storePaths: 0
+		});
+
+		await runCacheSetPriority(
+			{ kind: 'default' },
+			cachePrioritySchema.parse(30),
+			reporter([]),
+			cacheClient({
+				update: {
+					inDefaultCache(input) {
+						calls.push(input);
+						return Promise.resolve(summary);
+					},
+					inNamedCache: () => Promise.resolve(summary)
+				}
+			})
+		);
+
+		expect(calls).toStrictEqual([{ kind: 'priority', priority: 30 }]);
+	});
+});
+
 describe('runCacheRemove', () => {
 	it('removes the cache with the force flag once confirmed', async () => {
 		const calls: Parameters<CacheClient['remove']>[0][] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response: CacheRemoveResponse = {
-			name: 'builds',
+		const response = cacheRemoveResponseSchema.parse({
+			scope: { kind: 'named', name: 'builds' },
 			removed: true,
 			storePathsRemoved: 5
-		};
+		});
 
 		await runCacheRemove(
-			'builds',
+			cacheName('builds'),
 			true,
 			ui,
 			cacheClient({
@@ -199,7 +342,7 @@ describe('runCacheRemove', () => {
 	it('leaves the cache in place when the confirmation is declined', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runCacheRemove('builds', false, ui, cacheClient({}));
+		await runCacheRemove(cacheName('builds'), false, ui, cacheClient({}));
 
 		expect({
 			results: captured.results,
@@ -214,43 +357,28 @@ describe('runCacheRemove', () => {
 describe('runCacheInspect', () => {
 	it('reports the summary of a named cache', async () => {
 		const results: ResultRow[][] = [];
-
-		await runCacheInspect('builds', reporter(results), {
-			list: () =>
-				Promise.resolve(
-					cacheListResponseSchema.parse({
-						caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
-					})
-				)
+		const summary = cacheSummarySchema.parse({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 30,
+			storePaths: 5
 		});
+
+		await runCacheInspect(
+			{ kind: 'named', name: cacheName('builds') },
+			reporter(results),
+			{
+				get: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache: () => Promise.resolve(summary)
+				}
+			}
+		);
 
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Cache', value: 'builds' },
-				{ label: 'Priority', value: '30' },
-				{ label: 'Store paths', value: '5' }
-			]
-		]);
-	});
-
-	it('finds a private cache by the selector the user writes', async () => {
-		const results: ResultRow[][] = [];
-
-		await runCacheInspect('_private-builds', reporter(results), {
-			list: () =>
-				Promise.resolve(
-					cacheListResponseSchema.parse({
-						caches: [
-							{ name: 'builds', priority: 40, storePaths: 1 },
-							{ name: 'private/builds', priority: 30, storePaths: 5 }
-						]
-					})
-				)
-		});
-
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Cache', value: '_private-builds' },
+				{ label: 'Access', value: 'public' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' }
 			]
@@ -259,27 +387,30 @@ describe('runCacheInspect', () => {
 
 	it('reports the grace state when the server provides it', async () => {
 		const results: ResultRow[][] = [];
-
-		await runCacheInspect('builds', reporter(results), {
-			list: () =>
-				Promise.resolve(
-					cacheListResponseSchema.parse({
-						caches: [
-							{
-								name: 'builds',
-								priority: 30,
-								storePaths: 5,
-								graceManaged: true,
-								earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
-							}
-						]
-					})
-				)
+		const summary = cacheSummarySchema.parse({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'private',
+			priority: 30,
+			storePaths: 5,
+			graceManaged: true,
+			earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
 		});
+
+		await runCacheInspect(
+			{ kind: 'named', name: cacheName('builds') },
+			reporter(results),
+			{
+				get: {
+					inDefaultCache: () => Promise.resolve(summary),
+					inNamedCache: () => Promise.resolve(summary)
+				}
+			}
+		);
 
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Cache', value: 'builds' },
+				{ label: 'Access', value: 'private' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' },
 				{ label: 'Grace managed', value: 'yes' },
@@ -295,9 +426,18 @@ describe('runCacheInspect', () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
-		await runCacheInspect('missing', reporter(results, infos), {
-			list: () => Promise.resolve({ caches: [] })
-		});
+		await runCacheInspect(
+			{ kind: 'named', name: cacheName('missing') },
+			reporter(results, infos),
+			{
+				get: {
+					inDefaultCache: () =>
+						Promise.reject(new ORPCError('NOT_FOUND', { status: 404 })),
+					inNamedCache: () =>
+						Promise.reject(new ORPCError('NOT_FOUND', { status: 404 }))
+				}
+			}
+		);
 
 		expect({ results, infos }).toStrictEqual({
 			results: [],

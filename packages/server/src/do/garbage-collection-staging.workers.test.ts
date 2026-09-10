@@ -13,6 +13,7 @@ import {
 	currentServer,
 	initialise,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	testPushId
 } from '../test-support.ts';
@@ -99,11 +100,13 @@ describe('garbage collection best-effort staging deletes', () => {
 		const { outcome, failedDeletes } = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cacheId = resolvedCache(instance.context).id;
+
 				drizzle(state.storage, { schema: { pendingUploads } })
 					.insert(pendingUploads)
 					.values({
 						id: uploadIdSchema.parse('reaped-upload'),
-						cache: '',
+						cacheId,
 						narHash: syntheticNarHash(1),
 						r2Key: reapedKey,
 						metadataJson: '{}',
@@ -144,7 +147,9 @@ describe('garbage collection best-effort staging deletes', () => {
 				);
 
 				return {
-					outcome: await garbageCollection.collectGarbage(rootLogger()),
+					outcome: await garbageCollection.collectGarbage(rootLogger(), {
+						scope: 'tenant'
+					}),
 					failedDeletes
 				};
 			}
@@ -178,6 +183,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
 				state.storage.sql.exec(
 					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
 					 rows(value) AS (
@@ -188,10 +194,11 @@ describe('garbage collection best-effort staging deletes', () => {
 					   CROSS JOIN digits AS thousands
 					 )
 					 INSERT INTO pending_upload
-					   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at)
-					 SELECT printf('expired-upload-%d', value), '', ?,
+					   (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at)
+					 SELECT printf('expired-upload-%d', value), ?, ?,
 					        printf('staging/expired/upload-%d', value), '{}', ?, ?
 					 FROM rows WHERE value < ?`,
+					cache.id,
 					syntheticNarHash(1),
 					expired,
 					expired,
@@ -207,10 +214,11 @@ describe('garbage collection best-effort staging deletes', () => {
 					   CROSS JOIN digits AS thousands
 					 )
 					 INSERT INTO pending_attestation
-					   (id, cache, store_path_hash, digest, r2_key, created_at, expires_at)
-					 SELECT printf('expired-attestation-%d', value), '', ?, ?,
+					   (id, cache_id, store_path_hash, digest, r2_key, created_at, expires_at)
+					 SELECT printf('expired-attestation-%d', value), ?, ?, ?,
 					        printf('staging/expired/attestation-%d', value), ?, ?
 					 FROM rows WHERE value < ?`,
+					cache.id,
 					'a'.repeat(32),
 					'b'.repeat(64),
 					expired,
@@ -236,7 +244,9 @@ describe('garbage collection best-effort staging deletes', () => {
 					deletionQueue,
 					new RetentionService(instance.context)
 				);
-				const first = await garbageCollection.collectGarbage(rootLogger());
+				const first = await garbageCollection.collectGarbage(rootLogger(), {
+					scope: 'tenant'
+				});
 				const remainingAfterFirst = {
 					uploads: drizzle(state.storage, { schema: { pendingUploads } })
 						.select({ id: pendingUploads.id })
@@ -249,7 +259,9 @@ describe('garbage collection best-effort staging deletes', () => {
 						.from(pendingAttestations)
 						.all().length
 				};
-				const second = await garbageCollection.collectGarbage(rootLogger());
+				const second = await garbageCollection.collectGarbage(rootLogger(), {
+					scope: 'tenant'
+				});
 
 				return {
 					first: {

@@ -12,40 +12,34 @@ import {
 	rootTargetsPageSchema
 } from '../retention.ts';
 
-import {
-	cacheScopedProcedure,
-	cacheScopedQueryProcedure
-} from './cache-scoped.ts';
+import { cacheScopedProcedure } from './cache-scoped.ts';
 
 // Both listing routes accept the opaque cursor from the previous page and a
-// limit within the shared page bound.
-const listPageQuerySchema = z
-	.strictObject({
-		cursor: z.string().min(1).optional(),
-		limit: z.number().int().min(1).max(rootListPageSize).optional()
-	})
-	.default({});
+// limit within the shared page bound. Both are GET routes, so oRPC sends every
+// field the path does not name in the query string.
+const listPageShape = {
+	cursor: z.string().min(1).optional(),
+	limit: z.number().int().min(1).max(rootListPageSize).optional()
+};
 
 export const rootsContract = {
-	list: cacheScopedQueryProcedure(
+	list: cacheScopedProcedure(
 		{ method: 'GET', suffix: '/roots', requires: 'root:list' },
-		{},
-		listPageQuerySchema,
+		listPageShape,
 		rootListResponseSchema
 	),
 
 	// Fetch targets one bounded page at a time. Each page checks whether its
 	// targets can be served, so a run root can grow beyond one request and remain
 	// listable.
-	targets: cacheScopedQueryProcedure(
+	targets: cacheScopedProcedure(
 		{
 			method: 'GET',
 			suffix: '/roots/{name}/targets',
 			requires: 'root:list',
 			resource: { root: { field: 'name' } }
 		},
-		{ name: rootNameSchema },
-		listPageQuerySchema,
+		{ name: rootNameSchema, ...listPageShape },
 		rootTargetsPageSchema
 	),
 

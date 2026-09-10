@@ -1,29 +1,30 @@
 import {
+	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type ParsedUploadGraceFact,
-	type ParsedUploadNegotiateRequest,
-	type ParsedUploadPathMetadata,
-	type ParsedUploadPathNegotiation,
-	type ParsedUploadPreviewRequest,
-	type PushCredential,
+	type PushCredentialInput,
 	type PushId,
 	type UploadConfirmResponse,
 	type UploadDecision,
+	type UploadGraceFact,
 	type UploadId,
 	uploadIdSchema,
+	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
+	type UploadPathMetadata,
+	type UploadPathNegotiation,
+	type UploadPreviewRequest,
 	type UploadPreviewResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
+import type { ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { InvalidPushIdError } from '../errors.ts';
@@ -75,7 +76,7 @@ interface ClosureClassification {
 }
 
 interface ClosureRequest {
-	readonly paths: readonly ParsedUploadPathNegotiation[];
+	readonly paths: readonly UploadPathNegotiation[];
 }
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
@@ -119,7 +120,7 @@ export class UploadsService {
 	// D1 caps the number of bound parameters in one statement. Chunk closure
 	// lookups so a large request stays within that limit.
 	private existingNarInfos(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): Map<StorePathHash, NarInfoRow> {
 		const rows = chunk(storePathHashes, maxInClauseValues).flatMap(
@@ -129,7 +130,7 @@ export class UploadsService {
 					.from(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, cache),
+							eq(schema.narInfos.cacheId, cache.id),
 							inArray(schema.narInfos.storePathHash, storePathHashBatch)
 						)
 					)
@@ -142,9 +143,9 @@ export class UploadsService {
 	// A fresh upload uses a private staging key. Reuse records the canonical key but
 	// gives the client no write access to the shared object.
 	private planUpload(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		pushId: PushId,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		existingBlob: ReusableBlob | undefined,
 		graceDecision: GraceDecision,
 		attachRootName: RootName | undefined
@@ -152,8 +153,7 @@ export class UploadsService {
 		const uploadId = uploadIdSchema.parse(crypto.randomUUID());
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + uploadTtlMs);
-		const pendingMetadata:
-			ParsedUploadPathNegotiation | ParsedUploadPathMetadata =
+		const pendingMetadata: UploadPathNegotiation | UploadPathMetadata =
 			existingBlob === undefined
 				? metadata
 				: {
@@ -174,7 +174,7 @@ export class UploadsService {
 				id: uploadId,
 				// Store the cache in the pending row. Commit accepts only the upload
 				// identifier, so this binding prevents cross-cache redirection.
-				cache,
+				cacheId: cache.id,
 				narHash: metadata.narHash,
 				r2Key,
 				metadataJson: JSON.stringify(pendingMetadata),
@@ -235,7 +235,7 @@ export class UploadsService {
 	// availability comes from the D1 reference and blob indexes. Preview must use
 	// the non-claiming lookup because classification must not clear reaper timers.
 	private async classifyClosure(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
 		shouldClaim: boolean
@@ -295,8 +295,8 @@ export class UploadsService {
 	}
 
 	async negotiate(
-		cache: StoredCache,
-		body: ParsedUploadNegotiateRequest,
+		cacheScope: CacheScope,
+		body: UploadNegotiateRequest,
 		origin: RequestOrigin,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
@@ -307,11 +307,17 @@ export class UploadsService {
 
 		requireServedStorePaths(body.paths.map((path) => path.storePath));
 
+		if (body.paths.length === 0 && body.attachRoot === undefined) {
+			return { uploads: [] };
+		}
+
+		const cache = this.context.cacheRepository.require(cacheScope);
+
 		// Reject paths from another store directory before creating or extending the
 		// run root. Each pending upload then records the root its commit must attach
 		// to.
 		if (body.attachRoot !== undefined) {
-			await this.roots.bindRunRoot(
+			this.roots.bindRunRoot(
 				cache,
 				body.attachRoot.name,
 				body.attachRoot.ttlSeconds
@@ -342,7 +348,7 @@ export class UploadsService {
 				graceSeconds: resolvedGraceSeconds
 			})
 		};
-		const plannedGraceFact: ParsedUploadGraceFact =
+		const plannedGraceFact: UploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
@@ -436,7 +442,10 @@ export class UploadsService {
 
 		await this.reconcileQueue.enqueue(
 			origin,
-			skippableRows.map((row) => ({ cache, storePathHash: row.storePathHash }))
+			skippableRows.map((row) => ({
+				cacheId: cache.id,
+				storePathHash: row.storePathHash
+			}))
 		);
 
 		return { uploads };
@@ -447,8 +456,8 @@ export class UploadsService {
 	// stored deadline; commit and upload actions report the policy that a new
 	// publication would capture.
 	async preview(
-		cache: StoredCache,
-		body: ParsedUploadPreviewRequest,
+		cacheScope: CacheScope,
+		body: UploadPreviewRequest,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
 	): Promise<UploadPreviewResponse> {
@@ -457,11 +466,44 @@ export class UploadsService {
 		}
 
 		requireServedStorePaths(body.paths.map((path) => path.storePath));
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+		const resolvedGraceSeconds =
+			cache === undefined
+				? undefined
+				: this.retention.resolveGraceSeconds(cache);
+
+		if (cache === undefined) {
+			const facts = hints === undefined ? undefined : factsFromHints(hints);
+			const reusableByNarHash =
+				facts?.reusableByNarHash ??
+				(await this.uploadState.peekReusableBlobs(
+					body.paths.map((path) => path.narHash)
+				));
+			const plannedGraceFact: UploadGraceFact =
+				resolvedGraceSeconds === undefined
+					? {}
+					: { graceSeconds: resolvedGraceSeconds };
+
+			return {
+				uploads: body.paths.map((metadata) => {
+					const decision = {
+						action: reusableByNarHash.has(metadata.narHash)
+							? ('commit' as const)
+							: ('upload' as const),
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash
+					};
+
+					return shouldReportGrace
+						? { ...decision, grace: plannedGraceFact }
+						: decision;
+				})
+			};
+		}
 
 		const { existingByStorePathHash, skippable, reusableByNarHash } =
 			await this.classifyClosure(cache, body, hints, false);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
-		const plannedGraceFact: ParsedUploadGraceFact =
+		const plannedGraceFact: UploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
@@ -518,11 +560,22 @@ export class UploadsService {
 	// same narinfo identity when grace is applied. If any condition fails, the path
 	// is reported as unconfirmed and receives no grace extension.
 	async confirmPaths(
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<UploadConfirmResponse> {
 		if (storePathHashes.length === 0) {
 			return { paths: [] };
+		}
+
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return {
+				paths: storePathHashes.map((storePathHash) => ({
+					storePathHash,
+					confirmed: false
+				}))
+			};
 		}
 
 		// Deduplicate the storage queries without removing duplicate response entries.
@@ -582,7 +635,7 @@ export class UploadsService {
 	async issuePushCredential(
 		tokenExpiresAt: Date,
 		pushId?: PushId
-	): Promise<PushCredential> {
+	): Promise<PushCredentialInput> {
 		const now = new Date();
 		const ttlSeconds = pushCredentialTtlSeconds(tokenExpiresAt, now);
 		const issuer = this.context.pushCredentials();

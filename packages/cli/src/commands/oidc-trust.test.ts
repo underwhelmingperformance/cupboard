@@ -56,6 +56,7 @@ const prSubstitutions = {
 const prCacheBinding = {
 	equalsTemplate: 'pr-{pr}',
 	substitutions: prSubstitutions,
+	kind: 'named',
 	validate: 'cacheName'
 };
 const prRootBinding = {
@@ -75,6 +76,7 @@ const tagSubstitutions = {
 const tagCacheBinding = {
 	equalsTemplate: '{tag}',
 	substitutions: tagSubstitutions,
+	kind: 'named',
 	validate: 'cacheName'
 };
 const tagRootBinding = {
@@ -86,7 +88,9 @@ const tagRootBinding = {
 const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 	type: 'cupboard_cache',
 	actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-	resources: { cache: { exact: 'owner-ci', validate: 'cacheName' } }
+	resources: {
+		cache: { exact: 'owner-ci', kind: 'named', validate: 'cacheName' }
+	}
 };
 const ciGrantRow =
 	'cache owner-ci: upload:negotiate, upload:status, upload:commit';
@@ -444,7 +448,7 @@ describe('githubBranchAddBody', () => {
 					type: 'cupboard_cache',
 					actions: [...uploadActions, ...attestActions, ...rootActions],
 					resources: {
-						cache: { exact: '_default', validate: 'cacheName' },
+						cache: { kind: 'default' },
 						root: {
 							validate: 'rootName',
 							exact: 'github:acme/infra/main/'
@@ -477,7 +481,7 @@ describe('githubBranchAddBody', () => {
 				type: 'cupboard_cache',
 				actions: [...uploadActions, ...rootActions],
 				resources: {
-					cache: { exact: '_default', validate: 'cacheName' },
+					cache: { kind: 'default' },
 					root: { validate: 'rootName', exact: 'github:acme/infra/release/' }
 				}
 			}

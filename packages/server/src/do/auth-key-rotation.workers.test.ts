@@ -1,7 +1,7 @@
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	AuthKeyListResponse,
-	AuthKeyRotateResponse
+	AuthKeyListResponseInput,
+	AuthKeyRotateResponseInput
 } from '@cupboard/protocol/keys';
 import {
 	authKeyListResponseSchema,
@@ -25,7 +25,7 @@ import {
 	fetchPath,
 	initialise,
 	issueServerSignedToken,
-	latestMigrationIndex,
+	latestPreContractMigrationIndex,
 	migrateThrough,
 	resetTestServer
 } from '../test-support.ts';
@@ -36,13 +36,13 @@ async function adminToken(): Promise<string> {
 	return issueServerSignedToken(adminGrants());
 }
 
-async function listKeys(token: string): Promise<AuthKeyListResponse> {
+async function listKeys(token: string): Promise<AuthKeyListResponseInput> {
 	const response = await authorisedFetch('/keys/auth', token);
 
 	return authKeyListResponseSchema.parse(await response.json());
 }
 
-async function rotate(token: string): Promise<AuthKeyRotateResponse> {
+async function rotate(token: string): Promise<AuthKeyRotateResponseInput> {
 	const response = await authorisedFetch('/keys/auth/rotate', token, {
 		method: 'POST'
 	});
@@ -65,8 +65,8 @@ const orpcErrorBodySchema = z.strictObject({
 });
 
 function singleListedKey(
-	list: AuthKeyListResponse
-): AuthKeyListResponse['keys'][number] {
+	list: AuthKeyListResponseInput
+): AuthKeyListResponseInput['keys'][number] {
 	const [key] = z
 		.tuple([
 			z.object({
@@ -239,7 +239,7 @@ describe('auth-key rotation', () => {
 		const seeded = await runInDurableObject(
 			currentServer(),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, latestPreContractMigrationIndex);
 				const pair = await generateAuthKeyPair();
 
 				drizzle(state.storage, { schema: { authKeys } })

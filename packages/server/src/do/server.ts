@@ -1,15 +1,10 @@
 import { type Logger } from '@cupboard/logger';
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	cacheFromSelector,
 	cacheNameSchema,
-	cachePrioritySchema,
-	cacheSelectorSchema,
-	DEFAULT_CACHE,
-	isPrivateCache,
-	privateStoredCache,
-	type StoredCache,
-	storedCacheSchema
+	type CacheScope,
+	cacheScopeSchema,
+	isSameCacheScope,
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
@@ -17,24 +12,18 @@ import {
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
 import type {
-	ParsedR2CredentialCheck,
-	VerifyReport
+	R2CredentialCheck,
+	VerifyReportInput
 } from '@cupboard/protocol/reports';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import {
-	type ParsedReuseViewName,
-	privateStoredReuseView,
-	reuseViewNameSchema,
-	type StoredReuseView
-} from '@cupboard/protocol/reuse-views';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
-import {
+	type CommitBatchEntry,
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
 	commitCreditCapability,
+	type CommitSessionRequest,
 	commitSessionRequestSchema,
-	type ParsedCommitBatchEntry,
-	type ParsedCommitSessionRequest,
 	type SessionId,
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
@@ -53,6 +42,8 @@ import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { readTenantReadVerifier } from '../control/tenant-membership.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
 import {
@@ -71,20 +62,26 @@ import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	maxVerificationRpcRows,
 	parseNarInfoName,
+	parseNarName,
 	type R2ObjectKey,
 	type RequestOrigin,
 	textResponse,
-	uncachedNotFoundResponse,
 	verificationBatchSize
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
+import {
+	isCacheCatalogueComplete,
+	isLocalCacheCatalogueComplete,
+	markCacheCatalogueComplete,
+	reconcileCacheCatalogue as reconcileStoredCacheCatalogue
+} from '../migration/cache-access.ts';
 import {
 	loggerMiddleware,
 	requestLogger,
 	rootLogger
 } from '../observability/logging.ts';
 import { withSpan } from '../observability/span.ts';
-import { authoriseRequest } from '../orpc/authorise.ts';
+import { authoriseRequest, noPendingCache } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 import { commitEntryCreditBudget } from '../policy/commit-credit.ts';
@@ -92,6 +89,11 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
+import {
+	guardPrivateViewRead,
+	narAuthorityForView,
+	serveNar
+} from '../read/read.ts';
 
 import {
 	armAlarmNoLaterThan,
@@ -131,6 +133,7 @@ import {
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type GarbageCollectionOutcome,
+	type GarbageCollectionTarget,
 	ownerRuleId,
 	type RuntimeEnv,
 	ServerContext
@@ -154,7 +157,7 @@ import {
 	maintenancePassStatements,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
-import { applyMigrations } from './migrate.ts';
+import { applyMigrations, migrationsThrough } from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type NegotiateHints,
@@ -166,7 +169,10 @@ import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
-import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
+import {
+	type ResolvedReuseView,
+	ReuseViewAdminService
+} from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -226,6 +232,8 @@ export type VerificationRecordRpcResult =
 	| { readonly kind: 'recorded'; readonly applied: number }
 	| { readonly kind: 'timed-out' };
 
+const uploadGracePathPattern = /^(?:\/cache\/[^/]+)?\/uploads(?:\/preview)?$/u;
+
 // Reuse misses must be `no-store`. A view update or commit can make the same
 // lookup succeed, and no purge key covers the cached 404.
 function reuseNotFound(): Response {
@@ -279,7 +287,7 @@ const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
 	}),
 	z.object({
 		scope: z.literal('cache'),
-		cache: storedCacheSchema,
+		cache: cacheScopeSchema,
 		collectLimit: garbageCollectionLimitSchema
 	})
 ]);
@@ -290,6 +298,12 @@ const garbageCollectionContinuationsSchema = z
 type GarbageCollectionContinuation = z.infer<
 	typeof garbageCollectionContinuationSchema
 >;
+type GarbageCollectionScope =
+	| { readonly scope: 'tenant' }
+	| { readonly scope: 'cache'; readonly cache: CacheScope };
+const tenantGarbageCollectionScope: GarbageCollectionScope = {
+	scope: 'tenant'
+};
 
 // Discard an unreadable continuation. The next collection pass will rediscover
 // its backlog.
@@ -308,12 +322,14 @@ function parseGarbageCollectionContinuations(
 }
 
 function garbageCollectionContinuation(
-	cache: StoredCache | undefined,
+	target: GarbageCollectionTarget,
 	collectLimit: number
 ): GarbageCollectionContinuation {
-	return cache === undefined
-		? { scope: 'tenant', collectLimit }
-		: { scope: 'cache', cache, collectLimit };
+	if (target.scope === 'tenant') {
+		return { scope: 'tenant', collectLimit };
+	}
+
+	return { scope: 'cache', cache: target.cache.scope, collectLimit };
 }
 
 function mergeGarbageCollectionContinuation(
@@ -335,7 +351,8 @@ function mergeGarbageCollectionContinuation(
 	return [
 		...pending.filter(
 			(candidate) =>
-				candidate.scope !== 'cache' || candidate.cache !== continuation.cache
+				candidate.scope !== 'cache' ||
+				!isSameCacheScope(candidate.cache, continuation.cache)
 		),
 		continuation
 	];
@@ -491,7 +508,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.roots = new RootsService(
 			this.context,
-			this.cacheAdmin,
 			this.retention,
 			this.narInfoObjects
 		);
@@ -506,7 +522,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
-			this.cacheAdmin,
 			this.signingKeys,
 			this.uploadState,
 			this.narInfoObjects,
@@ -555,6 +570,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
+		// Resolve the cache from the path before any handler uses it. A bare path
+		// addresses the default cache.
+		this.app.use(async (context, next) => {
+			context.set('cache', { kind: 'default' });
+			await next();
+		});
+		this.app.use('/cache/:cacheName/*', async (context, next) => {
+			context.set('cache', {
+				kind: 'named',
+				name: parseRequestValue(cacheNameSchema, context.req.param('cacheName'))
+			});
+			await next();
+		});
+
 		// Contract routes must run before the routes that handle raw
 		// Request/Response, because the oRPC handler signals an unmatched request
 		// by falling through.
@@ -565,6 +594,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context: {
 						request: context.req.raw,
 						services: this.rpcServices(),
+						cache: context.get('cache'),
 						logger: context.get('logger')
 					}
 				}
@@ -575,8 +605,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				const pathname = new URL(context.req.url).pathname;
 				const isUploadGraceEndpoint =
 					context.req.method === 'POST' &&
-					(/^\/cache\/[^/]+\/uploads$/.test(pathname) ||
-						/^\/cache\/[^/]+\/uploads\/preview$/.test(pathname));
+					uploadGracePathPattern.test(pathname);
 
 				if (
 					isUploadGraceEndpoint &&
@@ -598,34 +627,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		// Treat an absent cache prefix and the `_default` selector as the stored
-		// default-cache name. Validate named prefixes before route dispatch.
-		this.app.use(async (context, next) => {
-			context.set('cache', DEFAULT_CACHE);
-			await next();
-		});
-		this.app.use('/cache/:cacheName/*', async (context, next) => {
-			const selector = parseRequestValue(
-				cacheSelectorSchema,
-				context.req.param('cacheName')
-			);
-
-			context.set('cache', cacheFromSelector(selector));
-			await next();
-		});
-
-		// The Worker preserves the private namespace prefix when forwarding an
-		// authenticated read. That prefix contains the cache's local name.
-		this.app.use('/private-cache/:cacheName/*', async (context, next) => {
-			const name = parseRequestValue(
-				cacheNameSchema,
-				context.req.param('cacheName')
-			);
-
-			context.set('cache', privateStoredCache(name));
-			await next();
-		});
-
 		this.app.get('/pubkey', async (context) =>
 			// Served uncached so a rotation is visible across colos at once; the
 			// strong ETag still lets Nix revalidate conditionally.
@@ -639,22 +640,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		// The Worker's fallback forwards unmatched tenant GET requests to this
-		// Durable Object without authenticating the reader. Private caches require
-		// authentication, so these routes return 404 before serving their content.
-		const refusePrivateCache = createMiddleware<TenantHonoEnv>(
-			async (context, next) => {
-				if (isPrivateCache(context.get('cache'))) {
-					return uncachedNotFoundResponse();
-				}
-
-				await next();
-			}
-		);
-
-		this.app.get(
-			'/cache/:cacheName/nix-cache-info',
-			refusePrivateCache,
+		this.app.on(
+			'GET',
+			['/nix-cache-info', '/cache/:cacheName/nix-cache-info'],
 			(context) =>
 				textResponse(
 					context.req.raw,
@@ -663,17 +651,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						'content-type': 'text/x-nix-cache-info; charset=utf-8'
 					}
 				)
-		);
-
-		this.app.get('/private-cache/:cacheName/nix-cache-info', (context) =>
-			textResponse(
-				context.req.raw,
-				this.cacheAdmin.cacheInfoBody(context.get('cache')),
-				{
-					'content-type': 'text/x-nix-cache-info; charset=utf-8',
-					'cache-control': 'no-store'
-				}
-			)
 		);
 
 		// Apply `no-store` to thrown reuse errors as well as ordinary responses.
@@ -699,15 +676,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		this.app.use('/reuse/*', uncachedReuseErrors);
-		this.app.use('/private-reuse/*', uncachedReuseErrors);
-
-		// Both namespaces carry the view's local name in the path. A public view
-		// is stored under that name and a private view under its private stored
-		// name, so each namespace reads its own views and neither can read the
-		// other's. Only an edge forward that has already authenticated the reader
-		// reaches the private routes.
-		this.registerReuseViewRoutes('/reuse', (name) => name);
-		this.registerReuseViewRoutes('/private-reuse', privateStoredReuseView);
+		this.registerReuseViewRoutes();
 
 		// `/token` uses the subject token as its credential. The Worker proxies the
 		// JWKS route to this Durable Object.
@@ -747,7 +716,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.on(
 			'GET',
 			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
-			refusePrivateCache,
 			(context) =>
 				this.attestations.handleServeList(
 					context.req.raw,
@@ -761,27 +729,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				'/attestation-bundles/:digest',
 				'/cache/:cacheName/attestation-bundles/:digest'
 			],
-			refusePrivateCache,
-			(context) =>
-				this.attestations.handleServeBundle(
-					context.req.raw,
-					context.get('cache'),
-					context.req.param('digest')
-				)
-		);
-
-		// The private namespace's attestation reads. They serve the same objects
-		// for the private cache the prefix names, and the Worker has authenticated
-		// the reader before forwarding.
-		this.app.get('/private-cache/:cacheName/attestations/:hash', (context) =>
-			this.attestations.handleServeList(
-				context.req.raw,
-				context.get('cache'),
-				context.req.param('hash')
-			)
-		);
-		this.app.get(
-			'/private-cache/:cacheName/attestation-bundles/:digest',
 			(context) =>
 				this.attestations.handleServeBundle(
 					context.req.raw,
@@ -791,39 +738,40 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The read routes of one reuse-view namespace. `storedView` maps the local
-	// name in the path to the name the view is stored under. Every response is
-	// `no-store`: a view update, a source commit, or collection can change both
-	// a hit and a miss, and no purge key covers those changes.
-	private registerReuseViewRoutes(
-		prefix: string,
-		storedView: (name: ParsedReuseViewName) => StoredReuseView
-	): void {
-		const requestedView = (
-			context: Context<TenantHonoEnv>
-		): StoredReuseView | undefined => {
+	// Every response is `no-store`: a view update, a source commit, or collection
+	// can change both a hit and a miss, and no purge key covers those changes.
+	private registerReuseViewRoutes(): void {
+		const requestedView = (context: Context<TenantHonoEnv>) => {
 			const name = reuseViewNameSchema.safeParse(context.req.param('view'));
 
-			return name.success ? storedView(name.data) : undefined;
+			return name.success ? this.reuseViews.resolve(name.data) : undefined;
 		};
 
-		this.app.get(`${prefix}/:view/nix-cache-info`, (context) => {
+		this.app.get('/reuse/:view/nix-cache-info', async (context) => {
 			const view = requestedView(context);
-			const body =
-				view === undefined ? undefined : this.reuseViews.cacheInfoBody(view);
 
-			if (body === undefined) {
+			if (view === undefined) {
 				return reuseNotFound();
 			}
 
-			return textResponse(context.req.raw, body, {
-				'content-type': 'text/x-nix-cache-info; charset=utf-8',
-				'cache-control': 'no-store'
-			});
+			const denied = await this.guardReuseViewRead(context.req.raw, view);
+
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			return textResponse(
+				context.req.raw,
+				this.reuseViews.cacheInfoBody(view),
+				{
+					'content-type': 'text/x-nix-cache-info; charset=utf-8',
+					'cache-control': 'no-store'
+				}
+			);
 		});
 
 		this.app.get(
-			String.raw`${prefix}/:view/:name{[0-9a-z]+\.narinfo}`,
+			String.raw`/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
 			async (context) => {
 				const view = requestedView(context);
 				const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
@@ -832,9 +780,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					return reuseNotFound();
 				}
 
+				const denied = await this.guardReuseViewRead(context.req.raw, view);
+
+				if (denied !== undefined) {
+					return denied;
+				}
+
 				const narInfo = await this.reuseLookup.lookup(
 					context.get('logger'),
-					view,
+					view.name,
+					view.access,
 					storePathHash
 				);
 
@@ -849,19 +804,63 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		);
 
-		this.app.post(`${prefix}/:view/api/v1/missing-paths`, async (context) => {
+		this.app.get('/reuse/:view/nar/:name', async (context) => {
+			const view = requestedView(context);
+			const nar = parseNarName(context.req.param('name'));
+
+			if (view === undefined || nar === undefined) {
+				return reuseNotFound();
+			}
+
+			const denied = await this.guardReuseViewRead(context.req.raw, view);
+
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			const response = await serveNar(
+				context.req.raw,
+				context.env,
+				this.context.requireTenant(),
+				nar,
+				narAuthorityForView(view.access, view.selectors),
+				true
+			);
+			const current = requestedView(context);
+
+			if (
+				current?.revision !== view.revision ||
+				current.access !== view.access
+			) {
+				return reuseNotFound();
+			}
+
+			return response;
+		});
+
+		this.app.post('/reuse/:view/api/v1/missing-paths', async (context) => {
 			const request = await parseRequestBody(
 				reuseViewAvailabilityRequestSchema,
 				context.req.raw
 			);
 			const view = requestedView(context);
+
+			if (view !== undefined) {
+				const denied = await this.guardReuseViewRead(context.req.raw, view);
+
+				if (denied !== undefined) {
+					return denied;
+				}
+			}
+
 			const response: CacheAvailabilityResponse = {
 				missingStorePathHashes:
 					view === undefined
 						? request.storePathHashes
 						: await this.reuseLookup.missingStorePathHashes(
 								context.get('logger'),
-								view,
+								view.name,
+								view.access,
 								request.storePathHashes
 							)
 			};
@@ -872,12 +871,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	private async guardReuseViewRead(
+		request: Request,
+		view: ResolvedReuseView
+	): Promise<Response | undefined> {
+		if (view.access === 'public') {
+			return undefined;
+		}
+
+		const verifier = await readTenantReadVerifier(
+			this.context.d1,
+			this.context.requireTenant()
+		);
+
+		return guardPrivateViewRead(request, verifier);
+	}
+
 	// Authenticate the HTTP upgrade before creating a socket. Store the session
 	// ID and cache on the accepted socket so verdict routing and cache scope
 	// survive hibernation.
 	private async commitSession(
 		request: Request,
-		cache: StoredCache,
+		cache: CacheScope,
 		authenticatedUntil: Date
 	): Promise<Response> {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
@@ -902,6 +917,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// tenant's connection limit.
 			commitEntryCreditBudget(this.context.env);
 		}
+
+		this.context.cacheRepository.require(cache);
 
 		const pair = new WebSocketPair();
 		const client = pair[0];
@@ -980,11 +997,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadId: UploadId,
 		identity?: Pick<
-			ParsedCommitBatchEntry,
+			CommitBatchEntry,
 			'storePathHash' | 'narHash' | 'retention'
 		>,
 		advisory?: {
@@ -1069,12 +1086,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// for an entry without the retention marker.
 	private async resolveGoneCommit(
 		socket: WebSocket,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		uploadId: UploadId,
-		identity: Pick<
-			ParsedCommitBatchEntry,
-			'storePathHash' | 'narHash' | 'retention'
-		>
+		identity: Pick<CommitBatchEntry, 'storePathHash' | 'narHash' | 'retention'>
 	): Promise<void> {
 		const servable = await this.narInfoObjects.servableNarInfoVersions(cache, [
 			identity.storePathHash
@@ -1131,12 +1145,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// still exists.
 	private replaySubscribedRow(
 		socket: WebSocket,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadId: UploadId,
 		row: typeof schema.pendingUploads.$inferSelect
 	): void {
-		if (row.cache !== cache) {
+		if (row.cacheId !== cache.id) {
 			sendCommitSessionFrame(socket, {
 				ev: 'error',
 				uploadId,
@@ -1178,7 +1192,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					status === 'servable'
 						? storedGraceFact(
 								this.context.db,
-								row.cache,
+								cache,
 								parseStoredUploadPathMetadata(uploadId, row.metadataJson)
 									.storePathHash
 							)
@@ -1192,7 +1206,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// one. Identity-aware clients use `subscribe-identity`.
 	private replaySubscribe(
 		socket: WebSocket,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		sessionId: SessionId,
 		uploadIds: readonly UploadId[]
 	): void {
@@ -1221,9 +1235,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// a later version of the same path.
 	private async replaySubscribeIdentity(
 		socket: WebSocket,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		sessionId: SessionId,
-		entries: readonly ParsedCommitBatchEntry[]
+		entries: readonly CommitBatchEntry[]
 	): Promise<void> {
 		for (const entry of entries) {
 			const { uploadId } = entry;
@@ -1282,9 +1296,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			await authoriseRequest(
 				claims,
-				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
-				{ id: cache },
-				() => Promise.resolve(cache)
+				{ requires: 'upload:commit', resource: { cache: { fromPath: true } } },
+				{},
+				cache,
+				noPendingCache
 			);
 			context.set('claims', claims);
 
@@ -1292,25 +1307,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private pendingCache(id: string): Promise<StoredCache | undefined> {
+	private pendingCache(id: string): Promise<CacheScope | undefined> {
 		const uploadId = uploadIdSchema.parse(id);
 		const upload = this.context.db
-			.select({ cache: schema.pendingUploads.cache })
+			.select({ cacheId: schema.pendingUploads.cacheId })
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
 		if (upload !== undefined) {
-			return Promise.resolve(upload.cache);
+			return Promise.resolve(
+				this.context.cacheRepository.scopeForId(upload.cacheId)
+			);
 		}
 
 		const attestation = this.context.db
-			.select({ cache: schema.pendingAttestations.cache })
+			.select({ cacheId: schema.pendingAttestations.cacheId })
 			.from(schema.pendingAttestations)
 			.where(eq(schema.pendingAttestations.id, uploadId))
 			.get();
 
-		return Promise.resolve(attestation?.cache);
+		return Promise.resolve(
+			attestation === undefined
+				? undefined
+				: this.context.cacheRepository.scopeForId(attestation.cacheId)
+		);
 	}
 
 	// Invalidate eligibility before cron maintenance and reconcile it afterwards.
@@ -1409,10 +1430,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private initialise(): Promise<void> {
-		this.migrationPromise ??= this.migrateAndSeed();
+	private initialise(tenant?: TenantId): Promise<void> {
+		this.migrationPromise ??= this.runInitialisation(tenant);
 
 		return this.migrationPromise;
+	}
+
+	private async runInitialisation(tenant?: TenantId): Promise<void> {
+		try {
+			await this.migrateAndSeed(tenant);
+		} catch (error: unknown) {
+			this.migrationPromise = undefined;
+			throw error;
+		}
 	}
 
 	// Fail loudly at initialisation if the runtime lacks native zstd, before
@@ -1445,27 +1475,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	private async migrateAndSeed(): Promise<void> {
+	private async migrateAndSeed(explicitTenant?: TenantId): Promise<void> {
 		// The meter is cumulative and a purged object can initialise again. Measure
 		// only this migration interval; its sole await does not access the database.
 		this.context.dbCost.recordOutstanding();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		applyMigrations(this.context.db, migrations);
+		applyMigrations(this.context.db, migrationsThrough(migrations, 43));
 		await this.assertZstdAvailable();
 
-		// The default cache always exists in the registry so its priority is
-		// resolved the same way as a named cache's. Idempotent across restarts.
-		this.context.db
-			.insert(schema.caches)
-			.values({
-				name: DEFAULT_CACHE,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoNothing()
-			.run();
+		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
+
+		if (tenant === undefined) {
+			throw new TenantNotConfiguredError();
+		}
+
+		const isCatalogueComplete = await isCacheCatalogueComplete(
+			this.context,
+			tenant
+		);
+
+		if (!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context)) {
+			await reconcileStoredCacheCatalogue(this.context, tenant);
+		}
+
+		applyMigrations(this.context.db, migrations);
+
+		if (!isCatalogueComplete) {
+			await markCacheCatalogueComplete(this.context, tenant);
+		}
 
 		this.oidcTrust.seedOwnerRule();
 
@@ -1526,9 +1565,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// requests between passes.
 	private async collectGarbageOnce(
 		collectLimit: number = maxPathsCollectedPerRun,
-		cache?: StoredCache
+		scope: GarbageCollectionScope = tenantGarbageCollectionScope
 	): Promise<void> {
-		const continuation = garbageCollectionContinuation(cache, collectLimit);
+		const target: GarbageCollectionTarget =
+			scope.scope === 'tenant'
+				? { scope: 'tenant' }
+				: {
+						scope: 'cache',
+						cache: this.context.cacheRepository.require(scope.cache)
+					};
+		const continuation = garbageCollectionContinuation(target, collectLimit);
 
 		await this.runGarbagePass(
 			() =>
@@ -1536,7 +1582,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					this.withMaintenanceEligibility(() =>
 						this.garbageCollection.collectGarbage(
 							logger,
-							cache,
+							target,
 							undefined,
 							collectLimit
 						)
@@ -1581,13 +1627,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// collection. A bounded interactive pass must also resume through alarms.
 	private collectGarbageInteractive(
 		logger: Logger,
-		cache: StoredCache | undefined,
+		target: GarbageCollectionTarget,
 		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome> {
 		return this.runExclusiveMaintenance('gc', () =>
 			this.runGarbagePass(
-				() => this.garbageCollection.collectGarbage(logger, cache, purgeOrigin),
-				garbageCollectionContinuation(cache, maxPathsCollectedPerRun)
+				() =>
+					this.garbageCollection.collectGarbage(logger, target, purgeOrigin),
+				garbageCollectionContinuation(target, maxPathsCollectedPerRun)
 			)
 		);
 	}
@@ -1602,7 +1649,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		logger: Logger,
 		purgeOrigin: RequestOrigin | undefined,
 		limit: number
-	): Promise<VerifyReport> {
+	): Promise<VerifyReportInput> {
 		return this.runExclusiveMaintenance('verify', () =>
 			(async () => {
 				this.commitPipeline.onVerificationPassStarted();
@@ -1645,7 +1692,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				: pending.filter(
 						(candidate) =>
 							candidate.scope !== 'cache' ||
-							candidate.cache !== continuation.cache
+							!isSameCacheScope(candidate.cache, continuation.cache)
 					);
 
 		if (remaining.length === 0) {
@@ -1685,7 +1732,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			await this.collectGarbageOnce(
 				continuation.collectLimit,
-				continuation.scope === 'cache' ? continuation.cache : undefined
+				continuation.scope === 'cache'
+					? { scope: 'cache', cache: continuation.cache }
+					: { scope: 'tenant' }
 			);
 		});
 	}
@@ -2137,13 +2186,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async runCacheTeardown(
-		cache: StoredCache,
+		cache: CacheScope,
 		origin: RequestOrigin
 	): Promise<void> {
 		await this.initialise();
+		const resolved = this.context.cacheRepository.require(cache);
 		await this.metered('cache-teardown', () =>
 			this.withMaintenanceEligibility(() =>
-				this.cacheAdmin.tearDownCache(cache, origin)
+				this.cacheAdmin.tearDownCache(resolved, origin)
 			)
 		);
 	}
@@ -2425,7 +2475,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			for (const { narHash, targets } of demotions) {
 				for (const target of targets) {
 					await this.narInfoObjects.demoteUnbacked(
-						target.cache,
+						this.context.cacheRepository.require(target.cache),
 						target.storePathHash,
 						narHash
 					);
@@ -2509,7 +2559,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Derive a temporary upload credential from the stored R2 credentials and
 	// probe R2 with it. This verifies the credential form used by uploads without
 	// exposing the stored credentials or accessing tenant state.
-	async checkR2(): Promise<ParsedR2CredentialCheck> {
+	async checkR2(): Promise<R2CredentialCheck> {
 		let response: Response;
 
 		try {
@@ -2538,7 +2588,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// read and write cannot interleave. An accepted identity revokes sessions for
 	// the previous owner and reseeds the owner rule.
 	async configure(identity: TenantIdentity): Promise<void> {
-		await this.initialise();
+		await this.initialise(identity.tenant);
 
 		await this.metered('configure', async () => {
 			this.context.db.transaction((transaction) => {
@@ -2552,6 +2602,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			await this.reconcileMaintenanceEligibility();
 		});
+	}
+
+	async migrateCacheCatalogue(tenant: TenantId): Promise<void> {
+		await this.initialise(tenant);
 	}
 
 	// The socket attachment preserves cache and session identity across
@@ -2606,7 +2660,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		const request = parsed.data;
-		const { cache, sessionId } = attachment;
+		const { cache: cacheScope, sessionId } = attachment;
 
 		if (request.op === 'request-credit') {
 			const hasNegotiated = this.commitCredit.declareDemand(
@@ -2627,6 +2681,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			return;
 		}
+
+		const cache = this.context.cacheRepository.require(cacheScope);
 
 		const decision = this.commitCredit.admitMessage(
 			socket,
@@ -2820,7 +2876,7 @@ function reclaimCommitCredit(
 
 // Debit credit only for entries that start commits. Subscription operations
 // retain their separate request-size bounds and consume no commit credit.
-function commitEntryCount(request: ParsedCommitSessionRequest): number {
+function commitEntryCount(request: CommitSessionRequest): number {
 	if (request.op === 'commit') {
 		return 1;
 	}

@@ -7,7 +7,7 @@ import {
 	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
-	type CommitSessionFrame,
+	type CommitSessionFrameInput,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -35,7 +35,7 @@ import {
 } from './commit-socket.ts';
 import type { BearerAttempt } from './credentials.ts';
 
-function frame(value: CommitSessionFrame): string {
+function frame(value: CommitSessionFrameInput): string {
 	return JSON.stringify(value);
 }
 
@@ -47,7 +47,7 @@ const storePathHash = storePathHashSchema.parse(
 	'0123456789abcdfghijklmnpqrsvwxyz'
 );
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
-const path = '/cache/_default/commit';
+const path = '/commit';
 // Advancing by this cap fires every possible jittered reconnect delay.
 const maxBackoffMs = 5000;
 // Node truncates longer timer delays. The session chains timers to preserve a

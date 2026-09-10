@@ -4,8 +4,9 @@ import { oc } from '@orpc/contract';
 import { type Operation } from '../grants.ts';
 
 /**
- * Specifies how the authoriser obtains a resource: from an input field or from
- * the pending upload or attestation addressed by the request.
+ * Specifies how the authoriser obtains a resource: from the cache the request
+ * path selected, from an input field, or from the pending upload or attestation
+ * the request addresses.
  *
  * A missing pending row denies access by default, which makes commit and attach
  * fail closed. Benign reads such as upload status set `missingDenies: false`;
@@ -13,6 +14,7 @@ import { type Operation } from '../grants.ts';
  * pending row is removed.
  */
 export type ResourceLocation =
+	| { readonly fromPath: true }
 	| { readonly field: string }
 	| { readonly pending: true; readonly missingDenies?: boolean };
 

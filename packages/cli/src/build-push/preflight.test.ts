@@ -8,7 +8,7 @@ import {
 	type NixStoreConfig
 } from '@cupboard/nix';
 import {
-	cacheSelectorSchema,
+	cacheNameSchema,
 	rootNameSchema,
 	storeDirectorySchema
 } from '@cupboard/nix-store/scalars';
@@ -32,13 +32,13 @@ import {
 import { linuxSunPathBytes } from './runtime-directory.ts';
 
 const invocationId = invocationIdSchema.parse('invocation-1');
-const cache = cacheSelectorSchema.parse('ci');
+const cache = { kind: 'named' as const, name: cacheNameSchema.parse('ci') };
 const coveredRoot = rootNameSchema.parse('github:acme/repo/run-1');
 const uncoveredRoot = rootNameSchema.parse('github:other/repo/run-1');
 const grants = authorizationDetailsSchema.parse([
 	{
 		type: 'cupboard_cache',
-		cache: 'ci',
+		cache: { kind: 'named', name: 'ci' },
 		actions: ['upload:negotiate', 'upload:commit', 'root:attach', 'root:set'],
 		root: 'github:acme/repo/'
 	}

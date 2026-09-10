@@ -1,23 +1,24 @@
 import {
-	type PrivateStoredCache,
+	type CacheAccessMode,
+	type CacheScope,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import {
-	type TenantReadMode,
-	type TenantStatus
-} from '@cupboard/protocol/tenants';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type ReadUser } from '@cupboard/shared/http';
 import { and, eq, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 
+import { cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
+import { cacheCatalogueVersion } from '../migration/cache-access.ts';
 import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
 } from '../read/read-auth.ts';
+import { tenantServer } from '../routing/durable-object.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
@@ -30,6 +31,7 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 
 const memberKeyPrefix = 'tenant-member:';
 const filterKey = 'tenant-filter';
+const defaultCacheScope: CacheScope = { kind: 'default' };
 
 // How long a colo trusts its cached filter before refetching. The filter only
 // rejects unknown tenants; it never supplies security-sensitive tenant state.
@@ -51,7 +53,6 @@ export interface TenantReadVerifier {
 
 export interface TenantEntry {
 	readonly status: TenantStatus;
-	readonly readMode: TenantReadMode;
 	readonly readVerifier?: TenantReadVerifier;
 }
 
@@ -60,14 +61,11 @@ export interface TenantEntry {
 export interface TenantAdmission {
 	readonly entry: TenantEntry;
 	readonly fresh: boolean;
-	// The selected private cache's verifier, when configured. A matching
-	// cache-specific credential is then required for the request.
+	readonly cache?: {
+		readonly access: CacheAccessMode;
+		readonly isDeleted: boolean;
+	};
 	readonly cacheVerifier?: TenantReadVerifier;
-	// True after deletion of the selected private cache. Deletion retains the read
-	// credential while the teardown drain removes narinfo and attestation objects.
-	// Authenticated content reads return 404, and availability reports every path
-	// as missing.
-	readonly isCacheDeleted: boolean;
 }
 
 interface DeferredContext {
@@ -171,7 +169,7 @@ async function loadMembershipFilter(
 
 const tenantAdmissionColumns = {
 	status: d1Schema.tenant.status,
-	readMode: d1Schema.tenant.readMode,
+	cacheCatalogueVersion: d1Schema.tenant.cacheCatalogueVersion,
 	readUser: d1Schema.tenant.readUser,
 	readPasswordHash: d1Schema.tenant.readPasswordHash,
 	readPasswordSalt: d1Schema.tenant.readPasswordSalt
@@ -185,41 +183,32 @@ const cacheCredentialColumns = {
 
 // Every push and fetch depends on this authoritative row. Retry one transient
 // D1 failure, then return a retryable refusal for a persistent failure.
-async function readTenantRow(
-	database: Database,
-	slug: TenantId
-): Promise<TenantAdmissionRow | undefined> {
-	try {
-		return await readWithOneRetry(() =>
-			database
-				.select(tenantAdmissionColumns)
-				.from(d1Schema.tenant)
-				.where(eq(d1Schema.tenant.id, slug))
-				.get()
-		);
-	} catch (error) {
-		throw new TenantAdmissionUnavailableError(error);
-	}
-}
-
-// Reads the tenant row, the selected private cache's credential row and its
-// lifecycle row in one D1 batch. All three queries use primary keys.
 async function readTenantAndCacheRows(
 	database: Database,
 	slug: TenantId,
-	cache: PrivateStoredCache
+	cache: CacheScope
 ): Promise<{
 	tenant: TenantAdmissionRow | undefined;
 	credential: TenantReadVerifier | undefined;
-	isDeleted: boolean;
+	cache:
+		| { readonly access: CacheAccessMode; readonly isDeleted: boolean }
+		| undefined;
 }> {
-	const namedCredentialRow = and(
+	const credentialRow = and(
 		eq(d1Schema.tenantCacheReadCredential.tenant, slug),
-		eq(d1Schema.tenantCacheReadCredential.cache, cache)
+		cacheIdentityCondition(
+			d1Schema.tenantCacheReadCredential.cacheKind,
+			d1Schema.tenantCacheReadCredential.cacheName,
+			cache
+		)
 	);
 	const lifecycleRow = and(
 		eq(d1Schema.cacheLifecycle.tenant, slug),
-		eq(d1Schema.cacheLifecycle.cache, cache)
+		cacheIdentityCondition(
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName,
+			cache
+		)
 	);
 
 	try {
@@ -233,9 +222,12 @@ async function readTenantAndCacheRows(
 					database
 						.select(cacheCredentialColumns)
 						.from(d1Schema.tenantCacheReadCredential)
-						.where(namedCredentialRow),
+						.where(credentialRow),
 					database
-						.select({ deletedAt: d1Schema.cacheLifecycle.deletedAt })
+						.select({
+							access: d1Schema.cacheLifecycle.access,
+							deletedAt: d1Schema.cacheLifecycle.deletedAt
+						})
 						.from(d1Schema.cacheLifecycle)
 						.where(lifecycleRow)
 				])
@@ -253,7 +245,13 @@ async function readTenantAndCacheRows(
 							passwordHash: credential.readPasswordHash,
 							passwordSalt: credential.readPasswordSalt
 						},
-			isDeleted: lifecycle !== undefined && lifecycle.deletedAt !== null
+			cache:
+				lifecycle === undefined
+					? undefined
+					: {
+							access: lifecycle.access,
+							isDeleted: lifecycle.deletedAt !== null
+						}
 		};
 	} catch (error) {
 		throw new TenantAdmissionUnavailableError(error);
@@ -262,7 +260,7 @@ async function readTenantAndCacheRows(
 
 interface TenantAdmissionRow {
 	status: TenantEntry['status'];
-	readMode: TenantEntry['readMode'];
+	cacheCatalogueVersion: number | null;
 	readUser: ReadUser | null;
 	readPasswordHash: ReadPasswordHash | null;
 	readPasswordSalt: ReadPasswordSalt | null;
@@ -276,7 +274,6 @@ function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 	) {
 		return {
 			status: row.status,
-			readMode: row.readMode,
 			readVerifier: {
 				user: row.readUser,
 				passwordHash: row.readPasswordHash,
@@ -285,7 +282,22 @@ function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 		};
 	}
 
-	return { status: row.status, readMode: row.readMode };
+	return { status: row.status };
+}
+
+export async function readTenantReadVerifier(
+	database: Database,
+	slug: TenantId
+): Promise<TenantReadVerifier | undefined> {
+	const row = await readWithOneRetry(() =>
+		database
+			.select(tenantAdmissionColumns)
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, slug))
+			.get()
+	);
+
+	return row === undefined ? undefined : entryFromRow(row).readVerifier;
 }
 
 // Tier 3 reads the authoritative tenant row and the credential row for a
@@ -294,24 +306,31 @@ function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 async function readTenantEntry(
 	env: Env,
 	slug: TenantId,
-	privateCache: PrivateStoredCache | undefined
+	cache: CacheScope
 ): Promise<TenantAdmission | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const rows =
-		privateCache === undefined
-			? {
-					tenant: await readTenantRow(database, slug),
-					credential: undefined,
-					isDeleted: false
-				}
-			: await readTenantAndCacheRows(database, slug, privateCache);
+	let rows = await readTenantAndCacheRows(database, slug, cache);
 
 	if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
 		return undefined;
 	}
 
+	if (rows.tenant.cacheCatalogueVersion !== cacheCatalogueVersion) {
+		try {
+			await tenantServer(env, slug).migrateCacheCatalogue(slug);
+		} catch (error) {
+			throw new TenantAdmissionUnavailableError(error);
+		}
+
+		rows = await readTenantAndCacheRows(database, slug, cache);
+
+		if (rows.tenant === undefined || rows.tenant.status === 'offboarded') {
+			return undefined;
+		}
+	}
+
 	const entry = entryFromRow(rows.tenant);
-	const admission = { entry, fresh: true, isCacheDeleted: rows.isDeleted };
+	const admission = { entry, fresh: true, cache: rows.cache };
 
 	if (rows.credential === undefined) {
 		return admission;
@@ -324,15 +343,14 @@ async function readTenantEntry(
  * Admits a tenant request. The membership filter and marker reject unknown
  * slugs, while a cache fault falls through to the authoritative D1 read.
  *
- * Pass `privateCache` for a request inside the private namespace. Admission then
- * loads the cache-specific verifier, if present, and reports whether the cache
- * has been deleted.
+ * Admission resolves the selected cache's access before routing can authenticate
+ * the request or consult Workers Cache.
  */
 export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
 	slug: TenantId,
-	privateCache?: PrivateStoredCache
+	cache: CacheScope = defaultCacheScope
 ): Promise<TenantAdmission | undefined> {
 	const filter = await loadMembershipFilter(env, ctx);
 
@@ -346,7 +364,7 @@ export async function admitTenant(
 		return undefined;
 	}
 
-	return readTenantEntry(env, slug, privateCache);
+	return readTenantEntry(env, slug, cache);
 }
 
 // Scheduled maintenance rebuilds the filter from one registry snapshot and

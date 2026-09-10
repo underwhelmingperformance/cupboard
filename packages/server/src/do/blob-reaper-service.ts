@@ -1,8 +1,8 @@
 import { type Logger } from '@cupboard/logger';
 import {
+	type CacheScope,
 	type NixSha256HashString,
 	type Sha256HexDigest,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
@@ -31,6 +31,7 @@ import {
 	drainObjectDeletions,
 	recoverAbandonedIncarnations
 } from '../blob/object-incarnation-recovery.ts';
+import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	blobReaperGraceMs,
@@ -50,7 +51,7 @@ import {
 } from './bulk.ts';
 
 export interface DemoteTarget {
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly storePathHash: StorePathHash;
 }
 
@@ -513,7 +514,8 @@ export class BlobReaperService {
 					.selectDistinct({
 						tenant: d1Schema.blobReference.tenant,
 						narHash: d1Schema.blobReference.narHash,
-						cache: d1Schema.blobReference.cache,
+						cacheKind: d1Schema.blobReference.cacheKind,
+						cacheName: d1Schema.blobReference.cacheName,
 						storePathHash: d1Schema.blobReference.storePathHash
 					})
 					.from(d1Schema.blobReference)
@@ -531,7 +533,10 @@ export class BlobReaperService {
 				[...edgesByHash].map(([narHash, group]) => ({
 					narHash,
 					targets: group.map((edge) => ({
-						cache: edge.cache,
+						cache: cacheScopeFromRow({
+							kind: edge.cacheKind,
+							name: edge.cacheName
+						}),
 						storePathHash: edge.storePathHash
 					}))
 				}))

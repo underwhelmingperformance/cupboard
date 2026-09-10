@@ -1,16 +1,17 @@
 import {
-	cacheNameSchema,
+	type CacheScope,
 	nixSha256HashSchema,
-	storedCacheSchema,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdentityCondition } from '../db/cache.ts';
+import * as schema from '../db/schema.ts';
 import {
 	attestationListObjectKey,
 	narInfoObjectKey,
@@ -23,7 +24,9 @@ import {
 	bootstrap,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
 	driveToCompletion,
+	namedCache,
 	narBytes,
 	narInfoDeletionRows,
 	narInfoGeneration,
@@ -39,12 +42,14 @@ import {
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
+import { maxTeardownPresenceChunk } from './deletion-queue-service.ts';
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
+const otherCache = namedCache('other');
 const origin = requestOriginSchema.parse('https://cache.example');
 const repeated = (character: string): string => character.repeat(32);
 
-function buildMetadata(character: string): ParsedUploadPathMetadata {
+function buildMetadata(character: string): UploadPathMetadata {
 	return uploadMetadata({
 		fileSize: narBytes.byteLength,
 		storePathHash: repeated(character),
@@ -52,29 +57,37 @@ function buildMetadata(character: string): ParsedUploadPathMetadata {
 	});
 }
 
-async function teardownPending(cache: string): Promise<unknown> {
-	return runInDurableObject(currentServer(), (_instance, state) =>
-		state.storage.get(`${teardownEntryPrefix}${cache}`)
-	);
+async function teardownPending(cache: CacheScope): Promise<unknown> {
+	return runInDurableObject(currentServer(), (instance, state) => {
+		const row = instance.context.db
+			.select({ id: schema.caches.id })
+			.from(schema.caches)
+			.where(
+				cacheIdentityCondition(schema.caches.kind, schema.caches.name, cache)
+			)
+			.get();
+
+		if (row === undefined) {
+			return;
+		}
+
+		return state.storage.get(`${teardownEntryPrefix}${String(row.id)}`);
+	});
 }
 
 async function isNarInfoObjectPresent(
 	storePathHash: StorePathHash,
-	cache?: string
+	cache: CacheScope = defaultCache()
 ): Promise<boolean> {
 	const object = await env.BLOBS.head(
-		narInfoObjectKey(
-			fixtureTenant,
-			storePathHash,
-			cache === undefined ? undefined : storedCacheSchema.parse(cache)
-		)
+		narInfoObjectKey(fixtureTenant, storePathHash, cache)
 	);
 
 	return object !== null;
 }
 
 async function rowsRemaining(
-	paths: readonly ParsedUploadPathMetadata[]
+	paths: readonly UploadPathMetadata[]
 ): Promise<number> {
 	const generations = await Promise.all(
 		paths.map((path) => narInfoGeneration(path.storePathHash))
@@ -88,12 +101,14 @@ describe('cache teardown', () => {
 
 	it('removes narinfo rows before cache deletion returns and drains narinfo objects later', async () => {
 		await useTestServer('teardown-drain');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const first = buildMetadata('a');
 		const paths = [first, buildMetadata('b'), buildMetadata('c')];
 
 		for (const metadata of paths) {
-			await pushPath(token, metadata, 'builds');
+			await pushPath(token, metadata, buildsCache);
 		}
 
 		// Observe the object and marker immediately after runCacheTeardown
@@ -105,6 +120,7 @@ describe('cache teardown', () => {
 		const onReturn = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = instance.context.cacheRepository.require(buildsCache);
 				await instance.runCacheTeardown(buildsCache, origin);
 
 				const object = await instance.context.env.BLOBS.head(
@@ -114,7 +130,7 @@ describe('cache teardown', () => {
 				return {
 					object: object !== null,
 					pending: await state.storage.get(
-						`${teardownEntryPrefix}${buildsCache}`
+						`${teardownEntryPrefix}${String(cache.id)}`
 					)
 				};
 			}
@@ -125,15 +141,15 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			paths.length + 1
 		);
 
 		expect({
 			onReturn,
 			rowsOnReturn,
-			object: await isNarInfoObjectPresent(first.storePathHash, 'builds'),
-			pending: await teardownPending('builds')
+			object: await isNarInfoObjectPresent(first.storePathHash, buildsCache),
+			pending: await teardownPending(buildsCache)
 		}).toStrictEqual({
 			onReturn: { object: true, pending: origin },
 			rowsOnReturn: 0,
@@ -144,11 +160,13 @@ describe('cache teardown', () => {
 
 	it('arms the marker and drains an over-cap teardown across resumes', async () => {
 		await useTestServer('teardown-resume');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const paths = [buildMetadata('a'), buildMetadata('b'), buildMetadata('c')];
 
 		for (const metadata of paths) {
-			await pushPath(token, metadata, 'builds');
+			await pushPath(token, metadata, buildsCache);
 		}
 
 		await currentServer().runCacheTeardown(buildsCache, origin);
@@ -157,28 +175,32 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			paths.length + 1
 		);
 
 		const present = await Promise.all(
-			paths.map((path) => isNarInfoObjectPresent(path.storePathHash, 'builds'))
+			paths.map((path) =>
+				isNarInfoObjectPresent(path.storePathHash, buildsCache)
+			)
 		);
 
 		expect({
 			objectsLeft: present.filter(Boolean).length,
-			pending: await teardownPending('builds')
+			pending: await teardownPending(buildsCache)
 		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
 	});
 
 	it('refuses reads as soon as an over-cap teardown returns, then drains the edges', async () => {
 		await useTestServer('teardown-edges');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const first = buildMetadata('a');
 		const paths = [first, buildMetadata('b'), buildMetadata('c')];
 
 		for (const metadata of paths) {
-			await pushPath(token, metadata, 'builds');
+			await pushPath(token, metadata, buildsCache);
 		}
 
 		// The three paths share one NAR, so one read covers the cache.
@@ -203,7 +225,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			paths.length + 1
 		);
 
@@ -222,15 +244,21 @@ describe('cache teardown', () => {
 
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 
-		// Enough paths that the presence delete spans several parameter sub-chunks.
+		// One more path than the widest presence batch makes the delete cross the
+		// parameter boundary without making the fixture perform unnecessary uploads.
 		// Each path must carry a distinct narHash so the IN list does not collapse
 		// to a single value; verifiableNar produces self-consistent compressed bytes
 		// whose decompressed content actually hashes to the declared narHash.
+		const pathCount = maxTeardownPresenceChunk + 1;
 		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 		const nars = await Promise.all(
-			Array.from({ length: 95 }, (_, index) => verifiableNar(String(index)))
+			Array.from({ length: pathCount }, (_, index) =>
+				verifiableNar(String(index))
+			)
 		);
 		const paths = nars.map((nar, index) => {
 			const suffix =
@@ -257,7 +285,7 @@ describe('cache teardown', () => {
 			await Promise.all(
 				pathsWithNars
 					.slice(start, start + pushConcurrency)
-					.map(([metadata, nar]) => pushPath(token, metadata, 'builds', nar))
+					.map(([metadata, nar]) => pushPath(token, metadata, buildsCache, nar))
 			);
 		}
 
@@ -268,7 +296,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			4
 		);
 
@@ -288,7 +316,11 @@ describe('cache teardown', () => {
 			}
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			removed: { name: 'builds', removed: true, storePathsRemoved: 95 },
+			removed: {
+				scope: buildsCache,
+				removed: true,
+				storePathsRemoved: pathCount
+			},
 			rows: 0,
 			queued: [],
 			edges: [],
@@ -299,7 +331,9 @@ describe('cache teardown', () => {
 
 	it('clears only the generations a chunk actually retired', async () => {
 		await useTestServer('teardown-generations');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const path = buildMetadata('a');
 
 		// A delete whose queued cleanup never flushed, then a recommit: the queue
@@ -307,18 +341,18 @@ describe('cache teardown', () => {
 		// drain chunks, so the first chunk's clear must remove only the generation
 		// it retired; wiping the path's other row would drop the second
 		// generation's edge retirement and credits on the floor.
-		await pushPath(token, path, 'builds');
+		await pushPath(token, path, buildsCache);
 		await queueUnflushedNarInfoDeletion({
 			storePathHash: path.storePathHash,
-			cache: 'builds'
+			cache: buildsCache
 		});
-		await pushPath(token, path, 'builds');
+		await pushPath(token, path, buildsCache);
 
 		await currentServer().runCacheTeardown(buildsCache, origin);
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			3
 		);
 
@@ -328,8 +362,8 @@ describe('cache teardown', () => {
 			queued: await narInfoDeletionRows(),
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
-			pending: await teardownPending('builds'),
-			object: await isNarInfoObjectPresent(path.storePathHash, 'builds'),
+			pending: await teardownPending(buildsCache),
+			object: await isNarInfoObjectPresent(path.storePathHash, buildsCache),
 			usage: {
 				bytes: usage?.bytes,
 				narinfos: usage?.narinfos,
@@ -347,12 +381,14 @@ describe('cache teardown', () => {
 
 	it('spares presence a sibling cache still references', async () => {
 		await useTestServer('teardown-shared');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const torn = buildMetadata('a');
 		const kept = buildMetadata('b');
 
-		await pushPath(token, torn, 'builds');
-		await pushPath(token, kept, 'other');
+		await pushPath(token, torn, buildsCache);
+		await pushPath(token, kept, otherCache);
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
 			method: 'DELETE'
@@ -361,7 +397,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			3
 		);
 
@@ -384,19 +420,21 @@ describe('cache teardown', () => {
 			}
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			removed: { name: 'builds', removed: true, storePathsRemoved: 1 },
+			removed: { scope: buildsCache, removed: true, storePathsRemoved: 1 },
 			presence: [narBytes.byteLength],
-			edges: [{ cache: 'other', storePathHash: kept.storePathHash }],
+			edges: [{ cache: otherCache, storePathHash: kept.storePathHash }],
 			usage: { bytes: narBytes.byteLength, narinfos: 1, blobs: 1 }
 		});
 	});
 
 	it('removes a stale attestation list object on a replayed retirement', async () => {
 		await useTestServer('teardown-attestation-list');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const path = buildMetadata('a');
 
-		await pushPath(token, path, 'builds');
+		await pushPath(token, path, buildsCache);
 
 		// The residue of a teardown chunk that crashed after removing the path's
 		// attestation references but before re-rendering its list object. The
@@ -416,7 +454,7 @@ describe('cache teardown', () => {
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
-			async () => (await teardownPending('builds')) === undefined,
+			async () => (await teardownPending(buildsCache)) === undefined,
 			3
 		);
 
@@ -431,7 +469,9 @@ describe('cache teardown', () => {
 
 	it('keeps a path recommitted above a queued retirement generation', async () => {
 		await useTestServer('teardown-fence');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const path = buildMetadata('a');
 
 		await pushPath(token, path);

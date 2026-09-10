@@ -1,6 +1,7 @@
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type AuthKeyId,
+	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type RootName,
@@ -29,8 +30,7 @@ import {
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
 import {
-	contractNameForReuseView,
-	type ParsedReuseViewSelector,
+	type ReuseViewSelector,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
@@ -47,10 +47,13 @@ import {
 	PushCredentialIssuer,
 	pushIdSigningKey
 } from '../blob/push-credential.ts';
+import type { ResolvedCache } from '../db/cache.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredOidcTrustInvalidError,
+	StoredRetentionPolicyInvalidError,
 	TenantNotConfiguredError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
@@ -105,6 +108,10 @@ export interface GarbageCollectionOutcome {
 	readonly orphanStagingDeleted: number;
 }
 
+export type GarbageCollectionTarget =
+	| { readonly scope: 'tenant' }
+	| { readonly scope: 'cache'; readonly cache: ResolvedCache };
+
 // The newest non-retired key signs tokens. Every non-retired key verifies
 // tokens and appears in the JWKS; retirement removes it from all three uses.
 export interface AuthKey {
@@ -146,6 +153,7 @@ export class ServerContext {
 	private credentialIssuer: PushCredentialIssuer | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
+	readonly cacheRepository: CacheRepository;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
@@ -170,6 +178,7 @@ export class ServerContext {
 		});
 		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
+		this.cacheRepository = new CacheRepository(this.db);
 	}
 
 	// Do not let an error escape from `blockConcurrencyWhile`: the runtime would
@@ -298,12 +307,30 @@ export function oidcTrustSummaryFromRow(
 }
 
 export function policySummaryFromRow(
-	row: typeof schema.retentionPolicies.$inferSelect
+	row: typeof schema.retentionPolicies.$inferSelect,
+	cache: CacheScope | undefined
 ): RetentionPolicySummary {
+	if (row.kind === 'cache') {
+		if (cache === undefined) {
+			throw new StoredRetentionPolicyInvalidError(row.id);
+		}
+
+		return {
+			id: row.id,
+			scope: 'cache',
+			cache,
+			ttlSeconds: row.defaultTtlSeconds
+		};
+	}
+
+	if (row.rootNamePrefix === null) {
+		throw new StoredRetentionPolicyInvalidError(row.id);
+	}
+
 	return {
 		id: row.id,
-		scope: row.scope,
-		pattern: row.pattern,
+		scope: 'root-name-prefix',
+		pattern: row.rootNamePrefix,
 		ttlSeconds: row.defaultTtlSeconds
 	};
 }
@@ -321,10 +348,11 @@ export function gracePolicySummaryFromRow(
 
 export function reuseViewSummaryFromRow(
 	row: typeof schema.reuseViews.$inferSelect,
-	selectors: readonly ParsedReuseViewSelector[]
+	selectors: readonly ReuseViewSelector[]
 ): ReuseViewSummary {
 	return {
-		name: contractNameForReuseView(row.name),
+		name: row.name,
+		access: row.access,
 		revision: row.revision,
 		priority: row.priority,
 		selectors: [...selectors],

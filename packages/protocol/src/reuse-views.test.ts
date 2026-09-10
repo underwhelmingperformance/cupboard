@@ -2,14 +2,8 @@ import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
-	contractNameForReuseView,
 	isDestinationPreferred,
-	isPrivateReuseView,
-	privateReuseViewNameSchema,
-	privateStoredReuseView,
-	privateStoredReuseViewSchema,
 	reuseViewDefaultPriority,
-	reuseViewFromContractName,
 	reuseViewListResponseSchema,
 	reuseViewMaxSelectors,
 	reuseViewNameSchema,
@@ -41,80 +35,65 @@ describe('reuseViewNameSchema', () => {
 
 describe('reuseViewSelectorSchema', () => {
 	it.each([
+		{ label: 'a named cache', selector: { kind: 'named', name: 'pr-1' } },
+		{ label: 'the default cache', selector: { kind: 'default' } },
+		{ label: 'a prefix', selector: { kind: 'prefix', prefix: 'pr-' } },
+		{ label: 'every cache', selector: { kind: 'all' } },
 		{
-			name: 'an exact selector for a valid cache',
-			kind: 'exact',
-			pattern: 'pr-1'
-		},
-		{
-			name: 'an exact selector for the default cache',
-			kind: 'exact',
-			pattern: '_default'
-		},
-		{ name: 'a prefix selector', kind: 'prefix', pattern: 'pr-' },
-		{
-			name: 'the empty prefix, matching every cache',
-			kind: 'prefix',
-			pattern: ''
-		},
-		{
-			name: 'a prefix that is itself a full valid cache name',
-			kind: 'prefix',
-			pattern: 'a'.repeat(63)
+			label: 'a prefix that is itself a full valid cache name',
+			selector: { kind: 'prefix', prefix: 'a'.repeat(63) }
 		}
-	])('accepts $name', ({ kind, pattern }) => {
-		expect(reuseViewSelectorSchema.safeParse({ kind, pattern }).success).toBe(
-			true
-		);
+	])('accepts $label', ({ selector }) => {
+		expect(reuseViewSelectorSchema.safeParse(selector).success).toBe(true);
 	});
 
 	it.each([
+		{ label: 'an empty cache name', selector: { kind: 'named', name: '' } },
 		{
-			name: 'an exact selector with an invalid cache name',
-			kind: 'exact',
-			pattern: ''
+			label: 'an uppercase cache name',
+			selector: { kind: 'named', name: 'PR-1' }
 		},
 		{
-			name: 'an exact selector with an uppercase cache name',
-			kind: 'exact',
-			pattern: 'PR-1'
+			label: 'the default cache carrying a name',
+			selector: { kind: 'default', name: 'pr-1' }
 		},
 		{
-			name: 'a pattern over the length bound',
-			kind: 'prefix',
-			pattern: 'a'.repeat(64)
+			label: 'a prefix over the length bound',
+			selector: { kind: 'prefix', prefix: 'a'.repeat(64) }
 		},
-		{ name: 'an unknown kind', kind: 'wildcard', pattern: 'pr-' },
+		{ label: 'an unknown kind', selector: { kind: 'wildcard', prefix: 'pr-' } },
 		{
-			name: 'a prefix with an uppercase character',
-			kind: 'prefix',
-			pattern: 'Pr-'
-		},
-		{ name: 'a prefix containing a space', kind: 'prefix', pattern: 'pr 1' },
-		{ name: 'a prefix containing a slash', kind: 'prefix', pattern: 'pr/1' },
-		{
-			name: 'a prefix containing a Unicode character',
-			kind: 'prefix',
-			pattern: 'préfix'
+			label: 'a prefix with an uppercase character',
+			selector: { kind: 'prefix', prefix: 'Pr-' }
 		},
 		{
-			name: 'a prefix starting with a separator',
-			kind: 'prefix',
-			pattern: '-pr'
+			label: 'a prefix containing a space',
+			selector: { kind: 'prefix', prefix: 'pr 1' }
+		},
+		{
+			label: 'a prefix containing a slash',
+			selector: { kind: 'prefix', prefix: 'pr/1' }
+		},
+		{
+			label: 'a prefix containing a Unicode character',
+			selector: { kind: 'prefix', prefix: 'pr\u{E9}fix' }
+		},
+		{
+			label: 'a prefix starting with a separator',
+			selector: { kind: 'prefix', prefix: '-pr' }
 		}
-	])('rejects $name', ({ kind, pattern }) => {
-		expect(reuseViewSelectorSchema.safeParse({ kind, pattern }).success).toBe(
-			false
-		);
+	])('rejects $label', ({ selector }) => {
+		expect(reuseViewSelectorSchema.safeParse(selector).success).toBe(false);
 	});
 });
 
 describe('reuseViewSetBodySchema', () => {
 	it('accepts a non-empty selector list without duplicates or a priority', () => {
 		const value = {
+			access: 'public',
 			selectors: [
-				{ kind: 'exact', pattern: 'pr-1' },
-				{ kind: 'prefix', pattern: 'pr-' }
+				{ kind: 'named', name: 'pr-1' },
+				{ kind: 'prefix', prefix: 'pr-' }
 			]
 		};
 
@@ -123,7 +102,8 @@ describe('reuseViewSetBodySchema', () => {
 
 	it('accepts an explicit priority', () => {
 		const value = {
-			selectors: [{ kind: 'prefix', pattern: '' }],
+			access: 'private',
+			selectors: [{ kind: 'all' }],
 			priority: 10
 		};
 
@@ -142,7 +122,7 @@ describe('reuseViewSetBodySchema', () => {
 					{ length: reuseViewMaxSelectors + 1 },
 					(_, index) => ({
 						kind: 'prefix',
-						pattern: `p${String(index)}`
+						prefix: `p${String(index)}`
 					})
 				)
 			}
@@ -151,18 +131,18 @@ describe('reuseViewSetBodySchema', () => {
 			name: 'a duplicated (kind, pattern) selector',
 			value: {
 				selectors: [
-					{ kind: 'prefix', pattern: 'pr-' },
-					{ kind: 'prefix', pattern: 'pr-' }
+					{ kind: 'prefix', prefix: 'pr-' },
+					{ kind: 'prefix', prefix: 'pr-' }
 				]
 			}
 		},
 		{
 			name: 'a negative priority',
-			value: { selectors: [{ kind: 'prefix', pattern: '' }], priority: -1 }
+			value: { selectors: [{ kind: 'all' }], priority: -1 }
 		},
 		{
 			name: 'a fractional priority',
-			value: { selectors: [{ kind: 'prefix', pattern: '' }], priority: 1.5 }
+			value: { selectors: [{ kind: 'all' }], priority: 1.5 }
 		}
 	])('rejects $name', ({ value }) => {
 		expect(reuseViewSetBodySchema.safeParse(value).success).toBe(false);
@@ -173,9 +153,10 @@ describe('reuseViewSummarySchema, list and remove responses', () => {
 	it('accepts a summary and the list and remove responses', () => {
 		const view = {
 			name: 'reuse',
+			access: 'public',
 			revision: 1,
 			priority: reuseViewDefaultPriority,
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }],
+			selectors: [{ kind: 'named', name: 'pr-1' }],
 			createdAt: '2026-01-01T00:00:00.000Z',
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};
@@ -195,6 +176,7 @@ describe('reuseViewSummarySchema, list and remove responses', () => {
 	it('rejects a summary with a revision below 1', () => {
 		const view = {
 			name: 'reuse',
+			access: 'public',
 			revision: 0,
 			priority: reuseViewDefaultPriority,
 			selectors: [],
@@ -239,101 +221,27 @@ describe('isDestinationPreferred', () => {
 	});
 });
 
-describe('private reuse-view names', () => {
-	it('keeps the stored and contract forms apart', () => {
-		expect({
-			storedSchema: {
-				stored: privateStoredReuseViewSchema.safeParse('private/reuse').success,
-				contractName:
-					privateStoredReuseViewSchema.safeParse('_private-reuse').success
-			},
-			contractNameSchema: {
-				stored: privateReuseViewNameSchema.safeParse('private/reuse').success,
-				contractName:
-					privateReuseViewNameSchema.safeParse('_private-reuse').success
-			}
-		}).toStrictEqual({
-			storedSchema: { stored: true, contractName: false },
-			contractNameSchema: { stored: false, contractName: true }
-		});
-	});
-
-	it.each([
-		['a local name alone', 'reuse'],
-		['the stored prefix alone', 'private/'],
-		['the contract prefix alone', '_private-'],
-		['an uppercase local name', 'private/Reuse'],
-		['a local name over the length bound', `private/${'a'.repeat(64)}`],
-		['a nested name', 'private/private/reuse'],
-		['a local name starting with a separator', 'private/-reuse']
-	])('rejects %s as a stored name', (_name, value) => {
-		expect(privateStoredReuseViewSchema.safeParse(value).success).toBe(false);
-	});
-
-	it.each([
-		{ localName: 'reuse' },
-		{ localName: 'pr-1' },
-		{ localName: 'a'.repeat(63) }
-	])(
-		'maps $localName between its stored and contract names',
-		({ localName }) => {
-			const stored = privateStoredReuseView(
-				reuseViewNameSchema.parse(localName)
-			);
-			const contractName = contractNameForReuseView(stored);
-
-			expect({
-				stored,
-				contractName,
-				backToStored: reuseViewFromContractName(contractName),
-				isPrivate: isPrivateReuseView(stored)
-			}).toStrictEqual({
-				stored: `private/${localName}`,
-				contractName: `_private-${localName}`,
-				backToStored: `private/${localName}`,
-				isPrivate: true
-			});
-		}
-	);
-
-	it('leaves a public view name unchanged in both directions', () => {
-		const name = reuseViewNameSchema.parse('reuse');
-
-		expect({
-			stored: reuseViewFromContractName(name),
-			contractName: contractNameForReuseView(name),
-			isPrivate: isPrivateReuseView(name)
-		}).toStrictEqual({
-			stored: 'reuse',
-			contractName: 'reuse',
-			isPrivate: false
-		});
-	});
-
-	it('uses contract names in view summaries and removal responses', () => {
+describe('private reuse views', () => {
+	it('uses the local name and records private access separately', () => {
 		const view = {
-			name: '_private-reuse',
+			name: 'reuse',
+			access: 'private',
 			revision: 1,
 			priority: reuseViewDefaultPriority,
-			selectors: [{ kind: 'exact', pattern: 'builds' }],
+			selectors: [{ kind: 'named', name: 'builds' }],
 			createdAt: '2026-01-01T00:00:00.000Z',
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};
 
 		expect({
 			summary: reuseViewSummarySchema.parse(view),
-			stored: reuseViewSummarySchema.safeParse({
-				...view,
-				name: 'private/reuse'
-			}).success,
 			remove: reuseViewRemoveResponseSchema.parse({
-				name: '_private-reuse',
+				name: 'reuse',
 				removed: true
 			})
 		}).toStrictEqual({
 			summary: view,
-			stored: false,
-			remove: { name: '_private-reuse', removed: true }
+			remove: { name: 'reuse', removed: true }
 		});
 	});
 });

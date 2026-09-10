@@ -31,9 +31,19 @@ const prCacheGrant = grant({
 					capture: { pattern: '^refs/pull/(?<ref>[0-9]+)/merge$', group: 'ref' }
 				}
 			},
+			kind: 'named',
 			validate: 'cacheName'
 		},
-		root: { equalsResource: 'cache', validate: 'rootName' }
+		root: {
+			equalsTemplate: 'pr-{ref}',
+			substitutions: {
+				ref: {
+					claim: 'ref',
+					capture: { pattern: '^refs/pull/(?<ref>[0-9]+)/merge$', group: 'ref' }
+				}
+			},
+			validate: 'rootName'
+		}
 	}
 });
 
@@ -61,7 +71,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['gc:run'],
-				cache: 'anything'
+				cache: { kind: 'named', name: 'anything' }
 			},
 			claims: {},
 			expected: true
@@ -72,7 +82,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: prClaims,
 			expected: true
@@ -83,7 +93,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-456'
+				cache: { kind: 'named', name: 'pr-456' }
 			},
 			claims: prClaims,
 			expected: false
@@ -94,7 +104,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: { iss: 'x' },
 			expected: false
@@ -105,7 +115,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: { ref: 'refs/heads/main' },
 			expected: false
@@ -116,7 +126,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['gc:run'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: prClaims,
 			expected: false
@@ -127,13 +137,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { exact: 'pr-123', kind: 'named', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:preview'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: {},
 			expected: true
@@ -144,13 +156,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { exact: 'pr-123', kind: 'named', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: {},
 			expected: false
@@ -161,13 +175,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { exact: 'pr-123', kind: 'named', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:confirm'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: {},
 			expected: false
@@ -178,13 +194,15 @@ describe('isGrantPermittedByRule', () => {
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+					resources: {
+						cache: { exact: 'pr-123', kind: 'named', validate: 'cacheName' }
+					}
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: 'pr-123'
+				cache: { kind: 'named', name: 'pr-123' }
 			},
 			claims: {},
 			expected: false
@@ -195,7 +213,7 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['root:set'],
-				cache: 'pr-123',
+				cache: { kind: 'named', name: 'pr-123' },
 				root: 'pr-123'
 			},
 			claims: prClaims,
@@ -207,25 +225,25 @@ describe('isGrantPermittedByRule', () => {
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['root:set'],
-				cache: 'pr-123',
+				cache: { kind: 'named', name: 'pr-123' },
 				root: 'main'
 			},
 			claims: prClaims,
 			expected: false
 		},
 		{
-			name: 'an exact _default binding permits the default cache',
+			name: 'a default-scope binding permits the default cache',
 			permitted: [
 				grant({
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					resources: { cache: { exact: '_default', validate: 'cacheName' } }
+					resources: { cache: { kind: 'default' } }
 				})
 			],
 			requested: {
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: '_default'
+				cache: { kind: 'default' }
 			},
 			claims: {},
 			expected: true
@@ -265,7 +283,7 @@ describe('isGrantPermittedByRule', () => {
 		);
 	});
 
-	it('refuses a binding that renders an invalid cache selector', () => {
+	it('refuses a binding that renders an invalid cache name', () => {
 		const verbatimGrant = grant({
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],
@@ -273,6 +291,7 @@ describe('isGrantPermittedByRule', () => {
 				cache: {
 					equalsTemplate: '{name}',
 					substitutions: { name: { claim: 'repository' } },
+					kind: 'named',
 					validate: 'cacheName'
 				}
 			}
@@ -284,7 +303,7 @@ describe('isGrantPermittedByRule', () => {
 				request({
 					type: 'cupboard_cache',
 					actions: ['upload:commit'],
-					cache: 'bad-name'
+					cache: { kind: 'named', name: 'bad-name' }
 				}),
 				{ repository: 'Bad Name' }
 			)

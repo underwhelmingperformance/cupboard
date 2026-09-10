@@ -3,7 +3,7 @@ import {
 	type TtlSeconds,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
-import type { PushCredential, PushId } from '@cupboard/protocol/upload';
+import type { PushCredentialInput, PushId } from '@cupboard/protocol/upload';
 
 import {
 	InvalidAccessTokenError,
@@ -87,7 +87,7 @@ export class PushCredentialIssuer {
 		pushId: PushId,
 		ttlSeconds: TtlSeconds,
 		now: Date
-	): Promise<PushCredential> {
+	): Promise<PushCredentialInput> {
 		const expiresAtSeconds = pushIdExpiresAtSeconds(pushId);
 
 		if (expiresAtSeconds === undefined || !(await this.verify(pushId, now))) {
@@ -115,7 +115,7 @@ export class PushCredentialIssuer {
 		return { pushId, ...credential };
 	}
 
-	async issue(ttlSeconds: TtlSeconds, now: Date): Promise<PushCredential> {
+	async issue(ttlSeconds: TtlSeconds, now: Date): Promise<PushCredentialInput> {
 		const expiresAtSeconds =
 			Math.floor(now.getTime() / 1000) + pushIdTtlSeconds;
 

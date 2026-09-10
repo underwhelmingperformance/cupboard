@@ -11,14 +11,14 @@ export const signingKeySchema = z.strictObject({
 	publicKey: z.string(),
 	createdAt: isoTimestampSchema
 });
-export type ParsedSigningKey = z.output<typeof signingKeySchema>;
+export type SigningKey = z.output<typeof signingKeySchema>;
 
 export const backfillFailureSchema = z.strictObject({
 	operation: z.enum(['resigning', 'cache-purge']),
 	failedAt: isoTimestampSchema,
 	message: z.string()
 });
-export type ParsedBackfillFailure = z.output<typeof backfillFailureSchema>;
+export type BackfillFailure = z.output<typeof backfillFailureSchema>;
 
 const runningBackfillSchema = z.strictObject({
 	state: z.literal('running'),
@@ -55,7 +55,7 @@ export const backfillStatusSchema = z.discriminatedUnion('state', [
 	retryingBackfillSchema,
 	completeBackfillSchema
 ]);
-export type ParsedBackfillStatus = z.output<typeof backfillStatusSchema>;
+export type BackfillStatus = z.output<typeof backfillStatusSchema>;
 
 export const signingKeyEntrySchema = z.discriminatedUnion('state', [
 	z.strictObject({
@@ -68,30 +68,30 @@ export const signingKeyEntrySchema = z.discriminatedUnion('state', [
 		key: signingKeySchema
 	})
 ]);
-export type ParsedSigningKeyEntry = z.output<typeof signingKeyEntrySchema>;
+export type SigningKeyEntry = z.output<typeof signingKeyEntrySchema>;
 
 export const keyListResponseSchema = z.strictObject({
 	keys: z.array(signingKeyEntrySchema)
 });
-export type ParsedKeyListResponse = z.output<typeof keyListResponseSchema>;
+export type KeyListResponse = z.output<typeof keyListResponseSchema>;
 
 export const keyRotateResponseSchema = z.strictObject({
 	rotated: rotatedSigningKeyEntrySchema,
 	keys: z.array(signingKeyEntrySchema)
 });
-export type ParsedKeyRotateResponse = z.output<typeof keyRotateResponseSchema>;
+export type KeyRotateResponse = z.output<typeof keyRotateResponseSchema>;
 
 export const keyRetireResponseSchema = z.strictObject({
 	id: signingKeyIdSchema,
 	state: z.enum(['published-only', 'absent'])
 });
-export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
+export type KeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 
 export const keyAbortResponseSchema = z.strictObject({
 	id: signingKeyIdSchema,
 	state: z.literal('absent')
 });
-export type ParsedKeyAbortResponse = z.output<typeof keyAbortResponseSchema>;
+export type KeyAbortResponse = z.output<typeof keyAbortResponseSchema>;
 
 // `active` marks the key that issues new tokens. Every listed key still
 // verifies tokens and remains published in the JWKS.
@@ -101,14 +101,12 @@ export const authKeySummarySchema = z.strictObject({
 	active: z.boolean(),
 	scheduledRetireAt: isoTimestampSchema.optional()
 });
-export type ParsedAuthKeySummary = z.output<typeof authKeySummarySchema>;
+export type AuthKeySummary = z.output<typeof authKeySummarySchema>;
 
 export const authKeyListResponseSchema = z.strictObject({
 	keys: z.array(authKeySummarySchema)
 });
-export type ParsedAuthKeyListResponse = z.output<
-	typeof authKeyListResponseSchema
->;
+export type AuthKeyListResponse = z.output<typeof authKeyListResponseSchema>;
 
 export const authKeyRotateResponseSchema = z.strictObject({
 	rotated: authKeyIdSchema,
@@ -120,7 +118,7 @@ export const authKeyRotateResponseSchema = z.strictObject({
 		.optional(),
 	keys: z.array(authKeySummarySchema)
 });
-export type ParsedAuthKeyRotateResponse = z.output<
+export type AuthKeyRotateResponse = z.output<
 	typeof authKeyRotateResponseSchema
 >;
 
@@ -128,19 +126,25 @@ export const authKeyRetireResponseSchema = z.strictObject({
 	kid: authKeyIdSchema,
 	retired: z.boolean()
 });
-export type ParsedAuthKeyRetireResponse = z.output<
+export type AuthKeyRetireResponse = z.output<
 	typeof authKeyRetireResponseSchema
 >;
 
-export type SigningKey = z.input<typeof signingKeySchema>;
-export type BackfillFailure = z.input<typeof backfillFailureSchema>;
-export type BackfillStatus = z.input<typeof backfillStatusSchema>;
-export type SigningKeyEntry = z.input<typeof signingKeyEntrySchema>;
-export type KeyListResponse = z.input<typeof keyListResponseSchema>;
-export type KeyRotateResponse = z.input<typeof keyRotateResponseSchema>;
-export type KeyRetireResponse = z.input<typeof keyRetireResponseSchema>;
-export type KeyAbortResponse = z.input<typeof keyAbortResponseSchema>;
-export type AuthKeySummary = z.input<typeof authKeySummarySchema>;
-export type AuthKeyListResponse = z.input<typeof authKeyListResponseSchema>;
-export type AuthKeyRotateResponse = z.input<typeof authKeyRotateResponseSchema>;
-export type AuthKeyRetireResponse = z.input<typeof authKeyRetireResponseSchema>;
+export type SigningKeyInput = z.input<typeof signingKeySchema>;
+export type BackfillFailureInput = z.input<typeof backfillFailureSchema>;
+export type BackfillStatusInput = z.input<typeof backfillStatusSchema>;
+export type SigningKeyEntryInput = z.input<typeof signingKeyEntrySchema>;
+export type KeyListResponseInput = z.input<typeof keyListResponseSchema>;
+export type KeyRotateResponseInput = z.input<typeof keyRotateResponseSchema>;
+export type KeyRetireResponseInput = z.input<typeof keyRetireResponseSchema>;
+export type KeyAbortResponseInput = z.input<typeof keyAbortResponseSchema>;
+export type AuthKeySummaryInput = z.input<typeof authKeySummarySchema>;
+export type AuthKeyListResponseInput = z.input<
+	typeof authKeyListResponseSchema
+>;
+export type AuthKeyRotateResponseInput = z.input<
+	typeof authKeyRotateResponseSchema
+>;
+export type AuthKeyRetireResponseInput = z.input<
+	typeof authKeyRetireResponseSchema
+>;

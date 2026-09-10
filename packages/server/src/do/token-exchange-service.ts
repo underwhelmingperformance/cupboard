@@ -8,11 +8,11 @@ import {
 	issuedAccessTokenType,
 	type OidcSubject,
 	oidcSubjectSchema,
-	type ParsedRefreshTokenGrantRequest,
-	type ParsedTokenExchangeGrantRequest,
+	type RefreshTokenGrantRequest,
 	refreshTokenGrantRequestSchema,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
+	type TokenExchangeGrantRequest,
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
@@ -95,7 +95,7 @@ type IssuanceAuthority =
 			readonly grants: AuthorizationDetails;
 	  };
 
-interface ParsedRefreshToken {
+interface RefreshToken {
 	readonly id: string;
 	readonly secret: string;
 }
@@ -113,7 +113,8 @@ export class TokenExchangeService {
 	) {}
 
 	private async exchange(
-		body: ParsedTokenExchangeGrantRequest
+		logger: Logger,
+		body: TokenExchangeGrantRequest
 	): Promise<Response> {
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
@@ -146,7 +147,7 @@ export class TokenExchangeService {
 		// and to refuse a token when its claims match no rule. Policy selection
 		// below uses only verified claims.
 		const decoded = this.oidcTrust.decodeInbound(body.subject_token);
-		const snapshots = this.oidcTrust.enabledOidcTrustRuleSnapshots();
+		const snapshots = this.oidcTrust.enabledOidcTrustRuleSnapshots(logger);
 		const rules = snapshots.map((snapshot) => snapshot.rule);
 		const target = oidcTrustVerificationTarget(rules, decoded);
 
@@ -342,7 +343,7 @@ export class TokenExchangeService {
 
 	private async refresh(
 		logger: Logger,
-		body: ParsedRefreshTokenGrantRequest
+		body: RefreshTokenGrantRequest
 	): Promise<Response> {
 		const presented = parseRefreshToken(body.refresh_token);
 
@@ -400,7 +401,7 @@ export class TokenExchangeService {
 		}
 
 		const snapshot = this.oidcTrust
-			.enabledOidcTrustRuleSnapshots()
+			.enabledOidcTrustRuleSnapshots(logger)
 			.find((candidate) => candidate.rule.id === family.ruleId);
 
 		if (snapshot === undefined) {
@@ -711,6 +712,7 @@ export class TokenExchangeService {
 			}
 
 			return this.exchange(
+				logger,
 				parseFormValue(tokenExchangeGrantRequestSchema, body)
 			);
 		}
@@ -740,7 +742,7 @@ function configuredAudiences(
 
 // A refresh token is spelled `<id>.<secret>`. The ID selects the row, and the
 // secret proves possession against the stored hash.
-function parseRefreshToken(token: string): ParsedRefreshToken | undefined {
+function parseRefreshToken(token: string): RefreshToken | undefined {
 	const separator = token.indexOf('.');
 
 	if (separator <= 0 || separator === token.length - 1) {

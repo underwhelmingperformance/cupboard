@@ -227,7 +227,9 @@ describe('verify alarm backstop', () => {
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, second.storePathHash)
+					narInfoObjectKey(fixtureTenant, second.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			sent: 2,
@@ -278,7 +280,9 @@ describe('verify alarm backstop', () => {
 			verdict: await pendingUploadVerdict(reuse.uploadId),
 			servable:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, second.storePathHash)
+					narInfoObjectKey(fixtureTenant, second.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			verdict: undefined,

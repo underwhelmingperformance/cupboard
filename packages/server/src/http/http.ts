@@ -1,10 +1,9 @@
 import {
-	DEFAULT_CACHE,
+	type CacheScope,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
@@ -124,12 +123,12 @@ export function casObjectKey(
 export function attestationListCachePath(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: StoredCache = DEFAULT_CACHE
+	cache: CacheScope
 ): string {
 	const suffix =
-		cache === DEFAULT_CACHE
+		cache.kind === 'default'
 			? `/attestations/${storePathHash}`
-			: `/cache/${cache}/attestations/${storePathHash}`;
+			: `/cache/${cache.name}/attestations/${storePathHash}`;
 
 	return `/t/${tenant}${suffix}`;
 }
@@ -137,12 +136,12 @@ export function attestationListCachePath(
 export function attestationListObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: StoredCache = DEFAULT_CACHE
+	cache: CacheScope
 ): R2ObjectKey {
 	const suffix =
-		cache === DEFAULT_CACHE
+		cache.kind === 'default'
 			? `attestations/${storePathHash}`
-			: `attestations/${cache}/${storePathHash}`;
+			: `attestations/${cache.name}/${storePathHash}`;
 
 	return r2ObjectKeySchema.parse(`t/${tenant}/${suffix}`);
 }
@@ -183,20 +182,20 @@ export function narInfoObjectPrefix(tenant: TenantId): string {
 export function narInfoObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: StoredCache = DEFAULT_CACHE
+	cache: CacheScope
 ): R2ObjectKey {
 	const suffix =
-		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
+		cache.kind === 'default' ? storePathHash : `${cache.name}/${storePathHash}`;
 
 	return r2ObjectKeySchema.parse(`${narInfoObjectPrefix(tenant)}${suffix}`);
 }
 
-export interface ParsedNarName {
+export interface NarObjectName {
 	readonly narHash: NixSha256HashString;
 	readonly incarnation: number;
 }
 
-export function parseNarName(name: string): ParsedNarName | undefined {
+export function parseNarName(name: string): NarObjectName | undefined {
 	const suffix = narObjectKeySuffix;
 
 	if (!name.endsWith(suffix)) {

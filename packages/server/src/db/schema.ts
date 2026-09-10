@@ -1,6 +1,7 @@
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
+	type CacheAccessMode,
 	type CacheName,
 	type CachePriority,
 	type GraceSeconds,
@@ -12,20 +13,20 @@ import {
 	type Sha256HexDigest,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
-	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
-	type TenantId
+	type TenantId,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
+	ReuseViewName,
 	ReuseViewPriority,
-	ReuseViewRevision,
-	StoredReuseView
+	ReuseViewRevision
 } from '@cupboard/protocol/reuse-views';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
-import { sql } from 'drizzle-orm';
+import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
 	check,
 	index,
@@ -39,14 +40,30 @@ import {
 
 import type { R2ObjectKey } from '../http/http.ts';
 
-export const cacheIdentities = sqliteTable(
+import type { CacheId } from './cache.ts';
+
+function cacheNameConstraint(column: SQLWrapper): SQL {
+	return sql`length(${column}) BETWEEN 1 AND 63 AND substr(${column}, 1, 1) GLOB '[a-z0-9]' AND ${column} NOT GLOB '*[^a-z0-9._-]*'`;
+}
+
+function cacheNamePrefixConstraint(column: SQLWrapper): SQL {
+	return sql`length(${column}) BETWEEN 1 AND 63 AND substr(${column}, 1, 1) GLOB '[a-z0-9]' AND ${column} NOT GLOB '*[^a-z0-9._-]*'`;
+}
+
+export const caches = sqliteTable(
 	'cache_identity',
 	{
-		id: integer('id').primaryKey({ autoIncrement: true }),
+		id: integer('id').$type<CacheId>().primaryKey({ autoIncrement: true }),
 		kind: text('kind', { enum: ['default', 'named'] }).notNull(),
-		name: text('name'),
-		access: text('access', { enum: ['public', 'private'] }),
-		priority: integer('priority').notNull(),
+		name: text('name').$type<CacheName>(),
+		access: text('access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		priority: integer('priority').$type<CachePriority>().notNull(),
+		// Set when the first grace-policy event applies to this cache and never
+		// cleared while the cache exists: the empty-cache collection guard stays off
+		// even if every policy is later removed, so a partially drained cache cannot
+		// strand between continuation runs.
 		graceManaged: integer('grace_managed', { mode: 'boolean' })
 			.notNull()
 			.default(false),
@@ -55,13 +72,17 @@ export const cacheIdentities = sqliteTable(
 	},
 	(table) => [
 		check(
-			'cache_identity_shape_check',
-			sql`(${table.kind} = 'default' AND ${table.name} IS NULL) OR (${table.kind} = 'named' AND ${table.name} IS NOT NULL)`
+			'cache_identity_check',
+			sql`(${table.kind} = 'default' AND ${table.name} IS NULL) OR (${table.kind} = 'named' AND ${table.name} IS NOT NULL AND ${cacheNameConstraint(table.name)})`
 		),
-		uniqueIndex('cache_identity_default_idx')
+		check(
+			'cache_identity_access_check',
+			sql`${table.access} IN ('public', 'private')`
+		),
+		uniqueIndex('cache_one_default_idx')
 			.on(table.kind)
 			.where(sql`${table.kind} = 'default' AND ${table.deletedAt} IS NULL`),
-		uniqueIndex('cache_identity_name_idx')
+		uniqueIndex('cache_named_name_idx')
 			.on(table.name)
 			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
 	]
@@ -70,8 +91,7 @@ export const cacheIdentities = sqliteTable(
 export const narInfos = sqliteTable(
 	'narinfo',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
@@ -97,18 +117,18 @@ export const narInfos = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
-		primaryKey({ columns: [table.cache, table.storePathHash] }),
+		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
 		// Reuse-view lookup starts with a store-path hash. Exact cache selectors use
 		// a point lookup, while prefix selectors scan the cache-name range for that
 		// hash. Keep `store_path_hash` first in this index.
 		index('narinfo_store_path_hash_cache_idx').on(
 			table.storePathHash,
-			table.cache
+			table.cacheId
 		),
 		index('narinfo_pending_signature_generation_idx').on(
 			table.pendingSignatureGeneration,
 			table.signatureGeneration,
-			table.cache,
+			table.cacheId,
 			table.storePathHash
 		),
 		index('narinfo_signature_generation_idx').on(table.signatureGeneration)
@@ -122,8 +142,7 @@ export const narInfos = sqliteTable(
 export const generationSeq = sqliteTable(
 	'generation_seq',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }).notNull(),
 		cacheName: text('cache_name').$type<CacheName>(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		nextGeneration: integer('next_generation')
@@ -131,15 +150,25 @@ export const generationSeq = sqliteTable(
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0))
 	},
-	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+	(table) => [
+		check(
+			'generation_seq_cache_identity_check',
+			sql`(${table.cacheKind} = 'default' AND ${table.cacheName} IS NULL) OR (${table.cacheKind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)})`
+		),
+		uniqueIndex('generation_seq_default_identity_idx')
+			.on(table.storePathHash)
+			.where(sql`${table.cacheKind} = 'default'`),
+		uniqueIndex('generation_seq_named_identity_idx')
+			.on(table.cacheName, table.storePathHash)
+			.where(sql`${table.cacheKind} = 'named'`)
+	]
 );
 
 export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -166,10 +195,8 @@ export const pendingUploads = sqliteTable(
 		// A commit attaches the path to the run root captured during negotiation.
 		// Null preserves the behaviour of pushes that did not request a root.
 		attachRootName: text('attach_root_name').$type<RootName>(),
-		// The verdict reported by the queue consumer. It remains here until a pass
-		// has enough D1 allowance to apply it. A recorded verdict prevents another
-		// consumer from claiming the row and repeating the decode. Rows created
-		// before this column was added contain null.
+		// The verification result remains here until a pass has enough D1 allowance
+		// to apply it. A recorded result prevents a second decode of the same row.
 		recordedVerdictJson: text('recorded_verdict_json')
 	},
 	// Maintenance finds the soonest-expiring upload, probes for work awaiting
@@ -194,8 +221,7 @@ export const pendingAttestations = sqliteTable(
 	'pending_attestation',
 	{
 		id: text('id').$type<UploadId>().primaryKey(),
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>(),
@@ -215,8 +241,7 @@ export const pendingAttestations = sqliteTable(
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		// The generation of the narinfo version this deletion captured, so the D1
@@ -230,7 +255,7 @@ export const narInfoDeletions = sqliteTable(
 	},
 	(table) => [
 		primaryKey({
-			columns: [table.cache, table.storePathHash, table.generation]
+			columns: [table.cacheId, table.storePathHash, table.generation]
 		})
 	]
 );
@@ -398,8 +423,7 @@ export const cachePurgeContinuations = sqliteTable(
 export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		name: text('name').$type<RootName>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
@@ -408,10 +432,10 @@ export const retentionRoots = sqliteTable(
 	// The maintenance pass finds the soonest-expiring TTL root; the index spares
 	// it a scan of every root.
 	(table) => [
-		primaryKey({ columns: [table.cache, table.name] }),
+		primaryKey({ columns: [table.cacheId, table.name] }),
 		index('retention_root_expires_at_idx').on(table.expiresAt),
 		index('retention_root_cache_expires_at_name_idx').on(
-			table.cache,
+			table.cacheId,
 			table.expiresAt,
 			table.name
 		)
@@ -421,15 +445,14 @@ export const retentionRoots = sqliteTable(
 export const retentionRootTargets = sqliteTable(
 	'retention_root_target',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull()
 	},
 	(table) => [
 		primaryKey({
-			columns: [table.cache, table.rootName, table.storePathHash]
+			columns: [table.cacheId, table.rootName, table.storePathHash]
 		})
 	]
 );
@@ -441,13 +464,12 @@ export const retentionRootTargets = sqliteTable(
 export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{
-		cache: text('cache').$type<StoredCache>().notNull().default(''),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		retainUntil: text('retain_until').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
-		primaryKey({ columns: [table.cache, table.storePathHash] }),
+		primaryKey({ columns: [table.cacheId, table.storePathHash] }),
 		index('retention_grace_retain_until_idx').on(table.retainUntil)
 	]
 );
@@ -459,15 +481,13 @@ export const retentionGrace = sqliteTable(
 export const garbageCollectionRevisions = sqliteTable(
 	'garbage_collection_revision',
 	{
-		cache: text('cache').$type<StoredCache>().primaryKey(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
 		revision: integer('revision').notNull().default(0)
 	}
 );
 
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
-	cache: text('cache').$type<StoredCache>().primaryKey(),
-	cacheId: integer('cache_id'),
+	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
@@ -483,21 +503,19 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 export const garbageCollectionFrontier = sqliteTable(
 	'garbage_collection_frontier',
 	{
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+	(table) => [primaryKey({ columns: [table.cacheId, table.storePathHash] })]
 );
 
 export const garbageCollectionMarks = sqliteTable(
 	'garbage_collection_mark',
 	{
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id'),
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+	(table) => [primaryKey({ columns: [table.cacheId, table.storePathHash] })]
 );
 
 // A tenant-wide collection advances through one cache at a time. The current
@@ -507,41 +525,33 @@ export const garbageCollectionTenantRuns = sqliteTable(
 	'garbage_collection_tenant_run',
 	{
 		id: integer('id').primaryKey(),
-		cache: text('cache').$type<StoredCache>().notNull(),
-		cacheId: integer('cache_id')
+		cacheId: integer('cache_id').$type<CacheId>().notNull()
 	}
 );
-
-export const caches = sqliteTable('cache', {
-	name: text('name').$type<StoredCache>().primaryKey(),
-	priority: integer('priority').$type<CachePriority>().notNull(),
-	// Set when the first grace-policy event applies to this cache and never
-	// cleared while the cache exists: the empty-cache collection guard stays off
-	// even if every policy is later removed, so a partially drained cache cannot
-	// strand between continuation runs.
-	graceManaged: integer('grace_managed', { mode: 'boolean' })
-		.notNull()
-		.default(false),
-	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
-});
 
 export const retentionPolicies = sqliteTable(
 	'retention_policy',
 	{
 		id: text('id').primaryKey(),
-		scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
-		pattern: text('pattern').notNull(),
-		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }),
-		cacheId: integer('cache_id'),
+		kind: text('kind', { enum: ['cache', 'root-name-prefix'] }).notNull(),
+		cacheId: integer('cache_id').$type<CacheId>(),
 		rootNamePrefix: text('root_name_prefix'),
-		defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
+		defaultTtlSeconds: integer('default_ttl_seconds')
+			.$type<TtlSeconds>()
+			.notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
-		unique('retention_policy_scope_pattern_unique').on(
-			table.scope,
-			table.pattern
-		)
+		check(
+			'retention_policy_identity_check',
+			sql`(${table.kind} = 'cache' AND ${table.cacheId} IS NOT NULL AND ${table.rootNamePrefix} IS NULL) OR (${table.kind} = 'root-name-prefix' AND ${table.cacheId} IS NULL AND ${table.rootNamePrefix} IS NOT NULL)`
+		),
+		uniqueIndex('retention_policy_cache_idx')
+			.on(table.cacheId)
+			.where(sql`${table.kind} = 'cache'`),
+		uniqueIndex('retention_policy_root_name_prefix_idx')
+			.on(table.rootNamePrefix)
+			.where(sql`${table.kind} = 'root-name-prefix'`)
 	]
 );
 
@@ -566,8 +576,7 @@ export const retentionGracePolicies = sqliteTable(
 // position. An empty position starts, or wraps, at the first cache and hash.
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
-	cache: text('cache').$type<StoredCache>().notNull().default(''),
-	cacheId: integer('cache_id'),
+	cacheId: integer('cache_id').$type<CacheId>().notNull(),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
@@ -588,41 +597,53 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
-export const reuseViews = sqliteTable('reuse_view', {
-	name: text('name').$type<StoredReuseView>().primaryKey(),
-	access: text('access', { enum: ['public', 'private'] }),
-	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
-	priority: integer('priority').$type<ReuseViewPriority>().notNull(),
-	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
-});
-
-export const reuseViewSelectors = sqliteTable(
-	'reuse_view_selector',
+export const reuseViews = sqliteTable(
+	'reuse_view',
 	{
-		view: text('view').$type<StoredReuseView>().notNull(),
-		kind: text('kind', { enum: ['exact', 'prefix'] }).notNull(),
-		pattern: text('pattern').notNull()
+		name: text('name').$type<ReuseViewName>().primaryKey(),
+		access: text('access', { enum: ['public', 'private'] })
+			.$type<CacheAccessMode>()
+			.notNull(),
+		revision: integer('revision').$type<ReuseViewRevision>().notNull(),
+		priority: integer('priority').$type<ReuseViewPriority>().notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
-	(table) => [primaryKey({ columns: [table.view, table.kind, table.pattern] })]
+	(table) => [
+		check('reuse_view_name_check', cacheNameConstraint(table.name)),
+		check(
+			'reuse_view_access_check',
+			sql`${table.access} IN ('public', 'private')`
+		)
+	]
 );
 
-export const nativeReuseViewSelectors = sqliteTable(
+export const reuseViewSelectors = sqliteTable(
 	'reuse_view_selector_native',
 	{
 		id: integer('id').primaryKey({ autoIncrement: true }),
-		view: text('view').notNull(),
+		view: text('view').$type<ReuseViewName>().notNull(),
 		kind: text('kind', {
 			enum: ['default', 'named', 'prefix', 'all-named', 'all']
 		}).notNull(),
-		cacheName: text('cache_name'),
+		cacheName: text('cache_name').$type<CacheName>(),
 		prefix: text('prefix')
 	},
 	(table) => [
+		check('reuse_view_selector_view_check', cacheNameConstraint(table.view)),
 		check(
-			'reuse_view_selector_native_shape_check',
-			sql`(${table.kind} IN ('default', 'all-named', 'all') AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'prefix' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NOT NULL AND length(${table.prefix}) > 0)`
-		)
+			'reuse_view_selector_identity_check',
+			sql`(${table.kind} IN ('default', 'all-named', 'all') AND ${table.cacheName} IS NULL AND ${table.prefix} IS NULL) OR (${table.kind} = 'named' AND ${table.cacheName} IS NOT NULL AND ${cacheNameConstraint(table.cacheName)} AND ${table.prefix} IS NULL) OR (${table.kind} = 'prefix' AND ${table.cacheName} IS NULL AND ${table.prefix} IS NOT NULL AND ${cacheNamePrefixConstraint(table.prefix)})`
+		),
+		uniqueIndex('reuse_view_selector_singleton_idx')
+			.on(table.view, table.kind)
+			.where(sql`${table.kind} IN ('default', 'all-named', 'all')`),
+		uniqueIndex('reuse_view_selector_named_idx')
+			.on(table.view, table.cacheName)
+			.where(sql`${table.kind} = 'named'`),
+		uniqueIndex('reuse_view_selector_prefix_idx')
+			.on(table.view, table.prefix)
+			.where(sql`${table.kind} = 'prefix'`)
 	]
 );
 
@@ -630,6 +651,6 @@ export const nativeReuseViewSelectors = sqliteTable(
 // name therefore receives a new revision, which lets the read path distinguish
 // that replacement from an unchanged view.
 export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
-	name: text('name').$type<StoredReuseView>().primaryKey(),
+	name: text('name').$type<ReuseViewName>().primaryKey(),
 	nextRevision: integer('next_revision').$type<ReuseViewRevision>().notNull()
 });

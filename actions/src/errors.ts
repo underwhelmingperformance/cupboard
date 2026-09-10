@@ -1,3 +1,4 @@
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import type { SubjectOrigin } from '@cupboard/protocol/build';
 import type { ReporterResultEvent } from '@cupboard/reporter';
 import {
@@ -18,17 +19,6 @@ export class CacheNameInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('cache must be a valid cache name');
 		this.name = 'CacheNameInvalidError';
-	}
-}
-
-/**
- * A push or an administrative call addresses exactly one cache, and the two
- * inputs address different namespaces.
- */
-export class CacheSelectionConflictError extends UsageError {
-	constructor() {
-		super('set either cache or private-cache, not both');
-		this.name = 'CacheSelectionConflictError';
 	}
 }
 
@@ -345,42 +335,26 @@ export class ReadPasswordRequiredError extends UsageError {
 }
 
 /**
- * The `private-cache-credentials` input is a JSON object that maps each private
- * cache's local name to its read credential.
+ * The `cache-credentials` input is a JSON array of explicit cache scopes and
+ * their read credentials.
  */
-export class PrivateCacheCredentialsInvalidError extends UsageError {
+export class CacheCredentialsInvalidError extends UsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
-			'private-cache-credentials must be a JSON object mapping a cache name to { user, password }',
+			'cache-credentials must be a JSON array of cache scopes and credentials',
 			options
 		);
-		this.name = 'PrivateCacheCredentialsInvalidError';
+		this.name = 'CacheCredentialsInvalidError';
 	}
 }
 
 /**
- * Each entry in `private-cache-credentials` must match a cache in
- * `private-cache`.
+ * Each entry in `cache-credentials` must match a cache in `cache`.
  */
-export class UnknownPrivateCacheCredentialError extends UsageError {
+export class UnknownCacheCredentialError extends UsageError {
 	constructor(public readonly cache: string) {
-		super(
-			`add '${cache}' to private-cache or remove its private-cache-credentials entry`
-		);
-		this.name = 'UnknownPrivateCacheCredentialError';
-	}
-}
-
-/**
- * Every private-cache read requires either a cache-specific credential or the
- * shared `read-user` and `read-password` pair.
- */
-export class PrivateCacheCredentialMissingError extends UsageError {
-	constructor(public readonly cache: string) {
-		super(
-			`no read credential for private cache '${cache}': supply private-cache-credentials or read-user and read-password`
-		);
-		this.name = 'PrivateCacheCredentialMissingError';
+		super(`add '${cache}' to cache or remove its cache-credentials entry`);
+		this.name = 'UnknownCacheCredentialError';
 	}
 }
 
@@ -972,6 +946,18 @@ export class CacheInfoFetchError extends CodedError {
 			`failed to fetch nix-cache-info for the ${side} (${url}): HTTP ${String(status)}`
 		);
 		this.name = 'CacheInfoFetchError';
+	}
+}
+
+export class CacheAccessProbeError extends CodedError {
+	constructor(
+		public readonly url: string,
+		public readonly status: number
+	) {
+		super(
+			`could not determine cache access from ${url}: expected HTTP 200 or 401, received HTTP ${String(status)}`
+		);
+		this.name = 'CacheAccessProbeError';
 	}
 }
 
@@ -1667,9 +1653,9 @@ export class GraceDeadlineMissingError extends CodedError {
 }
 
 export class GracePolicyMissingError extends CodedError {
-	constructor(public readonly cache: string) {
+	constructor(public readonly cache: CacheScope) {
 		super(
-			`No grace policy covers ${cache === '' ? 'the default cache' : `cache ${cache}`}: add one with \`cupboard policy add-grace\` or publish without require-grace`
+			`No grace policy covers ${cache.kind === 'default' ? 'the default cache' : `cache ${cache.name}`}: add one with \`cupboard policy add-grace\` or publish without require-grace`
 		);
 		this.name = 'GracePolicyMissingError';
 	}

@@ -1,8 +1,8 @@
 import {
 	cacheNamePrefixPattern,
+	cacheScopeSchema,
 	graceSecondsSchema,
 	rootNameSchema,
-	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema,
 	ttlSecondsSchema
@@ -28,7 +28,7 @@ export const rootSetBodySchema = z.strictObject({
 	targets: rootTargetListSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
 });
-export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;
+export type RootSetBody = z.output<typeof rootSetBodySchema>;
 
 // An ensure request checks whether the cache already contains its targets and
 // reports which targets require a build. The request must contain at least one
@@ -37,14 +37,14 @@ export const rootEnsureBodySchema = z.strictObject({
 	targets: rootTargetListSchema.min(1),
 	ttlSeconds: ttlSecondsSchema.optional()
 });
-export type ParsedRootEnsureBody = z.output<typeof rootEnsureBodySchema>;
+export type RootEnsureBody = z.output<typeof rootEnsureBodySchema>;
 
 export const rootTargetSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema,
 	present: z.boolean()
 });
-export type ParsedRootTarget = z.output<typeof rootTargetSchema>;
+export type RootTarget = z.output<typeof rootTargetSchema>;
 
 export const rootSummarySchema = z.strictObject({
 	name: rootNameSchema,
@@ -54,10 +54,10 @@ export const rootSummarySchema = z.strictObject({
 	updatedAt: isoTimestampSchema,
 	targets: z.array(rootTargetSchema)
 });
-export type ParsedRootSummary = z.output<typeof rootSummarySchema>;
+export type RootSummary = z.output<typeof rootSummarySchema>;
 
 export const rootSetResponseSchema = rootSummarySchema;
-export type ParsedRootSetResponse = z.output<typeof rootSetResponseSchema>;
+export type RootSetResponse = z.output<typeof rootSetResponseSchema>;
 
 export const rootEnsureResponseSchema = z.discriminatedUnion('status', [
 	z.strictObject({
@@ -69,9 +69,7 @@ export const rootEnsureResponseSchema = z.discriminatedUnion('status', [
 		unavailable: z.array(storePathSchema).min(1)
 	})
 ]);
-export type ParsedRootEnsureResponse = z.output<
-	typeof rootEnsureResponseSchema
->;
+export type RootEnsureResponse = z.output<typeof rootEnsureResponseSchema>;
 
 // A target page probes the narinfo object for each distinct path. A page contains
 // at most 200 targets so one request remains below the internal subrequest
@@ -92,27 +90,25 @@ export const rootListEntrySchema = z.strictObject({
 	updatedAt: isoTimestampSchema,
 	targetCount: countSchema
 });
-export type ParsedRootListEntry = z.output<typeof rootListEntrySchema>;
+export type RootListEntry = z.output<typeof rootListEntrySchema>;
 
 export const rootListResponseSchema = z.strictObject({
 	roots: z.array(rootListEntrySchema),
 	cursor: listCursorSchema.optional()
 });
-export type ParsedRootListResponse = z.output<typeof rootListResponseSchema>;
+export type RootListResponse = z.output<typeof rootListResponseSchema>;
 
 export const rootTargetsPageSchema = z.strictObject({
 	targets: z.array(rootTargetSchema),
 	cursor: listCursorSchema.optional()
 });
-export type ParsedRootTargetsPage = z.output<typeof rootTargetsPageSchema>;
+export type RootTargetsPage = z.output<typeof rootTargetsPageSchema>;
 
 export const rootRemoveResponseSchema = z.strictObject({
 	name: rootNameSchema,
 	removed: z.boolean()
 });
-export type ParsedRootRemoveResponse = z.output<
-	typeof rootRemoveResponseSchema
->;
+export type RootRemoveResponse = z.output<typeof rootRemoveResponseSchema>;
 
 // Each response reports only one bounded collection pass. The counts cover
 // expired roots, collected paths, pending uploads and attestations, narinfo
@@ -126,19 +122,18 @@ export const gcResponseSchema = z.strictObject({
 	narInfosDeleted: countSchema,
 	orphanStagingDeleted: countSchema
 });
-export type ParsedGcResponse = z.output<typeof gcResponseSchema>;
-export type GcResponse = z.input<typeof gcResponseSchema>;
+export type GcResponse = z.output<typeof gcResponseSchema>;
+export type GcResponseInput = z.input<typeof gcResponseSchema>;
 
-// A retention policy applies a default TTL to roots by cache (the pattern is a
-// cache name, or the empty string for the default cache) or by root-name prefix
-// (the pattern is a literal prefix).
+// A retention policy applies a default TTL to roots by cache or by root-name
+// prefix (the pattern is a literal prefix).
 export const retentionPolicyScopeSchema = z.enum(['cache', 'root-name-prefix']);
 export type RetentionPolicyScope = z.infer<typeof retentionPolicyScopeSchema>;
 
 export const retentionPolicyAddBodySchema = z.discriminatedUnion('scope', [
 	z.strictObject({
 		scope: z.literal('cache'),
-		pattern: storedCacheSchema,
+		cache: cacheScopeSchema,
 		ttlSeconds: ttlSecondsSchema
 	}),
 	z.strictObject({
@@ -147,24 +142,32 @@ export const retentionPolicyAddBodySchema = z.discriminatedUnion('scope', [
 		ttlSeconds: ttlSecondsSchema
 	})
 ]);
-export type ParsedRetentionPolicyAddBody = z.output<
+export type RetentionPolicyAddBody = z.output<
 	typeof retentionPolicyAddBodySchema
 >;
 
-export const retentionPolicySummarySchema = z.strictObject({
-	id: z.string(),
-	scope: retentionPolicyScopeSchema,
-	pattern: z.string(),
-	ttlSeconds: ttlSecondsSchema
-});
-export type ParsedRetentionPolicySummary = z.output<
+export const retentionPolicySummarySchema = z.discriminatedUnion('scope', [
+	z.strictObject({
+		id: z.string(),
+		scope: z.literal('cache'),
+		cache: cacheScopeSchema,
+		ttlSeconds: ttlSecondsSchema
+	}),
+	z.strictObject({
+		id: z.string(),
+		scope: z.literal('root-name-prefix'),
+		pattern: z.string().min(1),
+		ttlSeconds: ttlSecondsSchema
+	})
+]);
+export type RetentionPolicySummary = z.output<
 	typeof retentionPolicySummarySchema
 >;
 
 export const retentionPolicyListResponseSchema = z.strictObject({
 	policies: z.array(retentionPolicySummarySchema)
 });
-export type ParsedRetentionPolicyListResponse = z.output<
+export type RetentionPolicyListResponse = z.output<
 	typeof retentionPolicyListResponseSchema
 >;
 
@@ -172,7 +175,7 @@ export const retentionPolicyRemoveResponseSchema = z.strictObject({
 	id: z.string(),
 	removed: z.boolean()
 });
-export type ParsedRetentionPolicyRemoveResponse = z.output<
+export type RetentionPolicyRemoveResponse = z.output<
 	typeof retentionPolicyRemoveResponseSchema
 >;
 
@@ -191,9 +194,7 @@ export const gracePolicyAddBodySchema = z.strictObject({
 		}),
 	graceSeconds: graceSecondsSchema
 });
-export type ParsedGracePolicyAddBody = z.output<
-	typeof gracePolicyAddBodySchema
->;
+export type GracePolicyAddBody = z.output<typeof gracePolicyAddBodySchema>;
 
 export const gracePolicySummarySchema = z.strictObject({
 	id: z.string(),
@@ -201,14 +202,12 @@ export const gracePolicySummarySchema = z.strictObject({
 	graceSeconds: graceSecondsSchema,
 	createdAt: isoTimestampSchema
 });
-export type ParsedGracePolicySummary = z.output<
-	typeof gracePolicySummarySchema
->;
+export type GracePolicySummary = z.output<typeof gracePolicySummarySchema>;
 
 export const gracePolicyListResponseSchema = z.strictObject({
 	policies: z.array(gracePolicySummarySchema)
 });
-export type ParsedGracePolicyListResponse = z.output<
+export type GracePolicyListResponse = z.output<
 	typeof gracePolicyListResponseSchema
 >;
 
@@ -216,7 +215,7 @@ export const gracePolicyRemoveResponseSchema = z.strictObject({
 	id: z.string(),
 	removed: z.boolean()
 });
-export type ParsedGracePolicyRemoveResponse = z.output<
+export type GracePolicyRemoveResponse = z.output<
 	typeof gracePolicyRemoveResponseSchema
 >;
 
@@ -230,37 +229,39 @@ export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
 	}),
 	z.strictObject({ covered: z.literal(false) })
 ]);
-export type ParsedGraceCoverageResponse = z.output<
+export type GraceCoverageResponse = z.output<
 	typeof graceCoverageResponseSchema
 >;
 
-export type RootSetBody = z.input<typeof rootSetBodySchema>;
-export type RootTarget = z.input<typeof rootTargetSchema>;
-export type RootSummary = z.input<typeof rootSummarySchema>;
-export type RootSetResponse = z.input<typeof rootSetResponseSchema>;
-export type RootEnsureResponse = z.input<typeof rootEnsureResponseSchema>;
-export type RootListEntry = z.input<typeof rootListEntrySchema>;
-export type RootListResponse = z.input<typeof rootListResponseSchema>;
-export type RootTargetsPage = z.input<typeof rootTargetsPageSchema>;
-export type RootRemoveResponse = z.input<typeof rootRemoveResponseSchema>;
-export type RetentionPolicyAddBody = z.input<
+export type RootSetBodyInput = z.input<typeof rootSetBodySchema>;
+export type RootTargetInput = z.input<typeof rootTargetSchema>;
+export type RootSummaryInput = z.input<typeof rootSummarySchema>;
+export type RootSetResponseInput = z.input<typeof rootSetResponseSchema>;
+export type RootEnsureResponseInput = z.input<typeof rootEnsureResponseSchema>;
+export type RootListEntryInput = z.input<typeof rootListEntrySchema>;
+export type RootListResponseInput = z.input<typeof rootListResponseSchema>;
+export type RootTargetsPageInput = z.input<typeof rootTargetsPageSchema>;
+export type RootRemoveResponseInput = z.input<typeof rootRemoveResponseSchema>;
+export type RetentionPolicyAddBodyInput = z.input<
 	typeof retentionPolicyAddBodySchema
 >;
-export type RetentionPolicySummary = z.input<
+export type RetentionPolicySummaryInput = z.input<
 	typeof retentionPolicySummarySchema
 >;
-export type RetentionPolicyListResponse = z.input<
+export type RetentionPolicyListResponseInput = z.input<
 	typeof retentionPolicyListResponseSchema
 >;
-export type RetentionPolicyRemoveResponse = z.input<
+export type RetentionPolicyRemoveResponseInput = z.input<
 	typeof retentionPolicyRemoveResponseSchema
 >;
-export type GracePolicyAddBody = z.input<typeof gracePolicyAddBodySchema>;
-export type GracePolicySummary = z.input<typeof gracePolicySummarySchema>;
-export type GracePolicyListResponse = z.input<
+export type GracePolicyAddBodyInput = z.input<typeof gracePolicyAddBodySchema>;
+export type GracePolicySummaryInput = z.input<typeof gracePolicySummarySchema>;
+export type GracePolicyListResponseInput = z.input<
 	typeof gracePolicyListResponseSchema
 >;
-export type GraceCoverageResponse = z.input<typeof graceCoverageResponseSchema>;
-export type GracePolicyRemoveResponse = z.input<
+export type GraceCoverageResponseInput = z.input<
+	typeof graceCoverageResponseSchema
+>;
+export type GracePolicyRemoveResponseInput = z.input<
 	typeof gracePolicyRemoveResponseSchema
 >;

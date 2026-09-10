@@ -98,6 +98,33 @@ function fittedChunkWidth(
 }
 
 /**
+ * Splits `items` into chunks whose generated statements satisfy the platform's
+ * bound-parameter limit.
+ */
+export function chunkByStatementParameters<Item>(
+	items: readonly Item[],
+	buildStatement: (
+		chunk: readonly Item[]
+	) => Pick<InspectableStatement<unknown>, 'toSQL'>
+): readonly (readonly Item[])[] {
+	const chunks: (readonly Item[])[] = [];
+	let processed = 0;
+
+	while (processed < items.length) {
+		const rest = items.slice(processed);
+		const width = fittedChunkWidth(
+			rest,
+			(candidate) =>
+				buildStatement(rest.slice(0, candidate)).toSQL().params.length
+		);
+		chunks.push(rest.slice(0, width));
+		processed += width;
+	}
+
+	return chunks;
+}
+
+/**
  * Runs one statement for each chunk of `items`. Returns the processed prefix
  * and the result of each statement. The caller can defer the unprocessed suffix.
  *

@@ -1,18 +1,18 @@
 import {
+	type CacheAccessMode,
 	cacheNameSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
-	privateStoredCache,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
-	type ParsedTenantReadCredential,
+	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
@@ -22,6 +22,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
+import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -31,6 +32,8 @@ import {
 	narObjectKey,
 	requestOriginSchema
 } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -40,13 +43,17 @@ import {
 	countingD1,
 	currentNarObjectKey,
 	currentServer,
+	currentServerTenant,
 	driveToCompletion,
+	fetchPath,
 	fileAttestationReference,
+	namedCache,
 	narBytes,
 	narInfoGeneration,
 	provisionFixtureTenant,
 	publishAttestationList,
 	pushPath,
+	putTestCache,
 	readFetch,
 	resetTestServer,
 	tenantCasBlobRows,
@@ -64,8 +71,12 @@ import {
 } from './cache-admin-service.ts';
 import { maxFencedRetireRows } from './deletion-queue-service.ts';
 
-const buildsCache = cacheNameSchema.parse('builds');
-const privateBuilds = privateStoredCache(buildsCache);
+const buildsName = cacheNameSchema.parse('builds');
+const privateBuildsName = cacheNameSchema.parse('private-builds');
+const buildsCache = namedCache(buildsName);
+const privateBuilds = namedCache(privateBuildsName);
+const otherCache = namedCache('other');
+const defaultCache: CacheScope = { kind: 'default' };
 const origin = requestOriginSchema.parse('https://cache.example');
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const tenantReader = { user: 'alice', password: 'secret' };
@@ -80,11 +91,10 @@ const firstNarInfoGeneration = 0;
 
 // Generated read passwords are exactly 43 base64url characters, which is what
 // the control plane accepts.
-const cacheReader: ParsedTenantReadCredential =
-	tenantReadCredentialSchema.parse({
-		user: 'reader',
-		password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-	});
+const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
+	user: 'reader',
+	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+});
 
 function credentialHeaders(credential: {
 	readonly user: string;
@@ -107,7 +117,7 @@ function basic(credential: {
 function indexedMetadata(
 	index: number,
 	nar?: VerifiableNar
-): ParsedUploadPathMetadata {
+): UploadPathMetadata {
 	const suffix =
 		storePathAlphabet.charAt(Math.floor(index / 32)) +
 		storePathAlphabet.charAt(index % 32);
@@ -128,23 +138,34 @@ function database() {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-function cacheGenerationRows(): Promise<
-	{ cache: string; generation: number }[]
+async function cacheGenerationRows(): Promise<
+	{ cache: CacheScope; generation: number }[]
 > {
-	return database()
+	const rows = await database()
 		.select({
-			cache: d1Schema.cacheLifecycle.cache,
+			kind: d1Schema.cacheLifecycle.cacheKind,
+			name: d1Schema.cacheLifecycle.cacheName,
 			generation: d1Schema.cacheLifecycle.generation
 		})
 		.from(d1Schema.cacheLifecycle)
 		.all();
+
+	return rows.map((row) => ({
+		cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+		generation: row.generation
+	}));
 }
 
-function cacheCredentialCaches(): Promise<{ cache: string }[]> {
-	return database()
-		.select({ cache: d1Schema.tenantCacheReadCredential.cache })
+async function cacheCredentialCaches(): Promise<{ cache: CacheScope }[]> {
+	const rows = await database()
+		.select({
+			kind: d1Schema.tenantCacheReadCredential.cacheKind,
+			name: d1Schema.tenantCacheReadCredential.cacheName
+		})
 		.from(d1Schema.tenantCacheReadCredential)
 		.all();
+
+	return rows.map((row) => ({ cache: cacheScopeFromRow(row) }));
 }
 
 /**
@@ -157,9 +178,10 @@ function cacheCredentialCaches(): Promise<{ cache: string }[]> {
  * edge credits both and the tenant's counters may not go negative.
  */
 async function seedUnstampedEdge(
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHash: StorePathHash,
-	nar: VerifiableNar
+	nar: VerifiableNar,
+	access: CacheAccessMode = 'public'
 ): Promise<void> {
 	const fileSize = nar.narBytes.byteLength;
 	const insertBlob = database()
@@ -174,10 +196,10 @@ async function seedUnstampedEdge(
 		})
 		.onConflictDoNothing();
 	const insertEdge = database()
-		.insert(d1Schema.blobReference)
+		.insert(migrationSchema.blobReferences)
 		.values({
 			tenant: fixtureTenant,
-			cache,
+			...cacheMigrationColumns(cache, access),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
 			narHash: nar.narHash
@@ -222,10 +244,12 @@ function removeCache(token: string): Promise<Response> {
 	});
 }
 
-function teardownPending(cache: StoredCache): Promise<unknown> {
-	return runInDurableObject(currentServer(), (_instance, state) =>
-		state.storage.get(`${teardownEntryPrefix}${cache}`)
-	);
+function teardownPending(_cache: CacheScope): Promise<unknown> {
+	return runInDurableObject(currentServer(), async (_instance, state) => {
+		const markers = await state.storage.list({ prefix: teardownEntryPrefix });
+
+		return markers.values().next().value;
+	});
 }
 
 /**
@@ -238,10 +262,11 @@ function teardownPending(cache: StoredCache): Promise<unknown> {
  * workerd delivers an alarm that is already due, and the pass it runs claims
  * whatever marker it finds.
  */
-async function deleteAndParkTeardown(cache: StoredCache): Promise<void> {
+async function deleteAndParkTeardown(cache: CacheScope): Promise<void> {
 	await runInDurableObject(currentServer(), async (instance, state) => {
+		const resolved = instance.context.cacheRepository.require(cache);
 		await instance.runCacheTeardown(cache, origin);
-		await state.storage.delete(`${teardownEntryPrefix}${cache}`);
+		await state.storage.delete(`${teardownEntryPrefix}${String(resolved.id)}`);
 	});
 }
 
@@ -259,14 +284,14 @@ async function deletionStatements(
 	storePaths: number
 ): Promise<number> {
 	await useTestServer(server);
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 	for (let start = 0; start < storePaths; start += pushConcurrency) {
 		await Promise.all(
 			Array.from(
 				{ length: Math.min(pushConcurrency, storePaths - start) },
 				(_, offset) =>
-					pushPath(token, indexedMetadata(start + offset), 'builds')
+					pushPath(token, indexedMetadata(start + offset), buildsCache)
 			)
 		);
 	}
@@ -308,14 +333,14 @@ async function teardownPassStatements(
 	storePaths: number
 ): Promise<number> {
 	await useTestServer(server);
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 	for (let start = 0; start < storePaths; start += pushConcurrency) {
 		await Promise.all(
 			Array.from(
 				{ length: Math.min(pushConcurrency, storePaths - start) },
 				(_, offset) =>
-					pushPath(token, indexedMetadata(start + offset), 'builds')
+					pushPath(token, indexedMetadata(start + offset), buildsCache)
 			)
 		);
 	}
@@ -362,13 +387,13 @@ async function publishAttestedPaths(
 ): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 	for (let index = 0; index < paths; index += 1) {
 		const nar = await verifiableNar(`attested-${String(index)}`);
 		const metadata = indexedMetadata(index, nar);
 
-		await pushPath(token, metadata, 'builds', nar);
+		await pushPath(token, metadata, buildsCache, nar);
 
 		for (let reference = 0; reference < references; reference += 1) {
 			const bundle = index * references + reference;
@@ -376,9 +401,10 @@ async function publishAttestedPaths(
 			await fileAttestationReference({
 				uploadId: attestationUploadId(bundle),
 				bytes: new TextEncoder().encode(`{"bundle":${String(bundle)}}`),
-				cache: 'builds',
+				cache: buildsCache,
 				storePathHash: metadata.storePathHash,
-				generation: firstNarInfoGeneration
+				generation: firstNarInfoGeneration,
+				tenant: currentServerTenant()
 			});
 		}
 	}
@@ -403,6 +429,7 @@ async function attestedTeardownPassStatements(
 
 	return runInDurableObject(currentServer(), async (instance, state) => {
 		const real = instance.context.d1;
+		const cache = instance.context.cacheRepository.require(buildsCache);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
@@ -415,7 +442,7 @@ async function attestedTeardownPassStatements(
 
 		for (let taken = 0; taken < maxPasses; taken += 1) {
 			const marker = await state.storage.get(
-				`${teardownEntryPrefix}${buildsCache}`
+				`${teardownEntryPrefix}${String(cache.id)}`
 			);
 
 			if (marker === undefined) {
@@ -443,12 +470,14 @@ async function attestedTeardownPassStatements(
  */
 async function publishPrivatePath(server: string): Promise<{
 	token: string;
-	metadata: ParsedUploadPathMetadata;
+	metadata: UploadPathMetadata;
 	nar: VerifiableNar;
 }> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({
+		caches: [{ scope: privateBuilds, access: 'private' }]
+	});
 	const nar = await verifiableNar(server);
 	const metadata = indexedMetadata(0, nar);
 
@@ -457,7 +486,7 @@ async function publishPrivatePath(server: string): Promise<{
 	await setCacheReadCredential(
 		database(),
 		fixtureTenant,
-		buildsCache,
+		privateBuilds,
 		cacheReader,
 		now
 	);
@@ -473,7 +502,7 @@ async function publishPrivatePath(server: string): Promise<{
 // Reads the narinfo, NAR, attestation-list and availability routes with the
 // cache's own credential.
 async function readPrivateSurfaces(
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	nar: VerifiableNar
 ): Promise<{
 	narinfo: number;
@@ -482,19 +511,18 @@ async function readPrivateSurfaces(
 	missing: readonly string[];
 }> {
 	const narinfo = await readFetch(
-		`/private-cache/builds/${metadata.storePathHash}.narinfo`,
+		`/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`,
 		basic(cacheReader)
 	);
 	const narRead = await readFetch(
-		await pushedNarPath(nar, '/private-cache/builds'),
+		await pushedNarPath(nar, `/cache/${privateBuildsName}`),
 		basic(cacheReader)
 	);
-	const attestationList = await readFetch(
-		`/private-cache/builds/attestations/${metadata.storePathHash}`,
-		basic(cacheReader)
+	const attestationList = await fetchPath(
+		`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
 	);
 	const availability = await readFetch(
-		'/private-cache/builds/api/v1/missing-paths',
+		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
@@ -523,11 +551,11 @@ async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
 	head: number;
 	missing: readonly string[];
 }> {
-	const path = `/private-cache/builds/${storePathHash}.narinfo`;
+	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
 	const narinfo = await readFetch(path, basic(cacheReader));
 	const head = await readFetch(path, { method: 'HEAD', ...basic(cacheReader) });
 	const availability = await readFetch(
-		'/private-cache/builds/api/v1/missing-paths',
+		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
@@ -596,20 +624,21 @@ describe('deleted private cache', () => {
 		// Registering the name again ends the deleted state while the parked drain
 		// still holds the previous cache's published narinfo object. Only the
 		// reference edge separates the two caches' paths from here on.
+		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
-		const previousPath = `/private-cache/builds/${metadata.storePathHash}.narinfo`;
+		const previousPath = `/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`;
 		const previous = await readFetch(previousPath, basic(cacheReader));
 		const previousHead = await readFetch(previousPath, {
 			method: 'HEAD',
 			...basic(cacheReader)
 		});
 		const freshRead = await readFetch(
-			`/private-cache/builds/${fresh.storePathHash}.narinfo`,
+			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
 			basic(cacheReader)
 		);
 		const availability = await readFetch(
-			'/private-cache/builds/api/v1/missing-paths',
+			`/cache/${privateBuildsName}/api/v1/missing-paths`,
 			{
 				method: 'POST',
 				headers: {
@@ -670,6 +699,7 @@ describe('deleted private cache', () => {
 		// object.
 		const recommittedNar = await verifiableNar('recommitted-contents');
 
+		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(
 			token,
 			indexedMetadata(0, recommittedNar),
@@ -714,11 +744,11 @@ describe('deleted private cache', () => {
 		// The same path in the cache created next, with no attestation attached to
 		// the new commit. The list object the previous cache published is still
 		// there, and it describes the generation that cache committed.
+		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(token, metadata, privateBuilds, nar);
 
-		const list = await readFetch(
-			`/private-cache/builds/attestations/${metadata.storePathHash}`,
-			basic(cacheReader)
+		const list = await fetchPath(
+			`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
 		);
 
 		expect({
@@ -747,19 +777,19 @@ describe('deleted private cache', () => {
 		await deleteAndParkTeardown(privateBuilds);
 
 		const whileDeleted = await readFetch(
-			`/private-cache/builds/${fresh.storePathHash}.narinfo`,
+			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
 			basic(cacheReader)
 		);
 
-		// A push registers the cache name again and creates a new active generation.
+		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const freshRead = await readFetch(
-			`/private-cache/builds/${fresh.storePathHash}.narinfo`,
+			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
 			basic(cacheReader)
 		);
 		const freshNarRead = await readFetch(
-			await pushedNarPath(freshNar, '/private-cache/builds'),
+			await pushedNarPath(freshNar, `/cache/${privateBuildsName}`),
 			basic(cacheReader)
 		);
 
@@ -773,7 +803,7 @@ describe('deleted private cache', () => {
 			freshRead: StatusCodes.OK,
 			freshNarRead: StatusCodes.OK,
 			generations: [
-				{ cache: '', generation: 1 },
+				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
 			]
 		});
@@ -782,13 +812,13 @@ describe('deleted private cache', () => {
 	it('refuses attestations from the previous cache after the name is reused', async () => {
 		await useTestServer('gen-deleted-bundle');
 
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const nar = await verifiableNar('bundle-path');
 		const metadata = indexedMetadata(0, nar);
 		const freshNar = await verifiableNar('bundle-fresh-path');
 		const fresh = indexedMetadata(1, freshNar);
 
-		await pushPath(token, metadata, 'builds', nar);
+		await pushPath(token, metadata, buildsCache, nar);
 
 		// A reference answers a read only while the edge of the narinfo version it
 		// was filed against authorises one, so file it against the generation the
@@ -796,9 +826,10 @@ describe('deleted private cache', () => {
 		const { digest } = await fileAttestationReference({
 			uploadId: '00000000-0000-4000-8000-000000000001',
 			bytes: new TextEncoder().encode('{"bundle":true}'),
-			cache: 'builds',
+			cache: buildsCache,
 			storePathHash: metadata.storePathHash,
-			generation: firstNarInfoGeneration
+			generation: firstNarInfoGeneration,
+			tenant: currentServerTenant()
 		});
 		const bundlePath = `/cache/builds/attestation-bundles/${digest}`;
 		const listPath = `/cache/builds/attestations/${metadata.storePathHash}`;
@@ -813,8 +844,8 @@ describe('deleted private cache', () => {
 			list: number;
 			bundle: number;
 		}> => {
-			const list = await readFetch(listPath);
-			const bundle = await readFetch(bundlePath);
+			const list = await fetchPath(listPath);
+			const bundle = await fetchPath(bundlePath);
 
 			return { list: list.status, bundle: bundle.status };
 		};
@@ -828,7 +859,8 @@ describe('deleted private cache', () => {
 		// A cache of the same name again. Neither the reference nor the list object
 		// records a cache generation of its own, so only the edges they belong to
 		// can keep them from answering this cache's readers.
-		await pushPath(token, fresh, 'builds', freshNar);
+		await putTestCache(token, buildsCache);
+		await pushPath(token, fresh, buildsCache, freshNar);
 
 		const afterRecreation = await readAttestations();
 		const filedReferences = await attestationReferenceRows();
@@ -864,19 +896,20 @@ describe('attestation list generation', () => {
 	it('refuses an attestation list published for the generation before a recommit', async () => {
 		await useTestServer('gen-stale-list');
 
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const nar = await verifiableNar('stale-list');
 		const metadata = indexedMetadata(0, nar);
 		const listPath = `/cache/builds/attestations/${metadata.storePathHash}`;
 
-		await pushPath(token, metadata, 'builds', nar);
+		await pushPath(token, metadata, buildsCache, nar);
 
 		const { digest, size } = await fileAttestationReference({
 			uploadId: '00000000-0000-4000-8000-000000000001',
 			bytes: new TextEncoder().encode('{"bundle":true}'),
-			cache: 'builds',
+			cache: buildsCache,
 			storePathHash: metadata.storePathHash,
-			generation: firstNarInfoGeneration
+			generation: firstNarInfoGeneration,
+			tenant: currentServerTenant()
 		});
 		await publishAttestationList({
 			cache: buildsCache,
@@ -887,15 +920,16 @@ describe('attestation list generation', () => {
 			]
 		});
 
-		const beforeDeletion = await readFetch(listPath);
+		const beforeDeletion = await fetchPath(listPath);
 
 		// Park the drain so the list object of the deleted cache survives, then
 		// commit the same path again. The new commit takes the next generation and
 		// leaves the previous list object in place.
 		await deleteAndParkTeardown(buildsCache);
-		await pushPath(token, metadata, 'builds', nar);
+		await putTestCache(token, buildsCache);
+		await pushPath(token, metadata, buildsCache, nar);
 
-		const afterRecommit = await readFetch(listPath);
+		const afterRecommit = await fetchPath(listPath);
 
 		expect({
 			beforeDeletion: beforeDeletion.status,
@@ -911,19 +945,24 @@ describe('attestation list generation', () => {
 	it('serves a public list that records no generation and refuses a private one', async () => {
 		await useTestServer('gen-legacy-list');
 
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [
+				{ scope: buildsCache },
+				{ scope: privateBuilds, access: 'private' }
+			]
+		});
 		const publicNar = await verifiableNar('legacy-list-public');
 		const privateNar = await verifiableNar('legacy-list-private');
 		const publicPath = indexedMetadata(0, publicNar);
 		const privatePath = indexedMetadata(1, privateNar);
 
-		await pushPath(token, publicPath, 'builds', publicNar);
+		await pushPath(token, publicPath, buildsCache, publicNar);
 		await pushPath(token, privatePath, privateBuilds, privateNar);
 		await provisionFixtureTenant({ read: tenantReader });
 		await setCacheReadCredential(
 			database(),
 			fixtureTenant,
-			buildsCache,
+			privateBuilds,
 			cacheReader,
 			now
 		);
@@ -938,12 +977,11 @@ describe('attestation list generation', () => {
 			storePathHash: privatePath.storePathHash
 		});
 
-		const publicList = await readFetch(
+		const publicList = await fetchPath(
 			`/cache/builds/attestations/${publicPath.storePathHash}`
 		);
-		const privateList = await readFetch(
-			`/private-cache/builds/attestations/${privatePath.storePathHash}`,
-			basic(cacheReader)
+		const privateList = await fetchPath(
+			`/cache/${privateBuildsName}/attestations/${privatePath.storePathHash}`
 		);
 
 		expect({
@@ -959,9 +997,11 @@ describe('attestation list generation', () => {
 describe('cache generation gate', () => {
 	beforeEach(resetTestServer);
 
-	it('refuses a private-cache read when deletion returns and drains its edges afterwards', async () => {
+	it('refuses a private cache read when deletion returns and drains its edges afterwards', async () => {
 		await useTestServer('gen-private');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: privateBuilds, access: 'private' }]
+		});
 		const nar = await verifiableNar('private-shared');
 		const paths = [0, 1, 2].map((index) => indexedMetadata(index, nar));
 
@@ -973,14 +1013,14 @@ describe('cache generation gate', () => {
 		await setCacheReadCredential(
 			database(),
 			fixtureTenant,
-			buildsCache,
+			privateBuilds,
 			cacheReader,
 			now
 		);
 
 		// The cache's own credential opens it, so this read is authorised by the
 		// cache's own reference edges rather than by a namespace.
-		const narUrl = await pushedNarPath(nar, '/private-cache/builds');
+		const narUrl = await pushedNarPath(nar, `/cache/${privateBuildsName}`);
 		const beforeDeletion = await readFetch(narUrl, basic(cacheReader));
 
 		// Count the surviving edges in the same Durable Object invocation as the
@@ -1016,7 +1056,7 @@ describe('cache generation gate', () => {
 			undrainedEdges: paths.length,
 			edges: [],
 			generations: [
-				{ cache: '', generation: 1 },
+				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
 			],
 			credentials: [{ cache: privateBuilds }]
@@ -1025,18 +1065,19 @@ describe('cache generation gate', () => {
 
 	it('does not let an undrained edge authorise the cache created next', async () => {
 		await useTestServer('gen-recreate');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const oldNar = await verifiableNar('recreate-old');
 		const newNar = await verifiableNar('recreate-new');
 		const oldPath = indexedMetadata(0, oldNar);
 		const newPath = indexedMetadata(1, newNar);
 
-		await pushPath(token, oldPath, 'builds', oldNar);
+		await pushPath(token, oldPath, buildsCache, oldNar);
 		// The deletion leaves the edge of the deleted cache for its drain, so park
 		// the drain and let that edge survive into the lifetime of the next cache
 		// of the same name.
 		await deleteAndParkTeardown(buildsCache);
-		await pushPath(token, newPath, 'builds', newNar);
+		await putTestCache(token, buildsCache);
+		await pushPath(token, newPath, buildsCache, newNar);
 
 		const oldRead = await readFetch(await pushedNarPath(oldNar));
 		const newRead = await readFetch(await pushedNarPath(newNar));
@@ -1054,7 +1095,7 @@ describe('cache generation gate', () => {
 			oldRead: StatusCodes.NOT_FOUND,
 			newRead: StatusCodes.OK,
 			generations: [
-				{ cache: '', generation: 1 },
+				{ cache: defaultCache, generation: 1 },
 				{ cache: buildsCache, generation: 2 }
 			],
 			edges: [
@@ -1066,7 +1107,7 @@ describe('cache generation gate', () => {
 
 	it('serves an unstamped edge, stops at deletion, and does not resume at recreation', async () => {
 		await useTestServer('gen-legacy');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const legacyNar = await verifiableNar('legacy-edge');
 		const freshNar = await verifiableNar('legacy-fresh');
 		const legacyPath = indexedMetadata(0, legacyNar);
@@ -1082,7 +1123,8 @@ describe('cache generation gate', () => {
 
 		// A cache of the same name again. Its own paths read, while the unstamped
 		// edge of the deleted cache stays refused.
-		await pushPath(token, freshPath, 'builds', freshNar);
+		await putTestCache(token, buildsCache);
+		await pushPath(token, freshPath, buildsCache, freshNar);
 
 		const afterRecreation = await readFetch(legacyPathUrl);
 		const freshRead = await readFetch(await pushedNarPath(freshNar));
@@ -1101,13 +1143,13 @@ describe('cache generation gate', () => {
 			generations: await cacheGenerationRows()
 		}).toStrictEqual({
 			beforeDeletion: StatusCodes.OK,
-			removed: { name: 'builds', removed: false, storePathsRemoved: 0 },
+			removed: { scope: buildsCache, removed: true, storePathsRemoved: 0 },
 			afterDeletion: StatusCodes.NOT_FOUND,
 			afterRecreation: StatusCodes.NOT_FOUND,
 			freshRead: StatusCodes.OK,
 			legacyCacheGeneration: undefined,
 			generations: [
-				{ cache: '', generation: 1 },
+				{ cache: defaultCache, generation: 1 },
 				{ cache: buildsCache, generation: 2 }
 			]
 		});
@@ -1115,7 +1157,7 @@ describe('cache generation gate', () => {
 
 	it('drains an edge a previous deletion left behind', async () => {
 		await useTestServer('gen-residue');
-		await bootstrap();
+		await bootstrap({ caches: [{ scope: buildsCache }] });
 
 		const strandedNar = await verifiableNar('residue');
 		const stranded = indexedMetadata(0, strandedNar);
@@ -1132,9 +1174,10 @@ describe('cache generation gate', () => {
 		const queuedForDrain = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = instance.context.cacheRepository.require(buildsCache);
 				await instance.runCacheTeardown(buildsCache, origin);
 
-				return state.storage.get(`${teardownEntryPrefix}${buildsCache}`);
+				return state.storage.get(`${teardownEntryPrefix}${String(cache.id)}`);
 			}
 		);
 
@@ -1159,13 +1202,13 @@ describe('cache generation gate', () => {
 
 	it('sweeps a stranded edge after a chunk that emptied the queue', async () => {
 		await useTestServer('gen-residue-full-chunk');
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const committedNar = await verifiableNar('residue-committed');
 		const strandedNar = await verifiableNar('residue-stranded');
 		const committed = indexedMetadata(0, committedNar);
 		const stranded = indexedMetadata(1, strandedNar);
 
-		await pushPath(token, committed, 'builds', committedNar);
+		await pushPath(token, committed, buildsCache, committedNar);
 		// Seed a reference edge without a narinfo row. An interrupted earlier
 		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
@@ -1183,8 +1226,9 @@ describe('cache generation gate', () => {
 		const drained = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = instance.context.cacheRepository.require(buildsCache);
 				const marker = (): Promise<unknown> =>
-					state.storage.get(`${teardownEntryPrefix}${buildsCache}`);
+					state.storage.get(`${teardownEntryPrefix}${String(cache.id)}`);
 				const queuedPaths = (): StorePathHash[] =>
 					drizzle(state.storage, { schema: { narInfoDeletions } })
 						.select({ storePathHash: narInfoDeletions.storePathHash })
@@ -1305,38 +1349,43 @@ describe('cache generation gate', () => {
 	it("credits a digest only when teardown retires the tenant's last reference", async () => {
 		await useTestServer('gen-shared-digest');
 
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({
+			caches: [{ scope: buildsCache }, { scope: otherCache }]
+		});
 		const tornNar = await verifiableNar('shared-digest-torn');
 		const keptNar = await verifiableNar('shared-digest-kept');
 		const torn = indexedMetadata(0, tornNar);
 		const kept = indexedMetadata(1, keptNar);
 		const sharedBytes = new TextEncoder().encode('{"bundle":"shared"}');
 
-		await pushPath(token, torn, 'builds', tornNar);
-		await pushPath(token, kept, 'other', keptNar);
+		await pushPath(token, torn, buildsCache, tornNar);
+		await pushPath(token, kept, otherCache, keptNar);
 
 		// One bundle both caches reference and one only the torn-down cache does,
 		// so the drain meets a three-statement retirement and a five-statement one.
 		const shared = await fileAttestationReference({
 			uploadId: attestationUploadId(1),
 			bytes: sharedBytes,
-			cache: 'builds',
+			cache: buildsCache,
 			storePathHash: torn.storePathHash,
-			generation: firstNarInfoGeneration
+			generation: firstNarInfoGeneration,
+			tenant: currentServerTenant()
 		});
 		await fileAttestationReference({
 			uploadId: attestationUploadId(2),
 			bytes: sharedBytes,
-			cache: 'other',
+			cache: otherCache,
 			storePathHash: kept.storePathHash,
-			generation: firstNarInfoGeneration
+			generation: firstNarInfoGeneration,
+			tenant: currentServerTenant()
 		});
 		await fileAttestationReference({
 			uploadId: attestationUploadId(3),
 			bytes: new TextEncoder().encode('{"bundle":"own"}'),
-			cache: 'builds',
+			cache: buildsCache,
 			storePathHash: torn.storePathHash,
-			generation: firstNarInfoGeneration
+			generation: firstNarInfoGeneration,
+			tenant: currentServerTenant()
 		});
 
 		await removeCache(token);
@@ -1361,7 +1410,7 @@ describe('cache generation gate', () => {
 		}).toStrictEqual({
 			references: [
 				{
-					cache: 'other',
+					cache: otherCache,
 					storePathHash: kept.storePathHash,
 					digest: shared.digest
 				}

@@ -91,9 +91,9 @@ default cache and its key are kept; the caches you list are added.
 
 A public cache sets `url`. A private cache sets `substitutersFile` instead: its
 substituter URL carries a read credential, and `nix.conf` is world-readable, so
-the module never writes that URL into it. See [Private caches][private-caches].
+the module never writes that URL into it. See [Private caches][cache-access].
 
-[private-caches]: #private-caches
+[cache-access]: #private-caches
 
 NixOS:
 
@@ -125,48 +125,51 @@ cupboard config "$url" "$(cupboard pubkey "$url")" | sudo tee -a /etc/nix/nix.co
 
 ## Private caches
 
-Create a private cache by pushing to it:
+Create a private cache, then push to its stable cache URL:
 
 ```sh
-cupboard push "$url" ./result --private-cache release
+cupboard cache create "$url" release --access private
+cupboard push "$url/cache/release" ./result
 ```
 
-The push creates `release` if it does not exist. A reader needs the cache's
-substituter settings and a credential, which the next section configures.
+A reader needs the cache's substituter settings and a credential, which the next
+section configures.
 
 ### Configuring a client
 
-`cupboard config` takes `--cache` and `--private-cache` repeatedly and in any
-combination. It prints one snippet for all selected caches, in argument order:
+`cupboard config` takes cache names as positional arguments. It prints one
+snippet for all selected caches, in argument order. Omit the names when the URL
+already selects one cache, including the default cache at the bare tenant URL:
 
 ```sh
-credentials=$(printf '{"release":{"user":"%s","password":"%s"}}' "$user" "$password")
+credentials=$(printf '[{"cache":{"kind":"named","name":"release"},"credential":{"user":"%s","password":"%s"}}]' "$user" "$password")
 
-CUPBOARD_PRIVATE_CACHE_CREDENTIALS=$credentials \
+CUPBOARD_CACHE_CREDENTIALS=$credentials \
   cupboard config "$url" "$(cupboard pubkey "$url")" \
-    --cache builds --private-cache release
+    builds release
 ```
 
 Write the complete snippet to the destination file. The credentials are a JSON
-object that maps each private cache's local name to its `user` and `password`.
-Supply them in `CUPBOARD_PRIVATE_CACHE_CREDENTIALS` or
-`--private-cache-credentials`. The option takes precedence when both are set.
+array whose entries pair an explicit cache scope with its `user` and `password`.
+Supply it in `CUPBOARD_CACHE_CREDENTIALS` or `--cache-credentials`. The option
+takes precedence when both are set.
+
 The environment variable keeps the credential out of the process arguments,
 which other users of the machine can read. The composite action takes the same
-document in its `private-cache-credentials` input.
+document in its `cache-credentials` input.
 
 A private cache without its own entry uses `--read-user` and `--read-password`,
-which specify the tenant credential. The command fails if a private cache has no
-credential. Every credential entry must match a selected private cache.
+which specify the tenant-wide fallback credential. Every cache-specific entry
+must match a selected cache.
 
 ### Keeping the credential out of `nix.conf`
 
 A netrc entry is keyed only by host, so netrc cannot provide different
-credentials to several caches on the same host. Each private-cache substituter
-URL therefore contains that cache's credential as userinfo. Nix fetches through
+credentials to several caches on the same host. Each cache-specific credential
+therefore appears as userinfo in that cache's stable URL. Nix fetches through
 curl, which prefers a credential in a URL to a netrc entry for the same host.
-Netrc can therefore provide the tenant credential while each private-cache URL
-provides its own credential.
+Netrc can therefore provide the tenant-wide fallback credential while each
+private cache's URL provides its own credential.
 
 The generated snippet contains these URLs, so protect it as you would protect
 the credentials. Give the snippet to the modules through `substitutersFile`:
@@ -187,10 +190,10 @@ the credentials. Give the snippet to the modules through `substitutersFile`:
 ```
 
 Set `substitutersFile` to a file that contains the `extra-substituters` line
-printed by `cupboard config --private-cache`. Create the file outside the Nix
-store with mode 0400 or 0600, and make it readable only by the account that runs
-Nix. The option has type `lib.types.externalPath`, so module evaluation rejects
-a path in the Nix store.
+printed by `cupboard config`. Create the file outside the Nix store with mode
+0400 or 0600, and make it readable only by the account that runs Nix. The option
+has type `lib.types.externalPath`, so module evaluation rejects a path in the
+Nix store.
 
 The module writes a required `include` directive to `nix.conf`. Nix reads the
 protected file at runtime, so the credential-bearing URL does not appear in the
@@ -200,29 +203,23 @@ substituters. If the file is missing or unreadable, Nix rejects the
 configuration. The private cache therefore cannot disappear from the substituter
 list without an error.
 
-### Public and private namespaces
+### Cache access
 
-A cache is private by its address. A public cache is read at
-`/t/<tenant>/cache/<name>/`, or at the bare tenant URL for the tenant's default
-cache, and a private cache is read at `/t/<tenant>/private-cache/<name>/`, where
-every request authenticates with HTTP Basic credentials and every response is
-`cache-control: no-store`. The two namespaces are separate: `cache/foo` and
-`private-cache/foo` name different caches, which can both exist and hold
-different paths. Visibility is part of a cache's identity rather than a setting
-on it, so each cache remains in the namespace where it was created.
+A named cache is always read at `/t/<tenant>/cache/<name>/`, and the tenant's
+default cache uses the bare tenant URL. Its `access` property is either `public`
+or `private`. A private cache requires HTTP Basic authentication on the same
+stable URL and sends `cache-control: no-store`; changing access does not create
+a second cache or move its contents.
 
-Every command that addresses one cache takes `--cache` for a public cache and
-`--private-cache` for a private one, and refuses the two together. Commands that
-take a cache by its selector, such as `cupboard cache create`, write a private
-cache as `_private-<name>`.
+Commands accept the stable cache URL directly. A command that also takes local
+paths can instead use the bare tenant URL followed by a cache name. A bare
+tenant URL without a cache name selects the default cache.
 
-### A private tenant
+### The tenant-wide fallback credential
 
-A tenant can also require a credential on its public routes. Every read of a
-public cache then authenticates with the tenant's credential, while `/pubkey`
-stays open so a client can still fetch the key it has to trust. One credential
-covers the whole host, so Nix reads it from a netrc file. `cupboard config`
-prints the netrc line when given read credentials:
+One credential can cover every private cache that does not have a credential of
+its own. Nix reads this tenant-wide fallback credential from a netrc file.
+`cupboard config` prints the netrc line when given read credentials:
 
 ```sh
 cupboard config "$url" "$(cupboard pubkey "$url")" \
@@ -266,24 +263,24 @@ path's references, deriver and signatures. Nix needs the narinfo before it can
 ask for any bytes.
 
 The bytes are addressed by their NAR hash. A private cache serves a NAR under
-`/t/<tenant>/private-cache/<name>/nar/<hash>.nar.zst` only when that cache has a
-path that references the hash. A private cache's own credential authorises only
-reads through that cache. The public routes serve no NAR referenced only by
-private caches. Knowing the hash does not bypass these checks. Deleting the last
-path that references a NAR in a cache stops that cache serving the NAR before
-the deletion reports success.
+`/t/<tenant>/cache/<name>/nar/<hash>.nar.zst` only when that cache has a path
+that references the hash. A private cache's own credential authorises only reads
+through that cache. The public routes serve no NAR referenced only by private
+caches. Knowing the hash does not bypass these checks. Deleting the last path
+that references a NAR in a cache stops that cache serving the NAR before the
+deletion reports success.
 
 All of a tenant's public caches share one authorisation range. A reader admitted
 to one public cache can address every other public cache. A NAR referenced by
 any public cache is served from every public prefix of the tenant, including
 `/t/<tenant>/nar/<hash>.nar.zst`.
 
-Publishing a NAR hash does not bypass private-cache authorisation. It does
-disclose that the path exists and identifies its contents to anyone holding a
-copy from elsewhere. The in-toto subject digest of a cupboard attestation is the
-NAR hash. A public transparency log exposes that digest to everyone, and a
-repository's attestation store exposes it to every reader of that repository.
-Both are append-only, so a published NAR hash cannot be withdrawn.
+Publishing a NAR hash does not bypass cache authorisation. It does disclose that
+the path exists and identifies its contents to anyone holding a copy from
+elsewhere. The in-toto subject digest of a cupboard attestation is the NAR hash.
+A public transparency log exposes that digest to everyone, and a repository's
+attestation store exposes it to every reader of that repository. Both are
+append-only, so a published NAR hash cannot be withdrawn.
 
 ### Attesting to a private cache
 

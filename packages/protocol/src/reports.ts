@@ -1,4 +1,5 @@
 import {
+	cacheScopeSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
 	storePathSchema
@@ -26,11 +27,11 @@ export type CheckDiscrepancyKind = z.infer<typeof checkDiscrepancyKindSchema>;
 
 export const checkDiscrepancySchema = z.strictObject({
 	kind: checkDiscrepancyKindSchema,
-	cache: z.string(),
+	cache: cacheScopeSchema,
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema
 });
-export type ParsedCheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
+export type CheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
 
 export const checkReportSchema = z.strictObject({
 	narInfosChecked: countSchema,
@@ -38,21 +39,27 @@ export const checkReportSchema = z.strictObject({
 	complete: z.boolean(),
 	discrepancies: z.array(checkDiscrepancySchema)
 });
-export type ParsedCheckReport = z.output<typeof checkReportSchema>;
+export type CheckReport = z.output<typeof checkReportSchema>;
 
 // One bounded background-verification pass. The report counts scanned narinfo
 // rows, reconstructed narinfo objects, and removed narinfos whose NAR is
-// missing. `cursorCache` and `cursor` identify the next row. Both are empty after
-// the scan wraps.
-export const verifyReportSchema = z.strictObject({
-	scanned: countSchema,
-	narInfoObjectsRestored: countSchema,
-	danglingNarInfosRemoved: countSchema,
-	cursor: z.string(),
-	cursorCache: z.string(),
-	wrapped: z.boolean()
-});
-export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
+// missing. `cursorCache` and `cursor` identify the next row when another pass
+// must resume the scan.
+export const verifyReportSchema = z
+	.strictObject({
+		scanned: countSchema,
+		narInfoObjectsRestored: countSchema,
+		danglingNarInfosRemoved: countSchema,
+		cursor: storePathHashSchema.optional(),
+		cursorCache: cacheScopeSchema.optional(),
+		wrapped: z.boolean()
+	})
+	.refine(
+		(report) =>
+			(report.cursor === undefined) === (report.cursorCache === undefined),
+		{ message: 'Set cursor and cursorCache together' }
+	);
+export type VerifyReport = z.output<typeof verifyReportSchema>;
 
 // Checks whether R2 accepts requests signed with the tenant Worker's
 // credentials. Bindings do not expose the credential values, so the Worker
@@ -64,7 +71,7 @@ export const r2CredentialCheckSchema = z.discriminatedUnion('result', [
 	z.strictObject({ result: z.literal('unconfigured') }),
 	z.strictObject({ result: z.literal('no-tenant') })
 ]);
-export type ParsedR2CredentialCheck = z.output<typeof r2CredentialCheckSchema>;
+export type R2CredentialCheck = z.output<typeof r2CredentialCheckSchema>;
 
 // Whether the control database answers a trivial read. The bare-host control
 // surface can serve `/_version` from a previous Worker version before the new
@@ -74,9 +81,7 @@ export const controlDatabaseCheckSchema = z.discriminatedUnion('result', [
 	z.strictObject({ result: z.literal('ok') }),
 	z.strictObject({ result: z.literal('error') })
 ]);
-export type ParsedControlDatabaseCheck = z.output<
-	typeof controlDatabaseCheckSchema
->;
+export type ControlDatabaseCheck = z.output<typeof controlDatabaseCheckSchema>;
 
 // The admin-gated deployment check served by the control plane. Future
 // deployment diagnostics join the report as further fields.
@@ -84,9 +89,7 @@ export const controlCheckReportSchema = z.strictObject({
 	db: controlDatabaseCheckSchema,
 	r2: r2CredentialCheckSchema
 });
-export type ParsedControlCheckReport = z.output<
-	typeof controlCheckReportSchema
->;
+export type ControlCheckReport = z.output<typeof controlCheckReportSchema>;
 
 // The `kind` under which `cupboard push` emits its final summary result. A
 // consumer uses this value to find the summary in the reporter's result file.
@@ -102,7 +105,7 @@ export const pushFailureSchema = z.strictObject({
 	stage: z.enum(['resolve', 'upload', 'commit', 'verify']),
 	reason: z.string()
 });
-export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
+export type PushFailure = z.output<typeof pushFailureSchema>;
 
 // One path's publication outcome and retention result. `already-present` means
 // the path was committed before this push. `committed` means a fresh upload or a
@@ -119,7 +122,7 @@ export const pushSummaryPathSchema = z.strictObject({
 	outcome: z.enum(['committed', 'already-present', 'pending', 'collected']),
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedPushSummaryPath = z.output<typeof pushSummaryPathSchema>;
+export type PushSummaryPath = z.output<typeof pushSummaryPathSchema>;
 
 // The push-summary result data a `cupboard push` emits, parsed back by the
 // actions so they can read uploaded/reused/skipped counts, failures, and each
@@ -132,7 +135,7 @@ export const pushSummarySchema = z.strictObject({
 	failures: z.array(pushFailureSchema),
 	paths: z.array(pushSummaryPathSchema)
 });
-export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
+export type PushSummary = z.output<typeof pushSummarySchema>;
 
 // The `kind` under which `cupboard attest attach` emits its final summary
 // result. A consumer uses this value to find the summary in the reporter's
@@ -149,7 +152,7 @@ export const attestationAttachPathSchema = z.strictObject({
 	storePath: storePathSchema.optional(),
 	outcome: z.enum(['attached', 'reused', 'unservable'])
 });
-export type ParsedAttestationAttachPath = z.output<
+export type AttestationAttachPath = z.output<
 	typeof attestationAttachPathSchema
 >;
 
@@ -160,7 +163,7 @@ export const attestationAttachSummarySchema = z.strictObject({
 	uploadedBytes: countSchema,
 	paths: z.array(attestationAttachPathSchema)
 });
-export type ParsedAttestationAttachSummary = z.output<
+export type AttestationAttachSummary = z.output<
 	typeof attestationAttachSummarySchema
 >;
 
@@ -186,17 +189,19 @@ export const buildSummarySchema = z.strictObject({
 	childExitStatus: z.number().int().nonnegative(),
 	unconfirmedPaths: z.array(storePathSchema)
 });
-export type ParsedBuildSummary = z.output<typeof buildSummarySchema>;
+export type BuildSummary = z.output<typeof buildSummarySchema>;
 
-export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
-export type CheckReport = z.input<typeof checkReportSchema>;
-export type ControlCheckReport = z.input<typeof controlCheckReportSchema>;
-export type VerifyReport = z.input<typeof verifyReportSchema>;
-export type PushFailure = z.input<typeof pushFailureSchema>;
-export type PushSummaryPath = z.input<typeof pushSummaryPathSchema>;
-export type PushSummary = z.input<typeof pushSummarySchema>;
-export type AttestationAttachPath = z.input<typeof attestationAttachPathSchema>;
-export type AttestationAttachSummary = z.input<
+export type CheckDiscrepancyInput = z.input<typeof checkDiscrepancySchema>;
+export type CheckReportInput = z.input<typeof checkReportSchema>;
+export type ControlCheckReportInput = z.input<typeof controlCheckReportSchema>;
+export type VerifyReportInput = z.input<typeof verifyReportSchema>;
+export type PushFailureInput = z.input<typeof pushFailureSchema>;
+export type PushSummaryPathInput = z.input<typeof pushSummaryPathSchema>;
+export type PushSummaryInput = z.input<typeof pushSummarySchema>;
+export type AttestationAttachPathInput = z.input<
+	typeof attestationAttachPathSchema
+>;
+export type AttestationAttachSummaryInput = z.input<
 	typeof attestationAttachSummarySchema
 >;
-export type BuildSummary = z.input<typeof buildSummarySchema>;
+export type BuildSummaryInput = z.input<typeof buildSummarySchema>;

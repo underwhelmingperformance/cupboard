@@ -1,14 +1,11 @@
-import {
-	DEFAULT_CACHE_SELECTOR,
-	storePathSchema
-} from '@cupboard/nix-store/scalars';
+import { storePathSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type UploadAttachRoot,
+	type UploadAttachRootInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -45,7 +42,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:commit'],
-			cache: DEFAULT_CACHE_SELECTOR
+			cache: { kind: 'default' }
 		},
 		...(attachRootSelector === undefined
 			? []
@@ -53,7 +50,7 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 					{
 						type: 'cupboard_cache',
 						actions: ['root:attach'],
-						cache: DEFAULT_CACHE_SELECTOR,
+						cache: { kind: 'default' },
 						root: attachRootSelector
 					}
 				])
@@ -63,9 +60,9 @@ function pushGrants(attachRootSelector?: string): AuthorizationDetails {
 function negotiate(
 	token: string,
 	paths: readonly ReturnType<typeof uploadMetadata>[],
-	attachRoot?: UploadAttachRoot
+	attachRoot?: UploadAttachRootInput
 ): Promise<Response> {
-	return authorisedFetch(`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`, token, {
+	return authorisedFetch('/uploads', token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
@@ -82,7 +79,7 @@ async function retentionRootRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
 			.select({
-				cache: schema.retentionRoots.cache,
+				cacheId: schema.retentionRoots.cacheId,
 				name: schema.retentionRoots.name,
 				expiresAt: schema.retentionRoots.expiresAt,
 				createdAt: schema.retentionRoots.createdAt,
@@ -90,7 +87,11 @@ async function retentionRootRows(): Promise<readonly unknown[]> {
 			})
 			.from(schema.retentionRoots)
 			.all()
-			.map((row) => ({ ...row, expiresAt: row.expiresAt ?? undefined }))
+			.map(({ cacheId, ...row }) => ({
+				...row,
+				cache: instance.context.cacheRepository.scopeForId(cacheId),
+				expiresAt: row.expiresAt ?? undefined
+			}))
 	);
 }
 
@@ -121,9 +122,9 @@ async function addRootNamePolicy(
 			.insert(schema.retentionPolicies)
 			.values({
 				id: 'policy-1',
-				scope: 'root-name-prefix',
-				pattern,
-				defaultTtlSeconds: ttlSeconds,
+				kind: 'root-name-prefix',
+				rootNamePrefix: pattern,
+				defaultTtlSeconds: ttlSecondsSchema.parse(ttlSeconds),
 				createdAt: isoTimestamp(new Date())
 			})
 			.run();
@@ -159,7 +160,7 @@ describe('negotiate binds the run root', () => {
 		}).toStrictEqual({
 			roots: [
 				{
-					cache: '',
+					cache: { kind: 'default' },
 					name: runRootName,
 					expiresAt: oneHourLater,
 					createdAt: bindTime,
@@ -203,7 +204,7 @@ describe('negotiate binds the run root', () => {
 			second: StatusCodes.OK,
 			roots: [
 				{
-					cache: '',
+					cache: { kind: 'default' },
 					name: runRootName,
 					expiresAt,
 					createdAt: bindTime,
@@ -241,7 +242,7 @@ describe('negotiate binds the run root', () => {
 				status: StatusCodes.OK,
 				roots: [
 					{
-						cache: '',
+						cache: { kind: 'default' },
 						name: runRootName,
 						expiresAt,
 						createdAt: bindTime,
@@ -261,12 +262,12 @@ describe('negotiate binds the run root', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate', 'upload:commit'],
-					cache: DEFAULT_CACHE_SELECTOR
+					cache: { kind: 'default' }
 				},
 				{
 					type: 'cupboard_cache',
 					actions: ['root:set'],
-					cache: DEFAULT_CACHE_SELECTOR,
+					cache: { kind: 'default' },
 					root: runRootName
 				}
 			])

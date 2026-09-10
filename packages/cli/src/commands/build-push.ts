@@ -13,18 +13,17 @@ import {
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
 	type RootName,
-	selectorForCache,
 	storePathSchema,
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import {
+	type BuildReceipt,
 	buildReceiptSchema,
+	type BuildReceiptV3,
 	buildReceiptV3Schema,
-	invocationIdSchema,
-	type ParsedBuildReceipt,
-	type ParsedBuildReceiptV3,
-	type ParsedBuildSubjectV3
+	type BuildSubjectV3,
+	invocationIdSchema
 } from '@cupboard/protocol/build';
 import type { RootSetBody } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
@@ -47,13 +46,13 @@ import {
 	runChild,
 	type RunChildOptions
 } from '../build-push/supervisor.ts';
-import { privateCacheOption } from '../cache-option.ts';
-import { commandUi, type ProgramOptions } from '../cli.ts';
 import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+	cacheTargetFromUrl,
+	cacheTargetWithName,
+	splitDelimitedCachePositionals
+} from '../cache-target.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	parseTtl,
@@ -74,7 +73,13 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { parsePathFile, validateRetentionChoice } from './push.ts';
 
-interface BuildPushOptions extends CacheSelectionOptions {
+declare module 'commander' {
+	interface Command {
+		readonly rawArgs: string[];
+	}
+}
+
+interface BuildPushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -236,8 +241,8 @@ function unique<T>(values: readonly T[]): readonly T[] {
 // build, and a later cohort finds it already in the store. Keep the `built`
 // subject whichever order the receipts arrive in.
 function recordAggregateSubject(
-	subjects: Map<string, ParsedBuildSubjectV3>,
-	subject: ParsedBuildSubjectV3
+	subjects: Map<string, BuildSubjectV3>,
+	subject: BuildSubjectV3
 ): void {
 	if (
 		subjects.get(subject.storePath)?.origin === 'built' &&
@@ -255,8 +260,8 @@ function recordAggregateSubject(
  * failures remain distinct from command failures.
  */
 export function aggregateBuildReceipts(
-	receipts: readonly ParsedBuildReceipt[]
-): ParsedBuildReceiptV3 {
+	receipts: readonly BuildReceipt[]
+): BuildReceiptV3 {
 	const parsed = receipts.map((receipt) => buildReceiptV3Schema.parse(receipt));
 	const terminalFailures = parsed.flatMap((receipt) =>
 		receipt.terminalFailure === undefined ? [] : [receipt.terminalFailure]
@@ -276,7 +281,7 @@ export function aggregateBuildReceipts(
 	const firstFailedReceipt = parsed.find(
 		(receipt) => receipt.terminalFailure !== undefined
 	);
-	const subjects = new Map<string, ParsedBuildSubjectV3>();
+	const subjects = new Map<string, BuildSubjectV3>();
 
 	for (const receipt of parsed) {
 		for (const subject of receipt.subjects) {
@@ -303,9 +308,9 @@ export function aggregateBuildReceipts(
  * for the version 3 aggregate used by the action output.
  */
 export function multiCohortReceiptDocument(
-	receipts: readonly ParsedBuildReceipt[],
+	receipts: readonly BuildReceipt[],
 	shouldAggregateReceiptV3: boolean
-): ParsedBuildReceiptV3 | { readonly receipts: readonly ParsedBuildReceipt[] } {
+): BuildReceiptV3 | { readonly receipts: readonly BuildReceipt[] } {
 	return shouldAggregateReceiptV3
 		? aggregateBuildReceipts(receipts)
 		: { receipts: [...receipts] };
@@ -350,7 +355,7 @@ export async function updateAggregateCohortRoot(
 
 async function writtenReceipt(
 	receiptFile: string
-): Promise<ParsedBuildReceipt | undefined> {
+): Promise<BuildReceipt | undefined> {
 	try {
 		return buildReceiptSchema.parse(
 			JSON.parse(await readFile(receiptFile, 'utf8'))
@@ -416,11 +421,11 @@ export function registerBuildPushCommand(
 				'upload while the build continues, and a final reconciliation ' +
 				'settles roots and writes the build receipt.'
 		)
-		.usage('<url> [options] -- <build command...>')
+		.usage('<url> [cache] [options] -- <build command...>')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
-			'[command...]',
-			'the build command to run after --; it must use the inherited Nix store configuration (replaced by --cohorts-file for a multi-cohort run)'
+			'[arguments...]',
+			'an optional cache name before --, then the build command; the command must use the inherited Nix store configuration (replaced by --cohorts-file for a multi-cohort run)'
 		)
 		.option(
 			'--github-oidc',
@@ -463,8 +468,6 @@ export function registerBuildPushCommand(
 			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
 			parseTtl
 		)
-		.option('--cache <name>', 'push to a named cache rather than the default')
-		.addOption(privateCacheOption('push to'))
 		.option(
 			'--no-wait',
 			'reconcile without waiting for deferred blobs to become servable; an unconfirmed root is left untouched'
@@ -518,6 +521,10 @@ export function registerBuildPushCommand(
 				'  cupboard build-push https://cache.example.workers.dev/t/acme \\',
 				'    --root github:acme/infra/main -- nix build --no-link .#app',
 				'',
+				'  # Build into a named cache selected before the command boundary',
+				'  cupboard build-push https://cache.example.workers.dev/t/acme builds \\',
+				'    --root github:acme/infra/main -- nix build --no-link .#app',
+				'',
 				'  # Build from CI with a GitHub Actions OIDC token and a run root',
 				'  cupboard build-push --github-oidc --root github:acme/infra/main \\',
 				'    --run-root github:acme/infra/run-123 --run-root-ttl 2d \\',
@@ -527,16 +534,53 @@ export function registerBuildPushCommand(
 		.action(
 			async (url: URL, commandParts: string[], options: BuildPushOptions) => {
 				validateRetentionChoice(options);
+				const delimited = splitDelimitedCachePositionals(
+					commandParts,
+					program.rawArgs,
+					{
+						withoutSeparator:
+							options.cohortsFile === undefined
+								? 'command-payload'
+								: 'cache-only'
+					}
+				);
 
-				// Exactly one build input: a -- command builds a single cohort, and a
-				// cohorts file names the multi-cohort form.
-				if (commandParts.length > 0 === (options.cohortsFile !== undefined)) {
+				if (
+					delimited.payload.length > 0 ===
+					(options.cohortsFile !== undefined)
+				) {
 					throw new CohortInputError();
 				}
 
+				const targetRoot = options.retain === false ? undefined : options.root;
+				const urlTarget = cacheTargetFromUrl(url);
+				const target =
+					delimited.cacheName === undefined
+						? urlTarget
+						: cacheTargetWithName(urlTarget, delimited.cacheName);
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
+						signal: programOptions.signal
+					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: pushAuthorizationDetails({
+							cache: target.cache,
+							attest: false,
+							...(targetRoot !== undefined && { root: targetRoot }),
+							...(options.runRoot !== undefined && {
+								runRoot: options.runRoot
+							})
+						})
+					}
+				);
+
 				const cohorts: readonly BuildInvocation[] =
 					options.cohortsFile === undefined
-						? [{ kind: 'command', command: childCommand(commandParts) }]
+						? [{ kind: 'command', command: childCommand(delimited.payload) }]
 						: parseCohortsFile(await readFile(options.cohortsFile, 'utf8'));
 
 				const intermediatePaths =
@@ -546,25 +590,16 @@ export function registerBuildPushCommand(
 								await readFile(options.intermediatePathsFile, 'utf8')
 							);
 				const reporter = commandUi(program, programOptions).reporter();
-				const cache = resolveCacheSelection(options);
-				const raw = CupboardClient.fromUrl(url, {
-					cache,
-					signal: programOptions.signal
-				});
-				const cacheSelector = selectorForCache(cache);
-				const targetRoot = options.retain === false ? undefined : options.root;
+				const cache = target.cache;
 				const authorizationDetails = pushAuthorizationDetails({
-					cacheSelector,
+					cache,
 					attest: false,
 					...(targetRoot !== undefined && { root: targetRoot }),
-					...(options.runRoot !== undefined && { runRoot: options.runRoot })
+					...(options.runRoot !== undefined && {
+						runRoot: options.runRoot
+					})
 				});
-				const token = await authenticateForPush(raw, {
-					githubOidc: options.githubOidc,
-					audience: options.audience ?? audienceSchema.parse(url),
-					authorizationDetails
-				});
-				const pushClient = pushClientFor(url, token, {
+				const pushClient = pushClientFor(target.tenantUrl, credential, {
 					cache,
 					signal: programOptions.signal
 				});
@@ -663,7 +698,7 @@ export function registerBuildPushCommand(
 									daemonTrust: () => openDaemon().daemonTrust(),
 									invocationId,
 									grants: authorizationDetails,
-									cache: cacheSelector,
+									cache,
 									...(options.runRoot !== undefined && {
 										runRoot: options.runRoot
 									}),

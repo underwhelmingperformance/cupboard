@@ -223,31 +223,25 @@ pattern also filters tokens: a token whose claim does not match is refused.
 
 ## Pushing to a private cache
 
-A rule uses the selector `_private-<name>` to grant access to a private cache:
+Public and private caches use the same cache identity. The cache's `access`
+property controls reads and does not change the grant that authorises writes:
 
 ```bash
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --issuer https://token.actions.githubusercontent.com \
   --audience https://cupboard.example.workers.dev/t/acme \
   --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
-  --cache _private-ci \
+  --cache ci \
   --allow push
 ```
 
-`ci` and `_private-ci` are different caches. A grant for one does not apply to
-the other.
-
-A rendered `--cache-template` is matched against the same selector grammar, so a
-template reaches the private namespace only when its result starts with
-`_private-`. `add-github-pr` and `add-github-tag` capture values that start with
-a letter or a digit, so those values cannot supply the private prefix. Write
-`_private-` literally in `--cache-template` and let the named capture match only
-the local cache name. A custom `--capture` pattern can accept a leading
-underscore. If the capture includes the prefix, a token can select the public or
-private namespace.
+Changing `ci` between public and private access does not create a second cache
+and does not require a new trust rule. A rendered `--cache-template` uses the
+same cache-name grammar, so the captured value selects the same stable cache
+regardless of its access setting.
 
 A trust rule governs writes. Reads are separate: a reader of a private cache
 presents that cache's Basic credential. Trust rules do not grant read
-credentials. See [Private caches][nix-private-caches].
+credentials. See [Private caches][nix-cache-access].
 
-[nix-private-caches]: ./nix.md#private-caches
+[nix-cache-access]: ./nix.md#private-caches

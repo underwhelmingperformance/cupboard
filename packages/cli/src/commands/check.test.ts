@@ -1,6 +1,6 @@
 import {
-	checkReportSchema,
-	type ParsedCheckReport
+	type CheckReport,
+	checkReportSchema
 } from '@cupboard/protocol/reports';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -88,7 +88,7 @@ function reporter(captured: Captured): Reporter {
 }
 
 function checkClient(
-	report: ParsedCheckReport,
+	report: CheckReport,
 	calls: { deep: boolean }[]
 ): CheckClient {
 	return {
@@ -142,13 +142,13 @@ describe('runCheck', () => {
 			discrepancies: [
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: 'a'.repeat(32),
 					narHash
 				},
 				{
 					kind: 'missing-narinfo-object',
-					cache: 'builds',
+					cache: { kind: 'named', name: 'builds' },
 					storePathHash: 'b'.repeat(32),
 					narHash
 				}

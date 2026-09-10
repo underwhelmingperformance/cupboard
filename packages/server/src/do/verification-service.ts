@@ -1,21 +1,21 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
 import {
+	type CacheScope,
 	type NarInfoGeneration,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { type VerifyReport } from '@cupboard/protocol/reports';
+import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type ParsedUploadGraceFact,
-	type ParsedUploadPathNegotiation,
-	type ParsedUploadStatusResponse,
 	type SessionId,
+	type UploadGraceFact,
 	type UploadId,
-	uploadIdSchema
+	uploadIdSchema,
+	type UploadPathNegotiation,
+	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -35,6 +35,11 @@ import {
 import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
+import {
+	type CacheId,
+	cacheScopeFromRow,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
@@ -217,12 +222,16 @@ function otherDecodeFreeCandidateKind(
 }
 
 function edgeKey(
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHash: string,
 	generation: NarInfoGeneration,
 	narHash: string
 ): string {
-	return `${cache}\0${storePathHash}\0${String(generation)}\0${narHash}`;
+	return JSON.stringify([cache, storePathHash, generation, narHash]);
+}
+
+function reconcileTarget(row: NarInfoRow): ReconcileTarget {
+	return { cacheId: row.cacheId, storePathHash: row.storePathHash };
 }
 
 // Returns the number of D1 statements required to repair an observation.
@@ -400,7 +409,7 @@ interface HeldVerdictRow extends RecordedVerdict {
 
 interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
-	readonly metadata: ParsedUploadPathNegotiation;
+	readonly metadata: UploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
 	readonly owner: string;
 }
@@ -554,10 +563,14 @@ export class VerificationService {
 		// A failed verification must remove the path from every retention root. A
 		// root can include the path while its bytes are still being verified.
 		private readonly pruneRetentionTargets: (
-			cache: StoredCache,
+			cache: ResolvedCache,
 			storePathHash: StorePathHash
 		) => void
 	) {}
+
+	private cache(cacheId: CacheId): ResolvedCache {
+		return this.context.cacheRepository.resolvedForId(cacheId);
+	}
 
 	// Re-read the session after settlement awaits because `attachSession` can
 	// move the waiter to a reconnected socket. Use the captured ID if settlement
@@ -577,7 +590,7 @@ export class VerificationService {
 
 	private notifyWaiters(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		status: ParsedUploadStatusResponse['status']
+		status: UploadStatusResponse['status']
 	): void {
 		const sessionId = this.currentSessionId(pending.id, pending.sessionId);
 
@@ -609,7 +622,7 @@ export class VerificationService {
 	// deadline.
 	private servableGraceFact(
 		pending: typeof schema.pendingUploads.$inferSelect
-	): ParsedUploadGraceFact {
+	): UploadGraceFact {
 		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
@@ -617,7 +630,7 @@ export class VerificationService {
 
 		return storedGraceFact(
 			this.context.db,
-			pending.cache,
+			this.cache(pending.cacheId),
 			metadata.storePathHash
 		);
 	}
@@ -715,14 +728,14 @@ export class VerificationService {
 		const isReuse = pending.r2Key === narObjectKey(metadata.narHash);
 
 		if (!isReuse) {
-			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
+			const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 
 			if (reserved === undefined) {
 				return { kind: 'requires-decode' };
 			}
 
 			const isCommitted = await this.commitPipeline.isGenerationCommitted(
-				pending.cache,
+				this.cache(pending.cacheId),
 				metadata,
 				reserved.generation
 			);
@@ -818,7 +831,7 @@ export class VerificationService {
 
 	private async reservePendingRow(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		owner: string,
 		signal?: AbortSignal
 	): Promise<PendingReservation> {
@@ -827,7 +840,7 @@ export class VerificationService {
 		}
 
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
-			pending.cache,
+			this.cache(pending.cacheId),
 			metadata,
 			() => this.ownsActiveClaim(owner, pending.id, signal)
 		);
@@ -863,7 +876,7 @@ export class VerificationService {
 	// the committed reference and narinfo object.
 	private async finaliseIfAlreadyCommitted(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		owner: string,
 		signal?: AbortSignal
@@ -881,13 +894,13 @@ export class VerificationService {
 
 	private async finaliseIfAlreadyCommittedLocked(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		owner: string,
 		signal?: AbortSignal
 	): Promise<FinaliseCommittedResult> {
 		const isCommitted = await this.commitPipeline.isGenerationCommitted(
-			pending.cache,
+			this.cache(pending.cacheId),
 			metadata,
 			generation
 		);
@@ -909,7 +922,7 @@ export class VerificationService {
 		const confirmed = confirmGrace(
 			this.context,
 			this.retention,
-			pending.cache,
+			this.cache(pending.cacheId),
 			metadata.storePathHash,
 			generation,
 			metadata.narHash,
@@ -927,7 +940,7 @@ export class VerificationService {
 		// Attach the run root while the confirmation's identity proof still applies.
 		// The uninterrupted flush uses the same fence.
 		this.commitPipeline.attachRootTarget(
-			pending.cache,
+			this.cache(pending.cacheId),
 			pending.attachRootName,
 			metadata.storePathHash,
 			metadata.storePath
@@ -945,7 +958,7 @@ export class VerificationService {
 
 	private async promoteForCommit(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		verification: NarVerification,
 		promotion: PromotionState,
@@ -1052,7 +1065,7 @@ export class VerificationService {
 	private async materialiseVerified(
 		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		prefetched: PrefetchedMaterialisationFacts | undefined,
 		owner: string,
@@ -1072,7 +1085,7 @@ export class VerificationService {
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
 		let outcome = await this.commitPipeline.materialiseBatched(logger, {
-			cache: pending.cache,
+			cache: this.cache(pending.cacheId),
 			metadata,
 			generation,
 			probe,
@@ -1107,7 +1120,7 @@ export class VerificationService {
 			}
 
 			const retried = await this.commitPipeline.materialiseBatched(logger, {
-				cache: pending.cache,
+				cache: this.cache(pending.cacheId),
 				metadata,
 				generation,
 				probe: freshProbe,
@@ -1151,7 +1164,7 @@ export class VerificationService {
 				}
 
 				const result = await this.commitPipeline.reclaimReservedRow(
-					pending.cache,
+					this.cache(pending.cacheId),
 					metadata.storePathHash,
 					generation,
 					metadata.narHash,
@@ -1166,7 +1179,7 @@ export class VerificationService {
 				// run-root attachment before the waiter is notified.
 				if (result === 'committed-current') {
 					this.commitPipeline.attachRootTarget(
-						pending.cache,
+						this.cache(pending.cacheId),
 						pending.attachRootName,
 						metadata.storePathHash,
 						metadata.storePath
@@ -1174,7 +1187,7 @@ export class VerificationService {
 					confirmGrace(
 						this.context,
 						this.retention,
-						pending.cache,
+						this.cache(pending.cacheId),
 						metadata.storePathHash,
 						generation,
 						metadata.narHash,
@@ -1214,7 +1227,10 @@ export class VerificationService {
 			// path, so its retention targets must survive; only a genuinely
 			// reclaimed path releases them.
 			if (reclaim === 'reclaimed') {
-				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+				this.pruneRetentionTargets(
+					this.cache(pending.cacheId),
+					metadata.storePathHash
+				);
 			}
 
 			return true;
@@ -1224,7 +1240,7 @@ export class VerificationService {
 			// Keep the upload row until the narinfo object is published. An interruption
 			// before publication can then re-drive the commit.
 			const wasPublished = await this.narInfoObjects.publishNarInfoObjectWhile(
-				pending.cache,
+				this.cache(pending.cacheId),
 				metadata.storePathHash,
 				generation,
 				metadata.narHash,
@@ -1298,7 +1314,7 @@ export class VerificationService {
 	// from retiring a servable path.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
+		metadata: UploadPathNegotiation,
 		generation: NarInfoGeneration,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch',
 		owner: string,
@@ -1311,7 +1327,7 @@ export class VerificationService {
 			}
 
 			const result = await this.commitPipeline.reclaimReservedRow(
-				pending.cache,
+				this.cache(pending.cacheId),
 				metadata.storePathHash,
 				generation,
 				metadata.narHash,
@@ -1342,7 +1358,10 @@ export class VerificationService {
 		// so its retention targets must survive; only a genuinely reclaimed
 		// path releases them.
 		if (reclaim === 'reclaimed') {
-			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+			this.pruneRetentionTargets(
+				this.cache(pending.cacheId),
+				metadata.storePathHash
+			);
 		}
 
 		this.notifyWaiters(pending, verdict);
@@ -1370,7 +1389,7 @@ export class VerificationService {
 		}
 
 		await this.narInfoObjects.putNarInfoObject(
-			row.cache,
+			this.cache(row.cacheId),
 			row.storePathHash,
 			{
 				generation: row.generation,
@@ -1393,7 +1412,7 @@ export class VerificationService {
 	}
 
 	private narInfoRow(
-		cache: StoredCache,
+		cacheId: CacheId,
 		storePathHash: StorePathHash
 	): NarInfoRow | undefined {
 		return this.context.db
@@ -1401,7 +1420,7 @@ export class VerificationService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cacheId),
 					eq(schema.narInfos.storePathHash, storePathHash)
 				)
 			)
@@ -1451,7 +1470,7 @@ export class VerificationService {
 		const key = narInfoObjectKey(
 			this.context.requireTenant(),
 			row.storePathHash,
-			row.cache
+			this.cache(row.cacheId).scope
 		);
 
 		return (await this.context.env.BLOBS.head(key)) !== null;
@@ -1476,7 +1495,11 @@ export class VerificationService {
 		let minKey: string | undefined;
 		let lastKey = '';
 		for (const row of rows) {
-			const key = narInfoObjectKey(tenant, row.storePathHash, row.cache);
+			const key = narInfoObjectKey(
+				tenant,
+				row.storePathHash,
+				this.cache(row.cacheId).scope
+			);
 
 			if (key > lastKey) {
 				lastKey = key;
@@ -1574,7 +1597,8 @@ export class VerificationService {
 		const read = await executeChunkedStatement(hashes, (hashChunk) =>
 			this.context.d1
 				.select({
-					cache: d1Schema.blobReference.cache,
+					cacheKind: d1Schema.blobReference.cacheKind,
+					cacheName: d1Schema.blobReference.cacheName,
 					storePathHash: d1Schema.blobReference.storePathHash,
 					generation: d1Schema.blobReference.generation,
 					narHash: d1Schema.blobReference.narHash
@@ -1593,7 +1617,15 @@ export class VerificationService {
 		for (const edges of read.results) {
 			for (const edge of edges) {
 				keys.add(
-					edgeKey(edge.cache, edge.storePathHash, edge.generation, edge.narHash)
+					edgeKey(
+						cacheScopeFromRow({
+							kind: edge.cacheKind,
+							name: edge.cacheName
+						}),
+						edge.storePathHash,
+						edge.generation,
+						edge.narHash
+					)
 				);
 			}
 		}
@@ -1617,7 +1649,7 @@ export class VerificationService {
 			isNarPresent: isNarPresent,
 			objectPresent: isObjectPresent
 		} = observation;
-		const current = this.narInfoRow(row.cache, row.storePathHash);
+		const current = this.narInfoRow(row.cacheId, row.storePathHash);
 
 		if (current?.generation !== row.generation) {
 			return 'unchanged';
@@ -1626,7 +1658,7 @@ export class VerificationService {
 		if (
 			!committedEdges.has(
 				edgeKey(
-					current.cache,
+					this.cache(current.cacheId).scope,
 					current.storePathHash,
 					current.generation,
 					current.narHash
@@ -1681,7 +1713,7 @@ export class VerificationService {
 	): PendingUploadRow[] {
 		const pendingStorePathHash = sql<StorePathHash>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`;
 		const matchingNarInfo = and(
-			eq(schema.narInfos.cache, schema.pendingUploads.cache),
+			eq(schema.narInfos.cacheId, schema.pendingUploads.cacheId),
 			eq(schema.narInfos.storePathHash, pendingStorePathHash)
 		);
 		const matchingNarInfoQuery = this.context.db
@@ -1833,7 +1865,7 @@ export class VerificationService {
 						pending.metadataJson
 					);
 					const reserved = this.narInfoRow(
-						pending.cache,
+						pending.cacheId,
 						metadata.storePathHash
 					);
 
@@ -1844,7 +1876,7 @@ export class VerificationService {
 
 					const isCommitted = await raceVerificationOperation(
 						this.commitPipeline.isGenerationCommitted(
-							pending.cache,
+							this.cache(pending.cacheId),
 							metadata,
 							reserved.generation
 						),
@@ -2138,7 +2170,7 @@ export class VerificationService {
 		origin: RequestOrigin | undefined
 	): Promise<readonly ReconcileTarget[]> {
 		const rows = targets
-			.map((target) => this.narInfoRow(target.cache, target.storePathHash))
+			.map((target) => this.narInfoRow(target.cacheId, target.storePathHash))
 			.filter((row): row is NarInfoRow => row !== undefined);
 
 		if (rows.length === 0) {
@@ -2152,7 +2184,7 @@ export class VerificationService {
 			statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval
 		);
 		const probed = rows.slice(0, probeLimit);
-		const deferred: ReconcileTarget[] = rows.slice(probeLimit);
+		const deferred = rows.slice(probeLimit).map((row) => reconcileTarget(row));
 
 		const observations = await mapVerificationProbes(probed, (row) =>
 			this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
@@ -2168,7 +2200,7 @@ export class VerificationService {
 				// Keep the target queued when its probe throws. A later pass will probe
 				// the row again.
 				if (observation === undefined) {
-					deferred.push(row);
+					deferred.push(reconcileTarget(row));
 					continue;
 				}
 
@@ -2181,7 +2213,7 @@ export class VerificationService {
 					(statementsRemaining() < repair ||
 						!committedEdges.covered.has(row.storePathHash))
 				) {
-					deferred.push(row);
+					deferred.push(reconcileTarget(row));
 					continue;
 				}
 
@@ -2193,7 +2225,7 @@ export class VerificationService {
 				);
 
 				if (outcome === 'failed') {
-					deferred.push(row);
+					deferred.push(reconcileTarget(row));
 				}
 			}
 		});
@@ -2215,7 +2247,7 @@ export class VerificationService {
 		logger: Logger,
 		origin: RequestOrigin | undefined,
 		limit: number
-	): Promise<VerifyReport> {
+	): Promise<VerifyReportInput> {
 		// Snapshot the cursor and the batch synchronously. Synchronous SQLite on
 		// the single-threaded DO cannot interleave with anything, so this is an
 		// atomic read without a critical section.
@@ -2224,10 +2256,13 @@ export class VerificationService {
 			.from(schema.verificationCursor)
 			.where(eq(schema.verificationCursor.id, 'active'))
 			.get();
-		// An empty cursor starts (or restarts) at the lowest (cache, hash): the
-		// empty string sorts before every cache name and every 32-character hash.
-		const fromCache = cursor?.cache ?? '';
-		const fromHash = cursor?.lastStorePathHash ?? '';
+		const storedHash = storePathHashSchema.safeParse(cursor?.lastStorePathHash);
+		const resumeCursor =
+			cursor === undefined || !storedHash.success
+				? undefined
+				: { cacheId: cursor.cacheId, storePathHash: storedHash.data };
+		const resumeCache =
+			resumeCursor === undefined ? undefined : this.cache(resumeCursor.cacheId);
 
 		// Reserve one probe statement per row, plus the edge query and one removal.
 		// This leaves enough statements to repair at least one row. The page also
@@ -2248,24 +2283,34 @@ export class VerificationService {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: fromHash,
-				cursorCache: fromCache,
+				...(resumeCursor !== undefined && {
+					cursor: resumeCursor.storePathHash
+				}),
+				...(resumeCache !== undefined && {
+					cursorCache: resumeCache.scope
+				}),
 				wrapped: false
-			} satisfies VerifyReport;
+			} satisfies VerifyReportInput;
 		}
 
 		// Verification spans every cache and resumes after the composite
 		// `(cache, storePathHash)` cursor. Keep both parts in the predicate so a
 		// pass cannot skip the beginning of the next cache.
-		const sameCache = eq(schema.narInfos.cache, fromCache);
-		const afterHash = gt(schema.narInfos.storePathHash, sql`${fromHash}`);
+		const resumeAfter =
+			resumeCursor === undefined
+				? undefined
+				: or(
+						gt(schema.narInfos.cacheId, resumeCursor.cacheId),
+						and(
+							eq(schema.narInfos.cacheId, resumeCursor.cacheId),
+							gt(schema.narInfos.storePathHash, resumeCursor.storePathHash)
+						)
+					);
 		const rows = this.context.db
 			.select()
 			.from(schema.narInfos)
-			.where(
-				or(gt(schema.narInfos.cache, fromCache), and(sameCache, afterHash))
-			)
-			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.where(resumeAfter)
+			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
 			.limit(pageLimit)
 			.all();
 
@@ -2278,12 +2323,12 @@ export class VerificationService {
 		// reconcile exists to heal.
 		const tenant = this.context.requireTenant();
 		const startAfter =
-			fromCache === '' && fromHash === ''
+			resumeCursor === undefined
 				? undefined
 				: narInfoObjectKey(
 						tenant,
-						storePathHashSchema.parse(fromHash),
-						fromCache
+						resumeCursor.storePathHash,
+						this.cache(resumeCursor.cacheId).scope
 					);
 		const presentObjects = await this.presentNarInfoObjects(
 			logger,
@@ -2293,12 +2338,16 @@ export class VerificationService {
 		const resolveObjectPresent =
 			presentObjects === undefined
 				? (target: NarInfoRow) => this.headNarInfoObject(target)
-				: (target: NarInfoRow) =>
-						Promise.resolve(
-							presentObjects.has(
-								narInfoObjectKey(tenant, target.storePathHash, target.cache)
-							)
+				: (target: NarInfoRow) => {
+						const cache = this.cache(target.cacheId);
+						const key = narInfoObjectKey(
+							tenant,
+							target.storePathHash,
+							cache.scope
 						);
+
+						return Promise.resolve(presentObjects.has(key));
+					};
 		const observations = await mapVerificationProbes(rows, (row) =>
 			this.probeRow(logger, row, resolveObjectPresent)
 		);
@@ -2359,32 +2408,50 @@ export class VerificationService {
 			// truncated by the allowance has not reached the end.
 			const hasWrapped = reconciled === rows.length && rows.length < pageLimit;
 			const last = reconciled === 0 ? undefined : rows[reconciled - 1];
-			const nextCache = hasWrapped ? '' : (last?.cache ?? fromCache);
-			const nextHash = hasWrapped ? '' : (last?.storePathHash ?? fromHash);
+			const nextCursor = hasWrapped
+				? undefined
+				: last === undefined
+					? resumeCursor
+					: { cacheId: last.cacheId, storePathHash: last.storePathHash };
+			const nextCache =
+				nextCursor === undefined ? undefined : this.cache(nextCursor.cacheId);
 			const now = isoTimestamp(new Date());
 
-			this.context.db
-				.insert(schema.verificationCursor)
-				.values({
-					id: 'active',
-					cache: nextCache,
-					lastStorePathHash: nextHash,
-					updatedAt: now
-				})
-				.onConflictDoUpdate({
-					target: schema.verificationCursor.id,
-					set: { cache: nextCache, lastStorePathHash: nextHash, updatedAt: now }
-				})
-				.run();
+			if (nextCursor === undefined) {
+				this.context.db
+					.delete(schema.verificationCursor)
+					.where(eq(schema.verificationCursor.id, 'active'))
+					.run();
+			} else {
+				this.context.db
+					.insert(schema.verificationCursor)
+					.values({
+						id: 'active',
+						cacheId: nextCursor.cacheId,
+						lastStorePathHash: nextCursor.storePathHash,
+						updatedAt: now
+					})
+					.onConflictDoUpdate({
+						target: schema.verificationCursor.id,
+						set: {
+							cacheId: nextCursor.cacheId,
+							lastStorePathHash: nextCursor.storePathHash,
+							updatedAt: now
+						}
+					})
+					.run();
+			}
 
 			return {
 				scanned: reconciled,
 				narInfoObjectsRestored,
 				danglingNarInfosRemoved,
-				cursor: nextHash,
-				cursorCache: nextCache,
+				...(nextCursor !== undefined && {
+					cursor: nextCursor.storePathHash
+				}),
+				...(nextCache !== undefined && { cursorCache: nextCache.scope }),
 				wrapped: hasWrapped
-			} satisfies VerifyReport;
+			} satisfies VerifyReportInput;
 		});
 	}
 
@@ -2823,7 +2890,7 @@ export class VerificationService {
 			// row behind; with the canonical object gone it can never materialise, and
 			// a root may already reference it (as not-present). Reclaim it before
 			// dropping the marker.
-			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
+			const reserved = this.narInfoRow(pending.cacheId, metadata.storePathHash);
 
 			let reclaim: 'reclaimed' | 'committed-current' | 'superseded' =
 				'superseded';
@@ -2839,7 +2906,7 @@ export class VerificationService {
 					}
 
 					const result = await this.commitPipeline.reclaimReservedRow(
-						pending.cache,
+						this.cache(pending.cacheId),
 						metadata.storePathHash,
 						reserved.generation,
 						metadata.narHash,
@@ -2857,7 +2924,7 @@ export class VerificationService {
 					// under the same proof.
 					if (result === 'committed-current') {
 						this.commitPipeline.attachRootTarget(
-							pending.cache,
+							this.cache(pending.cacheId),
 							pending.attachRootName,
 							metadata.storePathHash,
 							metadata.storePath
@@ -2865,7 +2932,7 @@ export class VerificationService {
 						confirmGrace(
 							this.context,
 							this.retention,
-							pending.cache,
+							this.cache(pending.cacheId),
 							metadata.storePathHash,
 							reserved.generation,
 							metadata.narHash,
@@ -2916,7 +2983,10 @@ export class VerificationService {
 			// retention targets must survive; only a genuinely reclaimed path
 			// releases them.
 			if (reclaim === 'reclaimed') {
-				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+				this.pruneRetentionTargets(
+					this.cache(pending.cacheId),
+					metadata.storePathHash
+				);
 			}
 
 			return true;
@@ -2932,7 +3002,10 @@ export class VerificationService {
 		if (!isSettled) {
 			return false;
 		}
-		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+		this.pruneRetentionTargets(
+			this.cache(pending.cacheId),
+			metadata.storePathHash
+		);
 		this.notifyWaiters(pending, 'mismatch');
 		await this.deleteStagingObjectBestEffort(pending, signal);
 

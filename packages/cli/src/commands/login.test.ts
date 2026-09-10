@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
+import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { describe, expect, it, vi } from 'vitest';
 
 import { DeviceAuthorizationRequestError } from '../auth/oidc-login.ts';
@@ -40,7 +40,7 @@ function sessionToken(name: string): string {
 	return `${header}.${payload}.signature`;
 }
 
-function tokenResponse(name: string): ParsedTokenResponse {
+function tokenResponse(name: string): TokenResponse {
 	return {
 		access_token: sessionToken(name),
 		token_type: 'Bearer',

@@ -1,4 +1,8 @@
-import { rootNameSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	rootNameSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -11,16 +15,21 @@ import {
 } from './attenuate.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+const namedCache = (value: string): CacheScope => ({
+	kind: 'named',
+	name: cacheNameSchema.parse(value)
+});
+const defaultCache: CacheScope = { kind: 'default' };
 
 describe('pushAuthorizationDetails', () => {
 	it('requests only upload operations for a plain push', () => {
 		expect(
-			pushAuthorizationDetails({ cacheSelector: 'pr-1', attest: false })
+			pushAuthorizationDetails({ cache: namedCache('pr-1'), attest: false })
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
@@ -28,7 +37,7 @@ describe('pushAuthorizationDetails', () => {
 	it('adds attestation and root operations when used', () => {
 		expect(
 			pushAuthorizationDetails({
-				cacheSelector: 'pr-1',
+				cache: namedCache('pr-1'),
 				attest: true,
 				root: rootName('main')
 			})
@@ -43,25 +52,25 @@ describe('pushAuthorizationDetails', () => {
 					'attestation:attach',
 					'root:set'
 				],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('main')
 			}
 		]);
 	});
 
-	it('requests the default cache selector', () => {
+	it('requests the default cache scope', () => {
 		const [grant] = pushAuthorizationDetails({
-			cacheSelector: '_default',
+			cache: defaultCache,
 			attest: false
 		});
 
-		expect(grant).toMatchObject({ cache: '_default' });
+		expect(grant).toMatchObject({ cache: { kind: 'default' } });
 	});
 
 	it('requests a second grant for the run root beside the push grant', () => {
 		expect(
 			pushAuthorizationDetails({
-				cacheSelector: 'pr-1',
+				cache: namedCache('pr-1'),
 				attest: false,
 				root: rootName('main'),
 				runRoot: rootName('ci/run-1')
@@ -75,13 +84,13 @@ describe('pushAuthorizationDetails', () => {
 					'upload:commit',
 					'root:set'
 				],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('main')
 			},
 			{
 				type: 'cupboard_cache',
 				actions: ['root:attach'],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('ci/run-1')
 			}
 		]);
@@ -90,7 +99,7 @@ describe('pushAuthorizationDetails', () => {
 	it('requests the run-root grant for a push naming no target root', () => {
 		expect(
 			pushAuthorizationDetails({
-				cacheSelector: 'pr-1',
+				cache: namedCache('pr-1'),
 				attest: false,
 				runRoot: rootName('ci/run-1')
 			})
@@ -98,12 +107,12 @@ describe('pushAuthorizationDetails', () => {
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			},
 			{
 				type: 'cupboard_cache',
 				actions: ['root:attach'],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('ci/run-1')
 			}
 		]);
@@ -113,14 +122,14 @@ describe('pushAuthorizationDetails', () => {
 	// separate unretained flag.
 	it('requests no root:set detail for an unretained (--no-retain) push', () => {
 		const [grant] = pushAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: namedCache('pr-1'),
 			attest: false
 		});
 
 		expect(grant).toStrictEqual({
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-			cache: 'pr-1'
+			cache: { kind: 'named', name: 'pr-1' }
 		});
 	});
 });
@@ -129,14 +138,14 @@ describe('rootEnsureAuthorizationDetails', () => {
 	it('requests only root:set for the exact cache and root', () => {
 		expect(
 			rootEnsureAuthorizationDetails({
-				cacheSelector: 'pr-1',
+				cache: namedCache('pr-1'),
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			})
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:set'],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			}
 		]);
@@ -146,12 +155,12 @@ describe('rootEnsureAuthorizationDetails', () => {
 describe('rootListAuthorizationDetails', () => {
 	it('requests only root:list for the exact cache, naming no root, for a cache-wide listing', () => {
 		expect(
-			rootListAuthorizationDetails({ cacheSelector: 'pr-1' })
+			rootListAuthorizationDetails({ cache: namedCache('pr-1') })
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
@@ -159,30 +168,30 @@ describe('rootListAuthorizationDetails', () => {
 	it('requests root:list narrowed to the named root for a single root listing', () => {
 		expect(
 			rootListAuthorizationDetails({
-				cacheSelector: 'pr-1',
+				cache: namedCache('pr-1'),
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			})
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:list'],
-				cache: 'pr-1',
+				cache: { kind: 'named', name: 'pr-1' },
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			}
 		]);
 	});
 
-	it('requests the default cache selector', () => {
-		const [grant] = rootListAuthorizationDetails({ cacheSelector: '_default' });
+	it('requests the default cache scope', () => {
+		const [grant] = rootListAuthorizationDetails({ cache: defaultCache });
 
-		expect(grant).toMatchObject({ cache: '_default' });
+		expect(grant).toMatchObject({ cache: { kind: 'default' } });
 	});
 });
 
 describe('attestAttachAuthorizationDetails', () => {
 	it('requests the attestation conversation and only the negotiate upload operation', () => {
 		expect(
-			attestAttachAuthorizationDetails({ cacheSelector: 'pr-1' })
+			attestAttachAuthorizationDetails({ cache: namedCache('pr-1') })
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
@@ -191,56 +200,56 @@ describe('attestAttachAuthorizationDetails', () => {
 					'attestation:negotiate',
 					'attestation:attach'
 				],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
 
-	it('requests the default cache selector', () => {
+	it('requests the default cache scope', () => {
 		const [grant] = attestAttachAuthorizationDetails({
-			cacheSelector: '_default'
+			cache: defaultCache
 		});
 
-		expect(grant).toMatchObject({ cache: '_default' });
+		expect(grant).toMatchObject({ cache: { kind: 'default' } });
 	});
 });
 
 describe('confirmAuthorizationDetails', () => {
 	it('requests only upload:confirm for the exact cache', () => {
 		expect(
-			confirmAuthorizationDetails({ cacheSelector: 'pr-1' })
+			confirmAuthorizationDetails({ cache: namedCache('pr-1') })
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:confirm'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
 
-	it('requests the default cache selector', () => {
-		const [grant] = confirmAuthorizationDetails({ cacheSelector: '_default' });
+	it('requests the default cache scope', () => {
+		const [grant] = confirmAuthorizationDetails({ cache: defaultCache });
 
-		expect(grant).toMatchObject({ cache: '_default' });
+		expect(grant).toMatchObject({ cache: { kind: 'default' } });
 	});
 });
 
 describe('previewAuthorizationDetails', () => {
 	it('requests only upload:preview for the exact cache', () => {
 		expect(
-			previewAuthorizationDetails({ cacheSelector: 'pr-1' })
+			previewAuthorizationDetails({ cache: namedCache('pr-1') })
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['upload:preview'],
-				cache: 'pr-1'
+				cache: { kind: 'named', name: 'pr-1' }
 			}
 		]);
 	});
 
-	it('requests the default cache selector', () => {
-		const [grant] = previewAuthorizationDetails({ cacheSelector: '_default' });
+	it('requests the default cache scope', () => {
+		const [grant] = previewAuthorizationDetails({ cache: defaultCache });
 
-		expect(grant).toMatchObject({ cache: '_default' });
+		expect(grant).toMatchObject({ cache: { kind: 'default' } });
 	});
 });

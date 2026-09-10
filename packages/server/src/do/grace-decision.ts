@@ -3,14 +3,14 @@ import {
 	graceSecondsSchema,
 	type NarInfoGeneration,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { type ParsedUploadGraceFact } from '@cupboard/protocol/upload';
+import { type UploadGraceFact } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
+import type { ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
@@ -65,7 +65,7 @@ export function parseStoredGraceDecision(
 // duration captured during negotiation.
 export function capturedGraceFact(
 	decision: GraceDecision | undefined
-): ParsedUploadGraceFact {
+): UploadGraceFact {
 	return decision?.graceSeconds === undefined
 		? {}
 		: { graceSeconds: decision.graceSeconds };
@@ -73,15 +73,15 @@ export function capturedGraceFact(
 
 export function storedGraceFact(
 	database: ServerContext['db'],
-	cache: StoredCache,
+	cache: ResolvedCache,
 	storePathHash: StorePathHash
-): ParsedUploadGraceFact {
+): UploadGraceFact {
 	const row = database
 		.select({ retainUntil: schema.retentionGrace.retainUntil })
 		.from(schema.retentionGrace)
 		.where(
 			and(
-				eq(schema.retentionGrace.cache, cache),
+				eq(schema.retentionGrace.cacheId, cache.id),
 				eq(schema.retentionGrace.storePathHash, storePathHash)
 			)
 		)
@@ -91,7 +91,7 @@ export function storedGraceFact(
 }
 
 export type ConfirmedGrace =
-	| { readonly matched: true; readonly fact: ParsedUploadGraceFact }
+	| { readonly matched: true; readonly fact: UploadGraceFact }
 	| { readonly matched: false };
 
 /**
@@ -104,7 +104,7 @@ export type ConfirmedGrace =
 export function confirmGrace(
 	context: ServerContext,
 	retention: RetentionService,
-	cache: StoredCache,
+	cache: ResolvedCache,
 	storePathHash: StorePathHash,
 	generation: NarInfoGeneration,
 	narHash: NixSha256HashString,
@@ -129,14 +129,14 @@ export function confirmGrace(
 export function confirmGraceBatch(
 	context: ServerContext,
 	retention: RetentionService,
-	cache: StoredCache,
+	cache: ResolvedCache,
 	entries: readonly {
 		readonly storePathHash: StorePathHash;
 		readonly generation: NarInfoGeneration;
 		readonly narHash: NixSha256HashString;
 	}[],
 	graceSeconds: GraceSeconds | undefined
-): Map<StorePathHash, ParsedUploadGraceFact> {
+): Map<StorePathHash, UploadGraceFact> {
 	// Compute one deadline before batching so every matched row receives the same
 	// extension.
 	const retainUntil =
@@ -160,7 +160,7 @@ export function confirmGraceBatch(
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						inArray(schema.narInfos.storePathHash, batchHashes)
 					)
 				)
@@ -194,7 +194,7 @@ export function confirmGraceBatch(
 	if (retainUntil === undefined) {
 		// Report a matched zero-grace policy explicitly. An empty fact means no
 		// policy matched.
-		const fact: ParsedUploadGraceFact =
+		const fact: UploadGraceFact =
 			graceSeconds === undefined ? {} : { graceSeconds };
 
 		return new Map(matched.map((storePathHash) => [storePathHash, fact]));
@@ -222,7 +222,7 @@ export function confirmGraceBatch(
  */
 export function storedGraceDeadlines(
 	database: ServerContext['db'],
-	cache: StoredCache,
+	cache: ResolvedCache,
 	storePathHashes: readonly StorePathHash[]
 ): Map<StorePathHash, IsoTimestamp> {
 	const deadlines = new Map<StorePathHash, IsoTimestamp>();
@@ -236,7 +236,7 @@ export function storedGraceDeadlines(
 			.from(schema.retentionGrace)
 			.where(
 				and(
-					eq(schema.retentionGrace.cache, cache),
+					eq(schema.retentionGrace.cacheId, cache.id),
 					inArray(schema.retentionGrace.storePathHash, batch)
 				)
 			)

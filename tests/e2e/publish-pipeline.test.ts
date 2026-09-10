@@ -10,7 +10,7 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	autoBuildStore,
 	buildReceiptV3Schema,
-	type ParsedBuildSubjectV3
+	type BuildSubjectV3
 } from '@cupboard/protocol/build';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -686,7 +686,7 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 }
 
 function recordedAttribution(
-	subjects: readonly ParsedBuildSubjectV3[]
+	subjects: readonly BuildSubjectV3[]
 ): RecordedAttribution {
 	const built = subjects.filter((subject) => subject.origin === 'built');
 
@@ -884,16 +884,15 @@ async function retentionRoots(
 	const rpc = tenantRpc(prepared.server.tenantUrl, {
 		credential: await prepared.server.ownerAdminToken()
 	});
-	const { roots } = await rpc.roots.list({ params: { cacheName: '_default' } });
+	const { roots } = await rpc.roots.list.inDefaultCache({});
 
 	return Promise.all(
 		roots
 			.filter((root) => isWanted(root.name))
 			.toSorted((left, right) => byCodeUnit(left.name, right.name))
 			.map(async (root) => {
-				const { targets } = await rpc.roots.targets({
-					params: { cacheName: '_default', name: root.name },
-					query: {}
+				const { targets } = await rpc.roots.targets.inDefaultCache({
+					name: root.name
 				});
 
 				return {
@@ -970,7 +969,7 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 						'root:list'
 					],
 					resources: {
-						cache: { exact: '_default', validate: 'cacheName' },
+						cache: { kind: 'default' },
 						root: { exact: rootGrantPrefix, validate: 'rootName' }
 					}
 				}

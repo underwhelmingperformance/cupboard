@@ -175,11 +175,6 @@ export const positiveIntSchema = z
 
 export const cacheNamePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
-// The default (unnamed) cache served at the bare root. Named caches carry a
-// non-empty name matching `cacheNamePattern`; the empty string is reserved for
-// the default and is deliberately not a valid cache name.
-export const DEFAULT_CACHE = '';
-
 export const cacheNameSchema = z
 	.string()
 	.regex(cacheNamePattern)
@@ -191,157 +186,30 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 // uses the same first-character rule and alphabet as a complete cache name.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
-// The default cache's selector. Its stored name is the empty string, which
-// cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell it
-// `_default`. The leading underscore fails `cacheNamePattern`, so the selector
-// can never collide with a creatable cache, matching the `/_health` and
-// `/_version` convention for non-content names.
-export const DEFAULT_CACHE_SELECTOR = '_default';
-
-// Private stored names begin with this prefix. The local name of a public
-// cache cannot contain a slash, so no public stored name begins with this
-// prefix.
-export const PRIVATE_STORED_PREFIX = 'private/';
-
-// Private selectors begin with this prefix. A named public cache's selector
-// cannot start with an underscore, so it cannot use this prefix.
-export const PRIVATE_SELECTOR_PREFIX = '_private-';
-
-export const privateStoredCachePattern = /^private\/[a-z0-9][a-z0-9._-]{0,62}$/;
-export const privateCacheSelectorPattern =
-	/^_private-[a-z0-9][a-z0-9._-]{0,62}$/;
-
 /**
- * A private cache's stored name: `private/` followed by its local name. This
- * prefix makes the namespace part of the cache identity. Moving a cache between
- * the public and private namespaces therefore creates a different identity.
+ * How a request document or token grant identifies a cache. The default cache
+ * has no name, so it is a distinct variant rather than a reserved string.
  */
-export const privateStoredCacheSchema = z
-	.string()
-	.regex(privateStoredCachePattern)
-	.brand('PrivateStoredCache');
-export type PrivateStoredCache = z.output<typeof privateStoredCacheSchema>;
-
-/**
- * A private cache selector: `_private-` followed by its local name.
- */
-export const privateCacheSelectorSchema = z
-	.string()
-	.regex(privateCacheSelectorPattern)
-	.brand('PrivateCacheSelector');
-export type PrivateCacheSelector = z.output<typeof privateCacheSelectorSchema>;
-
-/**
- * A public selector: `_default` for the default cache or the local name of a
- * named public cache. Use this where a request must never address a private
- * cache, such as the public read paths.
- */
-export const publicCacheSelectorSchema = z.union([
-	z.literal(DEFAULT_CACHE_SELECTOR),
-	cacheNameSchema
+export const cacheScopeSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema })
 ]);
-export type PublicCacheSelector = z.output<typeof publicCacheSelectorSchema>;
+export type CacheScope = z.output<typeof cacheScopeSchema>;
 
-export const cacheSelectorSchema = z.union([
-	publicCacheSelectorSchema,
-	privateCacheSelectorSchema
-]);
-export type CacheSelector = z.output<typeof cacheSelectorSchema>;
+export const cacheAccessModeSchema = z.enum(['public', 'private']);
+export type CacheAccessMode = z.output<typeof cacheAccessModeSchema>;
 
-/**
- * A selector for a named cache: a public cache's local name or a private
- * cache's selector. The cache administration API cannot create or remove the
- * default cache, so this schema excludes `_default`.
- */
-export const namedCacheSelectorSchema = z.union([
-	cacheNameSchema,
-	privateCacheSelectorSchema
-]);
-export type NamedCacheSelector = z.output<typeof namedCacheSelectorSchema>;
-
-/**
- * The stored name of a public cache: `DEFAULT_CACHE` for the default cache or
- * `CacheName` for a named one. Use this where an input must never address a
- * private cache, such as a public-cache option.
- */
-export const publicStoredCacheSchema = z.union([
-	z.literal(DEFAULT_CACHE),
-	cacheNameSchema
-]);
-export type PublicStoredCache = z.output<typeof publicStoredCacheSchema>;
-
-/**
- * The stored name of a cache: `CacheName` for a named public cache,
- * `DEFAULT_CACHE` for the default cache, or `PrivateStoredCache` for a private
- * cache. Convert a selector with `cacheFromSelector`. Parse a raw database
- * value before using it as `StoredCache`.
- */
-export const storedCacheSchema = z.union([
-	publicStoredCacheSchema,
-	privateStoredCacheSchema
-]);
-export type StoredCache = z.output<typeof storedCacheSchema>;
-
-export function isPrivateCache(
-	cache: StoredCache
-): cache is PrivateStoredCache {
-	return privateStoredCacheSchema.safeParse(cache).success;
-}
-
-function isPrivateCacheSelector(
-	selector: CacheSelector
-): selector is PrivateCacheSelector {
-	return privateCacheSelectorSchema.safeParse(selector).success;
-}
-
-/**
- * Returns the stored name for a private cache with the given local name.
- */
-export function privateStoredCache(name: CacheName): PrivateStoredCache {
-	return privateStoredCacheSchema.parse(`${PRIVATE_STORED_PREFIX}${name}`);
-}
-
-/**
- * Returns a private cache's local name without the `private/` prefix.
- */
-export function privateCacheLocalName(cache: PrivateStoredCache): CacheName {
-	return cacheNameSchema.parse(cache.slice(PRIVATE_STORED_PREFIX.length));
-}
-
-export function cacheFromSelector(selector: CacheSelector): StoredCache {
-	if (selector === DEFAULT_CACHE_SELECTOR) {
-		return DEFAULT_CACHE;
+export function isSameCacheScope(left: CacheScope, right: CacheScope): boolean {
+	if (left.kind !== right.kind) {
+		return false;
 	}
 
-	if (isPrivateCacheSelector(selector)) {
-		return privateStoredCacheSchema.parse(
-			`${PRIVATE_STORED_PREFIX}${selector.slice(PRIVATE_SELECTOR_PREFIX.length)}`
-		);
+	if (left.kind === 'default') {
+		return true;
 	}
 
-	return selector;
+	return right.kind === 'named' && left.name === right.name;
 }
-
-export function selectorForCache(cache: StoredCache): CacheSelector {
-	if (cache === DEFAULT_CACHE) {
-		return DEFAULT_CACHE_SELECTOR;
-	}
-
-	if (isPrivateCache(cache)) {
-		return privateCacheSelectorSchema.parse(
-			`${PRIVATE_SELECTOR_PREFIX}${privateCacheLocalName(cache)}`
-		);
-	}
-
-	return cache;
-}
-
-// Raw bounds for the private stored-name range. Queries use these bounds to
-// exclude private caches. `'0'` is the code unit after `'/'`, so every name
-// beginning with `private/` falls within this half-open range. The public cache
-// named `private` sorts below the start bound.
-export const PRIVATE_STORED_RANGE_START = PRIVATE_STORED_PREFIX;
-export const PRIVATE_STORED_RANGE_END = 'private0';
 
 // A tenant slug: the outer addressing boundary, one isolated namespace per tenant
 // at `/t/<tenant>/`. It shares the cache-name shape but is its own branded type;

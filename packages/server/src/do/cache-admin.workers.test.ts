@@ -1,11 +1,10 @@
 import {
-	cacheNameSchema,
 	cachePrioritySchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
-	CacheListResponse,
-	CacheSummary
+	CacheListResponseInput,
+	CacheSummaryInput
 } from '@cupboard/protocol/caches';
 import {
 	cacheListResponseSchema,
@@ -26,17 +25,20 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
-	CommitSocketError,
+	CommitUpgradeError,
 	commitUploadRejection,
 	currentServer,
+	defaultCache,
 	driveToCompletion,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -44,7 +46,7 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const earlierLiveDeadline = isoTimestampSchema.parse(
@@ -53,19 +55,19 @@ const earlierLiveDeadline = isoTimestampSchema.parse(
 const laterLiveDeadline = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
 const expiredDeadline = isoTimestampSchema.parse('2025-12-01T00:00:00.000Z');
 
-function expectCommitSocketError(
+function expectCommitUpgradeError(
 	error: unknown
-): asserts error is CommitSocketError {
-	expect(error).toBeInstanceOf(CommitSocketError);
+): asserts error is CommitUpgradeError {
+	expect(error).toBeInstanceOf(CommitUpgradeError);
 }
 
 async function putCache(
 	token: string,
 	name: string,
 	priority: number
-): Promise<CacheSummary> {
+): Promise<CacheSummaryInput> {
 	const response = await authorisedFetch(`/caches/${name}`, token, {
-		body: JSON.stringify({ priority }),
+		body: JSON.stringify({ access: 'public', priority }),
 		headers: { 'content-type': 'application/json' },
 		method: 'PUT'
 	});
@@ -75,7 +77,7 @@ async function putCache(
 	return cacheSummarySchema.parse(await response.json());
 }
 
-async function listCaches(token: string): Promise<CacheListResponse> {
+async function listCaches(token: string): Promise<CacheListResponseInput> {
 	const response = await authorisedFetch('/caches', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
@@ -99,14 +101,26 @@ describe('cache registry admin', () => {
 		await pushPath(
 			init.token,
 			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
+			buildsCache
 		);
 
 		const { caches } = await listCaches(init.token);
 
 		expect(caches).toStrictEqual([
-			{ name: '', priority: 40, storePaths: 0, graceManaged: false },
-			{ name: 'builds', priority: 30, storePaths: 1, graceManaged: false }
+			{
+				scope: defaultCache(),
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				graceManaged: false
+			},
+			{
+				scope: buildsCache,
+				access: 'public',
+				priority: 30,
+				storePaths: 1,
+				graceManaged: false
+			}
 		]);
 	});
 
@@ -115,26 +129,28 @@ describe('cache registry admin', () => {
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30);
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context, buildsCache);
+
 			instance.context.db
 				.update(schema.caches)
 				.set({ graceManaged: true })
-				.where(eq(schema.caches.name, buildsCache))
+				.where(eq(schema.caches.id, cache.id))
 				.run();
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values([
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('a')),
 						retainUntil: laterLiveDeadline
 					},
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('b')),
 						retainUntil: earlierLiveDeadline
 					},
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('c')),
 						retainUntil: expiredDeadline
 					}
@@ -147,9 +163,16 @@ describe('cache registry admin', () => {
 		// The expired row does not count as the earliest deadline: only live
 		// deadlines are reported.
 		expect(caches).toStrictEqual([
-			{ name: '', priority: 40, storePaths: 0, graceManaged: false },
 			{
-				name: 'builds',
+				scope: defaultCache(),
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				graceManaged: false
+			},
+			{
+				scope: buildsCache,
+				access: 'public',
 				priority: 30,
 				storePaths: 0,
 				graceManaged: true,
@@ -187,9 +210,10 @@ describe('cache registry admin', () => {
 						instance.context.db
 							.insert(schema.caches)
 							.values({
-								name: cacheNameSchema.parse(
-									`cache-${String(index).padStart(2, '0')}`
-								),
+								kind: 'named',
+								name: namedCache(`cache-${String(index).padStart(2, '0')}`)
+									.name,
+								access: 'public',
 								priority: cachePrioritySchema.parse(40),
 								createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 							})
@@ -216,8 +240,13 @@ describe('cache registry admin', () => {
 	it('refuses to delete a non-empty cache without force, then force-tears it down', async () => {
 		await useTestServer('cache-admin-delete');
 		const init = await bootstrap();
+		await putCache(init.token, 'builds', 40);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata, 'builds');
+		await pushPath(init.token, metadata, buildsCache);
+		const buildsId = await runInDurableObject(
+			currentServer(),
+			(instance) => resolvedCache(instance.context, buildsCache).id
+		);
 
 		const refused = await authorisedFetch('/caches/builds', init.token, {
 			method: 'DELETE'
@@ -237,7 +266,7 @@ describe('cache registry admin', () => {
 			() => currentServer().resumeCacheTeardown(),
 			async () =>
 				(await runInDurableObject(currentServer(), (_instance, state) =>
-					state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+					state.storage.get(`${teardownEntryPrefix}${String(buildsId)}`)
 				)) === undefined,
 			3
 		);
@@ -252,13 +281,13 @@ describe('cache registry admin', () => {
 			forcedStatus: forced.status,
 			removed,
 			objectGone: object === null,
-			remainingNames: caches.map((cache) => cache.name)
+			remainingScopes: caches.map((cache) => cache.scope)
 		}).toStrictEqual({
 			refusedStatus: StatusCodes.CONFLICT,
 			forcedStatus: StatusCodes.OK,
-			removed: { name: 'builds', removed: true, storePathsRemoved: 1 },
+			removed: { scope: buildsCache, removed: true, storePathsRemoved: 1 },
 			objectGone: true,
-			remainingNames: ['']
+			remainingScopes: [defaultCache()]
 		});
 	});
 
@@ -269,7 +298,7 @@ describe('cache registry admin', () => {
 
 		const list = await authorisedFetch('/caches', writeToken);
 		const put = await authorisedFetch('/caches/builds', writeToken, {
-			body: JSON.stringify({ priority: 10 }),
+			body: JSON.stringify({ access: 'public', priority: 10 }),
 			headers: { 'content-type': 'application/json' },
 			method: 'PUT'
 		});
@@ -288,12 +317,54 @@ describe('cache registry admin', () => {
 		});
 	});
 
+	it('lets a cache operation grant inspect only its exact cache', async () => {
+		await useTestServer('cache-admin-exact-read');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30);
+		const buildsToken = await issueServerSignedToken(
+			cacheWriteGrants([], buildsCache)
+		);
+
+		const exact = await authorisedFetch('/caches/builds', buildsToken);
+		const other = await authorisedFetch('/cache', buildsToken);
+		const list = await authorisedFetch('/caches', buildsToken);
+		const missingToken = await issueServerSignedToken(
+			cacheWriteGrants([], namedCache('missing'))
+		);
+		const missing = await authorisedFetch('/caches/missing', missingToken);
+
+		expect({
+			exact: {
+				status: exact.status,
+				body: cacheSummarySchema.parse(await exact.json())
+			},
+			other: other.status,
+			list: list.status,
+			missing: missing.status
+		}).toStrictEqual({
+			exact: {
+				status: StatusCodes.OK,
+				body: {
+					scope: buildsCache,
+					access: 'public',
+					priority: 30,
+					storePaths: 0,
+					graceManaged: false
+				}
+			},
+			other: StatusCodes.FORBIDDEN,
+			list: StatusCodes.FORBIDDEN,
+			missing: StatusCodes.NOT_FOUND
+		});
+	});
+
 	it('clears in-flight uploads negotiated under a cache it tears down', async () => {
 		await useTestServer('cache-admin-teardown-pending');
 		const init = await bootstrap();
+		await putCache(init.token, 'builds', 40);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const decision = expectSingleUploadDecision(
-			await negotiateUploads(init.token, [metadata], 'builds'),
+			await negotiateUploads(init.token, [metadata], buildsCache),
 			metadata
 		);
 
@@ -310,10 +381,10 @@ describe('cache registry admin', () => {
 		const commitError = await commitUploadRejection(
 			init.token,
 			decision.uploadId,
-			'builds'
+			buildsCache
 		);
 
-		expectCommitSocketError(commitError);
+		expectCommitUpgradeError(commitError);
 		expect({
 			stagedBefore: stagedBefore !== null,
 			removed: removed.status,

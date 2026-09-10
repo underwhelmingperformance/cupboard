@@ -10,9 +10,9 @@ import { type ReadScope } from '../read/read.ts';
 /**
  * The Hono environment for the worker app: the admission middleware resolves
  * a tenant request's slug, tenant entry and tenant-relative path before any
- * route runs, and the mount a read matches decides which cache in which
- * namespace it addresses. `logger` is the request-scoped logger, seeded before
- * admission and narrowed with the tenant.
+ * route runs. Admission resolves the cache identity and access before any
+ * content route can authenticate or use Workers Cache. `logger` is the
+ * request-scoped logger, seeded before admission and narrowed with the tenant.
  */
 export interface WorkerHonoEnv {
 	Bindings: Env;
@@ -25,12 +25,11 @@ export interface WorkerHonoEnv {
 		tenantEntryFresh: boolean;
 		tenantRest: string;
 		readScope: ReadScope;
-		// The addressed private cache's own read verifier, when it has one.
-		// Admission loads it alongside the tenant row, and while it is present it
-		// is the only credential that opens that cache.
+		// The addressed cache's own read verifier, when it has one. Admission loads
+		// it alongside the tenant row.
 		cacheVerifier?: TenantReadVerifier;
-		// Whether the addressed private cache has been deleted. False for every
-		// request outside the private namespace, which reads no lifecycle state.
+		// Whether the addressed cache is absent or deleted. Content routes return
+		// 404 in either case.
 		isCacheDeleted: boolean;
 	};
 }

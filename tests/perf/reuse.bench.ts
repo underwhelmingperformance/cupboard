@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { afterAll, beforeAll, bench } from 'vitest';
@@ -128,15 +129,25 @@ beforeAll(async () => {
 
 	const hitPool = pool.slice(0, poolSize);
 	const commitPool = pool.slice(poolSize);
-	const client = server.pushClient(token, { cache: 'pr-1' });
+	const cache = {
+		kind: 'named',
+		name: cacheNameSchema.parse('pr-1')
+	} as const satisfies CacheScope;
+	const client = server.pushClient(token, { cache });
 	const pushContext: PushContext = { client, store: source };
+	const rpc = tenantRpc(server.tenantUrl, { credential: token });
 
+	await rpc.caches.put.inNamedCache({
+		cacheName: cache.name,
+		access: 'public',
+		priority: 40
+	});
 	await pushStorePaths(pushContext, hitPool);
 
-	const rpc = tenantRpc(server.tenantUrl, { credential: token });
 	await rpc.reuseViews.set({
 		name: 'reuse',
-		selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+		access: 'public',
+		selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 	});
 
 	state.harness = {

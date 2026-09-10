@@ -276,19 +276,36 @@ describe('tenant routing', () => {
 	it('dispatches a named tenant write to its Durable Object to authorise', async () => {
 		await provisionNamedTenant('acme');
 
-		const response = await handlerFetch(
-			'/t/acme/cache/_default/uploads',
-			writeRequest()
-		);
+		const response = await handlerFetch('/t/acme/uploads', writeRequest());
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
+
+	it.each([
+		{
+			name: 'a narinfo read',
+			path: `/t/${fixtureTenant}/cache/_reserved/${'0'.repeat(32)}.narinfo`,
+			expected: StatusCodes.NOT_FOUND
+		},
+		{
+			name: 'nix-cache-info',
+			path: `/t/${fixtureTenant}/cache/_reserved/nix-cache-info`,
+			expected: StatusCodes.NOT_FOUND
+		}
+	])(
+		'refuses $name addressed through an invalid cache name',
+		async ({ path, expected }) => {
+			const response = await handlerFetch(path);
+
+			expect(response.status).toBe(expected);
+		}
+	);
 
 	it('stops writes to a suspended fixture tenant on the authoritative D1 status', async () => {
 		await suspendTenant(fixtureTenant);
 
 		const response = await handlerFetch(
-			`/t/${fixtureTenant}/cache/_default/uploads`,
+			`/t/${fixtureTenant}/uploads`,
 			writeRequest()
 		);
 

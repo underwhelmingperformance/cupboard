@@ -21,9 +21,9 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 const forwardedBody = 'served by the tenant Worker';
 
 // The workers pool does not provide the cache-owning tenant Worker binding used
-// by public reads that require no credential. This helper supplies that binding
-// and records each forwarded request so the test can inspect its headers. The
-// proxy preserves every other binding.
+// by public cache reads. This helper supplies that binding and records each
+// forwarded request so the test can inspect its headers. The proxy preserves
+// every other binding.
 function envWithRecordingTenantWorker(forwarded: Request[]): Env {
 	return new Proxy(env, {
 		get(target, property, receiver): unknown {

@@ -1,7 +1,7 @@
 import { gcResponseSchema } from '../retention.ts';
 
 import { baseProcedure } from './base.ts';
-import { cacheScopedProcedure } from './cache-scoped.ts';
+import { namedCacheProcedure } from './cache-scoped.ts';
 
 export const gcContract = {
 	// One tenant-wide call advances a bounded collection continuation. It does
@@ -11,7 +11,10 @@ export const gcContract = {
 		.route({ method: 'POST', path: '/gc' })
 		.output(gcResponseSchema),
 
-	runCache: cacheScopedProcedure(
+	// `POST /gc` is the tenant-wide pass, so a bare path cannot also mean the
+	// default cache. Collecting the default cache alone therefore has no route;
+	// the tenant-wide pass reaches it.
+	runCache: namedCacheProcedure(
 		{ method: 'POST', suffix: '/gc', requires: 'gc:run', maintenance: true },
 		{},
 		gcResponseSchema

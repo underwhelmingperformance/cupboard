@@ -61,10 +61,87 @@ export class InvalidCacheNameError extends CliUsageError {
 	}
 }
 
+export class InvalidCacheTargetUrlError extends CliUsageError {
+	constructor(
+		public readonly value: string,
+		options?: { readonly cause: unknown }
+	) {
+		super(`Invalid cache URL: ${value}`, options);
+		this.name = 'InvalidCacheTargetUrlError';
+	}
+}
+
+export class CacheTargetConflictError extends CliUsageError {
+	constructor(
+		public readonly tenantUrl: string,
+		public readonly cache: string
+	) {
+		super(
+			`The URL already selects cache '${cache}', so do not supply another cache name.`
+		);
+		this.name = 'CacheTargetConflictError';
+	}
+}
+
+export class CacheTargetPayloadRequiredError extends CliUsageError {
+	constructor(
+		public readonly target: {
+			readonly tenantUrl: URL;
+			readonly cache: { readonly kind: 'named'; readonly name: string };
+		},
+		public readonly payloadDescription: string,
+		public readonly cacheUrl: URL
+	) {
+		const name = target.cache.name;
+
+		super(
+			`Cache '${name}' exists, so Cupboard treated '${name}' as the cache target, but the command still requires ${payloadDescription}. ` +
+				`Use './${name}' to pass a local path to the default cache, or select the cache explicitly with ${cacheUrl.href}.`
+		);
+		this.name = 'CacheTargetPayloadRequiredError';
+	}
+}
+
+export class CacheTargetPayloadCountError extends CliUsageError {
+	constructor(
+		public readonly actual: number,
+		public readonly maximum: number,
+		public readonly payloadDescription: string
+	) {
+		super(
+			`Too many positional arguments: expected at most ${String(maximum)} for ${payloadDescription}, received ${String(actual)}.`
+		);
+		this.name = 'CacheTargetPayloadCountError';
+	}
+}
+
+export class CommandPayloadRequiredError extends CliUsageError {
+	constructor(public readonly payloadDescription: string) {
+		super(`The command requires ${payloadDescription}.`);
+		this.name = 'CommandPayloadRequiredError';
+	}
+}
+
+export class NamedCacheTargetRequiredError extends CliUsageError {
+	constructor(action: string) {
+		super(
+			`${action} requires a named cache. Supply its name after the tenant URL or use a /cache/<name> URL.`
+		);
+		this.name = 'NamedCacheTargetRequiredError';
+	}
+}
+
 export class InvalidCachePriorityError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid cache priority (expected a non-negative integer): ${value}`);
 		this.name = 'InvalidCachePriorityError';
+	}
+}
+
+export class InvalidCacheAccessModeError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(`Invalid cache access mode (expected public or private): ${value}`);
+		this.name = 'InvalidCacheAccessModeError';
 	}
 }
 
@@ -776,9 +853,18 @@ export class InvalidReuseViewPriorityError extends CliUsageError {
 	}
 }
 
+export class InvalidReuseViewSelectorError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid reuse-view selector (expected default, all, all-named, cache:<name> or prefix:<prefix>): ${value}`
+		);
+		this.name = 'InvalidReuseViewSelectorError';
+	}
+}
+
 export class ReuseViewSelectorRequiredError extends CliUsageError {
 	constructor() {
-		super('reuse-view set requires at least one --exact or --prefix selector');
+		super('reuse-view set requires at least one --select selector');
 		this.name = 'ReuseViewSelectorRequiredError';
 	}
 }
@@ -1069,8 +1155,8 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
 }
 
 /**
-Basic read credentials come as a pair; half a pair is a mistake.
-*/
+ * Basic read credentials come as a pair; half a pair is a mistake.
+ */
 export class ReadCredentialPairError extends CliUsageError {
 	constructor() {
 		super('--read-user and --read-password must be supplied together');
@@ -1078,42 +1164,23 @@ export class ReadCredentialPairError extends CliUsageError {
 	}
 }
 
-/**
- * Every private-cache read requires authentication. The CLI therefore needs a
- * read credential before it can print the substituter URL.
- */
-export class PrivateCacheCredentialRequiredError extends CliUsageError {
-	constructor(public readonly cache: string) {
-		super(
-			`No read credential for private cache '${cache}'. Set --private-cache-credentials or CUPBOARD_PRIVATE_CACHE_CREDENTIALS, or --read-user and --read-password.`
-		);
-		this.name = 'PrivateCacheCredentialRequiredError';
-	}
-}
-
-/**
- * Private-cache credentials are a JSON object that maps each private cache's
- * local name to its read credential.
- */
-export class InvalidPrivateCacheCredentialsError extends CliUsageError {
+export class InvalidCacheCredentialsError extends CliUsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
-			'Invalid private cache credentials (expected a JSON object mapping a cache name to { user, password })',
+			'Invalid cache credentials (expected a JSON array of cache scopes and credentials)',
 			options
 		);
-		this.name = 'InvalidPrivateCacheCredentialsError';
+		this.name = 'InvalidCacheCredentialsError';
 	}
 }
 
 /**
- * Each entry in the credential document must match a selected private cache.
+ * Each credential must match a cache selected for the Nix configuration.
  */
-export class UnknownPrivateCacheCredentialError extends CliUsageError {
+export class UnknownCacheCredentialError extends CliUsageError {
 	constructor(public readonly cache: string) {
-		super(
-			`Select private cache '${cache}' with --private-cache or remove its credential.`
-		);
-		this.name = 'UnknownPrivateCacheCredentialError';
+		super(`Select ${cache} in the command or remove its credential.`);
+		this.name = 'UnknownCacheCredentialError';
 	}
 }
 

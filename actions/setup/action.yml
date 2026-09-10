@@ -39,30 +39,23 @@ inputs:
     required: false
   cache:
     description:
-      Public caches to use at the tenant URL, one per line or comma-separated.
-      If both cache and private-cache are empty, setup uses the tenant's default
-      cache.
+      Named caches to use at the tenant URL, one per line or comma-separated.
+      Leave empty to use the tenant's default cache.
     required: false
-  private-cache:
+  cache-credentials:
     description:
-      Private caches to use at the tenant URL, one per line or comma-separated.
-      Every private-cache read requires a credential. Supply one through
-      private-cache-credentials or through read-user and read-password.
-    required: false
-  private-cache-credentials:
-    description:
-      JSON object that maps each private cache's local name to its user and
-      password. Populate it from workflow secrets. A cache without its own entry
-      uses read-user and read-password.
+      JSON array of cache scopes and cache-specific read credentials. Populate
+      it from workflow secrets. A cache without an entry uses read-user and
+      read-password.
     required: false
   trusted-public-key:
     description: Nix signing key to trust for cache reads.
     required: false
   read-user:
-    description: Username for private cache reads.
+    description: Tenant-level Basic-auth username for cache reads.
     required: false
   read-password:
-    description: Password for private cache reads.
+    description: Tenant-level Basic-auth password for cache reads.
     required: false
   reuse-view:
     description:
@@ -152,8 +145,7 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
-        PRIVATE_CACHE: ${{ inputs.private-cache }}
-        PRIVATE_CACHE_CREDENTIALS: ${{ inputs.private-cache-credentials }}
+        CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
         READ_USER: ${{ inputs.read-user }}
@@ -172,8 +164,7 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
-          --private-cache "$PRIVATE_CACHE"
-          --private-cache-credentials "$PRIVATE_CACHE_CREDENTIALS"
+          --cache-credentials "$CACHE_CREDENTIALS"
           --reuse-view "$REUSE_VIEW"
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"

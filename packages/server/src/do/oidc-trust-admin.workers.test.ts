@@ -38,8 +38,8 @@ const additionBody: OidcTrustAddBodyInput = {
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 			resources: {
-				cache: { exact: 'owner-ci', validate: 'cacheName' },
-				root: { equalsResource: 'cache', validate: 'rootName' }
+				cache: { exact: 'owner-ci', kind: 'named', validate: 'cacheName' },
+				root: { exact: 'owner-ci', validate: 'rootName' }
 			}
 		}
 	]

@@ -1,10 +1,16 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import {
-	type DeletePathResponse,
+	type DeletePathResponseInput,
 	pathDeletionResponseSchema
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
+
+import {
+	type RecordedCall,
+	recordingCacheScopedClient
+} from '../client/cache-scoped.test-support.ts';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
 
@@ -24,11 +30,11 @@ describe('describeNarOutcome', () => {
 	])(
 		'describes "$expected"',
 		({ deleted, narScheduledForDeletion, expected }) => {
-			const result: DeletePathResponse = {
+			const result = pathDeletionResponseSchema.parse({
 				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
 				deleted,
 				narScheduledForDeletion
-			};
+			}) satisfies DeletePathResponseInput;
 
 			expect(describeNarOutcome(result)).toBe(expected);
 		}
@@ -37,32 +43,26 @@ describe('describeNarOutcome', () => {
 
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const storePath = `/nix/store/${storePathHash}-app`;
+const defaultCache: CacheScope = { kind: 'default' };
 
 /**
 A delete client that records its calls and reports the path as present.
 */
 function recordingClient(): {
 	client: DeleteClient;
-	calls: { cacheName: string; hash: string }[];
+	calls: readonly RecordedCall<{ hash: string }>[];
 } {
-	const calls: { cacheName: string; hash: string }[] = [];
+	const remove = recordingCacheScopedClient((input: { hash: string }) =>
+		Promise.resolve(
+			pathDeletionResponseSchema.parse({
+				storePathHash: input.hash,
+				deleted: true,
+				narScheduledForDeletion: false
+			})
+		)
+	);
 
-	return {
-		calls,
-		client: {
-			remove(input) {
-				calls.push(input);
-
-				return Promise.resolve(
-					pathDeletionResponseSchema.parse({
-						storePathHash: input.hash,
-						deleted: true,
-						narScheduledForDeletion: false
-					})
-				);
-			}
-		}
-	};
+	return { calls: remove.calls, client: { remove } };
 }
 
 describe('runDelete', () => {
@@ -70,10 +70,10 @@ describe('runDelete', () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		await runDelete('_default', storePath, ui, client);
+		await runDelete(defaultCache, storePath, ui, client);
 
 		expect({ calls, results: captured.results }).toStrictEqual({
-			calls: [{ cacheName: '_default', hash: storePathHash }],
+			calls: [{ cache: defaultCache, input: { hash: storePathHash } }],
 			results: [
 				{
 					kind: 'deleted-path',
@@ -96,7 +96,7 @@ describe('runDelete', () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runDelete('_default', storePath, ui, client);
+		await runDelete(defaultCache, storePath, ui, client);
 
 		expect({ calls, cancellations: captured.cancellations }).toStrictEqual({
 			calls: [],
@@ -105,26 +105,23 @@ describe('runDelete', () => {
 	});
 
 	it('rejects an argument that is not a store path', async () => {
-		const calls: Parameters<DeleteClient['remove']>[0][] = [];
+		const remove = recordingCacheScopedClient((input: { hash: string }) =>
+			Promise.resolve(
+				pathDeletionResponseSchema.parse({
+					storePathHash: input.hash,
+					deleted: false,
+					narScheduledForDeletion: false
+				})
+			)
+		);
+		const calls = remove.calls;
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
 		let outcome:
 			| { value: Awaited<ReturnType<typeof runDelete>> }
 			| { error: { name: string; storePath: string } };
 		try {
-			await runDelete('_default', '/tmp/not-a-store-path', ui, {
-				remove(input) {
-					calls.push(input);
-
-					return Promise.resolve(
-						pathDeletionResponseSchema.parse({
-							storePathHash: input.hash,
-							deleted: false,
-							narScheduledForDeletion: false
-						})
-					);
-				}
-			});
+			await runDelete(defaultCache, '/tmp/not-a-store-path', ui, { remove });
 			outcome = { value: undefined };
 		} catch (error_: unknown) {
 			expect(error_).toBeInstanceOf(InvalidStorePathError);

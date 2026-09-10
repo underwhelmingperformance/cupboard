@@ -1,4 +1,5 @@
-import { type VerifyReport } from '@cupboard/protocol/reports';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
+import { type VerifyReportInput } from '@cupboard/protocol/reports';
 import { verifyReportSchema } from '@cupboard/protocol/reports';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
@@ -9,6 +10,7 @@ import {
 	currentOrigin,
 	currentServer,
 	initialise,
+	namedCache,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -33,7 +35,7 @@ const tenantWideContinuation = {
 	scope: 'tenant',
 	collectLimit: maxPathsCollectedPerRun
 };
-const scopedContinuation = (cache: string) => ({
+const scopedContinuation = (cache: CacheScope) => ({
 	scope: 'cache',
 	cache,
 	collectLimit: maxPathsCollectedPerRun
@@ -48,10 +50,8 @@ const verifyReport = {
 	scanned: 0,
 	narInfoObjectsRestored: 0,
 	danglingNarInfosRemoved: 0,
-	cursor: '',
-	cursorCache: '',
 	wrapped: true
-} satisfies VerifyReport;
+} satisfies VerifyReportInput;
 
 describe('garbage-collection maintenance serialisation', () => {
 	beforeEach(resetTestServer);
@@ -262,6 +262,10 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
+					instance.context.cacheRepository.resolveOrCreate(
+						namedCache('builds'),
+						'public'
+					);
 					const response = await instance.fetch(request);
 					const afterFailure = {
 						status: response.status,
@@ -276,7 +280,9 @@ describe('garbage-collection maintenance serialisation', () => {
 						afterFailure,
 						afterRecovery: {
 							continuation: await state.storage.get(gcContinuationKey),
-							cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+							cacheScopes: collect.mock.calls.flatMap(([_logger, target]) =>
+								target.scope === 'cache' ? [target.cache.scope] : []
+							)
 						}
 					};
 				}
@@ -288,7 +294,7 @@ describe('garbage-collection maintenance serialisation', () => {
 					continuation: [
 						{
 							scope: 'cache',
-							cache: 'builds',
+							cache: namedCache('builds'),
 							collectLimit: maxPathsCollectedPerRun
 						}
 					],
@@ -296,7 +302,7 @@ describe('garbage-collection maintenance serialisation', () => {
 				},
 				afterRecovery: {
 					continuation: undefined,
-					cacheScopes: ['builds', 'builds']
+					cacheScopes: [namedCache('builds'), namedCache('builds')]
 				}
 			});
 		} finally {
@@ -318,7 +324,17 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					instance.context.cacheRepository.resolveOrCreate(
+						namedCache('a'),
+						'public'
+					);
+					instance.context.cacheRepository.resolveOrCreate(
+						namedCache('b'),
+						'public'
+					);
+					await state.storage.put(gcContinuationKey, [
+						scopedContinuation(namedCache('a'))
+					]);
 					const response = await instance.fetch(request);
 					const continuation = await state.storage.get(gcContinuationKey);
 					await state.storage.deleteAlarm();
@@ -326,15 +342,17 @@ describe('garbage-collection maintenance serialisation', () => {
 					return {
 						status: response.status,
 						continuation,
-						cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+						cacheScopes: collect.mock.calls.flatMap(([_logger, target]) =>
+							target.scope === 'cache' ? [target.cache.scope] : []
+						)
 					};
 				}
 			);
 
 			expect(observed).toStrictEqual({
 				status: StatusCodes.OK,
-				continuation: [scopedContinuation('a')],
-				cacheScopes: ['b']
+				continuation: [scopedContinuation(namedCache('a'))],
+				cacheScopes: [namedCache('b')]
 			});
 		} finally {
 			collect.mockRestore();
@@ -356,7 +374,17 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					instance.context.cacheRepository.resolveOrCreate(
+						namedCache('a'),
+						'public'
+					);
+					instance.context.cacheRepository.resolveOrCreate(
+						namedCache('b'),
+						'public'
+					);
+					await state.storage.put(gcContinuationKey, [
+						scopedContinuation(namedCache('a'))
+					]);
 					const response = await instance.fetch(request);
 					const queued = await state.storage.get(gcContinuationKey);
 
@@ -371,17 +399,22 @@ describe('garbage-collection maintenance serialisation', () => {
 						queued,
 						afterA,
 						afterB,
-						cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+						cacheScopes: collect.mock.calls.flatMap(([_logger, target]) =>
+							target.scope === 'cache' ? [target.cache.scope] : []
+						)
 					};
 				}
 			);
 
 			expect(observed).toStrictEqual({
 				status: StatusCodes.OK,
-				queued: [scopedContinuation('a'), scopedContinuation('b')],
-				afterA: [scopedContinuation('b')],
+				queued: [
+					scopedContinuation(namedCache('a')),
+					scopedContinuation(namedCache('b'))
+				],
+				afterA: [scopedContinuation(namedCache('b'))],
 				afterB: undefined,
-				cacheScopes: ['b', 'a', 'b']
+				cacheScopes: [namedCache('b'), namedCache('a'), namedCache('b')]
 			});
 		} finally {
 			collect.mockRestore();
@@ -402,7 +435,9 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					await state.storage.put(gcContinuationKey, [
+						scopedContinuation(namedCache('a'))
+					]);
 					await instance.runGarbageCollection();
 					const widened = await state.storage.get(gcContinuationKey);
 
@@ -545,7 +580,7 @@ describe('verification maintenance serialisation', () => {
 			});
 
 		try {
-			let interactiveReport: VerifyReport | undefined;
+			let interactiveReport: VerifyReportInput | undefined;
 
 			await runInDurableObject(currentServer(), async (instance) => {
 				const cron = instance.runVerification();

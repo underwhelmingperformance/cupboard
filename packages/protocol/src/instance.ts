@@ -10,10 +10,10 @@ export const configuredInstanceSummarySchema = z.strictObject({
 	state: z.literal('configured'),
 	name: instanceNameSchema
 });
-export type ParsedConfiguredInstanceSummary = z.output<
+export type ConfiguredInstanceSummary = z.output<
 	typeof configuredInstanceSummarySchema
 >;
-export type ConfiguredInstanceSummary = z.input<
+export type ConfiguredInstanceSummaryInput = z.input<
 	typeof configuredInstanceSummarySchema
 >;
 
@@ -21,8 +21,8 @@ export const instanceSummarySchema = z.discriminatedUnion('state', [
 	z.strictObject({ state: z.literal('unconfigured') }),
 	configuredInstanceSummarySchema
 ]);
-export type ParsedInstanceSummary = z.output<typeof instanceSummarySchema>;
-export type InstanceSummary = z.input<typeof instanceSummarySchema>;
+export type InstanceSummary = z.output<typeof instanceSummarySchema>;
+export type InstanceSummaryInput = z.input<typeof instanceSummarySchema>;
 
 export const instanceInitialiseBodySchema = z.strictObject({
 	name: instanceNameSchema
