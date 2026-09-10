@@ -393,31 +393,21 @@ describe('NAR reference authorisation', () => {
 	});
 });
 
-// A cache belongs to generation 1 while it has no lifecycle row, and an edge
-// belongs to generation 1 while it carries no cache generation. Deleting a
-// cache advances the cache to the next generation, so all of its edges,
-// including those written before the column existed, stop matching.
+// A cache belongs to generation 1 while it has no lifecycle row. Deleting a
+// cache advances it to the next generation, so all of its edges stop matching,
+// including edges written before `blob_ref.cache_generation` existed.
 describe('NAR reference cache generations', () => {
 	const secondGeneration = cacheGenerationSchema.parse(2);
 	const cases: {
 		readonly name: string;
-		readonly edgeGeneration?: CacheGeneration;
+		readonly edgeGeneration: CacheGeneration;
 		readonly cacheGeneration?: CacheGeneration;
 		readonly isServed: boolean;
 	}[] = [
 		{
-			name: 'an unstamped edge of a cache no deletion has reached',
-			isServed: true
-		},
-		{
 			name: 'a first-generation edge of a cache no deletion has reached',
 			edgeGeneration: firstCacheGeneration,
 			isServed: true
-		},
-		{
-			name: 'an unstamped edge of a deleted cache',
-			cacheGeneration: secondGeneration,
-			isServed: false
 		},
 		{
 			name: 'a first-generation edge of a deleted cache',
