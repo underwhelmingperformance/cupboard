@@ -16,10 +16,15 @@ import { wrapDispatchedMethods } from './dispatch-scope.ts';
  * leaves the rest for the next invocation: too small spends extra invocations
  * on the same work, too large makes one pass take longer to finish.
  *
- * Rows are the unit because they are the one quantity a pass can watch itself
- * spend as it runs, and the storage binding already counts them for billing.
- * Every Durable Object request logs its `rowsRead` and `rowsWritten`, so
- * production traces are the evidence for changing this number.
+ * Rows are the unit for the work a pass does in the object's own SQLite, which
+ * the storage binding already counts for billing: every Durable Object request
+ * logs its `rowsRead` and `rowsWritten`, so production traces are the evidence
+ * for changing this number.
+ *
+ * They are not the only quantity a pass can watch itself spend. A pass that
+ * reaches R2 or D1 also spends subrequests, which `subrequest-slice.ts` tracks
+ * separately. The two do not overlap: the runtime counts no storage operation
+ * as a subrequest, and no R2 or D1 call reads a row of this object.
  *
  * A row is not a fixed amount of work. A statement that binds its list as one
  * JSON parameter reads it through `json_each`, and SQLite counts every element
