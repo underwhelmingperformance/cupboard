@@ -28,9 +28,33 @@ const recordedPhaseQuery = `SELECT phase || '${fieldSeparator}' || required_loca
 // count, so this limit bounds only the list an error can print.
 const laggingTenantSampleSize = 20;
 
-export interface LocalStepReadiness {
+export interface TenantReadiness {
 	readonly pending: number;
 	readonly stragglers: readonly string[];
+}
+
+async function countAndName(
+	api: PhaseApi,
+	databaseId: DatabaseId,
+	predicate: string
+): Promise<TenantReadiness> {
+	const counted = await api.queryRows(
+		databaseId,
+		`SELECT count(*) FROM tenant WHERE ${predicate};`
+	);
+	const [count] = counted;
+
+	if (count === undefined || count === '0') {
+		return { pending: 0, stragglers: [] };
+	}
+
+	return {
+		pending: Number(count),
+		stragglers: await api.queryRows(
+			databaseId,
+			`SELECT id FROM tenant WHERE ${predicate} ORDER BY id LIMIT ${String(laggingTenantSampleSize)};`
+		)
+	};
 }
 
 /**
@@ -43,29 +67,16 @@ export interface LocalStepReadiness {
  * no traffic of its own, so the count falls without the deploy doing anything
  * and a later deploy can record the phase.
  */
-export async function readLocalStepReadiness(
+export function readLocalStepReadiness(
 	api: PhaseApi,
 	databaseId: DatabaseId,
 	requiredStep: LocalStep
-): Promise<LocalStepReadiness> {
-	const behind = `status = 'active' AND (local_step IS NULL OR local_step < ${String(requiredStep)})`;
-	const counted = await api.queryRows(
+): Promise<TenantReadiness> {
+	return countAndName(
+		api,
 		databaseId,
-		`SELECT count(*) FROM tenant WHERE ${behind};`
+		`status = 'active' AND (local_step IS NULL OR local_step < ${String(requiredStep)})`
 	);
-	const [count] = counted;
-
-	if (count === undefined || count === '0') {
-		return { pending: 0, stragglers: [] };
-	}
-
-	return {
-		pending: Number(count),
-		stragglers: await api.queryRows(
-			databaseId,
-			`SELECT id FROM tenant WHERE ${behind} ORDER BY id LIMIT ${String(laggingTenantSampleSize)};`
-		)
-	};
 }
 
 /**
@@ -115,8 +126,12 @@ export async function readDeploymentPhase(
 }
 
 /**
- * Records the phase the deployment has reached. Rerunning it with the same
- * phase rewrites the row with a later timestamp and changes nothing else.
+ * Records the phase the deployment has reached.
+ *
+ * The timestamp says when the deployment entered the phase, so rerunning the
+ * deploy in the same phase leaves it where it was. The contraction measures the
+ * predecessor's drain from it, and a rerun must not push that deadline further
+ * away.
  */
 export async function recordDeploymentPhase(
 	api: PhaseApi,
@@ -130,7 +145,9 @@ export async function recordDeploymentPhase(
 			`VALUES (${quote(deploymentPhaseRowId)}, ${quote(phase)}, ${String(requiredLocalStep)}, ${quote(isoTimestamp(now))}) ` +
 			`ON CONFLICT (id) DO UPDATE SET phase = excluded.phase, ` +
 			`required_local_step = excluded.required_local_step, ` +
-			`updated_at = excluded.updated_at;`
+			`updated_at = CASE WHEN deployment_phase.phase = excluded.phase ` +
+			`AND deployment_phase.required_local_step = excluded.required_local_step ` +
+			`THEN deployment_phase.updated_at ELSE excluded.updated_at END;`
 	]);
 }
 

@@ -12,11 +12,10 @@ import {
 	reuseViewRevisionSchema,
 	type ReuseViewSelector,
 	type ReuseViewSetBody,
-	type ReuseViewSummary,
-	type StoredReuseView
+	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { inArray, type SQL, sql } from 'drizzle-orm';
+import { eq, type SQL, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 
@@ -27,9 +26,6 @@ import {
 } from './context.ts';
 import { type JsonRowList, jsonRowLists } from './json-list.ts';
 import {
-	legacyReuseViewKey,
-	legacyReuseViewKeys,
-	legacyReuseViewSelectorRows,
 	reuseViewSelectorRow,
 	reuseViewSelectorsFromRows
 } from './reuse-view-selectors.ts';
@@ -44,12 +40,6 @@ export interface StoredReuseViewSelector {
 	readonly kind: ReuseViewSelector['kind'];
 	readonly cacheName: string;
 	readonly prefix: string;
-}
-
-// The columns of one legacy selector row, as SQL reads them back from the list.
-export interface LegacyStoredReuseViewSelector {
-	readonly kind: 'exact' | 'prefix';
-	readonly pattern: string;
 }
 
 function nullWhenEmpty(value: SQL): SQL {
@@ -80,7 +70,7 @@ export function storedReuseViewSelector(
  */
 export function reuseViewSelectorInsert(
 	handle: SchemaWriter,
-	view: StoredReuseView,
+	view: ReuseViewName,
 	selectors: JsonRowList<StoredReuseViewSelector>
 ) {
 	const cacheName = nullWhenEmpty(selectors.column('cacheName'));
@@ -95,24 +85,6 @@ export function reuseViewSelectorInsert(
 				selectors.column('kind'),
 				cacheName,
 				prefix
-			])
-		);
-}
-
-// The legacy rows stay in step with the native ones until the contraction
-// drops them, and their insert binds its list the same way.
-export function legacyReuseViewSelectorInsert(
-	handle: SchemaWriter,
-	view: StoredReuseView,
-	selectors: JsonRowList<LegacyStoredReuseViewSelector>
-) {
-	return handle
-		.insert(schema.reuseViewSelectors)
-		.select(
-			selectors.insertSource([
-				sql`${view}`,
-				selectors.column('kind'),
-				selectors.column('pattern')
 			])
 		);
 }
@@ -142,11 +114,10 @@ export class ReuseViewAdminService {
 		name: ReuseViewName,
 		body: ReuseViewSetBody
 	): ReuseViewSummary | undefined {
-		const keys = legacyReuseViewKeys(name);
 		const current = tx
 			.select()
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, keys))
+			.where(eq(schema.reuseViews.name, name))
 			.get();
 
 		if (current === undefined) {
@@ -164,7 +135,7 @@ export class ReuseViewAdminService {
 					prefix: schema.nativeReuseViewSelectors.prefix
 				})
 				.from(schema.nativeReuseViewSelectors)
-				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.where(eq(schema.nativeReuseViewSelectors.view, name))
 				.all()
 		).toSorted(selectorSort);
 		const isUnchanged =
@@ -231,26 +202,20 @@ export class ReuseViewAdminService {
 				return unchanged;
 			}
 
-			// The view is stored under the key its access gives it, and a view that
-			// changes access moves between the two keys. Every read therefore
-			// matches both, and every write replaces the rows held under both.
-			const keys = legacyReuseViewKeys(name);
-			const storedName = legacyReuseViewKey(name, body.access);
-
 			// A revision is an ABA fence for lookups, so it must never be reused.
-			// The counter travels with the view across an access change, which is
-			// why this takes the highest value recorded under either key.
+			// The counter outlives the view it belongs to, so a view recreated
+			// under the same name continues from where the previous one stopped.
 			const recorded = tx
 				.select({ next: schema.reuseViewRevisionSeq.nextRevision })
 				.from(schema.reuseViewRevisionSeq)
-				.where(inArray(schema.reuseViewRevisionSeq.name, keys))
+				.where(eq(schema.reuseViewRevisionSeq.name, name))
 				.all()
 				.map((row) => row.next);
 			const revision = reuseViewRevisionSchema.parse(Math.max(1, ...recorded));
 			const nextRevision = reuseViewRevisionSchema.parse(revision + 1);
 
 			tx.insert(schema.reuseViewRevisionSeq)
-				.values({ name: storedName, nextRevision })
+				.values({ name, nextRevision })
 				.onConflictDoUpdate({
 					target: schema.reuseViewRevisionSeq.name,
 					set: { nextRevision }
@@ -260,17 +225,17 @@ export class ReuseViewAdminService {
 			const existing = tx
 				.select({ createdAt: schema.reuseViews.createdAt })
 				.from(schema.reuseViews)
-				.where(inArray(schema.reuseViews.name, keys))
+				.where(eq(schema.reuseViews.name, name))
 				.get();
 			const createdAt = existing?.createdAt ?? now;
 			const priority = body.priority ?? reuseViewDefaultPriority;
 
 			tx.delete(schema.reuseViews)
-				.where(inArray(schema.reuseViews.name, keys))
+				.where(eq(schema.reuseViews.name, name))
 				.run();
 			tx.insert(schema.reuseViews)
 				.values({
-					name: storedName,
+					name,
 					access: body.access,
 					revision,
 					priority,
@@ -280,28 +245,14 @@ export class ReuseViewAdminService {
 				.run();
 
 			tx.delete(schema.nativeReuseViewSelectors)
-				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.where(eq(schema.nativeReuseViewSelectors.view, name))
 				.run();
 			const listedSelectors = jsonRowLists(
 				body.selectors.map((selector) => storedReuseViewSelector(selector))
 			);
 
 			for (const selectors of listedSelectors) {
-				reuseViewSelectorInsert(tx, storedName, selectors).run();
-			}
-
-			tx.delete(schema.reuseViewSelectors)
-				.where(inArray(schema.reuseViewSelectors.view, keys))
-				.run();
-
-			const listedLegacySelectors = jsonRowLists<LegacyStoredReuseViewSelector>(
-				legacyReuseViewSelectorRows(storedName, body.selectors).map(
-					({ kind, pattern }) => ({ kind, pattern })
-				)
-			);
-
-			for (const rows of listedLegacySelectors) {
-				legacyReuseViewSelectorInsert(tx, storedName, rows).run();
+				reuseViewSelectorInsert(tx, name, selectors).run();
 			}
 
 			return {
@@ -317,22 +268,18 @@ export class ReuseViewAdminService {
 	}
 
 	removeView(name: ReuseViewName): ReuseViewRemoveResponse {
-		const keys = legacyReuseViewKeys(name);
 		const existing = this.context.db
 			.select({ name: schema.reuseViews.name })
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, keys))
+			.where(eq(schema.reuseViews.name, name))
 			.get();
 
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.nativeReuseViewSelectors)
-				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
-				.run();
-			tx.delete(schema.reuseViewSelectors)
-				.where(inArray(schema.reuseViewSelectors.view, keys))
+				.where(eq(schema.nativeReuseViewSelectors.view, name))
 				.run();
 			tx.delete(schema.reuseViews)
-				.where(inArray(schema.reuseViews.name, keys))
+				.where(eq(schema.reuseViews.name, name))
 				.run();
 		});
 
@@ -340,7 +287,6 @@ export class ReuseViewAdminService {
 	}
 
 	resolve(name: ReuseViewName): ResolvedReuseView | undefined {
-		const keys = legacyReuseViewKeys(name);
 		const row = this.context.db
 			.select({
 				access: schema.reuseViews.access,
@@ -348,17 +294,10 @@ export class ReuseViewAdminService {
 				priority: schema.reuseViews.priority
 			})
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, keys))
+			.where(eq(schema.reuseViews.name, name))
 			.get();
 
 		if (row === undefined) {
-			return undefined;
-		}
-
-		// A row whose access the reconciliation has not yet supplied cannot say who
-		// may read the view. Resolving it as public would open a private view, so
-		// the view stays unresolved until the reconciliation reaches it.
-		if (row.access === null) {
 			return undefined;
 		}
 
@@ -371,7 +310,7 @@ export class ReuseViewAdminService {
 					prefix: schema.nativeReuseViewSelectors.prefix
 				})
 				.from(schema.nativeReuseViewSelectors)
-				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.where(eq(schema.nativeReuseViewSelectors.view, name))
 				.all()
 		).toSorted(selectorSort);
 

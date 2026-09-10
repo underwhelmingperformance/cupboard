@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
+	firstCacheGeneration,
 	graceSecondsSchema,
 	narInfoGenerationSchema,
 	rootNameSchema,
@@ -34,7 +35,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -43,8 +44,6 @@ import {
 	r2ObjectKeySchema,
 	requestOriginSchema
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -1855,7 +1854,7 @@ describe('retention grace at publication', () => {
 				// Pre-seed reference edges and advance the generation on every probe so
 				// each retry finds another committed winner.
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
-					schema: { blobReferences: migrationSchema.blobReferences }
+					schema: { blobReference: d1Schema.blobReference }
 				});
 				const live = instance.context.db
 					.select({
@@ -1875,15 +1874,16 @@ describe('retention grace at publication', () => {
 					throw new Error('the churned path must be committed');
 				}
 
-				await database.insert(migrationSchema.blobReferences).values(
+				await database.insert(d1Schema.blobReference).values(
 					Array.from({ length: 8 }, (_, index) => ({
 						tenant: instance.context.requireTenant(),
-						...cacheMigrationColumns(cache.scope, cache.access),
+						...cacheIdentityColumns(cache.scope),
 						storePathHash: hash,
 						generation: narInfoGenerationSchema.parse(
 							live.generation + index + 1
 						),
-						narHash: live.narHash
+						narHash: live.narHash,
+						cacheGeneration: firstCacheGeneration
 					}))
 				);
 
@@ -3527,10 +3527,7 @@ describe('confirming an unretained publication', () => {
 
 		const result = await runInDurableObject(currentServer(), (instance) => {
 			const cache = resolvedCache(instance.context);
-			const legacyCache = legacyCacheKey(cache.scope, cache.access);
-			// A narinfo row binds eleven parameters: the nine named here plus the
-			// two columns Drizzle fills from their defaults. Nine rows is the
-			// widest seed chunk that stays inside the bound-parameter limit.
+			// Seed in small chunks so one statement stays small.
 			const seedChunk = 9;
 
 			for (let start = 0; start < hashes.length; start += seedChunk) {
@@ -3538,7 +3535,6 @@ describe('confirming an unretained publication', () => {
 					.insert(schema.narInfos)
 					.values(
 						hashes.slice(start, start + seedChunk).map((storePathHash) => ({
-							cache: legacyCache,
 							cacheId: cache.id,
 							storePathHash,
 							storePath: storePathSchema.parse(

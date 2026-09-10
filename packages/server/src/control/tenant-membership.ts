@@ -199,11 +199,6 @@ const cacheCredentialColumns = {
 // D1 failure, then return a retryable refusal for a persistent failure.
 // Reads the tenant row, the addressed cache's credential row and its lifecycle
 // row in one D1 batch.
-//
-// Both cache queries match on the identity columns rather than the legacy
-// stored name. The route names a cache but not its access, and the legacy name
-// of a private cache differs from the name in the path, so only the identity
-// columns can find the row.
 async function readTenantAndCacheRows(
 	database: Database,
 	slug: TenantId,
@@ -258,10 +253,6 @@ async function readTenantAndCacheRows(
 		);
 		const credential = credentialRows[0];
 		const lifecycle = lifecycleRows[0];
-		// A row the catalogue reconciliation has not reached yet carries no
-		// access. Report no cache for it, which refuses the read, rather than
-		// assume an access that could publish a private cache.
-		const access = lifecycle?.access;
 
 		return {
 			tenant: tenantRows[0],
@@ -274,10 +265,10 @@ async function readTenantAndCacheRows(
 							passwordSalt: credential.readPasswordSalt
 						},
 			cache:
-				lifecycle === undefined || access === null || access === undefined
+				lifecycle === undefined
 					? undefined
 					: {
-							access,
+							access: lifecycle.access,
 							isDeleted: lifecycle.deletedAt !== null
 						},
 			version:

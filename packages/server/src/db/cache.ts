@@ -3,10 +3,7 @@ import {
 	type CacheGeneration,
 	type CacheName,
 	cacheNameSchema,
-	type CacheScope,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	type StoredCache
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { or, type SQL, sql } from 'drizzle-orm';
@@ -58,9 +55,7 @@ type CacheIdentityColumns =
 /**
  * The `cache_kind` and `cache_name` values for a scope.
  *
- * A default cache stores a SQL null for the name. The mirroring trigger fills
- * these columns for a row this build does not write natively, so a native write
- * sets them itself rather than leaving them for the trigger.
+ * A default cache stores a SQL null for the name.
  */
 export function cacheIdentityColumns(scope: CacheScope): CacheIdentityColumns {
 	if (scope.kind === 'default') {
@@ -163,10 +158,9 @@ export function cacheSelectorsCondition(
  * The scope stored in a row's identity columns.
  *
  * A row refuses to parse unless its name matches its kind: a default cache has
- * no name and a named cache has one. A row with no kind at all belongs to no
- * cache, which happens only if the backfill has not reached it; reading such a
- * row as the default cache would attribute it to the wrong cache, so this
- * refuses it instead.
+ * no name and a named cache has one. A row with no kind belongs to no cache.
+ * Reading it as the default cache would attribute it to the wrong cache, so
+ * this refuses it instead.
  */
 export function cacheScopeFromRow(row: {
 	readonly kind?: 'default' | 'named' | null;
@@ -186,22 +180,4 @@ export function cacheScopeFromRow(row: {
 	}
 
 	return { kind: 'named', name: identity.name };
-}
-
-/**
- * The legacy key for a scope and its access.
- *
- * A row carries both representations until the contraction drops the legacy
- * column. Deriving the key here keeps it from disagreeing with the identity
- * written beside it.
- */
-export function legacyCacheKey(
-	scope: CacheScope,
-	access: CacheAccessMode
-): StoredCache {
-	if (scope.kind === 'default') {
-		return DEFAULT_CACHE;
-	}
-
-	return access === 'private' ? privateStoredCache(scope.name) : scope.name;
 }

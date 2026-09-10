@@ -9,7 +9,6 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
 import {
 	narInfoDeletions,
 	retentionRoots,
@@ -57,7 +56,6 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 	await runInDurableObject(currentServer(), (instance, state) => {
 		const cache = resolvedCache(instance.context);
 		const rows = Array.from({ length: count }, (_unused, index) => ({
-			cache: legacyCacheKey(cache.scope, cache.access),
 			cacheId: cache.id,
 			storePathHash: syntheticStorePathHash(index),
 			narHash: syntheticNarHash(index),
@@ -199,12 +197,10 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 
 	await runInDurableObject(currentServer(), (instance) => {
 		const cache = resolvedCache(instance.context);
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		instance.context.db
 			.insert(retentionRoots)
 			.values({
-				cache: legacyCache,
 				cacheId: cache.id,
 				name,
 				expiresAt,
@@ -215,7 +211,6 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 		instance.context.db
 			.insert(retentionRootTargets)
 			.values({
-				cache: legacyCache,
 				cacheId: cache.id,
 				rootName: name,
 				storePathHash: target.storePathHash,

@@ -1,4 +1,3 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { CheckReportInput } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -39,7 +38,9 @@ import {
 } from './integrity-check-service.ts';
 import { withSubrequestSlice } from './subrequest-slice.ts';
 
-const startOfScan: CheckCursor = { cache: '', storePathHash: '' };
+// The fixture tenant's default cache is the first identity its object records.
+const defaultCacheId = 1;
+const startOfScan: CheckCursor = { cache: 0, storePathHash: '' };
 
 async function runCheck(
 	token: string,
@@ -52,8 +53,8 @@ async function runCheck(
 		query.set('deep', 'true');
 	}
 
-	if (cursor.cache !== '' || cursor.storePathHash !== '') {
-		query.set('cursorCache', cursor.cache);
+	if (cursor.cache !== 0 || cursor.storePathHash !== '') {
+		query.set('cursorCache', String(cursor.cache));
 		query.set('cursor', cursor.storePathHash);
 	}
 
@@ -91,7 +92,7 @@ describe('storage check', () => {
 				narInfosChecked: 2,
 				narBlobsChecked: 2,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: []
 			});
 		}
@@ -111,7 +112,7 @@ describe('storage check', () => {
 
 		const fromStart = await runCheck(token);
 		const afterFirst = await runCheck(token, false, {
-			cache: DEFAULT_CACHE,
+			cache: defaultCacheId,
 			storePathHash: 'a'.repeat(32)
 		});
 
@@ -120,14 +121,14 @@ describe('storage check', () => {
 				narInfosChecked: 3,
 				narBlobsChecked: 3,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: []
 			},
 			afterFirst: {
 				narInfosChecked: 2,
 				narBlobsChecked: 2,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: []
 			}
 		});
@@ -165,7 +166,7 @@ describe('storage check', () => {
 			discrepancies: report.discrepancies
 		}).toStrictEqual({
 			narInfosChecked: 1,
-			cursorCache: DEFAULT_CACHE,
+			cursorCache: defaultCacheId,
 			cursor: 'b'.repeat(32),
 			discrepancies: []
 		});
@@ -186,7 +187,7 @@ describe('storage check', () => {
 			narInfosChecked: 1,
 			narBlobsChecked: 1,
 			cursor: '',
-			cursorCache: '',
+			cursorCache: 0,
 			discrepancies: [
 				{
 					kind: 'missing-narinfo-object',
@@ -219,7 +220,7 @@ describe('storage check', () => {
 			narInfosChecked: 2,
 			narBlobsChecked: 1,
 			cursor: '',
-			cursorCache: '',
+			cursorCache: 0,
 			discrepancies: [
 				{
 					kind: 'missing-nar',
@@ -256,14 +257,14 @@ describe('storage check', () => {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: []
 			},
 			deep: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: [
 					{
 						kind: 'file-hash-mismatch',

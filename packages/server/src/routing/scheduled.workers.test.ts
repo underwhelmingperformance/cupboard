@@ -158,7 +158,11 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('plans catalogue migration for active and suspended tenants', async () => {
+	// Every tenant whose object can still be woken has to convert, because the
+	// contraction refuses to migrate an object whose caches record no access. An
+	// offboarding tenant is still woken by the offboard drain, so it converts
+	// too.
+	it('plans catalogue migration for every tenant that is not offboarded', async () => {
 		await provisionNamedTenant('active-migration', { configure: false });
 		await provisionNamedTenant('suspended-migration', { configure: false });
 		await provisionNamedTenant('offboarding-migration', { configure: false });
@@ -183,6 +187,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		expect(catalogueMessages).toStrictEqual([
 			{ kind: 'cache-catalogue-migration', tenant: 'active-migration' },
+			{ kind: 'cache-catalogue-migration', tenant: 'offboarding-migration' },
 			{ kind: 'cache-catalogue-migration', tenant: 'suspended-migration' }
 		]);
 	});

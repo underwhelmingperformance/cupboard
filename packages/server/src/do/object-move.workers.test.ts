@@ -12,7 +12,6 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as schema from '../db/schema.ts';
 import { StoredObjectKeyInvalidError } from '../errors.ts';
@@ -161,7 +160,6 @@ async function commitPath(
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
-				cache: legacyCacheKey(cache.scope, cache.access),
 				cacheId: cache.id,
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				storePath: storePathSchema.parse(`/nix/store/${storePathHash}-seeded`),

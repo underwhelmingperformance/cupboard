@@ -27,13 +27,10 @@ const seedLegacyRules = `
 		SELECT 1 UNION ALL SELECT n + 1 FROM counter WHERE n < ${seededRuleCount.toString()}
 	)
 	INSERT INTO retention_policy (
-		id, scope, pattern, kind, cache_id, root_name_prefix,
-		default_ttl_seconds, created_at
+		id, kind, cache_id, root_name_prefix, default_ttl_seconds, created_at
 	)
 	SELECT
 		printf('rule-%06d', n),
-		'root-name-prefix',
-		printf('p%06d/', n),
 		'root-name-prefix',
 		NULL,
 		printf('p%06d/', n),

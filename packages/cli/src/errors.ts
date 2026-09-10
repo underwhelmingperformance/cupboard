@@ -63,6 +63,19 @@ export class SigningKeyNotFoundError extends CliError {
  * The deploy has already uploaded the Workers when it throws this. Running the
  * deploy again once the rollout has finished records the phase.
  */
+export class UnclassifiedD1MigrationError extends CliError {
+	constructor(public readonly migrations: readonly string[]) {
+		const isSingle = migrations.length === 1;
+		const subject = isSingle ? 'it' : 'they';
+		const object = isSingle ? 'it' : 'them';
+
+		super(
+			`${migrations.join(' and ')} ${isSingle ? 'sorts' : 'sort'} at or after the migrations this release defers until after the cutover, but ${subject} ${isSingle ? 'is' : 'are'} not listed in migrationsAppliedAfterCutover. Add ${object} to that list if ${subject} must run only once the preceding release has stopped serving, or order ${object} before the deferred migrations if this release needs ${object} from the moment it serves.`
+		);
+		this.name = 'UnclassifiedD1MigrationError';
+	}
+}
+
 export class DeploymentPhaseUnsettledError extends CliError {
 	constructor(
 		public readonly scripts: readonly string[],

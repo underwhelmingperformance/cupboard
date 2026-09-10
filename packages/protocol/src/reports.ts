@@ -34,16 +34,17 @@ export const checkDiscrepancySchema = z.strictObject({
 export type CheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
 
 // One bounded pass of the integrity check. `cursorCache` and `cursor` identify
-// the row the next pass starts at, and are empty once the scan has reached the
-// end, so a caller checks every path by passing them back until they are. A
-// caller that needs to know whether the scan finished compares the cursor
-// with the empty string. The report carries no separate flag, which would be
-// a second way to say the same thing.
+// the row the next pass starts at: the cache's identity and the store-path
+// hash. They are zero and empty once the scan has reached the end, so a caller
+// checks every path by passing them back until they are. A caller that needs
+// to know whether the scan finished compares the cursor with the empty string.
+// The report carries no separate flag, which would be a second way to say the
+// same thing.
 export const checkReportSchema = z.strictObject({
 	narInfosChecked: countSchema,
 	narBlobsChecked: countSchema,
 	cursor: z.string(),
-	cursorCache: z.string(),
+	cursorCache: countSchema,
 	discrepancies: z.array(checkDiscrepancySchema)
 });
 export type CheckReport = z.output<typeof checkReportSchema>;

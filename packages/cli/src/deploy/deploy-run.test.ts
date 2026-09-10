@@ -1,8 +1,16 @@
+import {
+	currentLocalStep,
+	migrationsAppliedAfterCutover,
+	predecessorInvocationLifetimeMs
+} from '@cupboard/protocol/deployment';
 import type { Reporter } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
-import { DeploymentPhaseUnsettledError } from '../errors.ts';
+import {
+	DeploymentPhaseUnsettledError,
+	UnclassifiedD1MigrationError
+} from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
@@ -416,7 +424,8 @@ describe('runDeploy', () => {
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
 			'd1qr:SELECT count',
-			'd1q:INSERT INTO '
+			'd1q:INSERT INTO ',
+			'd1qr:SELECT phase'
 		]);
 	});
 
@@ -722,7 +731,8 @@ describe('runDeploy', () => {
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
 				'd1qr:SELECT count',
-				'd1q:INSERT INTO '
+				'd1q:INSERT INTO ',
+				'd1qr:SELECT phase'
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
 			skipped: [
@@ -808,7 +818,8 @@ describe('runDeploy', () => {
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
 			'd1qr:SELECT count',
-			'd1q:INSERT INTO '
+			'd1q:INSERT INTO ',
+			'd1qr:SELECT phase'
 		]);
 	});
 
@@ -896,7 +907,8 @@ describe('runDeploy', () => {
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
 				'd1qr:SELECT count',
-				'd1q:INSERT INTO '
+				'd1q:INSERT INTO ',
+				'd1qr:SELECT phase'
 			],
 			warnings: [
 				"CPU limit not applied: cupboard: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget"
@@ -953,5 +965,93 @@ describe('runDeploy', () => {
 			buildVersion: artifact.buildVersion,
 			recorded: []
 		});
+	});
+	// The contraction removes columns the preceding release still writes, so the
+	// deploy leaves it for a later run.
+	it.each([
+		{
+			name: 'defers the contraction while the preceding release could still be running',
+			elapsedMs: 60_000,
+			applied: [] as string[]
+		},
+		{
+			name: 'applies the contraction once the preceding release must have stopped',
+			elapsedMs: predecessorInvocationLifetimeMs,
+			applied: ['after']
+		}
+	])('$name', async ({ elapsedMs, applied: expected }) => {
+		const cutover = new Date('2026-01-01T00:00:00.000Z');
+		const contraction = {
+			name: migrationsAppliedAfterCutover[0] ?? '',
+			sha256:
+				'2b32db6c2c0a6235fb1397e8225ea85e0f0e6e8c7b126d0016ccbde0e667151e',
+			statements: ['ALTER TABLE a DROP COLUMN b;']
+		};
+		const { api, calls } = recordingApi();
+		const applied: string[] = [];
+		const phaseRow = `contracted|${String(currentLocalStep)}|${cutover.toISOString()}`;
+		const readingApi: CloudflareApi = {
+			...api,
+			d1QueryBatch(databaseId, statements) {
+				const [first] = statements;
+
+				if (first === contraction.statements[0]) {
+					applied.push(
+						calls.includes('d1qr:SELECT phase') ? 'after' : 'before'
+					);
+				}
+
+				return api.d1QueryBatch(databaseId, statements);
+			},
+			d1QueryRows(databaseId, sql) {
+				if (sql.startsWith('SELECT phase')) {
+					calls.push('d1qr:SELECT phase');
+
+					return Promise.resolve([phaseRow]);
+				}
+
+				return api.d1QueryRows(databaseId, sql);
+			}
+		};
+
+		await runDeploy({
+			artifact: {
+				...artifact,
+				d1Migrations: [...artifact.d1Migrations, contraction]
+			},
+			api: readingApi,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } },
+			now: () => new Date(cutover.getTime() + elapsedMs)
+		});
+
+		expect(applied).toStrictEqual(expected);
+	});
+
+	// The deferred list must be the end of the journal, and nothing enforced
+	// that: a later migration was applied before the deferred ones, against a
+	// schema they had not changed yet. Refuse before anything reaches D1, since
+	// the pre-upload set is applied first.
+	it('refuses a migration it cannot place on either side of the cutover', async () => {
+		const unplaceable = {
+			name: '9999_after_the_deferred_ones.sql',
+			sha256: 'a'.repeat(64),
+			statements: ['CREATE TABLE late (id);']
+		};
+		const { api, calls } = recordingApi();
+
+		await expect(
+			runDeploy({
+				artifact: {
+					...artifact,
+					d1Migrations: [...artifact.d1Migrations, unplaceable]
+				},
+				api,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			})
+		).rejects.toBeInstanceOf(UnclassifiedD1MigrationError);
+
+		expect(calls.filter((call) => call.startsWith('d1q:'))).toStrictEqual([]);
 	});
 });

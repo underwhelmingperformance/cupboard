@@ -134,7 +134,6 @@ async function commitTo(
 async function forgetViews(): Promise<void> {
 	await runInDurableObject(fixtureWorkerServer(), (instance) => {
 		instance.context.db.delete(schema.nativeReuseViewSelectors).run();
-		instance.context.db.delete(schema.reuseViewSelectors).run();
 		instance.context.db.delete(schema.reuseViews).run();
 	});
 }
@@ -519,7 +518,7 @@ describe('private reuse-view access', () => {
 		});
 	});
 
-	it('reads a view stored under the private spelling by its local name', async () => {
+	it('stores a private view under its local name', async () => {
 		const storePathHash = await publishThroughPrivateView();
 		const stored = await runInDurableObject(
 			fixtureWorkerServer(),
@@ -542,8 +541,8 @@ describe('private reuse-view access', () => {
 		);
 
 		expect({ ...stored, served: served.status }).toStrictEqual({
-			views: [`private/${privateViewName}`],
-			selectors: [`private/${privateViewName}`],
+			views: [privateViewName],
+			selectors: [privateViewName],
 			served: StatusCodes.OK
 		});
 	});

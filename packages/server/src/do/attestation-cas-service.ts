@@ -19,7 +19,7 @@ import {
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
-import { cacheIdentityCondition } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
@@ -31,8 +31,6 @@ import {
 	maxAttestationBundleBytes,
 	type R2ObjectKey
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 
 import { type ServerContext } from './context.ts';
 
@@ -293,7 +291,7 @@ export class AttestationCasService {
 
 		const now = isoTimestamp(new Date());
 		const cache = this.context.cacheRepository.require(reference.cache);
-		const cacheIdentity = cacheMigrationColumns(cache.scope, cache.access);
+		const cacheIdentity = cacheIdentityColumns(cache.scope);
 		const presenceMissing = notExists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -315,7 +313,7 @@ export class AttestationCasService {
 				})
 				.where(chargeFilter),
 			this.context.d1
-				.insert(migrationSchema.attestationReferences)
+				.insert(d1Schema.attestationReference)
 				.values({
 					tenant,
 					...cacheIdentity,

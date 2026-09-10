@@ -50,6 +50,9 @@ import m0047 from './0047_cache_retention_expand.sql';
 import m0048 from './0048_cache_retention_empty_rule_set.sql';
 import m0049 from './0049_cache_retention_migration_state.sql';
 import m0050 from './0050_cache_retention_migration_rules.sql';
+import m0051 from './0051_cache_identity_contract_assertions.sql';
+import m0052 from './0052_cache_identity_contract.sql';
+import m0053 from './0053_cache_identity_triggers.sql';
 
 export default {
 	journal,
@@ -104,6 +107,9 @@ export default {
 		m0047,
 		m0048,
 		m0049,
-		m0050
+		m0050,
+		m0051,
+		m0052,
+		m0053
 	}
 };

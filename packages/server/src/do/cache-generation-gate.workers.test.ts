@@ -1,8 +1,8 @@
 import {
-	type CacheAccessMode,
 	type CacheGeneration,
 	cacheNameSchema,
 	type CacheScope,
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	type StorePathHash,
 	storePathHashSchema
@@ -24,7 +24,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
@@ -35,8 +35,6 @@ import {
 	narObjectKey,
 	requestOriginSchema
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -156,33 +154,30 @@ async function cacheGenerationRows(): Promise<
 		.all();
 
 	return rows.map((row) => ({
-		cache: cacheScopeFromRow({
-			kind: row.kind ?? undefined,
-			name: row.name ?? undefined
-		}),
+		cache: cacheScopeFromRow({ kind: row.kind, name: row.name ?? undefined }),
 		generation: row.generation
 	}));
 }
 
-async function cacheScopeRows(): Promise<
-	{ cache: string; scope: CacheScope | undefined }[]
-> {
+async function cacheScopeRows(): Promise<(CacheScope | undefined)[]> {
 	const rows = await database()
 		.select({
-			cache: d1Schema.cacheLifecycle.cache,
 			cacheKind: d1Schema.cacheLifecycle.cacheKind,
 			cacheName: d1Schema.cacheLifecycle.cacheName
 		})
 		.from(d1Schema.cacheLifecycle)
+		.orderBy(
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName
+		)
 		.all();
 
-	return rows.map((row) => ({
-		cache: row.cache,
-		scope: cacheScopeFromRow({
-			kind: row.cacheKind ?? undefined,
+	return rows.map((row) =>
+		cacheScopeFromRow({
+			kind: row.cacheKind,
 			name: row.cacheName ?? undefined
 		})
-	}));
+	);
 }
 
 async function edgeScopeRows(): Promise<{
@@ -232,27 +227,23 @@ async function cacheCredentialCaches(): Promise<
 		.all();
 
 	return rows.map((row) => ({
-		cache: cacheScopeFromRow({
-			kind: row.kind ?? undefined,
-			name: row.name ?? undefined
-		})
+		cache: cacheScopeFromRow({ kind: row.kind, name: row.name ?? undefined })
 	}));
 }
 
 /**
- * Writes one reference edge as a cache wrote them before the cache generation
- * existed: no `cache_generation` on the edge and no lifecycle row for its
- * cache. The NAR it points at is stored too, so only the reference check can
- * decide whether a read of it succeeds.
+ * Writes one reference edge at the cache's first generation, with no lifecycle
+ * row for the cache. This is what a cache that has never been deleted holds.
+ * The NAR it points at is stored too, so only the reference check can decide
+ * whether a read of it succeeds.
  *
  * The presence row and the usage charge come with it, because retiring the
  * edge credits both and the tenant's counters may not go negative.
  */
-async function seedUnstampedEdge(
+async function seedFirstGenerationEdge(
 	cache: CacheScope,
 	storePathHash: StorePathHash,
-	nar: VerifiableNar,
-	access: CacheAccessMode = 'public'
+	nar: VerifiableNar
 ): Promise<void> {
 	const fileSize = nar.narBytes.byteLength;
 	const insertBlob = database()
@@ -267,13 +258,14 @@ async function seedUnstampedEdge(
 		})
 		.onConflictDoNothing();
 	const insertEdge = database()
-		.insert(migrationSchema.blobReferences)
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
-			narHash: nar.narHash
+			narHash: nar.narHash,
+			cacheGeneration: firstCacheGeneration
 		})
 		.onConflictDoNothing();
 	const insertPresence = database()
@@ -975,10 +967,7 @@ describe('deleted private cache', () => {
 
 		await deleteAndParkTeardown(privateBuilds);
 
-		expect(await cacheScopeRows()).toStrictEqual([
-			{ cache: '', scope: defaultCache },
-			{ cache: legacyCacheKey(privateBuilds, 'private'), scope: privateBuilds }
-		]);
+		expect(await cacheScopeRows()).toStrictEqual([defaultCache, privateBuilds]);
 	});
 
 	it('gives every reference edge a cache scope', async () => {
@@ -1413,7 +1402,7 @@ describe('cache generation gate', () => {
 		});
 	});
 
-	it('serves an unstamped edge, stops at deletion, and does not resume at recreation', async () => {
+	it('serves a first-generation edge, stops at deletion, and does not resume at recreation', async () => {
 		await useTestServer('gen-legacy');
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const legacyNar = await verifiableNar('legacy-edge');
@@ -1421,7 +1410,11 @@ describe('cache generation gate', () => {
 		const legacyPath = indexedMetadata(0, legacyNar);
 		const freshPath = indexedMetadata(1, freshNar);
 
-		await seedUnstampedEdge(buildsCache, legacyPath.storePathHash, legacyNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			legacyPath.storePathHash,
+			legacyNar
+		);
 
 		const legacyPathUrl = seededNarPath(legacyNar);
 		const beforeDeletion = await readFetch(legacyPathUrl);
@@ -1429,8 +1422,8 @@ describe('cache generation gate', () => {
 		const removed = cacheRemoveResponseSchema.parse(await removal.json());
 		const afterDeletion = await readFetch(legacyPathUrl);
 
-		// A cache of the same name again. Its own paths read, while the unstamped
-		// edge of the deleted cache stays refused.
+		// A cache of the same name again. Its own paths read, while the
+		// first-generation edge of the deleted cache stays refused.
 		await putTestCache(token, buildsCache);
 		await pushPath(token, freshPath, buildsCache, freshNar);
 
@@ -1473,7 +1466,11 @@ describe('cache generation gate', () => {
 		// Seed the state left when the row transaction commits but the drain does
 		// not run: a reference edge without a narinfo row. A later deletion must
 		// still retire this edge.
-		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			stranded.storePathHash,
+			strandedNar
+		);
 
 		// Read the marker in the same invocation as the deletion. Once that
 		// invocation ends, workerd can deliver the due alarm. The first pass
@@ -1520,7 +1517,11 @@ describe('cache generation gate', () => {
 		// Seed a reference edge without a narinfo row. An interrupted earlier
 		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
-		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			stranded.storePathHash,
+			strandedNar
+		);
 
 		// Delete and drain inside one Durable Object invocation. The deletion arms
 		// an alarm, and a pass that alarm ran would drain the whole cache at the

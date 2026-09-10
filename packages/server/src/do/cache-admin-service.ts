@@ -1,10 +1,8 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheName,
-	type CachePriority,
 	cachePrioritySchema,
-	type CacheScope,
-	type StoredCache
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -22,7 +20,6 @@ import {
 	cacheIdentityCondition,
 	cacheIdSchema,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
@@ -30,7 +27,6 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheAlreadyExistsError,
-	CacheIdentityMissingError,
 	CacheNotEmptyError,
 	CacheNotFoundError
 } from '../errors.ts';
@@ -173,35 +169,6 @@ export class CacheAdminService {
 			.run();
 	}
 
-	// The legacy registration table is still written so its rows stay in step
-	// with the identities. It is keyed by the cache's stored name, which encodes
-	// the access, so changing the access replaces the row rather than updating
-	// it.
-	private registerLegacyCache(
-		cache: ResolvedCache,
-		priority: CachePriority
-	): void {
-		this.context.db
-			.insert(schema.caches)
-			.values({
-				name: legacyCacheKey(cache.scope, cache.access),
-				priority,
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoUpdate({
-				target: schema.caches.name,
-				set: { priority }
-			})
-			.run();
-	}
-
-	private removeLegacyCache(cache: StoredCache): void {
-		this.context.db
-			.delete(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.run();
-	}
-
 	cacheInfoBody(scope: CacheScope): string {
 		const cache = this.context.cacheRepository.require(scope);
 		const row = this.context.db
@@ -273,13 +240,6 @@ export class CacheAdminService {
 
 		const caches = registered
 			.map((row): CacheSummary => {
-				// A row whose access the reconciliation has not supplied cannot say
-				// who may read the cache, so it is refused rather than listed as
-				// public.
-				if (row.access === null) {
-					throw new CacheIdentityMissingError({ id: row.id });
-				}
-
 				const earliestGraceDeadline = earliestDeadlines.get(row.id);
 
 				return {
@@ -355,8 +315,6 @@ export class CacheAdminService {
 			});
 			const cache = this.context.cacheRepository.stampVersion(created, version);
 
-			this.registerLegacyCache(cache, configuration.priority);
-
 			return this.cacheSummary(cache);
 		});
 	}
@@ -373,7 +331,6 @@ export class CacheAdminService {
 				.set({ priority: update.priority })
 				.where(eq(schema.cacheIdentities.id, cache.id))
 				.run();
-			this.registerLegacyCache(cache, update.priority);
 
 			return this.cacheSummary(cache);
 		}
@@ -438,7 +395,6 @@ export class CacheAdminService {
 
 		return this.context.criticalSection(async () => {
 			const existing = this.context.cacheRepository.require(scope);
-			const previous = legacyCacheKey(existing.scope, existing.access);
 			let updated: ResolvedCache;
 			let version: CacheLifecycleVersion;
 
@@ -462,9 +418,6 @@ export class CacheAdminService {
 
 			const cache = this.context.cacheRepository.stampVersion(updated, version);
 			const summary = this.cacheSummary(cache);
-
-			this.removeLegacyCache(previous);
-			this.registerLegacyCache(cache, summary.priority);
 
 			return summary;
 		});
@@ -637,10 +590,10 @@ export class CacheAdminService {
 			// deletion cannot remove.
 			this.context.db.transaction((tx) => {
 				tx.run(
-					sql`INSERT INTO narinfo_deletion (cache, cache_id, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache, cache_id, store_path_hash, nar_hash, generation, ${now}
+					sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
+						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
 						FROM narinfo WHERE cache_id = ${cache.id}
-						ON CONFLICT (cache, store_path_hash, generation)
+						ON CONFLICT (cache_id, store_path_hash, generation)
 						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
 				);
 				tx.delete(schema.narInfos)
@@ -698,7 +651,6 @@ export class CacheAdminService {
 					.delete(schema.cacheIdentities)
 					.where(eq(schema.cacheIdentities.id, cache.id))
 					.run();
-				this.removeLegacyCache(legacyCacheKey(cache.scope, cache.access));
 			}
 		});
 	}

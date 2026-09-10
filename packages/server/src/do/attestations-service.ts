@@ -34,7 +34,6 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	cacheIdentityCondition,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import {
@@ -666,7 +665,6 @@ export class AttestationsService {
 				.insert(schema.pendingAttestations)
 				.values({
 					id: uploadId,
-					cache: legacyCacheKey(cache.scope, cache.access),
 					cacheId: cache.id,
 					storePathHash: bundle.storePathHash,
 					digest: bundle.digest,
