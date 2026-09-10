@@ -75,7 +75,7 @@ function reconcileCachePage(database: SchemaWriter): number {
 }
 
 function missingRows(table: SQLiteTable): SQL {
-	return table === schema.retentionPolicies
+	return table === schema.legacyRetentionPolicies
 		? sql`cache_id is null and scope = 'cache'`
 		: sql`cache_id is null`;
 }
@@ -95,7 +95,7 @@ function reconcileTablePage(
 		return rows;
 	}
 	const storedName =
-		table === schema.retentionPolicies
+		table === schema.legacyRetentionPolicies
 			? sql`${table}.pattern`
 			: sql`${table}.cache`;
 	database.run(sql`
@@ -165,7 +165,7 @@ export async function reconcileCacheIdentities(
 		processed === 0 && stored?.identityRevision === identityRevision
 			? stored
 			: { identityRevision, tables: {} };
-	const tables = [...nameKeyedTables, schema.retentionPolicies];
+	const tables = [...nameKeyedTables, schema.legacyRetentionPolicies];
 	for (const table of tables) {
 		const name = getTableName(table);
 		const revision = revisions.get(name) ?? 0;

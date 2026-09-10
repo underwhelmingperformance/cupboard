@@ -79,7 +79,9 @@ describe('tenant contract round trip', () => {
 		const created = await client.caches.put.inNamedCache({
 			cacheName: 'builds',
 			access: 'public',
-			priority: 30
+			priority: 30,
+			defaultRootRetention: { kind: 'duration', seconds: 3600 },
+			grace: { kind: 'duration', graceSeconds: 60 }
 		});
 		const listed = await client.caches.list();
 		const removed = await client.caches.remove({
@@ -92,6 +94,9 @@ describe('tenant contract round trip', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'duration', seconds: 3600 },
+				grace: { kind: 'duration', graceSeconds: 60 },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			listed: {
@@ -101,6 +106,9 @@ describe('tenant contract round trip', () => {
 						access: 'public',
 						priority: 40,
 						storePaths: 0,
+						defaultRootRetention: { kind: 'permanent' },
+						grace: { kind: 'none' },
+						rootRetentionOverrides: [],
 						graceManaged: false
 					},
 					{
@@ -108,6 +116,9 @@ describe('tenant contract round trip', () => {
 						access: 'public',
 						priority: 30,
 						storePaths: 0,
+						defaultRootRetention: { kind: 'duration', seconds: 3600 },
+						grace: { kind: 'duration', graceSeconds: 60 },
+						rootRetentionOverrides: [],
 						graceManaged: false
 					}
 				]
@@ -141,13 +152,46 @@ describe('tenant contract round trip', () => {
 			kind: 'priority',
 			priority: 30
 		});
+		await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'set-default-root-ttl',
+			retention: { kind: 'duration', seconds: 7200 }
+		});
+		await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'set-root-ttl-override',
+			rootPrefix: 'ci/',
+			retention: { kind: 'duration', seconds: 900 }
+		});
+		const configured = await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'set-grace',
+			graceSeconds: 120
+		});
+		await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'set-default-root-ttl',
+			retention: { kind: 'permanent' }
+		});
+		await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'clear-root-ttl-override',
+			rootPrefix: 'ci/'
+		});
+		const cleared = await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'clear-grace'
+		});
 
-		expect({ privateCache, reprioritised }).toStrictEqual({
+		expect({ privateCache, reprioritised, configured, cleared }).toStrictEqual({
 			privateCache: {
 				scope: { kind: 'named', name: 'builds' },
 				access: 'private',
 				priority: 40,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			reprioritised: {
@@ -155,6 +199,34 @@ describe('tenant contract round trip', () => {
 				access: 'private',
 				priority: 30,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
+				graceManaged: false
+			},
+			configured: {
+				scope: { kind: 'named', name: 'builds' },
+				access: 'private',
+				priority: 30,
+				storePaths: 0,
+				defaultRootRetention: { kind: 'duration', seconds: 7200 },
+				grace: { kind: 'duration', graceSeconds: 120 },
+				rootRetentionOverrides: [
+					{
+						rootPrefix: 'ci/',
+						retention: { kind: 'duration', seconds: 900 }
+					}
+				],
+				graceManaged: false
+			},
+			cleared: {
+				scope: { kind: 'named', name: 'builds' },
+				access: 'private',
+				priority: 30,
+				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			}
 		});
@@ -189,6 +261,9 @@ describe('tenant contract round trip', () => {
 				access: 'private',
 				priority: 30,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			}
 		});
@@ -449,23 +524,10 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('creates policies and trust rules through the derived client', async () => {
-		await useTestServer('contract-policies-trust');
+	it('creates and removes trust rules through the derived client', async () => {
+		await useTestServer('contract-trust');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
-
-		const policy = await client.policies.add({
-			scope: 'root-name-prefix',
-			pattern: 'pr-',
-			ttlSeconds: 604_800
-		});
-		const updatedPolicy = await client.policies.add({
-			scope: 'root-name-prefix',
-			pattern: 'pr-',
-			ttlSeconds: 1_209_600
-		});
-		const policies = await client.policies.list();
-		const policyRemoved = await client.policies.remove({ id: policy.id });
 
 		const rule = await client.oidcTrust.add({
 			issuer: 'https://token.actions.githubusercontent.com',
@@ -484,34 +546,9 @@ describe('tenant contract round trip', () => {
 		const ruleRemoved = await client.oidcTrust.remove({ id: rule.id });
 
 		expect({
-			policy,
-			updatedPolicy,
-			policyListed: policies.policies,
-			policyRemoved,
 			ruleGrants: rule.permittedGrants.length,
 			ruleRemoved
 		}).toStrictEqual({
-			policy: {
-				id: policy.id,
-				scope: 'root-name-prefix',
-				pattern: 'pr-',
-				ttlSeconds: 604_800
-			},
-			updatedPolicy: {
-				id: policy.id,
-				scope: 'root-name-prefix',
-				pattern: 'pr-',
-				ttlSeconds: 1_209_600
-			},
-			policyListed: [
-				{
-					id: policy.id,
-					scope: 'root-name-prefix',
-					pattern: 'pr-',
-					ttlSeconds: 1_209_600
-				}
-			],
-			policyRemoved: { id: policy.id, removed: true },
 			ruleGrants: 1,
 			ruleRemoved: { id: rule.id, removed: true }
 		});

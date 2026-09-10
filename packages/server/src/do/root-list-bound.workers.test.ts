@@ -151,7 +151,7 @@ describe('root listing bounds', () => {
 			await setRoot(token, {
 				name,
 				targets: [metadata.storePath],
-				ttlSeconds: 3600
+				retention: { kind: 'duration', seconds: 3600 }
 			});
 		}
 		await seedTargets('run-b', [0, 1, 2, 3]);

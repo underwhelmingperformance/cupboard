@@ -10,6 +10,7 @@ import type { GarbageCollectionOutcome } from '../do/context.ts';
 import type { GarbageCollectionTarget } from '../do/context.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
+import type { LegacyRetentionService } from '../do/legacy-retention-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
@@ -41,6 +42,7 @@ export interface TenantRpcServices {
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;
 	readonly retention: RetentionService;
+	readonly legacyRetention: LegacyRetentionService;
 	readonly reuseViews: ReuseViewAdminService;
 	readonly oidcTrust: OidcTrustService;
 	readonly stats: StatsService;

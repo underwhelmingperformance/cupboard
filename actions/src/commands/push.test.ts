@@ -18,16 +18,19 @@ import {
 	GraceWaitConflictError,
 	LegacyPushSummaryError,
 	MissingInputError,
+	PermanentRetentionConflictError,
 	PushPathsMissingError,
 	PushSummaryMissingError,
 	PushSummaryResponseError,
 	ReferenceSourcePairingError,
+	RetentionChoiceConflictError,
 	RootGroupsJsonInvalidError,
 	RootGroupsPathsConflictError,
 	RootGroupsRetentionConflictError,
 	RootGroupsRootConflictError,
 	RootGroupsSchemaError,
 	RootRetentionConflictError,
+	RunRootPermanentRequiredError,
 	RunRootRequiredError,
 	TtlRetentionConflictError,
 	UrlInputInvalidError
@@ -53,14 +56,49 @@ import {
 
 const noExtras = {
 	store: '',
+	permanent: false,
 	intermediatePathsFile: '',
 	referencePathsFile: '',
 	referenceSource: '',
 	runRoot: '',
-	runRootTtl: ''
+	runRootTtl: '',
+	runRootPermanent: false
 };
 
 describe('buildPushArguments', () => {
+	it('passes permanent retention for the publication and run roots', () => {
+		expect(
+			buildPushArguments({
+				...noExtras,
+				url: new URL('https://cache.example.test'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: 'main',
+				cache: { kind: 'default' },
+				ttl: '',
+				retain: true,
+				wait: true,
+				waitTimeout: '',
+				attestations: [],
+				permanent: true,
+				runRoot: 'ci/run-1',
+				runRootPermanent: true
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test',
+			'/nix/store/a',
+			'--github-oidc',
+			'--root',
+			'main',
+			'--permanent',
+			'--run-root',
+			'ci/run-1',
+			'--run-root-permanent'
+		]);
+	});
+
 	it('builds a GitHub OIDC push invocation', () => {
 		expect(
 			buildPushArguments({
@@ -135,6 +173,7 @@ describe('buildPushArguments', () => {
 				cache: { kind: 'default' },
 				store: '',
 				ttl: '',
+				permanent: false,
 				retain: true,
 				wait: true,
 				waitTimeout: '',
@@ -143,7 +182,8 @@ describe('buildPushArguments', () => {
 				referencePathsFile: '/tmp/references.txt',
 				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
 				runRoot: 'github:owner/repo/_cupboard-run/12345/app',
-				runRootTtl: '24h'
+				runRootTtl: '24h',
+				runRootPermanent: false
 			})
 		).toStrictEqual([
 			'--no-colour',
@@ -199,6 +239,7 @@ describe('resolvePushInputs', () => {
 		audience: '',
 		root: 'github:owner/repo/main',
 		ttl: '',
+		permanent: false,
 		retain: true,
 		wait: true,
 		waitTimeout: '10m',
@@ -209,6 +250,7 @@ describe('resolvePushInputs', () => {
 		referenceSource: '',
 		runRoot: '',
 		runRootTtl: '',
+		runRootPermanent: false,
 		rootGroups: []
 	};
 
@@ -470,6 +512,16 @@ describe('resolvePushInputs unretained', () => {
 
 	it.each([
 		[
+			'permanent is combined with no-retain',
+			{ ...baseOptions, retain: 'false', permanent: 'true' },
+			PermanentRetentionConflictError
+		],
+		[
+			'ttl is combined with permanent',
+			{ ...baseOptions, ttl: '7d', permanent: 'true' },
+			RetentionChoiceConflictError
+		],
+		[
 			'root is combined with no-retain',
 			{ ...baseOptions, retain: 'false', root: 'github:owner/repo/main' },
 			RootRetentionConflictError
@@ -503,6 +555,21 @@ describe('resolvePushInputs reference and run-root pairing', () => {
 	};
 
 	it.each([
+		[
+			'run-root-permanent is given without run-root',
+			{ ...baseOptions, runRootPermanent: 'true' },
+			RunRootPermanentRequiredError
+		],
+		[
+			'run-root-ttl is combined with run-root-permanent',
+			{
+				...baseOptions,
+				runRoot: 'ci/run-1',
+				runRootTtl: '24h',
+				runRootPermanent: 'true'
+			},
+			RetentionChoiceConflictError
+		],
 		[
 			'reference-paths-file is given without reference-source',
 			{ ...baseOptions, referencePathsFile: '/tmp/references.txt' },
@@ -617,6 +684,7 @@ describe('pushArgumentsForInvocations', () => {
 		| 'cache'
 		| 'store'
 		| 'ttl'
+		| 'permanent'
 		| 'retain'
 		| 'wait'
 		| 'waitTimeout'
@@ -626,12 +694,14 @@ describe('pushArgumentsForInvocations', () => {
 		| 'referenceSource'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 	> = {
 		url: new URL('https://cache.example.test'),
 		audience: '',
 		cache: { kind: 'default' },
 		store: '',
 		ttl: '',
+		permanent: false,
 		retain: true,
 		wait: true,
 		waitTimeout: '',
@@ -640,7 +710,8 @@ describe('pushArgumentsForInvocations', () => {
 		referencePathsFile: '/tmp/references.txt',
 		referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
 		runRoot: 'github:owner/repo/_cupboard-run/12345/app',
-		runRootTtl: '24h'
+		runRootTtl: '24h',
+		runRootPermanent: false
 	};
 
 	it('builds a single push when there is one invocation', () => {
@@ -810,8 +881,9 @@ describe('pathsMissingGraceDeadline', () => {
 		expect(pathsMissingGraceDeadline(summaryWithPaths([]))).toStrictEqual([]);
 	});
 
-	// A path with no grace fact indicates a cache-level policy failure. Exclude
-	// it from the per-path deadline failures and detect it with `hasUngracedPath`.
+	// A path with no grace fact indicates that the cache has no configured grace.
+	// Exclude it from the per-path deadline failures and detect it with
+	// `hasUngracedPath`.
 	it('reports a path whose grace fact is empty as ungraced, not per-path', () => {
 		const summary = summaryWithPaths([
 			{ storePathHash: storePathHashB, outcome: 'committed', grace: {} }

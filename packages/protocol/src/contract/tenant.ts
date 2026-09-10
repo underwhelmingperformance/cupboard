@@ -18,9 +18,9 @@ import { verifyContract } from './verify.ts';
  * CLI both derive their implementations from this contract.
  */
 export const tenantContract = {
+	policies: policiesContract,
 	caches: cachesContract,
 	keys: keysContract,
-	policies: policiesContract,
 	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,

@@ -2,33 +2,21 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import {
-	cacheNameSchema,
-	graceSecondsSchema,
-	ttlSecondsSchema
-} from '@cupboard/nix-store/scalars';
+import { graceSecondsSchema } from '@cupboard/nix-store/scalars';
 import {
 	type GracePolicyListResponse,
 	type GracePolicyRemoveResponseInput,
-	type GracePolicySummary,
-	type RetentionPolicyAddBodyInput,
 	retentionPolicyListResponseSchema,
-	type RetentionPolicyRemoveResponseInput,
-	retentionPolicySummarySchema
+	type RetentionPolicyRemoveResponseInput
 } from '@cupboard/protocol/retention';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import { recordingCacheScopedClient } from '../client/cache-scoped.test-support.ts';
-
 import {
 	type PolicyClient,
-	runGraceCoverage,
-	runGracePolicyAdd,
 	runGracePolicyList,
 	runGracePolicyRemove,
-	runPolicyAdd,
 	runPolicyList,
 	runPolicyRemove
 } from './policy.ts';
@@ -36,23 +24,9 @@ import {
 function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 	return {
 		list: () => Promise.resolve({ policies: [] }),
-		add: (body) =>
-			Promise.resolve(
-				retentionPolicySummarySchema.parse({ id: 'p1', ...body })
-			),
 		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		graceList: () => Promise.resolve({ policies: [] }),
-		graceAdd: (body) =>
-			Promise.resolve({
-				id: 'g1',
-				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-				...body,
-				graceSeconds: graceSecondsSchema.parse(body.graceSeconds)
-			}),
 		graceRemove: ({ id }) => Promise.resolve({ id, removed: false }),
-		graceCoverage: recordingCacheScopedClient(() =>
-			Promise.resolve({ covered: false as const })
-		),
 		...overrides
 	};
 }
@@ -91,50 +65,6 @@ describe('runPolicyList', () => {
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
 			infos: ['No retention policies.']
-		});
-	});
-});
-
-describe('runPolicyAdd', () => {
-	it('builds a cache-scoped body and reports the policy', async () => {
-		const calls: RetentionPolicyAddBodyInput[] = [];
-		const results: ResultRow[][] = [];
-		const summary = retentionPolicySummarySchema.parse({
-			id: 'p1',
-			scope: 'cache',
-			cache: { kind: 'named', name: 'builds' },
-			ttlSeconds: 1_209_600
-		});
-
-		await runPolicyAdd(
-			'cache',
-			'builds',
-			ttlSecondsSchema.parse(1_209_600),
-			reporter(results),
-			{
-				add(body) {
-					calls.push(body);
-					return Promise.resolve(summary);
-				}
-			}
-		);
-
-		expect({ calls, results }).toStrictEqual({
-			calls: [
-				{
-					scope: 'cache',
-					cache: { kind: 'named', name: 'builds' },
-					ttlSeconds: 1_209_600
-				}
-			],
-			results: [
-				[
-					{ label: 'Policy', value: 'p1' },
-					{ label: 'Scope', value: 'cache' },
-					{ label: 'Cache', value: 'builds' },
-					{ label: 'TTL (seconds)', value: '1,209,600' }
-				]
-			]
 		});
 	});
 });
@@ -237,49 +167,6 @@ describe('runGracePolicyList', () => {
 	});
 });
 
-describe('runGracePolicyAdd', () => {
-	it.each([
-		{
-			name: 'a named prefix',
-			cachePrefix: 'pr-',
-			graceSeconds: graceSecondsSchema.parse(86_400),
-			prefixRow: { label: 'Cache prefix', value: 'pr-' },
-			graceRow: { label: 'Grace (seconds)', value: '86,400' }
-		},
-		{
-			name: 'the tenant-wide default prefix',
-			cachePrefix: '',
-			graceSeconds: graceSecondsSchema.parse(0),
-			prefixRow: { label: 'Cache prefix', value: '(all caches)' },
-			graceRow: { label: 'Grace (seconds)', value: '0' }
-		}
-	])(
-		'builds the body and reports the policy for $name',
-		async ({ cachePrefix, graceSeconds, prefixRow, graceRow }) => {
-			const calls: { cachePrefix: string; graceSeconds: number }[] = [];
-			const results: ResultRow[][] = [];
-			const summary: GracePolicySummary = {
-				id: 'g1',
-				cachePrefix,
-				graceSeconds,
-				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-			};
-
-			await runGracePolicyAdd(cachePrefix, graceSeconds, reporter(results), {
-				graceAdd(body) {
-					calls.push(body);
-					return Promise.resolve(summary);
-				}
-			});
-
-			expect({ calls, results }).toStrictEqual({
-				calls: [{ cachePrefix, graceSeconds }],
-				results: [[{ label: 'Policy', value: 'g1' }, prefixRow, graceRow]]
-			});
-		}
-	);
-});
-
 describe('runGracePolicyRemove', () => {
 	it('removes a grace policy and reports the outcome once confirmed', async () => {
 		const calls: { id: string }[] = [];
@@ -326,52 +213,6 @@ describe('runGracePolicyRemove', () => {
 		}).toStrictEqual({
 			results: [],
 			cancellations: ['The retention grace policy was left in place.']
-		});
-	});
-});
-
-describe('runGraceCoverage', () => {
-	it.each([
-		{
-			name: 'a covered cache with its resolved grace',
-			coverage: {
-				covered: true as const,
-				graceSeconds: graceSecondsSchema.parse(86_400)
-			},
-			rows: [
-				{ label: 'Cache', value: 'builds' },
-				{ label: 'Covered', value: 'yes' },
-				{ label: 'Grace (seconds)', value: '86,400' }
-			]
-		},
-		{
-			name: 'an uncovered cache without a grace row',
-			coverage: { covered: false as const },
-			rows: [
-				{ label: 'Cache', value: 'builds' },
-				{ label: 'Covered', value: 'no' }
-			]
-		}
-	])('reports $name', async ({ coverage, rows }) => {
-		const results: ResultRow[][] = [];
-		const graceCoverage = recordingCacheScopedClient(() =>
-			Promise.resolve(coverage)
-		);
-
-		await runGraceCoverage(
-			{ kind: 'named', name: cacheNameSchema.parse('builds') },
-			reporter(results),
-			policyClient({ graceCoverage })
-		);
-
-		expect({ requested: graceCoverage.calls, results }).toStrictEqual({
-			requested: [
-				{
-					cache: { kind: 'named', name: 'builds' },
-					input: { cacheName: 'builds' }
-				}
-			],
-			results: [rows]
 		});
 	});
 });

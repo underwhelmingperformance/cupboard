@@ -1,5 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
 	uploadCommitDecisionSchema,
 	uploadNegotiateResponseSchema
@@ -358,7 +360,13 @@ describe('commit batching', () => {
 	it('attaches every path of a batched session to the bound run root, across flushes', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('batch-attach');
-		const attachRoot = { name: 'ci/run-1', ttlSeconds: 3600 };
+		const attachRoot: {
+			readonly name: string;
+			readonly retention: RootRetentionRequest;
+		} = {
+			name: 'ci/run-1',
+			retention: { kind: 'duration', seconds: ttlSecondsSchema.parse(3600) }
+		};
 		const paths = ['a', 'b', 'c', 'd'].map((letter, index) =>
 			uploadMetadata({
 				name: `batch-attach-${String(index)}`,
@@ -515,7 +523,12 @@ async function drivePagedBurst(server: string): Promise<{
 				})
 				.from(narInfos)
 				.all()
-				.map((row) => [row.storePathHash, row.generation] as const)
+				.map(
+					(row): readonly [typeof row.storePathHash, typeof row.generation] => [
+						row.storePathHash,
+						row.generation
+					]
+				)
 		);
 		const pipeline = pipelineFor(instance.context);
 		const before = counting.statementsSent();
