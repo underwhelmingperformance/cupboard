@@ -11,9 +11,10 @@ import {
 import type { R2CredentialCheck } from '@cupboard/protocol/reports';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { SignupResponse } from '@cupboard/protocol/signup';
-import type {
-	MembershipRebuildResponse,
-	TenantSummary
+import {
+	defaultReadUser,
+	type MembershipRebuildResponse,
+	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ProgressHandle, StepLog } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
@@ -63,6 +64,7 @@ interface ScriptedUi {
 	readonly warnings: string[];
 	readonly successes: string[];
 	readonly infos: string[];
+	readonly menuMessages: string[];
 }
 
 const defaultApiCalls: ApiCall[] = [];
@@ -94,6 +96,7 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 	const warnings: string[] = [];
 	const successes: string[] = [];
 	const infos: string[] = [];
+	const menuMessages: string[] = [];
 	const facts: string[] = [];
 
 	const ui: DeployUi = {
@@ -125,8 +128,9 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		note: () => {
 			unscriptedInteractiveCalls.push({ method: 'note' });
 		},
-		menu: (_message, entries) => {
+		menu: (message, entries) => {
 			uiCalls.push({ method: 'menu' });
+			menuMessages.push(message);
 			const taken =
 				remainingMenuChoices.length > 0 ? [remainingMenuChoices.shift()] : [];
 			const [scripted] = z.array(z.string().optional()).length(1).parse(taken);
@@ -287,7 +291,7 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		})
 	};
 
-	return { ui, uiCalls, warnings, successes, infos };
+	return { ui, uiCalls, warnings, successes, infos, menuMessages };
 }
 
 type ApiCall =
@@ -612,7 +616,9 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		admin: claimable,
 		buildVersion: 'v-new',
 		claimSecret: { kind: 'none' },
+		cacheAccess: 'public',
 		r2: { kind: 'fresh' },
+		readPassword: () => readPassword,
 		clientFactory: client.factory,
 		cacheSession: client.cacheSession,
 		sleep: () => Promise.resolve()
@@ -661,6 +667,9 @@ function unreachableShape(outcome: OnboardOutcome): {
 		lastProbe: unreachable.lastProbe
 	};
 }
+
+const readPassword = 'A'.repeat(43);
+const read = { user: defaultReadUser, password: readPassword };
 
 const keptR2 = {
 	kind: 'kept',
@@ -748,7 +757,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
 			signupBodies: [{ subject_token: 'id-token-1' }],
@@ -758,7 +768,8 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience
+					ownerAudience: owner.audience,
+					read
 				}
 			],
 			cachedSessions: [
@@ -795,7 +806,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
 			signupBodies: [{ subject_token: 'id-token-1' }],
@@ -805,7 +817,8 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience
+					ownerAudience: owner.audience,
+					read
 				}
 			],
 			cachedSessions: [
@@ -904,7 +917,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			signupBodies: [{ subject_token: 'id-token-1', claim_secret: 'hunter2' }],
 			infos: [
@@ -975,7 +989,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
 			createdBodies: [
@@ -984,7 +999,8 @@ describe('onboardDeployment', () => {
 					defaultCacheAccess: 'public',
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience
+					ownerAudience: owner.audience,
+					read
 				}
 			],
 			controlCheckTokens: ['admin-jwt']
@@ -1088,7 +1104,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			probed: ['a'.repeat(32), goodKey],
 			apiCalls: [
@@ -1138,7 +1155,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds',
 				cacheUrl: new URL('https://cache.example.com/t/builds'),
-				publicKey: 'pk-1'
+				publicKey: 'pk-1',
+				read
 			} satisfies OnboardOutcome,
 			infos: [
 				'Create an R2 API token (Object Read & Write on the cache bucket) at\n' +
@@ -1172,7 +1190,8 @@ describe('onboardDeployment', () => {
 				url: 'https://cache.example.com',
 				slug: 'builds-2',
 				cacheUrl: new URL('https://cache.example.com/t/builds-2'),
-				publicKey: 'pk-2'
+				publicKey: 'pk-2',
+				read
 			} satisfies OnboardOutcome,
 			warnings: ['"builds" is already taken; choose another.']
 		});
@@ -1265,6 +1284,94 @@ describe('onboardDeployment', () => {
 				slugs: ['laney', 'builds']
 			} satisfies OnboardOutcome,
 			membershipRebuildTokens: ['admin-jwt']
+		});
+	});
+
+	it('asks who may read the first cache, and creates it with a credential', async () => {
+		const { ui, menuMessages } = scriptedUi({
+			slugs: ['builds'],
+			menuChoices: ['private']
+		});
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			cacheAccess: undefined
+		});
+
+		expect({
+			menuMessages,
+			createdBodies: client.createdBodies
+		}).toStrictEqual({
+			menuMessages: ['Who may read from this cache?'],
+			createdBodies: [
+				{
+					id: 'builds',
+					defaultCacheAccess: 'private',
+					ownerIssuer: owner.issuer,
+					ownerSubject: owner.subject,
+					ownerAudience: owner.audience,
+					read
+				}
+			]
+		});
+	});
+
+	it('takes the requested access without asking', async () => {
+		const { ui, menuMessages } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			cacheAccess: 'private'
+		});
+
+		expect({
+			menuMessages,
+			createdBodies: client.createdBodies
+		}).toStrictEqual({
+			menuMessages: [],
+			createdBodies: [
+				{
+					id: 'builds',
+					defaultCacheAccess: 'private',
+					ownerIssuer: owner.issuer,
+					ownerSubject: owner.subject,
+					ownerAudience: owner.audience,
+					read
+				}
+			]
+		});
+	});
+
+	it('stops with the claim intact when the access prompt is cancelled', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'], menuChoices: [undefined] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]]
+		});
+
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				cacheAccess: undefined
+			})
+		).toStrictEqual({
+			kind: 'cancelled',
+			url: 'https://cache.example.com'
 		});
 	});
 

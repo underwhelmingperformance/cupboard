@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import { tenantUrl } from '@cupboard/nix-store/cache-url';
-import { cacheNamePattern } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cacheNamePattern
+} from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	ConfiguredInstanceSummary,
@@ -14,11 +17,13 @@ import type {
 	ControlCheckReport,
 	R2CredentialCheck
 } from '@cupboard/protocol/reports';
-import type {
-	MembershipRebuildResponse,
-	TenantCreateBodyInput,
-	TenantListResponse,
-	TenantSummary
+import {
+	defaultReadUser,
+	type MembershipRebuildResponse,
+	type TenantCreateBodyInput,
+	type TenantListResponse,
+	type TenantReadCredential,
+	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
@@ -34,6 +39,7 @@ import { controlRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
+import { generateReadPassword } from '../read-user.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
 import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
@@ -112,6 +118,11 @@ export type OnboardOutcome =
 			readonly slug: string;
 			readonly cacheUrl: URL;
 			readonly publicKey: string;
+			/**
+			The credential created with the tenant, absent when the deployment
+			already had a cache and this run created nothing.
+			*/
+			readonly read?: TenantReadCredential;
 	  }
 	| { readonly kind: 'no-admin'; readonly url: string }
 	| {
@@ -220,6 +231,12 @@ export interface OnboardOptions {
 	readonly domain: string | undefined;
 	readonly instanceName?: InstanceName;
 	readonly admin: OnboardAdmin;
+	/**
+	 * Read access for the first cache, from `cupboard init --access`. When it
+	 * is absent the onboarding asks, so no cache is created without an
+	 * explicit choice.
+	 */
+	readonly cacheAccess: CacheAccessMode | undefined;
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
@@ -236,6 +253,7 @@ export interface OnboardOptions {
 		target: URL
 	) => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
+	readonly readPassword?: () => string;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
 }
@@ -428,22 +446,28 @@ export async function onboardDeployment(
 	}
 
 	let slug: string;
+	let created: FirstTenant | undefined;
 	const sole = existing[0];
 
 	if (sole === undefined) {
-		const tenant = await createFirstTenant(
+		created = await createFirstTenant(
 			ui,
 			client,
 			url,
 			claim.token,
-			admin.owner
+			admin.owner,
+			options.cacheAccess,
+			{
+				user: defaultReadUser,
+				password: (options.readPassword ?? generateReadPassword)()
+			}
 		);
 
-		if (tenant === undefined) {
+		if (created === undefined) {
 			return { kind: 'cancelled', url };
 		}
 
-		slug = tenant.id;
+		slug = created.tenant.id;
 	} else {
 		ui.info(`The cache "${sole.id}" already exists; nothing to create.`);
 		slug = sole.id;
@@ -495,7 +519,8 @@ export async function onboardDeployment(
 		url,
 		slug,
 		cacheUrl,
-		publicKey: key.value
+		publicKey: key.value,
+		...(created !== undefined && { read: created.read })
 	};
 }
 
@@ -846,18 +871,33 @@ async function claimAdmin(
 }
 
 /**
- * Prompts for a slug and creates the tenant. The server decides ownership
- * because another caller can claim the slug before this request arrives. If the
- * server reports a conflict, it prompts again. Recreating an identical tenant
- * is idempotent, so a rerun with the same slug returns the existing tenant.
+A tenant this run created, with the credential created alongside it.
+*/
+interface FirstTenant {
+	readonly tenant: TenantSummary;
+	readonly read: TenantReadCredential;
+}
+
+/**
+ * Prompts for a slug and, unless the command line supplied one, for the
+ * cache's read access, then creates the tenant with `read` as its fallback
+ * read credential. The server decides ownership because another caller can
+ * claim the slug before this request arrives. A conflict re-prompts for the
+ * slug and keeps both the access already chosen and the same credential.
+ * Recreating an identical tenant is idempotent, so a rerun with the same slug
+ * returns the existing tenant.
  */
 async function createFirstTenant(
 	ui: DeployUi,
 	client: OnboardClient,
 	url: string,
 	token: string,
-	owner: OwnerBinding
-): Promise<TenantSummary | undefined> {
+	owner: OwnerBinding,
+	requested: CacheAccessMode | undefined,
+	read: TenantReadCredential
+): Promise<FirstTenant | undefined> {
+	let chosen = requested;
+
 	for (;;) {
 		const slug = await ui.prefixedText({
 			message: 'Choose a slug for the first cache',
@@ -869,16 +909,27 @@ async function createFirstTenant(
 			return undefined;
 		}
 
+		const access = chosen ?? (await chooseCacheAccess(ui));
+
+		if (access === undefined) {
+			return undefined;
+		}
+
+		chosen = access;
+
 		try {
-			return await ui.reporter().phase(`Creating ${slug}`, () =>
+			const tenant = await ui.reporter().phase(`Creating ${slug}`, () =>
 				client.createTenant(token, {
 					id: slug,
-					defaultCacheAccess: 'public',
+					defaultCacheAccess: access,
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience
+					ownerAudience: owner.audience,
+					read
 				})
 			);
+
+			return { tenant, read };
 		} catch (error) {
 			if (error instanceof ORPCError && error.status === conflictStatusCode) {
 				ui.warn(`"${slug}" is already taken; choose another.`);
@@ -888,6 +939,28 @@ async function createFirstTenant(
 			throw error;
 		}
 	}
+}
+
+/**
+ * Asks who may read the first cache. Both modes are described on screen, so
+ * the operator sees what public means before choosing it. Private is listed
+ * first because the menu opens on its first entry, and a hurried return
+ * should not disclose the cache. Returns undefined when the prompt is
+ * cancelled or the run is not interactive.
+ */
+function chooseCacheAccess(ui: DeployUi): Promise<CacheAccessMode | undefined> {
+	return ui.menu<CacheAccessMode>('Who may read from this cache?', [
+		{
+			value: 'private',
+			label: 'Only clients with a read credential',
+			hint: 'private'
+		},
+		{
+			value: 'public',
+			label: 'Anyone who learns the URL',
+			hint: 'public'
+		}
+	]);
 }
 
 async function pollProbe<T>(
