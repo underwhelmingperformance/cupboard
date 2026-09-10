@@ -12,7 +12,7 @@ export const criticalSectionBudgetMs = 25_000;
 // Metadata calls always use the per-call limit. R2 byte transfers may take
 // longer outside a critical section and inherit only the collective budget
 // when they run inside one.
-const perCallCapMs = 15_000;
+export const perCallCapMs = 15_000;
 
 interface DeadlineScope {
 	readonly deadline: number;
