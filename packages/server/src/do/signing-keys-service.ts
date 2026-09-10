@@ -3,12 +3,12 @@ import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	narInfoGenerationSchema,
 	type NixFingerprint,
-	referencesSchema,
 	type SigningKeyGeneration,
 	signingKeyGenerationSchema,
 	type SigningKeyId,
 	signingKeyIdSchema,
 	storedCacheSchema,
+	storedReferencesSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
@@ -497,7 +497,7 @@ export class SigningKeysService {
 			const rendered: { row: (typeof rows)[number]; sigs: string[] }[] = [];
 
 			for (const narInfoRow of rows) {
-				const references = referencesSchema.parse(
+				const references = storedReferencesSchema.parse(
 					JSON.parse(narInfoRow.referencesJson) as unknown
 				);
 				const existing = storedSignaturesSchema.parse(
