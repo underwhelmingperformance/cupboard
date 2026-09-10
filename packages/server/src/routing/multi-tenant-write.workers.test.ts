@@ -39,8 +39,6 @@ import {
 } from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
-const acme = tenantIdSchema.parse('acme');
-
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {
 		return -1;
@@ -92,11 +90,15 @@ describe('multi-tenant writes', () => {
 		await clearBlobStorage();
 	});
 
+	// A delivered alarm can outlive a storage purge. Keep each test on a distinct
+	// tenant object so an alarm from an earlier test cannot initialise its successor.
+
 	it('lets a named tenant push a path that serves only under its own prefix', async () => {
-		const acmeIssuer = await provisionNamedTenant('acme');
+		const tenant = tenantIdSchema.parse('write-acme');
+		const issuer = await provisionNamedTenant(tenant);
 		const token = await issueTokenForTenant(
-			testServerFor('acme'),
-			acmeIssuer,
+			testServerFor(tenant),
+			issuer,
 			cacheWriteGrants()
 		);
 		const nar = await verifiableNar('acme-write');
@@ -109,10 +111,10 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPathToTenant(acme, token, metadata, nar);
+		await pushPathToTenant(tenant, token, metadata, nar);
 
 		const served = await handlerFetch(
-			`/t/acme/${metadata.storePathHash}.narinfo`
+			`/t/${tenant}/${metadata.storePathHash}.narinfo`
 		);
 		const atFixture = await handlerFetch(
 			`/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`
@@ -128,8 +130,8 @@ describe('multi-tenant writes', () => {
 			atFixture: StatusCodes.NOT_FOUND,
 			edges: [
 				{
-					tenant: 'acme',
-					cache: '',
+					tenant,
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 0,
 					narHash: nar.narHash,
@@ -138,7 +140,7 @@ describe('multi-tenant writes', () => {
 			],
 			presence: [
 				{
-					tenant: 'acme',
+					tenant,
 					narHash: nar.narHash,
 					fileSize: nar.narBytes.byteLength
 				}
@@ -147,10 +149,11 @@ describe('multi-tenant writes', () => {
 	});
 
 	it('dedups a NAR pushed by two tenants into one shared blob with per-tenant edges', async () => {
-		const acmeIssuer = await provisionNamedTenant('acme');
-		const acmeToken = await issueTokenForTenant(
-			testServerFor('acme'),
-			acmeIssuer,
+		const tenant = tenantIdSchema.parse('shared-acme');
+		const issuer = await provisionNamedTenant(tenant);
+		const tenantToken = await issueTokenForTenant(
+			testServerFor(tenant),
+			issuer,
 			cacheWriteGrants()
 		);
 		const fixtureToken = await initialise();
@@ -165,7 +168,7 @@ describe('multi-tenant writes', () => {
 		});
 
 		await pushPath(fixtureToken, metadata, undefined, nar);
-		await pushPathToTenant(acme, acmeToken, metadata, nar);
+		await pushPathToTenant(tenant, tenantToken, metadata, nar);
 
 		const presence = await tenantBlobRows();
 		const edges = await blobReferenceRows();
@@ -177,17 +180,18 @@ describe('multi-tenant writes', () => {
 			edgeTenants: edges.map((edge) => edge.tenant).toSorted(byCodeUnit)
 		}).toStrictEqual({
 			sharedBlobs: [{ narHash: nar.narHash }],
-			presenceTenants: ['acme', fixtureTenant],
+			presenceTenants: [fixtureTenant, tenant].toSorted(byCodeUnit),
 			presenceSizes: [nar.narBytes.byteLength, nar.narBytes.byteLength],
-			edgeTenants: ['acme', fixtureTenant]
+			edgeTenants: [fixtureTenant, tenant].toSorted(byCodeUnit)
 		});
 	});
 
 	it('reports blob totals scoped to the tenant', async () => {
-		const acmeIssuer = await provisionNamedTenant('acme');
-		const acmeToken = await issueTokenForTenant(
-			testServerFor('acme'),
-			acmeIssuer,
+		const tenant = tenantIdSchema.parse('stats-acme');
+		const issuer = await provisionNamedTenant(tenant);
+		const tenantToken = await issueTokenForTenant(
+			testServerFor(tenant),
+			issuer,
 			adminGrants()
 		);
 		const fixtureToken = await initialise();
@@ -211,7 +215,7 @@ describe('multi-tenant writes', () => {
 		});
 
 		await pushPath(fixtureToken, fixtureMetadata, undefined, fixtureNar);
-		await pushPathToTenant(acme, acmeToken, acmeMetadata, acmeNar);
+		await pushPathToTenant(tenant, tenantToken, acmeMetadata, acmeNar);
 
 		await expectStats(fixtureToken, {
 			storePaths: 1,
@@ -219,7 +223,7 @@ describe('multi-tenant writes', () => {
 			pendingUploads: 0,
 			totalFileSize: fixtureNar.narBytes.byteLength
 		});
-		await expectStatsForTenant(acme, acmeToken, {
+		await expectStatsForTenant(tenant, tenantToken, {
 			storePaths: 1,
 			narBlobs: 1,
 			pendingUploads: 0,
@@ -228,10 +232,11 @@ describe('multi-tenant writes', () => {
 	});
 
 	it('drives a named tenant deferred upload to servable from the scheduled handler', async () => {
-		const acmeIssuer = await provisionNamedTenant('acme');
+		const tenant = tenantIdSchema.parse('deferred-acme');
+		const issuer = await provisionNamedTenant(tenant);
 		const token = await issueTokenForTenant(
-			testServerFor('acme'),
-			acmeIssuer,
+			testServerFor(tenant),
+			issuer,
 			cacheWriteGrants()
 		);
 		const nar = await verifiableNar('acme-deferred');
@@ -244,14 +249,14 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		const uploadId = await stageDeferredForTenant(acme, token, metadata, nar);
-		const whilePending = await tenantUploadStatus(acme, token, uploadId);
+		const uploadId = await stageDeferredForTenant(tenant, token, metadata, nar);
+		const whilePending = await tenantUploadStatus(tenant, token, uploadId);
 
 		await runQueuedMaintenanceTick();
 
-		const afterCron = await tenantUploadStatus(acme, token, uploadId);
+		const afterCron = await tenantUploadStatus(tenant, token, uploadId);
 		const served = await handlerFetch(
-			`/t/acme/${metadata.storePathHash}.narinfo`
+			`/t/${tenant}/${metadata.storePathHash}.narinfo`
 		);
 
 		expect({ whilePending, afterCron, served: served.status }).toStrictEqual({
@@ -264,41 +269,41 @@ describe('multi-tenant writes', () => {
 	it('maintains the most-overdue tenants first, covering the fleet over ticks', async () => {
 		// All three tenants have a null maintenance timestamp. Suspend the fixture
 		// tenant so it does not enter the scheduler's tie-break.
-		await stageDeferredForNewTenant('acme');
-		await stageDeferredForNewTenant('beta');
-		await stageDeferredForNewTenant('gamma');
+		await stageDeferredForNewTenant('fleet-a');
+		await stageDeferredForNewTenant('fleet-b');
+		await stageDeferredForNewTenant('fleet-c');
 		await suspendTenant(fixtureTenant);
 
 		await runMaintenanceBatch(rootLogger(), env, 2);
-		await verifyTenants(['acme', 'beta']);
+		await verifyTenants(['fleet-a', 'fleet-b']);
 		const afterFirst = {
-			acme: await servedAt('acme'),
-			beta: await servedAt('beta'),
-			gamma: await servedAt('gamma'),
-			acmeStamped: await wasTenantMaintained('acme'),
-			gammaStamped: await wasTenantMaintained('gamma')
+			first: await servedAt('fleet-a'),
+			second: await servedAt('fleet-b'),
+			third: await servedAt('fleet-c'),
+			firstStamped: await wasTenantMaintained('fleet-a'),
+			thirdStamped: await wasTenantMaintained('fleet-c')
 		};
 
-		// Gamma still has a null timestamp, so the second bounded tick must process
-		// it before acme and beta.
+		// The third tenant still has a null timestamp, so the second bounded tick
+		// must process it before the first and second tenants.
 		await runMaintenanceBatch(rootLogger(), env, 2);
-		await verifyTenants(['gamma']);
-		const gammaAfterSecond = await servedAt('gamma');
+		await verifyTenants(['fleet-c']);
+		const thirdAfterSecond = await servedAt('fleet-c');
 
 		expect({
 			afterFirst,
-			gammaAfterSecond,
-			gammaStampedAfterSecond: await wasTenantMaintained('gamma')
+			thirdAfterSecond,
+			thirdStampedAfterSecond: await wasTenantMaintained('fleet-c')
 		}).toStrictEqual({
 			afterFirst: {
-				acme: StatusCodes.OK,
-				beta: StatusCodes.OK,
-				gamma: StatusCodes.NOT_FOUND,
-				acmeStamped: true,
-				gammaStamped: false
+				first: StatusCodes.OK,
+				second: StatusCodes.OK,
+				third: StatusCodes.NOT_FOUND,
+				firstStamped: true,
+				thirdStamped: false
 			},
-			gammaAfterSecond: StatusCodes.OK,
-			gammaStampedAfterSecond: true
+			thirdAfterSecond: StatusCodes.OK,
+			thirdStampedAfterSecond: true
 		});
 	});
 });

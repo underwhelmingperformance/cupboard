@@ -227,7 +227,9 @@ function withHarness(
 			const server = await CupboardTestServer.start(directory);
 
 			try {
-				const raw = new CupboardClient(server.tenantUrl);
+				const raw = new CupboardClient(server.tenantUrl, fetch, {
+					kind: 'default'
+				});
 				const token = await server.ownerAdminToken();
 				const publicKey = await raw.publicKey();
 

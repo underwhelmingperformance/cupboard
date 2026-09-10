@@ -1,7 +1,7 @@
 import {
+	type CacheScope,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
@@ -14,6 +14,7 @@ import { z } from 'zod';
 
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { isPushIdValid } from '../blob/push-id.ts';
+import { cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty } from '../do/bulk.ts';
 import { jsonValueLists } from '../do/json-list.ts';
@@ -45,7 +46,7 @@ export async function computeNegotiateHints(
 	request: Request,
 	env: Env,
 	tenant: TenantId,
-	cache: StoredCache | undefined
+	cache: CacheScope
 ): Promise<NegotiateHints | undefined> {
 	if (
 		parseAuthenticationHeader(
@@ -106,7 +107,7 @@ export async function computeNegotiateHints(
 async function readHints(
 	database: ReturnType<typeof drizzleD1<typeof d1Schema>>,
 	tenant: TenantId,
-	cache: StoredCache | undefined,
+	cache: CacheScope,
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {
@@ -136,37 +137,36 @@ async function readHints(
 				)
 			)
 	);
-	const edgeQueries =
-		cache === undefined
-			? []
-			: jsonValueLists(storePathHashes).map((list) =>
-					database
-						.select({
-							storePathHash: d1Schema.blobReference.storePathHash,
-							generation: d1Schema.blobReference.generation,
-							narHash: d1Schema.blobReference.narHash
-						})
-						.from(d1Schema.blobReference)
-						.where(
-							and(
-								eq(d1Schema.blobReference.tenant, tenant),
-								eq(d1Schema.blobReference.cache, cache),
-								inArray(d1Schema.blobReference.storePathHash, list)
-							)
-						)
-				);
+	const edgeQueries = jsonValueLists(storePathHashes).map((list) =>
+		database
+			.select({
+				storePathHash: d1Schema.blobReference.storePathHash,
+				generation: d1Schema.blobReference.generation,
+				narHash: d1Schema.blobReference.narHash
+			})
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, tenant),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache
+					),
+					inArray(d1Schema.blobReference.storePathHash, list)
+				)
+			)
+	);
 
 	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
 		batchNonEmpty(database, blobStateQueries),
 		batchNonEmpty(database, ownedQueries),
-		cache === undefined
-			? Promise.resolve(undefined)
-			: batchNonEmpty(database, edgeQueries)
+		batchNonEmpty(database, edgeQueries)
 	]);
 
 	return {
 		blobStates: blobStatePages.flat(),
 		ownedNarHashes: ownedPages.flat().map((row) => row.narHash),
-		committedEdges: edgePages?.flat()
+		committedEdges: edgePages.flat()
 	};
 }

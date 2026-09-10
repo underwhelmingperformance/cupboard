@@ -762,17 +762,21 @@ cache.
     `machine <host> login <user> password <pass>` to a `netrc-file`. The
     `config` command emits the netrc snippet alongside the substituter line when
     a credential is configured.
-  - Cached read responses key on the URL only, so private reads stay on the
-    uncached control entrypoint rather than forwarding authenticated bodies to
-    the cache-owning tenant entrypoint. Keying cache entries by credential is
-    deferred unless a later measured need justifies it.
-  - Per-cache private mode is deferred; this is a global toggle first.
-  - Superseded: per-cache privacy is a namespace, not a mode. A private cache
-    has its own identity (stored name `private/<name>`, selector
-    `_private-<name>`) and is read under `/t/<tenant>/private-cache/<name>/`, so
-    visibility is fixed at creation and no cache is ever switched between the
-    two. The tenant-wide toggle described above still governs the public
-    namespace.
+  - Cached read responses key on the URL only, so a read that needs a credential
+    stays on the uncached control entrypoint rather than forwarding an
+    authenticated body to the cache-owning tenant entrypoint. Whether a read may
+    be stored now follows the addressed cache's own access rather than a
+    tenant-wide read mode, which excludes a private cache under a tenant that
+    reads publicly. Keying cache entries by credential is deferred unless a
+    later measured need justifies it.
+  - Superseded: access is a property of each cache, not a namespace and not a
+    tenant-wide toggle. It is recorded on the cache's identity row and changed
+    with `cupboard cache set-access`, so a cache moves between public and
+    private without becoming a different cache. One name means one cache:
+    `/cache/<name>` reaches it whichever access it has, and the server takes
+    public-or-private from the cache rather than from the address. The stored
+    `private/<name>` form survives only as the legacy mirror the expansion
+    writes, and the contraction drops it.
 
 - [x] Support one or more named cache paths for organisation:
   - [x] `/cache/:cacheName/nix-cache-info`

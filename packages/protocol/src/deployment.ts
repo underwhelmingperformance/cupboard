@@ -31,12 +31,14 @@ export function localStep(value: number): LocalStep {
  * next step number and raises this constant. Step 1 gives every cache an
  * identity and fills the `cache_id` of the rows that still refer to a cache by
  * name alone. A migration cannot do that work, because both builds keep writing
- * such rows while the release is rolling out.
+ * such rows while the release is rolling out. Step 2 moves a private cache's
+ * stored objects off the keys its old `private/`-prefixed name gave them, which
+ * a migration cannot do either, because those objects are in R2.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(1);
+export const currentLocalStep: LocalStep = localStep(2);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a
@@ -52,28 +54,6 @@ export const deploymentPhaseNameSchema = z.enum([
 	'native-reads'
 ]);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
-
-// The phases in the order a release records them. A build compares phases to
-// decide whether the state a later phase requires is in place yet.
-const phaseOrder: readonly DeploymentPhaseName[] =
-	deploymentPhaseNameSchema.options;
-
-/**
- * Whether the recorded phase has reached the one asked about.
- *
- * A deployment with no phase row has not reached any of them: it was set up
- * before phases existed, so nothing has confirmed the state a phase describes.
- */
-export function hasReachedPhase(
-	recorded: DeploymentPhaseName | undefined,
-	wanted: DeploymentPhaseName
-): boolean {
-	if (recorded === undefined) {
-		return false;
-	}
-
-	return phaseOrder.indexOf(recorded) >= phaseOrder.indexOf(wanted);
-}
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.

@@ -1,11 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
+	type CacheScope,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	type StoredCache,
 	storePathHashSchema,
 	type TenantId,
 	tenantIdSchema
@@ -25,6 +23,8 @@ import {
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	afterGrace,
 	attemptPushToTenant,
@@ -33,8 +33,10 @@ import {
 	cacheWriteGrants,
 	clearBlobStorage,
 	currentNarObjectKey,
+	defaultCache,
 	issueTokenForTenant,
 	isTenantUsagePresent,
+	namedCache,
 	offboardTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
@@ -60,7 +62,6 @@ import { runCronTick, runOffboardBatch } from './scheduled.ts';
 // which the tenant released.
 
 const tenantCounter = { next: 0 };
-const defaultCache: StoredCache = DEFAULT_CACHE;
 
 async function isAdmittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
@@ -111,7 +112,7 @@ async function pushTenantPath(
 
 async function tenantEdges(id: string): Promise<
 	{
-		readonly cache: string;
+		readonly cache: CacheScope;
 		readonly storePathHash: string;
 		readonly generation: number;
 		readonly narHash: string;
@@ -246,7 +247,7 @@ describe('offboarding drain', () => {
 				status: 'offboarding',
 				edges: [
 					{
-						cache: '',
+						cache: defaultCache(),
 						storePathHash: 'b'.repeat(32),
 						generation: 0,
 						narHash: narHashB
@@ -268,14 +269,16 @@ describe('offboarding drain', () => {
 	it('bounds NAR edge deletion by exact captured rows', async () => {
 		const { id } = await provisionedWritingTenant();
 		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const database = drizzleD1(env.CUPBOARD_DB, {
+			schema: { blobReferences: migrationSchema.blobReferences }
+		});
 
 		await database
-			.insert(d1Schema.blobReference)
+			.insert(migrationSchema.blobReferences)
 			.values([
 				{
 					tenant: id,
-					cache: defaultCache,
+					...cacheMigrationColumns(defaultCache(), 'public'),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(0),
 					narHash: nixSha256HashSchema.parse(
@@ -284,7 +287,7 @@ describe('offboarding drain', () => {
 				},
 				{
 					tenant: id,
-					cache: cacheNameSchema.parse('builds'),
+					...cacheMigrationColumns(namedCache('builds'), 'public'),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(1),
 					narHash: nixSha256HashSchema.parse(
@@ -293,7 +296,7 @@ describe('offboarding drain', () => {
 				},
 				{
 					tenant: id,
-					cache: cacheNameSchema.parse('tests'),
+					...cacheMigrationColumns(namedCache('tests'), 'public'),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(2),
 					narHash: nixSha256HashSchema.parse(
@@ -318,7 +321,7 @@ describe('offboarding drain', () => {
 			result: { drained: false },
 			remaining: [
 				{
-					cache: 'builds',
+					cache: namedCache('builds'),
 					storePathHash,
 					generation: 1,
 					narHash: nixSha256HashSchema.parse(
@@ -326,7 +329,7 @@ describe('offboarding drain', () => {
 					)
 				},
 				{
-					cache: 'tests',
+					cache: namedCache('tests'),
 					storePathHash,
 					generation: 2,
 					narHash: nixSha256HashSchema.parse(
@@ -366,7 +369,7 @@ describe('offboarding drain', () => {
 			status: StatusCodes.FORBIDDEN,
 			edges: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					storePathHash: 'a'.repeat(32),
 					generation: 0,
 					narHash

@@ -1,26 +1,24 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	cachePrioritySchema,
-	DEFAULT_CACHE_SELECTOR
+	type CacheAccessMode,
+	cachePrioritySchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
-	contractNameForReuseView,
-	isPrivateReuseView,
-	type ParsedReuseViewSelector,
-	type ParsedReuseViewSetBody,
 	reuseViewDefaultPriority,
 	type ReuseViewListResponse,
+	type ReuseViewName,
 	type ReuseViewRemoveResponse,
 	reuseViewRevisionSchema,
+	type ReuseViewSelector,
+	type ReuseViewSetBody,
 	type ReuseViewSummary,
 	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { eq, sql } from 'drizzle-orm';
+import { inArray, type SQL, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
-import { PrivateViewDefaultSelectorError } from '../errors.ts';
 
 import {
 	reuseViewSummaryFromRow,
@@ -28,11 +26,46 @@ import {
 	type ServerContext
 } from './context.ts';
 import { type JsonRowList, jsonRowLists } from './json-list.ts';
+import {
+	legacyReuseViewKey,
+	legacyReuseViewKeys,
+	legacyReuseViewSelectorRows,
+	reuseViewSelectorRow,
+	reuseViewSelectorsFromRows
+} from './reuse-view-selectors.ts';
 
-// The columns of one selector row, as SQL reads them back from the list.
+/**
+ * A selector row as its insert's list carries it. A list value is text or a
+ * number, so a column the selector's kind leaves unset travels as an empty
+ * string and the statement writes `null` back through `nullif`. Neither a
+ * cache name nor a prefix is ever empty.
+ */
 export interface StoredReuseViewSelector {
-	readonly kind: ParsedReuseViewSelector['kind'];
+	readonly kind: ReuseViewSelector['kind'];
+	readonly cacheName: string;
+	readonly prefix: string;
+}
+
+// The columns of one legacy selector row, as SQL reads them back from the list.
+export interface LegacyStoredReuseViewSelector {
+	readonly kind: 'exact' | 'prefix';
 	readonly pattern: string;
+}
+
+function nullWhenEmpty(value: SQL): SQL {
+	return sql`nullif(${value}, '')`;
+}
+
+export function storedReuseViewSelector(
+	selector: ReuseViewSelector
+): StoredReuseViewSelector {
+	const row = reuseViewSelectorRow(selector);
+
+	return {
+		kind: row.kind,
+		cacheName: row.cacheName ?? '',
+		prefix: row.prefix ?? ''
+	};
 }
 
 /**
@@ -40,12 +73,38 @@ export interface StoredReuseViewSelector {
  * travel as a row list, so the statement binds the same parameters however many
  * a request carries.
  *
+ * `reuse_view_selector_native` numbers its rows itself, so the source supplies
+ * a null id for SQLite to replace.
+ *
  * The parameter test imports this builder and inspects the statement it makes.
  */
 export function reuseViewSelectorInsert(
 	handle: SchemaWriter,
 	view: StoredReuseView,
 	selectors: JsonRowList<StoredReuseViewSelector>
+) {
+	const cacheName = nullWhenEmpty(selectors.column('cacheName'));
+	const prefix = nullWhenEmpty(selectors.column('prefix'));
+
+	return handle
+		.insert(schema.nativeReuseViewSelectors)
+		.select(
+			selectors.insertSource([
+				sql`null`,
+				sql`${view}`,
+				selectors.column('kind'),
+				cacheName,
+				prefix
+			])
+		);
+}
+
+// The legacy rows stay in step with the native ones until the contraction
+// drops them, and their insert binds its list the same way.
+export function legacyReuseViewSelectorInsert(
+	handle: SchemaWriter,
+	view: StoredReuseView,
+	selectors: JsonRowList<LegacyStoredReuseViewSelector>
 ) {
 	return handle
 		.insert(schema.reuseViewSelectors)
@@ -59,40 +118,35 @@ export function reuseViewSelectorInsert(
 }
 
 function selectorSort(
-	left: ParsedReuseViewSelector,
-	right: ParsedReuseViewSelector
+	left: ReuseViewSelector,
+	right: ReuseViewSelector
 ): number {
 	return left.kind === right.kind
-		? byCodeUnit(left.pattern, right.pattern)
+		? byCodeUnit(JSON.stringify(left), JSON.stringify(right))
 		: byCodeUnit(left.kind, right.kind);
 }
 
-// Only an exact selector names the default cache. The empty prefix covers the
-// default cache too, but it means "every cache of this namespace", which a
-// private view may use.
-function hasDefaultCacheSelector(
-	selectors: readonly ParsedReuseViewSelector[]
-): boolean {
-	return selectors.some(
-		(selector) =>
-			selector.kind === 'exact' && selector.pattern === DEFAULT_CACHE_SELECTOR
-	);
+export interface ResolvedReuseView {
+	readonly name: ReuseViewName;
+	readonly access: CacheAccessMode;
+	readonly revision: ReuseViewSummary['revision'];
+	readonly priority: ReuseViewSummary['priority'];
+	readonly selectors: readonly ReuseViewSelector[];
 }
 
 export class ReuseViewAdminService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Compare the complete definition inside setView's transaction so another
-	// writer cannot change it between this read and the subsequent update.
 	private unchangedView(
 		tx: Parameters<Parameters<ServerContext['db']['transaction']>[0]>[0],
-		name: StoredReuseView,
-		body: ParsedReuseViewSetBody
+		name: ReuseViewName,
+		body: ReuseViewSetBody
 	): ReuseViewSummary | undefined {
+		const keys = legacyReuseViewKeys(name);
 		const current = tx
 			.select()
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, name))
+			.where(inArray(schema.reuseViews.name, keys))
 			.get();
 
 		if (current === undefined) {
@@ -101,32 +155,34 @@ export class ReuseViewAdminService {
 
 		const priority = body.priority ?? reuseViewDefaultPriority;
 		const requested = body.selectors.toSorted(selectorSort);
-		const stored = tx
-			.select({
-				kind: schema.reuseViewSelectors.kind,
-				pattern: schema.reuseViewSelectors.pattern
-			})
-			.from(schema.reuseViewSelectors)
-			.where(eq(schema.reuseViewSelectors.view, name))
-			.all()
-			.toSorted(selectorSort);
+		const stored = reuseViewSelectorsFromRows(
+			name,
+			tx
+				.select({
+					kind: schema.nativeReuseViewSelectors.kind,
+					cacheName: schema.nativeReuseViewSelectors.cacheName,
+					prefix: schema.nativeReuseViewSelectors.prefix
+				})
+				.from(schema.nativeReuseViewSelectors)
+				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.all()
+		).toSorted(selectorSort);
 		const isUnchanged =
+			current.access === body.access &&
 			current.priority === priority &&
 			stored.length === requested.length &&
-			stored.every((selector, index) => {
-				const match = requested[index];
-
-				return (
-					selector.kind === match?.kind && selector.pattern === match.pattern
-				);
-			});
+			stored.every(
+				(selector, index) =>
+					JSON.stringify(selector) === JSON.stringify(requested[index])
+			);
 
 		if (!isUnchanged) {
 			return undefined;
 		}
 
 		return {
-			name: contractNameForReuseView(name),
+			name,
+			access: body.access,
 			revision: current.revision,
 			priority,
 			selectors: requested,
@@ -139,16 +195,19 @@ export class ReuseViewAdminService {
 		const views = this.context.db.select().from(schema.reuseViews).all();
 		const selectorRows = this.context.db
 			.select()
-			.from(schema.reuseViewSelectors)
+			.from(schema.nativeReuseViewSelectors)
 			.all();
-		const selectorsByView = new Map<string, ParsedReuseViewSelector[]>();
+		const rowsByView = new Map<string, (typeof selectorRows)[number][]>();
 
 		for (const row of selectorRows) {
-			const selectors = selectorsByView.get(row.view) ?? [];
-
-			selectors.push({ kind: row.kind, pattern: row.pattern });
-			selectorsByView.set(row.view, selectors);
+			rowsByView.set(row.view, [...(rowsByView.get(row.view) ?? []), row]);
 		}
+
+		const selectorsByView = new Map<string, ReuseViewSelector[]>(
+			rowsByView
+				.entries()
+				.map(([view, rows]) => [view, reuseViewSelectorsFromRows(view, rows)])
+		);
 
 		const summaries = views
 			.map((view) =>
@@ -162,38 +221,36 @@ export class ReuseViewAdminService {
 		return { views: summaries };
 	}
 
-	// Replace the complete definition in one transaction. Readers must not see a
-	// new revision with the old selectors, and concurrent writers must receive
-	// revisions in commit order.
-	setView(
-		name: StoredReuseView,
-		body: ParsedReuseViewSetBody
-	): ReuseViewSummary {
-		if (isPrivateReuseView(name) && hasDefaultCacheSelector(body.selectors)) {
-			throw new PrivateViewDefaultSelectorError(contractNameForReuseView(name));
-		}
-
+	setView(name: ReuseViewName, body: ReuseViewSetBody): ReuseViewSummary {
 		const now = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
-			// An unchanged definition keeps its revision. Issuing a new revision
-			// would make concurrent lookups revalidate and retry unnecessarily.
 			const unchanged = this.unchangedView(tx, name, body);
 
 			if (unchanged !== undefined) {
 				return unchanged;
 			}
 
-			const seq = tx
+			// The view is stored under the key its access gives it, and a view that
+			// changes access moves between the two keys. Every read therefore
+			// matches both, and every write replaces the rows held under both.
+			const keys = legacyReuseViewKeys(name);
+			const storedName = legacyReuseViewKey(name, body.access);
+
+			// A revision is an ABA fence for lookups, so it must never be reused.
+			// The counter travels with the view across an access change, which is
+			// why this takes the highest value recorded under either key.
+			const recorded = tx
 				.select({ next: schema.reuseViewRevisionSeq.nextRevision })
 				.from(schema.reuseViewRevisionSeq)
-				.where(eq(schema.reuseViewRevisionSeq.name, name))
-				.get();
-			const revision = seq?.next ?? reuseViewRevisionSchema.parse(1);
+				.where(inArray(schema.reuseViewRevisionSeq.name, keys))
+				.all()
+				.map((row) => row.next);
+			const revision = reuseViewRevisionSchema.parse(Math.max(1, ...recorded));
 			const nextRevision = reuseViewRevisionSchema.parse(revision + 1);
 
 			tx.insert(schema.reuseViewRevisionSeq)
-				.values({ name, nextRevision })
+				.values({ name: storedName, nextRevision })
 				.onConflictDoUpdate({
 					target: schema.reuseViewRevisionSeq.name,
 					set: { nextRevision }
@@ -203,30 +260,53 @@ export class ReuseViewAdminService {
 			const existing = tx
 				.select({ createdAt: schema.reuseViews.createdAt })
 				.from(schema.reuseViews)
-				.where(eq(schema.reuseViews.name, name))
+				.where(inArray(schema.reuseViews.name, keys))
 				.get();
 			const createdAt = existing?.createdAt ?? now;
 			const priority = body.priority ?? reuseViewDefaultPriority;
 
+			tx.delete(schema.reuseViews)
+				.where(inArray(schema.reuseViews.name, keys))
+				.run();
 			tx.insert(schema.reuseViews)
-				.values({ name, revision, priority, createdAt, updatedAt: now })
-				.onConflictDoUpdate({
-					target: schema.reuseViews.name,
-					set: { revision, priority, updatedAt: now }
+				.values({
+					name: storedName,
+					access: body.access,
+					revision,
+					priority,
+					createdAt,
+					updatedAt: now
 				})
 				.run();
 
-			tx.delete(schema.reuseViewSelectors)
-				.where(eq(schema.reuseViewSelectors.view, name))
+			tx.delete(schema.nativeReuseViewSelectors)
+				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
 				.run();
-			for (const selectors of jsonRowLists<StoredReuseViewSelector>(
-				body.selectors
-			)) {
-				reuseViewSelectorInsert(tx, name, selectors).run();
+			const listedSelectors = jsonRowLists(
+				body.selectors.map((selector) => storedReuseViewSelector(selector))
+			);
+
+			for (const selectors of listedSelectors) {
+				reuseViewSelectorInsert(tx, storedName, selectors).run();
+			}
+
+			tx.delete(schema.reuseViewSelectors)
+				.where(inArray(schema.reuseViewSelectors.view, keys))
+				.run();
+
+			const listedLegacySelectors = jsonRowLists<LegacyStoredReuseViewSelector>(
+				legacyReuseViewSelectorRows(storedName, body.selectors).map(
+					({ kind, pattern }) => ({ kind, pattern })
+				)
+			);
+
+			for (const rows of listedLegacySelectors) {
+				legacyReuseViewSelectorInsert(tx, storedName, rows).run();
 			}
 
 			return {
-				name: contractNameForReuseView(name),
+				name,
+				access: body.access,
 				revision,
 				priority,
 				selectors: body.selectors.toSorted(selectorSort),
@@ -236,45 +316,79 @@ export class ReuseViewAdminService {
 		});
 	}
 
-	// Preserve the revision sequence when deleting a view. A recreated view must
-	// not reuse a revision because lookups use it as an ABA fence.
-	removeView(name: StoredReuseView): ReuseViewRemoveResponse {
+	removeView(name: ReuseViewName): ReuseViewRemoveResponse {
+		const keys = legacyReuseViewKeys(name);
 		const existing = this.context.db
 			.select({ name: schema.reuseViews.name })
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, name))
+			.where(inArray(schema.reuseViews.name, keys))
 			.get();
 
 		this.context.db.transaction((tx) => {
+			tx.delete(schema.nativeReuseViewSelectors)
+				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.run();
 			tx.delete(schema.reuseViewSelectors)
-				.where(eq(schema.reuseViewSelectors.view, name))
+				.where(inArray(schema.reuseViewSelectors.view, keys))
 				.run();
 			tx.delete(schema.reuseViews)
-				.where(eq(schema.reuseViews.name, name))
+				.where(inArray(schema.reuseViews.name, keys))
 				.run();
 		});
 
-		return {
-			name: contractNameForReuseView(name),
-			removed: existing !== undefined
-		};
+		return { name, removed: existing !== undefined };
 	}
 
-	cacheInfoBody(name: StoredReuseView): string | undefined {
+	resolve(name: ReuseViewName): ResolvedReuseView | undefined {
+		const keys = legacyReuseViewKeys(name);
 		const row = this.context.db
-			.select({ priority: schema.reuseViews.priority })
+			.select({
+				access: schema.reuseViews.access,
+				revision: schema.reuseViews.revision,
+				priority: schema.reuseViews.priority
+			})
 			.from(schema.reuseViews)
-			.where(eq(schema.reuseViews.name, name))
+			.where(inArray(schema.reuseViews.name, keys))
 			.get();
 
 		if (row === undefined) {
 			return undefined;
 		}
 
+		// A row whose access the reconciliation has not yet supplied cannot say who
+		// may read the view. Resolving it as public would open a private view, so
+		// the view stays unresolved until the reconciliation reaches it.
+		if (row.access === null) {
+			return undefined;
+		}
+
+		const selectors = reuseViewSelectorsFromRows(
+			name,
+			this.context.db
+				.select({
+					kind: schema.nativeReuseViewSelectors.kind,
+					cacheName: schema.nativeReuseViewSelectors.cacheName,
+					prefix: schema.nativeReuseViewSelectors.prefix
+				})
+				.from(schema.nativeReuseViewSelectors)
+				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.all()
+		).toSorted(selectorSort);
+
+		return {
+			name,
+			access: row.access,
+			revision: row.revision,
+			priority: row.priority,
+			selectors
+		};
+	}
+
+	cacheInfoBody(view: ResolvedReuseView): string {
 		return new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
-			cachePrioritySchema.parse(row.priority)
+			cachePrioritySchema.parse(view.priority)
 		).render();
 	}
 }

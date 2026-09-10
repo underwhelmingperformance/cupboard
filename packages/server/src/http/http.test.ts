@@ -1,5 +1,6 @@
 import {
 	cacheNameSchema,
+	type CacheScope,
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -8,7 +9,10 @@ import { describe, expect, it } from 'vitest';
 import { isNotModified, narInfoObjectKey } from './http.ts';
 
 const tenant = tenantIdSchema.parse('acme');
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('builds')
+};
 
 const etag = '"abc"';
 const lastModified = 'Thu, 01 Jan 2026 00:00:00 GMT';
@@ -143,7 +147,7 @@ describe('narInfoObjectKey', () => {
 
 	it('uses no cache segment for the default cache and adds one for a named cache', () => {
 		expect({
-			default: narInfoObjectKey(tenant, hash),
+			default: narInfoObjectKey(tenant, hash, { kind: 'default' }),
 			named: narInfoObjectKey(tenant, hash, buildsCache)
 		}).toStrictEqual({
 			default: `t/acme/narinfo/${hash}`,

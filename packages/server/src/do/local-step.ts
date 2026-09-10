@@ -10,6 +10,10 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { projectLocalCacheLifecycles } from './cache-lifecycle-projection.ts';
 import { type ServerContext } from './context.ts';
+import {
+	type LegacyObjectFamily,
+	moveLegacyPrivateObjects
+} from './legacy-object-move.ts';
 
 /**
  * Matches a tenant row whose object has not recorded the current step. A null
@@ -53,7 +57,8 @@ export type LocalStepOutcome =
  * once that object has recorded the step.
  */
 export async function recordLocalStep(
-	context: ServerContext
+	context: ServerContext,
+	families: readonly LegacyObjectFamily[]
 ): Promise<LocalStepOutcome> {
 	const tenant = context.tenant();
 
@@ -67,6 +72,12 @@ export async function recordLocalStep(
 
 	if (projection.hasMore) {
 		return { kind: 'incomplete', projected: projection.projected };
+	}
+
+	const move = await moveLegacyPrivateObjects(context, tenant, families);
+
+	if (move.hasMore) {
+		return { kind: 'incomplete', projected: move.moved };
 	}
 
 	await context.d1

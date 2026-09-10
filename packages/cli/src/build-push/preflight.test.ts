@@ -8,7 +8,8 @@ import {
 	type NixStoreConfig
 } from '@cupboard/nix';
 import {
-	cacheSelectorSchema,
+	cacheNameSchema,
+	type CacheScope,
 	rootNameSchema,
 	storeDirectorySchema
 } from '@cupboard/nix-store/scalars';
@@ -32,7 +33,10 @@ import {
 import { linuxSunPathBytes } from './runtime-directory.ts';
 
 const invocationId = invocationIdSchema.parse('invocation-1');
-const cache = cacheSelectorSchema.parse('ci');
+const cache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('ci')
+};
 const coveredRoot = rootNameSchema.parse('github:acme/repo/run-1');
 const uncoveredRoot = rootNameSchema.parse('github:other/repo/run-1');
 const grants = authorizationDetailsSchema.parse([

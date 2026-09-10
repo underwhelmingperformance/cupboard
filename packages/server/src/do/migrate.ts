@@ -17,6 +17,29 @@ export interface MigrationBundle {
  */
 export type MigrationDigests = ReadonlyMap<string, string>;
 
+/**
+ * The prefix of a bundle up to and including one journal index. The catalogue
+ * reconciliation runs between two groups of migrations, so it needs the
+ * earlier group on its own.
+ */
+export function migrationsThrough(
+	bundle: MigrationBundle,
+	throughIndex: number
+): MigrationBundle {
+	return {
+		journal: {
+			entries: bundle.journal.entries.filter(
+				(entry) => entry.idx <= throughIndex
+			)
+		},
+		migrations: Object.fromEntries(
+			Object.entries(bundle.migrations).filter(
+				([key]) => Math.trunc(Number(key.slice(1))) <= throughIndex
+			)
+		)
+	};
+}
+
 // Share Drizzle's bookkeeping table so either migrator recognises the latest
 // recorded timestamp. Drizzle stores the migration content hash in `hash`; this
 // migrator stores the stable journal tag there.

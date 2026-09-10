@@ -1,9 +1,7 @@
 import {
 	type CacheScope,
 	cacheScopeSchema,
-	DEFAULT_CACHE_SELECTOR,
 	isSameCacheScope,
-	PRIVATE_SELECTOR_PREFIX,
 	type RootName,
 	rootNameSchema,
 	type TenantId,
@@ -14,12 +12,12 @@ import { z } from 'zod';
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
 // `isCoveredByToken` checks the route's required operation against the concrete
 // request resource. Stored trust rules use templates and captures that resolve
-// to concrete selectors when the server issues a token.
+// to concrete resources when the server issues a token.
 
 // Cache-scoped tenant operations. `gc:run` and `stats:read` also appear as
 // domain operations: the per-cache form carries a cache, the deployment-wide
 // form carries none, and the procedure's declared resource picks which.
-export const cacheOperations = [
+export const cacheOperationSchema = z.enum([
 	'upload:negotiate',
 	'upload:preview',
 	'upload:status',
@@ -31,16 +29,21 @@ export const cacheOperations = [
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read'
-] as const;
+]);
+export type CacheOperation = z.infer<typeof cacheOperationSchema>;
+export const cacheOperations: readonly CacheOperation[] =
+	cacheOperationSchema.options;
 
 // Tenant-domain operations use authority over the tenant established by the
 // issuer. They have no separate resource selector.
-export const domainOperations = [
+const domainOperationSchema = z.enum([
 	'cache:list',
 	'stats:read',
 	'check:run',
@@ -62,23 +65,24 @@ export const domainOperations = [
 	'reuse-view:list',
 	'reuse-view:set',
 	'reuse-view:remove'
-] as const;
+]);
+export const domainOperations = domainOperationSchema.options;
 
 // These control operations require an exact tenant slug as their resource.
-export const tenantOperations = [
+const tenantOperationSchema = z.enum([
 	'tenant:create',
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
 	'tenant:clear-cache-read-credential'
-] as const;
+]);
+export const tenantOperations = tenantOperationSchema.options;
 
 // These control operations do not select a resource.
-export const controlOperations = [
+const controlOperationSchema = z.enum([
 	'control:check',
 	'instance:read',
 	'instance:initialise',
@@ -94,7 +98,8 @@ export const controlOperations = [
 	'control-oidc-trust:read',
 	'control-oidc-trust:add',
 	'control-oidc-trust:remove'
-] as const;
+]);
+export const controlOperations = controlOperationSchema.options;
 
 // `gc:run` and `stats:read` occur in two grant types but appear once in this
 // combined schema.
@@ -110,7 +115,9 @@ export const operationSchema = z.enum([
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'cache:list',
 	'narinfo:delete',
@@ -145,7 +152,6 @@ export const operationSchema = z.enum([
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
@@ -176,18 +182,19 @@ export interface ResourceRequest {
 // cache, so the same grant covers that cache whether it reads publicly or
 // requires a credential.
 
-export const grantTypes = [
+const grantTypeSchema = z.enum([
 	'cupboard_cache',
 	'cupboard_domain',
 	'cupboard_tenant',
 	'cupboard_control',
 	'cupboard_wildcard'
-] as const;
+]);
+export const grantTypes = grantTypeSchema.options;
 
-const cacheActionsSchema = z.array(z.enum(cacheOperations)).min(1);
-const domainActionsSchema = z.array(z.enum(domainOperations)).min(1);
-const tenantActionsSchema = z.array(z.enum(tenantOperations)).min(1);
-const controlActionsSchema = z.array(z.enum(controlOperations)).min(1);
+const cacheActionsSchema = z.array(cacheOperationSchema).min(1);
+const domainActionsSchema = z.array(domainOperationSchema).min(1);
+const tenantActionsSchema = z.array(tenantOperationSchema).min(1);
+const controlActionsSchema = z.array(controlOperationSchema).min(1);
 
 export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
@@ -234,6 +241,7 @@ const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
+const cacheOperationSet: ReadonlySet<Operation> = new Set(cacheOperations);
 
 function isOperationImplied(
 	actions: readonly Operation[],
@@ -241,6 +249,13 @@ function isOperationImplied(
 	impliedBy: Partial<Record<Operation, Operation>>
 ): boolean {
 	if (actions.includes(operation)) {
+		return true;
+	}
+
+	if (
+		operation === 'cache:read' &&
+		actions.some((action) => cacheOperationSet.has(action))
+	) {
 		return true;
 	}
 
@@ -416,23 +431,18 @@ function refineBinding(
 		readonly equalsTemplate?: string;
 		readonly exact?: string;
 		readonly substitutions?: Record<string, Substitution>;
-		readonly equalsResource?: 'cache';
 	},
-	ctx: z.RefinementCtx,
-	canUseResource: boolean
+	ctx: z.RefinementCtx
 ): void {
 	const choices = [
 		value.equalsTemplate !== undefined,
-		value.exact !== undefined,
-		value.equalsResource !== undefined
+		value.exact !== undefined
 	].filter(Boolean).length;
 
 	if (choices !== 1) {
 		ctx.addIssue({
 			code: 'custom',
-			message: canUseResource
-				? 'Set exactly one of equalsTemplate, exact, and equalsResource'
-				: 'Set exactly one of equalsTemplate and exact'
+			message: 'Set exactly one of equalsTemplate and exact'
 		});
 	}
 
@@ -452,8 +462,11 @@ function refineBinding(
 	}
 }
 
-// A rule binds either the default cache or a named one. The default cache has
-// no name to template, so it is a variant of its own.
+/**
+ * How a rule binds the cache it grants authority over. The default cache has no
+ * name to render, so it is a variant of its own; a `named` binding renders a
+ * plain cache name from an exact value or a template.
+ */
 export const cacheBindingSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('default') }),
 	z
@@ -463,22 +476,21 @@ export const cacheBindingSchema = z.discriminatedUnion('kind', [
 			validate: z.literal('cacheName')
 		})
 		.superRefine((value, ctx) => {
-			refineBinding(value, ctx, false);
+			refineBinding(value, ctx);
 		})
 ]);
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
-		validate: z.literal('rootName'),
-		equalsResource: z.literal('cache').optional()
+		validate: z.literal('rootName')
 	})
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, true);
+		refineBinding(value, ctx);
 	});
 export const tenantBindingSchema = z
 	.strictObject({ ...bindingShape, validate: z.literal('tenant') })
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
+		refineBinding(value, ctx);
 	});
 
 export const oidcTrustDisplaySchema = z.strictObject({
@@ -554,6 +566,12 @@ function withoutRetiredActions(grants: unknown): unknown {
 		});
 }
 
+// The retired selector spelling. No request uses it any more, but a document
+// stored before the cutover still spells a cache this way, so the upgrades
+// below need the two prefixes to read one.
+const legacyDefaultCacheSelector = '_default';
+const legacyPrivateSelectorPrefix = '_private-';
+
 const legacyCacheBindingSchema = z.looseObject({
 	exact: z.string().optional(),
 	equalsTemplate: z.string().optional()
@@ -597,15 +615,15 @@ function upgradedCacheBinding(binding: {
 	readonly exact?: string;
 	readonly equalsTemplate?: string;
 }): unknown {
-	if (binding.exact === DEFAULT_CACHE_SELECTOR) {
+	if (binding.exact === legacyDefaultCacheSelector) {
 		return { kind: 'default' };
 	}
 
-	if (binding.exact?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+	if (binding.exact?.startsWith(legacyPrivateSelectorPrefix) === true) {
 		return {
 			...binding,
 			kind: 'named',
-			exact: binding.exact.slice(PRIVATE_SELECTOR_PREFIX.length)
+			exact: binding.exact.slice(legacyPrivateSelectorPrefix.length)
 		};
 	}
 
@@ -652,14 +670,14 @@ export const storedAuthorizationDetailsSchema = z.preprocess((grants) => {
 }, authorizationDetailsSchema);
 
 function scopeFromSelectorText(selector: string): unknown {
-	if (selector === DEFAULT_CACHE_SELECTOR) {
+	if (selector === legacyDefaultCacheSelector) {
 		return { kind: 'default' };
 	}
 
 	return {
 		kind: 'named',
-		name: selector.startsWith(PRIVATE_SELECTOR_PREFIX)
-			? selector.slice(PRIVATE_SELECTOR_PREFIX.length)
+		name: selector.startsWith(legacyPrivateSelectorPrefix)
+			? selector.slice(legacyPrivateSelectorPrefix.length)
 			: selector
 	};
 }

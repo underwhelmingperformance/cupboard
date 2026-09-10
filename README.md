@@ -21,8 +21,9 @@ deployment by its bare host and are marked "operator only" in the help:
 
 - `cupboard init` (alias `cupboard deploy`) provisions the Workers, R2 bucket,
   D1 database, and queues on a Cloudflare account.
-- `cupboard tenant` creates, suspends, resumes, and removes tenants, and rotates
-  the read credential of a tenant or of one of its private caches.
+- `cupboard tenant` creates, suspends, resumes, and removes tenants, rotates the
+  tenant-wide fallback read credential, and manages the read credential of any
+  one of a tenant's caches.
 - `cupboard control-key` rotates the keys that sign control-plane tokens.
 
 A **tenant admin** owns one tenant within a deployment. They push paths, manage
@@ -55,16 +56,16 @@ Tenant-scoped commands take that host with the tenant's slug appended:
 https://cupboard.example.workers.dev/t/acme
 ```
 
-The default cache is implied by the bare tenant URL; a named cache is selected
-with `--cache <name>` where the command supports it.
+The bare tenant URL selects the default cache. A named cache has the stable URL
+`/t/acme/cache/<name>`. Commands accept that URL directly. Where a command also
+takes values such as local paths, it can instead take the bare tenant URL and
+the cache name as the next positional argument.
 
-A cache is public or private by its address, and a private cache is selected
-with `--private-cache <name>` instead. Its reads live under
-`/t/acme/private-cache/<name>/` and authenticate with the tenant's read
-credential or with one the cache has of its own; see [Private
-caches][private-caches].
+Each cache has an `access` property. A private cache uses the same stable URL
+and authenticates reads with the tenant-wide fallback credential or with a
+credential of its own; see [Private caches][cache-access].
 
-[private-caches]: ./docs/nix.md#private-caches
+[cache-access]: ./docs/nix.md#private-caches
 
 ## Getting started
 

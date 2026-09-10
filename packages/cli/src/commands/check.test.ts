@@ -1,6 +1,6 @@
 import {
-	checkReportSchema,
-	type ParsedCheckReport
+	type CheckReport,
+	checkReportSchema
 } from '@cupboard/protocol/reports';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -96,7 +96,7 @@ interface CheckCall {
 // Answers each call with the next page, so a test states the pages the server
 // would return and the command follows their cursors.
 function checkClient(
-	pages: readonly ParsedCheckReport[],
+	pages: readonly CheckReport[],
 	calls: CheckCall[]
 ): CheckClient {
 	let index = 0;
@@ -202,13 +202,13 @@ describe('runCheck', () => {
 			discrepancies: [
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: 'a'.repeat(32),
 					narHash
 				},
 				{
 					kind: 'missing-narinfo-object',
-					cache: 'builds',
+					cache: { kind: 'named', name: 'builds' },
 					storePathHash: 'b'.repeat(32),
 					narHash
 				}

@@ -191,13 +191,29 @@ describe('retention policy schemas', () => {
 	it.each([
 		{
 			name: 'a cache-scoped policy',
-			value: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 },
-			expected: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }
+			value: {
+				scope: 'cache',
+				cache: { kind: 'named', name: 'builds' },
+				ttlSeconds: 1_209_600
+			},
+			expected: {
+				scope: 'cache',
+				cache: { kind: 'named', name: 'builds' },
+				ttlSeconds: 1_209_600
+			}
 		},
 		{
 			name: 'a cache-scoped policy targeting the default cache',
-			value: { scope: 'cache', pattern: '', ttlSeconds: 1_209_600 },
-			expected: { scope: 'cache', pattern: '', ttlSeconds: 1_209_600 }
+			value: {
+				scope: 'cache',
+				cache: { kind: 'default' },
+				ttlSeconds: 1_209_600
+			},
+			expected: {
+				scope: 'cache',
+				cache: { kind: 'default' },
+				ttlSeconds: 1_209_600
+			}
 		},
 		{
 			name: 'a prefix-scoped policy',
@@ -219,7 +235,11 @@ describe('retention policy schemas', () => {
 	it.each([
 		{
 			name: 'a cache scope with an invalid cache name',
-			value: { scope: 'cache', pattern: 'Bad!', ttlSeconds: 1_209_600 }
+			value: {
+				scope: 'cache',
+				cache: { kind: 'named', name: 'Bad!' },
+				ttlSeconds: 1_209_600
+			}
 		},
 		{
 			name: 'an unknown scope',

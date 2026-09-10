@@ -1,15 +1,32 @@
+import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	initialiseViaWorker,
+	namedCache,
+	putWorkerTestCache,
 	readFetch,
-	resetTestServer,
-	workerFetch
+	resetTestServer
 } from '../test-support.ts';
 
 const storePathHash = 'a'.repeat(32);
 const digest = 'b'.repeat(64);
+const publicName = 'builds';
+const privateName = 'private-builds';
+
+async function provisionCaches(): Promise<void> {
+	const token = await initialiseViaWorker();
+
+	const caches: (readonly [string, CacheAccessMode])[] = [
+		[publicName, 'public'],
+		[privateName, 'private']
+	];
+
+	for (const [name, access] of caches) {
+		await putWorkerTestCache(token, namedCache(name), access);
+	}
+}
 
 describe('private cache reads', () => {
 	beforeEach(resetTestServer);
@@ -17,29 +34,42 @@ describe('private cache reads', () => {
 	it.each([
 		{ name: 'nix-cache-info', suffix: '/nix-cache-info' },
 		{ name: 'a narinfo', suffix: `/${storePathHash}.narinfo` },
-		{ name: 'a NAR', suffix: `/nar/${'c'.repeat(32)}.nar` },
+		{
+			name: 'a NAR',
+			suffix: `/nar/sha256:${'c'.repeat(52)}.nar.zst`
+		},
 		{ name: 'an attestation list', suffix: `/attestations/${storePathHash}` },
 		{
 			name: 'an attestation bundle',
-			suffix: `/attestation-bundles/${digest}.sigstore.json`
+			suffix: `/attestation-bundles/${digest}`
 		}
 	])(
-		'returns 404 for $name under a private selector at the edge',
+		'requires a credential for $name in a private cache',
 		async ({ suffix }) => {
-			await initialiseViaWorker();
+			await provisionCaches();
 
-			const response = await readFetch(`/cache/_private-builds${suffix}`);
+			const response = await readFetch(`/cache/${privateName}${suffix}`);
 
-			expect(response.status).toBe(StatusCodes.NOT_FOUND);
+			expect({
+				status: response.status,
+				challenge: response.headers.get('www-authenticate'),
+				control: response.headers.get('cache-control')
+			}).toStrictEqual({
+				status: StatusCodes.UNAUTHORIZED,
+				challenge: 'Basic realm="cupboard"',
+				control: 'no-store'
+			});
 		}
 	);
 
-	it('returns an uncached 404 for private cache information', async () => {
-		await initialiseViaWorker();
+	it('requires a credential for private cache information', async () => {
+		await provisionCaches();
 
-		const publicResponse = await workerFetch('/cache/builds/nix-cache-info');
-		const privateResponse = await workerFetch(
-			'/cache/_private-builds/nix-cache-info'
+		const publicResponse = await readFetch(
+			`/cache/${publicName}/nix-cache-info`
+		);
+		const privateResponse = await readFetch(
+			`/cache/${privateName}/nix-cache-info`
 		);
 
 		expect({
@@ -48,7 +78,7 @@ describe('private cache reads', () => {
 			privateCacheControl: privateResponse.headers.get('cache-control')
 		}).toStrictEqual({
 			public: StatusCodes.OK,
-			private: StatusCodes.NOT_FOUND,
+			private: StatusCodes.UNAUTHORIZED,
 			privateCacheControl: 'no-store'
 		});
 	});
@@ -62,23 +92,18 @@ describe('private cache reads', () => {
 			name: 'an attestation bundle identifier',
 			suffix: '/attestation-bundles/not-a-digest.sigstore.json'
 		}
-	])(
-		'returns 404 before parsing $name for a private cache',
-		async ({ suffix }) => {
-			await initialiseViaWorker();
+	])('rejects $name before applying cache access', async ({ suffix }) => {
+		await provisionCaches();
 
-			const publicResponse = await workerFetch(`/cache/builds${suffix}`);
-			const privateResponse = await workerFetch(
-				`/cache/_private-builds${suffix}`
-			);
+		const publicResponse = await readFetch(`/cache/${publicName}${suffix}`);
+		const privateResponse = await readFetch(`/cache/${privateName}${suffix}`);
 
-			expect({
-				public: publicResponse.status,
-				private: privateResponse.status
-			}).toStrictEqual({
-				public: StatusCodes.BAD_REQUEST,
-				private: StatusCodes.NOT_FOUND
-			});
-		}
-	);
+		expect({
+			public: publicResponse.status,
+			private: privateResponse.status
+		}).toStrictEqual({
+			public: StatusCodes.BAD_REQUEST,
+			private: StatusCodes.BAD_REQUEST
+		});
+	});
 });

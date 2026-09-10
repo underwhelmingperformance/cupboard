@@ -23,7 +23,7 @@ import {
 	invocationIdSchema
 } from '@cupboard/protocol/build';
 import {
-	type UploadDecision,
+	type UploadDecisionInput,
 	uploadDecisionSchema,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
@@ -126,7 +126,7 @@ function copiedSubject(storePath: StorePathString): unknown {
 
 function decisionFor(
 	storePath: StorePathString,
-	action: UploadDecision['action']
+	action: UploadDecisionInput['action']
 ) {
 	const base = {
 		storePathHash: StorePath.hash(storePath),
@@ -355,7 +355,7 @@ interface FlowConfig {
 	readonly declaredOutputs?: readonly StorePathString[];
 	readonly outPaths?: readonly StorePathString[];
 	readonly ultimatePaths?: readonly StorePathString[];
-	readonly action?: UploadDecision['action'];
+	readonly action?: UploadDecisionInput['action'];
 	readonly uploadFailure?: Error;
 	readonly unwritableReceipt?: boolean;
 	readonly preflightFailure?: Error;
@@ -796,7 +796,7 @@ function infoReporter(info: { lines: number }): Reporter {
 	};
 }
 
-const commitPath = '/cache/_default/commit';
+const commitPath = '/commit';
 const commitTarget = {
 	uploadId: uploadIdSchema.parse('upload-app'),
 	storePathHash: storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz'),

@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type OidcAudience,
 	type OidcIssuer,
@@ -271,21 +272,44 @@ export class OidcTrustService {
 		}
 	}
 
-	enabledOidcTrustRules(): OidcTrustRule[] {
-		return this.enabledOidcTrustRuleSnapshots().map(({ rule }) => rule);
+	enabledOidcTrustRules(logger: Logger): OidcTrustRule[] {
+		return this.enabledOidcTrustRuleSnapshots(logger).map(({ rule }) => rule);
 	}
 
-	enabledOidcTrustRuleSnapshots(): OidcTrustRuleSnapshot[] {
+	/**
+	 * Every enabled rule the server can read. A row it cannot read is left out and
+	 * logged: a token exchange then finds no rule and refuses the request, rather
+	 * than failing the whole exchange over a rule that was not going to match.
+	 * `oidcTrust.get` and `oidcTrust.list` still report the fault, so an
+	 * administrator can find the row.
+	 */
+	enabledOidcTrustRuleSnapshots(logger: Logger): OidcTrustRuleSnapshot[] {
 		return this.context.db
 			.select()
 			.from(schema.oidcTrust)
 			.where(isNull(schema.oidcTrust.disabledAt))
 			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
 			.all()
-			.map((row) => ({
-				rule: oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env)),
-				row
-			}));
+			.flatMap((row) => {
+				try {
+					return [
+						{
+							rule: oidcTrustRuleFromRow(
+								row,
+								canUseLoopbackHttp(this.context.env)
+							),
+							row
+						}
+					];
+				} catch (error: unknown) {
+					logger.error('stored OIDC trust rule skipped', {
+						rule: row.id,
+						reason: error instanceof Error ? error.message : String(error)
+					});
+
+					return [];
+				}
+			});
 	}
 
 	isEnabledSnapshotCurrent(

@@ -12,6 +12,7 @@ import {
 	blobStateNarHashes,
 	bootstrap,
 	currentOrigin,
+	defaultCache,
 	defaultCacheStatsPath,
 	isNarInfoSignatureValid,
 	narBytes,
@@ -59,7 +60,7 @@ describe('durable object state', () => {
 
 		const persisted = await runInDurableObject(
 			testServerFor('durability-rows'),
-			(_instance, state) => {
+			(instance, state) => {
 				const database = drizzle(state.storage, {
 					schema: { narInfos, signingKeys }
 				});
@@ -74,12 +75,17 @@ describe('durable object state', () => {
 						.all(),
 					narInfos: database
 						.select({
-							cache: narInfos.cache,
+							cacheId: narInfos.cacheId,
 							storePathHash: narInfos.storePathHash,
 							sigsJson: narInfos.sigsJson
 						})
 						.from(narInfos)
 						.all()
+						.map((row) => ({
+							cache: instance.context.cacheRepository.scopeForId(row.cacheId),
+							storePathHash: row.storePathHash,
+							sigsJson: row.sigsJson
+						}))
 				};
 			}
 		);
@@ -102,7 +108,7 @@ describe('durable object state', () => {
 			signingKeys: [{ signing: true, published: true }],
 			narInfoRows: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					storePathHash: metadata.storePathHash,
 					signatures: [{ keyName: 'cupboard-v1-1', rawBytes: 64 }]
 				}

@@ -1,11 +1,11 @@
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	DEFAULT_CACHE,
+	type CacheAccessMode,
+	type CacheScope,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray, type SQL } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -17,13 +17,13 @@ import {
 } from '../blob/narinfo-object-metadata.ts';
 import { type TenantEntry } from '../control/tenant-membership.ts';
 import {
+	cacheIdentityCondition,
+	cacheSelectorsCondition
+} from '../db/cache.ts';
+import {
 	authorisedByCacheGeneration,
 	referencedCacheLifecycle
 } from '../db/cache-generation.ts';
-import {
-	outsidePrivateCaches,
-	withinPrivateCaches
-} from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
@@ -36,22 +36,17 @@ import {
 	narInfoCacheControl,
 	narInfoObjectKey,
 	narObjectKey,
+	type NarObjectName,
 	notFoundResponse,
-	type ParsedNarName,
 	type R2ObjectKey,
-	TextBody,
-	textResponse,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
-import { tenantServer } from '../routing/durable-object.ts';
 
 import {
 	isReadAuthorised,
 	type ReadVerifier,
 	unauthorisedResponse
 } from './read-auth.ts';
-
-const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
 interface ReadEnv {
 	readonly BLOBS: R2Bucket;
@@ -60,13 +55,11 @@ interface ReadEnv {
 }
 
 /**
- * The namespace and cache selected by a read request. The tenant's read mode
- * determines whether a public-cache read requires authentication. Every
- * private-cache read requires it.
+ * The cache selected by a read request.
  */
 export interface ReadScope {
-	readonly visibility: 'public' | 'private';
-	readonly cache: StoredCache;
+	readonly scope: CacheScope;
+	readonly access: CacheAccessMode;
 }
 
 /**
@@ -75,14 +68,10 @@ export interface ReadScope {
  * Admission reads every verifier from the authoritative D1 rows on each
  * request, so a rotated or deleted verifier takes effect immediately.
  *
- * A request in the private namespace must authenticate. `cacheVerifier` is the
- * cache-specific verifier, when present. Only a matching credential opens that
- * cache. Otherwise the guard uses the tenant verifier. If neither verifier
- * exists, the guard refuses the request.
- *
- * A request in the public namespace authenticates only when the whole tenant is
- * private. Successful authenticated reads stay on the control Worker and never
- * enter the cache-owning tenant Worker.
+ * A private cache must authenticate. `cacheVerifier` is the cache-specific
+ * verifier, when present. Otherwise the guard uses the tenant verifier. If
+ * neither verifier exists, the guard refuses the request. Authenticated reads
+ * stay on the control Worker and never enter the cache-owning tenant Worker.
  */
 export async function guardScopedRead(
 	request: Request,
@@ -90,15 +79,11 @@ export async function guardScopedRead(
 	scope: ReadScope,
 	cacheVerifier?: ReadVerifier
 ): Promise<Response | undefined> {
-	if (scope.visibility === 'private') {
-		return authenticateRead(request, cacheVerifier ?? entry.readVerifier);
-	}
-
-	if (entry.readMode !== 'private') {
+	if (scope.access === 'public') {
 		return undefined;
 	}
 
-	return authenticateRead(request, entry.readVerifier);
+	return authenticateRead(request, cacheVerifier ?? entry.readVerifier);
 }
 
 /**
@@ -112,9 +97,9 @@ export async function guardScopedRead(
  */
 export function guardPrivateViewRead(
 	request: Request,
-	entry: TenantEntry
+	verifier: ReadVerifier | undefined
 ): Promise<Response | undefined> {
-	return authenticateRead(request, entry.readVerifier);
+	return authenticateRead(request, verifier);
 }
 
 async function authenticateRead(
@@ -135,39 +120,31 @@ async function authenticateRead(
  * narinfo for that hash has a corresponding `blob_ref` row. The read surface
  * determines which reference rows can authorise the request.
  *
- * A read in the public namespace counts rows from the tenant's public caches.
- * These caches share one read rule. A public tenant requires no credential; a
- * private tenant requires the tenant credential. Public caches have no
- * cache-specific credentials. A reader authorised for one public cache can
- * address any other public cache, so the reference check uses the complete
- * public namespace.
- *
- * A read in the private namespace selects one cache, which can have its own
- * credential. Only reference rows for that cache authorise the NAR.
- *
- * A read through a private reuse view counts rows from all of the tenant's
- * private caches. Only the tenant credential opens a private view, and every
- * private view selects from this range, so the private cache range is the
- * reference boundary.
+ * A direct cache read counts only reference rows for that cache. A reuse-view
+ * NAR read counts rows from caches selected by that exact view. Both forms also
+ * require the cache's current access to match the route that admitted the read.
  */
 export type NarAuthority =
-	| { readonly kind: 'cache'; readonly cache: StoredCache }
-	| { readonly kind: 'namespace'; readonly visibility: 'public' | 'private' };
-
-export const publicNarAuthority: NarAuthority = {
-	kind: 'namespace',
-	visibility: 'public'
-};
-
-export const privateNamespaceNarAuthority: NarAuthority = {
-	kind: 'namespace',
-	visibility: 'private'
-};
+	| {
+			readonly kind: 'cache';
+			readonly scope: CacheScope;
+			readonly access: CacheAccessMode;
+	  }
+	| {
+			readonly kind: 'view';
+			readonly selectors: readonly ReuseViewSelector[];
+			readonly access: CacheAccessMode;
+	  };
 
 export function narAuthorityForScope(scope: ReadScope): NarAuthority {
-	return scope.visibility === 'private'
-		? { kind: 'cache', cache: scope.cache }
-		: publicNarAuthority;
+	return { kind: 'cache', scope: scope.scope, access: scope.access };
+}
+
+export function narAuthorityForView(
+	access: CacheAccessMode,
+	selectors: readonly ReuseViewSelector[]
+): NarAuthority {
+	return { kind: 'view', access, selectors };
 }
 
 // An unreferenced NAR and an absent object both return 404, so the response does
@@ -177,7 +154,7 @@ export async function serveNar(
 	request: Request,
 	env: ReadEnv,
 	tenant: TenantId,
-	nar: ParsedNarName,
+	nar: NarObjectName,
 	authority: NarAuthority,
 	isPrivate: boolean
 ): Promise<Response> {
@@ -196,7 +173,13 @@ export async function serveNar(
 		request,
 		env,
 		narObjectKey(nar.narHash, nar.incarnation),
-		(object) => narHeaders(object, tenant, nar.narHash),
+		(object) =>
+			narHeaders(
+				object,
+				tenant,
+				nar.narHash,
+				!isPrivate && authority.kind === 'cache' ? authority.scope : undefined
+			),
 		!isPrivate
 	);
 }
@@ -208,8 +191,8 @@ export async function serveNar(
  *
  * Advancing the cache generation makes every edge from an earlier generation
  * stop authorising reads, so cache deletion does not need to retire those edges
- * synchronously to revoke read authority. The join is a left join because a
- * cache that has never been deleted has no lifecycle row.
+ * synchronously to revoke read authority. Every live cache has a lifecycle row;
+ * the inner join also rejects references whose catalogue entry is absent.
  *
  * The index test builds this statement so that it inspects the query the read
  * path runs.
@@ -227,7 +210,7 @@ export function narReferenceQuery(
 			d1Schema.blobState,
 			eq(d1Schema.blobState.narHash, d1Schema.blobReference.narHash)
 		)
-		.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),
@@ -261,22 +244,36 @@ async function isNarReferenced(
 
 function referencingCaches(authority: NarAuthority): SQL | undefined {
 	if (authority.kind === 'cache') {
-		return eq(d1Schema.blobReference.cache, authority.cache);
+		return and(
+			cacheIdentityCondition(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.blobReference.cacheName,
+				authority.scope
+			),
+			eq(d1Schema.cacheLifecycle.access, authority.access)
+		);
 	}
 
-	return authority.visibility === 'private'
-		? withinPrivateCaches(d1Schema.blobReference.cache)
-		: outsidePrivateCaches(d1Schema.blobReference.cache);
+	return and(
+		cacheSelectorsCondition(
+			d1Schema.blobReference.cacheKind,
+			d1Schema.blobReference.cacheName,
+			authority.selectors
+		),
+		eq(d1Schema.cacheLifecycle.access, authority.access)
+	);
 }
 
 /**
  * Builds the reference-edge lookup that authorises narinfo reads.
  *
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
- * `blob_ref` through its existing `(tenant, cache, store_path_hash,
- * generation)` primary key, joined to the cache lifecycle row. Availability
- * splits larger hash sets at D1's parameter limit and sends all resulting
- * lookups in one batch.
+ * `blob_ref` through `blob_ref_native_identity_idx`, which leads with the
+ * tenant and the cache's identity columns, joined to the cache lifecycle row.
+ * The legacy primary key cannot serve this: it leads with the stored name,
+ * which encodes the access, so a cache whose access changed would no longer
+ * match the edges it committed earlier. Availability splits larger hash sets at
+ * D1's parameter limit and sends all resulting lookups in one batch.
  *
  * A deleted cache keeps its path-keyed narinfo objects until the teardown drain
  * removes them. The same stored name can be registered again before that drain
@@ -291,7 +288,7 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
 export function narInfoReferenceQuery(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHashes: JsonValueList<StorePathHash>
 ) {
 	return database
@@ -305,7 +302,11 @@ export function narInfoReferenceQuery(
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),
-				eq(d1Schema.blobReference.cache, cache),
+				cacheIdentityCondition(
+					d1Schema.blobReference.cacheKind,
+					d1Schema.blobReference.cacheName,
+					cache
+				),
 				inArray(d1Schema.blobReference.storePathHash, storePathHashes),
 				authorisedByCacheGeneration()
 			)
@@ -328,7 +329,7 @@ export function narInfoReferenceQuery(
 async function authorisedNarInfoVersions(
 	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHashes: readonly StorePathHash[]
 ): Promise<ReadonlyMap<StorePathHash, NarInfoReferenceVersion>> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -374,15 +375,15 @@ export async function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: ReadScope,
 	storePathHash: StorePathHash,
 	isAuthenticatedRead: boolean
 ): Promise<Response> {
-	const key = narInfoObjectKey(tenant, storePathHash, cache);
+	const key = narInfoObjectKey(tenant, storePathHash, cache.scope);
 	const headersFor = (object: R2Object): Headers =>
-		narInfoHeaders(object, tenant, cache, storePathHash);
+		narInfoHeaders(object, tenant, cache.scope, storePathHash);
 
-	const versions = await authorisedNarInfoVersions(env, tenant, cache, [
+	const versions = await authorisedNarInfoVersions(env, tenant, cache.scope, [
 		storePathHash
 	]);
 	const current = versions.get(storePathHash);
@@ -407,14 +408,19 @@ export async function serveNarInfo(
 export async function missingStorePathHashes(
 	env: Env,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: ReadScope,
 	storePathHashes: readonly StorePathHash[]
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
 	// Resolve the current commit for each path before checking R2. Report the
 	// path as missing if the object belongs to another commit. A narinfo GET
 	// would refuse that object, so the push must not skip the path.
-	const versions = await authorisedNarInfoVersions(env, tenant, cache, unique);
+	const versions = await authorisedNarInfoVersions(
+		env,
+		tenant,
+		cache.scope,
+		unique
+	);
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
@@ -426,7 +432,7 @@ export async function missingStorePathHashes(
 			}
 
 			const object = await env.BLOBS.head(
-				narInfoObjectKey(tenant, storePathHash, cache)
+				narInfoObjectKey(tenant, storePathHash, cache.scope)
 			);
 			const isServable =
 				object !== null && isNarInfoObjectOfCommit(object, current);
@@ -439,34 +445,6 @@ export async function missingStorePathHashes(
 		(storePathHash): storePathHash is StorePathHash =>
 			storePathHash !== undefined
 	);
-}
-
-export async function cacheInfoResponse(
-	request: Request,
-	env: ReadEnv,
-	tenant: TenantId,
-	cache: StoredCache,
-	isPrivate: boolean
-): Promise<Response> {
-	// Default-cache priority is fixed, so render it locally. A named cache's
-	// priority comes from the Durable Object registry.
-	const response =
-		cache === DEFAULT_CACHE
-			? await textResponse(request, cacheInfoBody, {
-					'content-type': 'text/x-nix-cache-info; charset=utf-8'
-				})
-			: await tenantServer(env, tenant).fetch(request);
-
-	if (!isPrivate) {
-		return response;
-	}
-
-	// Override the Durable Object response too: authenticated cache metadata must
-	// carry `no-store`.
-	const headers = new Headers(response.headers);
-	headers.set('cache-control', 'no-store');
-
-	return new Response(response.body, { status: response.status, headers });
 }
 
 // Public origin requests reach the cache-owning tenant Worker only after
@@ -540,21 +518,26 @@ function privatise(headers: Headers, isPublicCache: boolean): Headers {
 	return headers;
 }
 
-// The tag lets a deletion invalidate a cached NAR once the tenant's caches stop
-// referencing its hash. Without it a stored response would keep answering
-// readers for the whole of its long lifetime.
+// The tag lets a deletion invalidate a public cache's NAR response once that
+// cache stops referencing the hash. Private and reuse-view reads are no-store
+// and therefore need no tag.
 function narHeaders(
 	object: R2Object,
 	tenant: TenantId,
-	narHash: NixSha256HashString
+	narHash: NixSha256HashString,
+	cache: CacheScope | undefined
 ): Headers {
 	const headers = new Headers({
 		'cache-control': narCacheControl,
-		'cache-tag': narCacheTag(tenant, narHash),
 		'content-type': 'application/zstd',
 		etag: object.httpEtag,
 		'last-modified': object.uploaded.toUTCString()
 	});
+
+	if (cache !== undefined) {
+		headers.set('cache-tag', narCacheTag(tenant, cache, narHash));
+	}
+
 	headers.set('content-length', String(object.size));
 
 	return headers;
@@ -563,7 +546,7 @@ function narHeaders(
 function narInfoHeaders(
 	object: R2Object,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHash: StorePathHash
 ): Headers {
 	const headers = new Headers();

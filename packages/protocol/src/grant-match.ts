@@ -121,18 +121,8 @@ function renderCache(
 
 function renderRoot(
 	binding: RootBinding,
-	cache: CacheScope,
 	claims: Record<string, string>
 ): string | undefined {
-	// An `equalsResource` binding uses the name of the cache resolved for this
-	// grant as the root. The default cache has no name, so such a binding
-	// resolves to nothing and the rule permits no grant.
-	if (binding.equalsResource === 'cache') {
-		return cache.kind === 'named'
-			? rootNameSchema.safeParse(cache.name).data
-			: undefined;
-	}
-
 	const raw = renderBindingValue(binding, claims);
 
 	if (raw === undefined) {
@@ -216,7 +206,7 @@ function isGrantPermitted(
 				return false;
 			}
 
-			const root = renderRoot(permitted.resources.root, cache, claims);
+			const root = renderRoot(permitted.resources.root, claims);
 
 			return root !== undefined && isRootWithin(requested.root, root);
 		}

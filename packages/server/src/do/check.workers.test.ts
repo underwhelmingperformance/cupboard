@@ -1,5 +1,5 @@
 import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
-import type { CheckReport } from '@cupboard/protocol/reports';
+import type { CheckReportInput } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -21,6 +21,7 @@ import {
 	corruptCommittedNarInfo,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -44,7 +45,7 @@ async function runCheck(
 	token: string,
 	isDeep = false,
 	cursor: CheckCursor = startOfScan
-): Promise<CheckReport> {
+): Promise<CheckReportInput> {
 	const query = new URLSearchParams();
 
 	if (isDeep) {
@@ -83,8 +84,8 @@ describe('storage check', () => {
 				name: 'beta'
 			});
 
-			await pushPath(token, alpha, DEFAULT_CACHE, alphaNar);
-			await pushPath(token, beta, DEFAULT_CACHE, betaNar);
+			await pushPath(token, alpha, defaultCache(), alphaNar);
+			await pushPath(token, beta, defaultCache(), betaNar);
 
 			expect(await runCheck(token, deep)).toStrictEqual({
 				narInfosChecked: 2,
@@ -105,7 +106,7 @@ describe('storage check', () => {
 				storePathHash: letter.repeat(32),
 				name: `resume-${letter}`
 			});
-			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+			await pushPath(token, metadata, defaultCache(), nar);
 		}
 
 		const fromStart = await runCheck(token);
@@ -143,7 +144,7 @@ describe('storage check', () => {
 				storePathHash: letter.repeat(32),
 				name: `slice-${letter}`
 			});
-			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+			await pushPath(token, metadata, defaultCache(), nar);
 		}
 
 		// Three subrequests buy the pass's one D1 read of the page's blob facts and
@@ -176,7 +177,9 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect(await runCheck(token)).toStrictEqual({
@@ -187,7 +190,7 @@ describe('storage check', () => {
 			discrepancies: [
 				{
 					kind: 'missing-narinfo-object',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash
 				}
@@ -220,13 +223,13 @@ describe('storage check', () => {
 			discrepancies: [
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: alpha.storePathHash,
 					narHash
 				},
 				{
 					kind: 'missing-nar',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: beta.storePathHash,
 					narHash
 				}
@@ -264,7 +267,7 @@ describe('storage check', () => {
 				discrepancies: [
 					{
 						kind: 'file-hash-mismatch',
-						cache: '',
+						cache: { kind: 'default' },
 						storePathHash: metadata.storePathHash,
 						narHash: metadata.narHash
 					}
@@ -281,7 +284,7 @@ describe('storage check', () => {
 			name: 'stored'
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 
 		// Store `nar` under the hash for `claimed`, then make the compressed-file
 		// metadata consistent with that substitution. Only decompression exposes
@@ -336,7 +339,7 @@ describe('storage check', () => {
 		expect(report.discrepancies).toStrictEqual([
 			{
 				kind: 'nar-hash-mismatch',
-				cache: '',
+				cache: { kind: 'default' },
 				storePathHash: metadata.storePathHash,
 				narHash: claimed.narHash
 			}
@@ -350,7 +353,7 @@ describe('storage check', () => {
 			name: 'sized'
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 		await corruptCommittedNarInfo(metadata.storePathHash, {
 			narSize: nar.narSize + 4096
 		});
@@ -360,7 +363,7 @@ describe('storage check', () => {
 		expect(report.discrepancies).toStrictEqual([
 			{
 				kind: 'nar-size-mismatch',
-				cache: '',
+				cache: { kind: 'default' },
 				storePathHash: metadata.storePathHash,
 				narHash: nar.narHash
 			}

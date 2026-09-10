@@ -9,8 +9,8 @@ import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	type CachePriority,
-	DEFAULT_CACHE,
-	privateStoredCache
+	type CacheScope,
+	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
@@ -19,11 +19,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { workflowCommands } from '@cupboard/shared/github-actions';
-import {
-	basicAuthHeader,
-	type BasicCredential,
-	type ReadUser
-} from '@cupboard/shared/http';
+import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
@@ -41,7 +37,6 @@ import {
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
-	PrivateCacheCredentialMissingError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -55,9 +50,8 @@ import {
 import {
 	isEnabled,
 	provided,
+	providedCacheCredentials,
 	providedCaches,
-	providedPrivateCacheCredentials,
-	providedPrivateCacheNames,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -85,8 +79,7 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
-	readonly privateCacheCredentials?: string;
+	readonly cacheCredentials?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
@@ -181,19 +174,11 @@ export function registerSetupCommand(
 		)
 		.option(
 			'--cache <name>',
-			'Add public caches at the tenant URL, one per line or comma-separated. ' +
-				'Can be combined with --private-cache.'
+			'Add named caches at the tenant URL, one per line or comma-separated.'
 		)
 		.option(
-			'--private-cache <name>',
-			'Add private caches at the tenant URL, one per line or comma-separated. ' +
-				'Supply each credential through --private-cache-credentials or ' +
-				'through --read-user and --read-password.'
-		)
-		.option(
-			'--private-cache-credentials <json>',
-			'Supply private cache credentials as a JSON object mapping each ' +
-				"cache's local name to its user and password."
+			'--cache-credentials <json>',
+			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
 			'--reuse-view <name>',
@@ -203,8 +188,8 @@ export function registerSetupCommand(
 			'--trusted-public-key <key>',
 			'Nix signing key to trust for cache reads'
 		)
-		.option('--read-user <user>', 'username for private cache reads')
-		.option('--read-password <password>', 'password for private cache reads')
+		.option('--read-user <user>', 'username for cache reads')
+		.option('--read-password <password>', 'password for cache reads')
 		.option(
 			'--nix-config-file <path>',
 			'existing Nix config file to append generated settings to'
@@ -278,7 +263,7 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options, readUser, readPassword),
+		caches: resolveCaches(options),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -296,49 +281,33 @@ export function resolveSetupInputs(
 }
 
 /**
- * Resolves the caches to configure. Public caches from `cache` come first,
- * followed by private caches from `private-cache`. If both inputs are empty,
- * the run configures the tenant's default cache.
- *
- * Every private cache requires a credential. Its entry in
- * `private-cache-credentials` takes precedence over the shared `read-user` and
- * `read-password`. The run fails if neither source provides a credential.
+ * Resolves the caches to configure and attaches cache-specific credentials.
+ * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(
-	options: SetupOptions,
-	readUser: ReadUser | '',
-	readPassword: string
-): readonly CacheSelection[] {
-	const publicCaches = providedCaches(options.cache);
-	const privateNames = providedPrivateCacheNames(options.privateCache);
+function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+	const caches = providedCaches(options.cache);
+	const defaultCache: CacheScope = { kind: 'default' };
+	const selected = caches.length === 0 ? [defaultCache] : caches;
 
-	if (publicCaches.length === 0 && privateNames.length === 0) {
-		return [{ cache: DEFAULT_CACHE }];
-	}
-
-	const credentials = providedPrivateCacheCredentials(
-		options.privateCacheCredentials,
-		privateNames
+	const credentials = providedCacheCredentials(
+		options.cacheCredentials,
+		selected
 	);
-	const shared: BasicCredential | undefined =
-		readUser === '' ? undefined : { user: readUser, password: readPassword };
 
-	return [
-		...publicCaches.map((cache) => ({ cache })),
-		...privateNames.map((name) => {
-			const credential = credentials.get(name) ?? shared;
+	return selected.map((cache) => {
+		const credential = credentials.find((entry) =>
+			isSameCacheScope(entry.cache, cache)
+		)?.credential;
 
-			if (credential === undefined) {
-				throw new PrivateCacheCredentialMissingError(name);
-			}
-
-			return { cache: privateStoredCache(name), credential };
-		})
-	];
+		return {
+			cache,
+			...(credential !== undefined && { credential })
+		};
+	});
 }
 
 /**
- * Registers every private-cache password and credential-bearing URL as a run
+ * Registers every cache-specific password and credential-bearing URL as a run
  * secret. The runner replaces each exact value with `***` in the log.
  *
  * Percent-encoding can change a password when the URL places it in userinfo, so
@@ -347,7 +316,7 @@ function resolveCaches(
  *
  * GitHub Actions applies a mask only to log output written after the command.
  */
-function maskPrivateCacheCredentials(
+function maskCacheCredentials(
 	inputs: SetupInputs,
 	mask: (value: string) => void
 ): void {
@@ -374,7 +343,7 @@ export async function setupAction(
 
 	const inputs = resolveSetupInputs(options, environment);
 
-	maskPrivateCacheCredentials(
+	maskCacheCredentials(
 		inputs,
 		dependencies.mask ??
 			((value) => {

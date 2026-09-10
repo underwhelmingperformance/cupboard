@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, signingKeyIdSchema } from '@cupboard/nix-store/scalars';
+import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { attestationUploadDecisionSchema } from '@cupboard/protocol/attestations';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { uploadActionDecisionSchema } from '@cupboard/protocol/upload';
@@ -19,8 +19,10 @@ import {
 	cacheWriteGrants,
 	currentOrigin,
 	currentServer,
+	defaultCache,
 	hexBytes,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	narDigestHex,
 	pushPath,
@@ -61,8 +63,9 @@ describe('tenant contract round trip', () => {
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
 
-		const created = await client.caches.put({
+		const created = await client.caches.put.inNamedCache({
 			cacheName: 'builds',
+			access: 'public',
 			priority: 30
 		});
 		const listed = await client.caches.list();
@@ -72,18 +75,115 @@ describe('tenant contract round trip', () => {
 
 		expect({ created, listed, removed }).toStrictEqual({
 			created: {
-				name: 'builds',
+				scope: { kind: 'named', name: 'builds' },
+				access: 'public',
 				priority: 30,
 				storePaths: 0,
 				graceManaged: false
 			},
 			listed: {
 				caches: [
-					{ name: '', priority: 40, storePaths: 0, graceManaged: false },
-					{ name: 'builds', priority: 30, storePaths: 0, graceManaged: false }
+					{
+						scope: { kind: 'default' },
+						access: 'public',
+						priority: 40,
+						storePaths: 0,
+						graceManaged: false
+					},
+					{
+						scope: { kind: 'named', name: 'builds' },
+						access: 'public',
+						priority: 30,
+						storePaths: 0,
+						graceManaged: false
+					}
 				]
 			},
-			removed: { name: 'builds', removed: true, storePathsRemoved: 0 }
+			removed: {
+				scope: { kind: 'named', name: 'builds' },
+				removed: true,
+				storePathsRemoved: 0
+			}
+		});
+	});
+
+	it('updates one cache property at a time through the derived client', async () => {
+		await useTestServer('contract-cache-update');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await client.caches.put.inNamedCache({
+			cacheName: 'builds',
+			access: 'public',
+			priority: 40
+		});
+
+		const privateCache = await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'access',
+			access: 'private'
+		});
+		const reprioritised = await client.caches.update.inNamedCache({
+			cacheName: 'builds',
+			kind: 'priority',
+			priority: 30
+		});
+
+		expect({ privateCache, reprioritised }).toStrictEqual({
+			privateCache: {
+				scope: { kind: 'named', name: 'builds' },
+				access: 'private',
+				priority: 40,
+				storePaths: 0,
+				graceManaged: false
+			},
+			reprioritised: {
+				scope: { kind: 'named', name: 'builds' },
+				access: 'private',
+				priority: 30,
+				storePaths: 0,
+				graceManaged: false
+			}
+		});
+	});
+
+	it('returns CACHE_ALREADY_EXISTS without changing the cache', async () => {
+		await useTestServer('contract-cache-already-exists');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await client.caches.put.inNamedCache({
+			cacheName: 'builds',
+			access: 'private',
+			priority: 30
+		});
+
+		const [error, data, isDefined] = await safe(
+			client.caches.put.inNamedCache({
+				cacheName: 'builds',
+				access: 'public',
+				priority: 40
+			})
+		);
+		const unchanged = await client.caches.get.inNamedCache({
+			cacheName: 'builds'
+		});
+
+		expect({ isDefined, data, unchanged }).toStrictEqual({
+			isDefined: true,
+			data: undefined,
+			unchanged: {
+				scope: { kind: 'named', name: 'builds' },
+				access: 'private',
+				priority: 30,
+				storePaths: 0,
+				graceManaged: false
+			}
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
+			code: 'CACHE_ALREADY_EXISTS',
+			status: StatusCodes.CONFLICT,
+			data: { cache: { kind: 'named', name: 'builds' } }
 		});
 	});
 
@@ -151,12 +251,14 @@ describe('tenant contract round trip', () => {
 
 	it('returns CACHE_NOT_EMPTY when cache removal requires force', async () => {
 		await useTestServer('contract-cache-not-empty');
-		const init = await bootstrap();
+		const init = await bootstrap({
+			caches: [{ scope: namedCache('builds') }]
+		});
 		const client = tenantClient(init.token);
 		await pushPath(
 			init.token,
 			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
+			namedCache('builds')
 		);
 
 		const [error, data, isDefined] = await safe(
@@ -170,14 +272,18 @@ describe('tenant contract round trip', () => {
 		expect({ isDefined, data, forced }).toStrictEqual({
 			isDefined: true,
 			data: undefined,
-			forced: { name: 'builds', removed: true, storePathsRemoved: 1 }
+			forced: {
+				scope: { kind: 'named', name: 'builds' },
+				removed: true,
+				storePathsRemoved: 1
+			}
 		});
 		expect(error).toBeInstanceOf(ORPCError);
 		expect(error).toMatchObject({
 			defined: true,
 			code: 'CACHE_NOT_EMPTY',
 			status: StatusCodes.CONFLICT,
-			data: { cache: 'builds' }
+			data: { cache: { kind: 'named', name: 'builds' } }
 		});
 	});
 
@@ -393,7 +499,43 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('serves stats, usage and check, addressing the default cache by the bare path', async () => {
+	// `_default` no longer selects the default cache; the bare path does. The
+	// named-cache parameter is a plain `cacheNameSchema`, which refuses a leading
+	// underscore, so the contract rejects the input rather than missing a route.
+	it('refuses _default in a named-cache path and serves a real name there', async () => {
+		await useTestServer('contract-named-cache-path');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await client.caches.put.inNamedCache({
+			cacheName: 'builds',
+			access: 'public',
+			priority: 30
+		});
+
+		const defaultSelectorUrl = new URL(
+			'/cache/_default/stats',
+			currentOrigin()
+		);
+		const defaultSelector = await currentServer().fetch(
+			new Request(defaultSelectorUrl, {
+				headers: { authorization: `Bearer ${init.token}` }
+			})
+		);
+		await defaultSelector.body?.cancel();
+		const named = await client.stats.cache.inNamedCache({
+			cacheName: 'builds'
+		});
+
+		expect({
+			defaultSelectorStatus: defaultSelector.status,
+			namedStorePaths: named.storePaths
+		}).toStrictEqual({
+			defaultSelectorStatus: StatusCodes.BAD_REQUEST,
+			namedStorePaths: 0
+		});
+	});
+
+	it('serves stats, usage and check on the default cache through bare paths', async () => {
 		await useTestServer('contract-stats');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -424,35 +566,6 @@ describe('tenant contract round trip', () => {
 				cursorCache: '',
 				discrepancies: []
 			}
-		});
-	});
-
-	it('refuses _default in a named-cache path and serves a named cache there', async () => {
-		await useTestServer('contract-named-cache-path');
-		const init = await bootstrap();
-		const client = tenantClient(init.token);
-		await client.caches.put({ cacheName: 'builds', priority: 30 });
-
-		const defaultSelectorUrl = new URL(
-			'/cache/_default/stats',
-			currentOrigin()
-		);
-		const defaultSelector = await currentServer().fetch(
-			new Request(defaultSelectorUrl, {
-				headers: { authorization: `Bearer ${init.token}` }
-			})
-		);
-		await defaultSelector.body?.cancel();
-		const named = await client.stats.cache.inNamedCache({
-			cacheName: 'builds'
-		});
-
-		expect({
-			defaultSelectorStatus: defaultSelector.status,
-			namedStorePaths: named.storePaths
-		}).toStrictEqual({
-			defaultSelectorStatus: StatusCodes.BAD_REQUEST,
-			namedStorePaths: 0
 		});
 	});
 
@@ -617,7 +730,7 @@ describe('tenant contract round trip', () => {
 			fileHash: nar.fileHash,
 			fileSize: nar.narBytes.byteLength
 		});
-		await pushPath(init.token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(init.token, metadata, defaultCache(), nar);
 
 		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
 		const digest = await sha256HexBytes(bundle);

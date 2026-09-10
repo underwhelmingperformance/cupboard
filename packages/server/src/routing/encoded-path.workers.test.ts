@@ -12,7 +12,7 @@ import {
 } from '@cupboard/protocol/attestations';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
-	type ParsedTenantReadCredential,
+	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { env } from 'cloudflare:workers';
@@ -30,10 +30,12 @@ import {
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
+	namedCache,
 	narDigestHex,
 	narHash,
 	provisionFixtureTenant,
 	pushPathToTenant,
+	putWorkerTestCache,
 	readFetch,
 	resetTestServer,
 	sigstoreBundleBytes,
@@ -45,20 +47,18 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 const tenant = tenantIdSchema.parse(fixtureTenant);
 const privateName = cacheNameSchema.parse('builds');
-const privateSelector = `_private-${privateName}`;
 const publicName = cacheNameSchema.parse('guides');
 const viewName = 'reuse';
-const privateViewName = `_private-${viewName}`;
+const privateViewName = 'private';
 const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 // The tenant's own read credential, and the private cache's own credential.
 // Once a cache holds one, only that credential opens the cache.
 const tenantReader = { user: 'alice', password: 'secret' };
-const cacheReader: ParsedTenantReadCredential =
-	tenantReadCredentialSchema.parse({
-		user: 'reader',
-		password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
-	});
+const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
+	user: 'reader',
+	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+});
 
 function basic(credential: {
 	readonly user: string;
@@ -78,8 +78,7 @@ interface Published {
 }
 
 // Negotiates, uploads and attaches one attestation bundle for the private
-// cache. A write addresses a cache by selector, so this uses the write surface
-// rather than the private read namespace.
+// cache through its write routes.
 async function attachBundle(
 	token: string,
 	storePathHash: StorePathHash
@@ -87,7 +86,7 @@ async function attachBundle(
 	const bundle = sigstoreBundleBytes(narDigestHex(narHash));
 	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 	const negotiated = await authorisedWorkerFetch(
-		`/cache/${privateSelector}/attestations`,
+		`/cache/${privateName}/attestations`,
 		token,
 		{
 			body: JSON.stringify({
@@ -107,7 +106,7 @@ async function attachBundle(
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	const attached = await authorisedWorkerFetch(
-		`/cache/${privateSelector}/attestations/${decision.uploadId}/attach`,
+		`/cache/${privateName}/attestations/${decision.uploadId}/attach`,
 		token,
 		{ method: 'POST' }
 	);
@@ -118,25 +117,39 @@ async function attachBundle(
 
 /**
  * Publishes the same store path to the default cache, a named public cache and
- * a private cache, and attaches one attestation bundle to the private cache. It
- * defines public and private views over their respective namespaces and gives
- * the tenant and private cache separate read credentials. All three cache
- * references use the same NAR hash.
+ * a private cache, and attaches one attestation bundle to the private cache.
+ * The public and private views select caches with the same access as the view.
+ * The tenant and private cache use separate read credentials. All three cache
+ * entries refer to the same NAR hash.
  */
 async function publish(): Promise<Published> {
 	const token = await initialiseViaWorker();
 	const metadata = uploadMetadata({ fileSize: 1234 });
+	await putWorkerTestCache(token, namedCache(publicName), 'public');
+	await putWorkerTestCache(token, namedCache(privateName), 'private');
 	await pushPathToTenant(tenant, token, metadata);
-	await pushPathToTenant(tenant, token, metadata, undefined, publicName);
-	await pushPathToTenant(tenant, token, metadata, undefined, privateSelector);
+	await pushPathToTenant(
+		tenant,
+		token,
+		metadata,
+		undefined,
+		namedCache(publicName)
+	);
+	await pushPathToTenant(
+		tenant,
+		token,
+		metadata,
+		undefined,
+		namedCache(privateName)
+	);
 	const bundleDigest = await attachBundle(token, metadata.storePathHash);
-	await setView([{ kind: 'prefix', pattern: '' }], viewName);
-	await setView([{ kind: 'prefix', pattern: '' }], privateViewName);
+	await setView([{ kind: 'all' }], viewName);
+	await setView([{ kind: 'all' }], privateViewName, 'private');
 	await provisionFixtureTenant({ read: tenantReader });
 	await setCacheReadCredential(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		tenant,
-		privateName,
+		namedCache(privateName),
 		cacheReader,
 		now
 	);
@@ -165,8 +178,7 @@ async function statusesFor(path: string): Promise<CredentialStatuses> {
 	return { withTenant: withTenant.status, withCache: withCache.status };
 }
 
-// Every read the private cache namespace serves, relative to the prefix that
-// addresses the cache.
+// Every read the private cache serves, relative to its stable cache prefix.
 const privateReads: readonly {
 	readonly name: string;
 	readonly suffix: (published: Published) => string;
@@ -191,26 +203,33 @@ describe('percent-encoded tenant route segments', () => {
 	beforeEach(resetTestServer);
 
 	// The tenant credential must not open a cache that holds its own credential.
-	// Admission looks for the addressed cache in the raw path, so an encoded
-	// namespace or an encoded name gives the route no cache verifier to check a
-	// credential against.
+	// Admission resolves the addressed cache from the raw path. Encoded aliases
+	// are rejected before either credential can identify another route spelling.
 	it.each(privateReads)(
-		'refuses an encoded namespace or cache-name segment when reading $name',
+		'refuses an encoded cache namespace or name when reading $name',
 		async ({ suffix }) => {
 			const published = await publish();
 			const suffixPath = suffix(published);
-			const refused = StatusCodes.UNAUTHORIZED;
 
 			expect({
 				encodedNamespace: await statusesFor(
-					`/private%2Dcache/${privateName}${suffixPath}`
+					`/cach%65/${privateName}${suffixPath}`
 				),
-				encodedName: await statusesFor(`/private-cache/%62uilds${suffixPath}`),
-				literal: await statusesFor(`/private-cache/${privateName}${suffixPath}`)
+				encodedName: await statusesFor(`/cache/%62uilds${suffixPath}`),
+				literal: await statusesFor(`/cache/${privateName}${suffixPath}`)
 			}).toStrictEqual({
-				encodedNamespace: { withTenant: refused, withCache: refused },
-				encodedName: { withTenant: refused, withCache: refused },
-				literal: { withTenant: refused, withCache: StatusCodes.OK }
+				encodedNamespace: {
+					withTenant: StatusCodes.NOT_FOUND,
+					withCache: StatusCodes.NOT_FOUND
+				},
+				encodedName: {
+					withTenant: StatusCodes.NOT_FOUND,
+					withCache: StatusCodes.NOT_FOUND
+				},
+				literal: {
+					withTenant: StatusCodes.UNAUTHORIZED,
+					withCache: StatusCodes.OK
+				}
 			});
 		}
 	);
@@ -278,23 +297,44 @@ describe('percent-encoded tenant route segments', () => {
 	});
 
 	it.each([
-		{ name: 'an encoded cache name', path: '/private-cache/%62uilds' },
-		{ name: 'an encoded cache namespace', path: '/private%2Dcache/builds' },
-		{ name: 'an encoded view name', path: '/private-reuse/%72euse' },
-		{ name: 'an encoded view namespace', path: `/private%2Dreuse/${viewName}` }
-	])('requires authentication before rejecting $name', async ({ path }) => {
+		{
+			name: 'an encoded private cache name',
+			encoded: '/cache/%62uilds/nix-cache-info',
+			canonical: `/cache/${privateName}/nix-cache-info`
+		},
+		{
+			name: 'an encoded cache namespace for a private cache',
+			encoded: `/cach%65/${privateName}/nix-cache-info`,
+			canonical: `/cache/${privateName}/nix-cache-info`
+		},
+		{
+			name: 'an encoded private view name',
+			encoded: '/reuse/%70rivate/nix-cache-info',
+			canonical: `/reuse/${privateViewName}/nix-cache-info`
+		},
+		{
+			name: 'an encoded reuse namespace for a private view',
+			encoded: `/reus%65/${privateViewName}/nix-cache-info`,
+			canonical: `/reuse/${privateViewName}/nix-cache-info`
+		}
+	])('rejects $name before authentication', async ({ encoded, canonical }) => {
 		await publish();
 
-		const response = await readFetch(`${path}/nix-cache-info`);
+		const alias = await readFetch(encoded);
+		const literal = await readFetch(canonical);
 
 		expect({
-			status: response.status,
-			challenge: response.headers.get('www-authenticate'),
-			control: response.headers.get('cache-control')
+			aliasStatus: alias.status,
+			aliasChallenge: alias.headers.has('www-authenticate'),
+			literalStatus: literal.status,
+			literalChallenge: literal.headers.get('www-authenticate'),
+			literalControl: literal.headers.get('cache-control')
 		}).toStrictEqual({
-			status: StatusCodes.UNAUTHORIZED,
-			challenge: 'Basic realm="cupboard"',
-			control: 'no-store'
+			aliasStatus: StatusCodes.NOT_FOUND,
+			aliasChallenge: false,
+			literalStatus: StatusCodes.UNAUTHORIZED,
+			literalChallenge: 'Basic realm="cupboard"',
+			literalControl: 'no-store'
 		});
 	});
 
@@ -315,12 +355,6 @@ describe('percent-encoded tenant route segments', () => {
 			init: {}
 		},
 		{
-			name: 'the default cache selector',
-			encoded: () => '/cache/%5Fdefault/nix-cache-info',
-			literal: () => '/cache/_default/nix-cache-info',
-			init: {}
-		},
-		{
 			name: 'a public reuse-view name',
 			encoded: () => `/reuse/%72euse/nix-cache-info`,
 			literal: () => `/reuse/${viewName}/nix-cache-info`,
@@ -328,8 +362,8 @@ describe('percent-encoded tenant route segments', () => {
 		},
 		{
 			name: 'a private reuse-view name',
-			encoded: () => `/private-reuse/%72euse/nix-cache-info`,
-			literal: () => `/private-reuse/${viewName}/nix-cache-info`,
+			encoded: () => `/reuse/%70rivate/nix-cache-info`,
+			literal: () => `/reuse/${privateViewName}/nix-cache-info`,
 			init: basic(tenantReader)
 		},
 		{
@@ -348,8 +382,8 @@ describe('percent-encoded tenant route segments', () => {
 		},
 		{
 			name: 'the private reuse-view namespace',
-			encoded: () => `/private%2Dreuse/${viewName}/nix-cache-info`,
-			literal: () => `/private-reuse/${viewName}/nix-cache-info`,
+			encoded: () => `/reus%65/${privateViewName}/nix-cache-info`,
+			literal: () => `/reuse/${privateViewName}/nix-cache-info`,
 			init: basic(tenantReader)
 		}
 	])(

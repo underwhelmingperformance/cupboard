@@ -1,13 +1,8 @@
 import {
-	cacheFromSelector,
+	cacheNameSchema,
 	type CacheScope,
-	type CacheSelector,
-	cacheSelectorSchema,
-	identityForCache,
 	type RootName,
 	rootNameSchema,
-	scopeFromSelector,
-	type StoredCache,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -28,7 +23,7 @@ import { InsufficientScopeError } from '../errors.ts';
  */
 export type PendingCacheResolver = (
 	id: string
-) => Promise<StoredCache | undefined>;
+) => Promise<CacheScope | undefined>;
 
 /**
  * A resolver for authorisations that declare no pending resource, so resource
@@ -63,7 +58,7 @@ interface ResolvedResource {
 async function resolveResource(
 	spec: ResourceSpec | undefined,
 	input: unknown,
-	pathCache: CacheSelector,
+	pathCache: CacheScope,
 	pendingCache: PendingCacheResolver
 ): Promise<ResolvedResource> {
 	if (spec === undefined) {
@@ -80,7 +75,7 @@ async function resolveResource(
 
 	if (spec.cache !== undefined) {
 		if ('fromPath' in spec.cache) {
-			resource.cache = scopeFromSelector(pathCache);
+			resource.cache = pathCache;
 		} else if ('pending' in spec.cache) {
 			const id = inputField(input, 'id');
 			const cache = id === undefined ? undefined : await pendingCache(id);
@@ -88,24 +83,20 @@ async function resolveResource(
 			if (cache === undefined) {
 				pendingMissing = { missingDenies: spec.cache.missingDenies !== false };
 			} else {
-				resource.cache = identityForCache(cache).scope;
+				resource.cache = cache;
 			}
 		} else {
-			// A scoped grant cannot cover an invalid selector. A wildcard can,
+			// A scoped grant cannot cover an invalid cache name. A wildcard can,
 			// although route validation will still return 400 for the input.
-			const selector = inputField(input, spec.cache.field);
+			const name = inputField(input, spec.cache.field);
 			const parsed =
-				selector === undefined
-					? undefined
-					: cacheSelectorSchema.safeParse(selector).data;
+				name === undefined ? undefined : cacheNameSchema.safeParse(name).data;
 
-			if (selector !== undefined && parsed === undefined) {
+			if (name !== undefined && parsed === undefined) {
 				isUnresolved = true;
 			} else {
 				resource.cache =
-					parsed === undefined
-						? undefined
-						: identityForCache(cacheFromSelector(parsed)).scope;
+					parsed === undefined ? undefined : { kind: 'named', name: parsed };
 			}
 		}
 	}
@@ -163,7 +154,7 @@ export async function authoriseRequest(
 	claims: AccessClaims,
 	meta: AuthzMeta,
 	input: unknown,
-	pathCache: CacheSelector,
+	pathCache: CacheScope,
 	pendingCache: PendingCacheResolver
 ): Promise<void> {
 	if (meta.requires === undefined) {
@@ -208,12 +199,10 @@ export async function authoriseRequest(
  */
 export function authoriseAttachRoot(
 	claims: AccessClaims,
-	cache: StoredCache,
+	cache: CacheScope,
 	root: RootName
 ): void {
-	const scope = identityForCache(cache).scope;
-
-	if (!isCoveredByToken(claims.grants, 'root:attach', { cache: scope, root })) {
+	if (!isCoveredByToken(claims.grants, 'root:attach', { cache, root })) {
 		throw new InsufficientScopeError();
 	}
 }

@@ -7,7 +7,7 @@ import path from 'node:path';
 import process, { platform } from 'node:process';
 
 import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
-import type { ParsedBuildEvent } from '@cupboard/protocol/build';
+import type { BuildEvent } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -54,14 +54,14 @@ afterEach(async () => {
 async function startListener(
 	options: {
 		drainTimeoutMs?: number;
-		onEvent?: (event: ParsedBuildEvent, signal: AbortSignal) => Promise<void>;
+		onEvent?: (event: BuildEvent, signal: AbortSignal) => Promise<void>;
 	} = {}
 ) {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-hook-'));
 	directories.push(directory);
 
 	const socketPath = path.join(directory, 'hook.sock');
-	const events: ParsedBuildEvent[] = [];
+	const events: BuildEvent[] = [];
 	const rejections: BuildEventRejectedError[] = [];
 	let notify: (() => void) | undefined;
 

@@ -1,7 +1,7 @@
 import { storePathSchema } from '@cupboard/nix-store/scalars';
 import {
-	buildReceiptSchema,
-	type ParsedBuildReceipt
+	type BuildReceipt,
+	buildReceiptSchema
 } from '@cupboard/protocol/build';
 import { describe, expect, it } from 'vitest';
 
@@ -18,7 +18,7 @@ function cohortInvocation(ordinal: number): BuildInvocation {
 	return { kind: 'command', command: ['sh', '-c', `exit ${String(ordinal)}`] };
 }
 
-function receiptFor(cohort: number): ParsedBuildReceipt {
+function receiptFor(cohort: number): BuildReceipt {
 	return buildReceiptSchema.parse({
 		version: 2,
 		paths: [pathA],

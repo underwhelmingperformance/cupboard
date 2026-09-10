@@ -1,12 +1,10 @@
-import type {
-	CheckDiscrepancy,
-	ParsedCheckReport
-} from '@cupboard/protocol/reports';
+import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -20,7 +18,7 @@ export interface CheckClient {
 		deep: boolean;
 		cursor: string;
 		cursorCache: string;
-	}): Promise<ParsedCheckReport>;
+	}): Promise<CheckReport>;
 }
 
 export function registerCheckCommand(
@@ -102,7 +100,5 @@ export async function runCheck(
 }
 
 function describeDiscrepancy(discrepancy: CheckDiscrepancy): string {
-	const cache = discrepancy.cache === '' ? '(default)' : discrepancy.cache;
-
-	return `${cache} ${discrepancy.storePathHash}`;
+	return `${cacheLabel(discrepancy.cache)} ${discrepancy.storePathHash}`;
 }

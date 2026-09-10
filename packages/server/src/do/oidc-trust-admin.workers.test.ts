@@ -39,7 +39,7 @@ const additionBody: OidcTrustAddBodyInput = {
 			actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 			resources: {
 				cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' },
-				root: { equalsResource: 'cache', validate: 'rootName' }
+				root: { exact: 'owner-ci', validate: 'rootName' }
 			}
 		}
 	]

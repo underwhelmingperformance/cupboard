@@ -5,7 +5,6 @@ import path from 'node:path';
 import { Nix } from '@cupboard/nix';
 import {
 	type CacheScope,
-	identityForCache,
 	type RootName,
 	storePathSchema,
 	type StorePathString,
@@ -25,13 +24,9 @@ import {
 	pushAuthorizationDetails
 } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import {
-	type CacheSelectionOptions,
-	CupboardClient,
-	resolveCacheSelection
-} from '../client/client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	parseTtl,
@@ -59,7 +54,7 @@ import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface PushOptions extends CacheSelectionOptions {
+interface PushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: RootName;
@@ -354,8 +349,6 @@ export function registerPushCommand(
 			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
 			parseTtl
 		)
-		.option('--cache <name>', 'push to a named cache rather than the default')
-		.addOption(privateCacheOption('push to'))
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store (default: the store Nix itself would use)',
@@ -478,8 +471,33 @@ export function registerPushCommand(
 				options.referencePathsFile === undefined
 					? undefined
 					: parsePathFile(await readFile(options.referencePathsFile, 'utf8'));
+			const canAcceptEmptyPayload =
+				(options.root !== undefined && options.dryRun !== true) ||
+				intermediatePaths !== undefined ||
+				referencePaths !== undefined;
+			const resolved = await resolveAuthorisedCachePositionals(url, paths, {
+				minimumPayload: canAcceptEmptyPayload ? 0 : 1,
+				payloadDescription: 'a store path',
+				authorise: (target) =>
+					authenticateForPush(
+						CupboardClient.fromUrl(target.tenantUrl, {
+							cache: target.cache,
+							signal: programOptions.signal
+						}),
+						{
+							githubOidc: options.githubOidc,
+							audience:
+								options.audience ?? audienceSchema.parse(target.tenantUrl),
+							authorizationDetails: pushCommandAuthorizationDetails(
+								options,
+								target.cache
+							)
+						}
+					),
+				signal: programOptions.signal
+			});
 			const publication = PublicationCollection.of({
-				targets: resolvePushPaths(paths),
+				targets: resolvePushPaths(resolved.payload),
 				...(intermediatePaths !== undefined && {
 					intermediatePaths: resolvePushPaths(intermediatePaths)
 				}),
@@ -497,24 +515,11 @@ export function registerPushCommand(
 				throw new EmptyPublicationError();
 			}
 			const reporter = commandUi(program, programOptions).reporter();
-			const cache = resolveCacheSelection(options);
-			const raw = CupboardClient.fromUrl(url, {
-				cache,
-				signal: programOptions.signal
-			});
-
-			const token = await authenticateForPush(raw, {
-				githubOidc: options.githubOidc,
-				audience: options.audience ?? audienceSchema.parse(url),
-				authorizationDetails: pushCommandAuthorizationDetails(
-					options,
-					identityForCache(cache).scope
-				)
-			});
+			const cache = resolved.target.cache;
 
 			const copiedFrom = await observedCopiesFrom(options.copiedFromFile);
 			const receipt = await runPush(publication, reporter, {
-				client: pushClientFor(url, token, {
+				client: pushClientFor(resolved.target.tenantUrl, resolved.credential, {
 					cache,
 					signal: programOptions.signal
 				}),

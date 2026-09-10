@@ -32,7 +32,7 @@ async function abandonCommitUpgrade(
 		socket.once('connect', () => {
 			socket.write(
 				[
-					`GET ${url.pathname}/cache/_default/commit HTTP/1.1`,
+					`GET ${url.pathname}/commit HTTP/1.1`,
 					`Host: ${url.host}`,
 					'Upgrade: websocket',
 					'Connection: Upgrade',
@@ -89,7 +89,9 @@ describe('a commit upgrade whose client leaves before the handshake', () => {
 
 			try {
 				const bearer = await server.ownerAdminToken();
-				const client = new CupboardClient(server.tenantUrl);
+				const client = new CupboardClient(server.tenantUrl, fetch, {
+					kind: 'default'
+				});
 
 				await abandonCommitUpgrade(server, bearer);
 

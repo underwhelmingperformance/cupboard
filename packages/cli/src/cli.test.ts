@@ -423,7 +423,7 @@ describe('command help', () => {
 
 		expect(help).toContain('--github-oidc');
 		expect(help).toContain('--audience');
-		expect(help).toContain('--cache');
+		expect(help).toContain('optional cache name');
 		expect(help).toContain('Example:');
 	});
 
@@ -435,15 +435,46 @@ describe('command help', () => {
 		expect(help).toContain('remove');
 	});
 
-	it('shows the selector, priority and namespace options and examples for reuse-view set', () => {
+	it('lists cache creation and direct property updates under cache', () => {
+		const help = helpFor(['cache']);
+
+		expect(help).toContain('create');
+		expect(help).toContain('set-access');
+		expect(help).toContain('set-priority');
+	});
+
+	it.each([
+		['set-access', '--access <mode>'],
+		['set-priority', '--priority <n>']
+	])('requires the new value for cache %s', async (command, option) => {
+		expect(helpFor(['cache', command])).toContain(option);
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'cache',
+				command,
+				'https://cupboard.example/t/acme',
+				'builds'
+			])
+		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
+	});
+
+	it('requires cache create to select a named cache', () => {
+		const help = helpFor(['cache', 'create']);
+
+		expect(help).toContain('Create a named cache.');
+		expect(help).toContain('cache name when the URL does not select one');
+	});
+
+	it('shows the selector, priority and access options and examples for reuse-view set', () => {
 		const help = helpFor(['reuse-view', 'set']);
 
-		expect(help).toContain('--exact');
-		expect(help).toContain('--prefix');
+		expect(help).toContain('--select');
 		expect(help).toContain('--priority');
-		expect(help).toContain('--private');
-		expect(help).toContain('matches');
-		expect(help).toContain('every cache');
+		expect(help).toContain('--access');
+		expect(help).toContain('cache:<name>');
+		expect(help).toContain('prefix:<prefix>');
 		expect(help).toContain('Examples:');
 	});
 

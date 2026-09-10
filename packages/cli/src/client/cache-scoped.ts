@@ -1,21 +1,13 @@
-import {
-	DEFAULT_CACHE,
-	type NamedCacheSelector,
-	namedSelectorForCache,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { type CacheName, type CacheScope } from '@cupboard/nix-store/scalars';
 
 /**
  * The two path variants the contract declares for one cache-scoped operation.
- * A command declares its dependency with this type, leaving `cacheName` out of
- * `Input`, and calls `callInCache` with a `StoredCache`. `callInCache` chooses
- * the variant and adds the selector, so no command builds a path.
+ * The derived client exposes them as sibling procedures; `callInCache` picks
+ * between them so a caller states the cache once and never builds a path.
  */
 export interface CacheScopedClient<Input, Output> {
 	inDefaultCache(input: Input): Promise<Output>;
-	inNamedCache(
-		input: Input & { cacheName: NamedCacheSelector }
-	): Promise<Output>;
+	inNamedCache(input: Input & { cacheName: CacheName }): Promise<Output>;
 }
 
 /**
@@ -23,15 +15,12 @@ export interface CacheScopedClient<Input, Output> {
  */
 export function callInCache<Input, Output>(
 	procedures: CacheScopedClient<Input, Output>,
-	cache: StoredCache,
+	cache: CacheScope,
 	input: Input
 ): Promise<Output> {
-	if (cache === DEFAULT_CACHE) {
+	if (cache.kind === 'default') {
 		return procedures.inDefaultCache(input);
 	}
 
-	return procedures.inNamedCache({
-		...input,
-		cacheName: namedSelectorForCache(cache)
-	});
+	return procedures.inNamedCache({ ...input, cacheName: cache.name });
 }
