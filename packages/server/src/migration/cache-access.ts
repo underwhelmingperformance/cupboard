@@ -14,11 +14,9 @@ import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import type { ServerContext } from '../do/context.ts';
-import { CacheCatalogueMigrationError } from '../errors.ts';
+import { CacheAccessMigrationError } from '../errors.ts';
 
 import * as migrationSchema from './cache-access-schema.ts';
-
-export const cacheCatalogueVersion = 1;
 
 interface LifecycleRow {
 	readonly access: CacheAccessMode;
@@ -162,9 +160,9 @@ async function d1Lifecycles(
 				deletedAt: row.deletedAt ?? undefined
 			});
 		} catch (error) {
-			throw new CacheCatalogueMigrationError(
+			throw new CacheAccessMigrationError(
 				tenant,
-				'lifecycle-invalid',
+				'invalid-lifecycle',
 				error instanceof Error ? error : new Error(String(error))
 			);
 		}
@@ -225,7 +223,7 @@ function reconcileLocalCaches(
 	});
 }
 
-export async function reconcileCacheCatalogue(
+export async function migrateLocalCacheAccess(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<void> {
@@ -233,13 +231,13 @@ export async function reconcileCacheCatalogue(
 	const defaultLifecycle = lifecycles.get(scopeKey({ kind: 'default' }));
 
 	if (defaultLifecycle === undefined) {
-		throw new CacheCatalogueMigrationError(tenant, 'lifecycle-incomplete');
+		throw new CacheAccessMigrationError(tenant, 'missing-default-lifecycle');
 	}
 
 	reconcileLocalCaches(context, defaultLifecycle.access, lifecycles);
 }
 
-export function isLocalCacheCatalogueComplete(context: ServerContext): boolean {
+export function isLocalCacheAccessComplete(context: ServerContext): boolean {
 	const incompleteCaches = context.db
 		.select({ count: sql<number>`count(*)`.as('incomplete_cache_count') })
 		.from(schema.caches)
@@ -277,27 +275,4 @@ export function isLocalCacheCatalogueComplete(context: ServerContext): boolean {
 		row.incompleteViews === 0 &&
 		row.defaultCaches === 1
 	);
-}
-
-export async function isCacheCatalogueComplete(
-	context: ServerContext,
-	tenant: TenantId
-): Promise<boolean> {
-	const row = await context.d1
-		.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-		.from(migrationSchema.tenants)
-		.where(eq(migrationSchema.tenants.id, tenant))
-		.get();
-
-	return row?.version === cacheCatalogueVersion;
-}
-
-export async function markCacheCatalogueComplete(
-	context: ServerContext,
-	tenant: TenantId
-): Promise<void> {
-	await context.d1
-		.update(migrationSchema.tenants)
-		.set({ cacheCatalogueVersion })
-		.where(eq(migrationSchema.tenants.id, tenant));
 }

@@ -734,4 +734,122 @@ describe('cache access compatible contract', () => {
 			)
 		).toBe(true);
 	});
+
+	it('retires tenant read mode without contracting compatibility storage', () => {
+		markCatalogueComplete(database);
+		applyCompatibleContract(database);
+		database
+			.prepare(
+				`INSERT INTO blob_ref (
+					tenant, cache, cache_kind, cache_name, store_path_hash,
+					generation, nar_hash, cache_generation
+				) VALUES (
+					'alice', 'guides', 'named', 'guides', 'path', 1,
+					'sha256:nar', 1
+				)`
+			)
+			.run();
+
+		applyMigration(database, '0025_retire_tenant_read_mode.sql');
+		database
+			.prepare(
+				`INSERT INTO tenant (
+					id, status, owner_issuer, owner_subject, owner_audience,
+					config_version, created_at
+				) VALUES (
+					'bob', 'active', 'issuer', 'subject', 'audience', 1,
+					'2026-01-02T00:00:00.000Z'
+				)`
+			)
+			.run();
+
+		const compatibilityTables = [
+			'attestation_ref',
+			'blob_ref',
+			'cache_lifecycle',
+			'tenant_cache_read_credential'
+		];
+		const legacyKeys = compatibilityTables.map((table) => {
+			const columns = database
+				.prepare(`PRAGMA table_info(${table})`)
+				.all()
+				.map((row) => ({ name: String(row.name), pk: Number(row.pk) }));
+
+			return {
+				table,
+				hasCacheColumn: columns.some((column) => column.name === 'cache'),
+				primaryKey: columns
+					.filter((column) => column.pk > 0)
+					.toSorted((left, right) => left.pk - right.pk)
+					.map((column) => column.name)
+			};
+		});
+
+		expect({
+			tenants: database
+				.prepare(
+					`SELECT id, read_mode, cache_catalogue_version
+					 FROM tenant ORDER BY id`
+				)
+				.all()
+				.map((row) => ({
+					...row,
+					read_mode: row.read_mode ?? undefined,
+					cache_catalogue_version: row.cache_catalogue_version ?? undefined
+				})),
+			blob: {
+				...database
+					.prepare(
+						`SELECT cache, cache_kind, cache_name, store_path_hash
+						 FROM blob_ref WHERE tenant = 'alice'`
+					)
+					.get()
+			},
+			legacyKeys
+		}).toStrictEqual({
+			tenants: [
+				{ id: 'alice', read_mode: 'public', cache_catalogue_version: 1 },
+				{
+					id: 'bob',
+					read_mode: undefined,
+					cache_catalogue_version: undefined
+				}
+			],
+			blob: {
+				cache: 'guides',
+				cache_kind: 'named',
+				cache_name: 'guides',
+				store_path_hash: 'path'
+			},
+			legacyKeys: [
+				{
+					table: 'attestation_ref',
+					hasCacheColumn: true,
+					primaryKey: [
+						'tenant',
+						'cache',
+						'store_path_hash',
+						'generation',
+						'predicate_type',
+						'digest'
+					]
+				},
+				{
+					table: 'blob_ref',
+					hasCacheColumn: true,
+					primaryKey: ['tenant', 'cache', 'store_path_hash', 'generation']
+				},
+				{
+					table: 'cache_lifecycle',
+					hasCacheColumn: true,
+					primaryKey: ['tenant', 'cache']
+				},
+				{
+					table: 'tenant_cache_read_credential',
+					hasCacheColumn: true,
+					primaryKey: ['tenant', 'cache']
+				}
+			]
+		});
+	});
 });

@@ -1,4 +1,5 @@
 import {
+	type CacheAccessMode,
 	cacheNameSchema,
 	type CacheScope,
 	type TenantId,
@@ -13,7 +14,7 @@ import {
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -278,8 +279,27 @@ describe('tenant registry', () => {
 			.from(d1Schema.cacheLifecycle)
 			.where(eq(d1Schema.cacheLifecycle.tenant, acme))
 			.get();
+		const compatibility = await database()
+			.select({
+				readMode: sql<CacheAccessMode | null>`${migrationSchema.tenants.readMode}`,
+				cacheCatalogueVersion: migrationSchema.tenants.cacheCatalogueVersion
+			})
+			.from(migrationSchema.tenants)
+			.where(eq(migrationSchema.tenants.id, acme))
+			.get();
 
-		expect({ summary, defaultCache }).toStrictEqual({
+		expect({
+			summary,
+			defaultCache,
+			compatibility:
+				compatibility === undefined
+					? undefined
+					: {
+							readMode: compatibility.readMode ?? undefined,
+							cacheCatalogueVersion:
+								compatibility.cacheCatalogueVersion ?? undefined
+						}
+		}).toStrictEqual({
 			summary: {
 				id: acme,
 				status: 'active',
@@ -289,7 +309,11 @@ describe('tenant registry', () => {
 				configVersion: 1,
 				createdAt: now
 			},
-			defaultCache: { access: 'private' }
+			defaultCache: { access: 'private' },
+			compatibility: {
+				readMode: undefined,
+				cacheCatalogueVersion: undefined
+			}
 		});
 	});
 
