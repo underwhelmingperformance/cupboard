@@ -10,6 +10,7 @@ import {
 	and,
 	asc,
 	eq,
+	getTableName,
 	gt,
 	inArray,
 	lt,
@@ -23,6 +24,7 @@ import {
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
+	GarbageCollectionBarrierMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
@@ -74,6 +76,74 @@ export const phaseGranule = 128;
 // size only because the expiry phase reads every root it selects in one query,
 // and nothing stops it being raised to `phaseGranule`.
 export const maxRootsExpiredPerRun = 32;
+
+/**
+ * The tables the collection scan reads reachability from.
+ *
+ * A path is reachable when one of the seed tables names it, or when a reachable
+ * path with a `narinfo` row references it. Those are the only two relations the
+ * scan reads, so a statement can enlarge the reachable set only by writing one
+ * of these tables.
+ *
+ * The write barrier is a pair of triggers on each of them, named after the
+ * table. This list is what the trigger names are derived from, what
+ * `advanceSeed` reads its seeds from, and what the migration test and
+ * `assertBarrierPresent` check. A seed source added here therefore fails the
+ * migration test until its triggers exist, and no pass runs while one of them
+ * is missing.
+ */
+const reachabilitySources = [
+	{
+		role: 'seed',
+		phase: 'roots',
+		table: schema.retentionRootTargets,
+		cacheId: schema.retentionRootTargets.cacheId,
+		storePathHash: schema.retentionRootTargets.storePathHash
+	},
+	{
+		role: 'seed',
+		phase: 'grace',
+		table: schema.retentionGrace,
+		cacheId: schema.retentionGrace.cacheId,
+		storePathHash: schema.retentionGrace.storePathHash
+	},
+	{
+		// The scan reads every edge from `references_json`, in `advanceMark` and
+		// nowhere else.
+		role: 'edge',
+		table: schema.narInfos
+	}
+] as const;
+
+type SeedSource = Extract<
+	(typeof reachabilitySources)[number],
+	{ role: 'seed' }
+>;
+
+// The seed phases of the scan, in the order the scan runs them.
+const seedSources: readonly SeedSource[] = reachabilitySources.filter(
+	(source): source is SeedSource => source.role === 'seed'
+);
+
+const barrierTriggerPrefix = 'garbage_collection_barrier_';
+
+/**
+ * The barrier triggers, each with the table it fires on.
+ *
+ * Deriving these from {@link reachabilitySources} is what keeps the trigger set
+ * closed under the sources the scan reads: there is no second list to update.
+ */
+export const barrierTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = reachabilitySources.flatMap((source) => {
+	const table = getTableName(source.table);
+
+	return (['insert', 'update'] as const).map((statement) => ({
+		name: `${barrierTriggerPrefix}${table}_${statement}`,
+		table
+	}));
+});
 
 /**
  * Builds one ordered page of targets for roots that have just expired. The
@@ -145,22 +215,6 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private currentRevision(cache: ResolvedCache): number {
-		this.context.db
-			.insert(schema.garbageCollectionRevisions)
-			.values({ cacheId: cache.id, revision: 0 })
-			.onConflictDoNothing()
-			.run();
-
-		return (
-			this.context.db
-				.select({ revision: schema.garbageCollectionRevisions.revision })
-				.from(schema.garbageCollectionRevisions)
-				.where(eq(schema.garbageCollectionRevisions.cacheId, cache.id))
-				.get()?.revision ?? 0
-		);
-	}
-
 	private clearScan(cache: ResolvedCache): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
@@ -175,36 +229,20 @@ export class GarbageCollectionService {
 		});
 	}
 
-	private resetScan(cache: ResolvedCache, revision: number): void {
-		this.context.db.transaction((tx) => {
-			tx.delete(schema.garbageCollectionFrontier)
-				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
-				.run();
-			tx.delete(schema.garbageCollectionMarks)
-				.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
-				.run();
-			tx.insert(schema.garbageCollectionScans)
-				.values({
-					cacheId: cache.id,
-					revision,
-					phase: 'expire-roots',
-					cursor: '',
-					referenceCursor: -1,
-					allowEmptyCollection: false
-				})
-				.onConflictDoUpdate({
-					target: schema.garbageCollectionScans.cacheId,
-					set: {
-						revision,
-						phase: 'expire-roots',
-						cursor: '',
-						markStorePathHash: sql`null`,
-						referenceCursor: -1,
-						allowEmptyCollection: false
-					}
-				})
-				.run();
-		});
+	// Starts a scan at the first phase. A cache with no scan row has no mark and no
+	// frontier row either: `clearScan` removes them when a scan ends, and the
+	// barrier triggers add nothing while no scan row exists.
+	private startScan(cache: ResolvedCache): void {
+		this.context.db
+			.insert(schema.garbageCollectionScans)
+			.values({
+				cacheId: cache.id,
+				phase: 'expire-roots',
+				cursor: '',
+				referenceCursor: -1,
+				allowEmptyCollection: false
+			})
+			.run();
 	}
 
 	private scanRow(
@@ -217,35 +255,24 @@ export class GarbageCollectionService {
 			.get();
 	}
 
-	/**
-	 * Reads the scan, restarting it when the cache changed under it.
-	 *
-	 * The revision comparison costs two statements beyond the scan row itself,
-	 * and it can only tell a pass something at its start: a cache's revision
-	 * changes through triggers on `narinfo`, `retention_root`,
-	 * `retention_root_target` and `retention_grace`, and within one invocation
-	 * the only writer of those tables is the pass itself, which adopts its own
-	 * revision as it goes. A pass therefore compares once and reads the row with
-	 * {@link scanRow} after that.
-	 */
+	// Reads the scan of this cache, starting one when none is in progress.
 	private scan(
 		cache: ResolvedCache
 	): typeof schema.garbageCollectionScans.$inferSelect {
-		const revision = this.currentRevision(cache);
 		const stored = this.scanRow(cache);
 
-		if (stored?.revision !== revision) {
-			this.resetScan(cache, revision);
-			const reset = this.scanRow(cache);
-
-			if (reset === undefined) {
-				throw new Error('garbage-collection scan reset did not persist');
-			}
-
-			return reset;
+		if (stored !== undefined) {
+			return stored;
 		}
 
-		return stored;
+		this.startScan(cache);
+		const started = this.scanRow(cache);
+
+		if (started === undefined) {
+			throw new Error('garbage-collection scan did not persist');
+		}
+
+		return started;
 	}
 
 	private updateScan(
@@ -253,11 +280,7 @@ export class GarbageCollectionService {
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
-				| 'phase'
-				| 'cursor'
-				| 'referenceCursor'
-				| 'allowEmptyCollection'
-				| 'revision'
+				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptyCollection'
 			>
 		> & {
 			readonly markStorePathHash?: StorePathHash | SQL;
@@ -268,10 +291,6 @@ export class GarbageCollectionService {
 			.set(set)
 			.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 			.run();
-	}
-
-	private synchroniseScanRevision(cache: ResolvedCache): void {
-		this.updateScan(cache, { revision: this.currentRevision(cache) });
 	}
 
 	private expireRoots(
@@ -427,40 +446,27 @@ export class GarbageCollectionService {
 		}
 	}
 
+	// Copies a page of one seed table's store-path hashes onto the frontier. A
+	// root target row exists for each root that names a path, so the page is read
+	// distinct. A grace row is unique per path already.
 	private advanceSeed(
 		cache: ResolvedCache,
-		phase: 'roots' | 'grace',
+		source: SeedSource,
 		cursor: string
 	): void {
 		const page = phaseGranule;
-		const rows =
-			phase === 'roots'
-				? this.context.db
-						.selectDistinct({
-							storePathHash: schema.retentionRootTargets.storePathHash
-						})
-						.from(schema.retentionRootTargets)
-						.where(
-							and(
-								eq(schema.retentionRootTargets.cacheId, cache.id),
-								sql`${schema.retentionRootTargets.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionRootTargets.storePathHash))
-						.limit(page + 1)
-						.all()
-				: this.context.db
-						.select({ storePathHash: schema.retentionGrace.storePathHash })
-						.from(schema.retentionGrace)
-						.where(
-							and(
-								eq(schema.retentionGrace.cacheId, cache.id),
-								sql`${schema.retentionGrace.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionGrace.storePathHash))
-						.limit(page + 1)
-						.all();
+		const rows = this.context.db
+			.selectDistinct({ storePathHash: source.storePathHash })
+			.from(source.table)
+			.where(
+				and(
+					eq(source.cacheId, cache.id),
+					sql`${source.storePathHash} > ${cursor}`
+				)
+			)
+			.orderBy(asc(source.storePathHash))
+			.limit(page + 1)
+			.all();
 		const batch = rows.slice(0, page);
 
 		this.insertFrontier(
@@ -476,10 +482,11 @@ export class GarbageCollectionService {
 			return;
 		}
 
-		this.updateScan(cache, {
-			phase: phase === 'roots' ? 'grace' : 'mark',
-			cursor: ''
-		});
+		// The seed phases run in the order of `reachabilitySources`, and the mark
+		// phase follows the last of them.
+		const next = seedSources[seedSources.indexOf(source) + 1];
+
+		this.updateScan(cache, { phase: next?.phase ?? 'mark', cursor: '' });
 	}
 
 	private existingMarks(
@@ -662,6 +669,11 @@ export class GarbageCollectionService {
 
 			const page = phaseGranule;
 
+			// This statement is the only place the scan reads an edge from. Reading a
+			// second column or table here would put those edges outside the write
+			// barrier, which follows `reachabilitySources`: a new edge source needs an
+			// entry in that list and the pair of triggers derived from it, or the mark
+			// will not follow the edges a commit adds after it.
 			const references = this.context.db.all<{
 				referenceIndex: number;
 				reference: unknown;
@@ -707,37 +719,70 @@ export class GarbageCollectionService {
 		}
 	}
 
+	// Whether any marked path of this cache has a narinfo row.
+	private hasRetainedPath(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.narInfos)
+				.innerJoin(
+					schema.garbageCollectionMarks,
+					and(
+						eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
+						eq(
+							schema.garbageCollectionMarks.storePathHash,
+							schema.narInfos.storePathHash
+						)
+					)
+				)
+				.where(eq(schema.narInfos.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	 * Moves a completed mark phase to the collect phase, or ends the scan.
+	 *
+	 * The empty-cache guard belongs to the decision to start collecting, so it
+	 * applies on the first entry to `collect` only. A cursor of '' is what
+	 * identifies that entry: the seed phase left the cursor there when it moved to
+	 * the mark phase, and a cursor written mid-collect is the last hash of a
+	 * non-empty page. The cursor is therefore kept here, so a scan that returned
+	 * to marking resumes the page it had reached.
+	 */
 	private finishMark(
 		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): boolean {
-		const retained = this.context.db
-			.select({ storePathHash: schema.narInfos.storePathHash })
-			.from(schema.narInfos)
-			.innerJoin(
-				schema.garbageCollectionMarks,
-				and(
-					eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
-					eq(
-						schema.garbageCollectionMarks.storePathHash,
-						schema.narInfos.storePathHash
-					)
-				)
-			)
-			.where(eq(schema.narInfos.cacheId, cache.id))
-			.limit(1)
-			.get();
-
-		if (retained === undefined && !scan.allowEmptyCollection) {
+		if (
+			scan.cursor === '' &&
+			!scan.allowEmptyCollection &&
+			!this.hasRetainedPath(cache)
+		) {
 			this.clearScan(cache);
 			return true;
 		}
 
-		this.updateScan(cache, { phase: 'collect', cursor: '' });
+		this.updateScan(cache, { phase: 'collect' });
 		return false;
 	}
 
-	// A mark for the path the outer statement is looking at.
+	// Whether the barrier has queued a path since the mark phase finished. The
+	// collect phase trusts the mark alone, so it must not delete while a queued
+	// path is waiting to be marked.
+	private hasQueuedPaths(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.garbageCollectionFrontier)
+				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	// The mark set of a path the outer statement is looking at.
 	private markedPath(cache: ResolvedCache) {
 		return this.context.db
 			.select({ one: sql`1` })
@@ -823,6 +868,17 @@ export class GarbageCollectionService {
 		for (const paths of jsonRowLists(batch)) {
 			const unmarked = notExists(this.markedPath(cache));
 			const settled = notExists(this.inFlightUpload(cache));
+			// The barrier triggers fill the frontier from commits and root writes, so
+			// an empty frontier is what says the mark holds every reachable path. The
+			// collect branch of `collectUnreachable` returns to marking when a path is
+			// queued; this condition keeps the delete from running against a mark that
+			// is behind even if that branch is ever reordered.
+			const markIsCurrent = notExists(
+				this.context.db
+					.select({ one: sql`1` })
+					.from(schema.garbageCollectionFrontier)
+					.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+			);
 
 			// Queue exactly the paths the delete removed, so a path kept by the mark
 			// or by an upload in flight is never queued for deletion.
@@ -837,7 +893,8 @@ export class GarbageCollectionService {
 								generation: schema.narInfos.generation
 							}),
 							unmarked,
-							settled
+							settled,
+							markIsCurrent
 						)
 					)
 					.returning({
@@ -856,7 +913,6 @@ export class GarbageCollectionService {
 			this.updateScan(cache, {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
-			this.synchroniseScanRevision(cache);
 		} else {
 			this.clearScan(cache);
 		}
@@ -919,6 +975,36 @@ export class GarbageCollectionService {
 	}
 
 	/**
+	 * Refuses the pass while a barrier trigger is missing.
+	 *
+	 * SQLite drops a table's triggers together with the table, and a migration
+	 * that rebuilds one of the tables in {@link reachabilitySources} would not
+	 * re-create them. The mark would then stop following the writes that land
+	 * between invocations, and the collect phase would delete paths those writes
+	 * made reachable. A pass that refuses to run leaves a logged error and a
+	 * re-armed continuation, which is recoverable; a pass that collects against a
+	 * mark the barrier no longer maintains is not.
+	 */
+	private assertBarrierPresent(): void {
+		const present = new Set(
+			this.context.db
+				.all<{ name: string }>(
+					sql`SELECT name FROM sqlite_master
+					    WHERE type = 'trigger'
+					      AND name GLOB ${`${barrierTriggerPrefix}*`}`
+				)
+				.map((row) => row.name)
+		);
+		const missing = barrierTriggers
+			.map((trigger) => trigger.name)
+			.filter((name) => !present.has(name));
+
+		if (missing.length > 0) {
+			throw new GarbageCollectionBarrierMissingError(missing);
+		}
+	}
+
+	/**
 	 * Advances one cache's collection scan until the invocation's row budget is
 	 * spent, leaving the phase it stopped in recorded for the next invocation.
 	 *
@@ -941,13 +1027,14 @@ export class GarbageCollectionService {
 		hasMoreExpiredRoots: boolean;
 		hasMoreWork: boolean;
 	} {
+		this.assertBarrierPresent();
+
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
 		let hasMoreExpiredRoots = false;
-		// Compare the revision once. Nothing outside this pass can write the
-		// tables that change it while the pass runs, and each phase adopts the
-		// revision its own writes produce, so later steps read the row alone.
+		// Read the scan row once and then after each step. Within one invocation
+		// every statement is synchronous, so nothing but this pass can change it.
 		let scan: typeof schema.garbageCollectionScans.$inferSelect | undefined =
 			this.scan(cache);
 
@@ -960,7 +1047,6 @@ export class GarbageCollectionService {
 				// can finish the roots an earlier one left behind.
 				hasMoreExpiredRoots = expired.hasMoreExpiredRoots;
 				this.updateScan(cache, {
-					revision: this.currentRevision(cache),
 					allowEmptyCollection:
 						scan.allowEmptyCollection ||
 						expired.rootsExpired > 0 ||
@@ -980,7 +1066,6 @@ export class GarbageCollectionService {
 				const expired = this.expireGraceStep(cache, now);
 
 				this.updateScan(cache, {
-					revision: this.currentRevision(cache),
 					allowEmptyCollection:
 						scan.allowEmptyCollection || this.cacheGraceManaged(cache),
 					...(!expired.hasMoreDeadlines && { phase: 'roots' })
@@ -994,8 +1079,13 @@ export class GarbageCollectionService {
 				continue;
 			}
 
-			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				this.advanceSeed(cache, scan.phase, scan.cursor);
+			const { phase } = scan;
+			const seedSource = seedSources.find(
+				(candidate) => candidate.phase === phase
+			);
+
+			if (seedSource !== undefined) {
+				this.advanceSeed(cache, seedSource, scan.cursor);
 
 				if (isRowBudgetExhausted()) {
 					break;
@@ -1009,6 +1099,21 @@ export class GarbageCollectionService {
 				const marked = this.advanceMark(cache, scan);
 
 				if (marked.complete || isRowBudgetExhausted()) {
+					break;
+				}
+
+				scan = this.scanRow(cache);
+				continue;
+			}
+
+			// A path queued since the mark phase finished has to be marked before
+			// anything is deleted, and its closure with it. Return to the mark phase
+			// and leave the collect cursor where it is, so the marks already made
+			// stand and collecting resumes from the page it had reached.
+			if (this.hasQueuedPaths(cache)) {
+				this.updateScan(cache, { phase: 'mark' });
+
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
@@ -1330,125 +1435,110 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
-		// Remove pending rows under the critical section, but delete their staging
-		// objects afterwards so an R2 stall cannot hold the section. The orphan scan
-		// retries objects left by a failed delete.
-		let stagingKeys: R2ObjectKey[] = [];
+		// Every statement from here to the deletion flush is synchronous. Nothing
+		// yields between them, so no other event can interleave whether or not the
+		// input gate is held, and inside the gate they would spend the 25-second gate
+		// budget that the awaited flush needs. The row budget is what keeps this
+		// stretch short, and it comes from the dispatch scope rather than the gate.
+		const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
 
-		const reaped = await this.context.criticalSection(async () => {
-			const expiredRefreshFamilies = this.collectExpiredRefreshFamilies(now);
-
-			if (expiredRefreshFamilies.hasMoreWork) {
-				log.warn(
-					'refresh-token family backlog remains after bounded collection',
-					{
-						membersDeleted: expiredRefreshFamilies.membersDeleted,
-						familiesDeleted: expiredRefreshFamilies.familiesDeleted
-					}
-				);
-			}
-
-			// `pending` and `committing` are live commit states, even after expiry;
-			// verification may still resume them. Reap only uploads without a verdict
-			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
-			//
-			// Each delete names its rows through a subquery and reports them with
-			// `RETURNING`, so the pass learns which staging objects to remove
-			// without reading the page first.
-			const expiredUploads = this.context.db.all<
-				Pick<
-					typeof schema.pendingUploads.$inferSelect,
-					'id' | 'narHash' | 'r2Key'
-				>
-			>(
-				sql`DELETE FROM pending_upload
-				    WHERE id IN (
-				      SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
-				      WHERE expires_at < ${now}
-				        AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
-				      ORDER BY expires_at, id
-				      LIMIT ${maxPendingRowsDeletedPerRun}
-				    )
-				    RETURNING id, nar_hash AS narHash, r2_key AS r2Key`
+		if (expiredRefreshFamilies.hasMoreWork) {
+			log.warn(
+				'refresh-token family backlog remains after bounded collection',
+				{
+					membersDeleted: expiredRefreshFamilies.membersDeleted,
+					familiesDeleted: expiredRefreshFamilies.familiesDeleted
+				}
 			);
-			const dueAttestations = this.context.db
-				.select({ id: schema.pendingAttestations.id })
-				.from(schema.pendingAttestations)
-				.where(lt(schema.pendingAttestations.expiresAt, now))
-				.orderBy(asc(schema.pendingAttestations.expiresAt))
-				.limit(maxPendingRowsDeletedPerRun);
-			const expiredAttestations = this.context.db
-				.delete(schema.pendingAttestations)
-				.where(inArray(schema.pendingAttestations.id, dueAttestations))
-				.returning({ r2Key: schema.pendingAttestations.r2Key })
-				.all();
-			// A step that filled its page may have left more behind. The alarm runs
-			// the next one, which stops when it finds nothing.
-			const hasMorePendingRows =
-				expiredUploads.length === maxPendingRowsDeletedPerRun ||
-				expiredAttestations.length === maxPendingRowsDeletedPerRun;
+		}
 
-			if (hasMorePendingRows) {
-				log.warn('pending staging backlog remains after bounded collection', {
-					uploadsDeleted: expiredUploads.length,
-					attestationsDeleted: expiredAttestations.length
-				});
-			}
+		// `pending` and `committing` are live commit states, even after expiry;
+		// verification may still resume them. Reap only uploads without a verdict
+		// and terminal `servable`, `mismatch`, or `over-quota` uploads.
+		//
+		// Each delete names its rows through a subquery and reports them with
+		// `RETURNING`, so the pass learns which staging objects to remove
+		// without reading the page first.
+		const expiredUploads = this.context.db.all<
+			Pick<
+				typeof schema.pendingUploads.$inferSelect,
+				'id' | 'narHash' | 'r2Key'
+			>
+		>(
+			sql`DELETE FROM pending_upload
+			    WHERE id IN (
+			      SELECT id FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+			      WHERE expires_at < ${now}
+			        AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+			      ORDER BY expires_at, id
+			      LIMIT ${maxPendingRowsDeletedPerRun}
+			    )
+			    RETURNING id, nar_hash AS narHash, r2_key AS r2Key`
+		);
+		const dueAttestations = this.context.db
+			.select({ id: schema.pendingAttestations.id })
+			.from(schema.pendingAttestations)
+			.where(lt(schema.pendingAttestations.expiresAt, now))
+			.orderBy(asc(schema.pendingAttestations.expiresAt))
+			.limit(maxPendingRowsDeletedPerRun);
+		const expiredAttestations = this.context.db
+			.delete(schema.pendingAttestations)
+			.where(inArray(schema.pendingAttestations.id, dueAttestations))
+			.returning({ r2Key: schema.pendingAttestations.r2Key })
+			.all();
+		// A step that filled its page may have left more behind. The alarm runs
+		// the next one, which stops when it finds nothing.
+		const hasMorePendingRows =
+			expiredUploads.length === maxPendingRowsDeletedPerRun ||
+			expiredAttestations.length === maxPendingRowsDeletedPerRun;
 
-			// Delete only private staging objects here. A reuse upload points at the
-			// shared canonical NAR, whose lifetime is owned by the global reaper.
-			stagingKeys = [
-				...expiredUploads
-					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-					.map((upload) => upload.r2Key),
-				...expiredAttestations.map((upload) => upload.r2Key)
-			];
+		if (hasMorePendingRows) {
+			log.warn('pending staging backlog remains after bounded collection', {
+				uploadsDeleted: expiredUploads.length,
+				attestationsDeleted: expiredAttestations.length
+			});
+		}
 
-			// Tenant-wide collection advances through registered caches one at a time.
-			// Scoped collection uses only the requested cache. Persistent mark and
-			// frontier state resumes each pass without rereading earlier chunks.
-			const collectionCache =
-				target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
-			const collected =
-				collectionCache === undefined
-					? {
-							rootsExpired: 0,
-							pathsCollected: 0,
-							hasMoreExpiredRoots: false,
-							hasMoreWork: false
-						}
-					: this.collectUnreachable(collectionCache, now);
-			const hasMoreCollectionWork =
-				collectionCache !== undefined &&
-				!collected.hasMoreWork &&
-				target.scope === 'tenant'
-					? this.advanceTenantCollection(collectionCache)
-					: collected.hasMoreWork;
-			const hasMoreWork =
-				expiredRefreshFamilies.hasMoreWork ||
-				hasMorePendingRows ||
-				hasMoreCollectionWork;
+		// Delete only private staging objects here. A reuse upload points at the
+		// shared canonical NAR, whose lifetime is owned by the global reaper.
+		const stagingKeys = [
+			...expiredUploads
+				.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
+				.map((upload) => upload.r2Key),
+			...expiredAttestations.map((upload) => upload.r2Key)
+		];
 
-			const narInfosDeleted =
-				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
+		// Tenant-wide collection advances through registered caches one at a time.
+		// Scoped collection uses only the requested cache. Persistent mark and
+		// frontier state resumes each pass without rereading earlier chunks.
+		const collectionCache =
+			target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
+		const collected =
+			collectionCache === undefined
+				? {
+						rootsExpired: 0,
+						pathsCollected: 0,
+						hasMoreExpiredRoots: false,
+						hasMoreWork: false
+					}
+				: this.collectUnreachable(collectionCache, now);
+		const hasMoreCollectionWork =
+			collectionCache !== undefined &&
+			!collected.hasMoreWork &&
+			target.scope === 'tenant'
+				? this.advanceTenantCollection(collectionCache)
+				: collected.hasMoreWork;
+		const hasMoreWork =
+			expiredRefreshFamilies.hasMoreWork ||
+			hasMorePendingRows ||
+			hasMoreCollectionWork;
 
-			// Queue retirement can change the scan revision by deleting grace rows. It
-			// runs under this critical section, so adopting that revision ignores only
-			// the scan's own cleanup and still detects external changes.
-			if (collectionCache !== undefined && collected.hasMoreWork) {
-				this.synchroniseScanRevision(collectionCache);
-			}
-
-			return {
-				pendingUploadsDeleted: expiredUploads.length,
-				pendingAttestationsDeleted: expiredAttestations.length,
-				rootsExpired: collected.rootsExpired,
-				pathsCollected: collected.pathsCollected,
-				hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
-				hasMoreWork,
-				narInfosDeleted
-			};
-		});
+		// The flush keeps the gate. Its R2 narinfo-object delete is keyed by path and
+		// nothing heals it on read, so a recommit between the edge retirement and the
+		// object delete would lose the new object.
+		const narInfosDeleted = await this.context.criticalSection(() =>
+			this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
+		);
 
 		// Delete R2 objects outside the critical section. The orphan scan then reads
 		// current pending rows and applies the age fence, so a concurrent upload is
@@ -1471,6 +1561,15 @@ export class GarbageCollectionService {
 			startedAt
 		);
 
-		return { ...reaped, orphanStagingDeleted };
+		return {
+			pendingUploadsDeleted: expiredUploads.length,
+			pendingAttestationsDeleted: expiredAttestations.length,
+			rootsExpired: collected.rootsExpired,
+			pathsCollected: collected.pathsCollected,
+			hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
+			hasMoreWork,
+			narInfosDeleted,
+			orphanStagingDeleted
+		};
 	}
 }

@@ -31,6 +31,8 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
+import { barrierTriggers } from './garbage-collection-service.ts';
+
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
 
@@ -48,6 +50,12 @@ function rootGrantsJson(resources: unknown): string {
 
 function insertRootGrantRule(id: string, resources: unknown): string {
 	return `INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES ('${id}', 'https://issuer.example', 'https://cache.example', '{}', '${rootGrantsJson(resources)}', '2026-01-01T00:00:00.000Z')`;
+}
+
+// A frontier row as the barrier test reads it back. The query filters on the
+// cache, so the row names only the path.
+function queued(storePathHash: string): unknown {
+	return { store_path_hash: storePathHash };
 }
 
 describe('migrations', () => {
@@ -620,11 +628,13 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasRecordedVerdict: false }]);
 	});
 
-	it('migrates a pre-0034 sweep scan to the collect phase', async () => {
+	it('migrates a pre-0034 sweep scan to the collect phase and then clears it', async () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";
+		const selectRenamedScans =
+			'SELECT cache, revision, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
 		const selectScans =
-			'SELECT cache_identity.name, garbage_collection_scan.revision, garbage_collection_scan.phase, garbage_collection_scan.cursor, garbage_collection_scan.allow_empty_collection FROM garbage_collection_scan JOIN cache_identity ON cache_identity.id = garbage_collection_scan.cache_id';
+			'SELECT cache_id, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
 
 		const migrated = await runInDurableObject(
 			testServerFor('migration-collect-phase'),
@@ -633,26 +643,218 @@ describe('migrations', () => {
 				// phase `sweep` and holding its allow-empty flag in
 				// `allow_empty_sweep`. The migration must rename the column and
 				// rewrite the phase, so the interrupted collection resumes where it
-				// stopped. The anchor is fixed so later migrations cannot silently
+				// stopped. The anchors are fixed so later migrations cannot silently
 				// retarget the test.
 				await migrateThrough(state, 33);
 				state.storage.sql.exec(insertCollectingScan);
 
+				await migrateThrough(state, 34);
+				const renamed = state.storage.sql.exec(selectRenamedScans).toArray();
+
+				// The migration that removed the revision also clears the collection
+				// state, because a mark made under the revision regime was not
+				// maintained by the write barrier that replaced it.
 				await migrateThroughConvertedCatalogue(state);
 
-				return state.storage.sql.exec(selectScans).toArray();
+				return {
+					renamed,
+					scans: state.storage.sql.exec(selectScans).toArray()
+				};
 			}
 		);
 
-		expect(migrated).toStrictEqual([
-			{
-				name: 'builds',
-				revision: 7,
-				phase: 'collect',
-				cursor: 'aa',
-				allow_empty_collection: 1
+		expect(migrated).toStrictEqual({
+			renamed: [
+				{
+					cache: 'builds',
+					revision: 7,
+					phase: 'collect',
+					cursor: 'aa',
+					allow_empty_collection: 1
+				}
+			],
+			scans: []
+		});
+	});
+
+	it('fires the collection write barrier for every write that adds reachability', async () => {
+		const cacheName = 'builds';
+		const rootTargetHash = 'a'.repeat(32);
+		const graceHash = 'b'.repeat(32);
+		const markedHash = 'c'.repeat(32);
+		const movedRootTargetHash = 'd'.repeat(32);
+		const movedGraceHash = 'f'.repeat(32);
+		const unscannedRootTargetHash = 'g'.repeat(32);
+		const unscannedGraceHash = 'h'.repeat(32);
+		const unmarkedHash = 'j'.repeat(32);
+		const retainUntil = '2026-06-01T00:00:00.000Z';
+		const selectBarrierTriggers =
+			"SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'garbage_collection_barrier_*'";
+		const insertCacheIdentity =
+			"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', ?, 'public', 50, '2026-01-01T00:00:00.000Z')";
+		const selectCacheIdentity =
+			"SELECT id FROM cache_identity WHERE kind = 'named' AND name = ?";
+		// The query filters on the cache, so a row's presence already says which
+		// cache queued it and the assertion below names only the path.
+		const selectFrontier =
+			'SELECT store_path_hash FROM garbage_collection_frontier WHERE cache_id = ? ORDER BY store_path_hash';
+		const clearFrontier =
+			'DELETE FROM garbage_collection_frontier WHERE cache_id = ?';
+		const insertScan =
+			"INSERT INTO garbage_collection_scan (cache_id, phase) VALUES (?, 'mark')";
+		const clearScan = 'DELETE FROM garbage_collection_scan WHERE cache_id = ?';
+		const insertMark =
+			'INSERT INTO garbage_collection_mark (cache_id, store_path_hash) VALUES (?, ?)';
+		const clearMark = 'DELETE FROM garbage_collection_mark WHERE cache_id = ?';
+		const insertRootTarget =
+			"INSERT INTO retention_root_target (cache_id, root_name, store_path_hash, store_path) VALUES (?, 'main', ?, ?)";
+		const moveRootTarget =
+			'UPDATE retention_root_target SET store_path_hash = ? WHERE cache_id = ? AND store_path_hash = ?';
+		const insertGrace =
+			'INSERT INTO retention_grace (cache_id, store_path_hash, retain_until) VALUES (?, ?, ?)';
+		const moveGrace =
+			'UPDATE retention_grace SET store_path_hash = ? WHERE cache_id = ? AND store_path_hash = ?';
+		const extendGrace =
+			'UPDATE retention_grace SET retain_until = ? WHERE cache_id = ? AND store_path_hash = ?';
+		const insertNarInfo =
+			"INSERT INTO narinfo (cache_id, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at) VALUES (?, ?, ?, 'sha256:nar', 10, '[]', '[]', '2026-01-01T00:00:00.000Z')";
+		const updateNarInfoReferences =
+			'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+		const updateNarInfoSignatures =
+			'UPDATE narinfo SET sigs_json = ? WHERE cache_id = ? AND store_path_hash = ?';
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-gc-barrier'),
+			async (_instance, state) => {
+				await migrateThroughConvertedCatalogue(state);
+
+				const run = (
+					query: string,
+					...parameters: (string | number)[]
+				): void => {
+					state.storage.sql.exec(query, ...parameters);
+				};
+
+				state.storage.sql.exec(insertCacheIdentity, cacheName);
+				const cache = state.storage.sql
+					.exec<{ id: number }>(selectCacheIdentity, cacheName)
+					.toArray()[0]?.id;
+
+				if (cache === undefined) {
+					throw new Error('the cache identity row did not persist');
+				}
+
+				// Each stage runs the writes one trigger covers and reports the frontier
+				// rows they produced. A present trigger can still protect nothing, so
+				// the rows are what proves the barrier; the names below only say which
+				// trigger is missing when one is.
+				const frontierAfter = (writes: () => void): unknown[] => {
+					writes();
+					const rows = state.storage.sql.exec(selectFrontier, cache).toArray();
+					run(clearFrontier, cache);
+
+					return rows;
+				};
+
+				run(insertScan, cache);
+
+				return {
+					triggers: Object.fromEntries(
+						[
+							...state.storage.sql.exec<{
+								name: string;
+								tbl_name: string;
+							}>(selectBarrierTriggers)
+						].map((trigger) => [trigger.name, trigger.tbl_name])
+					),
+					frontier: {
+						seedInserts: frontierAfter(() => {
+							run(
+								insertRootTarget,
+								cache,
+								rootTargetHash,
+								`/nix/store/${rootTargetHash}-app`
+							);
+							run(insertGrace, cache, graceHash, retainUntil);
+						}),
+						narInfoInsert: frontierAfter(() => {
+							run(insertMark, cache, markedHash);
+							run(
+								insertNarInfo,
+								cache,
+								markedHash,
+								`/nix/store/${markedHash}-app`
+							);
+						}),
+						seedIdentityUpdates: frontierAfter(() => {
+							run(moveRootTarget, movedRootTargetHash, cache, rootTargetHash);
+							run(moveGrace, movedGraceHash, cache, graceHash);
+						}),
+						narInfoReferencesUpdate: frontierAfter(() => {
+							run(
+								updateNarInfoReferences,
+								JSON.stringify([`${unmarkedHash}-child`]),
+								cache,
+								markedHash
+							);
+						}),
+						narInfoSignatureUpdate: frontierAfter(() => {
+							run(
+								updateNarInfoSignatures,
+								JSON.stringify(['cupboard-1:abc']),
+								cache,
+								markedHash
+							);
+						}),
+						graceDeadlineExtension: frontierAfter(() => {
+							run(
+								extendGrace,
+								'2026-07-01T00:00:00.000Z',
+								cache,
+								movedGraceHash
+							);
+						}),
+						// Between scans there is no scan row and the mark table is empty,
+						// so the same writes queue nothing.
+						withoutScanOrMark: frontierAfter(() => {
+							run(clearScan, cache);
+							run(clearMark, cache);
+							run(
+								insertRootTarget,
+								cache,
+								unscannedRootTargetHash,
+								`/nix/store/${unscannedRootTargetHash}-app`
+							);
+							run(insertGrace, cache, unscannedGraceHash, retainUntil);
+							run(
+								insertNarInfo,
+								cache,
+								unmarkedHash,
+								`/nix/store/${unmarkedHash}-app`
+							);
+						})
+					}
+				};
 			}
-		]);
+		);
+
+		expect(migrated).toStrictEqual({
+			triggers: Object.fromEntries(
+				barrierTriggers.map((trigger) => [trigger.name, trigger.table])
+			),
+			frontier: {
+				seedInserts: [queued(rootTargetHash), queued(graceHash)],
+				narInfoInsert: [queued(markedHash)],
+				seedIdentityUpdates: [
+					queued(movedRootTargetHash),
+					queued(movedGraceHash)
+				],
+				narInfoReferencesUpdate: [queued(markedHash)],
+				narInfoSignatureUpdate: [],
+				graceDeadlineExtension: [],
+				withoutScanOrMark: []
+			}
+		});
 	});
 
 	it('gains the reuse-view tables and narinfo index at the latest migration, leaving an existing narinfo row untouched', async () => {

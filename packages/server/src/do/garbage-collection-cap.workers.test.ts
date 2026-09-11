@@ -1,6 +1,7 @@
 import {
 	narInfoGenerationSchema,
-	rootNameSchema
+	rootNameSchema,
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -10,6 +11,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	garbageCollectionFrontier,
 	narInfoDeletions,
 	retentionRoots,
 	retentionRootTargets
@@ -32,7 +34,8 @@ import {
 	syntheticStorePathHash,
 	underOneUnitOfWork,
 	uploadMetadata,
-	useTestServer
+	useTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
@@ -220,6 +223,18 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 	});
 }
 
+// Queues a path the way a barrier trigger does, without a write that would also
+// change what the scan finds.
+async function queueFrontier(storePathHash: StorePathHash): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.insert(garbageCollectionFrontier)
+			.values({ cacheId: resolvedCache(instance.context).id, storePathHash })
+			.onConflictDoNothing()
+			.run();
+	});
+}
+
 async function retentionRootCounts(): Promise<{
 	readonly roots: number;
 	readonly targets: number;
@@ -233,7 +248,6 @@ async function retentionRootCounts(): Promise<{
 
 interface ScanProgress {
 	readonly phase: string;
-	readonly revision: number;
 	readonly cursor: string;
 	readonly frontier: number;
 	readonly marks: number;
@@ -245,8 +259,8 @@ function scanProgress(
 ): ScanProgress | undefined {
 	const cache = resolvedCache(context);
 	const scan = state.storage.sql
-		.exec<{ phase: string; revision: number; cursor: string }>(
-			`SELECT phase, revision, cursor
+		.exec<{ phase: string; cursor: string }>(
+			`SELECT phase, cursor
 			 FROM garbage_collection_scan
 			 WHERE cache_id = ?`,
 			cache.id
@@ -432,9 +446,6 @@ describe('garbage collection cap', () => {
 				return { progress, refresh, continuation: pending };
 			}
 		);
-		const revision = firstPass.progress?.revision;
-
-		expect(typeof revision).toBe('number');
 		// The refresh-family phase spends the budget on its first step of members
 		// and leaves the rest, so the collection phases that follow advance by a
 		// single step: the scan completes the expiry phase, which has no expired
@@ -442,7 +453,6 @@ describe('garbage collection cap', () => {
 		expect(firstPass).toStrictEqual({
 			progress: {
 				phase: 'expire-grace',
-				revision,
 				cursor: '',
 				frontier: 0,
 				marks: 0
@@ -537,28 +547,22 @@ describe('garbage collection cap', () => {
 		await driven.collectOneUnitOfWork();
 		const closureMarked = await currentScanProgress();
 		const progress = { seeded, parentMarked, closureMarked };
-		const revision = progress.seeded?.revision;
-
-		expect(typeof revision).toBe('number');
 
 		expect(progress).toStrictEqual({
 			seeded: {
 				phase: 'mark',
-				revision,
 				cursor: '',
 				frontier: 0,
 				marks: 1
 			},
 			parentMarked: {
 				phase: 'mark',
-				revision: progress.seeded?.revision,
 				cursor: '',
 				frontier: 1,
 				marks: 1
 			},
 			closureMarked: {
 				phase: 'mark',
-				revision: progress.seeded?.revision,
 				cursor: '',
 				frontier: 0,
 				marks: 2
@@ -582,7 +586,88 @@ describe('garbage collection cap', () => {
 		expect(generations.collectable).toBeUndefined();
 	});
 
-	it('restarts an in-progress walk when retention changes between chunks', async () => {
+	// The barrier queues a path when a write makes it reachable, and the mark may
+	// not hold its closure yet. A collect phase that deleted with a queued path
+	// waiting would delete that closure, so it returns to marking first.
+	it('returns to marking when a path is queued during the collect phase', async () => {
+		await useTestServer('gc-collect-requeue');
+		const { token } = await bootstrap();
+		const child = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'child',
+			references: []
+		});
+		const parent = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'parent',
+			references: [StorePath.basename(child.storePath)]
+		});
+		const rooted = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'rooted',
+			references: []
+		});
+
+		await pushPath(token, child);
+		await pushPath(token, parent);
+		await pushPath(token, rooted);
+		await setRoot(token, { name: 'channel', targets: [rooted.storePath] });
+
+		const generations = async (): Promise<
+			Record<string, number | undefined>
+		> => ({
+			rooted: await narInfoGeneration(rooted.storePathHash),
+			parent: await narInfoGeneration(parent.storePathHash),
+			child: await narInfoGeneration(child.storePathHash)
+		});
+		const pushed = await generations();
+
+		// Park the continuation with the scan about to collect, so the queued path
+		// arrives after the mark phase finished and before anything is deleted.
+		await driveScanTo((scan) => scan?.phase === 'collect');
+		const collecting = await currentScanProgress();
+
+		await queueFrontier(parent.storePathHash);
+
+		// The next unit finds the queued path and goes back to marking, keeping the
+		// mark it already made.
+		await driven.collectOneUnitOfWork();
+		const requeued = await currentScanProgress();
+
+		await driven.restore();
+		await drainContinuation();
+
+		expect({
+			collecting,
+			requeued,
+			scan: await currentScanProgress(),
+			continuation: await continuation(),
+			stored: await generations()
+		}).toStrictEqual({
+			collecting: {
+				phase: 'collect',
+				cursor: '',
+				frontier: 0,
+				marks: 1
+			},
+			requeued: {
+				phase: 'mark',
+				cursor: '',
+				frontier: 1,
+				marks: 1
+			},
+			scan: undefined,
+			continuation: undefined,
+			stored: pushed
+		});
+	});
+
+	// A target attached while the scan is marking is queued by the barrier, so the
+	// scan keeps the marks it has and walks the new target from where it stopped.
+	it('continues an in-progress walk and marks a target attached between chunks', async () => {
 		await useTestServer('gc-bounded-mutation');
 		const { token } = await bootstrap();
 		const kept = uploadMetadata({
@@ -604,7 +689,6 @@ describe('garbage collection cap', () => {
 
 		await driveScanTo((scan) => scan?.phase === 'mark' && scan.marks === 1);
 		const initial = await currentScanProgress();
-		const initialRevision = initial?.revision;
 
 		expect(driven.isContinuationArmed).toBe(true);
 
@@ -613,46 +697,101 @@ describe('garbage collection cap', () => {
 			targets: [kept.storePath, newlyRetained.storePath]
 		});
 
-		// The changed retention bumps the revision, so the next pass discards the
-		// marks and seeds the roots again. One seeding step covers both targets,
-		// so the restarted scan is observed once it has queued them.
-		await driveScanTo(
-			(scan) => scan?.revision !== initialRevision && scan?.frontier === 2
-		);
-		const restarted = await currentScanProgress();
+		// The write rewrites both targets of the root, so the barrier queues both
+		// the marked path and the new one. Observe the scan once the queue holds
+		// them.
+		await driveScanTo((scan) => scan?.frontier === 2);
+		const attached = await currentScanProgress();
 
 		expect(driven.isContinuationArmed).toBe(true);
-		const restartedRevision = restarted?.revision;
 
-		expect(typeof initialRevision).toBe('number');
-		expect(typeof restartedRevision).toBe('number');
-
-		expect({ initial, restarted }).toStrictEqual({
+		expect({ initial, attached }).toStrictEqual({
 			initial: {
 				phase: 'mark',
-				revision: initialRevision,
 				cursor: '',
 				frontier: 0,
 				marks: 1
 			},
-			restarted: {
-				phase: 'grace',
-				revision: restartedRevision,
+			attached: {
+				phase: 'mark',
 				cursor: '',
 				frontier: 2,
-				marks: 0
+				marks: 1
 			}
 		});
-		expect(restartedRevision).toBeGreaterThan(initialRevision ?? 0);
 
 		await driven.restore();
 
 		await drainContinuation();
 
-		expect(await continuation()).toBeUndefined();
-		expect(await narInfoGeneration(newlyRetained.storePathHash)).toEqual(
-			expect.any(Number)
+		expect({
+			continuation: await continuation(),
+			scan: await currentScanProgress(),
+			kept: await narInfoGeneration(kept.storePathHash),
+			newlyRetained: await narInfoGeneration(newlyRetained.storePathHash)
+		}).toStrictEqual({
+			continuation: undefined,
+			scan: undefined,
+			kept: 0,
+			newlyRetained: 0
+		});
+	});
+
+	// A commit between two invocations used to bump a revision the next invocation
+	// compared, which discarded the mark. A cache taking one commit per invocation
+	// therefore never reached its collect phase and its unreachable paths grew
+	// without bound.
+	it('reaches the collect phase while commits land between invocations', async () => {
+		await useTestServer('gc-sustained-commits');
+		const { token } = await bootstrap();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept',
+			references: []
+		});
+		const collectable = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'collectable',
+			references: []
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, collectable);
+		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+
+		let committed = 0;
+		const hasCollectablePath = async (): Promise<boolean> =>
+			(await narInfoGeneration(collectable.storePathHash)) !== undefined;
+
+		// Commit one path after every invocation. Each commit is an insert into
+		// `narinfo` for a path no mark holds, which the barrier does not queue, so
+		// the scan keeps its marks and advances.
+		await withoutAlarmArming(() =>
+			driveToCompletion(
+				async () => {
+					await driven.collectOneUnitOfWork();
+					await pushPath(
+						token,
+						uploadMetadata({
+							fileSize: narBytes.byteLength,
+							storePathHash: syntheticStorePathHash(committed),
+							name: `committed-${String(committed)}`,
+							references: []
+						})
+					);
+					committed += 1;
+				},
+				async () => !(await hasCollectablePath()),
+				maxDrivenPasses
+			)
 		);
+
+		expect({
+			collectable: await narInfoGeneration(collectable.storePathHash),
+			kept: await narInfoGeneration(kept.storePathHash)
+		}).toStrictEqual({ collectable: undefined, kept: 0 });
 	});
 
 	it('pages one high-fanout path across bounded mark chunks', async () => {
