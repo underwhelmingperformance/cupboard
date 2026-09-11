@@ -5,6 +5,7 @@ import {
 	cloudflareTest,
 	readD1Migrations
 } from '@cloudflare/vitest-pool-workers';
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig(async () => {
@@ -49,6 +50,19 @@ export default defineConfig(async () => {
 									// must stay above the concurrency any other suite pushes
 									// with, or that suite's seeding would be refused.
 									CUPBOARD_COMMIT_SOCKET_CEILING: '10',
+									// Every cap in the Durable Object is a function of the D1
+									// statement allowance, and a deployment supplies it through
+									// this variable. The pool would otherwise take it from the
+									// environment, which includes a developer's gitignored
+									// `.dev.vars`, and a machine that sets it for a real
+									// deployment would change what the suite asserts. Pin the
+									// Workers Free figure, which is the tightest deployment and
+									// so the one every cap has to fit. A test that wants a
+									// different allowance states it with
+									// `withDeployedStatementAllowance`.
+									CUPBOARD_D1_STATEMENTS_PER_INVOCATION: String(
+										freeTierD1StatementsPerInvocation
+									),
 									TEST_MIGRATIONS: migrations
 								},
 								// The admission manifest KV the control handler reads and writes;
