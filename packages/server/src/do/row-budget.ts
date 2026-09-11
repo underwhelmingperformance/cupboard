@@ -137,5 +137,5 @@ export function isRowBudgetExhausted(): boolean {
  * row budget, and so each dispatch shares one budget.
  */
 export function enterRowBudgetOnDispatch(prototype: object): void {
-	wrapDispatchedMethods(prototype, withRowBudget);
+	wrapDispatchedMethods(prototype, (body) => withRowBudget(body));
 }

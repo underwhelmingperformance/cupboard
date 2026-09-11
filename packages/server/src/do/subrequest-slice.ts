@@ -95,5 +95,5 @@ export function spendSubrequests(subrequests: number): void {
  * so nested dispatches share it.
  */
 export function enterSubrequestSliceOnDispatch(prototype: object): void {
-	wrapDispatchedMethods(prototype, withSubrequestSlice);
+	wrapDispatchedMethods(prototype, (body) => withSubrequestSlice(body));
 }

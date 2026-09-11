@@ -10,7 +10,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfos, pendingUploads, verificationCursor } from '../db/schema.ts';
 import {
-	d1StatementsPerInvocation,
 	narObjectKeyPrefix,
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
@@ -124,6 +123,7 @@ async function driveCronVerification(
 ): Promise<{
 	readonly passes: readonly VerificationPassObservation[];
 	readonly committedRows: number;
+	readonly statementAllowance: number;
 }> {
 	await commitScannedPaths(server);
 
@@ -166,7 +166,8 @@ async function driveCronVerification(
 			committedRows: local
 				.select({ storePathHash: narInfos.storePathHash })
 				.from(narInfos)
-				.all().length
+				.all().length,
+			statementAllowance: instance.context.d1StatementsPerInvocation
 		};
 	});
 }
@@ -230,6 +231,7 @@ async function driveClaims(
 ): Promise<{
 	readonly claims: readonly ClaimObservation[];
 	readonly pendingRows: number;
+	readonly statementAllowance: number;
 }> {
 	const passRequests = await queueReuseRows(server);
 
@@ -279,14 +281,18 @@ async function driveClaims(
 			value: real
 		});
 
-		return { claims: observed, pendingRows: pendingDepth() };
+		return {
+			claims: observed,
+			pendingRows: pendingDepth(),
+			statementAllowance: instance.context.d1StatementsPerInvocation
+		};
 	});
 }
 
 describe('cron verification D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every verification invocation within the 50-statement D1 limit', async () => {
+	it('keeps every verification invocation within its D1 statement allowance', async () => {
 		const driven = await driveCronVerification('verify-allowance-cron', 3);
 
 		// All rows are committed, so the pass can use the complete maintenance
@@ -302,9 +308,9 @@ describe('cron verification D1 statement allowance', () => {
 			committedRows: driven.committedRows,
 			passStatements: driven.passes.map((pass) => pass.statements),
 			overAllowancePasses: driven.passes.filter(
-				(pass) => pass.statements > d1StatementsPerInvocation
+				(pass) => pass.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			cursors: driven.passes.map((pass) => pass.cursor)
 		}).toStrictEqual({
 			pageSize: 38,
@@ -324,7 +330,7 @@ describe('cron verification D1 statement allowance', () => {
 describe('verification claim D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every claim within the 50-statement D1 limit and settles the rest across claims', async () => {
+	it('keeps every claim within its D1 statement allowance and settles the rest across claims', async () => {
 		const driven = await driveClaims('verify-allowance-claim', 4);
 
 		// Each claim settles two rows: two statements for maintenance eligibility,
@@ -335,9 +341,9 @@ describe('verification claim D1 statement allowance', () => {
 		expect({
 			claimStatements: driven.claims.map((claim) => claim.statements),
 			overAllowanceClaims: driven.claims.filter(
-				(claim) => claim.statements > d1StatementsPerInvocation
+				(claim) => claim.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			pendingBefore: driven.claims.map((claim) => claim.pendingRowsBefore),
 			passRequests: driven.claims.map((claim) => claim.passRequests),
 			pendingRows: driven.pendingRows
@@ -453,6 +459,7 @@ async function driveRecordedVerdicts(
 	readonly heldVerdicts: number;
 	readonly pendingRows: number;
 	readonly publishedPaths: number;
+	readonly statementAllowance: number;
 }> {
 	const uploads = await deferFreshUploads(
 		server,
@@ -536,7 +543,8 @@ async function driveRecordedVerdicts(
 			publishedPaths: local
 				.select({ storePathHash: narInfos.storePathHash })
 				.from(narInfos)
-				.all().length
+				.all().length,
+			statementAllowance: instance.context.d1StatementsPerInvocation
 		};
 	});
 }
@@ -548,7 +556,7 @@ const drainedBatch = 8;
 describe('recorded verdict D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('accepts a full verdict batch within the 50-statement D1 limit', async () => {
+	it('accepts a full verdict batch within its D1 statement allowance', async () => {
 		const driven = await driveRecordedVerdicts(
 			'verify-allowance-record',
 			recordedBatch,
@@ -567,9 +575,9 @@ describe('recorded verdict D1 statement allowance', () => {
 			appliedByRecord: driven.appliedByRecord,
 			recordStatements: driven.invocations[0]?.statements,
 			overAllowanceInvocations: driven.invocations.filter(
-				(invocation) => invocation.statements > d1StatementsPerInvocation
+				(invocation) => invocation.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			heldAfterRecord: driven.invocations[0]?.heldAfter
 		}).toStrictEqual({
 			claims: recordedBatch,
@@ -604,9 +612,9 @@ describe('recorded verdict D1 statement allowance', () => {
 				(invocation) => invocation.statements
 			),
 			overAllowanceInvocations: driven.invocations.filter(
-				(invocation) => invocation.statements > d1StatementsPerInvocation
+				(invocation) => invocation.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			heldVerdicts: driven.heldVerdicts,
 			pendingRows: driven.pendingRows,
 			publishedPaths: driven.publishedPaths

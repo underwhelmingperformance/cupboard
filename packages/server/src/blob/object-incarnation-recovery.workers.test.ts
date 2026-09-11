@@ -16,11 +16,11 @@ import type { ObjectReaperPhase } from '../do/blob-reaper-service.ts';
 import {
 	blobReaperGraceMs,
 	casObjectKey,
-	d1StatementsPerInvocation,
 	narObjectKey,
 	objectDeletionBatchSize,
 	objectRecoveryBatchSize
 } from '../http/http.ts';
+import { d1StatementAllowance } from '../policy/d1-statements.ts';
 import { runBlobReaper as runBlobReaperPhase } from '../routing/scheduled.ts';
 import {
 	clearBlobStorage,
@@ -44,6 +44,10 @@ import {
 	drainObjectDeletions,
 	recoverAbandonedIncarnations
 } from './object-incarnation-recovery.ts';
+
+// The reaper runs in the control Worker, which reads the same deployment
+// variable as the tenant Durable Object.
+const statementAllowance = d1StatementAllowance(env);
 
 async function casFixture(seed: string): Promise<{
 	readonly bytes: Uint8Array;
@@ -752,6 +756,7 @@ describe('abandoned object version recovery', () => {
 					'nar',
 					now,
 					2,
+					statementAllowance,
 					rootLogger()
 				),
 				await recoverAbandonedIncarnations(
@@ -760,6 +765,7 @@ describe('abandoned object version recovery', () => {
 					'nar',
 					now,
 					2,
+					statementAllowance,
 					rootLogger()
 				)
 			];
@@ -813,7 +819,7 @@ describe('abandoned object version recovery', () => {
 
 	it('continues a recovery backlog in query-budgeted pages', async () => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const rowCount = objectRecoveryBatchSize + 1;
+		const rowCount = objectRecoveryBatchSize(statementAllowance) + 1;
 		const rows = Array.from({ length: rowCount }, (_, index) => ({
 			kind: 'nar' as const,
 			objectId: syntheticNarHash(index + 10_000),
@@ -866,14 +872,17 @@ describe('abandoned object version recovery', () => {
 			),
 			continuations: continueReaper.mock.calls.map(([phase]) => phase)
 		}).toStrictEqual({
-			afterFirst: { absent: objectRecoveryBatchSize, pending: 1 },
+			afterFirst: {
+				absent: objectRecoveryBatchSize(statementAllowance),
+				pending: 1
+			},
 			afterSecond: { absent: rowCount },
 			continuations: ['recover', 'arm']
 		});
 	});
 
 	it('continues deletion markers within the Workers Free D1 allowance', async () => {
-		const rowCount = objectDeletionBatchSize + 1;
+		const rowCount = objectDeletionBatchSize(statementAllowance) + 1;
 		await env.CUPBOARD_DB.batch(
 			Array.from({ length: rowCount }, (_, index) =>
 				env.CUPBOARD_DB.prepare(
@@ -914,8 +923,8 @@ describe('abandoned object version recovery', () => {
 		);
 
 		expect({
-			statementLimit: d1StatementsPerInvocation,
-			pageSize: objectDeletionBatchSize,
+			statementLimit: statementAllowance,
+			pageSize: objectDeletionBatchSize(statementAllowance),
 			afterFirst,
 			afterSecond: await markerCount(),
 			continuations

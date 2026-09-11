@@ -64,11 +64,15 @@ const revokedEdgeSweepStatementsPerPass = 1;
  * remaining D1 allowance can stop it earlier. The calculation reserves one
  * statement for the revoked-edge sweep.
  */
-export const maxPathsTornDownPerRun =
-	Math.floor(
-		(maintenancePassStatements - revokedEdgeSweepStatementsPerPass) /
-			minimumStatementsPerTeardownChunk
-	) * maxFencedRetireRows;
+export function maxPathsTornDownPerRun(statementAllowance: number): number {
+	return (
+		Math.floor(
+			(maintenancePassStatements(statementAllowance) -
+				revokedEdgeSweepStatementsPerPass) /
+				minimumStatementsPerTeardownChunk
+		) * maxFencedRetireRows
+	);
+}
 
 // Each cache being torn down has its own durable marker because several cache
 // deletion queues can be active at once. The complete suffix is the cache name,
@@ -707,7 +711,9 @@ export class CacheAdminService {
 	async resumeTeardownPass(
 		cache: ResolvedCache,
 		origin: RequestOrigin,
-		limit: number = maxPathsTornDownPerRun
+		limit: number = maxPathsTornDownPerRun(
+			this.context.d1StatementsPerInvocation
+		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
 			await this.drainTeardownChunk(cache, origin, limit);

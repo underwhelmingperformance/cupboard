@@ -365,10 +365,14 @@ export async function recoverAbandonedIncarnations(
 	kind: SharedObjectKind,
 	now: Date,
 	limit: number,
+	statementAllowance: number,
 	logger: Logger
 ): Promise<{ readonly hasMoreWork: boolean; readonly recovered: number }> {
 	const staleBefore = isoTimestamp(new Date(now.getTime() - blobReaperGraceMs));
-	const batchSize = Math.min(limit, objectRecoveryBatchSize);
+	const batchSize = Math.min(
+		limit,
+		objectRecoveryBatchSize(statementAllowance)
+	);
 	const stateRowBehind =
 		kind === 'nar'
 			? blobStateIsBehind(

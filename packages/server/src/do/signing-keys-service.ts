@@ -93,9 +93,11 @@ const statementsPerBackfillEntry = 5;
  * if an entry requires more statements than the estimate, and the pass then
  * publishes fewer entries.
  */
-export const backfillEntriesPerPass = Math.floor(
-	maintenancePassStatements / statementsPerBackfillEntry
-);
+export function backfillEntriesPerPass(statementAllowance: number): number {
+	return Math.floor(
+		maintenancePassStatements(statementAllowance) / statementsPerBackfillEntry
+	);
+}
 
 const purgeEntrySchema = z.strictObject({
 	cacheId: cacheIdSchema,
@@ -748,7 +750,7 @@ export class SigningKeysService {
 		// page must be one the invocation's allowance covers in full. Otherwise
 		// the entry the binding refused would fail the same page on every pass.
 		const affordable = Math.min(
-			backfillEntriesPerPass,
+			backfillEntriesPerPass(this.context.d1StatementsPerInvocation),
 			affordableOperations(statementsPerBackfillEntry)
 		);
 		const entries = queued.slice(0, affordable);

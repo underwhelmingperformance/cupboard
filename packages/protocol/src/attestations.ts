@@ -32,12 +32,9 @@ const attestationBundleRequestSchema = z.strictObject({
 // The subrequests a negotiate spends other than its per-bundle heads: the D1
 // reads for the committed reference edges and for the reference keys already
 // filed. Each binds its list as one parameter, so each is one call per bound
-// list, and a page produces one list. Fifty is the whole D1 statement
-// allowance one Durable Object invocation has, `d1StatementsPerInvocation` in
-// `packages/server/src/http/http.ts`, which the D1 binding refuses to exceed,
-// so reserving that many cannot be overspent however those reads are
-// rearranged. This package cannot import that constant, so the two are held
-// equal by hand. The margin is deliberately larger than the reads it covers.
+// list, and a page produces one list. Two reads is therefore the real cost, and
+// the reserve is deliberately far larger so that rearranging them cannot
+// overspend it.
 const attestationNegotiateOverhead = 50;
 
 /**
