@@ -12,19 +12,27 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// The largest target set one root can hold.
+// The largest target set one root-set or root-ensure request may carry.
 //
 // Setting a root replaces its target set as a whole: every target is probed for
-// servability, nothing is written if any is unavailable, and the new set is
-// swapped in under a write gate. A root's meaning is the complete set, so it
-// cannot be assembled across several requests; a partly written root would
+// servability, nothing is written if any is unavailable, the new set is swapped
+// in under a write gate, and released targets enter retention grace. One request
+// therefore cannot be split into several, because a partly replaced set would
 // retain the wrong paths and the retention sweep would collect what the missing
 // part was protecting.
 //
-// This number is therefore how large a set one such operation supports, not a
-// budget for the work it does. A caller with more paths than this splits them
-// across named roots, each retained in its own right, which `RootTargetLimitError`
-// says.
+// This bounds that one request and not a root. A run root is assembled across
+// many requests through `attachRoot`, whose insert is additive and idempotent
+// and carries no such bound, so a root's total target count is not limited here.
+// A caller replacing more paths than this at once splits them across named
+// roots, which `RootTargetLimitError` says.
+//
+// The number is far above what callers send. A root holds the targets a
+// caller declares, not their closures, because collection reaches everything
+// a target references. A push sends its declared targets alone, and a matrix
+// run declares at most `maximumMatrixJobs` of them, 256, in
+// `actions/src/commands/plan.ts`. So this is about four times the largest set
+// the Action can ask to replace.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);

@@ -1,16 +1,25 @@
 import { UnboundableIoError, UncountableStatementError } from '../errors.ts';
 
-import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
+import { boundedSubrequest, perCallCapMs, unboundedCapMs } from './deadline.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
+import { spendSubrequests } from './subrequest-slice.ts';
 
+// Declare the call against the pass's subrequest slice before making it. The
+// slice refuses nothing; a pass asks `hasSubrequestsFor` before a granule and
+// defers when the answer is no. Durable Object storage is deliberately absent:
+// the runtime counts no storage operation, so the row budget measures that work
+// instead and the two do not overlap.
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
 	subrequest: string,
 	capMs?: number
 ): (...arguments_: A) => Promise<R> {
-	return (...arguments_: A) =>
-		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	return (...arguments_: A) => {
+		spendSubrequests(1);
+
+		return boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	};
 }
 
 // Decrement the invocation's statement allowance before calling D1. If the call
@@ -48,6 +57,68 @@ function passThrough(target: object, property: PropertyKey): unknown {
 	const bound: unknown = value.bind(target);
 
 	return bound;
+}
+
+/**
+ * The deadline one Worker R2 metadata call gets.
+ *
+ * Worker code reached R2 through the binding the runtime supplies, so a head
+ * that never returned never returned: no deadline, no allowance, nothing. This
+ * is a per-call deadline where there was none.
+ *
+ * No measurement supports the figure. It is chosen clear of anything this path
+ * is observed to take, and it matches what a Durable Object already applies to
+ * the same kind of call so that the two sides of the service binding behave
+ * alike; that is consistency, not derivation. The R2 head latency that would
+ * justify it is the same measurement that would justify
+ * `cacheAvailabilityMaxPaths`, and neither can be taken here, because the local
+ * pool enforces no connection limit and no subrequest ceiling.
+ *
+ * What it buys is throughput rather than safety. A request has six simultaneous
+ * outgoing connections, and the availability probe runs its heads six at a time,
+ * so one head that hangs holds a slot and stalls every path queued behind it. A
+ * per-call deadline keeps the rest moving. The invocation itself needs no
+ * collective budget here: there is no input gate to hold and no Durable Object
+ * to reset, which is what the critical-section budget exists for.
+ *
+ * Where this and the reader part company: Nix abandons a narinfo fetch only
+ * after libcurl measures under a byte per second for five minutes, so a head
+ * that is slow but progressing would never trouble Nix while this deadline cuts
+ * it. The window is narrow, because a few-hundred-byte metadata head still
+ * moving after fifteen seconds is stuck rather than slow, but a request that
+ * would have succeeded can now fail.
+ *
+ * A head that rejects fails the probe. It is not read as the path being absent:
+ * `missingStorePathHashes` reports a path missing only when the object is null
+ * or belongs to another commit, `mapWithConcurrency` rethrows the first failure,
+ * and the route does not catch. Catching a timeout there to make the probe
+ * resilient would report every timed-out path as missing and have the client
+ * upload bytes it already holds, which is the defect the reuse-view candidate
+ * limit used to cause.
+ */
+export const workerMetadataCapMs = perCallCapMs;
+
+/**
+ * Wraps the bindings a Worker invocation uses. R2 metadata calls gain the
+ * deadline above; byte transfers stay unbounded, because a NAR body legitimately
+ * takes as long as it takes.
+ *
+ * D1 is left alone. The statement allowance and the row budget belong to a
+ * Durable Object dispatch, and a Worker holds neither.
+ */
+export function boundedWorkerEnv<T extends { readonly BLOBS: R2Bucket }>(
+	env: T
+): T {
+	// Wrap through a proxy rather than a copy. A spread would rebuild the
+	// environment, and a service binding is identified by the object the runtime
+	// supplied: a copy of it dispatches nowhere.
+	return new Proxy(env, {
+		get(target, property) {
+			return property === 'BLOBS'
+				? boundedBlobs(target.BLOBS)
+				: passThrough(target, property);
+		}
+	});
 }
 
 /**

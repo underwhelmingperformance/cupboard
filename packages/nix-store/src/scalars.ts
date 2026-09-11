@@ -392,6 +392,20 @@ export const referencesSchema = z
 	.array(storePathBasenameSchema)
 	.max(referencesMaxLength);
 
+/**
+ * The same references, read back from a row that already holds them.
+ *
+ * A bound on stored data can only ever be loosened, never tightened: rows
+ * written under the old bound still exist and cannot be revalidated, so a read
+ * that enforces `referencesMaxLength` refuses a narinfo the server itself
+ * accepted and committed if that figure is ever lowered. Ingest is where the
+ * limit belongs, and it is applied there through `referencesSchema`.
+ *
+ * What a reader still needs is the element type, because a stored value that is
+ * not a store-path basename cannot be rendered into a narinfo at all.
+ */
+export const storedReferencesSchema = z.array(storePathBasenameSchema);
+
 // A single free-form narinfo metadata line (`Deriver`, `CA`): bounded and free
 // of control characters, so a value that parses here always renders back to a
 // well-formed narinfo line. The render path rejects control characters, so an

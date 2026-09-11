@@ -168,15 +168,23 @@ export class ServerContext {
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
+		// Copying the environment is safe here only while nothing in it is
+		// dispatched through by identity. A service binding is the object the
+		// runtime supplied, so a copy of one dispatches nowhere, and neither the
+		// type checker nor a unit test can see that. Add a service binding to this
+		// environment and this spread has to become a proxy, as `boundedWorkerEnv`
+		// already is.
+		//
 		// Bound all storage subrequests before a service can use them. Otherwise a
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
 		//
 		// These wrappers reach only the bindings this object holds. Code in the
-		// Worker, such as the availability route in `read/read.ts`, calls
-		// `env.BLOBS` and `env.CUPBOARD_DB` as the runtime supplies them, with no
-		// deadline, no statement allowance and no row meter. Anything said about
-		// storage here holds on one side of the service binding and not the other.
+		// Worker, such as the availability route in `read/read.ts`, reaches R2
+		// through `boundedWorkerEnv`, which puts a per-call deadline on metadata
+		// calls and nothing else: no statement allowance, no row meter, and
+		// `env.CUPBOARD_DB` as the runtime supplies it. The limits described in
+		// this class therefore bound Durable Object code only, not the Worker.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)

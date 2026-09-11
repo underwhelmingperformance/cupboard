@@ -8,10 +8,12 @@ import {
 	attestationAttachResponseSchema,
 	attestationDecisionSchema,
 	attestationListSchema,
+	attestationNegotiateMaxBundles,
 	attestationNegotiateResponseSchema,
 	attestationUploadDecisionSchema,
 	type ParsedAttestationDecision
 } from '@cupboard/protocol/attestations';
+import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
 import {
 	uploadActionDecisionSchema,
 	uploadNegotiateResponseSchema
@@ -595,6 +597,71 @@ describe('attestation attach and reads', () => {
 			pending: [],
 			stagingPresent: false
 		});
+	});
+
+	// A re-run of `cupboard attest` over an unchanged closure sends one bundle for
+	// each already-attested path, and negotiate heads the CAS object of every one
+	// of them that it already records. A bundle's digest is the hash of its own
+	// document, so no two bundles in a closure share one and the deduplication by
+	// digest saves nothing. One page of bundles therefore costs one subrequest
+	// each, and a page larger than the invocation's subrequests cannot be served
+	// at all: the call that exceeds the ceiling throws, and the caller gets
+	// nothing back.
+	it('costs one subrequest for each already-attested bundle of a page', async () => {
+		const extra = 4;
+		const first = await committedPathBundle();
+		const { token } = first;
+		await attachBundle(token, first.metadata.storePathHash, first.bundle);
+		const bundles = [
+			{ storePathHash: first.metadata.storePathHash, digest: first.digest }
+		];
+
+		for (let index = 0; index < extra; index += 1) {
+			const nar = await verifiableNar(`attested-${String(index)}`);
+			const metadata = uploadMetadata({
+				storePathHash: uniqueStorePathHash(),
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
+			const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+			await attachBundle(token, metadata.storePathHash, bundle);
+			bundles.push({
+				storePathHash: metadata.storePathHash,
+				digest: sha256HexDigestSchema.parse(await sha256HexBytes(bundle))
+			});
+		}
+
+		const heads = vi.spyOn(env.BLOBS, 'head');
+
+		try {
+			const response = await authorisedWorkerFetch(
+				'/cache/_default/attestations',
+				token,
+				{
+					body: JSON.stringify({ pushId: testPushId, bundles }),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST'
+				}
+			);
+
+			expect(response.status).toBe(StatusCodes.OK);
+
+			const casHeads = heads.mock.calls.filter((call) =>
+				typeof call[0] === 'string' ? call[0].startsWith('cas/') : false
+			).length;
+			const pageHeads =
+				(casHeads / bundles.length) * attestationNegotiateMaxBundles;
+
+			expect({
+				headsPerBundle: casHeads / bundles.length,
+				pageFitsTheCeiling: pageHeads <= subrequestsPerInvocation
+			}).toStrictEqual({ headsPerBundle: 1, pageFitsTheCeiling: true });
+		} finally {
+			heads.mockRestore();
+		}
 	});
 
 	it('decides correctly for more bundles than a statement could bind', async () => {

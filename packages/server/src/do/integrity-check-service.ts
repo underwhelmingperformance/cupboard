@@ -24,6 +24,7 @@ import {
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
  * Where a pass starts: the row the previous pass stopped at, or two empty
@@ -186,7 +187,19 @@ export class IntegrityCheckService {
 		const distinctNarHashes = [...new Set(rows.map((row) => row.narHash))];
 		const blobFacts = await this.blobFactsFor(distinctNarHashes);
 
+		// A row costs a narinfo head, a NAR head for a hash not seen yet, and in
+		// deep mode a read of that NAR. Ask for all three, so a row that starts is
+		// a row that can finish and the report never describes half of one.
+		const subrequestsPerRow = isDeep ? 3 : 2;
+		let stopped: (typeof rows)[number] | undefined;
+		let checked = 0;
+
 		for (const row of rows) {
+			if (!hasSubrequestsFor(subrequestsPerRow)) {
+				stopped = row;
+				break;
+			}
+
 			const narInfoObject = await this.context.env.BLOBS.head(
 				narInfoObjectKey(tenant, row.storePathHash, row.cache)
 			);
@@ -218,13 +231,21 @@ export class IntegrityCheckService {
 					narHash: row.narHash
 				});
 			}
+
+			checked += 1;
 		}
 
+		// A pass that stopped on its slice resumes at the row it did not start, not
+		// at the row after the page. Its cursor therefore names that row's
+		// predecessor's successor: the row itself, so the next pass repeats nothing
+		// and skips nothing.
+		const resumeAt = stopped ?? next;
+
 		return {
-			narInfosChecked: rows.length,
+			narInfosChecked: checked,
 			narBlobsChecked,
-			cursor: next === undefined ? '' : next.storePathHash,
-			cursorCache: next === undefined ? '' : next.cache,
+			cursor: resumeAt === undefined ? '' : resumeAt.storePathHash,
+			cursorCache: resumeAt === undefined ? '' : resumeAt.cache,
 			discrepancies
 		};
 	}

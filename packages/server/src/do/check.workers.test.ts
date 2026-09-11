@@ -2,6 +2,7 @@ import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -19,6 +20,7 @@ import {
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	currentNarObjectKey,
+	currentServer,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -30,7 +32,11 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-import { type CheckCursor } from './integrity-check-service.ts';
+import {
+	type CheckCursor,
+	IntegrityCheckService
+} from './integrity-check-service.ts';
+import { withSubrequestSlice } from './subrequest-slice.ts';
 
 const startOfScan: CheckCursor = { cache: '', storePathHash: '' };
 
@@ -123,6 +129,44 @@ describe('storage check', () => {
 				cursorCache: '',
 				discrepancies: []
 			}
+		});
+	});
+
+	// The page bounds the rows a pass reads; the slice bounds the R2 calls it
+	// makes. A pass that runs out of slice stops at a row it has not started and
+	// reports that row, so the next pass repeats nothing and skips nothing.
+	it('stops on its subrequest slice and resumes at the row it did not start', async () => {
+		const token = await initialise();
+
+		for (const letter of ['a', 'b', 'c'] as const) {
+			const { metadata, nar } = await verifiablePath(`slice-${letter}`, {
+				storePathHash: letter.repeat(32),
+				name: `slice-${letter}`
+			});
+			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		}
+
+		// Three subrequests buy the pass's one D1 read of the page's blob facts and
+		// then one shallow row: its narinfo head and its NAR head. Reading the page
+		// itself costs none, being the object's own SQLite.
+		const report = await runInDurableObject(currentServer(), (instance) =>
+			withSubrequestSlice(
+				() =>
+					new IntegrityCheckService(instance.context).check(false, startOfScan),
+				3
+			)
+		);
+
+		expect({
+			narInfosChecked: report.narInfosChecked,
+			cursorCache: report.cursorCache,
+			cursor: report.cursor,
+			discrepancies: report.discrepancies
+		}).toStrictEqual({
+			narInfosChecked: 1,
+			cursorCache: DEFAULT_CACHE,
+			cursor: 'b'.repeat(32),
+			discrepancies: []
 		});
 	});
 
