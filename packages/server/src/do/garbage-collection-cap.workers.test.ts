@@ -38,6 +38,7 @@ import {
 
 import { chunk } from './bulk.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
+import { phaseGranule } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -171,13 +172,13 @@ async function refreshFamilyCounts(): Promise<{
 	}));
 }
 
-// A pass under a one-unit budget advances the walk by one unit of work (seeding
-// a root, marking a path, reading one reference, or collecting a path) or
+// A pass under a one-unit budget advances the walk by one step (seeding roots,
+// marking a path, walking a step of its references, or collecting paths) or
 // completes one scan phase, and one alarm runs one such pass. These fixtures
-// hold at most three paths, and the longest run here was measured at eight
-// passes, so sixteen leaves slack. The bound is reached only when the walk has
-// wedged; the assertions after the loop then fail, and their output shows the
-// state it reached.
+// hold at most three paths, so sixteen is slack rather than measured headroom.
+// The bound is reached only when the walk has wedged; the assertions after the
+// loop then fail, and their output shows the state it reached. To find what
+// these runs really take, count the iterations `driveToCompletion` makes.
 const maxDrivenPasses = 16;
 
 async function drainContinuation(): Promise<void> {
@@ -311,7 +312,17 @@ async function referenceWalk(): Promise<unknown> {
 			)
 			.toArray()[0]?.count;
 
-		return { scan, frontier };
+		return {
+			scan:
+				scan === undefined
+					? undefined
+					: {
+							...scan,
+							// The column is SQL NULL while no path is being walked.
+							markStorePathHash: scan.markStorePathHash ?? undefined
+						},
+			frontier
+		};
 	});
 }
 
@@ -389,7 +400,7 @@ describe('garbage collection cap', () => {
 		await pushPath(token, kept);
 		await pushPath(token, collectable);
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
-		await seedExpiredRefreshFamily(2);
+		await seedExpiredRefreshFamily(phaseGranule + 1);
 
 		const firstPass = await runInDurableObject(
 			currentServer(),
@@ -419,9 +430,10 @@ describe('garbage collection cap', () => {
 		const revision = firstPass.progress?.revision;
 
 		expect(typeof revision).toBe('number');
-		// The refresh-family phase spends the budget on its one member, so the
-		// collection phases that follow advance by a single unit: the scan completes
-		// the expiry phase, which has no expired root to read, and stops there.
+		// The refresh-family phase spends the budget on its first step of members
+		// and leaves the rest, so the collection phases that follow advance by a
+		// single step: the scan completes the expiry phase, which has no expired
+		// root to read, and stops there.
 		expect(firstPass).toStrictEqual({
 			progress: {
 				phase: 'expire-grace',
@@ -467,9 +479,9 @@ describe('garbage collection cap', () => {
 		const seeded = await retentionRootCounts();
 
 		// The work that precedes collection in this pass spends the budget, so the
-		// expiry phase becomes due with nothing left to spend. It must still take one
-		// unit: a phase that reads no rows records no progress, and the next pass
-		// would arrive at the same boundary and read nothing again.
+		// expiry phase becomes due with nothing left to spend. The pass consults
+		// the budget after a step and not before one, so the phase still runs a
+		// whole step and expires the root.
 		await driven.collectOneUnitOfWork();
 
 		expect({ seeded, expired: await retentionRootCounts() }).toStrictEqual({
@@ -587,6 +599,7 @@ describe('garbage collection cap', () => {
 
 		await driveScanTo((scan) => scan?.phase === 'mark' && scan.marks === 1);
 		const initial = await currentScanProgress();
+		const initialRevision = initial?.revision;
 
 		expect(driven.isContinuationArmed).toBe(true);
 
@@ -596,12 +609,14 @@ describe('garbage collection cap', () => {
 		});
 
 		// The changed retention bumps the revision, so the next pass discards the
-		// marks and seeds the roots again.
-		await driveScanTo((scan) => scan?.phase === 'roots' && scan.frontier === 1);
+		// marks and seeds the roots again. One seeding step covers both targets,
+		// so the restarted scan is observed once it has queued them.
+		await driveScanTo(
+			(scan) => scan?.revision !== initialRevision && scan?.frontier === 2
+		);
 		const restarted = await currentScanProgress();
 
 		expect(driven.isContinuationArmed).toBe(true);
-		const initialRevision = initial?.revision;
 		const restartedRevision = restarted?.revision;
 
 		expect(typeof initialRevision).toBe('number');
@@ -616,10 +631,10 @@ describe('garbage collection cap', () => {
 				marks: 1
 			},
 			restarted: {
-				phase: 'roots',
+				phase: 'grace',
 				revision: restartedRevision,
-				cursor: kept.storePathHash,
-				frontier: 1,
+				cursor: '',
+				frontier: 2,
 				marks: 0
 			}
 		});
@@ -639,7 +654,7 @@ describe('garbage collection cap', () => {
 		await useTestServer('gc-bounded-references');
 		const { token } = await bootstrap();
 		const references = Array.from(
-			{ length: 25 },
+			{ length: phaseGranule + 5 },
 			(_unused, index) => `${syntheticStorePathHash(index)}-reference`
 		);
 		const parent = uploadMetadata({
@@ -652,34 +667,38 @@ describe('garbage collection cap', () => {
 		await pushPath(token, parent);
 		await setRoot(token, { name: 'channel', targets: [parent.storePath] });
 
-		// Drive to the unit that reads the path's first reference. The path holds
-		// more references than one unit can afford, so the walk records how far it
-		// reached and each later unit resumes from there.
+		// Drive to the unit that marks the path itself, which leaves the walk about
+		// to read its references. The path holds more of them than one step walks,
+		// so the step records how far it reached and the next resumes from there.
 		await driveScanTo(
 			(scan) =>
-				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 1
+				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 0
 		);
-		const firstReference = await referenceWalk();
 
 		await driven.collectOneUnitOfWork();
-		const secondReference = await referenceWalk();
+		const firstStep = await referenceWalk();
 
-		expect({ firstReference, secondReference }).toStrictEqual({
-			firstReference: {
+		await driven.collectOneUnitOfWork();
+		const secondStep = await referenceWalk();
+
+		expect({ firstStep, secondStep }).toStrictEqual({
+			firstStep: {
 				scan: {
 					phase: 'mark',
 					markStorePathHash: parent.storePathHash,
-					referenceCursor: 0
+					referenceCursor: phaseGranule - 1
 				},
-				frontier: 1
+				frontier: phaseGranule
 			},
-			secondReference: {
+			// The remaining references fit in one step, so the walk finishes the path
+			// and releases its cursor.
+			secondStep: {
 				scan: {
 					phase: 'mark',
-					markStorePathHash: parent.storePathHash,
-					referenceCursor: 1
+					markStorePathHash: undefined,
+					referenceCursor: -1
 				},
-				frontier: 2
+				frontier: phaseGranule + 5
 			}
 		});
 	});

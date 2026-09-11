@@ -64,6 +64,7 @@ import {
 
 import { AuthKeysService } from './auth-keys-service.ts';
 import { ownerRuleId } from './context.ts';
+import { phaseGranule } from './garbage-collection-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { TenantIdentityService } from './tenant-identity-service.ts';
@@ -1794,7 +1795,7 @@ describe('refresh grant', () => {
 						.set({ expiresAt: deadline })
 						.run();
 
-					await instance.runGarbageCollection();
+					await underOneUnitOfWork(() => instance.runGarbageCollection());
 					const continuation = await state.storage.get(gcContinuationKey);
 					await state.storage.deleteAlarm();
 
@@ -1844,9 +1845,10 @@ describe('refresh grant', () => {
 	});
 
 	it('drains expired refresh families through bounded continuation passes', async () => {
-		// The large family holds one spent member beside its active one, which is one
-		// more than a one-unit page deletes, so it survives the first pass.
-		const spentMembers = 1;
+		// The large family holds `phaseGranule` spent members beside its active
+		// one. That is one member more than a step deletes, so the family
+		// survives the first pass.
+		const spentMembers = phaseGranule;
 		const subjectToken = await installTrustedIdp('admin');
 		await exchange(subjectToken);
 		await exchange(subjectToken);
@@ -1946,14 +1948,16 @@ describe('refresh grant', () => {
 					properties: {
 						job: 'garbage-collection',
 						method: 'garbage-collection',
-						membersDeleted: 1,
+						membersDeleted: phaseGranule,
 						familiesDeleted: 0
 					}
 				}
 			]
 		});
 
-		const afterSecondPass = await runInDurableObject(
+		// The continuation pass runs on a whole budget, which covers the member the
+		// first pass left and the second family behind it.
+		const drained = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
 				await instance.alarm();
@@ -1967,37 +1971,6 @@ describe('refresh grant', () => {
 					families: database.select().from(refreshTokenFamilies).all(),
 					members: database.select().from(refreshTokenMembers).all(),
 					continuation
-				};
-			}
-		);
-
-		expect({
-			families: afterSecondPass.families.length,
-			members: afterSecondPass.members.length,
-			memberFamily: afterSecondPass.members[0]?.familyId,
-			familyId: afterSecondPass.families[0]?.id,
-			continuation: afterSecondPass.continuation
-		}).toStrictEqual({
-			families: 1,
-			members: 1,
-			memberFamily: afterSecondPass.families[0]?.id,
-			familyId: afterSecondPass.families[0]?.id,
-			continuation: [{ scope: 'tenant' }]
-		});
-
-		await runInDurableObject(currentServer(), (instance) => instance.alarm());
-
-		const drained = await runInDurableObject(
-			currentServer(),
-			async (_instance, state) => {
-				const database = drizzle(state.storage, {
-					schema: { refreshTokenFamilies, refreshTokenMembers }
-				});
-
-				return {
-					families: database.select().from(refreshTokenFamilies).all(),
-					members: database.select().from(refreshTokenMembers).all(),
-					continuation: await state.storage.get(gcContinuationKey)
 				};
 			}
 		);
