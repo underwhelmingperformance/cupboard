@@ -9,6 +9,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type TenantReadCredential,
@@ -44,7 +45,6 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	currentServerTenant,
-	deployedStatementAllowance,
 	driveToCompletion,
 	fetchPath,
 	fileAttestationReference,
@@ -64,7 +64,8 @@ import {
 	uploadMetadata,
 	useTestServer,
 	type VerifiableNar,
-	verifiableNar
+	verifiableNar,
+	withDeployedStatementAllowance
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
@@ -88,6 +89,31 @@ const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 // A Durable Object may hold six outgoing connections at once, so push in groups
 // of that size to fill a large cache without queueing behind the cap.
 const pushConcurrency = 6;
+
+// The allowance the statement counts below are measured at. Workers Free is the
+// tightest deployment, so a pass that fits there fits every other. A deployment
+// supplies its own allowance through `CUPBOARD_D1_STATEMENTS_PER_INVOCATION`,
+// which a developer's `.dev.vars` can also set, so each measured run states the
+// figure rather than taking whatever the local environment configured.
+const measuredAllowance = freeTierD1StatementsPerInvocation;
+
+/**
+ * A statement count and the allowance the Durable Object held while it was
+ * taken. The allowance is read back from the object, so an assertion on it
+ * shows which figure the count belongs to.
+ */
+interface MeasuredStatements {
+	readonly statements: number;
+	readonly allowance: number;
+}
+
+/**
+The same measurement taken once per teardown pass.
+*/
+interface MeasuredPasses {
+	readonly perPass: number[];
+	readonly allowance: number;
+}
 
 // The narinfo version the first commit of a path takes.
 const firstNarInfoGeneration = 0;
@@ -367,7 +393,7 @@ async function clearNarInfoObject(
 async function deletionStatements(
 	server: string,
 	storePaths: number
-): Promise<number> {
+): Promise<MeasuredStatements> {
 	await useTestServer(server);
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
@@ -391,16 +417,25 @@ async function deletionStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const measured = await withDeployedStatementAllowance(
+			instance.context,
+			measuredAllowance,
+			async () => {
+				await instance.runCacheTeardown(buildsCache, origin);
 
-		const spent = counting.statementsSent();
+				return {
+					statements: counting.statementsSent(),
+					allowance: instance.context.d1StatementsPerInvocation
+				};
+			}
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return spent;
+		return measured;
 	});
 }
 
@@ -416,7 +451,7 @@ async function deletionStatements(
 async function teardownPassStatements(
 	server: string,
 	storePaths: number
-): Promise<number> {
+): Promise<MeasuredStatements> {
 	await useTestServer(server);
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
@@ -440,18 +475,28 @@ async function teardownPassStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const measured = await withDeployedStatementAllowance(
+			instance.context,
+			measuredAllowance,
+			async () => {
+				await instance.runCacheTeardown(buildsCache, origin);
 
-		const beforePass = counting.statementsSent();
-		await instance.resumeCacheTeardown();
-		const spent = counting.statementsSent() - beforePass;
+				const beforePass = counting.statementsSent();
+				await instance.resumeCacheTeardown();
+
+				return {
+					statements: counting.statementsSent() - beforePass,
+					allowance: instance.context.d1StatementsPerInvocation
+				};
+			}
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return spent;
+		return measured;
 	});
 }
 
@@ -507,7 +552,7 @@ async function attestedTeardownPassStatements(
 	paths: number,
 	references: number,
 	maxPasses = 6
-): Promise<number[]> {
+): Promise<MeasuredPasses> {
 	await publishAttestedPaths(server, paths, references);
 
 	const counting = countingD1(env.CUPBOARD_DB);
@@ -521,30 +566,41 @@ async function attestedTeardownPassStatements(
 			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 		});
 
-		await instance.runCacheTeardown(buildsCache, origin);
+		const measured = await withDeployedStatementAllowance(
+			instance.context,
+			measuredAllowance,
+			async () => {
+				await instance.runCacheTeardown(buildsCache, origin);
 
-		const perPass: number[] = [];
+				const perPass: number[] = [];
 
-		for (let taken = 0; taken < maxPasses; taken += 1) {
-			const marker = await state.storage.get(
-				`${teardownEntryPrefix}${String(cache.id)}`
-			);
+				for (let taken = 0; taken < maxPasses; taken += 1) {
+					const marker = await state.storage.get(
+						`${teardownEntryPrefix}${String(cache.id)}`
+					);
 
-			if (marker === undefined) {
-				break;
+					if (marker === undefined) {
+						break;
+					}
+
+					const before = counting.statementsSent();
+					await instance.resumeCacheTeardown();
+					perPass.push(counting.statementsSent() - before);
+				}
+
+				return {
+					perPass,
+					allowance: instance.context.d1StatementsPerInvocation
+				};
 			}
-
-			const before = counting.statementsSent();
-			await instance.resumeCacheTeardown();
-			perPass.push(counting.statementsSent() - before);
-		}
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
 			value: real
 		});
 
-		return perPass;
+		return measured;
 	});
 }
 
@@ -1611,45 +1667,45 @@ describe('cache generation gate', () => {
 		// maintenance-eligibility statements. A deletion that retired a chunk of
 		// paths itself would add roughly six statements for every 45 paths and pass
 		// the invocation allowance on a cache of a few hundred.
-		expect({
-			small,
-			large,
-			allowance: await deployedStatementAllowance()
-		}).toStrictEqual({ small: 4, large: 4, allowance: 50 });
+		expect({ small, large }).toStrictEqual({
+			small: { statements: 4, allowance: 50 },
+			large: { statements: 4, allowance: 50 }
+		});
 	}, 240_000);
 
 	it('keeps a full teardown pass within the D1 statements one invocation may run', async () => {
-		const oneChunk = await teardownPassStatements('gen-pass-small', 1);
-		const twoChunks = await teardownPassStatements(
+		const one = await teardownPassStatements('gen-pass-small', 1);
+		const two = await teardownPassStatements(
 			'gen-pass-large',
 			maxFencedRetireRows + 1
 		);
 		// A second chunk adds only its retirement statements. The difference gives
 		// the per-chunk cost, and the remainder gives the fixed cost of a pass.
-		const perChunk = twoChunks - oneChunk;
-		const perPass = oneChunk - perChunk;
+		const perChunk = two.statements - one.statements;
+		const perPass = one.statements - perChunk;
 
-		// The deployed cap in the worst case: every chunk full and the sweep run.
-		// Measuring both costs rather than restating the constant means a wider cap
-		// or a costlier chunk fails here instead of on Workers Free.
-		const allowance = await deployedStatementAllowance();
-
+		// The cap in the worst case: every chunk full and the sweep run. Measuring
+		// both costs rather than restating the constant means a wider cap or a
+		// costlier chunk fails here instead of on Workers Free.
 		expect({
-			oneChunk,
-			twoChunks,
+			oneChunk: one.statements,
+			twoChunks: two.statements,
 			perChunk,
 			perPass,
 			worstCase:
 				perPass +
-				(maxPathsTornDownPerRun(allowance) / maxFencedRetireRows) * perChunk,
-			allowance
+				(maxPathsTornDownPerRun(one.allowance) / maxFencedRetireRows) *
+					perChunk,
+			allowance: one.allowance,
+			sameAllowance: one.allowance === two.allowance
 		}).toStrictEqual({
 			oneChunk: 9,
 			twoChunks: 15,
 			perChunk: 6,
 			perPass: 3,
 			worstCase: 45,
-			allowance: 50
+			allowance: 50,
+			sameAllowance: true
 		});
 	}, 240_000);
 
@@ -1658,16 +1714,16 @@ describe('cache generation gate', () => {
 		// afford, so the drain has to stop inside the chunk and resume. Measuring
 		// each pass means an attestation retirement that grows costlier fails here
 		// instead of on Workers Free.
-		const perPass = await attestedTeardownPassStatements(
+		const measured = await attestedTeardownPassStatements(
 			'gen-pass-attested',
 			3,
 			4
 		);
 
 		expect({
-			perPass,
-			worstPass: Math.max(...perPass),
-			allowance: await deployedStatementAllowance(),
+			perPass: measured.perPass,
+			worstPass: Math.max(...measured.perPass),
+			allowance: measured.allowance,
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
