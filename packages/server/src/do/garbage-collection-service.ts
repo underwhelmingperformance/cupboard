@@ -1264,10 +1264,16 @@ export class GarbageCollectionService {
 			return this.context.cacheRepository.resolvedForId(current.cache);
 		}
 
+		// Start at the lowest identity, because `advanceTenantCollection` walks
+		// upward by identity and stops at the end. Starting anywhere else leaves
+		// every cache below the starting point uncollected for good. Ordering by
+		// name did exactly that: identities are assigned in the order caches are
+		// first touched, so a cache whose name sorts late can hold a low
+		// identity, and nothing would ever reach it.
 		const first = this.context.db
 			.select({ cache: schema.cacheIdentities.id })
 			.from(schema.cacheIdentities)
-			.orderBy(asc(schema.cacheIdentities.name))
+			.orderBy(asc(schema.cacheIdentities.id))
 			.limit(1)
 			.get();
 

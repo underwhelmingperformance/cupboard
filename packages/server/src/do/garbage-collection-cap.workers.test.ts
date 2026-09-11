@@ -7,11 +7,14 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	cacheIdentities,
 	garbageCollectionFrontier,
+	garbageCollectionTenantRuns,
 	narInfoDeletions,
 	retentionRoots,
 	retentionRootTargets
@@ -24,9 +27,11 @@ import {
 	bootstrap,
 	currentServer,
 	driveToCompletion,
+	namedCache,
 	narBytes,
 	narInfoGeneration,
 	pushPath,
+	putTestCache,
 	resetTestServer,
 	resolvedCache,
 	setRoot,
@@ -400,6 +405,85 @@ describe('garbage collection cap', () => {
 		}).toStrictEqual({ collectable: 0, continuation: undefined });
 
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
+	});
+
+	it('starts a tenant collection at the lowest cache identity', async () => {
+		await useTestServer('gc-cache-order');
+		const { token } = await bootstrap();
+
+		// `zebra` is created first, so it takes the lower identity, while
+		// `alpha` sorts first by name. A traversal that starts by name would
+		// begin at `alpha` and, because it only ever walks upward by identity,
+		// would never reach `zebra`.
+		await putTestCache(token, namedCache('zebra'));
+		await putTestCache(token, namedCache('alpha'));
+
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('d'),
+				name: 'zebra-path'
+			}),
+			namedCache('zebra')
+		);
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('f'),
+				name: 'alpha-path'
+			}),
+			namedCache('alpha')
+		);
+
+		// Remove the default cache's identity, which is the only row whose null
+		// name sorts before every other. Without it the two orders disagree:
+		// `zebra` holds the lower identity and `alpha` sorts first by name.
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { cacheIdentities } })
+				.delete(cacheIdentities)
+				.where(eq(cacheIdentities.kind, 'default'))
+				.run();
+		});
+
+		await driven.collectOneUnitOfWork();
+
+		const observed = await runInDurableObject(
+			currentServer(),
+			(_instance, state) => {
+				const database = drizzle(state.storage, {
+					schema: { cacheIdentities, garbageCollectionTenantRuns }
+				});
+
+				return {
+					identities: database
+						.select({
+							id: cacheIdentities.id,
+							name: cacheIdentities.name
+						})
+						.from(cacheIdentities)
+						.orderBy(cacheIdentities.id)
+						.all(),
+					startedAt: database
+						.select({ cacheId: garbageCollectionTenantRuns.cacheId })
+						.from(garbageCollectionTenantRuns)
+						.get()?.cacheId
+				};
+			}
+		);
+
+		await driven.restore();
+
+		// The identities are asserted too, so this cannot pass on a database
+		// where neither cache exists and both values are undefined.
+		expect(observed).toStrictEqual({
+			identities: [
+				{ id: 2, name: 'zebra' },
+				{ id: 3, name: 'alpha' }
+			],
+			startedAt: 2
+		});
 	});
 
 	it('spends one budget across the refresh-family and collection phases', async () => {
