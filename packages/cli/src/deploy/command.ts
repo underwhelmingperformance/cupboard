@@ -56,7 +56,12 @@ import {
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
-import { renameResource, withCrons, withSignupGate } from './overrides.ts';
+import {
+	renameResource,
+	withCrons,
+	withD1StatementAllowance,
+	withSignupGate
+} from './overrides.ts';
 import {
 	cloudflareDashIssuer,
 	defaultOwnerChoice,
@@ -86,6 +91,10 @@ import {
 } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
+import {
+	establishWorkersPlan,
+	type WorkersPlanOverride
+} from './workers-plan.ts';
 
 export class DeployCancelledError extends CliError {
 	constructor() {
@@ -149,6 +158,7 @@ export interface DeployCliOptions {
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
 	readonly wrangler?: boolean;
+	readonly workersPlan?: WorkersPlanOverride;
 }
 
 export interface DeployRuntimeOptions {
@@ -1364,12 +1374,25 @@ async function deployFlow(
 
 	const { options } = await planFor(agreed);
 
-	// The signup gate is applied once, to the agreed config. Applying it inside
-	// the plan review loop would apply it again to an already-gated config on
-	// every edit.
-	const deployedConfig = withSignupGate(
-		agreed.config,
-		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
+	// The signup gate and the D1 statement allowance are applied once, to the
+	// agreed config. Applying them inside the plan review loop would apply them
+	// again to an already-gated config on every edit.
+	const d1Statements = await establishWorkersPlan({
+		api: apiFor(agreed.accountId),
+		ui,
+		...(cliOptions.workersPlan !== undefined && {
+			override: cliOptions.workersPlan
+		}),
+		...(runtimeOptions.signal !== undefined && {
+			signal: runtimeOptions.signal
+		})
+	});
+	const deployedConfig = withD1StatementAllowance(
+		withSignupGate(
+			agreed.config,
+			agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
+		),
+		d1Statements
 	);
 
 	await runDeploy({

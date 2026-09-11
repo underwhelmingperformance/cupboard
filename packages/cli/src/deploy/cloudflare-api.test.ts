@@ -815,3 +815,151 @@ describe('setWorkersDevRoutes', () => {
 		).rejects.toBeInstanceOf(NotFoundError);
 	});
 });
+
+/**
+ * A Cloudflare client whose account subscriptions endpoint answers with one
+ * prepared response, or rejects with `fault`. Every other path answers 404.
+ */
+function subscriptionsClient(
+	response:
+		| { readonly status: number; readonly body: unknown }
+		| { readonly fault: Error }
+): Cloudflare {
+	const fetcher: typeof fetch = (input) => {
+		const rawUrl =
+			typeof input === 'string'
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+
+		if (!new URL(rawUrl).pathname.endsWith('/subscriptions')) {
+			return Promise.resolve(
+				Response.json(
+					{ success: false, errors: [{ code: 0, message: 'no route' }] },
+					{ status: StatusCodes.NOT_FOUND }
+				)
+			);
+		}
+
+		return 'fault' in response
+			? Promise.reject(response.fault)
+			: Promise.resolve(
+					Response.json(response.body, { status: response.status })
+				);
+	};
+
+	return new Cloudflare({
+		apiToken: 'token',
+		fetch: fetcher,
+		maxRetries: 0
+	});
+}
+
+function succeeding(result: unknown): { status: number; body: unknown } {
+	return {
+		status: StatusCodes.OK,
+		body: { success: true, errors: [], messages: [], result }
+	};
+}
+
+describe('listAccountSubscriptions', () => {
+	it('reads the rate plan of each subscription as a string', async () => {
+		const client = subscriptionsClient(
+			succeeding([
+				{
+					state: 'Paid',
+					// A rate plan id the published schema's zone enum never lists.
+					rate_plan: { id: 'workers_ent_contract', scope: 'account' }
+				},
+				{ state: 'Provisioned', rate_plan: { id: 'pro' } }
+			])
+		);
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+		).resolves.toStrictEqual({
+			kind: 'listed',
+			subscriptions: [
+				{ state: 'Paid', ratePlanId: 'workers_ent_contract' },
+				{ state: 'Provisioned', ratePlanId: 'pro' }
+			]
+		});
+	});
+
+	it('reports a token that may not read the subscriptions', async () => {
+		const client = subscriptionsClient({
+			status: StatusCodes.FORBIDDEN,
+			body: {
+				success: false,
+				errors: [
+					{ code: 9109, message: 'Unauthorized to access requested resource' }
+				]
+			}
+		});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+		).resolves.toStrictEqual({ kind: 'unreadable' });
+	});
+
+	it.each([
+		{
+			name: 'a server fault',
+			response: {
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				body: {
+					success: false,
+					errors: [{ code: 0, message: 'Internal server error' }]
+				}
+			}
+		},
+		{
+			name: 'a rate limit',
+			response: {
+				status: StatusCodes.TOO_MANY_REQUESTS,
+				body: { success: false, errors: [{ code: 0, message: 'slow down' }] }
+			}
+		},
+		{
+			name: 'a connection failure',
+			response: { fault: new TypeError('fetch failed') }
+		}
+	])(
+		'reports subscriptions it could not reach after $name',
+		async ({ response }) => {
+			const client = subscriptionsClient(response);
+
+			await expect(
+				createCloudflareApi(
+					client,
+					accountId('acc-1')
+				).listAccountSubscriptions()
+			).resolves.toStrictEqual({ kind: 'unavailable' });
+		}
+	);
+
+	// A cancelled run is the operator stopping, not an answer about the account,
+	// so it must not read as a plan this build could not establish.
+	it('lets a cancelled request through rather than reporting it', async () => {
+		const client = subscriptionsClient(succeeding([]));
+		const cancelled = new AbortController();
+		cancelled.abort();
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions(
+				cancelled.signal
+			)
+		).rejects.toBeInstanceOf(Cloudflare.APIUserAbortError);
+	});
+
+	it('reports a response whose subscriptions it cannot read', async () => {
+		const client = subscriptionsClient(
+			succeeding([{ state: 7, rate_plan: { id: ['workers_paid'] } }])
+		);
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).listAccountSubscriptions()
+		).resolves.toStrictEqual({ kind: 'unparsed' });
+	});
+});

@@ -34,6 +34,33 @@ export interface AccountSummary {
 	readonly name: string;
 }
 
+/**
+ * One account subscription, read as the live endpoint returns it.
+ *
+ * The published schema gives `rate_plan.id` the zone plan vocabulary, which the
+ * SDK's types repeat. The account endpoint returns product subscription ids
+ * that vocabulary never lists, so read the field as a string.
+ */
+export interface AccountSubscription {
+	readonly state: string | undefined;
+	readonly ratePlanId: string | undefined;
+}
+
+/**
+ * What the deploy learned from the account's subscriptions. A token scoped to
+ * Workers alone cannot read them, which is the common case, so a caller has to
+ * tell an empty list from a list it never saw, and has to tell a token that may
+ * not read them from an endpoint that did not answer.
+ */
+export type AccountSubscriptions =
+	| {
+			readonly kind: 'listed';
+			readonly subscriptions: readonly AccountSubscription[];
+	  }
+	| { readonly kind: 'unreadable' }
+	| { readonly kind: 'unavailable' }
+	| { readonly kind: 'unparsed' };
+
 export interface QueueConsumerSettings {
 	readonly maxBatchSize: number | undefined;
 	readonly maxBatchTimeout: number | undefined;
@@ -126,6 +153,17 @@ export interface WorkerLogEvent {
  */
 export interface CloudflareApi {
 	listAccounts(): Promise<AccountSummary[]>;
+
+	/**
+	 * The account's subscriptions, from which `cupboard deploy` establishes the
+	 * Workers plan. Reports rather than throws whenever the subscriptions cannot
+	 * be read, because failing to establish the plan must not stop a deploy.
+	 *
+	 * The exception is a cancelled request, which is the operator stopping the
+	 * run rather than an answer about the account. Pass the run's abort signal
+	 * for the SDK to tell a cancellation from a request that simply failed.
+	 */
+	listAccountSubscriptions(signal?: AbortSignal): Promise<AccountSubscriptions>;
 
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
@@ -284,6 +322,32 @@ const liveConsumerSchema = z.object({
 		})
 		.optional()
 });
+
+/**
+ * An account subscription as the live endpoint returns it. Every field is
+ * optional because the endpoint returns subscriptions for products this deploy
+ * knows nothing about, and a subscription that says nothing about Workers must
+ * not make the whole list unreadable.
+ */
+const liveSubscriptionSchema = z.object({
+	state: z.string().optional(),
+	rate_plan: z.object({ id: z.string().optional() }).loose().optional()
+});
+
+/**
+ * Whether Cloudflare refused the request because the token may not make it,
+ * which is what a deployment token scoped to Workers alone gets from the
+ * subscriptions endpoint. Another plan-detection outcome covers a request that
+ * failed for any other reason.
+ */
+function isTokenRefusal(error: unknown): boolean {
+	return (
+		error instanceof Cloudflare.APIError &&
+		(error.status === StatusCodes.FORBIDDEN ||
+			error.status === StatusCodes.UNAUTHORIZED)
+	);
+}
+
 const defaultQueueBatchSize = 10;
 const defaultQueueBatchWaitMilliseconds = 5000;
 const defaultQueueRetries = 3;
@@ -412,6 +476,40 @@ export function createCloudflareApi(
 				id: cloudflareAccountIdSchema.parse(item.id),
 				name: item.name
 			}));
+		},
+
+		async listAccountSubscriptions(signal) {
+			let listed: unknown[];
+
+			try {
+				listed = await filterCloudflareItems(
+					client.accounts.subscriptions.get(account, {
+						...(signal !== undefined && { signal })
+					}),
+					() => true,
+					'Cloudflare account subscription list'
+				);
+			} catch (error) {
+				if (error instanceof Cloudflare.APIUserAbortError) {
+					throw error;
+				}
+
+				return isTokenRefusal(error)
+					? { kind: 'unreadable' as const }
+					: { kind: 'unavailable' as const };
+			}
+
+			const parsed = z.array(liveSubscriptionSchema).safeParse(listed);
+
+			return parsed.success
+				? {
+						kind: 'listed' as const,
+						subscriptions: parsed.data.map((subscription) => ({
+							state: subscription.state,
+							ratePlanId: subscription.rate_plan?.id
+						}))
+					}
+				: { kind: 'unparsed' as const };
 		},
 
 		r2BucketExists: isBucketPresent,
