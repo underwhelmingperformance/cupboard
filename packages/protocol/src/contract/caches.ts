@@ -20,10 +20,13 @@ export const cachesContract = {
 		.route({ method: 'GET', path: '/caches' })
 		.output(cacheListResponseSchema),
 
+	// Registration upserts by name, and clears a stored deletion timestamp only
+	// where one is present, so a repeat leaves the same rows behind.
 	put: baseProcedure
 		.meta({
 			requires: 'cache:create',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'PUT', path: '/caches/{cacheName}' })
 		.input(
@@ -34,6 +37,9 @@ export const cachesContract = {
 		)
 		.output(cacheSummarySchema),
 
+	// Removal stays `replay-unsafe`. It deletes by name, so a retry sent after the
+	// name was registered again would tear down the new cache, and every call
+	// advances the cache lifecycle generation.
 	remove: baseProcedure
 		.meta({
 			requires: 'cache:delete',

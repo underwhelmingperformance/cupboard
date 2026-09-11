@@ -20,8 +20,10 @@ export const reuseViewsContract = {
 		.route({ method: 'GET', path: '/reuse-views' })
 		.output(reuseViewListResponseSchema),
 
+	// The write compares the complete definition inside its transaction and keeps
+	// the current revision when nothing changed, so a repeat stores nothing new.
 	set: baseProcedure
-		.meta({ requires: 'reuse-view:set' })
+		.meta({ requires: 'reuse-view:set', replaySafety: 'replay-safe' })
 		.route({ method: 'PUT', path: '/reuse-views/{name}' })
 		.input(
 			z.strictObject({
@@ -40,6 +42,8 @@ export const reuseViewsContract = {
 		})
 		.output(reuseViewSummarySchema),
 
+	// Removal stays `replay-unsafe`. It deletes by name, so a retry sent after the
+	// name was defined again would delete the new view.
 	remove: baseProcedure
 		.meta({ requires: 'reuse-view:remove' })
 		.route({ method: 'DELETE', path: '/reuse-views/{name}' })

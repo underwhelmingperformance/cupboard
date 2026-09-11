@@ -375,6 +375,20 @@ export class QuotaExceededError extends ServerHttpError {
 	}
 }
 
+// The usage row holds the tenant's quota and the CHECK that enforces it, so a
+// tenant without one cannot be charged and would store without limit. Creation
+// writes that row in the same batch as the tenant row, so only a tenant created
+// by an earlier release reaches this. Rerunning the idempotent creation request
+// writes the missing row.
+export class TenantUsageMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly tenant: TenantId) {
+		super(`Tenant '${tenant}' has no usage row and cannot be charged`);
+		this.name = 'TenantUsageMissingError';
+	}
+}
+
 export class ControlKeyMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

@@ -64,6 +64,14 @@ async function divergentEncodings(
 	return { small, large };
 }
 
+// Models a tenant whose creation wrote the tenant row but not its usage row.
+async function dropFixtureTenantUsage(): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.delete(d1Schema.tenantUsage)
+		.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+		.run();
+}
+
 function expectCommitSocketError(
 	error: unknown
 ): asserts error is CommitSocketError {
@@ -246,6 +254,43 @@ describe('per-tenant quota', () => {
 				casBlobs: 0,
 				quotaBytes: nar.narBytes.byteLength - 1
 			}
+		});
+	});
+
+	it('refuses a commit for a tenant whose usage row is missing', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('quota-usage-row-missing');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(decision.r2Key, nar);
+		await dropFixtureTenantUsage();
+		const commitError = await commitUploadRejection(token, decision.uploadId);
+
+		expectCommitSocketError(commitError);
+		expect({
+			error: { name: commitError.name, status: commitError.status },
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			error: {
+				name: 'CommitSocketError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR
+			},
+			edges: [],
+			presence: [],
+			usage: undefined
 		});
 	});
 

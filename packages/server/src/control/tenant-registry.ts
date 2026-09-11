@@ -163,34 +163,44 @@ export async function ensureTenant(
 	now: IsoTimestamp
 ): Promise<ParsedTenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
-	const inserted = await database
-		.insert(d1Schema.tenant)
-		.values({
-			id: body.id,
-			status: 'active',
-			readMode: body.readMode,
-			ownerIssuer: body.ownerIssuer,
-			ownerSubject: body.ownerSubject,
-			ownerAudience: body.ownerAudience,
-			configVersion: 1,
-			createdAt: now,
-			readUser: verifier.readUser,
-			readPasswordHash: verifier.readPasswordHash,
-			readPasswordSalt: verifier.readPasswordSalt
-		})
-		.onConflictDoNothing()
-		.returning();
-	const row = inserted[0];
 
-	if (row !== undefined) {
-		await ensureUsageRow(database, body, now);
+	// The usage row carries the quota and the CHECK that enforces it, so a tenant
+	// row without one accepts writes that nothing counts or limits. Write the pair
+	// in one batch, which D1 applies as a single transaction. Take this branch
+	// only for an unclaimed slug: a conflicting body must not write a usage row,
+	// and a usage row already stored must keep the quota it has.
+	if ((await loadTenant(database, body.id)) === undefined) {
+		const [inserted] = await database.batch([
+			database
+				.insert(d1Schema.tenant)
+				.values({
+					id: body.id,
+					status: 'active',
+					readMode: body.readMode,
+					ownerIssuer: body.ownerIssuer,
+					ownerSubject: body.ownerSubject,
+					ownerAudience: body.ownerAudience,
+					configVersion: 1,
+					createdAt: now,
+					readUser: verifier.readUser,
+					readPasswordHash: verifier.readPasswordHash,
+					readPasswordSalt: verifier.readPasswordSalt
+				})
+				.onConflictDoNothing()
+				.returning(),
+			usageRowInsert(database, body, now)
+		]);
+		const row = inserted[0];
 
-		return toSummary(row);
+		if (row !== undefined) {
+			return toSummary(row);
+		}
 	}
 
-	// Validate the existing configuration before touching usage. Otherwise a
-	// conflicting request could create a usage row with the wrong quota and make a
-	// later matching retry fail.
+	// Either the slug was already claimed, or a concurrent create claimed it
+	// between the read and the insert. Validate the existing configuration before
+	// touching usage. Otherwise a conflicting request could create a usage row
+	// with the wrong quota and make a later matching retry fail.
 	const existing = await loadTenant(database, body.id);
 
 	// Never reuse a slug after offboarding has begun; doing so could restore the
@@ -249,14 +259,14 @@ export async function ensureTenant(
 	return toSummary(concurrent);
 }
 
-// The usage row must exist before the tenant accepts writes. Conflict handling
-// preserves any quota already stored during a provisioning retry.
-async function ensureUsageRow(
+// The conflict clause keeps any quota already stored, so the same statement
+// serves the creation batch above and the repair below.
+function usageRowInsert(
 	database: Database,
 	body: ParsedTenantCreateBody,
 	now: IsoTimestamp
-): Promise<void> {
-	await database
+) {
+	return database
 		.insert(d1Schema.tenantUsage)
 		.values({
 			tenant: body.id,
@@ -266,8 +276,17 @@ async function ensureUsageRow(
 			quotaBytes: body.quotaBytes,
 			updatedAt: now
 		})
-		.onConflictDoNothing()
-		.run();
+		.onConflictDoNothing();
+}
+
+// Repairs a tenant that an earlier release created without its usage row. A
+// tenant created with the batch above always has one.
+async function ensureUsageRow(
+	database: Database,
+	body: ParsedTenantCreateBody,
+	now: IsoTimestamp
+): Promise<void> {
+	await usageRowInsert(database, body, now).run();
 }
 
 async function loadTenant(
