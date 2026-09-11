@@ -12,6 +12,7 @@ import {
 import {
 	type RootName,
 	selectorForCache,
+	type StoredCache,
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
@@ -31,6 +32,7 @@ import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { callInCache } from '../client/cache-scoped.ts';
 import {
 	type CacheSelectionOptions,
 	CupboardClient,
@@ -255,7 +257,7 @@ export interface PlanCohortRunOptions {
 	readonly plannedFloatingOutputs?: readonly NixDerivedPathString[];
 	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
 	readonly plannedLocalOutputs?: readonly ParsedPlannedLocalOutput[];
-	readonly cacheName: string;
+	readonly cache: StoredCache;
 	readonly ttlSeconds?: TtlSeconds;
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
@@ -379,7 +381,6 @@ export function registerPlanCommands(
 			const input = await readCohortPlanInput(options.targetsFile);
 			const { targets } = input;
 			const cache = resolveCacheSelection(options);
-			const cacheName = selectorForCache(cache);
 			const uniqueRoots = [...new Set(targets.map((target) => target.root))];
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, {
@@ -390,7 +391,10 @@ export function registerPlanCommands(
 					githubOidc: options.githubOidc,
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: uniqueRoots.flatMap((root) =>
-						rootEnsureAuthorizationDetails({ cacheSelector: cacheName, root })
+						rootEnsureAuthorizationDetails({
+							cacheSelector: selectorForCache(cache),
+							root
+						})
 					)
 				}
 			);
@@ -432,7 +436,7 @@ export function registerPlanCommands(
 			await runPlanCohort(
 				{
 					targets,
-					cacheName,
+					cache,
 					plannedSubstitutionPolicy,
 					...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
 					storeIdentity: {
@@ -526,7 +530,7 @@ export async function runPlanCohort(
 		() =>
 			ensureCohortRoots(
 				options.targets,
-				options.cacheName,
+				options.cache,
 				options.ttlSeconds,
 				dependencies.rootClient
 			)
@@ -757,7 +761,7 @@ async function checkLocalCapacity(
 // outputs.
 async function ensureCohortRoots(
 	targets: readonly ParsedCohortTarget[],
-	cacheName: string,
+	cache: StoredCache,
 	ttlSeconds: TtlSeconds | undefined,
 	client: Pick<RootClient, 'ensure'>
 ): Promise<ReadonlyMap<RootName, ParsedRootEnsureResponse>> {
@@ -791,8 +795,7 @@ async function ensureCohortRoots(
 		maximumConcurrentRootEnsures,
 		async (root): Promise<readonly [RootName, ParsedRootEnsureResponse]> => {
 			const storePaths = targetsByRoot.get(root) ?? [];
-			const response = await client.ensure({
-				cacheName,
+			const response = await callInCache(client.ensure, cache, {
 				name: root,
 				targets: [...storePaths],
 				...(ttlSeconds !== undefined && { ttlSeconds })

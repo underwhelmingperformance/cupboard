@@ -1,7 +1,6 @@
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
-	cacheSelectorSchema,
 	namedCacheSelectorSchema,
 	rootNameSchema,
 	storePathHashSchema,
@@ -104,8 +103,7 @@ const idempotentMutations = [
 	{
 		name: 'a root replacement',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.roots.set({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.roots.set.inDefaultCache({
 				name: rootNameSchema.parse('channel'),
 				targets: []
 			})
@@ -113,8 +111,7 @@ const idempotentMutations = [
 	{
 		name: 'a root ensure',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.roots.ensure({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.roots.ensure.inDefaultCache({
 				name: rootNameSchema.parse('channel'),
 				targets: [storePathSchema.parse(storePath)]
 			})
@@ -138,8 +135,7 @@ const idempotentMutations = [
 	{
 		name: 'an upload confirmation',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.uploads.confirm({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.uploads.confirm.inDefaultCache({
 				storePathHashes: [storePathHashSchema.parse('a'.repeat(32))]
 			})
 	}
@@ -151,8 +147,7 @@ const deletesByName = [
 	{
 		name: 'a root removal',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.roots.remove({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.roots.remove.inDefaultCache({
 				name: rootNameSchema.parse('channel')
 			})
 	},
@@ -176,20 +171,18 @@ const deletesByName = [
 const nonIdempotentNegotiations = [
 	{
 		name: 'upload negotiation',
-		url: 'https://cupboard.test/t/acme/cache/_default/uploads',
+		url: 'https://cupboard.test/t/acme/uploads',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.uploads.negotiate({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.uploads.negotiate.inDefaultCache({
 				pushId: pushIdSchema.parse('push'),
 				paths: []
 			})
 	},
 	{
 		name: 'attestation negotiation',
-		url: 'https://cupboard.test/t/acme/cache/_default/attestations',
+		url: 'https://cupboard.test/t/acme/attestations',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.attestations.negotiate({
-				cacheName: cacheSelectorSchema.parse('_default'),
+			rpc.attestations.negotiate.inDefaultCache({
 				pushId: pushIdSchema.parse('push'),
 				bundles: []
 			})
@@ -468,8 +461,7 @@ describe('tenantRpc', () => {
 			const pending = (async () => {
 				try {
 					return {
-						value: await rpc.attestations.attach({
-							cacheName: cacheSelectorSchema.parse('_default'),
+						value: await rpc.attestations.attach.inDefaultCache({
 							id: '1f0d5a2a-35d4-4c7f-9ff0-dfb432eca408'
 						})
 					};

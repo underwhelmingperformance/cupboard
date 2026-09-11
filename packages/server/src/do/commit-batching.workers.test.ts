@@ -1,8 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR
-} from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	uploadCommitDecisionSchema,
@@ -395,19 +392,15 @@ describe('commit batching', () => {
 
 		await commitPath(token, seed, nar);
 
-		const negotiated = await authorisedFetch(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/uploads`,
-			token,
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					pushId: testPushId,
-					paths: attached.map((path) => uploadPathNegotiation(path)),
-					attachRoot
-				})
-			}
-		);
+		const negotiated = await authorisedFetch('/uploads', token, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: attached.map((path) => uploadPathNegotiation(path)),
+				attachRoot
+			})
+		});
 		expect(negotiated.status).toBe(StatusCodes.OK);
 		const decisions = uploadNegotiateResponseSchema
 			.parse(await negotiated.json())

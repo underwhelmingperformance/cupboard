@@ -50,21 +50,18 @@ async function negotiateViaWorker(
 	paths: readonly ParsedUploadPathMetadata[],
 	extraHeaders: Record<string, string> = {}
 ) {
-	const response = await handlerFetch(
-		`/t/${fixtureTenant}/cache/_default/uploads`,
-		{
-			method: 'POST',
-			headers: {
-				authorization: `Bearer ${token}`,
-				'content-type': 'application/json',
-				...extraHeaders
-			},
-			body: JSON.stringify({
-				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path))
-			})
-		}
-	);
+	const response = await handlerFetch(`/t/${fixtureTenant}/uploads`, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${token}`,
+			'content-type': 'application/json',
+			...extraHeaders
+		},
+		body: JSON.stringify({
+			pushId: testPushId,
+			paths: paths.map((path) => uploadPathNegotiation(path))
+		})
+	});
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -83,17 +80,14 @@ function probeRequest(
 	body: unknown,
 	headers?: Record<string, string>
 ): Request {
-	return new Request(
-		`https://cache.example/t/${fixtureTenant}/cache/_default/uploads`,
-		{
-			method: 'POST',
-			headers: {
-				'content-type': 'application/json',
-				...(headers ?? { authorization: 'Bearer junk' })
-			},
-			body: typeof body === 'string' ? body : JSON.stringify(body)
-		}
-	);
+	return new Request(`https://cache.example/t/${fixtureTenant}/uploads`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			...(headers ?? { authorization: 'Bearer junk' })
+		},
+		body: typeof body === 'string' ? body : JSON.stringify(body)
+	});
 }
 
 // Hint computation runs before the Durable Object authenticates the request.
@@ -229,7 +223,7 @@ describe('negotiate hints', () => {
 		const paths = [committed, reuse, fresh];
 
 		const hinted = await negotiateViaWorker(token, paths);
-		const direct = await authorisedFetch('/cache/_default/uploads', token, {
+		const direct = await authorisedFetch('/uploads', token, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
@@ -374,21 +368,17 @@ describe('negotiate hints', () => {
 			],
 			ownedNarHashes: [nar.narHash]
 		});
-		const hintedResponse = await authorisedFetch(
-			'/cache/_default/uploads',
-			token,
-			{
-				method: 'POST',
-				headers: {
-					'content-type': 'application/json',
-					[negotiateHintsHeader]: staged
-				},
-				body: JSON.stringify({
-					pushId: testPushId,
-					paths: [uploadPathNegotiation(metadata)]
-				})
-			}
-		);
+		const hintedResponse = await authorisedFetch('/uploads', token, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				[negotiateHintsHeader]: staged
+			},
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(metadata)]
+			})
+		});
 
 		expect(hintedResponse.status).toBe(StatusCodes.OK);
 
@@ -404,7 +394,7 @@ describe('negotiate hints', () => {
 			status: StatusCodes.NOT_FOUND
 		});
 
-		const replayed = await authorisedFetch('/cache/_default/uploads', token, {
+		const replayed = await authorisedFetch('/uploads', token, {
 			method: 'POST',
 			headers: {
 				'content-type': 'application/json',

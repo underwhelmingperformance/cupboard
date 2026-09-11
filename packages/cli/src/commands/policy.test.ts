@@ -3,6 +3,7 @@ import {
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
 import {
+	cacheNameSchema,
 	graceSecondsSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
@@ -18,6 +19,8 @@ import {
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
+
+import { cacheScopedDouble } from '../test-support.ts';
 
 import {
 	type PolicyClient,
@@ -47,7 +50,7 @@ function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 				graceSeconds: graceSecondsSchema.parse(body.graceSeconds)
 			}),
 		graceRemove: ({ id }) => Promise.resolve({ id, removed: false }),
-		graceCoverage: () => Promise.resolve({ covered: false }),
+		graceCoverage: cacheScopedDouble(() => Promise.resolve({ covered: false })),
 		...overrides
 	};
 }
@@ -337,17 +340,17 @@ describe('runGraceCoverage', () => {
 		}
 	])('reports $name', async ({ coverage, rows }) => {
 		const results: ResultRow[][] = [];
-		const requested: { cacheName: string }[] = [];
+		const requested: { cacheName?: string }[] = [];
 
 		await runGraceCoverage(
-			'builds',
+			cacheNameSchema.parse('builds'),
 			reporter(results),
 			policyClient({
-				graceCoverage(input) {
+				graceCoverage: cacheScopedDouble((input) => {
 					requested.push(input);
 
 					return Promise.resolve(coverage);
-				}
+				})
 			})
 		);
 

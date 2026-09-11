@@ -135,7 +135,7 @@ describe('OIDC federation', () => {
 			const ciRoots = tenantRpc(server.tenantUrl, {
 				credential: ciToken
 			}).roots;
-			const permitted = await ciRoots.set({
+			const permitted = await ciRoots.set.inNamedCache({
 				cacheName: 'owner-ci',
 				name: 'github:owner/repo',
 				targets: [target]
@@ -143,7 +143,7 @@ describe('OIDC federation', () => {
 
 			let outsidePrefix: string;
 			try {
-				await ciRoots.set({
+				await ciRoots.set.inNamedCache({
 					cacheName: 'owner-ci',
 					name: 'github:other/repo',
 					targets: [target]

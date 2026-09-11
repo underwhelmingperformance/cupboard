@@ -1,5 +1,5 @@
 import { type Logger } from '@cupboard/logger';
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -33,13 +33,8 @@ import {
 	controlLocalStepWake
 } from '../control/local-step.ts';
 
-import { authoriseRequest } from './authorise.ts';
+import { authoriseRequest, noPendingCache } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
-
-// The control plane has no pending-upload rows; resource resolution never needs
-// a pending-cache lookup, so the resolver always reports absence.
-const noPendingCache = (): Promise<StoredCache | undefined> =>
-	Promise.resolve(undefined);
 
 export interface ControlOrpcContext {
 	readonly request: Request;
@@ -62,10 +57,14 @@ const os = implement(controlContract)
 	.use(async ({ context, procedure, next }, input) => {
 		const claims = await controlAuthenticate(context.request, context.env);
 
+		// No control procedure declares a cache resource read from the request
+		// path, so this selector is never consulted. A cache-scoped control
+		// procedure would have to resolve its own.
 		await authoriseRequest(
 			claims,
 			procedure['~orpc'].meta,
 			input,
+			DEFAULT_CACHE_SELECTOR,
 			noPendingCache
 		);
 

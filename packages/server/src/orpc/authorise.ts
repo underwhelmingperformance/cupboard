@@ -27,6 +27,13 @@ export type PendingCacheResolver = (
 	id: string
 ) => Promise<StoredCache | undefined>;
 
+/**
+ * A resolver for authorisations that declare no pending resource, so resource
+ * resolution never looks one up. It returns `undefined` for every id.
+ */
+export const noPendingCache: PendingCacheResolver = () =>
+	Promise.resolve(undefined);
+
 function inputField(input: unknown, name: string): string | undefined {
 	const direct = z.looseObject({ [name]: z.string() }).safeParse(input);
 
@@ -53,6 +60,7 @@ interface ResolvedResource {
 async function resolveResource(
 	spec: ResourceSpec | undefined,
 	input: unknown,
+	pathCache: CacheSelector,
 	pendingCache: PendingCacheResolver
 ): Promise<ResolvedResource> {
 	if (spec === undefined) {
@@ -68,7 +76,9 @@ async function resolveResource(
 	let pendingMissing: ResolvedResource['pendingMissing'] = false;
 
 	if (spec.cache !== undefined) {
-		if ('pending' in spec.cache) {
+		if ('fromPath' in spec.cache) {
+			resource.cache = pathCache;
+		} else if ('pending' in spec.cache) {
 			const id = inputField(input, 'id');
 			const cache = id === undefined ? undefined : await pendingCache(id);
 
@@ -147,6 +157,7 @@ export async function authoriseRequest(
 	claims: AccessClaims,
 	meta: AuthzMeta,
 	input: unknown,
+	pathCache: CacheSelector,
 	pendingCache: PendingCacheResolver
 ): Promise<void> {
 	if (meta.requires === undefined) {
@@ -156,6 +167,7 @@ export async function authoriseRequest(
 	const { resource, unresolved, pendingMissing } = await resolveResource(
 		meta.resource,
 		input,
+		pathCache,
 		pendingCache
 	);
 
@@ -190,10 +202,14 @@ export async function authoriseRequest(
  */
 export function authoriseAttachRoot(
 	claims: AccessClaims,
-	cache: CacheSelector,
+	cache: StoredCache,
 	root: RootName
 ): void {
-	if (!isCoveredByToken(claims.grants, 'root:attach', { cache, root })) {
+	const selector = selectorForCache(cache);
+
+	if (
+		!isCoveredByToken(claims.grants, 'root:attach', { cache: selector, root })
+	) {
 		throw new InsufficientScopeError();
 	}
 }
