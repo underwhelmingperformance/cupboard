@@ -1,6 +1,7 @@
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
+	type CacheScope,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
@@ -19,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -44,6 +46,72 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+
+/**
+ * Every cache identity in creation order, with the scope read back out of the
+ * stored columns.
+ */
+async function cacheIdentities(): Promise<
+	{
+		id: CacheId;
+		scope: CacheScope | undefined;
+		access: string | undefined;
+		deleted: boolean;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				id: schema.cacheIdentities.id,
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: schema.cacheIdentities.access,
+				deletedAt: schema.cacheIdentities.deletedAt
+			})
+			.from(schema.cacheIdentities)
+			.orderBy(schema.cacheIdentities.id)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		id: row.id,
+		scope: cacheScopeFromRow({
+			kind: row.kind,
+			name: row.name ?? undefined
+		}),
+		access: row.access ?? undefined,
+		deleted: row.deletedAt !== null
+	}));
+}
+async function policyIdentityRows(): Promise<
+	{
+		pattern: string;
+		kind: string | undefined;
+		cacheId: CacheId | undefined;
+		rootNamePrefix: string | undefined;
+	}[]
+> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				pattern: schema.retentionPolicies.pattern,
+				kind: schema.retentionPolicies.kind,
+				cacheId: schema.retentionPolicies.cacheId,
+				rootNamePrefix: schema.retentionPolicies.rootNamePrefix
+			})
+			.from(schema.retentionPolicies)
+			.orderBy(schema.retentionPolicies.pattern)
+			.all()
+	);
+
+	return rows.map((row) => ({
+		pattern: row.pattern,
+		kind: row.kind ?? undefined,
+		cacheId: row.cacheId ?? undefined,
+		rootNamePrefix: row.rootNamePrefix ?? undefined
+	}));
+}
+
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
@@ -210,6 +278,221 @@ describe('cache registry admin', () => {
 		}).toStrictEqual({
 			one: 1,
 			many: 21
+		});
+	});
+
+	it('binds a published path to the cache identity', async () => {
+		await useTestServer('cache-admin-identity-binding');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		// A commit deletes the pending row, so negotiate a second path and leave
+		// it uncommitted so that a pending row survives to be read.
+		await negotiateUploads(
+			init.token,
+			[
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash: repeated('c')
+				})
+			],
+			'builds'
+		);
+
+		const [identity] = await cacheIdentities();
+		const bound = await runInDurableObject(currentServer(), (instance) => ({
+			narInfos: instance.context.db
+				.select({ cacheId: schema.narInfos.cacheId })
+				.from(schema.narInfos)
+				.all(),
+			pendingUploads: instance.context.db
+				.select({ cacheId: schema.pendingUploads.cacheId })
+				.from(schema.pendingUploads)
+				.all()
+		}));
+
+		expect({ identity: identity?.id, bound }).toStrictEqual({
+			identity: 1,
+			bound: {
+				narInfos: [{ cacheId: 1 }],
+				pendingUploads: [{ cacheId: 1 }]
+			}
+		});
+	});
+
+	it('binds retention rows to the cache identity', async () => {
+		await useTestServer('cache-admin-identity-retention');
+
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await pushPath(init.token, metadata, 'builds');
+
+		const set = await authorisedFetch(
+			'/cache/builds/roots/channel',
+			init.token,
+			{
+				body: JSON.stringify({ targets: [metadata.storePath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+		const bound = await runInDurableObject(currentServer(), (instance) => ({
+			roots: instance.context.db
+				.select({ cacheId: schema.retentionRoots.cacheId })
+				.from(schema.retentionRoots)
+				.all(),
+			targets: instance.context.db
+				.select({ cacheId: schema.retentionRootTargets.cacheId })
+				.from(schema.retentionRootTargets)
+				.all()
+		}));
+
+		expect({ set: set.status, bound }).toStrictEqual({
+			set: StatusCodes.OK,
+			bound: {
+				roots: [{ cacheId: 1 }],
+				targets: [{ cacheId: 1 }]
+			}
+		});
+	});
+
+	it('links a cache-scoped policy when its cache is created', async () => {
+		await useTestServer('cache-admin-identity-policy');
+
+		const init = await bootstrap();
+		const addPolicy = (body: unknown): Promise<Response> =>
+			authorisedFetch('/policies', init.token, {
+				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+		// The cache does not exist yet, so this policy has no identity to name.
+		await addPolicy({ scope: 'cache', pattern: 'builds', ttlSeconds: 3600 });
+		await addPolicy({
+			scope: 'root-name-prefix',
+			pattern: 'release/',
+			ttlSeconds: 7200
+		});
+
+		const beforeCache = await policyIdentityRows();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterCache = await policyIdentityRows();
+
+		// The other order: this cache exists before its policy is added, so the
+		// insert resolves the identity itself.
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('d')
+			}),
+			'docs'
+		);
+		await addPolicy({ scope: 'cache', pattern: 'docs', ttlSeconds: 3600 });
+
+		const prefixPolicy = {
+			pattern: 'release/',
+			kind: 'root-name-prefix',
+			cacheId: undefined,
+			rootNamePrefix: 'release/'
+		};
+
+		expect({
+			beforeCache,
+			afterCache,
+			afterSecondCache: await policyIdentityRows()
+		}).toStrictEqual({
+			beforeCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: undefined,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			],
+			afterCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: 1,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			],
+			afterSecondCache: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: 1,
+					rootNamePrefix: undefined
+				},
+				{
+					pattern: 'docs',
+					kind: 'cache',
+					cacheId: 2,
+					rootNamePrefix: undefined
+				},
+				prefixPolicy
+			]
+		});
+	});
+
+	it('gives each incarnation of a cache name its own identity', async () => {
+		await useTestServer('cache-admin-identity');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const afterPush = await cacheIdentities();
+
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+
+		const afterDeletion = await cacheIdentities();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('b')
+			}),
+			'builds'
+		);
+
+		const afterReuse = await cacheIdentities();
+		const builds = {
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public'
+		};
+
+		expect({ afterPush, afterDeletion, afterReuse }).toStrictEqual({
+			afterPush: [{ ...builds, id: 1, deleted: false }],
+			afterDeletion: [{ ...builds, id: 1, deleted: true }],
+			afterReuse: [
+				{ ...builds, id: 1, deleted: true },
+				{ ...builds, id: 2, deleted: false }
+			]
 		});
 	});
 

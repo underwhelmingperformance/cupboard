@@ -19,6 +19,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
@@ -73,13 +74,19 @@ export class RetentionService {
 		}[],
 		writer: SchemaWriter
 	): void {
+		if (entries.length === 0) {
+			return;
+		}
+
+		const cacheId = new CacheRepository(writer).find(cache);
+
 		for (const rows of jsonRowLists(entries)) {
 			writer
 				.insert(schema.retentionGrace)
 				.select(
 					rows.insertSource([
 						sql`${cache}`,
-						sql`null`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
 						rows.column('storePathHash'),
 						rows.column('retainUntil')
 					])
@@ -110,6 +117,19 @@ export class RetentionService {
 
 	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
+		// A cache-scoped policy names one cache, which need not exist yet. Its
+		// `cache_id` stays null until `CacheRepository.ensure` registers that
+		// cache and links the row.
+		const identity =
+			body.scope === 'cache'
+				? {
+						kind: 'cache' as const,
+						cacheId: new CacheRepository(this.context.db).find(body.pattern)
+					}
+				: {
+						kind: 'root-name-prefix' as const,
+						rootNamePrefix: body.pattern
+					};
 
 		const row = this.context.db
 			.insert(schema.retentionPolicies)
@@ -117,6 +137,7 @@ export class RetentionService {
 				id,
 				scope: body.scope,
 				pattern: body.pattern,
+				...identity,
 				defaultTtlSeconds: body.ttlSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
@@ -125,7 +146,7 @@ export class RetentionService {
 					schema.retentionPolicies.scope,
 					schema.retentionPolicies.pattern
 				],
-				set: { defaultTtlSeconds: body.ttlSeconds }
+				set: { ...identity, defaultTtlSeconds: body.ttlSeconds }
 			})
 			.returning()
 			.get();

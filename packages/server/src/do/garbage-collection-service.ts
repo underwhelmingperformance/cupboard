@@ -21,6 +21,8 @@ import {
 	sql
 } from 'drizzle-orm';
 
+import { type CacheId } from '../db/cache.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredReferencesInvalidError,
@@ -144,10 +146,14 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
+	private cacheIdOf(cache: StoredCache): CacheId | undefined {
+		return new CacheRepository(this.context.db).find(cache);
+	}
+
 	private currentRevision(cache: StoredCache): number {
 		this.context.db
 			.insert(schema.garbageCollectionRevisions)
-			.values({ cache, revision: 0 })
+			.values({ cache, cacheId: this.cacheIdOf(cache), revision: 0 })
 			.onConflictDoNothing()
 			.run();
 
@@ -185,6 +191,7 @@ export class GarbageCollectionService {
 			tx.insert(schema.garbageCollectionScans)
 				.values({
 					cache,
+					cacheId: this.cacheIdOf(cache),
 					revision,
 					phase: 'expire-roots',
 					cursor: '',
@@ -409,11 +416,21 @@ export class GarbageCollectionService {
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
+		if (storePathHashes.length === 0) {
+			return;
+		}
+
+		const cacheId = this.cacheIdOf(cache);
+
 		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
 				.select(
-					hashes.insertSource([sql`${cache}`, sql`null`, hashes.element()])
+					hashes.insertSource([
+						sql`${cache}`,
+						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						hashes.element()
+					])
 				)
 				.onConflictDoNothing()
 				.run();
@@ -615,7 +632,11 @@ export class GarbageCollectionService {
 						)
 						.run();
 					tx.insert(schema.garbageCollectionMarks)
-						.values({ cache, storePathHash: frontier.storePathHash })
+						.values({
+							cache,
+							cacheId: this.cacheIdOf(cache),
+							storePathHash: frontier.storePathHash
+						})
 						.onConflictDoNothing()
 						.run();
 
@@ -1162,7 +1183,11 @@ export class GarbageCollectionService {
 
 		this.context.db
 			.insert(schema.garbageCollectionTenantRuns)
-			.values({ id: 1, cache: first.cache })
+			.values({
+				id: 1,
+				cache: first.cache,
+				cacheId: this.cacheIdOf(first.cache)
+			})
 			.run();
 
 		return first.cache;
@@ -1187,7 +1212,7 @@ export class GarbageCollectionService {
 
 		this.context.db
 			.update(schema.garbageCollectionTenantRuns)
-			.set({ cache: next.cache })
+			.set({ cache: next.cache, cacheId: this.cacheIdOf(next.cache) })
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.run();
 

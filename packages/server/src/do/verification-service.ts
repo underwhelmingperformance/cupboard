@@ -35,6 +35,7 @@ import {
 import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
@@ -2388,17 +2389,28 @@ export class VerificationService {
 			const nextHash = hasWrapped ? '' : (last?.storePathHash ?? fromHash);
 			const now = isoTimestamp(new Date());
 
+			// The cursor's cache is a position in the scan order rather than a
+			// reference to a cache, but the expanded column mirrors the legacy one
+			// so both agree on where the next pass resumes.
+			const cacheId = new CacheRepository(this.context.db).find(nextCache);
+
 			this.context.db
 				.insert(schema.verificationCursor)
 				.values({
 					id: 'active',
 					cache: nextCache,
+					cacheId,
 					lastStorePathHash: nextHash,
 					updatedAt: now
 				})
 				.onConflictDoUpdate({
 					target: schema.verificationCursor.id,
-					set: { cache: nextCache, lastStorePathHash: nextHash, updatedAt: now }
+					set: {
+						cache: nextCache,
+						cacheId,
+						lastStorePathHash: nextHash,
+						updatedAt: now
+					}
 				})
 				.run();
 
