@@ -22,6 +22,10 @@ import {
 	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	privateStoredReuseView,
+	reuseViewNameSchema
+} from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -41,7 +45,9 @@ import {
 	fencedCasObjectDeletion
 } from './blob-reaper-service.ts';
 import {
+	capturedReferenceSelect,
 	fencedEdgeRetirement,
+	publicReferenceSelect,
 	teardownPresenceBatch
 } from './deletion-queue-service.ts';
 import { expiredRootTargetSelect } from './garbage-collection-service.ts';
@@ -54,6 +60,11 @@ import {
 	buildTenantBlobDeleteStatement,
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
+import {
+	reuseViewSelectorInsert,
+	type StoredReuseViewSelector
+} from './reuse-view-admin-service.ts';
+import { reuseEdgeSelect } from './reuse-view-lookup-service.ts';
 import { buildLeaseUpdate } from './verification-service.ts';
 
 const throwStub = (): never => {
@@ -89,6 +100,9 @@ const testStorePath = storePathSchema.parse(
 const testRootName = rootNameSchema.parse('main');
 const testDigest = sha256HexDigestSchema.parse('0'.repeat(64));
 const testGeneration = narInfoGenerationSchema.parse(0);
+const testReuseView = privateStoredReuseView(
+	reuseViewNameSchema.parse('shared')
+);
 const testUploadId = uploadIdSchema.parse('01J0000000000000000000000A');
 
 function narHashes(count: number): NixSha256HashString[] {
@@ -352,6 +366,45 @@ function expiredRootTargetParameters(roots: number): number {
 	).toSQL().params.length;
 }
 
+// The chunk of paths a teardown retires reaches these statements as a list, so
+// the count comes from the statement rather than from the chunk size.
+function capturedReferenceParameters(paths: number): number {
+	return capturedReferenceSelect(
+		database,
+		tenant,
+		privateStoredCache(cache),
+		retiredEdges(paths),
+		46
+	).toSQL().params.length;
+}
+
+function publicReferenceParameters(hashes: number): number {
+	return publicReferenceSelect(database, tenant, narHashList(hashes)).toSQL()
+		.params.length;
+}
+
+// A path one view holds in many caches reaches the edge lookup as one row list,
+// so the count comes from the statement rather than from the number of caches.
+function reuseEdgeParameters(candidates: number): number {
+	const rows = rowList(candidates, {
+		cache,
+		storePathHash: testStorePathHash,
+		generation: testGeneration
+	});
+
+	return reuseEdgeSelect(database, tenant, rows).toSQL().params.length;
+}
+
+function reuseViewSelectorParameters(selectors: number): number {
+	const rows = rowList<StoredReuseViewSelector>(selectors, {
+		kind: 'prefix',
+		pattern: 'builds'
+	});
+
+	return reuseViewSelectorInsert(doDatabase, testReuseView, rows).toSQL().params
+		.length;
+}
+
 function leaseParameters(uploads: number): number {
 	const list = firstList(jsonValueLists(repeated(uploads, testUploadId)));
 
@@ -452,6 +505,19 @@ const listStatements: readonly {
 				casObjectVersions(objects)
 			).remove.toSQL().params.length
 	},
+	{
+		statement: 'teardown attestation-reference SELECT',
+		parameters: capturedReferenceParameters
+	},
+	{
+		statement: 'teardown public-reference SELECT',
+		parameters: publicReferenceParameters
+	},
+	{
+		statement: 'reuse view selector INSERT',
+		parameters: reuseViewSelectorParameters
+	},
+	{ statement: 'reuse view edge SELECT', parameters: reuseEdgeParameters },
 	{ statement: 'verification claim lease UPDATE', parameters: leaseParameters },
 	{ statement: 'root target INSERT', parameters: rootTargetInsertParameters },
 	{

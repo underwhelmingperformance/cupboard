@@ -12,10 +12,19 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// A root can contain at most 1,000 targets. Updating a root probes the narinfo
-// and canonical NAR for each distinct target, then replaces its target rows. The
-// limit bounds both R2 requests and SQL statement size within one Durable Object
-// request.
+// The largest target set one root can hold.
+//
+// Setting a root replaces its target set as a whole: every target is probed for
+// servability, nothing is written if any is unavailable, and the new set is
+// swapped in under a write gate. A root's meaning is the complete set, so it
+// cannot be assembled across several requests; a partly written root would
+// retain the wrong paths and the retention sweep would collect what the missing
+// part was protecting.
+//
+// This number is therefore how large a set one such operation supports, not a
+// budget for the work it does. A caller with more paths than this splits them
+// across named roots, each retained in its own right, which `RootTargetLimitError`
+// says.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
@@ -73,9 +82,11 @@ export type ParsedRootEnsureResponse = z.output<
 	typeof rootEnsureResponseSchema
 >;
 
-// A target page probes the narinfo object for each distinct path. A page contains
-// at most 200 targets so one request remains below the internal subrequest
-// limit. Root listings use the same page size to bound response size.
+// A target page probes each distinct path for servability: its narinfo object
+// and NAR, a repair of a missing narinfo object, and the repaired objects again,
+// so a page of 200 targets makes at most 800 R2 requests. A caller reads every
+// target by following the cursor the page returns. Root listings use the same
+// page size to bound response size.
 export const rootListPageSize = 200;
 
 // Clients must return the cursor unchanged to resume a listing. Its contents

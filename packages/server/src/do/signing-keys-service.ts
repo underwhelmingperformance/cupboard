@@ -106,7 +106,13 @@ const purgeEntrySchema = z.strictObject({
 });
 type PurgeEntry = z.output<typeof purgeEntrySchema>;
 
-const purgeEntriesSchema = z.array(purgeEntrySchema).min(1).max(100);
+// A bound on persisted data can only be loosened: rows written under a looser
+// bound still exist and cannot be revalidated. So a schema that parses stored
+// state describes only what corrupt data looks like. A continuation with no
+// entries is never written, which makes an empty array corrupt. Its length is
+// not: the row holds however many entries `stageBackfill` wrote, and a pass
+// publishes only the page its D1 allowance covers before rewriting the rest.
+const purgeEntriesSchema = z.array(purgeEntrySchema).min(1);
 
 type BackfillRow = typeof schema.signingKeyBackfills.$inferSelect;
 

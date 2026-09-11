@@ -168,7 +168,10 @@ export const tenantRouter = os.router({
 	},
 	check: {
 		run: os.check.run.handler(({ input, context }) =>
-			context.services.integrityCheck.check(input.deep)
+			context.services.integrityCheck.check(input.deep, {
+				cache: input.cursorCache,
+				storePathHash: input.cursor
+			})
 		)
 	},
 	roots: {

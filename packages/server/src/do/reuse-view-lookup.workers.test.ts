@@ -28,9 +28,9 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-import { reuseCandidateLimit } from './reuse-view-lookup-service.ts';
 import {
 	committedPath,
+	insertAgreeingCopy,
 	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
@@ -218,25 +218,24 @@ describe('reuse-view narinfo lookup', () => {
 		});
 	});
 
-	it('misses instead of truncating past the candidate limit', async () => {
-		const path = await committedPath('reuse-limit', 'pr-0', {
+	// Every copy the view selects is compared rather than truncated, so the
+	// number of caches holding a path does not affect whether it is served.
+	it('serves a path that many caches of the view hold', async () => {
+		const copies = 40;
+		const path = await committedPath('reuse-wide', 'pr-0', {
 			storePathHash: '4'.repeat(32)
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		for (let index = 1; index <= reuseCandidateLimit; index += 1) {
-			await insertUnbackedRow(
-				`pr-${String(index)}`,
-				path.storePathHash,
-				path.narHash
-			);
+		for (let index = 1; index <= copies; index += 1) {
+			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
 		}
 
+		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+
 		const response = await readFetch(lookupPath(path.storePathHash));
+		const narInfo = NarInfo.parse(await response.text());
 		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
-			body: JSON.stringify({
-				storePathHashes: [path.storePathHash]
-			}),
+			body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
 			headers: { 'content-type': 'application/json' },
 			method: 'POST'
 		});
@@ -246,39 +245,38 @@ describe('reuse-view narinfo lookup', () => {
 
 		expect({
 			narInfoStatus: response.status,
+			narHash: narInfo.narHash.toString(),
 			availabilityStatus: availability.status,
 			body
 		}).toStrictEqual({
-			narInfoStatus: StatusCodes.NOT_FOUND,
+			narInfoStatus: StatusCodes.OK,
+			narHash: path.narHash,
 			availabilityStatus: StatusCodes.OK,
-			body: { missingStorePathHashes: [path.storePathHash] }
+			body: { missingStorePathHashes: [] }
 		});
 	});
 
-	it('serves at exactly the candidate limit', async () => {
-		const path = await committedPath('reuse-limit-edge', 'pr-0', {
-			storePathHash: 'f4'.repeat(16)
+	// The comparison is what makes serving a wide view safe, so it has to reach
+	// every copy. One cache out of many that disagrees still refuses the path.
+	it('answers a wide view with one disagreeing copy as a miss', async () => {
+		const agreeing = 40;
+		const path = await committedPath('reuse-wide-conflict', 'pr-0', {
+			storePathHash: '7'.repeat(32)
+		});
+
+		for (let index = 1; index <= agreeing; index += 1) {
+			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
+		}
+
+		await committedPath('reuse-wide-other', `pr-${String(agreeing + 1)}`, {
+			storePathHash: path.storePathHash,
+			name: 'divergent'
 		});
 		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		for (let index = 1; index < reuseCandidateLimit; index += 1) {
-			await insertUnbackedRow(
-				`pr-${String(index)}`,
-				path.storePathHash,
-				path.narHash
-			);
-		}
-
 		const response = await readFetch(lookupPath(path.storePathHash));
-		const narInfo = NarInfo.parse(await response.text());
 
-		expect({
-			status: response.status,
-			narHash: narInfo.narHash.toString()
-		}).toStrictEqual({
-			status: StatusCodes.OK,
-			narHash: path.narHash
-		});
+		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
 	it('answers conflicting candidates as a miss', async () => {
