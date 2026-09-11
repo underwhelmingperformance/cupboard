@@ -1,6 +1,8 @@
 import {
 	type CacheGeneration,
 	cacheGenerationSchema,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type StoredCache,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -22,6 +24,30 @@ export const firstCacheGeneration = cacheGenerationSchema.parse(1);
 export const secondCacheGeneration = cacheGenerationSchema.parse(
 	firstCacheGeneration + 1
 );
+
+/**
+ * The read revision a cache starts at, and the one a reader assumes for a cache
+ * whose lifecycle row it cannot find.
+ */
+export const firstCacheReadRevision = cacheReadRevisionSchema.parse(1);
+
+/**
+ * The read revision written when a deletion first creates a cache's lifecycle
+ * row.
+ */
+export const secondCacheReadRevision = cacheReadRevisionSchema.parse(
+	firstCacheReadRevision + 1
+);
+
+/**
+ * Which incarnation of a cache name a reader is addressing, and under which
+ * read-access policy. The lifecycle row is authoritative for both, and a
+ * registration returns the pair it published.
+ */
+export interface CacheLifecycleVersion {
+	readonly generation: CacheGeneration;
+	readonly readRevision: CacheReadRevision;
+}
 
 const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, ${firstCacheGeneration})`;
 

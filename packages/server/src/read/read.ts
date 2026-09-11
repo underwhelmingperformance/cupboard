@@ -1,8 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	type CacheAccessMode,
 	DEFAULT_CACHE,
-	isPrivateCache,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash,
@@ -272,7 +270,7 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
 }
 
 /**
- * Builds the reference-edge lookup that authorises private narinfo reads.
+ * Builds the reference-edge lookup that authorises narinfo reads.
  *
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
  * `blob_ref` through its existing `(tenant, cache, store_path_hash,
@@ -315,8 +313,8 @@ export function narInfoReferenceQuery(
 }
 
 /**
- * Returns the current commit of each requested path in this private cache,
- * taken from the reference edges the cache generation authorises.
+ * Returns the current commit of each requested path in this cache, taken from
+ * the reference edges the cache generation authorises.
  *
  * A recommit can leave an earlier edge in place until the teardown drain
  * removes it, so D1 can contain several authorised edges for one path. Narinfo
@@ -367,28 +365,22 @@ async function authorisedNarInfoVersions(
 // the same tenant, cache, and path identity in its cache tag so deletion and
 // re-signing purge only this narinfo.
 //
-// A private read serves the object only when an authorised reference edge
-// matches the path and the object's recorded generation and NAR hash match that
-// edge. Without the second check, a reader of a recreated cache could receive
-// the object published by the previous cache with that name. Public caches accept
-// the eventual removal of a deleted cache's objects instead, which keeps the
-// cacheable read path free of D1.
+// The read serves the object only when an authorised reference edge matches the
+// path and the object's recorded generation and NAR hash match that edge.
+// Narinfo objects are keyed by path within a cache, so without those checks a
+// reader of a recreated cache would receive the object published by the previous
+// cache with that name.
 export async function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
 	tenant: TenantId,
 	cache: StoredCache,
 	storePathHash: StorePathHash,
-	isAuthenticatedRead: boolean,
-	access: CacheAccessMode
+	isAuthenticatedRead: boolean
 ): Promise<Response> {
 	const key = narInfoObjectKey(tenant, storePathHash, cache);
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache, storePathHash);
-
-	if (access === 'public') {
-		return serveR2(request, env, key, headersFor, !isAuthenticatedRead);
-	}
 
 	const versions = await authorisedNarInfoVersions(env, tenant, cache, [
 		storePathHash
@@ -419,20 +411,17 @@ export async function missingStorePathHashes(
 	storePathHashes: readonly StorePathHash[]
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
-	// For a private cache, resolve the current commit for each path before
-	// checking R2. Report the path as missing if the object belongs to another
-	// commit. A narinfo GET would refuse that object, so the push must not skip
-	// the path.
-	const versions = isPrivateCache(cache)
-		? await authorisedNarInfoVersions(env, tenant, cache, unique)
-		: undefined;
+	// Resolve the current commit for each path before checking R2. Report the
+	// path as missing if the object belongs to another commit. A narinfo GET
+	// would refuse that object, so the push must not skip the path.
+	const versions = await authorisedNarInfoVersions(env, tenant, cache, unique);
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
 		async (storePathHash) => {
-			const current = versions?.get(storePathHash);
+			const current = versions.get(storePathHash);
 
-			if (versions !== undefined && current === undefined) {
+			if (current === undefined) {
 				return storePathHash;
 			}
 
@@ -440,8 +429,7 @@ export async function missingStorePathHashes(
 				narInfoObjectKey(tenant, storePathHash, cache)
 			);
 			const isServable =
-				object !== null &&
-				(current === undefined || isNarInfoObjectOfCommit(object, current));
+				object !== null && isNarInfoObjectOfCommit(object, current);
 
 			return isServable ? undefined : storePathHash;
 		}

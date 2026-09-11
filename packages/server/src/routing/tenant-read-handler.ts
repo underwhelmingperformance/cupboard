@@ -22,6 +22,7 @@ import {
 	serveNarInfo
 } from '../read/read.ts';
 
+import { cacheRequestVersion } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { isLiteralNamespacePath, parseTenantPath } from './tenant-routing.ts';
 
@@ -81,17 +82,13 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			return noStore(notFoundResponse());
 		}
 
-		// This Worker serves only the public namespace. An authenticated read
-		// stays on the control Worker and never reaches here, so the cache is
-		// public whichever selector named it.
 		return serveNarInfo(
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
 			context.get('cache'),
 			storePathHash,
-			false,
-			'public'
+			false
 		);
 	});
 
@@ -146,7 +143,12 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	app.use('/t/:tenant/*', async (context, next) => {
 		const route = parseTenantPath(new URL(context.req.url).pathname);
 
-		if (route === undefined) {
+		// A request that carries no cache version was not canonicalised by the
+		// control Worker, so Workers Cache would key its response by path alone.
+		if (
+			route === undefined ||
+			cacheRequestVersion(context.req.raw) === undefined
+		) {
 			return noStore(notFoundResponse());
 		}
 

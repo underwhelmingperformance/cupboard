@@ -1,76 +1,70 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	addressedCache,
 	isLiteralNamespacePath,
-	parsePrivateCachePath,
 	type RouteNamespace
 } from './tenant-routing.ts';
 
-interface ParsedRow {
+interface AddressedCacheRow {
 	readonly pathname: string;
-	readonly expected: { cache: string; rest: string };
+	readonly expected: string;
 }
 
-interface RejectedRow {
-	readonly pathname: string;
-}
+// The default cache, which is what a path that names no cache resolves to, and
+// what a path whose cache name does not parse resolves to as well.
+const defaultCache = '';
 
-const parsedRows: readonly ParsedRow[] = [
+const addressedCacheRows: readonly AddressedCacheRow[] = [
 	{
 		pathname: '/private-cache/builds/nix-cache-info',
-		expected: { cache: 'private/builds', rest: '/nix-cache-info' }
+		expected: 'private/builds'
 	},
-	{
-		pathname: '/private-cache/builds/',
-		expected: { cache: 'private/builds', rest: '/' }
-	},
+	{ pathname: '/private-cache/builds/', expected: 'private/builds' },
 	// The prefix by itself addresses the cache root.
-	{
-		pathname: '/private-cache/builds',
-		expected: { cache: 'private/builds', rest: '/' }
-	},
+	{ pathname: '/private-cache/builds', expected: 'private/builds' },
 	{
 		pathname: '/private-cache/a.b-c_0/nar/x.nar.zst',
-		expected: { cache: 'private/a.b-c_0', rest: '/nar/x.nar.zst' }
+		expected: 'private/a.b-c_0'
 	},
 	// `private` is an ordinary local name, so this path names the cache whose
 	// stored name is `private/private`.
 	{
 		pathname: '/private-cache/private/builds/info',
-		expected: { cache: 'private/private', rest: '/builds/info' }
+		expected: 'private/private'
 	},
 	{
 		pathname: `/private-cache/${'b'.repeat(63)}/info`,
-		expected: { cache: `private/${'b'.repeat(63)}`, rest: '/info' }
-	}
+		expected: `private/${'b'.repeat(63)}`
+	},
+	{ pathname: '/cache/builds/nix-cache-info', expected: 'builds' },
+	{ pathname: '/cache/_default/nix-cache-info', expected: defaultCache },
+	{ pathname: '/nix-cache-info', expected: defaultCache },
+	{ pathname: '/caches', expected: defaultCache },
+	{ pathname: '/private-cacheXbuilds/info', expected: defaultCache },
+	{ pathname: '/private-cache/', expected: defaultCache },
+	{ pathname: '/private-cache//nix-cache-info', expected: defaultCache },
+	{ pathname: '/private-cache/_private-builds/info', expected: defaultCache },
+	{ pathname: '/private-cache/_default/info', expected: defaultCache },
+	{ pathname: '/private-cache/Builds/info', expected: defaultCache },
+	{ pathname: '/private-cache/.builds/info', expected: defaultCache },
+	{ pathname: '/private-cache/-builds/info', expected: defaultCache },
+	{
+		pathname: `/private-cache/${'b'.repeat(64)}/info`,
+		expected: defaultCache
+	},
+	{ pathname: '/cache/%62uilds/info', expected: defaultCache },
+	{ pathname: '/cache/Builds/info', expected: defaultCache },
+	{ pathname: '/cache/', expected: defaultCache }
 ];
 
-const rejectedRows: readonly RejectedRow[] = [
-	{ pathname: '/cache/builds/nix-cache-info' },
-	{ pathname: '/nix-cache-info' },
-	{ pathname: '/private-cacheXbuilds/info' },
-	{ pathname: '/private-cache/' },
-	{ pathname: '/private-cache//nix-cache-info' },
-	{ pathname: '/private-cache/_private-builds/info' },
-	{ pathname: '/private-cache/_default/info' },
-	{ pathname: '/private-cache/Builds/info' },
-	{ pathname: '/private-cache/.builds/info' },
-	{ pathname: '/private-cache/-builds/info' },
-	{ pathname: `/private-cache/${'b'.repeat(64)}/info` }
-];
-
-describe('parsePrivateCachePath', () => {
-	it.each(parsedRows)('parses $pathname', ({ pathname, expected }) => {
-		const route = parsePrivateCachePath(pathname);
-
-		expect(
-			route === undefined ? undefined : { cache: route.cache, rest: route.rest }
-		).toStrictEqual(expected);
-	});
-
-	it.each(rejectedRows)('rejects $pathname', ({ pathname }) => {
-		expect(parsePrivateCachePath(pathname)).toBeUndefined();
-	});
+describe('addressedCache', () => {
+	it.each(addressedCacheRows)(
+		'reads $expected from $pathname',
+		({ pathname, expected }) => {
+			expect(addressedCache(pathname)).toBe(expected);
+		}
+	);
 });
 
 interface NamespacePathRow {

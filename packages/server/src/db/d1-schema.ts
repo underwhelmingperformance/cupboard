@@ -1,6 +1,8 @@
 import {
 	type AuthKeyId,
 	type CacheGeneration,
+	type CacheReadRevision,
+	cacheReadRevisionSchema,
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
@@ -183,6 +185,14 @@ export const cacheLifecycle = sqliteTable(
 		cacheName: text('cache_name'),
 		access: text('access', { enum: ['public', 'private'] }),
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
+		// The version of the cache's read access. Deleting a cache advances it, and
+		// so does registering the name again with a different access. The Workers
+		// Cache key for a public read carries it, so a stored response cannot
+		// answer a reader once the cache reads differently.
+		readRevision: integer('read_revision')
+			.$type<CacheReadRevision>()
+			.notNull()
+			.default(cacheReadRevisionSchema.parse(1)),
 		// When the cache was last deleted, and null while it is live. Deletion sets
 		// it in the same statement that advances the generation, and registering
 		// the cache name again clears it.

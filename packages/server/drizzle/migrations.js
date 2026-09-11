@@ -44,6 +44,7 @@ import m0041 from './0041_pending_upload_recorded_verdict.sql';
 import m0042 from './0042_cache_access_expand.sql';
 import m0043 from './0043_cache_access_backfill.sql';
 import m0044 from './0044_cache_grant_json.sql';
+import m0045 from './0045_cache_incarnation_expand.sql';
 
 export default {
 	journal,
@@ -92,6 +93,7 @@ export default {
 		m0041,
 		m0042,
 		m0043,
-		m0044
+		m0044,
+		m0045
 	}
 };
