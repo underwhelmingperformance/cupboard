@@ -26,6 +26,7 @@ import {
 	commitPath,
 	currentCasObjectKey,
 	currentServer,
+	defaultCache,
 	deletePath,
 	expectStats,
 	fileAttestationReference,
@@ -297,7 +298,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 
 		await currentServer().removeAttestationReference({
-			cache: '',
+			cache: defaultCache(),
 			storePathHash: storePathHashSchema.parse('d'.repeat(32)),
 			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
@@ -305,7 +306,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 		const afterFirst = await tenantUsageRow();
 		await currentServer().removeAttestationReference({
-			cache: '',
+			cache: defaultCache(),
 			storePathHash: storePathHashSchema.parse('f'.repeat(32)),
 			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
@@ -346,7 +347,7 @@ describe('attestation CAS lifecycle', () => {
 
 		const result = await currentServer().reserveAttestationReference(
 			{
-				cache: '',
+				cache: defaultCache(),
 				storePathHash,
 				generation: narInfoGenerationSchema.parse(0),
 				predicateType,
@@ -406,7 +407,7 @@ describe('attestation CAS lifecycle', () => {
 			predicateType
 		});
 		await currentServer().removeAttestationReference({
-			cache: '',
+			cache: defaultCache(),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
@@ -423,7 +424,7 @@ describe('attestation CAS lifecycle', () => {
 			refs: [
 				{
 					tenant: fixtureTenant,
-					cache: '',
+					cache: defaultCache(),
 					storePathHash,
 					generation: 1,
 					predicateType,
@@ -465,7 +466,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 		const firstKey = await currentCasObjectKey(first.digest);
 		await currentServer().removeAttestationReference({
-			cache: '',
+			cache: defaultCache(),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
 			predicateType,

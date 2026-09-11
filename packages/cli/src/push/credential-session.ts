@@ -1,7 +1,4 @@
-import {
-	type ParsedPushCredential,
-	type PushId
-} from '@cupboard/protocol/upload';
+import { type PushCredential, type PushId } from '@cupboard/protocol/upload';
 
 import { type CredentialProvider } from './r2-upload.ts';
 
@@ -10,7 +7,7 @@ import { type CredentialProvider } from './r2-upload.ts';
 // the server signs a fresh id.
 export type IssuePushCredential = (
 	pushId: PushId | undefined
-) => Promise<ParsedPushCredential>;
+) => Promise<PushCredential>;
 
 export interface CredentialSessionOptions {
 	readonly refreshMarginMs?: number;
@@ -37,13 +34,13 @@ export function credentialSession(
 	const now = options.now ?? (() => Date.now());
 
 	let pushId: PushId | undefined;
-	let cached: ParsedPushCredential | undefined;
-	let inFlight: Promise<ParsedPushCredential> | undefined;
+	let cached: PushCredential | undefined;
+	let inFlight: Promise<PushCredential> | undefined;
 
-	const isFresh = (credential: ParsedPushCredential): boolean =>
+	const isFresh = (credential: PushCredential): boolean =>
 		new Date(credential.expiresAt).getTime() - now() > refreshMarginMs;
 
-	const issueAndCache = async (): Promise<ParsedPushCredential> => {
+	const issueAndCache = async (): Promise<PushCredential> => {
 		try {
 			const credential = await issue(pushId);
 			pushId = credential.pushId;

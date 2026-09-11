@@ -2,15 +2,15 @@ import { createHash } from 'node:crypto';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
-	storedCacheSchema,
+	cacheNameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
-	AttestationAttachResponse,
-	AttestationDecision,
-	AttestationNegotiateRequest
+	AttestationAttachResponseInput,
+	AttestationDecisionInput,
+	AttestationNegotiateRequestInput
 } from '@cupboard/protocol/attestations';
 import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
 import {
@@ -95,7 +95,7 @@ describe('readCommittedAttestationPathInfos', () => {
 			[appPath],
 			{
 				url: new URL('https://cache.example.test/t/acme'),
-				cache: storedCacheSchema.parse('builds'),
+				cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
 				readUser: readUserInputSchema.parse('reader'),
 				readPassword: 'secret'
 			},
@@ -131,7 +131,7 @@ describe('readCommittedAttestationPathInfos', () => {
 				[appPath],
 				{
 					url: new URL('https://cache.example.test/t/acme'),
-					cache: ''
+					cache: { kind: 'default' }
 				},
 				{
 					fetch: () => Promise.resolve(new Response(undefined, { status: 404 }))
@@ -146,7 +146,7 @@ describe('readCommittedAttestationPathInfos', () => {
 				[appPath],
 				{
 					url: new URL('https://cache.example.test/t/acme'),
-					cache: ''
+					cache: { kind: 'default' }
 				},
 				{
 					fetch: () =>
@@ -309,7 +309,7 @@ async function collectReadableStream(
 }
 
 interface RecordedClient {
-	readonly negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[];
+	readonly negotiations: Omit<AttestationNegotiateRequestInput, 'pushId'>[];
 	readonly uploads: { r2Key: string; body: Uint8Array }[];
 	readonly attached: string[];
 }
@@ -323,13 +323,13 @@ function recordedClient(
 		}) => 'upload' | 'skip';
 		readonly attach?: (uploadId: string) => Promise<void>;
 		readonly attachResponse?: (
-			decision: Extract<AttestationDecision, { action: 'upload' }>
-		) => AttestationAttachResponse;
+			decision: Extract<AttestationDecisionInput, { action: 'upload' }>
+		) => AttestationAttachResponseInput;
 	}
 ): AttestationAttachClient {
 	const uploadsById = new Map<
 		string,
-		Extract<AttestationDecision, { action: 'upload' }>
+		Extract<AttestationDecisionInput, { action: 'upload' }>
 	>();
 
 	return {
@@ -437,19 +437,19 @@ describe('runAttestAttach', () => {
 	it.each([
 		{
 			name: 'missing',
-			response: (decisions: readonly AttestationDecision[]) =>
+			response: (decisions: readonly AttestationDecisionInput[]) =>
 				decisions.slice(0, 1)
 		},
 		{
 			name: 'duplicate',
-			response: (decisions: readonly AttestationDecision[]) => [
+			response: (decisions: readonly AttestationDecisionInput[]) => [
 				decisions[0],
 				decisions[0]
 			]
 		},
 		{
 			name: 'unexpected',
-			response: (decisions: readonly AttestationDecision[]) => [
+			response: (decisions: readonly AttestationDecisionInput[]) => [
 				...decisions,
 				{
 					action: 'skip' as const,
@@ -475,7 +475,7 @@ describe('runAttestAttach', () => {
 
 				return {
 					bundles: response(negotiation.bundles).filter(
-						(decision): decision is AttestationDecision =>
+						(decision): decision is AttestationDecisionInput =>
 							decision !== undefined
 					)
 				};

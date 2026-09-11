@@ -208,7 +208,7 @@ describe('action errors', () => {
 		],
 		[
 			'GracePolicyMissingError',
-			new GracePolicyMissingError(''),
+			new GracePolicyMissingError({ kind: 'default' }),
 			genericExitCode
 		],
 		[

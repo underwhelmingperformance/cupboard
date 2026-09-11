@@ -1,10 +1,13 @@
 import {
+	type CacheAccessMode,
+	cacheGenerationSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
-	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { type ReuseViewSelectorInput } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -13,37 +16,34 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { expect } from 'vitest';
 
-import * as d1Schema from '../db/d1-schema.ts';
+import { legacyCacheKey } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
 	fixtureWorkerServer,
 	initialiseViaWorker,
 	pushPathToTenant,
+	putWorkerTestCache,
 	verifiablePath
 } from '../test-support.ts';
 
-export interface ReuseSelector {
-	readonly kind: 'exact' | 'prefix';
-	readonly pattern: string;
-}
-
 /**
  * Defines or replaces one of the fixture tenant's views through the admin API.
- * `name` is the name a request gives the view, so a private view is defined
- * under its `_private-` name.
  */
 export async function setView(
-	selectors: readonly ReuseSelector[],
-	name = 'reuse'
+	selectors: readonly ReuseViewSelectorInput[],
+	name = 'reuse',
+	access: CacheAccessMode = 'public'
 ): Promise<void> {
 	const token = await initialiseViaWorker();
 	const response = await authorisedWorkerFetch(
 		`/reuse-views/${encodeURIComponent(name)}`,
 		token,
 		{
-			body: JSON.stringify({ selectors }),
+			body: JSON.stringify({ access, selectors }),
 			headers: { 'content-type': 'application/json' },
 			method: 'PUT'
 		}
@@ -66,14 +66,20 @@ export function lookupPath(storePathHash: string, view = 'reuse'): string {
  */
 export async function committedPath(
 	seed: string,
-	cache: string,
-	fields: { readonly storePathHash?: string; readonly name?: string } = {}
+	cache: CacheScope,
+	fields: {
+		readonly storePathHash?: string;
+		readonly name?: string;
+		readonly access?: CacheAccessMode;
+	} = {}
 ): Promise<{
 	storePathHash: string;
 	storePath: string;
 	narHash: string;
 }> {
 	const token = await initialiseViaWorker();
+	await putWorkerTestCache(token, cache, fields.access ?? 'public');
+
 	const { metadata, nar } = await verifiablePath(seed, fields);
 	await pushPathToTenant(fixtureTenant, token, metadata, nar, cache);
 
@@ -89,15 +95,20 @@ export async function committedPath(
  * in the local table from a generation an in-flight commit has reserved.
  */
 export async function insertUnbackedRow(
-	cache: string,
+	cache: CacheScope,
 	storePathHash: string,
 	narHash: string
 ): Promise<void> {
+	await putWorkerTestCache(await initialiseViaWorker(), cache, 'public');
+
 	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		const resolved = instance.context.cacheRepository.require(cache);
+
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
-				cache: storedCacheSchema.parse(cache),
+				cache: legacyCacheKey(resolved.scope, resolved.access),
+				cacheId: resolved.id,
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				storePath: storePathSchema.parse(`/nix/store/${storePathHash}-first`),
 				narHash: nixSha256HashSchema.parse(narHash),
@@ -117,10 +128,12 @@ export async function insertUnbackedRow(
  * copies agree and whose narinfo a view should serve.
  */
 export async function insertAgreeingCopy(
-	cache: string,
-	committedStorePathHash: string
+	cache: CacheScope,
+	committedStorePathHash: string,
+	access: CacheAccessMode = 'public'
 ): Promise<void> {
-	const targetCache = storedCacheSchema.parse(cache);
+	await putWorkerTestCache(await initialiseViaWorker(), cache, access);
+
 	const hash = storePathHashSchema.parse(committedStorePathHash);
 	const source = await runInDurableObject(fixtureWorkerServer(), (instance) =>
 		instance.context.db
@@ -135,20 +148,30 @@ export async function insertAgreeingCopy(
 	}
 
 	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		const targetCache = instance.context.cacheRepository.resolveOrCreate(
+			cache,
+			access
+		);
+
 		instance.context.db
 			.insert(schema.narInfos)
-			.values({ ...source, cache: targetCache })
+			.values({
+				...source,
+				cache: legacyCacheKey(targetCache.scope, targetCache.access),
+				cacheId: targetCache.id
+			})
 			.run();
 	});
 
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.blobReference)
+	await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
+		.insert(migrationSchema.blobReferences)
 		.values({
 			tenant: fixtureTenant,
-			cache: targetCache,
+			...cacheMigrationColumns(cache, access),
 			storePathHash: hash,
 			generation: source.generation,
-			narHash: source.narHash
+			narHash: source.narHash,
+			cacheGeneration: cacheGenerationSchema.parse(1)
 		})
 		.run();
 }
@@ -159,11 +182,13 @@ export async function insertAgreeingCopy(
  * lookup tests can distinguish selector filtering from missing backing data.
  */
 export async function insertBackedRow(
-	cache: string,
+	cache: CacheScope,
 	storePathHash: string,
-	committedStorePathHash: string
+	committedStorePathHash: string,
+	access: CacheAccessMode = 'public'
 ): Promise<void> {
-	const targetCache = storedCacheSchema.parse(cache);
+	await putWorkerTestCache(await initialiseViaWorker(), cache, access);
+
 	const targetHash = storePathHashSchema.parse(storePathHash);
 	const generation = narInfoGenerationSchema.parse(1);
 	const source = await runInDurableObject(fixtureWorkerServer(), (instance) =>
@@ -184,11 +209,17 @@ export async function insertBackedRow(
 	}
 
 	await runInDurableObject(fixtureWorkerServer(), (instance) => {
+		const targetCache = instance.context.cacheRepository.resolveOrCreate(
+			cache,
+			access
+		);
+
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
 				...source,
-				cache: targetCache,
+				cache: legacyCacheKey(targetCache.scope, targetCache.access),
+				cacheId: targetCache.id,
 				storePathHash: targetHash,
 				storePath: storePathSchema.parse(
 					`/nix/store/${storePathHash}-published`
@@ -198,14 +229,15 @@ export async function insertBackedRow(
 			.run();
 	});
 
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.blobReference)
+	await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
+		.insert(migrationSchema.blobReferences)
 		.values({
 			tenant: fixtureTenant,
-			cache: targetCache,
+			...cacheMigrationColumns(cache, access),
 			storePathHash: targetHash,
 			generation,
-			narHash: source.narHash
+			narHash: source.narHash,
+			cacheGeneration: cacheGenerationSchema.parse(1)
 		})
 		.run();
 }

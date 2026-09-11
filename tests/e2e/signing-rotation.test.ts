@@ -34,7 +34,9 @@ describe('Nix substitution through a signing-key rotation', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.tenantUrl);
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
 					const token = await server.ownerAdminToken();
 					const rpc = tenantRpc(server.tenantUrl, {
 						credential: token

@@ -1,17 +1,13 @@
-import {
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	storePathHashSchema
-} from '@cupboard/nix-store/scalars';
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import {
 	commitAcceptCapabilitiesHeader,
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
+	type CommitBatchEntry,
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
 	type CommitSessionRequest,
-	type ParsedCommitBatchEntry,
 	type SessionId,
 	type UploadId,
 	uploadIdSchema
@@ -28,6 +24,7 @@ import {
 	commitCreditAccept,
 	commitUpload,
 	currentServer,
+	defaultCache,
 	deferFreshUpload,
 	expectSingleUploadDecision,
 	fetchPath,
@@ -53,7 +50,7 @@ import {
 } from './commit-credit-service.ts';
 
 function openCredited(token: string): Promise<CommitConversation> {
-	return openCommitSession(token, DEFAULT_CACHE, commitCreditAccept);
+	return openCommitSession(token, defaultCache(), commitCreditAccept);
 }
 
 function unknownUpload(seed: string): UploadId {
@@ -63,7 +60,7 @@ function unknownUpload(seed: string): UploadId {
 async function settledEntry(
 	token: string,
 	hashCharacter: string
-): Promise<ParsedCommitBatchEntry> {
+): Promise<CommitBatchEntry> {
 	const name = `settled-${hashCharacter}`;
 	// Use a unique NAR hash so negotiation creates an upload instead of returning
 	// `reuse` for an existing blob.
@@ -105,7 +102,7 @@ function faultPresenceProbes(): Promise<void> {
 	});
 }
 
-function unrunEntry(hashCharacter: string): ParsedCommitBatchEntry {
+function unrunEntry(hashCharacter: string): CommitBatchEntry {
 	return {
 		uploadId: unknownUpload(hashCharacter),
 		storePathHash: storePathHashSchema.parse(hashCharacter.repeat(32)),
@@ -365,7 +362,7 @@ describe('commit session credit', () => {
 		'advertises the opening grant to $client',
 		async ({ accepted, capabilities }) => {
 			const token = await initialise();
-			const session = await openCommitSession(token, DEFAULT_CACHE, accepted);
+			const session = await openCommitSession(token, defaultCache(), accepted);
 
 			expect(session.capabilities).toBe(capabilities);
 
@@ -381,16 +378,13 @@ describe('commit session credit', () => {
 
 		await misconfigureBudget();
 
-		const response = await fetchPath(
-			`/cache/${DEFAULT_CACHE_SELECTOR}/commit`,
-			{
-				headers: {
-					authorization: `Bearer ${token}`,
-					upgrade: 'websocket',
-					[commitAcceptCapabilitiesHeader]: commitCreditAccept
-				}
+		const response = await fetchPath('/commit', {
+			headers: {
+				authorization: `Bearer ${token}`,
+				upgrade: 'websocket',
+				[commitAcceptCapabilitiesHeader]: commitCreditAccept
 			}
-		);
+		});
 		const sockets = await runInDurableObject(
 			currentServer(),
 			(_instance, state) => state.getWebSockets().length
@@ -770,7 +764,7 @@ describe('commit session credit', () => {
 	// the circulating budget and leaves the client waiting for abandoned work.
 	it('sends errors for unstarted entries after a batch failure and returns their credit', async () => {
 		const token = await initialise();
-		const commits: ParsedCommitBatchEntry[] = [];
+		const commits: CommitBatchEntry[] = [];
 
 		// Exceed the concurrency limit so a rejection leaves entries unstarted.
 		// Nix base32 omits `e`.

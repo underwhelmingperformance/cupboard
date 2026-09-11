@@ -47,14 +47,12 @@ const uploadBlobMetadataShape = {
 export const uploadPathNegotiationSchema = z
 	.strictObject(uploadPathNegotiationShape)
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
-export type ParsedUploadPathNegotiation = z.output<
+export type UploadPathNegotiation = z.output<
 	typeof uploadPathNegotiationSchema
 >;
 
 export const uploadBlobMetadataSchema = z.strictObject(uploadBlobMetadataShape);
-export type ParsedUploadBlobMetadata = z.output<
-	typeof uploadBlobMetadataSchema
->;
+export type UploadBlobMetadata = z.output<typeof uploadBlobMetadataSchema>;
 
 export const uploadPathMetadataSchema = z
 	.strictObject({
@@ -62,9 +60,7 @@ export const uploadPathMetadataSchema = z
 		...uploadBlobMetadataShape
 	})
 	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
-export type ParsedUploadPathMetadata = z.output<
-	typeof uploadPathMetadataSchema
->;
+export type UploadPathMetadata = z.output<typeof uploadPathMetadataSchema>;
 
 // An identifier signed by the server when it issues upload credentials. The
 // identifier scopes staging objects to `staging/<pushId>/`, so one credential
@@ -100,8 +96,8 @@ export const r2CredentialSchema = z.strictObject({
 	bucket: z.string(),
 	expiresAt: isoTimestampSchema
 });
-export type ParsedR2Credential = z.output<typeof r2CredentialSchema>;
-export type R2Credential = z.input<typeof r2CredentialSchema>;
+export type R2Credential = z.output<typeof r2CredentialSchema>;
+export type R2CredentialInput = z.input<typeof r2CredentialSchema>;
 
 // The CLI passes these temporary credentials to a standard S3 client and
 // uploads directly to the push's staging prefix in R2. The signed push id names
@@ -110,8 +106,8 @@ export const pushCredentialSchema = z.strictObject({
 	pushId: pushIdSchema,
 	...r2CredentialSchema.shape
 });
-export type ParsedPushCredential = z.output<typeof pushCredentialSchema>;
-export type PushCredential = z.input<typeof pushCredentialSchema>;
+export type PushCredential = z.output<typeof pushCredentialSchema>;
+export type PushCredentialInput = z.input<typeof pushCredentialSchema>;
 
 // Negotiation and preview each accept at most 100,000 store paths. Confirmation
 // uses the lower 1,000-hash limit below.
@@ -131,7 +127,7 @@ export const uploadGraceFactSchema = z
 			message: 'Set either retainUntil or graceSeconds, not both'
 		}
 	);
-export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
+export type UploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
 // Commit frames carry no root. Negotiation binds this root alongside the push
 // id, and the commit socket applies it to every path in the push.
@@ -139,14 +135,14 @@ export const uploadAttachRootSchema = z.strictObject({
 	name: rootNameSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
 });
-export type ParsedUploadAttachRoot = z.output<typeof uploadAttachRootSchema>;
+export type UploadAttachRoot = z.output<typeof uploadAttachRootSchema>;
 
 export const uploadNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
 	attachRoot: uploadAttachRootSchema.optional(),
 	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
-export type ParsedUploadNegotiateRequest = z.output<
+export type UploadNegotiateRequest = z.output<
 	typeof uploadNegotiateRequestSchema
 >;
 
@@ -156,9 +152,7 @@ export const uploadSkipDecisionSchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedUploadSkipDecision = z.output<
-	typeof uploadSkipDecisionSchema
->;
+export type UploadSkipDecision = z.output<typeof uploadSkipDecisionSchema>;
 
 export const uploadCommitDecisionSchema = z.strictObject({
 	action: z.literal('commit'),
@@ -167,9 +161,7 @@ export const uploadCommitDecisionSchema = z.strictObject({
 	uploadId: uploadIdSchema,
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedUploadCommitDecision = z.output<
-	typeof uploadCommitDecisionSchema
->;
+export type UploadCommitDecision = z.output<typeof uploadCommitDecisionSchema>;
 
 export const uploadActionDecisionSchema = z.strictObject({
 	action: z.literal('upload'),
@@ -180,21 +172,19 @@ export const uploadActionDecisionSchema = z.strictObject({
 	expiresAt: isoTimestampSchema,
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedUploadActionDecision = z.output<
-	typeof uploadActionDecisionSchema
->;
+export type UploadActionDecision = z.output<typeof uploadActionDecisionSchema>;
 
 export const uploadDecisionSchema = z.discriminatedUnion('action', [
 	uploadSkipDecisionSchema,
 	uploadCommitDecisionSchema,
 	uploadActionDecisionSchema
 ]);
-export type ParsedUploadDecision = z.output<typeof uploadDecisionSchema>;
+export type UploadDecision = z.output<typeof uploadDecisionSchema>;
 
 export const uploadNegotiateResponseSchema = z.strictObject({
 	uploads: z.array(uploadDecisionSchema)
 });
-export type ParsedUploadNegotiateResponse = z.output<
+export type UploadNegotiateResponse = z.output<
 	typeof uploadNegotiateResponseSchema
 >;
 
@@ -205,9 +195,7 @@ export type ParsedUploadNegotiateResponse = z.output<
 export const uploadPreviewRequestSchema = z.strictObject({
 	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
-export type ParsedUploadPreviewRequest = z.output<
-	typeof uploadPreviewRequestSchema
->;
+export type UploadPreviewRequest = z.output<typeof uploadPreviewRequestSchema>;
 
 // A preview decision reports the action that negotiation would plan. It omits
 // `uploadId`, `r2Key`, and `expiresAt` because preview creates no staging object.
@@ -219,14 +207,14 @@ export const uploadPreviewDecisionSchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedUploadPreviewDecision = z.output<
+export type UploadPreviewDecision = z.output<
 	typeof uploadPreviewDecisionSchema
 >;
 
 export const uploadPreviewResponseSchema = z.strictObject({
 	uploads: z.array(uploadPreviewDecisionSchema)
 });
-export type ParsedUploadPreviewResponse = z.output<
+export type UploadPreviewResponse = z.output<
 	typeof uploadPreviewResponseSchema
 >;
 
@@ -238,9 +226,7 @@ export const uploadConfirmMaxPaths = 1000;
 export const uploadConfirmRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(uploadConfirmMaxPaths)
 });
-export type ParsedUploadConfirmRequest = z.output<
-	typeof uploadConfirmRequestSchema
->;
+export type UploadConfirmRequest = z.output<typeof uploadConfirmRequestSchema>;
 
 // `confirmed` is false unless the committed reference, canonical NAR and
 // current narinfo identity all pass their checks. The server does not extend a
@@ -250,14 +236,12 @@ export const uploadConfirmedPathSchema = z.strictObject({
 	confirmed: z.boolean(),
 	grace: uploadGraceFactSchema.optional()
 });
-export type ParsedUploadConfirmedPath = z.output<
-	typeof uploadConfirmedPathSchema
->;
+export type UploadConfirmedPath = z.output<typeof uploadConfirmedPathSchema>;
 
 export const uploadConfirmResponseSchema = z.strictObject({
 	paths: z.array(uploadConfirmedPathSchema)
 });
-export type ParsedUploadConfirmResponse = z.output<
+export type UploadConfirmResponse = z.output<
 	typeof uploadConfirmResponseSchema
 >;
 
@@ -266,7 +250,7 @@ export const commitResponseSchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	status: z.enum(['committed', 'already-present', 'pending'])
 });
-export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
+export type CommitResponse = z.output<typeof commitResponseSchema>;
 
 // The status of a deferred upload. `servable` means verification committed the
 // upload. `pending` means verification is still running. `mismatch` and
@@ -282,10 +266,10 @@ export const uploadStatusSchema = z.enum([
 export const uploadStatusResponseSchema = z.strictObject({
 	status: uploadStatusSchema
 });
-export type ParsedUploadStatusResponse = z.output<
+export type UploadStatusResponse = z.output<typeof uploadStatusResponseSchema>;
+export type UploadStatusResponseInput = z.input<
 	typeof uploadStatusResponseSchema
 >;
-export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 
 // One WebSocket handles all commits for a push. Upload-specific requests and
 // responses identify their upload. The `request-credit` operation and the
@@ -400,7 +384,7 @@ export const commitBatchEntrySchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	retention: z.literal(true).optional()
 });
-export type ParsedCommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
+export type CommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 
 export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 	z.strictObject({ op: z.literal('commit'), uploadId: uploadIdSchema }),
@@ -428,10 +412,10 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 		entries: positiveIntSchema
 	})
 ]);
-export type ParsedCommitSessionRequest = z.output<
+export type CommitSessionRequest = z.output<typeof commitSessionRequestSchema>;
+export type CommitSessionRequestInput = z.input<
 	typeof commitSessionRequestSchema
 >;
-export type CommitSessionRequest = z.input<typeof commitSessionRequestSchema>;
 
 export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	// The optional `grace` fields below are sent only for an upload whose
@@ -490,10 +474,8 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 		ahead: countSchema
 	})
 ]);
-export type ParsedCommitSessionFrame = z.output<
-	typeof commitSessionFrameSchema
->;
-export type CommitSessionFrame = z.input<typeof commitSessionFrameSchema>;
+export type CommitSessionFrame = z.output<typeof commitSessionFrameSchema>;
+export type CommitSessionFrameInput = z.input<typeof commitSessionFrameSchema>;
 
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,
@@ -504,7 +486,7 @@ export const statsResponseSchema = z.strictObject({
 	pendingUploads: countSchema,
 	totalFileSize: countSchema
 });
-export type ParsedStatsResponse = z.output<typeof statsResponseSchema>;
+export type StatsResponse = z.output<typeof statsResponseSchema>;
 
 export const usageResponseSchema = z.strictObject({
 	narBlobs: countSchema,
@@ -515,39 +497,55 @@ export const usageResponseSchema = z.strictObject({
 	quotaBytes: countSchema.optional(),
 	remainingQuotaBytes: countSchema.optional()
 });
-export type ParsedUsageResponse = z.output<typeof usageResponseSchema>;
+export type UsageResponse = z.output<typeof usageResponseSchema>;
 
 export const pathDeletionResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	deleted: z.boolean(),
 	narScheduledForDeletion: z.boolean()
 });
-export type ParsedDeletePathResponse = z.output<
-	typeof pathDeletionResponseSchema
->;
+export type DeletePathResponse = z.output<typeof pathDeletionResponseSchema>;
 
 export type UploadPathNegotiationFields = z.input<
 	typeof uploadPathNegotiationSchema
 >;
 export type UploadBlobMetadataFields = z.input<typeof uploadBlobMetadataSchema>;
 export type UploadPathMetadataFields = z.input<typeof uploadPathMetadataSchema>;
-export type UploadAttachRoot = z.input<typeof uploadAttachRootSchema>;
-export type UploadNegotiateRequest = z.input<
+export type UploadAttachRootInput = z.input<typeof uploadAttachRootSchema>;
+export type UploadNegotiateRequestInput = z.input<
 	typeof uploadNegotiateRequestSchema
 >;
-export type UploadActionDecision = z.input<typeof uploadActionDecisionSchema>;
-export type UploadCommitDecision = z.input<typeof uploadCommitDecisionSchema>;
-export type UploadDecision = z.input<typeof uploadDecisionSchema>;
-export type UploadNegotiateResponse = z.input<
+export type UploadActionDecisionInput = z.input<
+	typeof uploadActionDecisionSchema
+>;
+export type UploadCommitDecisionInput = z.input<
+	typeof uploadCommitDecisionSchema
+>;
+export type UploadDecisionInput = z.input<typeof uploadDecisionSchema>;
+export type UploadNegotiateResponseInput = z.input<
 	typeof uploadNegotiateResponseSchema
 >;
-export type UploadPreviewRequest = z.input<typeof uploadPreviewRequestSchema>;
-export type UploadPreviewDecision = z.input<typeof uploadPreviewDecisionSchema>;
-export type UploadPreviewResponse = z.input<typeof uploadPreviewResponseSchema>;
-export type UploadConfirmRequest = z.input<typeof uploadConfirmRequestSchema>;
-export type UploadConfirmedPath = z.input<typeof uploadConfirmedPathSchema>;
-export type UploadConfirmResponse = z.input<typeof uploadConfirmResponseSchema>;
-export type CommitResponse = z.input<typeof commitResponseSchema>;
-export type StatsResponse = z.input<typeof statsResponseSchema>;
-export type UsageResponse = z.input<typeof usageResponseSchema>;
-export type DeletePathResponse = z.input<typeof pathDeletionResponseSchema>;
+export type UploadPreviewRequestInput = z.input<
+	typeof uploadPreviewRequestSchema
+>;
+export type UploadPreviewDecisionInput = z.input<
+	typeof uploadPreviewDecisionSchema
+>;
+export type UploadPreviewResponseInput = z.input<
+	typeof uploadPreviewResponseSchema
+>;
+export type UploadConfirmRequestInput = z.input<
+	typeof uploadConfirmRequestSchema
+>;
+export type UploadConfirmedPathInput = z.input<
+	typeof uploadConfirmedPathSchema
+>;
+export type UploadConfirmResponseInput = z.input<
+	typeof uploadConfirmResponseSchema
+>;
+export type CommitResponseInput = z.input<typeof commitResponseSchema>;
+export type StatsResponseInput = z.input<typeof statsResponseSchema>;
+export type UsageResponseInput = z.input<typeof usageResponseSchema>;
+export type DeletePathResponseInput = z.input<
+	typeof pathDeletionResponseSchema
+>;

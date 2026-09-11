@@ -3,10 +3,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 
 import type { StoreDirectory } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import {
-	buildEventSchema,
-	type ParsedBuildEvent
-} from '@cupboard/protocol/build';
+import { type BuildEvent, buildEventSchema } from '@cupboard/protocol/build';
 import { withCleanups } from '@cupboard/shared/cleanup';
 
 import {
@@ -48,7 +45,7 @@ export interface BuildEventListenerOptions {
 	readonly socketPath: string;
 	readonly storeDirectory: StoreDirectory;
 	readonly onEvent: (
-		event: ParsedBuildEvent,
+		event: BuildEvent,
 		signal: AbortSignal
 	) => Promise<void> | void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
@@ -74,7 +71,7 @@ export class BuildEventListener {
 		return listener;
 	}
 
-	private readonly acceptedEvents: ParsedBuildEvent[] = [];
+	private readonly acceptedEvents: BuildEvent[] = [];
 	private readonly unsettledSockets = new Set<Socket>();
 	private readonly server: Server;
 	private draining = false;
@@ -248,7 +245,7 @@ export class BuildEventListener {
 		}
 	}
 
-	get accepted(): readonly ParsedBuildEvent[] {
+	get accepted(): readonly BuildEvent[] {
 		return this.acceptedEvents;
 	}
 

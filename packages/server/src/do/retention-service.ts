@@ -1,17 +1,16 @@
 import {
-	type CacheAccessMode,
+	type CacheScope,
 	type GraceSeconds,
-	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type GraceCoverageResponse,
+	type GracePolicyAddBody,
 	type GracePolicyListResponse,
 	type GracePolicyRemoveResponse,
 	type GracePolicySummary,
-	type ParsedGracePolicyAddBody,
-	type ParsedRetentionPolicyAddBody,
+	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
 	type RetentionPolicyRemoveResponse,
 	type RetentionPolicySummary
@@ -19,7 +18,11 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { CacheRepository } from '../db/cache-repository.ts';
+import {
+	type CacheId,
+	legacyCacheKey,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
@@ -40,7 +43,7 @@ export class RetentionService {
 	constructor(private readonly context: ServerContext) {}
 
 	private narinfoBackedHashes(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[],
 		writer: SchemaWriter
 	): StorePathHash[] {
@@ -52,7 +55,7 @@ export class RetentionService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						inArray(schema.narInfos.storePathHash, hashes)
 					)
 				)
@@ -67,26 +70,22 @@ export class RetentionService {
 	}
 
 	private extendGraceDeadlineEntries(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		entries: readonly {
 			readonly storePathHash: StorePathHash;
 			readonly retainUntil: IsoTimestamp;
 		}[],
 		writer: SchemaWriter
 	): void {
-		if (entries.length === 0) {
-			return;
-		}
-
-		const cacheId = new CacheRepository(writer).find(cache);
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		for (const rows of jsonRowLists(entries)) {
 			writer
 				.insert(schema.retentionGrace)
 				.select(
 					rows.insertSource([
-						sql`${cache}`,
-						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						sql`${legacyCache}`,
+						sql`${cache.id}`,
 						rows.column('storePathHash'),
 						rows.column('retainUntil')
 					])
@@ -104,44 +103,67 @@ export class RetentionService {
 		}
 	}
 
+	// The identity columns for a policy, with the legacy `pattern` beside them.
+	// A cache-scoped policy is keyed by the cache's stored name, so the legacy
+	// value comes from the resolved cache rather than from the request.
+	private policyIdentity(body: RetentionPolicyAddBody): {
+		readonly kind: 'cache' | 'root-name-prefix';
+		readonly pattern: string;
+		readonly cacheId: CacheId | undefined;
+		readonly rootNamePrefix: string | undefined;
+	} {
+		if (body.scope === 'root-name-prefix') {
+			return {
+				kind: 'root-name-prefix',
+				pattern: body.pattern,
+				cacheId: undefined,
+				rootNamePrefix: body.pattern
+			};
+		}
+
+		const cache = this.context.cacheRepository.require(body.cache);
+
+		return {
+			kind: 'cache',
+			pattern: legacyCacheKey(cache.scope, cache.access),
+			cacheId: cache.id,
+			rootNamePrefix: undefined
+		};
+	}
+
 	listPolicies(): RetentionPolicyListResponse {
 		const policies = this.context.db
 			.select()
 			.from(schema.retentionPolicies)
 			.all()
-			.map((row) => policySummaryFromRow(row))
+			.map((row) =>
+				policySummaryFromRow(
+					row,
+					row.cacheId === null
+						? undefined
+						: this.context.cacheRepository.scopeForId(row.cacheId)
+				)
+			)
 			.toSorted((left, right) => byCodeUnit(left.id, right.id));
 
 		return { policies };
 	}
 
-	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
+	addPolicy(body: RetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
-		// A cache-scoped policy names one cache, which need not exist yet. Its
-		// `cache_id` stays null until `CacheRepository.ensure` registers that
-		// cache and links the row.
-		const identity =
-			body.scope === 'cache'
-				? {
-						kind: 'cache' as const,
-						cacheId: new CacheRepository(this.context.db).find(body.pattern)
-					}
-				: {
-						kind: 'root-name-prefix' as const,
-						rootNamePrefix: body.pattern
-					};
-
+		const identity = this.policyIdentity(body);
 		const row = this.context.db
 			.insert(schema.retentionPolicies)
 			.values({
 				id,
 				scope: body.scope,
-				pattern: body.pattern,
 				...identity,
 				defaultTtlSeconds: body.ttlSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoUpdate({
+				// The unique index is still on the legacy scope and pattern, so the
+				// upsert matches on those rather than on the identity columns.
 				target: [
 					schema.retentionPolicies.scope,
 					schema.retentionPolicies.pattern
@@ -151,7 +173,10 @@ export class RetentionService {
 			.returning()
 			.get();
 
-		return policySummaryFromRow(row);
+		return policySummaryFromRow(
+			row,
+			body.scope === 'cache' ? body.cache : undefined
+		);
 	}
 
 	removePolicy(id: string): RetentionPolicyRemoveResponse {
@@ -172,18 +197,22 @@ export class RetentionService {
 		};
 	}
 
-	resolvePolicyTtl(cache: StoredCache, name: string): number | undefined {
+	resolvePolicyTtl(cache: ResolvedCache, name: string): number | undefined {
 		const policies = this.context.db
 			.select()
 			.from(schema.retentionPolicies)
 			.all()
-			.map((row) => ({
-				scope: row.scope,
-				pattern: row.pattern,
-				ttlSeconds: row.defaultTtlSeconds
-			}));
+			.map((row) =>
+				policySummaryFromRow(
+					row,
+					row.cacheId === null
+						? undefined
+						: this.context.cacheRepository.scopeForId(row.cacheId)
+				)
+			);
 
-		return mostSpecificPolicy(policies, { cache, name })?.ttlSeconds;
+		return mostSpecificPolicy(policies, { cache: cache.scope, name })
+			?.ttlSeconds;
 	}
 
 	listGracePolicies(): GracePolicyListResponse {
@@ -199,7 +228,7 @@ export class RetentionService {
 		return { policies };
 	}
 
-	addGracePolicy(body: ParsedGracePolicyAddBody): GracePolicySummary {
+	addGracePolicy(body: GracePolicyAddBody): GracePolicySummary {
 		const id = crypto.randomUUID();
 
 		const row = this.context.db
@@ -238,11 +267,10 @@ export class RetentionService {
 		};
 	}
 
-	graceCoverage(
-		cache: StoredCache,
-		access: CacheAccessMode
-	): GraceCoverageResponse {
-		const graceSeconds = this.resolveGraceSeconds(cache, access);
+	graceCoverage(cacheScope: CacheScope): GraceCoverageResponse {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+		const graceSeconds =
+			cache === undefined ? undefined : this.resolveGraceSeconds(cache);
 
 		return graceSeconds === undefined
 			? { covered: false }
@@ -251,15 +279,9 @@ export class RetentionService {
 
 	// The longest matching cache-name prefix wins. The empty prefix is the
 	// tenant-wide default for public caches. Private caches do not use retention
-	// grace policies, although the empty prefix also matches their stored names.
-	//
-	// The caller supplies the access because this runs inside a synchronous
-	// transaction, which cannot wait for a read of the recorded deployment phase.
-	resolveGraceSeconds(
-		cache: StoredCache,
-		access: CacheAccessMode
-	): GraceSeconds | undefined {
-		if (access === 'private') {
+	// grace policies, although the empty prefix also matches their names.
+	resolveGraceSeconds(cache: ResolvedCache): GraceSeconds | undefined {
+		if (cache.access === 'private') {
 			return undefined;
 		}
 
@@ -270,7 +292,11 @@ export class RetentionService {
 			})
 			.from(schema.retentionGracePolicies)
 			.all()
-			.filter((policy) => cache.startsWith(policy.cachePrefix))
+			.filter((policy) =>
+				cache.scope.kind === 'default'
+					? policy.cachePrefix === ''
+					: cache.scope.name.startsWith(policy.cachePrefix)
+			)
 			.toSorted(
 				(left, right) => right.cachePrefix.length - left.cachePrefix.length
 			)
@@ -282,7 +308,7 @@ export class RetentionService {
 	// deadline. Callers can supply their transaction to make this update atomic
 	// with the retention change that released the paths.
 	extendGraceDeadlines(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[],
 		retainUntil: IsoTimestamp,
 		writer: SchemaWriter = this.context.db
@@ -298,26 +324,24 @@ export class RetentionService {
 	}
 
 	markCacheGraceManaged(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		writer: SchemaWriter = this.context.db
 	): void {
 		writer
-			.update(schema.caches)
+			.update(schema.cacheIdentities)
 			.set({ graceManaged: true })
-			.where(eq(schema.caches.name, cache))
+			.where(eq(schema.cacheIdentities.id, cache.id))
 			.run();
 	}
 
 	applyGraceTransition(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[],
 		anchorIso: IsoTimestamp,
 		writer: SchemaWriter = this.context.db
 	): void {
 		this.applyGraceTransitions(
 			cache,
-			access,
 			storePathHashes.map((storePathHash) => ({ storePathHash, anchorIso })),
 			writer
 		);
@@ -328,8 +352,7 @@ export class RetentionService {
 	// The caller can supply its transaction so removing retention and granting
 	// grace cannot be separated by a crash.
 	applyGraceTransitions(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		transitions: readonly GraceTransition[],
 		writer: SchemaWriter = this.context.db
 	): void {
@@ -337,7 +360,7 @@ export class RetentionService {
 			return;
 		}
 
-		const graceSeconds = this.resolveGraceSeconds(cache, access);
+		const graceSeconds = this.resolveGraceSeconds(cache);
 
 		if (graceSeconds === undefined) {
 			return;

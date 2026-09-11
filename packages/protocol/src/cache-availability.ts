@@ -32,10 +32,10 @@ export const reuseViewAvailabilityMaxPaths = cacheAvailabilityMaxPaths;
 export const cacheAvailabilityRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(cacheAvailabilityMaxPaths)
 });
-export type CacheAvailabilityRequest = z.input<
+export type CacheAvailabilityRequestInput = z.input<
 	typeof cacheAvailabilityRequestSchema
 >;
-export type ParsedCacheAvailabilityRequest = z.output<
+export type CacheAvailabilityRequest = z.output<
 	typeof cacheAvailabilityRequestSchema
 >;
 
@@ -44,10 +44,10 @@ export const reuseViewAvailabilityRequestSchema = z.strictObject({
 		.array(storePathHashSchema)
 		.max(reuseViewAvailabilityMaxPaths)
 });
-export type ReuseViewAvailabilityRequest = z.input<
+export type ReuseViewAvailabilityRequestInput = z.input<
 	typeof reuseViewAvailabilityRequestSchema
 >;
-export type ParsedReuseViewAvailabilityRequest = z.output<
+export type ReuseViewAvailabilityRequest = z.output<
 	typeof reuseViewAvailabilityRequestSchema
 >;
 
@@ -56,9 +56,9 @@ export const cacheAvailabilityResponseSchema = z.strictObject({
 		.array(storePathHashSchema)
 		.max(cacheAvailabilityMaxPaths)
 });
-export type CacheAvailabilityResponse = z.input<
+export type CacheAvailabilityResponseInput = z.input<
 	typeof cacheAvailabilityResponseSchema
 >;
-export type ParsedCacheAvailabilityResponse = z.output<
+export type CacheAvailabilityResponse = z.output<
 	typeof cacheAvailabilityResponseSchema
 >;

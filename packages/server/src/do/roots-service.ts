@@ -1,20 +1,19 @@
 import {
-	type CacheAccessMode,
+	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
-	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
-	type ParsedRootEnsureBody,
-	type ParsedRootSetBody,
+	type RootEnsureBody,
 	type RootEnsureResponse,
 	rootListPageSize,
 	type RootListResponse,
 	type RootRemoveResponse,
+	type RootSetBody,
 	type RootSetResponse,
 	type RootSummary,
 	type RootTargetsPage
@@ -22,13 +21,12 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, sql } from 'drizzle-orm';
 
-import { CacheRepository } from '../db/cache-repository.ts';
+import { legacyCacheKey, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
 
-import { type CacheAdminService } from './cache-admin-service.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
 import { jsonRowLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -57,16 +55,11 @@ type RootWrite =
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly cacheAdmin: CacheAdminService,
 		private readonly retention: RetentionService,
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	private async writeRoot(
-		cache: StoredCache,
-		access: CacheAccessMode,
-		request: RootSetCommand
-	): Promise<StoredRoot> {
+	private writeRoot(cache: ResolvedCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const expiresAt = resolveRootExpiry({
@@ -77,9 +70,7 @@ export class RootsService {
 			now
 		});
 
-		await this.cacheAdmin.loadOrCreateCache(cache);
-
-		const cacheId = new CacheRepository(this.context.db).find(cache);
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
@@ -98,7 +89,7 @@ export class RootsService {
 				.from(schema.retentionRoots)
 				.where(
 					and(
-						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.cacheId, cache.id),
 						eq(schema.retentionRoots.name, request.name)
 					)
 				)
@@ -108,7 +99,7 @@ export class RootsService {
 			tx.delete(schema.retentionRootTargets)
 				.where(
 					and(
-						eq(schema.retentionRootTargets.cache, cache),
+						eq(schema.retentionRootTargets.cacheId, cache.id),
 						eq(schema.retentionRootTargets.rootName, request.name)
 					)
 				)
@@ -116,7 +107,7 @@ export class RootsService {
 			tx.delete(schema.retentionRoots)
 				.where(
 					and(
-						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.cacheId, cache.id),
 						eq(schema.retentionRoots.name, request.name)
 					)
 				)
@@ -124,8 +115,8 @@ export class RootsService {
 
 			tx.insert(schema.retentionRoots)
 				.values({
-					cache,
-					cacheId,
+					cache: legacyCache,
+					cacheId: cache.id,
 					name: request.name,
 					expiresAt,
 					createdAt: created,
@@ -137,8 +128,8 @@ export class RootsService {
 				tx.insert(schema.retentionRootTargets)
 					.select(
 						targets.insertSource([
-							sql`${cache}`,
-							cacheId === undefined ? sql`null` : sql`${cacheId}`,
+							sql`${legacyCache}`,
+							sql`${cache.id}`,
 							sql`${request.name}`,
 							targets.column('storePathHash'),
 							targets.column('storePath')
@@ -150,7 +141,7 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets from the old
 			// root's retention with no deadline ever established.
-			this.retention.applyGraceTransition(cache, access, released, nowIso, tx);
+			this.retention.applyGraceTransition(cache, released, nowIso, tx);
 
 			return created;
 		});
@@ -159,7 +150,7 @@ export class RootsService {
 	}
 
 	private rootTargetRows(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		name: RootName
 	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
 		return this.context.db
@@ -170,7 +161,7 @@ export class RootsService {
 			.from(schema.retentionRootTargets)
 			.where(
 				and(
-					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.cacheId, cache.id),
 					eq(schema.retentionRootTargets.rootName, name)
 				)
 			)
@@ -178,7 +169,7 @@ export class RootsService {
 	}
 
 	private async servableTargets(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		targets: readonly { storePathHash: StorePathHash }[]
 	): Promise<ReadonlySet<StorePathHash>> {
 		return this.narInfoObjects.servableStorePathHashes(
@@ -191,7 +182,7 @@ export class RootsService {
 	// and NAR hash inside the write gate, so a delete and recommit during the probe
 	// cannot retain content that the probe did not verify.
 	private async servableTargetIdentities(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		targets: readonly { storePathHash: StorePathHash }[]
 	): Promise<ReadonlyMap<StorePathHash, TargetIdentity>> {
 		const hashes = [...new Set(targets.map((target) => target.storePathHash))];
@@ -215,7 +206,7 @@ export class RootsService {
 	}
 
 	private rowPresent(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): boolean {
 		return (
@@ -224,7 +215,7 @@ export class RootsService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, storePathHash)
 					)
 				)
@@ -233,7 +224,7 @@ export class RootsService {
 	}
 
 	private mismatchedTargets(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		targets: readonly {
 			storePathHash: StorePathHash;
 			storePath: StorePathString;
@@ -291,7 +282,7 @@ export class RootsService {
 
 	private buildRootSetCommand(
 		rootName: RootName,
-		body: ParsedRootSetBody
+		body: RootSetBody
 	): RootSetCommand {
 		requireServedStorePaths(body.targets);
 
@@ -310,12 +301,11 @@ export class RootsService {
 	// rejection after leaving the gate because throwing inside it resets the
 	// Durable Object.
 	private async gatedRootWrite(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		requested: RootSetCommand,
 		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
 	): Promise<RootWrite> {
-		return this.context.criticalSection(async (): Promise<RootWrite> => {
+		return this.context.criticalSection((): Promise<RootWrite> => {
 			const absent =
 				expectedIdentities === undefined
 					? requested.targets
@@ -328,24 +318,24 @@ export class RootsService {
 						);
 
 			if (absent.length > 0) {
-				return { kind: 'rejected', unavailable: absent };
+				return Promise.resolve({ kind: 'rejected', unavailable: absent });
 			}
 
-			return {
+			return Promise.resolve({
 				kind: 'written',
-				stored: await this.writeRoot(cache, access, requested)
-			};
+				stored: this.writeRoot(cache, requested)
+			});
 		});
 	}
 
 	// The first negotiation creates a run root; later negotiations can only extend
 	// its expiry. They do not replace targets or release paths into grace. Commits
 	// add their paths as they finish.
-	async bindRunRoot(
-		cache: StoredCache,
+	bindRunRoot(
+		cache: ResolvedCache,
 		name: RootName,
 		explicitTtlSeconds: TtlSeconds | undefined
-	): Promise<void> {
+	): void {
 		const now = new Date();
 		const nowIso = isoTimestamp(now);
 		const expiresAt = resolveRootExpiry({
@@ -356,13 +346,11 @@ export class RootsService {
 			now
 		});
 
-		await this.cacheAdmin.loadOrCreateCache(cache);
-
 		this.context.db
 			.insert(schema.retentionRoots)
 			.values({
-				cache,
-				cacheId: new CacheRepository(this.context.db).find(cache),
+				cache: legacyCacheKey(cache.scope, cache.access),
+				cacheId: cache.id,
 				name,
 				expiresAt,
 				createdAt: nowIso,
@@ -385,26 +373,22 @@ export class RootsService {
 	// it during negotiation. The insert is additive and idempotent; it neither
 	// replaces targets nor starts a grace transition.
 	attachRunRootTargets(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		name: RootName,
 		targets: readonly {
 			readonly storePathHash: StorePathHash;
 			readonly storePath: StorePathString;
 		}[]
 	): void {
-		if (targets.length === 0) {
-			return;
-		}
-
-		const cacheId = new CacheRepository(this.context.db).find(cache);
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		for (const batch of jsonRowLists(targets)) {
 			this.context.db
 				.insert(schema.retentionRootTargets)
 				.select(
 					batch.insertSource([
-						sql`${cache}`,
-						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						sql`${legacyCache}`,
+						sql`${cache.id}`,
 						sql`${name}`,
 						batch.column('storePathHash'),
 						batch.column('storePath')
@@ -418,14 +402,14 @@ export class RootsService {
 	// Replace the complete target set, including when it is empty. The root and
 	// its resolved expiry remain, and released targets enter retention grace.
 	async setRoot(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cacheScope: CacheScope,
 		rootName: RootName,
-		body: ParsedRootSetBody
+		body: RootSetBody
 	): Promise<RootSetResponse> {
+		const cache = this.context.cacheRepository.require(cacheScope);
 		const requested = this.buildRootSetCommand(rootName, body);
 		const servable = await this.servableTargets(cache, requested.targets);
-		const write = await this.gatedRootWrite(cache, access, requested);
+		const write = await this.gatedRootWrite(cache, requested);
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);
@@ -441,11 +425,11 @@ export class RootsService {
 	}
 
 	async ensureRoot(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cacheScope: CacheScope,
 		rootName: RootName,
-		body: ParsedRootEnsureBody
+		body: RootEnsureBody
 	): Promise<RootEnsureResponse> {
+		const cache = this.context.cacheRepository.require(cacheScope);
 		const requested = this.buildRootSetCommand(rootName, body);
 		const identities = await this.servableTargetIdentities(
 			cache,
@@ -459,12 +443,7 @@ export class RootsService {
 			return { status: 'build-required', unavailable };
 		}
 
-		const write = await this.gatedRootWrite(
-			cache,
-			access,
-			requested,
-			identities
-		);
+		const write = await this.gatedRootWrite(cache, requested, identities);
 
 		if (write.kind === 'rejected') {
 			return {
@@ -488,9 +467,15 @@ export class RootsService {
 	// Count targets in SQLite and paginate roots by name without reading target
 	// rows or probing R2. Large run roots therefore do not expand this request.
 	listRoots(
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		options: { readonly cursor?: string; readonly limit?: number } = {}
 	): RootListResponse {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return { roots: [] };
+		}
+
 		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
 		const now = isoTimestamp(new Date());
 		const rows = this.context.db
@@ -499,12 +484,12 @@ export class RootsService {
 				expiresAt: schema.retentionRoots.expiresAt,
 				createdAt: schema.retentionRoots.createdAt,
 				updatedAt: schema.retentionRoots.updatedAt,
-				targetCount: sql<number>`(select count(*) from ${schema.retentionRootTargets} where ${schema.retentionRootTargets.cache} = ${schema.retentionRoots.cache} and ${schema.retentionRootTargets.rootName} = ${schema.retentionRoots.name})`
+				targetCount: sql<number>`(select count(*) from ${schema.retentionRootTargets} where ${schema.retentionRootTargets.cacheId} = ${schema.retentionRoots.cacheId} and ${schema.retentionRootTargets.rootName} = ${schema.retentionRoots.name})`
 			})
 			.from(schema.retentionRoots)
 			.where(
 				and(
-					eq(schema.retentionRoots.cache, cache),
+					eq(schema.retentionRoots.cacheId, cache.id),
 					options.cursor === undefined
 						? undefined
 						: sql`${schema.retentionRoots.name} > ${options.cursor}`
@@ -532,10 +517,16 @@ export class RootsService {
 	// Paginate by store-path hash before probing servability, which bounds the R2
 	// fan-out for a large run root. An unknown root returns an empty page.
 	async rootTargets(
-		cache: StoredCache,
+		cacheScope: CacheScope,
 		name: RootName,
 		options: { readonly cursor?: string; readonly limit?: number } = {}
 	): Promise<RootTargetsPage> {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return { targets: [] };
+		}
+
 		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
 		const rows = this.context.db
 			.select({
@@ -545,7 +536,7 @@ export class RootsService {
 			.from(schema.retentionRootTargets)
 			.where(
 				and(
-					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.cacheId, cache.id),
 					eq(schema.retentionRootTargets.rootName, name),
 					options.cursor === undefined
 						? undefined
@@ -570,11 +561,13 @@ export class RootsService {
 		};
 	}
 
-	removeRoot(
-		cache: StoredCache,
-		access: CacheAccessMode,
-		name: RootName
-	): RootRemoveResponse {
+	removeRoot(cacheScope: CacheScope, name: RootName): RootRemoveResponse {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return { name, removed: false };
+		}
+
 		const released = this.rootTargetRows(cache, name).map(
 			(target) => target.storePathHash
 		);
@@ -586,7 +579,7 @@ export class RootsService {
 				.from(schema.retentionRoots)
 				.where(
 					and(
-						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.cacheId, cache.id),
 						eq(schema.retentionRoots.name, name)
 					)
 				)
@@ -595,7 +588,7 @@ export class RootsService {
 			tx.delete(schema.retentionRootTargets)
 				.where(
 					and(
-						eq(schema.retentionRootTargets.cache, cache),
+						eq(schema.retentionRootTargets.cacheId, cache.id),
 						eq(schema.retentionRootTargets.rootName, name)
 					)
 				)
@@ -603,7 +596,7 @@ export class RootsService {
 			tx.delete(schema.retentionRoots)
 				.where(
 					and(
-						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.cacheId, cache.id),
 						eq(schema.retentionRoots.name, name)
 					)
 				)
@@ -612,7 +605,7 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets with no
 			// deadline ever established.
-			this.retention.applyGraceTransition(cache, access, released, nowIso, tx);
+			this.retention.applyGraceTransition(cache, released, nowIso, tx);
 
 			return { name, removed: existing !== undefined };
 		});
@@ -621,14 +614,14 @@ export class RootsService {
 	// A deferred upload that fails verification cannot become servable. Remove it
 	// from every root so later listings do not continue to advertise it.
 	pruneRetentionTargets(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): void {
 		this.context.db
 			.delete(schema.retentionRootTargets)
 			.where(
 				and(
-					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.cacheId, cache.id),
 					eq(schema.retentionRootTargets.storePathHash, storePathHash)
 				)
 			)

@@ -7,7 +7,6 @@ import {
 	signingKeyGenerationSchema,
 	type SigningKeyId,
 	signingKeyIdSchema,
-	storedCacheSchema,
 	storedReferencesSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -18,12 +17,12 @@ import {
 	instanceNameSchema
 } from '@cupboard/protocol/instance';
 import type {
-	BackfillStatus,
-	KeyAbortResponse,
-	KeyListResponse,
-	KeyRetireResponse,
-	KeyRotateResponse,
-	SigningKeyEntry
+	BackfillStatusInput,
+	KeyAbortResponseInput,
+	KeyListResponseInput,
+	KeyRetireResponseInput,
+	KeyRotateResponseInput,
+	SigningKeyEntryInput
 } from '@cupboard/protocol/keys';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, isNull, lt, ne, sql } from 'drizzle-orm';
@@ -34,6 +33,7 @@ import {
 	generateSigningKeyMaterial,
 	signNixFingerprint
 } from '../crypto/crypto.ts';
+import { cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -98,7 +98,7 @@ export const backfillEntriesPerPass = Math.floor(
 );
 
 const purgeEntrySchema = z.strictObject({
-	cache: storedCacheSchema,
+	cacheId: cacheIdSchema,
 	storePathHash: storePathHashSchema,
 	narInfoGeneration: narInfoGenerationSchema,
 	targetGeneration: signingKeyGenerationSchema,
@@ -315,7 +315,7 @@ export class SigningKeysService {
 	private hasRemaining(generation: SigningKeyGeneration): boolean {
 		return (
 			this.context.db
-				.select({ cache: schema.narInfos.cache })
+				.select({ cache: schema.narInfos.cacheId })
 				.from(schema.narInfos)
 				.where(lt(schema.narInfos.signatureGeneration, generation))
 				.limit(1)
@@ -388,7 +388,7 @@ export class SigningKeysService {
 		}
 	}
 
-	private backfillStatus(row: BackfillRow): BackfillStatus {
+	private backfillStatus(row: BackfillRow): BackfillStatusInput {
 		if (row.state === 'complete' && row.completedAt !== null) {
 			return {
 				state: 'complete',
@@ -425,7 +425,7 @@ export class SigningKeysService {
 		return { state: 'running', ...common };
 	}
 
-	private entries(keys: readonly SigningKey[]): SigningKeyEntry[] {
+	private entries(keys: readonly SigningKey[]): SigningKeyEntryInput[] {
 		const backfills = new Map(
 			this.context.db
 				.select()
@@ -481,6 +481,9 @@ export class SigningKeysService {
 						isNull(schema.narInfos.pendingSignatureGeneration)
 					)
 				)
+				// The covering index for this scan is keyed by the legacy cache
+				// column, so ordering by the identity instead would sort the batch in
+				// a temporary B-tree.
 				.orderBy(
 					schema.narInfos.signatureGeneration,
 					schema.narInfos.cache,
@@ -522,6 +525,9 @@ export class SigningKeysService {
 
 			this.context.db.transaction((tx) => {
 				for (const item of rendered) {
+					const cache = this.context.cacheRepository.resolvedForId(
+						item.row.cacheId
+					);
 					const updated = tx
 						.update(schema.narInfos)
 						.set({
@@ -530,14 +536,13 @@ export class SigningKeysService {
 						})
 						.where(
 							and(
-								eq(schema.narInfos.cache, item.row.cache),
+								eq(schema.narInfos.cacheId, cache.id),
 								eq(schema.narInfos.storePathHash, item.row.storePathHash),
 								eq(schema.narInfos.generation, item.row.generation),
 								isNull(schema.narInfos.pendingSignatureGeneration)
 							)
 						)
 						.returning({
-							cache: schema.narInfos.cache,
 							storePathHash: schema.narInfos.storePathHash,
 							generation: schema.narInfos.generation
 						})
@@ -548,13 +553,13 @@ export class SigningKeysService {
 					}
 
 					entries.push({
-						cache: updated.cache,
+						cacheId: cache.id,
 						storePathHash: updated.storePathHash,
 						narInfoGeneration: updated.generation,
 						targetGeneration: row.generation,
 						tag: narInfoCacheTag(
 							this.context.requireTenant(),
-							updated.cache,
+							cache.scope,
 							updated.storePathHash
 						)
 					});
@@ -593,12 +598,13 @@ export class SigningKeysService {
 		entries: readonly PurgeEntry[]
 	): Promise<void> {
 		for (const entry of entries) {
+			const cache = this.context.cacheRepository.resolvedForId(entry.cacheId);
 			const row = this.context.db
 				.select()
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, entry.cache),
+						eq(schema.narInfos.cacheId, entry.cacheId),
 						eq(schema.narInfos.storePathHash, entry.storePathHash),
 						eq(schema.narInfos.generation, entry.narInfoGeneration),
 						eq(
@@ -620,7 +626,7 @@ export class SigningKeysService {
 			}
 
 			await this.narInfoObjects.publishNarInfoObject(
-				entry.cache,
+				cache,
 				entry.storePathHash,
 				entry.narInfoGeneration,
 				row.narHash,
@@ -654,7 +660,7 @@ export class SigningKeysService {
 					})
 					.where(
 						and(
-							eq(schema.narInfos.cache, entry.cache),
+							eq(schema.narInfos.cacheId, entry.cacheId),
 							eq(schema.narInfos.storePathHash, entry.storePathHash),
 							eq(schema.narInfos.generation, entry.narInfoGeneration),
 							eq(
@@ -664,7 +670,7 @@ export class SigningKeysService {
 						)
 					)
 					.returning({
-						cache: schema.narInfos.cache,
+						cacheId: schema.narInfos.cacheId,
 						storePathHash: schema.narInfos.storePathHash
 					})
 					.all();
@@ -861,7 +867,7 @@ export class SigningKeysService {
 		this.publicKeyBody = undefined;
 	}
 
-	async rotateKey(): Promise<KeyRotateResponse> {
+	async rotateKey(): Promise<KeyRotateResponseInput> {
 		const material = await generateSigningKeyMaterial();
 		const instance = await this.instanceName();
 
@@ -960,7 +966,7 @@ export class SigningKeysService {
 		return response;
 	}
 
-	async retireKey(id: SigningKeyId): Promise<KeyRetireResponse> {
+	async retireKey(id: SigningKeyId): Promise<KeyRetireResponseInput> {
 		const outcome = await this.context.criticalSection(async () => {
 			const keys = await this.loadedKeys();
 			const key = keys.find((candidate) => candidate.id === id);
@@ -1015,7 +1021,7 @@ export class SigningKeysService {
 		return { id, state: outcome.state };
 	}
 
-	async abortKeyRotation(id: SigningKeyId): Promise<KeyAbortResponse> {
+	async abortKeyRotation(id: SigningKeyId): Promise<KeyAbortResponseInput> {
 		const state = await this.context.criticalSection(async () => {
 			const keys = await this.loadedKeys();
 			const key = keys.find((candidate) => candidate.id === id);
@@ -1070,7 +1076,7 @@ export class SigningKeysService {
 		return { id, state };
 	}
 
-	async keyList(): Promise<KeyListResponse> {
+	async keyList(): Promise<KeyListResponseInput> {
 		const keys = await this.loadedKeys();
 		await this.ensureBackfillAlarm();
 

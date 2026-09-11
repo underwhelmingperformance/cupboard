@@ -85,7 +85,9 @@ describe('verification with a pending row left after commit', () => {
 			}
 
 			const object = await env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash)
+				narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash, {
+					kind: 'default'
+				})
 			);
 			const { targets } = await listRootTargets(token, 'main');
 
@@ -113,7 +115,8 @@ describe('verification with a pending row left after commit', () => {
 		const staged = await snapshotPendingRow(upload.uploadId);
 		const objectKey = narInfoObjectKey(
 			fixtureTenant,
-			upload.metadata.storePathHash
+			upload.metadata.storePathHash,
+			{ kind: 'default' }
 		);
 
 		await verifyCurrentTenant();

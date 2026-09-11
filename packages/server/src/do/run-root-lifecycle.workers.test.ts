@@ -1,5 +1,4 @@
 import {
-	DEFAULT_CACHE,
 	graceSecondsSchema,
 	rootNameSchema,
 	storePathHashSchema,
@@ -8,8 +7,8 @@ import {
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
-	type UploadAttachRoot,
-	type UploadNegotiateResponse,
+	type UploadAttachRootInput,
+	type UploadNegotiateResponseInput,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -21,10 +20,12 @@ import {
 	authorisedFetch,
 	commitUpload,
 	currentServer,
+	defaultCache,
 	initialise,
 	narBytes,
 	putNarBytes,
 	resetTestServer,
+	resolvedCache,
 	runGcResult,
 	setRoot,
 	singleDecision,
@@ -34,7 +35,7 @@ import {
 	uploadPathNegotiation
 } from '../test-support.ts';
 
-const runRoot: UploadAttachRoot = { name: 'ci/run-1', ttlSeconds: 3600 };
+const runRoot: UploadAttachRootInput = { name: 'ci/run-1', ttlSeconds: 3600 };
 // The Durable Object's SQLite caps bound variables per statement, so seeding
 // inserts in small row batches.
 const seedInsertBatchSize = 20;
@@ -42,8 +43,8 @@ const seedInsertBatchSize = 20;
 async function negotiateWithRoot(
 	token: string,
 	paths: readonly ReturnType<typeof uploadMetadata>[],
-	attachRoot?: UploadAttachRoot
-): Promise<UploadNegotiateResponse> {
+	attachRoot?: UploadAttachRootInput
+): Promise<UploadNegotiateResponseInput> {
 	const response = await authorisedFetch('/uploads', token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -62,7 +63,7 @@ async function negotiateWithRoot(
 async function pushWithRoot(
 	token: string,
 	metadata: ReturnType<typeof uploadMetadata>,
-	attachRoot?: UploadAttachRoot
+	attachRoot?: UploadAttachRootInput
 ): Promise<void> {
 	const decision = singleDecision(
 		await negotiateWithRoot(token, [metadata], attachRoot)
@@ -82,14 +83,13 @@ async function pushWithRoot(
 async function rootTargetRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select({
-				cache: schema.retentionRootTargets.cache,
-				rootName: schema.retentionRootTargets.rootName,
-				storePathHash: schema.retentionRootTargets.storePathHash,
-				storePath: schema.retentionRootTargets.storePath
-			})
+			.select()
 			.from(schema.retentionRootTargets)
 			.all()
+			.map(({ cacheId, ...row }) => ({
+				...row,
+				cache: instance.context.cacheRepository.scopeForId(cacheId)
+			}))
 			.toSorted((left, right) =>
 				`${left.rootName} ${left.storePathHash}`.localeCompare(
 					`${right.rootName} ${right.storePathHash}`
@@ -101,16 +101,14 @@ async function rootTargetRows(): Promise<readonly unknown[]> {
 async function retentionRootRows(): Promise<readonly unknown[]> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
-			.select({
-				cache: schema.retentionRoots.cache,
-				name: schema.retentionRoots.name,
-				expiresAt: schema.retentionRoots.expiresAt,
-				createdAt: schema.retentionRoots.createdAt,
-				updatedAt: schema.retentionRoots.updatedAt
-			})
+			.select()
 			.from(schema.retentionRoots)
 			.all()
-			.map((row) => ({ ...row, expiresAt: row.expiresAt ?? undefined }))
+			.map(({ cacheId, ...row }) => ({
+				...row,
+				cache: instance.context.cacheRepository.scopeForId(cacheId),
+				expiresAt: row.expiresAt ?? undefined
+			}))
 			.toSorted((left, right) => left.name.localeCompare(right.name))
 	);
 }
@@ -130,6 +128,8 @@ function seededTarget(index: number): {
 
 async function seedRunRootTargets(count: number): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context);
+
 		for (let offset = 0; offset < count; offset += seedInsertBatchSize) {
 			const rows: (typeof schema.retentionRootTargets.$inferInsert)[] =
 				Array.from(
@@ -138,7 +138,7 @@ async function seedRunRootTargets(count: number): Promise<void> {
 						const target = seededTarget(offset + index);
 
 						return {
-							cache: DEFAULT_CACHE,
+							cacheId: cache.id,
 							rootName: rootNameSchema.parse(runRoot.name),
 							storePathHash: storePathHashSchema.parse(target.storePathHash),
 							storePath: storePathSchema.parse(target.storePath)
@@ -188,14 +188,13 @@ describe('run root lifecycle', () => {
 
 		const rows = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.db
-				.select({
-					cache: schema.retentionRootTargets.cache,
-					rootName: schema.retentionRootTargets.rootName,
-					storePathHash: schema.retentionRootTargets.storePathHash,
-					storePath: schema.retentionRootTargets.storePath
-				})
+				.select()
 				.from(schema.retentionRootTargets)
 				.all()
+				.map(({ cacheId, ...row }) => ({
+					...row,
+					cache: instance.context.cacheRepository.scopeForId(cacheId)
+				}))
 		);
 		const gatedRows = rows.filter(
 			(row) => row.storePathHash === gated.storePathHash
@@ -205,7 +204,7 @@ describe('run root lifecycle', () => {
 			total: rootSetMaxTargets + 1,
 			gatedRows: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: runRoot.name,
 					storePathHash: gated.storePathHash,
 					storePath: gated.storePath
@@ -229,10 +228,12 @@ describe('run root lifecycle', () => {
 
 		// Seed a partial earlier attempt before replaying both batches.
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context);
+
 			instance.context.db
 				.insert(schema.retentionRootTargets)
 				.values({
-					cache: DEFAULT_CACHE,
+					cacheId: cache.id,
 					rootName: rootNameSchema.parse(runRoot.name),
 					storePathHash: first.storePathHash,
 					storePath: first.storePath
@@ -249,13 +250,13 @@ describe('run root lifecycle', () => {
 
 		const expected = [
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: first.storePathHash,
 				storePath: first.storePath
 			},
 			{
-				cache: '',
+				cache: defaultCache(),
 				rootName: runRoot.name,
 				storePathHash: second.storePathHash,
 				storePath: second.storePath
@@ -305,14 +306,14 @@ describe('run root lifecycle', () => {
 		}).toStrictEqual({
 			roots: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					name: runRoot.name,
 					expiresAt: '2026-01-01T01:00:00.000Z',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					updatedAt: '2026-01-01T00:00:00.000Z'
 				},
 				{
-					cache: '',
+					cache: defaultCache(),
 					name: 'main',
 					expiresAt: undefined,
 					createdAt: '2026-01-01T00:00:00.000Z',
@@ -321,13 +322,13 @@ describe('run root lifecycle', () => {
 			],
 			targets: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: runRoot.name,
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
 				},
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: 'main',
 					storePathHash: next.storePathHash,
 					storePath: next.storePath
@@ -403,7 +404,7 @@ describe('run root lifecycle', () => {
 			},
 			targets: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: 'main',
 					storePathHash: kept.storePathHash,
 					storePath: kept.storePath
@@ -471,7 +472,7 @@ describe('run root lifecycle', () => {
 			},
 			heldTargets: [
 				{
-					cache: '',
+					cache: defaultCache(),
 					rootName: 'ci/run-2',
 					storePathHash: shared.storePathHash,
 					storePath: shared.storePath

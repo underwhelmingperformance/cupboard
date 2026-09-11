@@ -1,15 +1,14 @@
 import {
-	cacheNameSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
-	storedCacheSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { gcResponseSchema } from '@cupboard/protocol/retention';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
-	type StatsResponse,
+	type StatsResponseInput,
 	statsResponseSchema,
-	type UsageResponse,
+	type UsageResponseInput,
 	usageResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -34,14 +33,18 @@ import {
 	commitUploadRejection,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
+	driveToCompletion,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	narHash,
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	syntheticStorePathHash,
 	testServerFor,
@@ -53,7 +56,7 @@ import {
 import { chunk } from './bulk.ts';
 import { gcContinuationKey } from './server.ts';
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 
 function expectCommitSocketError(
 	error: unknown
@@ -63,7 +66,7 @@ function expectCommitSocketError(
 
 async function putRoot(
 	token: string,
-	cache: string,
+	cache: CacheScope,
 	name: string,
 	storePath: string
 ): Promise<void> {
@@ -82,8 +85,8 @@ async function putRoot(
 
 async function statsForCache(
 	token: string,
-	cache: string
-): Promise<StatsResponse> {
+	cache: CacheScope
+): Promise<StatsResponseInput> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/stats'),
 		token
@@ -93,7 +96,7 @@ async function statsForCache(
 	return statsResponseSchema.parse(await response.json());
 }
 
-async function usageForTenant(token: string): Promise<UsageResponse> {
+async function usageForTenant(token: string): Promise<UsageResponseInput> {
 	const response = await authorisedFetch('/usage', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
@@ -101,30 +104,30 @@ async function usageForTenant(token: string): Promise<UsageResponse> {
 }
 
 async function seedCollectablePaths(
-	cache: string,
+	cache: CacheScope,
 	count: number
 ): Promise<void> {
-	const storedCache = storedCacheSchema.parse(cache);
 	const createdAt = isoTimestamp(new Date());
-	const rows = Array.from({ length: count }, (_unused, index) => {
-		const storePathHash = syntheticStorePathHash(index);
 
-		return {
-			cache: storedCache,
-			storePathHash,
-			storePath: storePathSchema.parse(
-				`/nix/store/${storePathHash}-overflow-${String(index)}`
-			),
-			narHash: syntheticNarHash(index),
-			narSize: narBytes.byteLength,
-			referencesJson: '[]',
-			sigsJson: '[]',
-			generation: narInfoGenerationSchema.parse(1),
-			createdAt
-		};
-	});
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const resolved = resolvedCache(instance.context, cache);
+		const rows = Array.from({ length: count }, (_unused, index) => {
+			const storePathHash = syntheticStorePathHash(index);
 
-	await runInDurableObject(currentServer(), (_instance, state) => {
+			return {
+				cacheId: resolved.id,
+				storePathHash,
+				storePath: storePathSchema.parse(
+					`/nix/store/${storePathHash}-overflow-${String(index)}`
+				),
+				narHash: syntheticNarHash(index),
+				narSize: narBytes.byteLength,
+				referencesJson: '[]',
+				sigsJson: '[]',
+				generation: narInfoGenerationSchema.parse(1),
+				createdAt
+			};
+		});
 		const database = drizzle(state.storage, { schema: { narInfos } });
 
 		for (const batch of chunk(rows, 8)) {
@@ -138,28 +141,31 @@ describe('named caches', () => {
 
 	it('materialises one path in two caches with a single shared blob', async () => {
 		await useTestServer('named-cache-share');
-		const init = await bootstrap();
+		const init = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(init.token, metadata);
-		await pushPath(init.token, metadata, 'builds');
+		await pushPath(init.token, metadata, buildsCache);
 
 		const narinfoCaches = await runInDurableObject(
 			testServerFor('named-cache-share'),
-			(_instance, state) =>
+			(instance, state) =>
 				drizzle(state.storage, { schema: { narInfos } })
-					.select({ cache: narInfos.cache })
+					.select({ cacheId: narInfos.cacheId })
 					.from(narInfos)
-					.orderBy(narInfos.cache)
 					.all()
-					.map((row) => row.cache)
+					.map((row) =>
+						instance.context.cacheRepository.scopeForId(row.cacheId)
+					)
 		);
 		const rows = { narinfoCaches, blobCount: await blobStateCount() };
-		const defaultStats = await statsForCache(init.token, '');
-		const buildsStats = await statsForCache(init.token, 'builds');
+		const defaultStats = await statsForCache(init.token, defaultCache());
+		const buildsStats = await statsForCache(init.token, buildsCache);
 		const usage = await usageForTenant(init.token);
 		const defaultObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		const buildsObject = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
@@ -174,7 +180,7 @@ describe('named caches', () => {
 			defaultObjectExists: defaultObject !== null,
 			buildsObjectExists: buildsObject !== null
 		}).toStrictEqual({
-			narinfoCaches: ['', 'builds'],
+			narinfoCaches: [defaultCache(), buildsCache],
 			blobCount: 1,
 			defaultStats: {
 				storePaths: 1,
@@ -208,7 +214,7 @@ describe('named caches', () => {
 
 	it('collects each cache independently while a shared NAR survives', async () => {
 		await useTestServer('named-cache-gc');
-		const init = await bootstrap();
+		const init = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const kept = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: 'a'.repeat(32),
@@ -222,21 +228,23 @@ describe('named caches', () => {
 
 		await pushPath(init.token, kept);
 		await pushPath(init.token, collected);
-		await pushPath(init.token, collected, 'builds');
+		await pushPath(init.token, collected, buildsCache);
 
 		// The default cache retains only `kept`, so the other path is unreachable
 		// there; the builds cache retains it, so the shared NAR stays referenced.
-		await putRoot(init.token, '', 'channel', kept.storePath);
-		await putRoot(init.token, 'builds', 'channel', collected.storePath);
+		await putRoot(init.token, defaultCache(), 'channel', kept.storePath);
+		await putRoot(init.token, buildsCache, 'channel', collected.storePath);
 
 		const gc = await authorisedFetch('/gc', init.token, { method: 'POST' });
 		expect(gc.status).toBe(StatusCodes.OK);
 
 		const collectedDefault = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, collected.storePathHash)
+			narInfoObjectKey(fixtureTenant, collected.storePathHash, {
+				kind: 'default'
+			})
 		);
 		const keptDefault = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, kept.storePathHash)
+			narInfoObjectKey(fixtureTenant, kept.storePathHash, { kind: 'default' })
 		);
 		const collectedBuilds = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, collected.storePathHash, buildsCache)
@@ -258,7 +266,11 @@ describe('named caches', () => {
 
 	it('resumes an overflowing cache run without collecting another cache', async () => {
 		await useTestServer('named-cache-gc-continuation');
-		const init = await bootstrap();
+		const aCache = namedCache('a');
+		const bCache = namedCache('b');
+		const init = await bootstrap({
+			caches: [{ scope: aCache }, { scope: bCache }]
+		});
 		const keptInA = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: 'a'.repeat(32),
@@ -275,16 +287,18 @@ describe('named caches', () => {
 			name: 'collectable-b'
 		});
 
-		await pushPath(init.token, keptInA, 'a');
-		await pushPath(init.token, keptInB, 'b');
-		await pushPath(init.token, collectableInB, 'b');
-		await putRoot(init.token, 'a', 'channel', keptInA.storePath);
-		await putRoot(init.token, 'b', 'channel', keptInB.storePath);
-		await seedCollectablePaths('a', 2);
+		await pushPath(init.token, keptInA, aCache);
+		await pushPath(init.token, keptInB, bCache);
+		await pushPath(init.token, collectableInB, bCache);
+		await putRoot(init.token, aCache, 'channel', keptInA.storePath);
+		await putRoot(init.token, bCache, 'channel', keptInB.storePath);
+		await seedCollectablePaths(aCache, 2);
 
 		const observed = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const resolvedA = resolvedCache(instance.context, aCache);
+				const resolvedB = resolvedCache(instance.context, bCache);
 				// A budget of one unit of work leaves the scan of cache `a` unfinished,
 				// so the continuation has to name that cache for the alarms to resume.
 				const response = await underOneUnitOfWork(() =>
@@ -301,28 +315,26 @@ describe('named caches', () => {
 					continuation: await state.storage.get(gcContinuationKey)
 				};
 
-				for (let pass = 0; pass < 10; pass += 1) {
-					if ((await state.storage.get(gcContinuationKey)) === undefined) {
-						break;
-					}
-
-					await instance.alarm();
-				}
+				await driveToCompletion(
+					() => instance.alarm(),
+					async () =>
+						(await state.storage.get(gcContinuationKey)) === undefined,
+					30
+				);
 				await state.storage.deleteAlarm();
 
 				const database = drizzle(state.storage, { schema: { narInfos } });
 				const cacheRows = database
-					.select({ cache: narInfos.cache })
+					.select({ cacheId: narInfos.cacheId })
 					.from(narInfos)
 					.all();
-				const bCache = cacheNameSchema.parse('b');
 				const isBCollectablePresent =
 					database
 						.select({ storePathHash: narInfos.storePathHash })
 						.from(narInfos)
 						.where(
 							and(
-								eq(narInfos.cache, bCache),
+								eq(narInfos.cacheId, resolvedB.id),
 								eq(narInfos.storePathHash, collectableInB.storePathHash)
 							)
 						)
@@ -333,8 +345,8 @@ describe('named caches', () => {
 					afterContinuation: {
 						continuation: await state.storage.get(gcContinuationKey),
 						cacheCounts: {
-							a: cacheRows.filter((row) => row.cache === 'a').length,
-							b: cacheRows.filter((row) => row.cache === 'b').length
+							a: cacheRows.filter((row) => row.cacheId === resolvedA.id).length,
+							b: cacheRows.filter((row) => row.cacheId === resolvedB.id).length
 						},
 						isBCollectablePresent
 					}
@@ -354,7 +366,7 @@ describe('named caches', () => {
 					narInfosDeleted: 0,
 					orphanStagingDeleted: 0
 				},
-				continuation: [{ scope: 'cache', cache: 'a' }]
+				continuation: [{ scope: 'cache', cache: aCache }]
 			},
 			afterContinuation: {
 				continuation: undefined,
@@ -369,7 +381,7 @@ describe('named caches', () => {
 
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		await useTestServer('named-cache-scope');
-		await bootstrap();
+		await bootstrap({ caches: [{ scope: buildsCache }] });
 		const admin = await issueServerSignedToken(adminGrants(), 'owner');
 		// Activation gates on servability, so the target must be committed first.
 		await pushPath(
@@ -379,10 +391,10 @@ describe('named caches', () => {
 				storePathHash: 'a'.repeat(32),
 				name: 'x'
 			}),
-			'builds'
+			buildsCache
 		);
 		const writeToken = await issueServerSignedToken(
-			cacheWriteGrants(['channel'], 'builds'),
+			cacheWriteGrants(['channel'], buildsCache),
 			'ci'
 		);
 
@@ -417,35 +429,32 @@ describe('named caches', () => {
 		});
 	});
 
-	it('refuses a malformed cache name in the path with or without a valid token', async () => {
+	// Routing resolves the cache before any route runs, so a path segment that is
+	// not a cache name is refused whatever the caller presents. The refusal
+	// reveals only the published cache-name grammar, never whether a cache
+	// exists, and it matches what the Worker already answers for a read.
+	it.each([
+		{ name: 'no valid token', token: () => Promise.resolve('any-token') },
+		{
+			name: 'an admin token',
+			token: () => issueServerSignedToken(adminGrants())
+		}
+	])('refuses an invalid cache name with $name', async ({ token }) => {
 		await useTestServer('named-cache-invalid');
 
-		// Middleware parses the cache prefix before any route runs, so the
-		// refusal comes before authentication. The 400 reveals only that the path
-		// segment is not a cache selector, and nothing about the tenant.
-		const unauthenticated = await authorisedFetch(
+		const response = await authorisedFetch(
 			'/cache/Bad_NAME!/stats',
-			'any-token'
-		);
-		const authenticated = await authorisedFetch(
-			'/cache/Bad_NAME!/stats',
-			await issueServerSignedToken(adminGrants())
+			await token()
 		);
 
-		expect({
-			unauthenticated: unauthenticated.status,
-			authenticated: authenticated.status
-		}).toStrictEqual({
-			unauthenticated: StatusCodes.BAD_REQUEST,
-			authenticated: StatusCodes.BAD_REQUEST
-		});
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
 	it('refuses to commit an upload under a different cache than negotiated', async () => {
-		const init = await bootstrap();
+		const init = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const decision = expectSingleUploadDecision(
-			await negotiateUploads(init.token, [metadata], 'builds'),
+			await negotiateUploads(init.token, [metadata], buildsCache),
 			metadata
 		);
 
@@ -460,10 +469,10 @@ describe('named caches', () => {
 		const committed = await commitUpload(
 			init.token,
 			decision.uploadId,
-			'builds'
+			buildsCache
 		);
-		const defaultStats = await statsForCache(init.token, '');
-		const buildsStats = await statsForCache(init.token, 'builds');
+		const defaultStats = await statsForCache(init.token, defaultCache());
+		const buildsStats = await statsForCache(init.token, buildsCache);
 
 		expectCommitSocketError(crossCommitError);
 		expect({

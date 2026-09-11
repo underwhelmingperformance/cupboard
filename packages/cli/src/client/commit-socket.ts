@@ -12,11 +12,11 @@ import {
 	commitCreditCapability,
 	commitCreditGrantAttribute,
 	commitSessionFrameSchema,
-	type CommitSessionRequest,
-	type ParsedUploadGraceFact,
+	type CommitSessionRequestInput,
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
 	subscribeIdentityCapability,
+	type UploadGraceFact,
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
@@ -154,10 +154,10 @@ export interface CommitOutcome {
 	readonly settled: Promise<void>;
 	// The acknowledgement reports the captured policy decision for a pending
 	// outcome and the stored deadline for a final outcome.
-	readonly grace?: ParsedUploadGraceFact;
+	readonly grace?: UploadGraceFact;
 	// Reads the final grace fact after `settled`. Deferred paths receive their
 	// deadline in the verdict rather than the acknowledgement.
-	readonly verdictGrace?: () => ParsedUploadGraceFact | undefined;
+	readonly verdictGrace?: () => UploadGraceFact | undefined;
 }
 
 export interface CommitSession {
@@ -184,7 +184,7 @@ interface SessionEntry {
 	retryTimer?: NodeJS.Timeout;
 	// The grace fact of the last `settled` or `verdict` frame, exposed through
 	// the outcome's `verdictGrace` once the entry has its verdict.
-	verdictGrace?: ParsedUploadGraceFact;
+	verdictGrace?: UploadGraceFact;
 }
 
 type DropCause =
@@ -485,7 +485,7 @@ export function runCommitSession(
 	// later wait cannot report stale server state.
 	let lastRefusal: CupboardHttpError | undefined;
 
-	const sendNow = (request: CommitSessionRequest): void => {
+	const sendNow = (request: CommitSessionRequestInput): void => {
 		socket?.send(JSON.stringify(request));
 	};
 

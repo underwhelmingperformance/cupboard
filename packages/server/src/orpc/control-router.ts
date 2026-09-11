@@ -1,5 +1,4 @@
 import { type Logger } from '@cupboard/logger';
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -24,7 +23,6 @@ import {
 	controlTenantResume,
 	controlTenantRotateCacheReadCredential,
 	controlTenantRotateReadCredential,
-	controlTenantSetReadMode,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
 import { controlDeploymentPhase } from '../control/deployment-phase.ts';
@@ -58,13 +56,13 @@ const os = implement(controlContract)
 		const claims = await controlAuthenticate(context.request, context.env);
 
 		// No control procedure declares a cache resource read from the request
-		// path, so this selector is never consulted. A cache-scoped control
+		// path, so this scope is never consulted. A cache-scoped control
 		// procedure would have to resolve its own.
 		await authoriseRequest(
 			claims,
 			procedure['~orpc'].meta,
 			input,
-			DEFAULT_CACHE_SELECTOR,
+			{ kind: 'default' },
 			noPendingCache
 		);
 
@@ -102,9 +100,6 @@ export const controlRouter = os.router({
 		resume: os.tenants.resume.handler(({ input, context }) =>
 			controlTenantResume(context.env, input.id)
 		),
-		setReadMode: os.tenants.setReadMode.handler(({ input, context }) =>
-			controlTenantSetReadMode(context.env, input.id, input.readMode)
-		),
 		rotateReadCredential: os.tenants.rotateReadCredential.handler(
 			({ input, context }) =>
 				controlTenantRotateReadCredential(context.env, input.id, input.read)
@@ -113,23 +108,38 @@ export const controlRouter = os.router({
 			({ input, context }) =>
 				controlTenantClearReadCredential(context.env, input.id)
 		),
-		rotateCacheReadCredential: os.tenants.rotateCacheReadCredential.handler(
-			({ input, context }) =>
+		rotateDefaultCacheReadCredential:
+			os.tenants.rotateDefaultCacheReadCredential.handler(
+				({ input, context }) =>
+					controlTenantRotateCacheReadCredential(
+						context.env,
+						input.id,
+						{ kind: 'default' },
+						input.read
+					)
+			),
+		rotateNamedCacheReadCredential:
+			os.tenants.rotateNamedCacheReadCredential.handler(({ input, context }) =>
 				controlTenantRotateCacheReadCredential(
 					context.env,
 					input.id,
-					input.cacheName,
+					{ kind: 'named', name: input.cacheName },
 					input.read
 				)
-		),
-		clearCacheReadCredential: os.tenants.clearCacheReadCredential.handler(
-			({ input, context }) =>
-				controlTenantClearCacheReadCredential(
-					context.env,
-					input.id,
-					input.cacheName
-				)
-		),
+			),
+		clearDefaultCacheReadCredential:
+			os.tenants.clearDefaultCacheReadCredential.handler(({ input, context }) =>
+				controlTenantClearCacheReadCredential(context.env, input.id, {
+					kind: 'default'
+				})
+			),
+		clearNamedCacheReadCredential:
+			os.tenants.clearNamedCacheReadCredential.handler(({ input, context }) =>
+				controlTenantClearCacheReadCredential(context.env, input.id, {
+					kind: 'named',
+					name: input.cacheName
+				})
+			),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)
 		)

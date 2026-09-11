@@ -6,7 +6,7 @@ import { type Operation } from '../grants.ts';
 /**
  * Specifies how the authoriser obtains a resource: from the cache the request
  * path selected, from an input field, or from the pending upload or attestation
- * addressed by the request.
+ * the request addresses.
  *
  * A missing pending row denies access by default, which makes commit and attach
  * fail closed. Benign reads such as upload status set `missingDenies: false`;

@@ -1,29 +1,22 @@
 import {
-	type CacheName,
 	cacheNameSchema,
-	DEFAULT_CACHE,
-	isPrivateCache,
-	privateCacheLocalName,
-	privateStoredCache,
-	type PublicStoredCache,
-	publicStoredCacheSchema,
-	type StoredCache
+	type CacheScope,
+	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import {
-	type PrivateCacheCredentials,
-	privateCacheCredentialsSchema
-} from '@cupboard/protocol/private-cache-credentials';
+	type CacheCredentials,
+	cacheCredentialsSchema
+} from '@cupboard/protocol/cache-credentials';
 import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 
 import {
 	BooleanInputInvalidError,
+	CacheCredentialsInvalidError,
 	CacheNameInvalidError,
-	CacheSelectionConflictError,
 	ChoiceInputInvalidError,
-	PrivateCacheCredentialsInvalidError,
 	ReadUserInvalidError,
-	UnknownPrivateCacheCredentialError,
+	UnknownCacheCredentialError,
 	UrlInputInvalidError,
 	type UrlInputName
 } from './errors.ts';
@@ -63,110 +56,51 @@ export function provided(value: string | undefined): string | undefined {
 }
 
 /**
- * Parses a public cache input. An absent or blank input selects the default
- * cache. This input rejects the private stored form `private/<name>` because
- * callers select private caches through `private-cache`.
+ * Parses one cache input. An absent or blank input selects the default cache.
  */
-export function providedCache(value: string | undefined): PublicStoredCache {
-	const parsed = publicStoredCacheSchema.safeParse(
-		provided(value) ?? DEFAULT_CACHE
-	);
+export function providedCache(value: string | undefined): CacheScope {
+	const name = provided(value);
+
+	if (name === undefined) {
+		return { kind: 'default' };
+	}
+
+	const parsed = cacheNameSchema.safeParse(name);
 
 	if (!parsed.success) {
 		throw new CacheNameInvalidError(value ?? '');
 	}
 
-	return parsed.data;
+	return { kind: 'named', name: parsed.data };
+}
+
+export function providedCacheSelection(cache: string | undefined): CacheScope {
+	return providedCache(cache);
 }
 
 /**
- * Resolves the single cache targeted by an action. `cache` selects the public
- * namespace, while `private-cache` selects the private namespace. The run fails
- * if both inputs are set. If both are empty, it selects the tenant's default
- * cache.
- */
-export function providedCacheSelection(
-	cache: string | undefined,
-	privateCache: string | undefined
-): StoredCache {
-	const privateName = provided(privateCache);
-
-	if (privateName === undefined) {
-		return providedCache(cache);
-	}
-
-	if (provided(cache) !== undefined) {
-		throw new CacheSelectionConflictError();
-	}
-
-	const parsed = cacheNameSchema.safeParse(privateName);
-
-	if (!parsed.success) {
-		throw new CacheNameInvalidError(privateName);
-	}
-
-	return privateStoredCache(parsed.data);
-}
-
-/**
- * Returns the cupboard arguments for one cache. The default cache requires no
- * cache-selection argument.
- */
-export function cacheArguments(cache: StoredCache): readonly string[] {
-	if (cache === DEFAULT_CACHE) {
-		return [];
-	}
-
-	return isPrivateCache(cache)
-		? ['--private-cache', privateCacheLocalName(cache)]
-		: ['--cache', cache];
-}
-
-/**
- * Parses public cache names in input order. A blank input returns an empty list,
+ * Parses cache names in input order. A blank input returns an empty list,
  * and the caller decides whether that means the default cache or no cache.
  */
 export function providedCaches(
 	value: string | undefined
-): readonly PublicStoredCache[] {
+): readonly CacheScope[] {
 	return parseListInput(value ?? '').map((name) => providedCache(name));
 }
 
 /**
- * Parses the local names of private caches in input order. Credential documents
- * and URLs use local names; `privateStoredCache` converts them to stored names.
- */
-export function providedPrivateCacheNames(
-	value: string | undefined
-): readonly CacheName[] {
-	return parseListInput(value ?? '').map((name) => {
-		const parsed = cacheNameSchema.safeParse(name);
-
-		if (!parsed.success) {
-			throw new CacheNameInvalidError(name);
-		}
-
-		return parsed.data;
-	});
-}
-
-/**
- * Parses `private-cache-credentials`, a JSON object that maps each private
- * cache's local name to its read credential. An absent or blank input returns
- * an empty map. A caller can use the shared `read-user` and `read-password` for
- * a cache with no entry.
- *
- * Rejects an entry unless `private-cache` lists the same cache. Otherwise the
+ * Parses `cache-credentials`. An absent or blank input returns an empty list.
+ * Rejects an entry unless `cache` lists the same cache. Otherwise the
  * credential document and the configured cache list disagree.
  */
-export function providedPrivateCacheCredentials(
+export function providedCacheCredentials(
 	value: string | undefined,
-	privateCacheNames: readonly CacheName[]
-): PrivateCacheCredentials {
+	caches: readonly CacheScope[]
+): CacheCredentials {
 	const trimmed = provided(value);
 
 	if (trimmed === undefined) {
-		return new Map();
+		return [];
 	}
 
 	let document: unknown;
@@ -174,20 +108,20 @@ export function providedPrivateCacheCredentials(
 	try {
 		document = JSON.parse(trimmed);
 	} catch (error) {
-		throw new PrivateCacheCredentialsInvalidError({ cause: error });
+		throw new CacheCredentialsInvalidError({ cause: error });
 	}
 
-	const parsed = privateCacheCredentialsSchema.safeParse(document);
+	const parsed = cacheCredentialsSchema.safeParse(document);
 
 	if (!parsed.success) {
-		throw new PrivateCacheCredentialsInvalidError({ cause: parsed.error });
+		throw new CacheCredentialsInvalidError({ cause: parsed.error });
 	}
 
-	const listed = new Set<string>(privateCacheNames);
-
-	for (const name of parsed.data.keys()) {
-		if (!listed.has(name)) {
-			throw new UnknownPrivateCacheCredentialError(name);
+	for (const entry of parsed.data) {
+		if (caches.every((cache) => !isSameCacheScope(cache, entry.cache))) {
+			throw new UnknownCacheCredentialError(
+				entry.cache.kind === 'default' ? 'the default cache' : entry.cache.name
+			);
 		}
 	}
 

@@ -596,7 +596,7 @@ async function planReuseView(
 	client: GithubSetupClient,
 	destinationPriority: CachePriority
 ): Promise<PlannedSetupStep> {
-	const selectors = [{ kind: 'prefix' as const, pattern: pullRequestPrefix }];
+	const selectors = [{ kind: 'prefix' as const, prefix: pullRequestPrefix }];
 	const { views } = await client.reuseViews.list();
 	const existing = views.find((view) => view.name === pullRequestViewName);
 
@@ -610,6 +610,7 @@ async function planReuseView(
 			apply: async () => {
 				await client.reuseViews.set({
 					name: pullRequestViewName,
+					access: 'public',
 					selectors,
 					priority: reuseViewPrioritySchema.parse(
 						destinationPriority + viewPriorityMargin

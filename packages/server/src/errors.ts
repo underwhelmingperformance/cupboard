@@ -1,9 +1,10 @@
 import {
 	type AuthKeyId,
+	type CacheAccessMode,
+	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
 	type SigningKeyId,
-	type StoredCache,
 	type StoreDirectory,
 	type StorePathHash,
 	type StorePathString,
@@ -15,7 +16,6 @@ import {
 	subjectTokenProblems
 } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
-import { type ReuseViewContractName } from '@cupboard/protocol/reuse-views';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
@@ -55,6 +55,28 @@ export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 	constructor(public readonly value: string) {
 		super('CUPBOARD_COLD_PATH_TTL_SECONDS is not a valid TTL');
 		this.name = 'ColdPathTtlConfigurationInvalidError';
+	}
+}
+
+export type CacheCatalogueMigrationProblem =
+	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
+
+export class CacheCatalogueMigrationError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly tenant: TenantId,
+		public readonly problem: CacheCatalogueMigrationProblem,
+		public override readonly cause?: Error
+	) {
+		super(
+			problem === 'tenant-missing'
+				? 'The tenant registry row is missing during cache catalogue migration'
+				: problem === 'lifecycle-incomplete'
+					? 'A cache lifecycle is incomplete during cache catalogue migration'
+					: 'A cache lifecycle is invalid during cache catalogue migration'
+		);
+		this.name = 'CacheCatalogueMigrationError';
 	}
 }
 
@@ -123,21 +145,83 @@ export class CommitSessionLimitError extends ServerHttpError {
 	}
 }
 
-export class PrivateViewDefaultSelectorError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public readonly view: ReuseViewContractName) {
-		super('Private reuse views select named private caches only');
-		this.name = 'PrivateViewDefaultSelectorError';
-	}
-}
-
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly cache: StoredCache) {
+	constructor(public readonly cache: CacheScope) {
 		super('The cache contains store paths. Set force to true to delete it.');
 		this.name = 'CacheNotEmptyError';
+	}
+}
+
+export class CacheAlreadyExistsError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly cache: CacheScope) {
+		super('The requested cache already exists');
+		this.name = 'CacheAlreadyExistsError';
+	}
+}
+
+export class CacheNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly cache: CacheScope) {
+		super('The requested cache does not exist');
+		this.name = 'CacheNotFoundError';
+	}
+}
+
+export class CacheIdentityMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		// A row whose `cache_id` is still unset refers to no cache at all, so it
+		// reports a missing identity with no id.
+		public readonly identity: CacheScope | { readonly id?: number }
+	) {
+		super('The cache identity is missing from the cache registry');
+		this.name = 'CacheIdentityMissingError';
+	}
+}
+
+/**
+ * A stored object key under a private cache's old directory does not name a
+ * cache and a store path.
+ *
+ * Only this server writes those keys, so a key it cannot read back is a defect
+ * in this build rather than an object left by something else. The move refuses
+ * the key instead of treating it as an object no cache claims, because that
+ * branch deletes.
+ */
+export class LegacyObjectKeyInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly key: string) {
+		super('A stored object key does not name a cache and a store path');
+		this.name = 'LegacyObjectKeyInvalidError';
+	}
+}
+
+export class CacheAccessMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly cache: CacheScope,
+		public readonly expected: CacheAccessMode,
+		public readonly actual: CacheAccessMode
+	) {
+		super('The cache already exists with a different access mode');
+		this.name = 'CacheAccessMismatchError';
+	}
+}
+
+export class StoredRetentionPolicyInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly id: string) {
+		super('The stored retention policy has no valid selector');
+		this.name = 'StoredRetentionPolicyInvalidError';
 	}
 }
 
@@ -760,6 +844,15 @@ export class StoredDeploymentPhaseInvalidError extends ServerHttpError {
 	}
 }
 
+export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly view: string) {
+		super('Stored reuse-view selector is invalid');
+		this.name = 'StoredReuseViewSelectorInvalidError';
+	}
+}
+
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -887,8 +980,8 @@ export class UploadCacheMismatchError extends ServerHttpError {
 
 	constructor(
 		public readonly uploadId: UploadId,
-		public readonly negotiatedCache: StoredCache,
-		public readonly requestedCache: StoredCache
+		public readonly negotiatedCache: CacheScope,
+		public readonly requestedCache: CacheScope
 	) {
 		super(
 			'The request tried to commit the upload to a different cache from the one used during negotiation.'
@@ -999,8 +1092,8 @@ export class AttestationUploadCacheMismatchError extends ServerHttpError {
 
 	constructor(
 		public readonly uploadId: UploadId,
-		public readonly negotiatedCache: StoredCache,
-		public readonly requestedCache: StoredCache
+		public readonly negotiatedCache: CacheScope,
+		public readonly requestedCache: CacheScope
 	) {
 		super(
 			'The request tried to attach the attestation to a different cache from the one used during negotiation.'

@@ -19,9 +19,9 @@ import {
 } from '@cupboard/nix';
 import { Derivation } from '@cupboard/nix-store/derivation';
 import {
+	type CacheScope,
 	hasControlCharacter,
 	rootNameSchema,
-	type StoredCache,
 	type StorePathBasename,
 	storePathBasenameSchema,
 	storePathSchema,
@@ -32,8 +32,7 @@ import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
-	type ParsedBuildReceiptV3,
-	type ParsedTerminalBuildFailure
+	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
 import {
 	availabilityCeilingSchema,
@@ -94,7 +93,6 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
-	cacheArguments,
 	isEnabled,
 	provided,
 	providedCacheSelection,
@@ -360,7 +358,6 @@ export interface BuildCohortOptions {
 	readonly url?: string;
 	readonly cupboardPath?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
 	readonly reuseView?: string;
 	readonly ttl?: string;
 	readonly audience?: string;
@@ -386,7 +383,7 @@ export interface BuildCohortInputs {
 	readonly cohort: CohortMatrixEntry;
 	readonly url: URL;
 	readonly cupboardPath: string;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly reuseView: string;
 	readonly ttl: string;
 	readonly audience: string;
@@ -489,7 +486,7 @@ export function resolveBuildCohortInputs(
 		cohort: cohort.data,
 		url,
 		cupboardPath,
-		cache: providedCacheSelection(options.cache, options.privateCache),
+		cache: providedCacheSelection(options.cache),
 		reuseView: provided(options.reuseView) ?? '',
 		ttl: provided(options.ttl) ?? '',
 		audience: provided(options.audience) ?? '',
@@ -552,8 +549,7 @@ export function registerBuildCohortCommand(
 			'--cupboard-path <path>',
 			'path to the cupboard binary installed by actions/setup'
 		)
-		.option('--cache <name>', 'Inspect and publish to a named public cache.')
-		.option('--private-cache <name>', 'Inspect and publish to a private cache.')
+		.option('--cache <name>', 'Inspect and publish to a named cache.')
 		.option(
 			'--reuse-view <name>',
 			'named reuse view to probe for substitutable paths'
@@ -563,8 +559,8 @@ export function registerBuildCohortCommand(
 			'TTL applied when retaining an already cached target'
 		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option('--read-user <user>', 'username for private cache reads')
-		.option('--read-password <password>', 'password for private cache reads')
+		.option('--read-user <user>', 'username for cache reads')
+		.option('--read-password <password>', 'password for cache reads')
 		.option('--max-jobs <count>', 'maximum local build jobs')
 		.option(
 			'--store <uri>',
@@ -769,7 +765,7 @@ export async function buildCohortAction(
 		let streamedFailure:
 			| {
 					readonly error: CupboardReportedError;
-					readonly receipt: ParsedBuildReceiptV3;
+					readonly receipt: BuildReceiptV3;
 			  }
 			| undefined;
 
@@ -1155,13 +1151,13 @@ async function settledTargetBuildFailure(
 	receiptFile: string
 ): Promise<{
 	readonly error: CupboardReportedError;
-	readonly receipt: ParsedBuildReceiptV3;
+	readonly receipt: BuildReceiptV3;
 }> {
 	if (!(error instanceof CupboardReportedError)) {
 		throw error;
 	}
 
-	let receipt: ParsedBuildReceiptV3;
+	let receipt: BuildReceiptV3;
 
 	try {
 		receipt = buildReceiptV3Schema.parse(
@@ -1187,7 +1183,7 @@ async function settledTargetBuildFailure(
 async function resolveStreamedBuildOwners(options: {
 	readonly members: readonly CohortMember[];
 	readonly buildInstallables: readonly string[];
-	readonly receipt: ParsedBuildReceiptV3;
+	readonly receipt: BuildReceiptV3;
 	readonly inputs: BuildCohortInputs;
 	readonly runNix: typeof runNixBuild;
 	readonly reporter: Reporter;
@@ -1248,7 +1244,7 @@ async function resolveStreamedBuildOwners(options: {
 async function writeRemoteFailureReceipt(
 	receiptFile: string,
 	shouldPreservePublishedReceipt: boolean,
-	terminalFailure: ParsedTerminalBuildFailure
+	terminalFailure: TerminalBuildFailure
 ): Promise<void> {
 	let receipt: BuildReceiptV3;
 
@@ -1289,7 +1285,7 @@ async function settleCohortBuild(
 		readonly publicationBuilds?: readonly NixBuildResult[];
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
-		readonly terminalFailure?: ParsedTerminalBuildFailure;
+		readonly terminalFailure?: TerminalBuildFailure;
 		/**
 		The stores each path was copied from, keyed by store path.
 		*/
@@ -1524,7 +1520,7 @@ export function cohortBuildPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'build-push',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		'--github-oidc',
 		'--no-retain',
 		'--cohorts-file',
@@ -1537,8 +1533,6 @@ export function cohortBuildPushArguments(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.gcBetweenCohorts) {
 		arguments_.push('--gc-between-cohorts');
@@ -1623,7 +1617,7 @@ export function cohortReceiptPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'push',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		...paths,
 		'--github-oidc',
 		'--no-retain',
@@ -1644,8 +1638,6 @@ export function cohortReceiptPushArguments(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.runRoot !== '') {
 		arguments_.push('--run-root', inputs.runRoot);
@@ -1823,7 +1815,7 @@ export function cohortPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'push',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		...group.paths,
 		'--github-oidc',
 		...(group.complete ? ['--root', group.root] : ['--no-retain'])
@@ -1832,8 +1824,6 @@ export function cohortPushArguments(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.store !== '') {
 		arguments_.push('--store', inputs.store);
@@ -2204,7 +2194,7 @@ function reprobeTargets(
 /**
  * The `cupboard plan reprobe` arguments for one cohort. The command reads cache
  * endpoints without exchanging a token or opening a Nix store. It uses the
- * run's read credentials for a private cache.
+ * run's read credentials for a cache.
  */
 export function planReprobeArguments(
 	inputs: Pick<
@@ -2217,10 +2207,9 @@ export function planReprobeArguments(
 		'--no-colour',
 		'plan',
 		'reprobe',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		'--targets-file',
-		targetsFile,
-		...cacheArguments(inputs.cache)
+		targetsFile
 	];
 
 	if (inputs.reuseView !== '') {
@@ -2329,7 +2318,7 @@ async function planCohort(
 		'--no-colour',
 		'plan',
 		'cohort',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		'--targets-file',
 		targetsFile,
 		'--plan-file',
@@ -2347,8 +2336,6 @@ async function planCohort(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.reuseView !== '') {
 		arguments_.push('--reuse-view', inputs.reuseView);

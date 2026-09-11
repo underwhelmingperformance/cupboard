@@ -1,13 +1,12 @@
 import {
 	cacheNameSchema,
 	cachePrioritySchema,
-	namedCacheSelectorSchema,
 	rootNameSchema,
 	storePathHashSchema,
 	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import { reuseViewContractNameSchema } from '@cupboard/protocol/reuse-views';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { pushIdSchema } from '@cupboard/protocol/upload';
 import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { ORPCError } from '@orpc/client';
@@ -119,8 +118,9 @@ const idempotentMutations = [
 	{
 		name: 'a cache registration',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
-			rpc.caches.put({
-				cacheName: namedCacheSelectorSchema.parse('builds'),
+			rpc.caches.put.inNamedCache({
+				cacheName: cacheNameSchema.parse('builds'),
+				access: 'public',
 				priority: cachePrioritySchema.parse(41)
 			})
 	},
@@ -128,8 +128,9 @@ const idempotentMutations = [
 		name: 'a reuse-view replacement',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.reuseViews.set({
-				name: reuseViewContractNameSchema.parse('shared'),
-				selectors: [{ kind: 'prefix', pattern: 'build' }]
+				name: reuseViewNameSchema.parse('shared'),
+				access: 'public',
+				selectors: [{ kind: 'prefix', prefix: 'build' }]
 			})
 	},
 	{
@@ -155,7 +156,7 @@ const deletesByName = [
 		name: 'a cache removal',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.caches.remove({
-				params: { cacheName: namedCacheSelectorSchema.parse('builds') },
+				params: { cacheName: cacheNameSchema.parse('builds') },
 				query: { force: false }
 			})
 	},
@@ -163,7 +164,7 @@ const deletesByName = [
 		name: 'a reuse-view removal',
 		request: (rpc: ReturnType<typeof tenantRpc>) =>
 			rpc.reuseViews.remove({
-				name: reuseViewContractNameSchema.parse('shared')
+				name: reuseViewNameSchema.parse('shared')
 			})
 	}
 ] as const;
@@ -685,7 +686,7 @@ describe('tenantRpc', () => {
 
 	it('rejects a response that does not satisfy the contract', async () => {
 		const { fetcher } = capturingFetcher([
-			() => Response.json({ caches: [{ name: 'builds' }] })
+			() => Response.json({ caches: [{}] })
 		]);
 		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'admin-token',
@@ -701,8 +702,10 @@ describe('tenantRpc', () => {
 				data: rejected.data,
 				issuePaths: rejected.issues.map((issue) => issue.path)
 			}).toStrictEqual({
-				data: { caches: [{ name: 'builds' }] },
+				data: { caches: [{}] },
 				issuePaths: [
+					['caches', 0, 'scope'],
+					['caches', 0, 'access'],
 					['caches', 0, 'priority'],
 					['caches', 0, 'storePaths']
 				]
@@ -765,7 +768,7 @@ describe('controlRpc', () => {
 			name: 'a private-cache read-credential rotation',
 			attempts: 2,
 			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.rotateCacheReadCredential({
+				rpc.tenants.rotateNamedCacheReadCredential({
 					id: tenantIdSchema.parse('acme'),
 					cacheName: cacheNameSchema.parse('builds'),
 					read: readCredential
@@ -781,7 +784,7 @@ describe('controlRpc', () => {
 			name: 'a private-cache read-credential clear',
 			attempts: 1,
 			request: (rpc: ReturnType<typeof controlRpc>) =>
-				rpc.tenants.clearCacheReadCredential({
+				rpc.tenants.clearNamedCacheReadCredential({
 					id: tenantIdSchema.parse('acme'),
 					cacheName: cacheNameSchema.parse('builds')
 				})

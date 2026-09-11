@@ -38,7 +38,16 @@ const prCacheGrant = grant({
 			},
 			validate: 'cacheName'
 		},
-		root: { equalsResource: 'cache', validate: 'rootName' }
+		root: {
+			equalsTemplate: 'pr-{ref}',
+			substitutions: {
+				ref: {
+					claim: 'ref',
+					capture: { pattern: '^refs/pull/(?<ref>[0-9]+)/merge$', group: 'ref' }
+				}
+			},
+			validate: 'rootName'
+		}
 	}
 });
 
@@ -227,7 +236,7 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
-			name: 'a default binding permits the default cache',
+			name: 'a default-scope binding permits the default cache',
 			permitted: [
 				grant({
 					type: 'cupboard_cache',
@@ -278,7 +287,7 @@ describe('isGrantPermittedByRule', () => {
 		);
 	});
 
-	it('refuses a binding that renders an invalid cache selector', () => {
+	it('refuses a binding that renders an invalid cache name', () => {
 		const verbatimGrant = grant({
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],

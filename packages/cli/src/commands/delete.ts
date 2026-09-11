@@ -1,30 +1,29 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import type { StoredCache } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type {
-	DeletePathResponse,
-	ParsedDeletePathResponse
-} from '@cupboard/protocol/upload';
+import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { privateCacheOption } from '../cache-option.ts';
+import { resolveAuthorisedCachePositionals } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
-import {
-	type CacheSelectionOptions,
-	resolveCacheSelection
-} from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { CommandPayloadRequiredError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-interface DeleteOptions extends CacheSelectionOptions {
+interface DeleteOptions {
 	readonly yes?: boolean;
 }
 
 export interface DeleteClient {
-	remove: CacheScopedClient<{ hash: string }, ParsedDeletePathResponse>;
+	remove: CacheScopedClient<
+		{
+			hash: string;
+		},
+		DeletePathResponse
+	>;
 }
 
 export function registerDeleteCommand(
@@ -36,28 +35,43 @@ export function registerDeleteCommand(
 		.description('Delete a single store path from the cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
-			'<store-path>',
-			'store path to delete (e.g. /nix/store/<hash>-<name>)'
+			'<arguments...>',
+			'optional cache name followed by the store path to delete'
 		)
-		.option(
-			'--cache <name>',
-			'delete from a named cache rather than the default'
-		)
-		.addOption(privateCacheOption('delete from'))
 		.option('-y, --yes', 'delete without the confirmation prompt')
-		.action(async (url: URL, storePath: string, options: DeleteOptions) => {
+		.action(async (url: URL, positionals: string[], options: DeleteOptions) => {
+			const resolved = await resolveAuthorisedCachePositionals(
+				url,
+				positionals,
+				{
+					minimumPayload: 1,
+					maximumPayload: 1,
+					payloadDescription: 'a store path',
+					authorise: (target) =>
+						cachedOwnerProvider(target.tenantUrl, {
+							signal: programOptions.signal
+						}),
+					signal: programOptions.signal
+				}
+			);
+			const [storePath] = resolved.payload;
+
+			if (storePath === undefined) {
+				throw new CommandPayloadRequiredError('a store path');
+			}
+
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			const rpc = tenantRpc(resolved.target.tenantUrl, {
+				credential: resolved.credential,
 				signal: programOptions.signal
 			});
 
-			await runDelete(resolveCacheSelection(options), storePath, ui, rpc.paths);
+			await runDelete(resolved.target.cache, storePath, ui, rpc.paths);
 		});
 }
 
 export async function runDelete(
-	cache: StoredCache,
+	cache: CacheScope,
 	storePath: string,
 	ui: CliUi,
 	client: DeleteClient
