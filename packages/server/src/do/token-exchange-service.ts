@@ -2,7 +2,7 @@ import { type Logger } from '@cupboard/logger';
 import { type TtlSeconds } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	storedAuthorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
@@ -579,7 +579,9 @@ export class TokenExchangeService {
 		}
 
 		try {
-			return authorizationDetailsSchema.parse(JSON.parse(family.grantsJson));
+			return storedAuthorizationDetailsSchema.parse(
+				JSON.parse(family.grantsJson)
+			);
 		} catch {
 			this.revokeFamily(family.id);
 			throw new StaleRefreshTokenError();

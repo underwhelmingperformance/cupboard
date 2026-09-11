@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
-import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheScope,
+	rootNameSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -40,6 +44,7 @@ import {
 } from './push.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+const defaultCache: CacheScope = { kind: 'default' };
 
 describe('resolvePushPath', () => {
 	const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -308,7 +313,7 @@ describe('pushCommandAuthorizationDetails', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					cache: '_default'
+					cache: defaultCache
 				}
 			]
 		},
@@ -326,7 +331,7 @@ describe('pushCommandAuthorizationDetails', () => {
 						'attestation:attach',
 						'root:set'
 					],
-					cache: '_default',
+					cache: defaultCache,
 					root: rootName('main')
 				}
 			]
@@ -338,7 +343,7 @@ describe('pushCommandAuthorizationDetails', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
-					cache: '_default'
+					cache: defaultCache
 				}
 			]
 		},
@@ -356,13 +361,13 @@ describe('pushCommandAuthorizationDetails', () => {
 						'attestation:attach',
 						'root:set'
 					],
-					cache: '_default',
+					cache: defaultCache,
 					root: rootName('main')
 				},
 				{
 					type: 'cupboard_cache',
 					actions: ['root:attach'],
-					cache: '_default',
+					cache: defaultCache,
 					root: rootName('ci/run-1')
 				}
 			]
@@ -374,14 +379,14 @@ describe('pushCommandAuthorizationDetails', () => {
 				{
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					cache: '_default'
+					cache: defaultCache
 				}
 			]
 		}
 	])('$name', ({ options, expected }) => {
-		expect(pushCommandAuthorizationDetails(options, '_default')).toStrictEqual(
-			expected
-		);
+		expect(
+			pushCommandAuthorizationDetails(options, defaultCache)
+		).toStrictEqual(expected);
 	});
 });
 

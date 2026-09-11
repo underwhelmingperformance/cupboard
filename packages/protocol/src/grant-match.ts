@@ -1,5 +1,7 @@
 import {
-	cacheSelectorSchema,
+	cacheNameSchema,
+	type CacheScope,
+	isSameCacheScope,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 
@@ -101,28 +103,37 @@ function renderBindingValue(
 function renderCache(
 	binding: CacheBinding,
 	claims: Record<string, string>
-): string | undefined {
+): CacheScope | undefined {
+	if (binding.kind === 'default') {
+		return { kind: 'default' };
+	}
+
 	const raw = renderBindingValue(binding, claims);
 
 	if (raw === undefined) {
 		return undefined;
 	}
 
-	// Use the cache-selector grammar so `_default` can bind the default cache.
-	return cacheSelectorSchema.safeParse(raw).data;
+	const name = cacheNameSchema.safeParse(raw).data;
+
+	return name === undefined ? undefined : { kind: 'named', name };
 }
 
 function renderRoot(
 	binding: RootBinding,
-	cache: string,
+	cache: CacheScope,
 	claims: Record<string, string>
 ): string | undefined {
-	// An `equalsResource` binding uses the cache resolved for this grant as the
-	// root.
-	const raw =
-		binding.equalsResource === 'cache'
-			? cache
-			: renderBindingValue(binding, claims);
+	// An `equalsResource` binding uses the name of the cache resolved for this
+	// grant as the root. The default cache has no name, so such a binding
+	// resolves to nothing and the rule permits no grant.
+	if (binding.equalsResource === 'cache') {
+		return cache.kind === 'named'
+			? rootNameSchema.safeParse(cache.name).data
+			: undefined;
+	}
+
+	const raw = renderBindingValue(binding, claims);
 
 	if (raw === undefined) {
 		return undefined;
@@ -193,7 +204,7 @@ function isGrantPermitted(
 
 			const cache = renderCache(permitted.resources.cache, claims);
 
-			if (cache === undefined || requested.cache !== cache) {
+			if (cache === undefined || !isSameCacheScope(requested.cache, cache)) {
 				return false;
 			}
 

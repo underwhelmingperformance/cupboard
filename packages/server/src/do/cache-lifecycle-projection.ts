@@ -59,12 +59,16 @@ export async function projectLocalCacheLifecycles(
 		.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
 		.all();
 	const known = new Set<string>(projected.map((row) => row.cache));
-	// The default cache is never registered locally, so add it here rather than
-	// relying on the local table to name it.
+	// The default cache is usually absent from the local table, so add it here
+	// rather than relying on that table to name it. A commit does register it
+	// locally, and a set drops that repeat: a cache counted twice would spend two
+	// of this run's slots on one row.
 	const missing: StoredCache[] = [
-		storedCacheSchema.parse(DEFAULT_CACHE),
-		...local
-	].filter((cache) => !known.has(cache));
+		...new Set<StoredCache>([
+			storedCacheSchema.parse(DEFAULT_CACHE),
+			...local
+		]).difference(known)
+	];
 	const now = isoTimestamp(new Date());
 	const batches = chunk(
 		missing.slice(0, maxCachesProjectedPerRun),

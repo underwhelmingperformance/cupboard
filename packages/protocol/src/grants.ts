@@ -1,6 +1,9 @@
 import {
-	type CacheSelector,
-	cacheSelectorSchema,
+	type CacheScope,
+	cacheScopeSchema,
+	DEFAULT_CACHE_SELECTOR,
+	isSameCacheScope,
+	PRIVATE_SELECTOR_PREFIX,
 	type RootName,
 	rootNameSchema,
 	type TenantId,
@@ -159,14 +162,19 @@ export const operationSchema = z.enum([
 export type Operation = z.infer<typeof operationSchema>;
 
 export interface ResourceRequest {
-	readonly cache?: CacheSelector;
+	readonly cache?: CacheScope;
 	readonly root?: RootName;
 	readonly tenant?: TenantId;
 }
 
-// Issued grants carry only concrete selectors. Cache and tenant selectors are
-// exact; a root selector is an exact name or a trailing-slash prefix. The
-// wildcard is the only non-concrete grant and covers its whole domain.
+// Issued grants carry only concrete resources. A cache scope names one cache
+// and a tenant selector one tenant; a root selector is an exact name or a
+// trailing-slash prefix. The wildcard is the only non-concrete grant and covers
+// its whole domain.
+//
+// A grant names the cache but not its access. Access is a property of the
+// cache, so the same grant covers that cache whether it reads publicly or
+// requires a credential.
 
 export const grantTypes = [
 	'cupboard_cache',
@@ -185,7 +193,7 @@ export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
-		cache: cacheSelectorSchema,
+		cache: cacheScopeSchema,
 		root: rootNameSchema.optional()
 	}),
 	z.strictObject({
@@ -284,7 +292,7 @@ function isCoveredByGrant(
 		case 'cupboard_cache': {
 			return (
 				resource.cache !== undefined &&
-				resource.cache === grant.cache &&
+				isSameCacheScope(resource.cache, grant.cache) &&
 				(resource.root === undefined ||
 					(grant.root !== undefined && isRootWithin(resource.root, grant.root)))
 			);
@@ -444,11 +452,20 @@ function refineBinding(
 	}
 }
 
-export const cacheBindingSchema = z
-	.strictObject({ ...bindingShape, validate: z.literal('cacheName') })
-	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
-	});
+// A rule binds either the default cache or a named one. The default cache has
+// no name to template, so it is a variant of its own.
+export const cacheBindingSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z
+		.strictObject({
+			kind: z.literal('named'),
+			...bindingShape,
+			validate: z.literal('cacheName')
+		})
+		.superRefine((value, ctx) => {
+			refineBinding(value, ctx, false);
+		})
+]);
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
@@ -537,13 +554,112 @@ function withoutRetiredActions(grants: unknown): unknown {
 		});
 }
 
+const legacyCacheBindingSchema = z.looseObject({
+	exact: z.string().optional(),
+	equalsTemplate: z.string().optional()
+});
+const legacyCacheGrantSchema = z.looseObject({
+	type: z.literal('cupboard_cache'),
+	resources: z.looseObject({ cache: z.looseObject({}) })
+});
+
+// A rule stored before a cache binding carried a `kind` spells the default and
+// private caches into the bound value: `_default` for the default cache and a
+// `_private-` prefix for a private one. Rewrite that spelling into the current
+// shape, in which the binding names the cache and says nothing about access.
+function withUpgradedCacheBindings(grants: unknown): unknown {
+	if (!Array.isArray(grants)) {
+		return grants;
+	}
+
+	const items: readonly unknown[] = grants;
+
+	return items.map((grant) => {
+		const parsed = legacyCacheGrantSchema.safeParse(grant);
+
+		if (!parsed.success || 'kind' in parsed.data.resources.cache) {
+			return grant;
+		}
+
+		const binding = legacyCacheBindingSchema.parse(parsed.data.resources.cache);
+
+		return {
+			...parsed.data,
+			resources: {
+				...parsed.data.resources,
+				cache: upgradedCacheBinding(binding)
+			}
+		};
+	});
+}
+
+function upgradedCacheBinding(binding: {
+	readonly exact?: string;
+	readonly equalsTemplate?: string;
+}): unknown {
+	if (binding.exact === DEFAULT_CACHE_SELECTOR) {
+		return { kind: 'default' };
+	}
+
+	if (binding.exact?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+		return {
+			...binding,
+			kind: 'named',
+			exact: binding.exact.slice(PRIVATE_SELECTOR_PREFIX.length)
+		};
+	}
+
+	return { ...binding, kind: 'named' };
+}
+
 /**
  * Validates stored trust-rule grants from both current and earlier releases.
- * Before strict validation, the preprocessor removes retired operations and any
+ * Before strict validation, the preprocessor upgrades a cache binding written
+ * in the older selector spelling, then removes retired operations and any
  * non-wildcard grant with no recognised operation. An upgrade that narrows the
  * operation set therefore does not invalidate the stored rule.
  */
 export const storedPermittedGrantsSchema = z.preprocess(
-	withoutRetiredActions,
+	(grants) => withoutRetiredActions(withUpgradedCacheBindings(grants)),
 	z.array(permittedGrantSchema)
 );
+
+const legacyIssuedCacheGrantSchema = z.looseObject({
+	type: z.literal('cupboard_cache'),
+	cache: z.string()
+});
+
+/**
+ * Validates issued grants recorded by a refresh-token family, upgrading a cache
+ * named in the older selector spelling. A family outlives the release that
+ * created it, so a refresh must still read the grants written before a cache
+ * grant carried a scope.
+ */
+export const storedAuthorizationDetailsSchema = z.preprocess((grants) => {
+	if (!Array.isArray(grants)) {
+		return grants;
+	}
+
+	const items: readonly unknown[] = grants;
+
+	return items.map((grant) => {
+		const parsed = legacyIssuedCacheGrantSchema.safeParse(grant);
+
+		return parsed.success
+			? { ...parsed.data, cache: scopeFromSelectorText(parsed.data.cache) }
+			: grant;
+	});
+}, authorizationDetailsSchema);
+
+function scopeFromSelectorText(selector: string): unknown {
+	if (selector === DEFAULT_CACHE_SELECTOR) {
+		return { kind: 'default' };
+	}
+
+	return {
+		kind: 'named',
+		name: selector.startsWith(PRIVATE_SELECTOR_PREFIX)
+			? selector.slice(PRIVATE_SELECTOR_PREFIX.length)
+			: selector
+	};
+}

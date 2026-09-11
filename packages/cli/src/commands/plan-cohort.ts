@@ -10,8 +10,8 @@ import {
 	type ReadKeyFile
 } from '@cupboard/nix';
 import {
+	identityForCache,
 	type RootName,
-	selectorForCache,
 	type StoredCache,
 	type StorePathString,
 	type TtlSeconds
@@ -392,7 +392,7 @@ export function registerPlanCommands(
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: uniqueRoots.flatMap((root) =>
 						rootEnsureAuthorizationDetails({
-							cacheSelector: selectorForCache(cache),
+							cache: identityForCache(cache).scope,
 							root
 						})
 					)

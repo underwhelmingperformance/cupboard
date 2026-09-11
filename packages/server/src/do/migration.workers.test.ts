@@ -802,4 +802,103 @@ describe('migrations', () => {
 
 		expect(rows).toStrictEqual([rule]);
 	});
+
+	// Before 0044 a cache grant spelled the cache as a selector: `_default` for
+	// the default cache and a `_private-` prefix for a private one. The rewrite
+	// leaves the access out, because a cache carries its own access.
+	it('rewrites the cache selectors stored in a grant', async () => {
+		const storedRule = (id: string, cache: unknown) =>
+			`INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES ('${id}', 'https://issuer.example', 'https://cache.example', '{}', '${JSON.stringify(
+				[
+					{
+						type: 'cupboard_cache',
+						actions: ['upload:commit'],
+						resources: { cache }
+					}
+				]
+			)}', '2026-01-01T00:00:00.000Z')`;
+		const storedFamily = (id: string, cache: unknown) =>
+			`INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES ('${id}', 'm-${id}', 1, 'r1', 'alice', '${JSON.stringify(
+				[{ type: 'cupboard_cache', actions: ['upload:commit'], cache }]
+			)}', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`;
+
+		const rewritten = await runInDurableObject(
+			testServerFor('migration-cache-grant-json'),
+			async (_instance, state) => {
+				await migrateThrough(state, 43);
+
+				const statements = [
+					storedRule('named', { exact: 'ci', validate: 'cacheName' }),
+					storedRule('default', { exact: '_default', validate: 'cacheName' }),
+					storedRule('private', {
+						exact: '_private-ci',
+						validate: 'cacheName'
+					}),
+					`INSERT INTO oidc_trust (id, issuer, audience, claims_json, permitted_grants_json, created_at) VALUES ('wildcard-only', 'https://issuer.example', 'https://cache.example', '{}', '[{"type":"cupboard_wildcard"}]', '2026-01-01T00:00:00.000Z')`,
+					storedFamily('family-named', 'ci'),
+					storedFamily('family-default', '_default'),
+					storedFamily('family-private', '_private-ci')
+				];
+
+				for (const statement of statements) {
+					state.storage.sql.exec(statement);
+				}
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				return {
+					rules: state.storage.sql
+						.exec(
+							'SELECT id, permitted_grants_json FROM oidc_trust ORDER BY id'
+						)
+						.toArray(),
+					families: state.storage.sql
+						.exec(
+							'SELECT id, grants_json FROM refresh_token_family ORDER BY id'
+						)
+						.toArray()
+				};
+			}
+		);
+
+		const ruleGrant = (cache: unknown) =>
+			JSON.stringify([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache }
+				}
+			]);
+		const issuedGrant = (cache: unknown) =>
+			JSON.stringify([
+				{ type: 'cupboard_cache', actions: ['upload:commit'], cache }
+			]);
+		const namedCi = { exact: 'ci', validate: 'cacheName', kind: 'named' };
+
+		expect(rewritten).toStrictEqual({
+			rules: [
+				{
+					id: 'default',
+					permitted_grants_json: ruleGrant({ kind: 'default' })
+				},
+				{ id: 'named', permitted_grants_json: ruleGrant(namedCi) },
+				{ id: 'private', permitted_grants_json: ruleGrant(namedCi) },
+				{
+					id: 'wildcard-only',
+					permitted_grants_json: JSON.stringify([{ type: 'cupboard_wildcard' }])
+				}
+			],
+			families: [
+				{ id: 'family-default', grants_json: issuedGrant({ kind: 'default' }) },
+				{
+					id: 'family-named',
+					grants_json: issuedGrant({ kind: 'named', name: 'ci' })
+				},
+				{
+					id: 'family-private',
+					grants_json: issuedGrant({ kind: 'named', name: 'ci' })
+				}
+			]
+		});
+	});
 });

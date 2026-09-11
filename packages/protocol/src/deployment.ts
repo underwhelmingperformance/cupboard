@@ -78,11 +78,12 @@ export function hasReachedPhase(
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
 //
-// `expanded` says that every cache row stores its identity beside the legacy
-// key and that every object has reached the step which fills the rows the
-// forward writes could not. A later release reads the identity instead of the
-// key, which is safe only once a deploy has settled in this phase.
-export const settledDeploymentPhase: DeploymentPhaseName = 'expanded';
+// `expanded` said that every cache row stores its identity beside the legacy
+// key and that every object had reached the step which fills the rows the
+// forward writes could not. The predecessor release settled there, so every
+// tenant this build meets already holds those rows, and `native-reads` says
+// the reads take a cache from its identity rather than from the legacy key.
+export const settledDeploymentPhase: DeploymentPhaseName = 'native-reads';
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row and the Workers read it.

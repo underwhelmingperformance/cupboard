@@ -275,6 +275,7 @@ describe('oidc trust schemas', () => {
 				actions: ['upload:commit', 'root:set'],
 				resources: {
 					cache: {
+						kind: 'named',
 						equalsTemplate: 'pr-{ref}',
 						substitutions: {
 							ref: {
