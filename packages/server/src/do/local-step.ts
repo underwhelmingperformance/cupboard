@@ -11,9 +11,10 @@ import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { projectLocalCacheLifecycles } from './cache-lifecycle-projection.ts';
 import { type ServerContext } from './context.ts';
 import {
-	type LegacyObjectFamily,
-	moveLegacyPrivateObjects
-} from './legacy-object-move.ts';
+	moveLegacyPrivateObjects,
+	moveObjectsToCacheIncarnation,
+	type ObjectFamily
+} from './object-move.ts';
 
 /**
  * Matches a tenant row whose object has not recorded the current step. A null
@@ -58,7 +59,7 @@ export type LocalStepOutcome =
  */
 export async function recordLocalStep(
 	context: ServerContext,
-	families: readonly LegacyObjectFamily[]
+	families: readonly ObjectFamily[]
 ): Promise<LocalStepOutcome> {
 	const tenant = context.tenant();
 
@@ -74,10 +75,20 @@ export async function recordLocalStep(
 		return { kind: 'incomplete', projected: projection.projected };
 	}
 
-	const move = await moveLegacyPrivateObjects(context, tenant, families);
+	const legacyMove = await moveLegacyPrivateObjects(context, tenant, families);
 
-	if (move.hasMore) {
-		return { kind: 'incomplete', projected: move.moved };
+	if (legacyMove.hasMore) {
+		return { kind: 'incomplete', projected: legacyMove.moved };
+	}
+
+	const incarnationMove = await moveObjectsToCacheIncarnation(
+		context,
+		tenant,
+		families
+	);
+
+	if (incarnationMove.hasMore) {
+		return { kind: 'incomplete', projected: incarnationMove.moved };
 	}
 
 	await context.d1

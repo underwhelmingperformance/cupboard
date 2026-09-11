@@ -1,4 +1,5 @@
 import {
+	type CacheGeneration,
 	cacheNameSchema,
 	type CacheScope,
 	type TenantId
@@ -13,7 +14,12 @@ import {
 	parseNarInfoName,
 	parseNarName
 } from '../http/http.ts';
-import { narAuthorityForScope, serveNar, serveNarInfo } from '../read/read.ts';
+import {
+	narAuthorityForScope,
+	type ReadScope,
+	serveNar,
+	serveNarInfo
+} from '../read/read.ts';
 
 import { cacheRequestVersion } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
@@ -24,6 +30,9 @@ interface TenantReadHonoEnv {
 	Variables: {
 		tenant: TenantId;
 		cache: CacheScope;
+		// Which incarnation of the cache name admission resolved, taken from the
+		// canonical request. Object keys are built from this generation.
+		generation: CacheGeneration;
 		tenantRest: string;
 	};
 }
@@ -35,6 +44,16 @@ function noStore(response: Response): Response {
 	mutable.headers.set('cache-control', 'no-store');
 
 	return mutable;
+}
+
+// The control Worker forwards only public cache reads here, so every read this
+// app serves has public access.
+function readScope(context: Context<TenantReadHonoEnv>): ReadScope {
+	return {
+		scope: context.get('cache'),
+		access: 'public',
+		generation: context.get('generation')
+	};
 }
 
 function innerRequest(context: Context<TenantReadHonoEnv>): Request {
@@ -66,7 +85,7 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.req.raw,
 			context.env,
 			context.get('tenant'),
-			{ scope: context.get('cache'), access: 'public' },
+			readScope(context),
 			storePathHash,
 			false
 		);
@@ -84,10 +103,7 @@ function buildCachedReadApp(): Hono<TenantReadHonoEnv> {
 			context.env,
 			context.get('tenant'),
 			nar,
-			narAuthorityForScope({
-				scope: context.get('cache'),
-				access: 'public'
-			}),
+			narAuthorityForScope(readScope(context)),
 			false
 		);
 	});
@@ -123,18 +139,24 @@ function buildTenantReadApp(): Hono<TenantReadHonoEnv> {
 	});
 	app.use('/t/:tenant/*', async (context, next) => {
 		const route = parseTenantPath(new URL(context.req.url).pathname);
+		const version = cacheRequestVersion(context.req.raw);
 
 		// A request that carries no cache version was not canonicalised by the
 		// control Worker, so Workers Cache would key its response by path alone.
-		if (
-			route === undefined ||
-			cacheRequestVersion(context.req.raw) === undefined
-		) {
+		if (route === undefined || version === undefined) {
 			return noStore(notFoundResponse());
 		}
 
 		context.set('tenant', route.tenant);
 		context.set('cache', { kind: 'default' });
+		// The generation selects which incarnation of the cache name a read
+		// addresses, so a caller able to choose it could read the objects of a
+		// deleted incarnation. Taking it from the request is safe only because no
+		// route reaches this app: the tenant Worker's default entrypoint refuses
+		// every request, and the control Worker arrives over the service binding
+		// after admission has read the generation from D1. Giving that default
+		// entrypoint a route would make the parameter caller-controlled.
+		context.set('generation', version.generation);
 		context.set('tenantRest', route.rest);
 		await next();
 	});

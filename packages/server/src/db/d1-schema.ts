@@ -187,8 +187,8 @@ export const cacheLifecycle = sqliteTable(
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
 		// The version of the cache's read access. Deleting a cache advances it, and
 		// so does registering the name again with a different access. The Workers
-		// Cache key for a public read carries it, so a stored response cannot
-		// answer a reader once the cache reads differently.
+		// Cache key for a public read carries it, so a stored response cannot be
+		// served once the cache's access changes.
 		readRevision: integer('read_revision')
 			.$type<CacheReadRevision>()
 			.notNull()

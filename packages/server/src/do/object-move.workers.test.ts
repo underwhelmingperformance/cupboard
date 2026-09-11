@@ -9,11 +9,13 @@ import {
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
 import { legacyCacheKey } from '../db/cache.ts';
+import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as schema from '../db/schema.ts';
-import { LegacyObjectKeyInvalidError } from '../errors.ts';
+import { StoredObjectKeyInvalidError } from '../errors.ts';
 import {
 	bootstrap,
 	currentServer,
@@ -33,6 +35,11 @@ const cacheName = 'builds';
 const privateCache: CacheScope = {
 	kind: 'named',
 	name: cacheNameSchema.parse(cacheName)
+};
+const advancedName = 'advanced';
+const advancedCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse(advancedName)
 };
 
 /**
@@ -114,8 +121,8 @@ function wake(): Promise<unknown> {
 }
 
 /**
- * The tenant the object was configured with, which is what its object keys are
- * built from. It differs from the name the harness addresses the object by.
+ * The tenant this server was configured with. Object keys are built from that
+ * tenant id, which differs from the name the harness addresses the server by.
  */
 async function configuredTenant(): Promise<string> {
 	const tenant = await runInDurableObject(currentServer(), (instance) =>
@@ -140,13 +147,16 @@ async function useServerWithPrivateCache(name: string): Promise<string> {
 }
 
 /**
- * Records a committed version of the path in the private cache, as a commit
- * would. The dual write keeps the legacy key beside the identity for as long
- * as both spellings are read.
+ * Records a committed version of the path in one cache, as a commit would. The
+ * dual write keeps the legacy key beside the identity for as long as both
+ * spellings are read.
  */
-async function commitPath(generation: number): Promise<void> {
+async function commitPath(
+	generation: number,
+	scope: CacheScope = privateCache
+): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
-		const cache = resolvedCache(instance.context, privateCache);
+		const cache = resolvedCache(instance.context, scope);
 
 		instance.context.db
 			.insert(schema.narInfos)
@@ -340,8 +350,75 @@ describe('legacy private object move', () => {
 		await clear(key);
 		await seed(key, legacyBody, narInfoMetadata(3));
 
-		await expect(wake()).rejects.toThrow(LegacyObjectKeyInvalidError);
+		await expect(wake()).rejects.toThrow(StoredObjectKeyInvalidError);
 
 		await clear(key);
+	});
+});
+
+/**
+ * Brings up a server holding one public cache named `builds`, with its
+ * identity row stamped at the second generation, and returns its tenant.
+ *
+ * Stamping the identity row is what a registration does after `cache_lifecycle`
+ * returns the generation the deletion left. Everything the move reads comes
+ * from that row.
+ */
+async function useServerWithAdvancedCache(name: string): Promise<string> {
+	await useTestServer(name);
+	await bootstrap({ caches: [{ scope: advancedCache }] });
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.update(schema.cacheIdentities)
+			.set({ generation: secondCacheGeneration })
+			.where(
+				eq(
+					schema.cacheIdentities.id,
+					resolvedCache(instance.context, advancedCache).id
+				)
+			)
+			.run();
+	});
+
+	return configuredTenant();
+}
+
+describe('cache incarnation object move', () => {
+	it('moves an object to the key its cache generation gives it', async () => {
+		const tenant = await useServerWithAdvancedCache('incarnation-move');
+		const source = `t/${tenant}/narinfo/${advancedName}/${storePathHash}`;
+		const destination = `t/${tenant}/narinfo/generation/2/${advancedName}/${storePathHash}`;
+		await clear(source, destination);
+		await seed(source, legacyBody, narInfoMetadata(3));
+		await commitPath(3, advancedCache);
+
+		await wake();
+
+		expect({
+			source: await objectAt(source),
+			destination: await objectAt(destination)
+		}).toStrictEqual({
+			source: undefined,
+			destination: { body: legacyBody, generation: '3' }
+		});
+	});
+
+	// No row in this cache claims the object, which is what an object of an
+	// earlier incarnation of the name looks like once that incarnation's rows
+	// have gone. Relocating it would put an object at a live key that no read can
+	// serve and nothing collects.
+	it('deletes an object no row in the cache claims', async () => {
+		const tenant = await useServerWithAdvancedCache('incarnation-move-gone');
+		const source = `t/${tenant}/narinfo/${advancedName}/${storePathHash}`;
+		const destination = `t/${tenant}/narinfo/generation/2/${advancedName}/${storePathHash}`;
+		await clear(source, destination);
+		await seed(source, legacyBody, narInfoMetadata(3));
+
+		await wake();
+
+		expect({
+			source: await objectAt(source),
+			destination: await objectAt(destination)
+		}).toStrictEqual({ source: undefined, destination: undefined });
 	});
 });

@@ -54,8 +54,8 @@ export const cacheIdentities = sqliteTable(
 		access: text('access', { enum: ['public', 'private'] }),
 		priority: integer('priority').notNull(),
 		// The lifecycle generation and read revision D1 holds for this cache,
-		// stamped on the row whenever registration publishes them. A local
-		// incarnation therefore knows which incarnation of the name it is.
+		// stamped on the row whenever registration publishes them. The local row
+		// therefore records which incarnation of the name it belongs to.
 		generation: integer('generation')
 			.$type<CacheGeneration>()
 			.notNull()

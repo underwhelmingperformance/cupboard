@@ -10,20 +10,25 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { and, eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { legacyCacheKey } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { internalOrigin, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
 	authorisedFetch,
+	commitPath,
 	currentServer,
 	defaultCache,
+	flakyD1,
 	initialise,
 	namedCache,
 	narInfoDeletionRows,
@@ -33,13 +38,15 @@ import {
 	syntheticStorePathHash,
 	testBase,
 	testServerFor,
-	useTestServer
+	uploadMetadata,
+	useTestServer,
+	verifiableNar
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { chunk } from './bulk.ts';
-import { type ServerContext } from './context.ts';
+import { ServerContext } from './context.ts';
 import {
 	DeletionQueueService,
 	maxFencedRetireRows,
@@ -300,6 +307,76 @@ describe('narinfo deletion queue', () => {
 		}).toStrictEqual({
 			errorIsTimeout: true,
 			remaining: expectedQueueRows(entries.slice(maxFencedRetireRows))
+		});
+	});
+
+	// The reference edge is what authorises a read of the path, and the read
+	// takes the published object at face value, so an object must never outlive
+	// its edge. Failing the edge retirement leaves the two in the other order:
+	// the object gone while D1 still names the path, which a read answers with
+	// 404 either way.
+	it('removes the published object before it retires the reference edge', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('retirement-order');
+		const metadata = uploadMetadata({
+			name: 'retirement-order',
+			storePathHash: 'r'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, metadata, nar);
+
+		const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
+		const objectKey = narInfoObjectKey(
+			fixtureTenant,
+			storePathHash,
+			defaultCache()
+		);
+		const failure = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
+						failures: 1,
+						matches: (query) => query.startsWith('delete from "blob_ref"')
+					})
+				});
+
+				try {
+					await buildDeletionQueue(context).deleteStorePath(
+						defaultCache(),
+						storePathHash,
+						internalOrigin
+					);
+
+					return;
+				} catch (error: unknown) {
+					return error;
+				}
+			}
+		);
+		const edge = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, fixtureTenant),
+					eq(d1Schema.blobReference.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		expect({
+			retirementFailed: failure !== undefined,
+			objectGone: (await env.BLOBS.head(objectKey)) === null,
+			edgeKept: edge !== undefined
+		}).toStrictEqual({
+			retirementFailed: true,
+			objectGone: true,
+			edgeKept: true
 		});
 	});
 });
