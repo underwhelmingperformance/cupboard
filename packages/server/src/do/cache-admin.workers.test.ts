@@ -13,6 +13,11 @@ import {
 	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
+import {
+	currentLocalStep,
+	type DeploymentPhaseName,
+	deploymentPhaseRowId
+} from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -40,6 +45,7 @@ import {
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
+	readFetch,
 	resetTestServer,
 	runGcResult,
 	uploadMetadata,
@@ -115,6 +121,22 @@ async function policyIdentityRows(): Promise<
 		cacheId: row.cacheId ?? undefined,
 		rootNamePrefix: row.rootNamePrefix ?? undefined
 	}));
+}
+
+async function recordPhase(phase: DeploymentPhaseName): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.deploymentPhase)
+		.values({
+			id: deploymentPhaseRowId,
+			phase,
+			requiredLocalStep: currentLocalStep,
+			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.deploymentPhase.id,
+			set: { phase }
+		})
+		.run();
 }
 
 function wake(): Promise<LocalStepOutcome> {
@@ -565,6 +587,40 @@ describe('cache registry admin', () => {
 			second: 'recorded',
 			total: cacheCount + 1
 		});
+	});
+
+	it('lists the same caches from the identity table as from the legacy one', async () => {
+		await useTestServer('cache-admin-native-list');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+		await putCache(init.token, 'docs', 20);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		const reads = async (): Promise<{
+			list: CacheListResponse;
+			cacheInfo: string;
+			summary: CacheSummary;
+		}> => {
+			const info = await readFetch('/cache/builds/nix-cache-info');
+
+			return {
+				list: await listCaches(init.token),
+				cacheInfo: await info.text(),
+				summary: await putCache(init.token, 'builds', 30)
+			};
+		};
+
+		const legacy = await reads();
+
+		await recordPhase('native-reads');
+
+		expect(await reads()).toStrictEqual(legacy);
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {

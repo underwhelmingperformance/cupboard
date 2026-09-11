@@ -3,6 +3,7 @@ import {
 	type CachePriority,
 	cachePrioritySchema,
 	DEFAULT_CACHE,
+	identityForCache,
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
@@ -13,8 +14,9 @@ import {
 	type CacheSummary
 } from '@cupboard/protocol/caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, min, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
 
+import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
 import { CacheRepository } from '../db/cache-repository.ts';
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
@@ -31,6 +33,7 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
+import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -60,12 +63,14 @@ export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
 	private readonly identities: CacheRepository;
+	private readonly phases: DeploymentPhaseGate;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
 	) {
 		this.identities = new CacheRepository(context.db);
+		this.phases = new DeploymentPhaseGate(context.d1);
 	}
 
 	private teardownKey(cache: StoredCache): string {
@@ -110,7 +115,14 @@ export class CacheAdminService {
 			.limit(limit)
 			.all();
 
-		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
+		// A pass claims its cache from a teardown marker rather than from a
+		// request's selector, so the access comes from stored state too.
+		await this.deletionQueue.retireTornDownNarInfos(
+			cache,
+			identityForCache(cache).access,
+			queued,
+			origin
+		);
 
 		if (this.hasQueuedDeletions(cache)) {
 			return;
@@ -138,12 +150,81 @@ export class CacheAdminService {
 		return row?.earliest ?? undefined;
 	}
 
-	cacheInfoBody(cache: StoredCache): string {
-		const row = this.context.db
-			.select({ priority: schema.caches.priority })
+	/**
+	 * What is registered against one cache, read either from the legacy table or
+	 * from the identity table. Both hold the same values while a deployment
+	 * stores each cache twice.
+	 */
+	private async registeredCache(
+		cache: StoredCache
+	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
+		if (await this.phases.hasReached('native-reads')) {
+			return this.identities.readRegistration(cache);
+		}
+
+		return this.context.db
+			.select({
+				priority: schema.caches.priority,
+				graceManaged: schema.caches.graceManaged
+			})
 			.from(schema.caches)
 			.where(eq(schema.caches.name, cache))
 			.get();
+	}
+
+	/**
+	 * The registered caches, read either from the legacy table or from the
+	 * identity table.
+	 *
+	 * Both hold the same caches while a deployment stores each one twice, so the
+	 * two readings agree. Which one runs follows the recorded phase, and that is
+	 * what makes the cutover reversible: rolling back to the earlier phase sends
+	 * the read to the legacy table again.
+	 */
+	private async registeredCaches(): Promise<
+		{ name: StoredCache; priority: CachePriority; graceManaged: boolean }[]
+	> {
+		if (!(await this.phases.hasReached('native-reads'))) {
+			return this.context.db.select().from(schema.caches).all();
+		}
+
+		return this.context.db
+			.select({
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: schema.cacheIdentities.access,
+				priority: schema.cacheIdentities.priority,
+				graceManaged: schema.cacheIdentities.graceManaged
+			})
+			.from(schema.cacheIdentities)
+			.where(isNull(schema.cacheIdentities.deletedAt))
+			.all()
+			.flatMap((row) => {
+				const scope = cacheScopeFromRow({
+					kind: row.kind,
+					name: row.name ?? undefined
+				});
+
+				// The legacy table never holds the default cache, so the two readings
+				// agree only if this one leaves it out too.
+				if (scope === undefined || scope.kind === 'default') {
+					return [];
+				}
+
+				return [
+					{
+						name: storedCacheSchema.parse(
+							legacyCacheKey(scope, row.access ?? 'public')
+						),
+						priority: cachePrioritySchema.parse(row.priority),
+						graceManaged: row.graceManaged
+					}
+				];
+			});
+	}
+
+	async cacheInfoBody(cache: StoredCache): Promise<string> {
+		const row = await this.registeredCache(cache);
 		const info = new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
@@ -153,8 +234,8 @@ export class CacheAdminService {
 		return info.render();
 	}
 
-	listCaches(): CacheListResponse {
-		const registered = this.context.db.select().from(schema.caches).all();
+	async listCaches(): Promise<CacheListResponse> {
+		const registered = await this.registeredCaches();
 		const counts = new Map(
 			this.context.db
 				.select({ cache: schema.narInfos.cache, count: count() })
@@ -256,12 +337,11 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: StoredCache, priority: CachePriority): CacheSummary {
-		const managed = this.context.db
-			.select({ graceManaged: schema.caches.graceManaged })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
-			.get();
+	async cacheSummary(
+		cache: StoredCache,
+		priority: CachePriority
+	): Promise<CacheSummary> {
+		const managed = await this.registeredCache(cache);
 		const earliest = this.earliestLiveGraceDeadline(cache);
 
 		return {

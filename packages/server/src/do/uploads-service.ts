@@ -1,4 +1,5 @@
 import {
+	type CacheAccessMode,
 	type NixSha256HashString,
 	type RootName,
 	type StoredCache,
@@ -295,6 +296,7 @@ export class UploadsService {
 
 	async negotiate(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		body: ParsedUploadNegotiateRequest,
 		origin: RequestOrigin,
 		hints: NegotiateHints | undefined,
@@ -334,7 +336,10 @@ export class UploadsService {
 		// change cannot alter the decision before commit finishes. Attach grace facts
 		// only when the client requested them, so a client that did not ask still
 		// receives the legacy response shape.
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
+			cache,
+			access
+		);
 		const graceDecision: GraceDecision = {
 			reportsGrace: shouldReportGrace,
 			...(resolvedGraceSeconds !== undefined && {
@@ -447,6 +452,7 @@ export class UploadsService {
 	// publication would capture.
 	async preview(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		body: ParsedUploadPreviewRequest,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
@@ -459,7 +465,10 @@ export class UploadsService {
 
 		const { existingByStorePathHash, skippable, reusableByNarHash } =
 			await this.classifyClosure(cache, body, hints, false);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
+			cache,
+			access
+		);
 		const plannedGraceFact: ParsedUploadGraceFact =
 			resolvedGraceSeconds === undefined
 				? {}
@@ -518,6 +527,7 @@ export class UploadsService {
 	// is reported as unconfirmed and receives no grace extension.
 	async confirmPaths(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<UploadConfirmResponse> {
 		if (storePathHashes.length === 0) {
@@ -532,7 +542,10 @@ export class UploadsService {
 			this.narInfoObjects.servableStorePathHashes(cache, uniqueHashes),
 			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
 		]);
-		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(
+			cache,
+			access
+		);
 
 		const confirmable = uniqueHashes.flatMap((storePathHash) => {
 			const existing = existingByStorePathHash.get(storePathHash);
