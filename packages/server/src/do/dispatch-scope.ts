@@ -12,10 +12,13 @@
  * `scope` must reuse an enclosing scope when one is already open. A method that
  * calls another method of the same object enters a nested scope, and the
  * invocation still has exactly one.
+ *
+ * `scope` also receives the object the method was dispatched to, so a scope
+ * whose size the deployment supplies can read that size from the instance.
  */
-export function wrapDispatchedMethods(
-	prototype: object,
-	scope: (body: () => unknown) => unknown
+export function wrapDispatchedMethods<T extends object>(
+	prototype: T,
+	scope: (body: () => unknown, receiver: T) => unknown
 ): void {
 	for (const property of Object.getOwnPropertyNames(prototype)) {
 		if (property === 'constructor') {
@@ -37,8 +40,11 @@ export function wrapDispatchedMethods(
 
 		Object.defineProperty(prototype, property, {
 			...descriptor,
-			value: function (this: unknown, ...parameters: unknown[]): unknown {
-				return scope((): unknown => Reflect.apply(method, this, parameters));
+			value: function (this: T, ...parameters: unknown[]): unknown {
+				return scope(
+					(): unknown => Reflect.apply(method, this, parameters),
+					this
+				);
 			}
 		});
 	}

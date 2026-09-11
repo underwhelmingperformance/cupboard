@@ -26,3 +26,18 @@
  * subrequest ceiling at all.
  */
 export const subrequestsPerInvocation = 10_000;
+
+/**
+ * The D1 statements one invocation may run, counting each statement of a batch,
+ * on each Workers plan. Cloudflare's D1 limits table gives these as "Queries per
+ * Worker invocation".
+ *
+ * Unlike `subrequestsPerInvocation` this figure is not configurable. The plan
+ * decides it, so a deployment supplies the figure its own plan allows and the
+ * caps sized against it are functions of that value. A deployment that supplies
+ * nothing gets the free figure: a pass that exhausts its allowance defers the
+ * rest of its work and resumes, whereas a pass that assumes more than the plan
+ * allows fails a statement at runtime.
+ */
+export const freeTierD1StatementsPerInvocation = 50;
+export const paidTierD1StatementsPerInvocation = 1000;

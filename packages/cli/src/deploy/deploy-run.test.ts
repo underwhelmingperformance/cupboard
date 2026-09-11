@@ -169,6 +169,8 @@ function recordingApi(
 				Promise.resolve([
 					{ id: cloudflareAccountIdSchema.parse('acc'), name: 'Acme' }
 				]),
+			listAccountSubscriptions: () =>
+				Promise.resolve({ kind: 'listed' as const, subscriptions: [] }),
 			r2BucketExists: () => {
 				recordFallbackApiCall(calls, 'r2BucketExists');
 				return Promise.resolve(false);

@@ -362,10 +362,15 @@ function mergeGarbageCollectionContinuation(
  * the D1 binding enforces the allowance during settlement. Unprocessed rows
  * remain pending, and the pass requests another verification run.
  */
-export const verifyBackstopReuseSettleLimit = Math.floor(
-	(maintenancePassStatements - pendingSettlePrefetchStatements) /
-		statementsPerPendingSettleRow
-);
+export function verifyBackstopReuseSettleLimit(
+	statementAllowance: number
+): number {
+	return Math.floor(
+		(maintenancePassStatements(statementAllowance) -
+			pendingSettlePrefetchStatements) /
+			statementsPerPendingSettleRow
+	);
+}
 
 type MaintenanceKind = 'gc' | 'verify';
 
@@ -409,7 +414,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// RPC, and any method added later. No dispatched method can run without them,
 	// and none has to remember to open them itself.
 	static {
-		enterStatementAllowanceOnDispatch(this.prototype);
+		enterStatementAllowanceOnDispatch(
+			this.prototype,
+			(server) => server.context.d1StatementsPerInvocation
+		);
 		enterRowBudgetOnDispatch(this.prototype);
 		enterSubrequestSliceOnDispatch(this.prototype);
 	}
@@ -1828,7 +1836,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.withMaintenanceEligibility(() =>
 				this.verification.processPendingWithoutDecode(
 					logger,
-					verifyBackstopReuseSettleLimit
+					verifyBackstopReuseSettleLimit(this.context.d1StatementsPerInvocation)
 				)
 			)
 		);

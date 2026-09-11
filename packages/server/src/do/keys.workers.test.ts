@@ -29,6 +29,7 @@ import {
 	bootstrap,
 	cacheWriteGrants,
 	currentServer,
+	deployedStatementAllowance,
 	fetchNarInfo,
 	fetchPath,
 	isNarInfoSignatureValid,
@@ -717,7 +718,8 @@ describe('signing key rotation', () => {
 		);
 
 		expect({ remaining }).toStrictEqual({
-			remaining: queued - backfillEntriesPerPass
+			remaining:
+				queued - backfillEntriesPerPass(await deployedStatementAllowance())
 		});
 	});
 

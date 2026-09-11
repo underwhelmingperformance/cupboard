@@ -10,7 +10,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfos, pendingUploads, verificationCursor } from '../db/schema.ts';
 import {
-	d1StatementsPerInvocation,
 	narObjectKeyPrefix,
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
@@ -35,10 +34,12 @@ import {
 	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withDeployedStatementAllowance
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
+import { maxPathsReconciledPerRun } from './reconcile-queue-service.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
@@ -55,16 +56,21 @@ const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 // of that size.
 const pushConcurrency = 6;
 
-// More committed paths than one verification pass can probe within its
-// statement allowance, so the scan only reaches the end across several cron
-// invocations.
-const committedPaths = 100;
+// A statement allowance that leaves a scan a page of a few rows. The property
+// under test is scale-independent: a pass respects its allowance and the scan
+// reaches the end across several invocations. Proving it at a small allowance
+// keeps the fixture to tens of paths rather than the hundreds a
+// production-sized page would need.
+const scanAllowance = 20;
 
 // Each row needs one probe. After maintenance eligibility uses its statements,
 // the pass also reserves one statement for the committed-reference query and
-// one for a removal. This page size uses the remaining allowance. The D1 binding
-// still enforces the 50-statement limit.
-const scanPageSize = 38;
+// one for a removal. This page size uses the remaining allowance.
+const scanPageSize = maxPathsReconciledPerRun(scanAllowance);
+
+// Two full pages and a short third, so the scan reaches the end and wraps on
+// the third pass.
+const committedPaths = scanPageSize * 2 + 4;
 
 // More rows than one claim settles without decoding, so the claim's limit
 // applies and later claims have to settle the rest.
@@ -101,8 +107,9 @@ async function commitScannedPaths(server: string): Promise<void> {
 	});
 
 	for (let start = 0; start < committedPaths; start += pushConcurrency) {
+		const group = Math.min(pushConcurrency, committedPaths - start);
 		await Promise.all(
-			Array.from({ length: pushConcurrency }, (_, offset) =>
+			Array.from({ length: group }, (_, offset) =>
 				pushPath(token, indexedMetadata(start + offset), namedCache('builds'))
 			)
 		);
@@ -124,6 +131,7 @@ async function driveCronVerification(
 ): Promise<{
 	readonly passes: readonly VerificationPassObservation[];
 	readonly committedRows: number;
+	readonly statementAllowance: number;
 }> {
 	await commitScannedPaths(server);
 
@@ -147,14 +155,23 @@ async function driveCronVerification(
 				.where(eq(verificationCursor.id, 'active'))
 				.get()?.hash ?? '';
 
-		const passes = await measureInvocations(state, counting, {
-			attempts: invocations,
-			run: async () => {
-				await instance.runVerification();
+		// The cache was filled at the deployed allowance. Every measured pass runs
+		// at the small one, as a deployment on that allowance would.
+		const measured = await withDeployedStatementAllowance(
+			instance.context,
+			scanAllowance,
+			async () => ({
+				passes: await measureInvocations(state, counting, {
+					attempts: invocations,
+					run: async () => {
+						await instance.runVerification();
 
-				return { cursor: scanCursor() };
-			}
-		});
+						return { cursor: scanCursor() };
+					}
+				}),
+				statementAllowance: instance.context.d1StatementsPerInvocation
+			})
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
@@ -162,7 +179,7 @@ async function driveCronVerification(
 		});
 
 		return {
-			passes,
+			...measured,
 			committedRows: local
 				.select({ storePathHash: narInfos.storePathHash })
 				.from(narInfos)
@@ -230,6 +247,7 @@ async function driveClaims(
 ): Promise<{
 	readonly claims: readonly ClaimObservation[];
 	readonly pendingRows: number;
+	readonly statementAllowance: number;
 }> {
 	const passRequests = await queueReuseRows(server);
 
@@ -279,39 +297,46 @@ async function driveClaims(
 			value: real
 		});
 
-		return { claims: observed, pendingRows: pendingDepth() };
+		return {
+			claims: observed,
+			pendingRows: pendingDepth(),
+			statementAllowance: instance.context.d1StatementsPerInvocation
+		};
 	});
 }
 
 describe('cron verification D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every verification invocation within the 50-statement D1 limit', async () => {
+	it('keeps every verification invocation within its D1 statement allowance', async () => {
 		const driven = await driveCronVerification('verify-allowance-cron', 3);
 
 		// All rows are committed, so the pass can use the complete maintenance
 		// allowance for the scan: one statement to invalidate maintenance
-		// eligibility, one probe
-		// for each row of the page, and one to reconcile eligibility afterwards.
-		// Every row is healthy, so the pass runs neither the committed reference
-		// edge query nor a repair. The bootstrap leaves two committed paths of its
-		// own beside the pushed ones, so the third pass scans 26 rows, reaches the
-		// end and wraps, which resets the cursor.
+		// eligibility, one probe for each row of the page, and one to reconcile
+		// eligibility afterwards. Every row is healthy, so the pass runs neither
+		// the committed reference edge query nor a repair. The third pass scans
+		// the rows the first two left, reaches the end and wraps, which resets the
+		// cursor.
 		expect({
 			pageSize: scanPageSize,
 			committedRows: driven.committedRows,
 			passStatements: driven.passes.map((pass) => pass.statements),
 			overAllowancePasses: driven.passes.filter(
-				(pass) => pass.statements > d1StatementsPerInvocation
+				(pass) => pass.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			cursors: driven.passes.map((pass) => pass.cursor)
 		}).toStrictEqual({
-			pageSize: 38,
-			committedRows: committedPaths + 2,
-			passStatements: [40, 40, 28],
+			pageSize: scanPageSize,
+			committedRows: committedPaths,
+			passStatements: [
+				scanPageSize + 2,
+				scanPageSize + 2,
+				committedPaths - 2 * scanPageSize + 2
+			],
 			overAllowancePasses: [],
-			statementAllowance: 50,
+			statementAllowance: scanAllowance,
 			cursors: [
 				indexedMetadata(scanPageSize - 1).storePathHash,
 				indexedMetadata(2 * scanPageSize - 1).storePathHash,
@@ -324,7 +349,7 @@ describe('cron verification D1 statement allowance', () => {
 describe('verification claim D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every claim within the 50-statement D1 limit and settles the rest across claims', async () => {
+	it('keeps every claim within its D1 statement allowance and settles the rest across claims', async () => {
 		const driven = await driveClaims('verify-allowance-claim', 4);
 
 		// Each claim settles two rows: two statements for maintenance eligibility,
@@ -335,9 +360,9 @@ describe('verification claim D1 statement allowance', () => {
 		expect({
 			claimStatements: driven.claims.map((claim) => claim.statements),
 			overAllowanceClaims: driven.claims.filter(
-				(claim) => claim.statements > d1StatementsPerInvocation
+				(claim) => claim.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			pendingBefore: driven.claims.map((claim) => claim.pendingRowsBefore),
 			passRequests: driven.claims.map((claim) => claim.passRequests),
 			pendingRows: driven.pendingRows
@@ -453,6 +478,7 @@ async function driveRecordedVerdicts(
 	readonly heldVerdicts: number;
 	readonly pendingRows: number;
 	readonly publishedPaths: number;
+	readonly statementAllowance: number;
 }> {
 	const uploads = await deferFreshUploads(
 		server,
@@ -536,7 +562,8 @@ async function driveRecordedVerdicts(
 			publishedPaths: local
 				.select({ storePathHash: narInfos.storePathHash })
 				.from(narInfos)
-				.all().length
+				.all().length,
+			statementAllowance: instance.context.d1StatementsPerInvocation
 		};
 	});
 }
@@ -548,7 +575,7 @@ const drainedBatch = 8;
 describe('recorded verdict D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('accepts a full verdict batch within the 50-statement D1 limit', async () => {
+	it('accepts a full verdict batch within its D1 statement allowance', async () => {
 		const driven = await driveRecordedVerdicts(
 			'verify-allowance-record',
 			recordedBatch,
@@ -567,9 +594,9 @@ describe('recorded verdict D1 statement allowance', () => {
 			appliedByRecord: driven.appliedByRecord,
 			recordStatements: driven.invocations[0]?.statements,
 			overAllowanceInvocations: driven.invocations.filter(
-				(invocation) => invocation.statements > d1StatementsPerInvocation
+				(invocation) => invocation.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			heldAfterRecord: driven.invocations[0]?.heldAfter
 		}).toStrictEqual({
 			claims: recordedBatch,
@@ -604,9 +631,9 @@ describe('recorded verdict D1 statement allowance', () => {
 				(invocation) => invocation.statements
 			),
 			overAllowanceInvocations: driven.invocations.filter(
-				(invocation) => invocation.statements > d1StatementsPerInvocation
+				(invocation) => invocation.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			heldVerdicts: driven.heldVerdicts,
 			pendingRows: driven.pendingRows,
 			publishedPaths: driven.publishedPaths

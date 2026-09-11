@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
+
 import {
 	MissingStatementAllowanceError,
 	StatementAllowanceExceededError
 } from '../errors.ts';
-import { d1StatementsPerInvocation } from '../http/http.ts';
 
 import { wrapDispatchedMethods } from './dispatch-scope.ts';
 
@@ -61,10 +62,14 @@ const allowanceScope = new AsyncLocalStorage<StatementAllowance>();
  *
  * The body may be synchronous or asynchronous: async-local storage carries the
  * allowance into whatever the body awaits.
+ *
+ * A caller that states no size gets the Workers Free allowance, which every
+ * plan permits. The Durable Object's dispatch wrapper always states the size
+ * the deployment supplies.
  */
 export function withStatementAllowance<T>(
 	body: () => T,
-	statements: number = d1StatementsPerInvocation
+	statements: number = freeTierD1StatementsPerInvocation
 ): T {
 	if (allowanceScope.getStore() !== undefined) {
 		return body();
@@ -150,7 +155,15 @@ export function hasStatementAllowance(): boolean {
 /**
  * Wraps every method on `prototype` so each dispatch enters the invocation's D1
  * allowance, and so each dispatch shares one allowance.
+ *
+ * `allowanceOf` reads the allowance from the object being dispatched to,
+ * because the deployment supplies it rather than the module fixing it.
  */
-export function enterStatementAllowanceOnDispatch(prototype: object): void {
-	wrapDispatchedMethods(prototype, withStatementAllowance);
+export function enterStatementAllowanceOnDispatch<T extends object>(
+	prototype: T,
+	allowanceOf: (receiver: T) => number
+): void {
+	wrapDispatchedMethods(prototype, (body, receiver) =>
+		withStatementAllowance(body, allowanceOf(receiver))
+	);
 }

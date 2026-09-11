@@ -612,6 +612,50 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
+ * The D1 statements one invocation of the current test server may run.
+ *
+ * The pool binds the deployment's environment, so this is the figure the
+ * Durable Object read at construction and the figure every cap in it is a
+ * function of.
+ */
+export function deployedStatementAllowance(): Promise<number> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) => instance.context.d1StatementsPerInvocation
+	);
+}
+
+/**
+ * Runs `body` with the Durable Object's D1 statement allowance replaced, and
+ * restores the deployed allowance afterwards.
+ *
+ * Every cap is a function of this value and the dispatch wrapper reads it on
+ * each call, so the object runs entirely at the replaced allowance. A test that
+ * exercises a cap can therefore use a fixture sized for a small allowance
+ * instead of one large enough to exceed a production-sized cap.
+ */
+export async function withDeployedStatementAllowance<T>(
+	context: ServerContext,
+	statements: number,
+	body: () => Promise<T>
+): Promise<T> {
+	const deployed = context.d1StatementsPerInvocation;
+	const set = (value: number): void => {
+		Object.defineProperty(context, 'd1StatementsPerInvocation', {
+			configurable: true,
+			value
+		});
+	};
+	set(statements);
+
+	try {
+		return await body();
+	} finally {
+		set(deployed);
+	}
+}
+
+/**
  * Claims an upload and records one owner-fenced verification verdict.
  */
 export async function recordClaimedVerification(

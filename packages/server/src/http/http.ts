@@ -90,22 +90,23 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export const blobReaperBatchSize = 500;
 
-// Fifty D1 statements in one invocation, counting each statement of a batch.
-// The D1 binding holds every maintenance invocation to this allowance and
-// refuses the statement that would exceed it.
-//
-// Fifty is the Workers Free figure, and this deployment is on a paid plan:
-// both Worker configurations set `limits.cpu_ms` to 300,000, which is the paid
-// maximum, and Cloudflare accepts a `limits` block only on the Standard Usage
-// Model. The allowance is therefore more conservative than the plan requires.
-// Being conservative costs extra invocations and never a failed statement, so
-// it stands until somebody measures what the plan permits.
-export const d1StatementsPerInvocation = 50;
+/**
+ * How many object deletions one invocation flushes. The pass reads the due
+ * markers with one statement and deletes each object with another, so the batch
+ * leaves one statement of `statementAllowance` for the read.
+ */
+export function objectDeletionBatchSize(statementAllowance: number): number {
+	return statementAllowance - 1;
+}
 
-export const objectDeletionBatchSize = d1StatementsPerInvocation - 1;
-export const objectRecoveryBatchSize = Math.floor(
-	(d1StatementsPerInvocation - 1) / 3
-);
+/**
+ * How many abandoned promotion reservations one invocation recovers. The pass
+ * reads the stale reservations with one statement and spends three more on each
+ * reservation it repairs.
+ */
+export function objectRecoveryBatchSize(statementAllowance: number): number {
+	return Math.floor((statementAllowance - 1) / 3);
+}
 
 // Verification SQL reconstructs NAR object keys from `nar_hash`. Keep these
 // fragments in sync with that query.

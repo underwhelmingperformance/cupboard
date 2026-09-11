@@ -370,7 +370,8 @@ export class BlobReaperService {
 		private readonly d1: DrizzleD1Database<typeof d1Schema>,
 		private readonly blobs: R2Bucket,
 		private readonly demoter: NarInfoDemoter,
-		private readonly casDemoter: CasReferenceDemoter
+		private readonly casDemoter: CasReferenceDemoter,
+		private readonly statementAllowance: number
 	) {}
 
 	// Determine global reachability from `blob_ref.nar_hash`, not from one
@@ -811,7 +812,7 @@ export class BlobReaperService {
 					this.d1,
 					this.blobs,
 					kind,
-					Math.min(limit, objectDeletionBatchSize)
+					Math.min(limit, objectDeletionBatchSize(this.statementAllowance))
 				);
 
 				return {
@@ -825,7 +826,8 @@ export class BlobReaperService {
 					this.blobs,
 					kind,
 					now,
-					Math.min(limit, objectRecoveryBatchSize),
+					Math.min(limit, objectRecoveryBatchSize(this.statementAllowance)),
+					this.statementAllowance,
 					logger
 				);
 
@@ -853,7 +855,7 @@ export class BlobReaperService {
 					this.d1,
 					this.blobs,
 					kind,
-					Math.min(limit, objectDeletionBatchSize)
+					Math.min(limit, objectDeletionBatchSize(this.statementAllowance))
 				);
 
 				return {

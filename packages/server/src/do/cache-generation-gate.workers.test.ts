@@ -30,7 +30,6 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
 	attestationListObjectKey,
-	d1StatementsPerInvocation,
 	narInfoObjectKey,
 	narObjectKey,
 	requestOriginSchema
@@ -45,6 +44,7 @@ import {
 	currentNarObjectKey,
 	currentServer,
 	currentServerTenant,
+	deployedStatementAllowance,
 	driveToCompletion,
 	fetchPath,
 	fileAttestationReference,
@@ -1614,7 +1614,7 @@ describe('cache generation gate', () => {
 		expect({
 			small,
 			large,
-			allowance: d1StatementsPerInvocation
+			allowance: await deployedStatementAllowance()
 		}).toStrictEqual({ small: 4, large: 4, allowance: 50 });
 	}, 240_000);
 
@@ -1632,14 +1632,17 @@ describe('cache generation gate', () => {
 		// The deployed cap in the worst case: every chunk full and the sweep run.
 		// Measuring both costs rather than restating the constant means a wider cap
 		// or a costlier chunk fails here instead of on Workers Free.
+		const allowance = await deployedStatementAllowance();
+
 		expect({
 			oneChunk,
 			twoChunks,
 			perChunk,
 			perPass,
 			worstCase:
-				perPass + (maxPathsTornDownPerRun / maxFencedRetireRows) * perChunk,
-			allowance: d1StatementsPerInvocation
+				perPass +
+				(maxPathsTornDownPerRun(allowance) / maxFencedRetireRows) * perChunk,
+			allowance
 		}).toStrictEqual({
 			oneChunk: 9,
 			twoChunks: 15,
@@ -1664,7 +1667,7 @@ describe('cache generation gate', () => {
 		expect({
 			perPass,
 			worstPass: Math.max(...perPass),
-			allowance: d1StatementsPerInvocation,
+			allowance: await deployedStatementAllowance(),
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({

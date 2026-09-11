@@ -321,6 +321,10 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'listAccounts');
 			return Promise.resolve([]);
 		},
+		listAccountSubscriptions: () => {
+			recordApiCall(apiCalls, 'listAccountSubscriptions');
+			return Promise.resolve({ kind: 'listed' as const, subscriptions: [] });
+		},
 		r2BucketExists: () => {
 			recordApiCall(apiCalls, 'r2BucketExists');
 			return Promise.resolve(false);

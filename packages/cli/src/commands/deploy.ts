@@ -7,6 +7,15 @@ import { type Command, InvalidArgumentError } from 'commander';
 import { parseCacheAccess } from '../cache-access.ts';
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
+import type { WorkersPlanOverride } from '../deploy/workers-plan.ts';
+
+function parseWorkersPlan(value: string): WorkersPlanOverride {
+	if (value !== 'free' && value !== 'paid') {
+		throw new InvalidArgumentError('Workers plan must be free or paid.');
+	}
+
+	return value;
+}
 
 function parseInstanceName(value: string): InstanceName {
 	const parsed = instanceNameSchema.safeParse(value);
@@ -48,6 +57,13 @@ export function registerDeployCommand(
 		.option(
 			'--no-wrangler',
 			"do not use a logged-in wrangler's stored token; log in directly"
+		)
+		.option(
+			'--workers-plan <plan>',
+			"Workers plan to size the deployment's D1 statement budgets for, when " +
+				"the deployment token cannot read the account's subscriptions: free " +
+				'or paid',
+			parseWorkersPlan
 		)
 		.option('--dry-run', 'show the plan without making any changes')
 		.option('--from-tree', 'bundle the working tree even from a built binary')

@@ -18,11 +18,7 @@ import {
 	signingKeyBackfills,
 	signingKeys
 } from '../db/schema.ts';
-import {
-	d1StatementsPerInvocation,
-	narInfoObjectKey,
-	requestOriginSchema
-} from '../http/http.ts';
+import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -45,11 +41,15 @@ import {
 	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withDeployedStatementAllowance
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
-import { teardownEntryPrefix } from './cache-admin-service.ts';
+import {
+	maxPathsTornDownPerRun,
+	teardownEntryPrefix
+} from './cache-admin-service.ts';
 import { verifyBackstopKey } from './commit-pipeline-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
@@ -71,9 +71,15 @@ const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 // of that size to fill a large cache without queueing behind the cap.
 const pushConcurrency = 6;
 
-// More paths than one teardown pass can retire, so the drain stops on its
-// statement allowance and later alarms have to resume it.
-const committedPaths = 360;
+// A statement allowance small enough that a teardown pass retires one chunk.
+// The property under test is scale-independent: a pass respects its allowance
+// and resumes. Proving it at a small allowance keeps the fixture to tens of
+// paths rather than the hundreds a production-sized cap would need.
+const teardownAllowance = 15;
+
+// One path more than a pass can retire, so the drain stops on its statement
+// allowance and later alarms have to resume it.
+const committedPaths = maxPathsTornDownPerRun(teardownAllowance) + 1;
 
 type AlarmObservation = MeasuredInvocation<{
 	readonly pass: string;
@@ -105,8 +111,9 @@ async function publishCommittedPaths(server: string): Promise<void> {
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 	for (let start = 0; start < committedPaths; start += pushConcurrency) {
+		const group = Math.min(pushConcurrency, committedPaths - start);
 		await Promise.all(
-			Array.from({ length: pushConcurrency }, (_, offset) =>
+			Array.from({ length: group }, (_, offset) =>
 				pushPath(token, indexedMetadata(start + offset), buildsCache)
 			)
 		);
@@ -128,6 +135,7 @@ async function driveAlarms(
 	readonly teardownPending: unknown;
 	readonly collectionPending: unknown;
 	readonly queuedDeletions: number;
+	readonly statementAllowance: number;
 }> {
 	await publishCommittedPaths(server);
 
@@ -142,9 +150,6 @@ async function driveAlarms(
 		});
 
 		const cache = resolvedCache(instance.context, buildsCache);
-		await instance.runCacheTeardown(buildsCache, origin);
-		await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
-
 		const teardownKey = `${teardownEntryPrefix}${String(cache.id)}`;
 		const queueDepth = (): number =>
 			drizzle(state.storage, { schema: { narInfoDeletions } })
@@ -152,25 +157,43 @@ async function driveAlarms(
 				.from(narInfoDeletions)
 				.all().length;
 
-		const alarms = await measureInvocations(state, counting, {
-			attempts: maxAlarms,
-			// Filling the cache runs alarms of its own, which leave the maintenance
-			// pass cursor wherever they finished. This fixture asserts which pass
-			// each alarm runs, so start the rotation from the first pass.
-			prepare: () => state.storage.delete(maintenancePassCursorKey),
-			isDue: async () =>
-				(await state.storage.get(teardownKey)) !== undefined ||
-				(await state.storage.get(gcContinuationKey)) !== undefined,
-			run: async () => {
-				const queuedDeletions = queueDepth();
-				await instance.alarm();
+		// The cache was filled at the deployed allowance. The deletion and every
+		// measured alarm run at the small one, as a deployment on that allowance
+		// would.
+		const driven = await withDeployedStatementAllowance(
+			instance.context,
+			teardownAllowance,
+			async () => {
+				await instance.runCacheTeardown(buildsCache, origin);
+				await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
+
+				const alarms = await measureInvocations(state, counting, {
+					attempts: maxAlarms,
+					// Filling the cache runs alarms of its own, which leave the
+					// maintenance pass cursor wherever they finished. This fixture
+					// asserts which pass each alarm runs, so start the rotation from
+					// the first pass.
+					prepare: () => state.storage.delete(maintenancePassCursorKey),
+					isDue: async () =>
+						(await state.storage.get(teardownKey)) !== undefined ||
+						(await state.storage.get(gcContinuationKey)) !== undefined,
+					run: async () => {
+						const queuedDeletions = queueDepth();
+						await instance.alarm();
+
+						return {
+							pass: await currentMaintenancePass(state),
+							queuedDeletions
+						};
+					}
+				});
 
 				return {
-					pass: await currentMaintenancePass(state),
-					queuedDeletions
+					alarms,
+					statementAllowance: instance.context.d1StatementsPerInvocation
 				};
 			}
-		});
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
@@ -178,7 +201,7 @@ async function driveAlarms(
 		});
 
 		return {
-			alarms,
+			...driven,
 			teardownPending: await state.storage.get(teardownKey),
 			collectionPending: await state.storage.get(gcContinuationKey),
 			queuedDeletions: queueDepth()
@@ -189,7 +212,7 @@ async function driveAlarms(
 describe('alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps teardown and garbage-collection alarms within the 50-statement D1 limit', async () => {
+	it('keeps teardown and garbage-collection alarms within their D1 statement allowance', async () => {
 		const driven = await driveAlarms('alarm-allowance-cap', 12);
 
 		// A teardown drain and a collection pass each size their page for a whole
@@ -197,17 +220,17 @@ describe('alarm D1 statement allowance', () => {
 		// Counting whole invocations means a costlier pass fails here instead of
 		// on Workers Free.
 		//
-		// The first alarm issues 44 statements: one to invalidate maintenance
-		// eligibility, six for each of seven retirement chunks, and one to
-		// reconcile eligibility afterwards. Each later count depends on the rows
-		// processed earlier, so assert only that it does not exceed the allowance.
+		// The first alarm issues eight statements: one to invalidate maintenance
+		// eligibility, six for its one retirement chunk, and one to reconcile
+		// eligibility afterwards. Each later count depends on the rows processed
+		// earlier, so assert only that it does not exceed the allowance.
 		expect({
 			queuedDeletionsAtFirstAlarm: driven.alarms[0]?.queuedDeletions,
 			firstAlarmStatements: driven.alarms[0]?.statements,
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -216,9 +239,9 @@ describe('alarm D1 statement allowance', () => {
 			queuedDeletions: driven.queuedDeletions
 		}).toStrictEqual({
 			queuedDeletionsAtFirstAlarm: committedPaths,
-			firstAlarmStatements: 44,
+			firstAlarmStatements: 8,
 			overAllowanceAlarms: [],
-			statementAllowance: 50,
+			statementAllowance: teardownAllowance,
 			// Only teardown and garbage collection are due in this fixture. Any
 			// other value identifies unrelated maintenance work that ran during the
 			// alarm loop.
@@ -234,8 +257,8 @@ describe('alarm D1 statement allowance', () => {
 
 		// Each alarm starts its search after the maintenance pass recorded by the
 		// previous alarm, so garbage collection runs before teardown finishes.
-		// Given 360 queued deletions and the configured pass limits, both work
-		// sources complete in the three alarms asserted below.
+		// The fixture holds one path more than a teardown pass retires, so both
+		// work sources complete in the four alarms asserted below.
 		expect({
 			queuedDeletionsAtFirstAlarm: driven.alarms[0]?.queuedDeletions,
 			passes: driven.alarms.map((alarm) => alarm.pass),
@@ -257,9 +280,15 @@ describe('alarm D1 statement allowance', () => {
 	}, 240_000);
 });
 
-// More queued reconcile targets than one pass can probe within its statement
-// allowance, so the queue only drains across successive alarms.
-const reconciledPaths = 100;
+// A statement allowance that leaves a reconcile pass a page of a few targets
+// and enough remaining statements for four restores.
+const reconcileAllowance = 20;
+
+const reconcilePageSize = maxPathsReconciledPerRun(reconcileAllowance);
+
+// Three pages of targets, less the two the first pass has to leave queued, so
+// the queue drains on the third alarm.
+const reconciledPaths = reconcilePageSize * 3 - 2;
 
 // The fixture removes this many published narinfo objects before it queues the
 // paths. Each missing object requires two repair statements after the probe.
@@ -347,6 +376,8 @@ async function driveReconcileAlarms(
 	readonly alarms: readonly ReconcileAlarmObservation[];
 	readonly queuedTargets: number;
 	readonly restoredObjects: number;
+	readonly statementAllowance: number;
+	readonly pageSize: number;
 }> {
 	const paths = await commitReconcilePaths(server);
 
@@ -370,27 +401,39 @@ async function driveReconcileAlarms(
 				return queuedTargets.size;
 			};
 
-			const alarms = await measureInvocations(state, counting, {
-				attempts: maxAlarms,
-				prepare: () => queueReconcileTargets(queue, cache.id, paths),
-				isDue: () => queue.hasPending(),
-				run: async () => {
-					const queuedTargets = await queueDepth();
-					await instance.alarm();
+			// The paths were committed at the deployed allowance. Every measured
+			// alarm runs at the small one, as a deployment on that allowance would.
+			const measured = await withDeployedStatementAllowance(
+				instance.context,
+				reconcileAllowance,
+				async () => ({
+					alarms: await measureInvocations(state, counting, {
+						attempts: maxAlarms,
+						prepare: () => queueReconcileTargets(queue, cache.id, paths),
+						isDue: () => queue.hasPending(),
+						run: async () => {
+							const queuedTargets = await queueDepth();
+							await instance.alarm();
 
-					return {
-						pass: await currentMaintenancePass(state),
-						queuedTargets
-					};
-				}
-			});
+							return {
+								pass: await currentMaintenancePass(state),
+								queuedTargets
+							};
+						}
+					}),
+					statementAllowance: instance.context.d1StatementsPerInvocation,
+					pageSize: maxPathsReconciledPerRun(
+						instance.context.d1StatementsPerInvocation
+					)
+				})
+			);
 
 			Object.defineProperty(instance.context, 'd1', {
 				configurable: true,
 				value: real
 			});
 
-			return { alarms, queuedTargets: await queueDepth() };
+			return { ...measured, queuedTargets: await queueDepth() };
 		}
 	);
 
@@ -470,6 +513,8 @@ async function driveBackstopAlarms(
 ): Promise<{
 	readonly alarms: readonly BackstopAlarmObservation[];
 	readonly pendingRows: number;
+	readonly statementAllowance: number;
+	readonly settleLimit: number;
 }> {
 	await queueBackstopReuseRows(server);
 	const counting = countingD1(env.CUPBOARD_DB);
@@ -516,18 +561,25 @@ async function driveBackstopAlarms(
 			value: real
 		});
 
-		return { alarms, pendingRows: pendingDepth() };
+		const statementAllowance = instance.context.d1StatementsPerInvocation;
+
+		return {
+			alarms,
+			pendingRows: pendingDepth(),
+			statementAllowance,
+			settleLimit: verifyBackstopReuseSettleLimit(statementAllowance)
+		};
 	});
 }
 
 describe('reconcile alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every reconcile alarm within the 50-statement D1 limit', async () => {
+	it('keeps every reconcile alarm within its D1 statement allowance', async () => {
 		const driven = await driveReconcileAlarms('alarm-allowance-reconcile', 12);
 
-		// The first alarm spends 49 of the 50 statements: one to invalidate
-		// maintenance eligibility, 38 for the probes, one for the committed
+		// The first alarm spends 19 of its 20 statements: one to invalidate
+		// maintenance eligibility, eight for the probes, one for the committed
 		// reference edge query, eight to restore four objects, and one to reconcile
 		// eligibility afterwards. Earlier repairs change the later statement counts,
 		// so assert only that every later alarm stays within the allowance.
@@ -535,9 +587,9 @@ describe('reconcile alarm D1 statement allowance', () => {
 			queuedAtFirstAlarm: driven.alarms[0]?.queuedTargets,
 			firstAlarmStatements: driven.alarms[0]?.statements,
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -545,9 +597,9 @@ describe('reconcile alarm D1 statement allowance', () => {
 			restoredObjects: driven.restoredObjects
 		}).toStrictEqual({
 			queuedAtFirstAlarm: reconciledPaths,
-			firstAlarmStatements: 49,
+			firstAlarmStatements: 19,
 			overAllowanceAlarms: [],
-			statementAllowance: 50,
+			statementAllowance: reconcileAllowance,
 			passes: ['reconcile'],
 			queuedTargets: 0,
 			restoredObjects: brokenNarInfoObjects
@@ -560,18 +612,24 @@ describe('reconcile alarm D1 statement allowance', () => {
 			12
 		);
 
-		// The first pass probes a full page of 38, but its allowance covers only four
-		// of the six
-		// restores, so it clears 36 targets and leaves two queued. The second pass
-		// probes another full page, which the two re-queued targets rejoin at the
-		// front of the queue order, and has enough allowance for both restores.
+		// The first pass probes a full page of eight, but its allowance covers only
+		// four of the six restores, so it clears six targets and leaves two queued.
+		// The second pass probes another full page, which the two re-queued targets
+		// rejoin at the front of the queue order, and has enough allowance for both
+		// restores.
+		const afterFirstPass = reconciledPaths - (reconcilePageSize - 2);
+
 		expect({
-			pageSize: maxPathsReconciledPerRun,
+			pageSize: driven.pageSize,
 			queueDepths: driven.alarms.map((alarm) => alarm.queuedTargets),
 			queuedTargets: driven.queuedTargets
 		}).toStrictEqual({
-			pageSize: 38,
-			queueDepths: [100, 64, 26],
+			pageSize: reconcilePageSize,
+			queueDepths: [
+				reconciledPaths,
+				afterFirstPass,
+				afterFirstPass - reconcilePageSize
+			],
 			queuedTargets: 0
 		});
 	}, 240_000);
@@ -750,7 +808,7 @@ describe('reconcile queue retention', () => {
 describe('verify backstop alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every backstop alarm within the 50-statement D1 limit', async () => {
+	it('keeps every backstop alarm within its D1 statement allowance', async () => {
 		const driven = await driveBackstopAlarms('alarm-allowance-backstop', 12);
 
 		// Each alarm settles two rows: two statements for maintenance eligibility,
@@ -759,12 +817,12 @@ describe('verify backstop alarm D1 statement allowance', () => {
 		// because every row settles.
 		expect({
 			pendingAtFirstAlarm: driven.alarms[0]?.pendingRows,
-			settleLimit: verifyBackstopReuseSettleLimit,
+			settleLimit: driven.settleLimit,
 			alarmStatements: driven.alarms.map((alarm) => alarm.statements),
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -835,6 +893,8 @@ async function driveBackfillAlarms(
 	readonly alarms: readonly BackfillAlarmObservation[];
 	readonly resigned: number;
 	readonly pendingBackfills: number;
+	readonly statementAllowance: number;
+	readonly entriesPerPass: number;
 }> {
 	await queueSigningKeyBackfill(server);
 
@@ -914,10 +974,14 @@ async function driveBackfillAlarms(
 			value: real
 		});
 
+		const statementAllowance = instance.context.d1StatementsPerInvocation;
+
 		return {
 			alarms,
 			resigned: resignedCount(),
-			pendingBackfills: pendingBackfills()
+			pendingBackfills: pendingBackfills(),
+			statementAllowance,
+			entriesPerPass: backfillEntriesPerPass(statementAllowance)
 		};
 	});
 }
@@ -925,7 +989,7 @@ async function driveBackfillAlarms(
 describe('signing key backfill alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every backfill alarm within the 50-statement D1 limit', async () => {
+	it('keeps every backfill alarm within its D1 statement allowance', async () => {
 		const driven = await driveBackfillAlarms('alarm-allowance-backfill', 12);
 
 		// The first alarm stages the whole batch, which writes only to the Durable
@@ -933,12 +997,12 @@ describe('signing key backfill alarm D1 statement allowance', () => {
 		// statements each: one to render the narinfo and one to confirm the
 		// written object.
 		expect({
-			entriesPerPass: backfillEntriesPerPass,
+			entriesPerPass: driven.entriesPerPass,
 			alarmStatements: driven.alarms.map((alarm) => alarm.statements),
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
