@@ -17,10 +17,12 @@ import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -39,11 +41,14 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	runGcResult,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
+import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
+import { type LocalStepOutcome } from './local-step.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 
@@ -110,6 +115,21 @@ async function policyIdentityRows(): Promise<
 		cacheId: row.cacheId ?? undefined,
 		rootNamePrefix: row.rootNamePrefix ?? undefined
 	}));
+}
+
+function wake(): Promise<LocalStepOutcome> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.reportLocalStep()
+	);
+}
+
+async function projectedCaches(): Promise<number> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ cache: d1Schema.cacheLifecycle.cache })
+		.from(d1Schema.cacheLifecycle)
+		.all();
+
+	return rows.length;
 }
 
 const buildsCache = cacheNameSchema.parse('builds');
@@ -449,6 +469,101 @@ describe('cache registry admin', () => {
 				},
 				prefixPolicy
 			]
+		});
+	});
+
+	it('fills the identity of rows a forward write left behind', async () => {
+		await useTestServer('cache-admin-identity-reconcile');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+		// A collection pass reaches the default cache, which nothing has
+		// registered, so it writes a revision row with no identity. The insert
+		// does nothing on conflict, so no later pass repairs it.
+		await runGcResult();
+
+		const collectionState = (): Promise<
+			{ cache: string; cacheId: CacheId | undefined }[]
+		> =>
+			runInDurableObject(currentServer(), (instance) =>
+				instance.context.db
+					.select({
+						cache: schema.garbageCollectionRevisions.cache,
+						cacheId: schema.garbageCollectionRevisions.cacheId
+					})
+					.from(schema.garbageCollectionRevisions)
+					.orderBy(schema.garbageCollectionRevisions.cache)
+					.all()
+					.map((row) => ({
+						cache: row.cache,
+						cacheId: row.cacheId ?? undefined
+					}))
+			);
+
+		const beforeStep = await collectionState();
+
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep()
+		);
+
+		const afterStep = await collectionState();
+		const identities = await cacheIdentities();
+
+		expect({
+			beforeStep,
+			afterStep,
+			identities: identities.map(({ scope }) => scope)
+		}).toStrictEqual({
+			beforeStep: [
+				{ cache: '', cacheId: undefined },
+				{ cache: 'builds', cacheId: undefined }
+			],
+			afterStep: [
+				{ cache: '', cacheId: 2 },
+				{ cache: 'builds', cacheId: 1 }
+			],
+			identities: [{ kind: 'named', name: 'builds' }, { kind: 'default' }]
+		});
+	});
+
+	it('finishes projecting more caches than one invocation allows over two wakes', async () => {
+		await useTestServer('cache-admin-identity-projection');
+
+		const init = await bootstrap();
+		// More empty caches than one invocation projects. The backfill sees a
+		// cache only where a reference or credential mentions it, so an empty one
+		// reaches D1 only through this projection.
+		const cacheCount = maxCachesProjectedPerRun + 5;
+
+		for (let index = 0; index < cacheCount; index += 1) {
+			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
+		}
+
+		// A commit writes a lifecycle row for the cache it targets, so the count
+		// before the first wake is not zero. Compare the growth rather than the
+		// total.
+		const beforeWake = await projectedCaches();
+		const first = await wake();
+		const afterFirst = await projectedCaches();
+		const second = await wake();
+		const afterSecond = await projectedCaches();
+
+		expect({
+			first: first.kind,
+			projectedByFirst: afterFirst - beforeWake,
+			second: second.kind,
+			// Every cache the tenant has, plus the default one.
+			total: afterSecond
+		}).toStrictEqual({
+			first: 'incomplete',
+			projectedByFirst: maxCachesProjectedPerRun,
+			second: 'recorded',
+			total: cacheCount + 1
 		});
 	});
 
