@@ -101,35 +101,6 @@ async function cacheIdentities(): Promise<
 		deleted: row.deletedAt !== null
 	}));
 }
-async function policyIdentityRows(): Promise<
-	{
-		pattern: string;
-		kind: string | undefined;
-		cacheId: CacheId | undefined;
-		rootNamePrefix: string | undefined;
-	}[]
-> {
-	const rows = await runInDurableObject(currentServer(), (instance) =>
-		instance.context.db
-			.select({
-				pattern: schema.retentionPolicies.pattern,
-				kind: schema.retentionPolicies.kind,
-				cacheId: schema.retentionPolicies.cacheId,
-				rootNamePrefix: schema.retentionPolicies.rootNamePrefix
-			})
-			.from(schema.retentionPolicies)
-			.orderBy(schema.retentionPolicies.pattern)
-			.all()
-	);
-
-	return rows.map((row) => ({
-		pattern: row.pattern,
-		kind: row.kind ?? undefined,
-		cacheId: row.cacheId ?? undefined,
-		rootNamePrefix: row.rootNamePrefix ?? undefined
-	}));
-}
-
 async function recordPhase(phase: DeploymentPhaseName): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.insert(d1Schema.deploymentPhase)
@@ -328,6 +299,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -335,6 +309,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 1,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			}
 		]);
@@ -384,6 +361,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -391,6 +371,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: true,
 				earliestGraceDeadline: earlierLiveDeadline
 			}
@@ -536,68 +519,6 @@ describe('cache registry admin', () => {
 				roots: [{ cacheId: 2 }],
 				targets: [{ cacheId: 2 }]
 			}
-		});
-	});
-
-	it('records the identity of the cache a policy names', async () => {
-		await useTestServer('cache-admin-identity-policy');
-
-		const init = await bootstrap();
-		const addPolicy = (body: unknown): Promise<Response> =>
-			authorisedFetch('/policies', init.token, {
-				body: JSON.stringify(body),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			});
-
-		// A cache-scoped policy names a cache, so it can only be added once that
-		// cache exists.
-		const beforeCache = await addPolicy({
-			scope: 'cache',
-			cache: buildsCache,
-			ttlSeconds: 3600
-		});
-
-		await putCache(init.token, 'builds', 40);
-		await putCache(init.token, 'guides', 40, 'private');
-		await addPolicy({ scope: 'cache', cache: buildsCache, ttlSeconds: 3600 });
-		await addPolicy({
-			scope: 'cache',
-			cache: namedCache('guides'),
-			ttlSeconds: 3600
-		});
-		await addPolicy({
-			scope: 'root-name-prefix',
-			pattern: 'release/',
-			ttlSeconds: 7200
-		});
-
-		expect({
-			beforeCache: beforeCache.status,
-			policies: await policyIdentityRows()
-		}).toStrictEqual({
-			beforeCache: StatusCodes.NOT_FOUND,
-			policies: [
-				{
-					pattern: 'builds',
-					kind: 'cache',
-					cacheId: 2,
-					rootNamePrefix: undefined
-				},
-				// The legacy pattern still spells out a private cache's access.
-				{
-					pattern: 'private/guides',
-					kind: 'cache',
-					cacheId: 3,
-					rootNamePrefix: undefined
-				},
-				{
-					pattern: 'release/',
-					kind: 'root-name-prefix',
-					cacheId: undefined,
-					rootNamePrefix: 'release/'
-				}
-			]
 		});
 	});
 
@@ -968,6 +889,9 @@ describe('cache registry admin', () => {
 					access: 'public',
 					priority: 30,
 					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [],
 					graceManaged: false
 				}
 			},

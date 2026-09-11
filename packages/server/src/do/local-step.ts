@@ -6,6 +6,10 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import {
+	advanceCacheRetentionMigration,
+	retentionMigrationBatchSize
+} from '../migration/cache-retention.ts';
 
 import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { projectLocalCacheLifecycles } from './cache-lifecycle-projection.ts';
@@ -89,6 +93,12 @@ export async function recordLocalStep(
 
 	if (incarnationMove.hasMore) {
 		return { kind: 'incomplete', projected: incarnationMove.moved };
+	}
+
+	const retention = await advanceCacheRetentionMigration(context.db);
+
+	if (retention.status === 'pending') {
+		return { kind: 'incomplete', projected: retentionMigrationBatchSize };
 	}
 
 	await context.d1

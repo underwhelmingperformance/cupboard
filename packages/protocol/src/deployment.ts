@@ -35,12 +35,15 @@ export function localStep(value: number): LocalStep {
  * stored objects off the keys its old `private/`-prefixed name gave them, which
  * a migration cannot do either, because those objects are in R2. Step 3 moves
  * the stored objects of a cache above its first generation onto the keys that
- * carry that generation.
+ * carry that generation. Step 4 gives each cache the retention that the
+ * tenant's prefix policies gave it. A migration cannot do that either, because
+ * a tenant can hold more policies and caches than one Durable Object
+ * invocation may read and write.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(3);
+export const currentLocalStep: LocalStep = localStep(4);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a

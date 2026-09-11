@@ -25,7 +25,10 @@ import {
 	type BuildSubjectV3,
 	invocationIdSchema
 } from '@cupboard/protocol/build';
-import type { RootSetBody } from '@cupboard/protocol/retention';
+import type {
+	RootRetentionRequest,
+	RootSetBody
+} from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 import { z } from 'zod';
@@ -71,7 +74,11 @@ import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-import { parsePathFile, validateRetentionChoice } from './push.ts';
+import {
+	parsePathFile,
+	rootRetentionChoice,
+	validateRetentionChoice
+} from './push.ts';
 
 declare module 'commander' {
 	interface Command {
@@ -84,11 +91,13 @@ interface BuildPushOptions {
 	readonly audience?: Audience;
 	readonly root?: RootName;
 	readonly ttl?: TtlSeconds;
+	readonly permanent?: boolean;
 	readonly retain?: boolean;
 	readonly closure?: boolean;
 	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
+	readonly runRootPermanent?: boolean;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
@@ -321,7 +330,7 @@ interface AggregateCohortRootOptions {
 	readonly failed: boolean;
 	readonly root: RootName;
 	readonly settledTargets: ReadonlyMap<number, readonly StorePathString[]>;
-	readonly ttlSeconds?: TtlSeconds;
+	readonly retention: RootRetentionRequest;
 }
 
 /**
@@ -347,9 +356,7 @@ export async function updateAggregateCohortRoot(
 
 	await setRoot(options.root, {
 		targets: [...targets],
-		...(options.ttlSeconds !== undefined && {
-			ttlSeconds: options.ttlSeconds
-		})
+		retention: options.retention
 	});
 }
 
@@ -443,12 +450,13 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--ttl <duration>',
-			'expire the retained targets after this duration (e.g. 7d, 12h); default permanent',
+			'expire the retained targets after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--permanent', 'retain the target root permanently')
 		.option(
 			'--no-retain',
-			"publish without any target root; the paths are kept only by the destination cache's retention grace policy, if one covers that cache"
+			"publish without any target root; the paths are kept only by the destination cache's configured retention grace"
 		)
 		.option(
 			'--closure',
@@ -465,9 +473,10 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--run-root-ttl <duration>',
-			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
+			'expire the run root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--run-root-permanent', 'retain the run root permanently')
 		.option(
 			'--no-wait',
 			'reconcile without waiting for deferred blobs to become servable; an unconfirmed root is left untouched'
@@ -645,13 +654,14 @@ export function registerBuildPushCommand(
 								targetRoot !== undefined && {
 									root: targetRoot
 								}),
-							...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+							retention: rootRetentionChoice(options.ttl, options.permanent),
 							...(options.runRoot !== undefined && {
 								runRoot: {
 									name: options.runRoot,
-									...(options.runRootTtl !== undefined && {
-										ttlSeconds: options.runRootTtl
-									})
+									retention: rootRetentionChoice(
+										options.runRootTtl,
+										options.runRootPermanent
+									)
 								}
 							}),
 							...(options.closure !== undefined && {
@@ -756,9 +766,7 @@ export function registerBuildPushCommand(
 								failed: firstFailure !== undefined,
 								root: targetRoot,
 								settledTargets,
-								...(options.ttl !== undefined && {
-									ttlSeconds: options.ttl
-								})
+								retention: rootRetentionChoice(options.ttl, options.permanent)
 							},
 							(root, body) =>
 								reporter.phase('Updating retention root', async () => {

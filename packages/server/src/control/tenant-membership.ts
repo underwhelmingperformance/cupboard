@@ -26,6 +26,7 @@ import {
 import { tenantServer } from '../routing/durable-object.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
+import { tenantMemberKey } from './tenant-member-key.ts';
 
 // Admission first checks an in-memory filter, then a per-tenant KV marker, and
 // finally the authoritative D1 row. The first two layers can reject a slug or
@@ -34,7 +35,6 @@ import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
-const memberKeyPrefix = 'tenant-member:';
 const filterKey = 'tenant-filter';
 const defaultCacheScope: CacheScope = { kind: 'default' };
 
@@ -88,10 +88,6 @@ const firstCacheVersion: CacheLifecycleVersion = {
 
 interface DeferredContext {
 	waitUntil(promise: Promise<unknown>): void;
-}
-
-export function tenantMemberKey(slug: TenantId): string {
-	return `${memberKeyPrefix}${slug}`;
 }
 
 // Writes the per-tenant membership marker. Reliable on create (the caller awaits

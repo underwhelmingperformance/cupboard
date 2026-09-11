@@ -15,6 +15,7 @@ import {
 	observedCopiesSchema
 } from '@cupboard/protocol/build';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -44,6 +45,8 @@ import {
 	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
+	RootRetentionOptionConflictError,
+	RunRootRetentionWithoutRunRootError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 import { PublicationCollection } from '../push/publication.ts';
@@ -59,6 +62,7 @@ interface PushOptions {
 	readonly audience?: Audience;
 	readonly root?: RootName;
 	readonly ttl?: TtlSeconds;
+	readonly permanent?: boolean;
 	readonly closure?: boolean;
 	readonly intermediatePathsFile?: string;
 	readonly referencePathsFile?: string;
@@ -67,6 +71,7 @@ interface PushOptions {
 	readonly readPassword?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
+	readonly runRootPermanent?: boolean;
 	readonly store?: string;
 	readonly receiptFile?: string;
 	readonly alreadyHeld?: readonly string[] | false;
@@ -95,10 +100,12 @@ export function validateRetentionChoice(
 		| 'retain'
 		| 'root'
 		| 'ttl'
+		| 'permanent'
 		| 'githubOidc'
 		| 'dryRun'
 		| 'runRoot'
 		| 'runRootTtl'
+		| 'runRootPermanent'
 	>
 ): void {
 	if (options.retain === false && options.root !== undefined) {
@@ -109,12 +116,31 @@ export function validateRetentionChoice(
 		throw new NoRetainConflictError('--ttl');
 	}
 
+	if (options.retain === false && options.permanent === true) {
+		throw new NoRetainConflictError('--permanent');
+	}
+
+	if (options.ttl !== undefined && options.permanent === true) {
+		throw new RootRetentionOptionConflictError();
+	}
+
 	// The run root is independent of the target root: an unretained push may
 	// still bind a run root, and its commits join that root while the push
 	// declares no target root. Only a `--run-root-ttl` with no `--run-root`
 	// is refused.
 	if (options.runRootTtl !== undefined && options.runRoot === undefined) {
 		throw new RunRootTtlWithoutRunRootError();
+	}
+
+	if (options.runRootPermanent === true && options.runRoot === undefined) {
+		throw new RunRootRetentionWithoutRunRootError('--run-root-permanent');
+	}
+
+	if (options.runRootTtl !== undefined && options.runRootPermanent === true) {
+		throw new RootRetentionOptionConflictError(
+			'--run-root-ttl',
+			'--run-root-permanent'
+		);
 	}
 
 	if (
@@ -125,6 +151,17 @@ export function validateRetentionChoice(
 	) {
 		throw new OidcRetentionChoiceRequiredError();
 	}
+}
+
+export function rootRetentionChoice(
+	ttl: TtlSeconds | undefined,
+	permanent: boolean | undefined
+): RootRetentionRequest {
+	if (ttl !== undefined) {
+		return { kind: 'duration', seconds: ttl };
+	}
+
+	return permanent === true ? { kind: 'permanent' } : { kind: 'inherit' };
 }
 
 /**
@@ -306,12 +343,13 @@ export function registerPushCommand(
 		)
 		.option(
 			'--ttl <duration>',
-			'expire the retained paths after this duration (e.g. 7d, 12h); default permanent',
+			'expire the retained paths after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--permanent', 'retain the target root or pins permanently')
 		.option(
 			'--no-retain',
-			"publish without any retention root or per-path pin; the paths are kept only by the destination cache's retention grace policy, if one covers that cache"
+			"publish without any retention root or per-path pin; the paths are kept only by the destination cache's configured retention grace"
 		)
 		.option(
 			'--closure',
@@ -346,9 +384,10 @@ export function registerPushCommand(
 		)
 		.option(
 			'--run-root-ttl <duration>',
-			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
+			'expire the run root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
+		.option('--run-root-permanent', 'retain the run root permanently')
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store (default: the store Nix itself would use)',
@@ -546,13 +585,14 @@ export function registerPushCommand(
 				attest: options.attest,
 				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root !== undefined && { root: options.root }),
-				...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+				retention: rootRetentionChoice(options.ttl, options.permanent),
 				...(options.runRoot !== undefined && {
 					runRoot: {
 						name: options.runRoot,
-						...(options.runRootTtl !== undefined && {
-							ttlSeconds: options.runRootTtl
-						})
+						retention: rootRetentionChoice(
+							options.runRootTtl,
+							options.runRootPermanent
+						)
 					}
 				}),
 				...(options.retain !== undefined && { retain: options.retain }),

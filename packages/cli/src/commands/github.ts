@@ -1,9 +1,6 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import {
-	type CachePriority,
-	type GraceSeconds
-} from '@cupboard/nix-store/scalars';
+import { type CachePriority } from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
@@ -30,7 +27,6 @@ import { resilientFetcher } from '../client/transport.ts';
 
 const maximumCacheInfoBytes = 1024 * 1024;
 import { parseWorkerUrl } from '../client/transport.ts';
-import { parseGrace } from '../duration.ts';
 import {
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
@@ -40,7 +36,6 @@ import {
 	GithubSetupDriftError,
 	GithubSetupOwnerRuleConflictError,
 	GithubSetupRemovalError,
-	GraceTooShortError,
 	ReadCredentialPairError
 } from '../errors.ts';
 import { parseReadUser } from '../read-user.ts';
@@ -52,7 +47,6 @@ import {
 	githubPullRequestClaims
 } from './github/claims.ts';
 import {
-	minimumGraceSeconds,
 	parseExactWorkflowReference,
 	parseWorkflowReference,
 	pullRequestPrefix,
@@ -62,7 +56,6 @@ import {
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { lookupRepository } from './oidc-trust/github.ts';
-import { type PolicyClient } from './policy.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
@@ -71,7 +64,6 @@ const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
 export interface GithubSetupOptions {
 	readonly repo: string;
 	readonly branch: string;
-	readonly grace: string;
 	readonly workflowRef: string;
 	readonly yes?: boolean;
 	readonly readUser?: ReadUser;
@@ -79,7 +71,6 @@ export interface GithubSetupOptions {
 }
 
 export interface GithubSetupClient {
-	readonly policies: Pick<PolicyClient, 'graceList' | 'graceAdd'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
 	readonly oidcTrust: {
 		list(): Promise<OidcTrustListResponse>;
@@ -559,39 +550,6 @@ interface PlannedSetupStep {
 	readonly apply?: () => Promise<void>;
 }
 
-async function planGracePolicy(
-	client: GithubSetupClient,
-	graceSeconds: GraceSeconds
-): Promise<PlannedSetupStep> {
-	const { policies } = await client.policies.graceList();
-	const existing = policies.find((policy) => policy.cachePrefix === '');
-
-	if (existing === undefined) {
-		return {
-			step: {
-				step: 'grace policy',
-				outcome: 'created',
-				detail: `tenant-wide grace ${String(graceSeconds)}s`
-			},
-			apply: async () => {
-				await client.policies.graceAdd({ cachePrefix: '', graceSeconds });
-			}
-		};
-	}
-
-	if (existing.graceSeconds === graceSeconds) {
-		return { step: { step: 'grace policy', outcome: 'unchanged' } };
-	}
-
-	return {
-		step: {
-			step: 'grace policy',
-			outcome: 'drift',
-			detail: `stored tenant-wide grace is ${String(existing.graceSeconds)}s, setup would write ${String(graceSeconds)}s`
-		}
-	};
-}
-
 async function planReuseView(
 	client: GithubSetupClient,
 	destinationPriority: CachePriority
@@ -694,12 +652,6 @@ export async function runGithubSetup(
 		dependencies.verifyWorkflowReference ?? verifyWorkflowReference;
 	const lookupOptions =
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
-	const graceSeconds = parseGrace(options.grace);
-
-	if (graceSeconds < minimumGraceSeconds) {
-		throw new GraceTooShortError(graceSeconds, minimumGraceSeconds);
-	}
-
 	const workflowReference = parseWorkflowReference(options.workflowRef);
 
 	if (workflowReference.pin.kind !== 'tag-pattern') {
@@ -795,11 +747,7 @@ export async function runGithubSetup(
 	);
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
-		() =>
-			Promise.all([
-				planGracePolicy(client, graceSeconds),
-				planReuseView(client, destination.priority)
-			])
+		async () => [await planReuseView(client, destination.priority)]
 	);
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'
@@ -1007,7 +955,7 @@ export function registerGithubCommands(
 	github
 		.command('setup')
 		.description(
-			'Configure the grace policy, pull-request reuse view and trust rules for cache-aware flake publication.'
+			'Configure the pull-request reuse view and trust rules for cache-aware flake publication.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
@@ -1015,7 +963,6 @@ export function registerGithubCommands(
 			'GitHub repository that will publish.'
 		)
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
-		.option('--grace <duration>', 'Tenant-wide retention grace period.', '24h')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
 			'Match job_workflow_ref to a full commit id, a tag ref for a release GitHub reports as immutable, or a tag pattern such as @refs/tags/v*. A pattern also trusts matching tags created later.'
@@ -1045,7 +992,6 @@ export function registerGithubCommands(
 				options,
 				ui,
 				{
-					policies: rpc.policies,
 					reuseViews: rpc.reuseViews,
 					oidcTrust: rpc.oidcTrust
 				},
@@ -1064,7 +1010,7 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			"Check tenant state against the quickstart's modelled pull-request and branch publications: trust rules and grants, grace coverage, reuse-view configuration and root-prefix nesting."
+			"Check tenant state against the quickstart's modelled pull-request and branch publications: trust rules and grants, reuse-view configuration and root-prefix nesting."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
@@ -1101,7 +1047,6 @@ export function registerGithubCommands(
 				options,
 				reporter,
 				{
-					policies: rpc.policies,
 					reuseViews: rpc.reuseViews,
 					oidcTrust: rpc.oidcTrust
 				},

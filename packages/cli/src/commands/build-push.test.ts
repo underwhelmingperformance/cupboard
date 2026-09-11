@@ -138,13 +138,19 @@ describe('aggregateCohortTargets', () => {
 					[1, [pathA]],
 					[2, [pathB]]
 				]),
-				ttlSeconds: ttl
+				retention: { kind: 'duration', seconds: ttl }
 			},
 			setRoot
 		);
 
 		expect(setRoot.mock.calls).toStrictEqual([
-			[root, { targets: [pathA, pathB], ttlSeconds: ttl }]
+			[
+				root,
+				{
+					targets: [pathA, pathB],
+					retention: { kind: 'duration', seconds: ttl }
+				}
+			]
 		]);
 	});
 
@@ -156,12 +162,15 @@ describe('aggregateCohortTargets', () => {
 				cohortCount: 2,
 				failed: false,
 				root,
-				settledTargets: new Map()
+				settledTargets: new Map(),
+				retention: { kind: 'inherit' }
 			},
 			setRoot
 		);
 
-		expect(setRoot.mock.calls).toStrictEqual([[root, { targets: [] }]]);
+		expect(setRoot.mock.calls).toStrictEqual([
+			[root, { targets: [], retention: { kind: 'inherit' } }]
+		]);
 	});
 
 	it('does not replace the root when any cohort failed', async () => {
@@ -175,7 +184,8 @@ describe('aggregateCohortTargets', () => {
 				settledTargets: new Map([
 					[1, [pathA]],
 					[2, [pathB]]
-				])
+				]),
+				retention: { kind: 'inherit' }
 			},
 			setRoot
 		);

@@ -23,11 +23,11 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { controlTenantCreate } from '../control/control-plane.ts';
+import { tenantMemberKey } from '../control/tenant-member-key.ts';
 import {
 	admitTenant,
 	refreshTenantMembership,
-	type TenantEntry,
-	tenantMemberKey
+	type TenantEntry
 } from '../control/tenant-membership.ts';
 import {
 	ensureTenant,
