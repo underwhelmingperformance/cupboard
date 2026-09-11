@@ -2,6 +2,8 @@ import type { Reporter } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
+import { DeploymentPhaseUnsettledError } from '../errors.ts';
+
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
@@ -92,7 +94,14 @@ const artifact: DeploymentArtifact = {
 	},
 	controlBundle: { mainModule: 'worker.js', code: 'control' },
 	tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant' },
-	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }],
+	d1Migrations: [
+		{
+			name: '0000_a.sql',
+			sha256:
+				'7f07f8d020fed7a8f79462634bc21708339f44069448533d8d9a9973f4386065',
+			statements: ['CREATE TABLE a (id);']
+		}
+	],
 	buildVersion: 'abc123def456'
 };
 
@@ -127,8 +136,23 @@ function absentString(): string | undefined {
 	return undefined;
 }
 
-function recordingApi(): { api: CloudflareApi; calls: string[] } {
+/**
+ * A Cloudflare API that records every call and tracks each script's deployed
+ * build. A script has no configuration until it is uploaded, and afterwards
+ * reports the build of that upload. `alreadyDeployed` sets the build each script
+ * is running when the deploy starts.
+ *
+ * The deploy checks the deployed build twice: before the uploads, to decide
+ * which scripts to upload, and after them, to confirm the new build is serving.
+ * Tracking the state lets both checks see what they would see in production.
+ */
+function recordingApi(
+	alreadyDeployed: Readonly<Record<string, DeployedBuild>> = {}
+): { api: CloudflareApi; calls: string[] } {
 	const calls: string[] = [];
+	const deployedBuilds = new Map<string, DeployedBuild>(
+		Object.entries(alreadyDeployed)
+	);
 
 	return {
 		calls,
@@ -196,13 +220,28 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`d1qr:${sql.slice(0, 12)}`);
 				return Promise.resolve([]);
 			},
-			getScriptConfiguration: () => {
-				recordFallbackApiCall(calls, 'getScriptConfiguration');
-				return Promise.resolve(undefined);
+			getScriptConfiguration(scriptName) {
+				calls.push(`config:${scriptName}`);
+
+				const build = deployedBuilds.get(scriptName);
+
+				return Promise.resolve(
+					build === undefined
+						? undefined
+						: deployedConfiguration(scriptName, build)
+				);
 			},
-			uploadScript(scriptName) {
+			uploadScript(scriptName, metadata) {
 				calls.push(`upload:${scriptName}`);
+				deployedBuilds.set(
+					scriptName,
+					metadata.annotations?.['workers/tag'] ?? ''
+				);
 				return Promise.resolve();
+			},
+			listDeployedVersions(scriptName) {
+				calls.push(`versions:${scriptName}`);
+				return Promise.resolve([{ versionId: 'v1', percentage: 100 }]);
 			},
 			ensureQueueConsumer(queueId, scriptName) {
 				calls.push(`consumer:${queueId}->${scriptName}`);
@@ -238,9 +277,13 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 
 const noBuildVersion = Symbol('no-build-version');
 
+// What a deployed script reports as its build. A settings update can drop the
+// build tag altogether, and `noBuildVersion` stands for that.
+type DeployedBuild = string | typeof noBuildVersion;
+
 function deployedConfiguration(
 	script: string,
-	buildVersion: string | typeof noBuildVersion = artifact.buildVersion
+	buildVersion: DeployedBuild = artifact.buildVersion
 ): ScriptConfiguration {
 	const resources = {
 		d1: new Map([['cupboard', databaseId('db-id')]]),
@@ -257,6 +300,8 @@ function deployedConfiguration(
 	return {
 		...(buildVersion !== noBuildVersion && { buildVersion }),
 		bindings: [
+			// Keep this secret binding. Without it nothing checks that
+			// hasMatchingBindings ignores secrets.
 			{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
 			...(bindings ?? [])
 		],
@@ -350,9 +395,11 @@ describe('runDeploy', () => {
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
+			'd1q:ALTER TABLE ',
+			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
-			'unexpected:getScriptConfiguration',
-			'unexpected:getScriptConfiguration',
+			'config:cupboard-tenant',
+			'config:cupboard',
 			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
 			'upload:cupboard',
@@ -362,7 +409,13 @@ describe('runDeploy', () => {
 			'consumer:qid-cupboard-maintenance->cupboard',
 			'cron:cupboard:0 * * * *',
 			'zone:cupboard.store',
-			'domain:cupboard.store->cupboard'
+			'domain:cupboard.store->cupboard',
+			'd1qr:SELECT phase',
+			'versions:cupboard',
+			'config:cupboard',
+			'versions:cupboard-tenant',
+			'config:cupboard-tenant',
+			'd1q:INSERT INTO '
 		]);
 	});
 
@@ -616,22 +669,16 @@ describe('runDeploy', () => {
 	});
 
 	it('reconciles cache settings when the live build and bindings match', async () => {
-		const { api, calls } = recordingApi();
+		const { api, calls } = recordingApi({
+			cupboard: artifact.buildVersion,
+			'cupboard-tenant': artifact.buildVersion
+		});
 		const skipped: string[] = [];
 		const succeeded: string[] = [];
 
-		// What the deployed scripts would answer: exactly the bindings this
-		// deploy would upload, plus the secrets the upload keeps but the
-		// comparison must ignore.
-		const convergedApi: CloudflareApi = {
-			...api,
-			getScriptConfiguration: (script) =>
-				Promise.resolve(deployedConfiguration(script))
-		};
-
 		await runDeploy({
 			artifact,
-			api: convergedApi,
+			api,
 			reporter: {
 				...silentReporter,
 				success: (message) => {
@@ -657,13 +704,23 @@ describe('runDeploy', () => {
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
+				'd1q:ALTER TABLE ',
+				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
+				'config:cupboard-tenant',
+				'config:cupboard',
 				'workers-dev:cupboard-tenant:false:false',
 				'workers-dev:cupboard-tenant:false:false',
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
 				'cron:cupboard:0 * * * *',
-				'domain:(none)->cupboard'
+				'domain:(none)->cupboard',
+				'd1qr:SELECT phase',
+				'versions:cupboard',
+				'config:cupboard',
+				'versions:cupboard-tenant',
+				'config:cupboard-tenant',
+				'd1q:INSERT INTO '
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
 			skipped: [
@@ -675,21 +732,14 @@ describe('runDeploy', () => {
 	});
 
 	it('uploads only the Worker whose deployed build does not match', async () => {
-		const { api, calls } = recordingApi();
-		const partialApi: CloudflareApi = {
-			...api,
-			getScriptConfiguration: (script) =>
-				Promise.resolve(
-					deployedConfiguration(
-						script,
-						script === 'cupboard' ? artifact.buildVersion : 'previous-build'
-					)
-				)
-		};
+		const { api, calls } = recordingApi({
+			cupboard: artifact.buildVersion,
+			'cupboard-tenant': 'previous-build'
+		});
 
 		await runDeploy({
 			artifact,
-			api: partialApi,
+			api,
 			reporter: silentReporter,
 			options: { domain: undefined, secrets: { control: [], tenant: [] } }
 		});
@@ -700,21 +750,14 @@ describe('runDeploy', () => {
 	});
 
 	it('uploads a Worker when a settings update removed its build tag', async () => {
-		const { api, calls } = recordingApi();
-		const driftedApi: CloudflareApi = {
-			...api,
-			getScriptConfiguration: (script) =>
-				Promise.resolve(
-					deployedConfiguration(
-						script,
-						script === 'cupboard' ? noBuildVersion : artifact.buildVersion
-					)
-				)
-		};
+		const { api, calls } = recordingApi({
+			cupboard: noBuildVersion,
+			'cupboard-tenant': artifact.buildVersion
+		});
 
 		await runDeploy({
 			artifact,
-			api: driftedApi,
+			api,
 			reporter: silentReporter,
 			options: { domain: undefined, secrets: { control: [], tenant: [] } }
 		});
@@ -746,6 +789,8 @@ describe('runDeploy', () => {
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
+			'd1q:ALTER TABLE ',
+			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
@@ -754,7 +799,13 @@ describe('runDeploy', () => {
 			'queue:cupboard-maintenance',
 			'consumer:qid-cupboard-maintenance->cupboard',
 			'cron:cupboard:0 * * * *',
-			'domain:(none)->cupboard'
+			'domain:(none)->cupboard',
+			'd1qr:SELECT phase',
+			'versions:cupboard',
+			'config:cupboard',
+			'versions:cupboard-tenant',
+			'config:cupboard-tenant',
+			'd1q:INSERT INTO '
 		]);
 	});
 
@@ -823,9 +874,11 @@ describe('runDeploy', () => {
 				'kv:cupboard-tenant-cache',
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
+				'd1q:ALTER TABLE ',
+				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
-				'unexpected:getScriptConfiguration',
-				'unexpected:getScriptConfiguration',
+				'config:cupboard-tenant',
+				'config:cupboard',
 				'workers-dev:cupboard-tenant:false:false',
 				'upload:cupboard-tenant',
 				'upload:cupboard',
@@ -833,11 +886,68 @@ describe('runDeploy', () => {
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
 				'cron:cupboard:0 * * * *',
-				'domain:(none)->cupboard'
+				'domain:(none)->cupboard',
+				'd1qr:SELECT phase',
+				'versions:cupboard',
+				'config:cupboard',
+				'versions:cupboard-tenant',
+				'config:cupboard-tenant',
+				'd1q:INSERT INTO '
 			],
 			warnings: [
 				"CPU limit not applied: cupboard: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget"
 			]
+		});
+	});
+
+	it.each([
+		{
+			label: 'a script still splits traffic across versions',
+			versions: [
+				{ versionId: 'v1', percentage: 60 },
+				{ versionId: 'v2', percentage: 40 }
+			],
+			scripts: ['cupboard', 'cupboard-tenant']
+		},
+		{
+			label: 'a script has no deployment at all',
+			versions: [],
+			scripts: ['cupboard', 'cupboard-tenant']
+		}
+	])('does not record the phase when $label', async ({ versions, scripts }) => {
+		const { api, calls } = recordingApi();
+		const splitApi: CloudflareApi = {
+			...api,
+			listDeployedVersions: () => Promise.resolve(versions)
+		};
+
+		let failure: unknown;
+
+		try {
+			await runDeploy({
+				artifact,
+				api: splitApi,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(DeploymentPhaseUnsettledError);
+
+		if (!(failure instanceof DeploymentPhaseUnsettledError)) {
+			return;
+		}
+
+		expect({
+			scripts: failure.scripts,
+			buildVersion: failure.buildVersion,
+			recorded: calls.filter((call) => call.startsWith('d1q:INSERT INTO'))
+		}).toStrictEqual({
+			scripts,
+			buildVersion: artifact.buildVersion,
+			recorded: []
 		});
 	});
 });

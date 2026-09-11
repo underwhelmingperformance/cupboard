@@ -2,6 +2,7 @@
 	"name": "cupboard",
 	"version": "0.0.0",
 	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20260705.1",
 		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
@@ -63,6 +64,7 @@
 		"check:types": "pnpm -r run check:types",
 		"check:types:conformance": "tsc -p tests/conformance/tsconfig.json",
 		"check:types:perf": "tsc -p tests/perf/tsconfig.json",
+		"check:types:predecessor-fixture": "tsc -p tests/fixtures/cache-deployment-predecessor/tsconfig.json",
 		"check:types:root": "tsc -p tsconfig.json",
 		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
 		"cli": "pnpm --filter @cupboard/cli cli",

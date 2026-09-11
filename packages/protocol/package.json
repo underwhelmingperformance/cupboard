@@ -23,6 +23,7 @@
 		"./capture": "./src/capture.ts",
 		"./contract": "./src/contract/index.ts",
 		"./control-keys": "./src/control-keys.ts",
+		"./deployment": "./src/deployment.ts",
 		"./grant-match": "./src/grant-match.ts",
 		"./grants": "./src/grants.ts",
 		"./instance": "./src/instance.ts",

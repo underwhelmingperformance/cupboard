@@ -304,6 +304,32 @@ describe('d1QueryBatch', () => {
 	});
 });
 
+describe('d1QueryRows', () => {
+	it('reads the first column whatever the query named it', async () => {
+		const path = '/accounts/acc-1/d1/database/db-1/query';
+		const { client } = fakeCloudflare({
+			[`POST ${path}`]: [
+				{
+					results: [
+						{ "name || ':' || sha256": '0001_first:aaa' },
+						{ "name || ':' || sha256": '0002_second:bbb' }
+					]
+				}
+			]
+		});
+
+		const rows = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).d1QueryRows(
+			databaseIdSchema.parse('db-1'),
+			"SELECT name || ':' || sha256 FROM d1_migrations;"
+		);
+
+		expect(rows).toStrictEqual(['0001_first:aaa', '0002_second:bbb']);
+	});
+});
+
 describe('ensureQueueConsumer', () => {
 	it('does not write when the live consumer already matches', async () => {
 		const { client, requests } = fakeCloudflare({

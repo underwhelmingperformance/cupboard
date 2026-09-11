@@ -70,6 +70,14 @@ export interface ScriptConfiguration {
 	readonly crossVersionCache: boolean;
 }
 
+// One version of a script, and the share of requests its deployment sends to
+// that version. A gradual deployment splits traffic between versions, so a
+// single entry at 100 means every request reaches one version.
+export interface DeployedVersion {
+	readonly versionId: string;
+	readonly percentage: number;
+}
+
 export interface WorkersDevelopmentRoutes {
 	readonly workersDev: boolean;
 	readonly previewUrls: boolean;
@@ -135,6 +143,10 @@ export interface CloudflareApi {
 		databaseId: DatabaseId,
 		statements: readonly string[]
 	): Promise<void>;
+	/**
+	 * Runs one read query and returns the first column of each row. A row whose
+	 * first column is not a string is left out.
+	 */
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	/**
@@ -149,6 +161,12 @@ export interface CloudflareApi {
 		metadata: ScriptMetadata,
 		bundle: WorkerBundle
 	): Promise<void>;
+
+	/**
+	 * The traffic split of the script's newest deployment. Empty when the script
+	 * has never been deployed.
+	 */
+	listDeployedVersions(scriptName: ScriptName): Promise<DeployedVersion[]>;
 
 	ensureQueueConsumer(
 		queueId: QueueId,
@@ -508,7 +526,10 @@ export function createCloudflareApi(
 			for (const result of response.result) {
 				const records = result.results ?? [];
 				for (const record of records) {
-					const value = (record as Record<string, unknown>).name;
+					// Read the first column by position. SQLite names a result column
+					// after the expression that produced it, so a caller whose query
+					// selects an expression cannot predict the column name.
+					const [value] = Object.values(record as Record<string, unknown>);
 
 					if (typeof value === 'string') {
 						rows.push(value);
@@ -581,6 +602,31 @@ export function createCloudflareApi(
 				`/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`,
 				{ body: form }
 			);
+		},
+
+		async listDeployedVersions(scriptName) {
+			try {
+				const { deployments } = await client.workers.scripts.deployments.list(
+					scriptName,
+					account
+				);
+				// The API does not promise an order, so pick the newest deployment by
+				// its creation time.
+				const newest = deployments.toSorted((left, right) =>
+					right.created_on.localeCompare(left.created_on)
+				)[0];
+
+				return (newest?.versions ?? []).map((version) => ({
+					versionId: version.version_id,
+					percentage: version.percentage
+				}));
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return [];
+				}
+
+				throw error;
+			}
 		},
 
 		async ensureQueueConsumer(queueId, scriptName, settings) {

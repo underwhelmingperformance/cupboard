@@ -16,6 +16,7 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -149,6 +150,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -1862,23 +1864,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Apply the verdicts the upload rows are still holding. A pass that left the
-	// queue no shorter failed on every verdict it tried, so it reports a stall
-	// and waits before the next attempt.
+	// Apply the verdicts the upload rows are still holding. A pass that resolved
+	// none of the verdicts in its page failed on every one it tried, so it
+	// reports a stall and waits before the next attempt. The number of held
+	// verdicts cannot decide that: a commit can record a new verdict while the
+	// pass runs, which would make a pass that resolved its whole page look
+	// stalled and leave the remaining verdicts waiting out the retry deadline.
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
-		const before = this.verification.recordedVerdictCount();
-		await this.metered('verdict-drain', (logger) =>
+		const page = await this.metered('verdict-drain', (logger) =>
 			this.withMaintenanceEligibility(() =>
 				this.verification.applyRecordedVerdicts(logger)
 			)
 		);
-		const remaining = this.verification.recordedVerdictCount();
 
-		if (remaining === 0) {
+		if (!this.verification.hasRecordedVerdicts()) {
 			return 'progressed';
 		}
 
-		if (remaining >= before) {
+		if (page.resolved === 0) {
 			return 'stalled';
 		}
 
@@ -2404,6 +2407,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requestVerificationPass();
 	}
 
+	/**
+	 * Applies any pending migrations and records the step this object has
+	 * reached in its tenant row. Returns undefined when the control plane has
+	 * not configured this object, which has no tenant state to advance.
+	 *
+	 * The control plane calls this to advance a tenant with no traffic of its
+	 * own, so a deployment does not wait on an idle object.
+	 */
+	async reportLocalStep(): Promise<LocalStep | undefined> {
+		await this.initialise();
+
+		return this.metered('local-step', () => recordLocalStep(this.context));
+	}
+
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
@@ -2887,6 +2904,7 @@ type MeteredMethod =
 	| 'demote-narinfo-objects'
 	| 'garbage-collection'
 	| 'initialise'
+	| 'local-step'
 	| 'offboard'
 	| 'reconcile'
 	| 'record-missing-object'
