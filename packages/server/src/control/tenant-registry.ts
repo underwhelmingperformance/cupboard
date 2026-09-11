@@ -21,6 +21,7 @@ import { and, eq, exists, ne, notInArray, type SQL, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
@@ -442,6 +443,9 @@ export async function setCacheReadCredential(
 		readPasswordSalt
 	);
 	const cache = privateStoredCache(cacheName);
+	// A cache credential only ever covers a private named cache, so the scope
+	// and its access are both known here.
+	const identity = cacheIdentityColumns({ kind: 'named', name: cacheName });
 	// Select from a live tenant in the same statement as the upsert. If
 	// offboarding wins the race, the SELECT returns no row, so the upsert cannot
 	// recreate the credential that cleanup deleted.
@@ -452,6 +456,10 @@ export async function setCacheReadCredential(
 				.select({
 					tenant: d1Schema.tenant.id,
 					cache: sql<PrivateStoredCache>`${cache}`.as('cache'),
+					cacheKind: sql<typeof identity.cacheKind>`${identity.cacheKind}`.as(
+						'cache_kind'
+					),
+					cacheName: sql<CacheName>`${identity.cacheName}`.as('cache_name'),
 					readUser: sql<ReadUser>`${read.user}`.as('read_user'),
 					readPasswordHash: sql<ReadPasswordHash>`${readPasswordHash}`.as(
 						'read_password_hash'

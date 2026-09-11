@@ -1,5 +1,6 @@
 import {
 	cacheNameSchema,
+	type CacheScope,
 	narInfoGenerationSchema,
 	privateStoredCache,
 	type StoredCache,
@@ -22,6 +23,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
+import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -138,6 +140,62 @@ function cacheGenerationRows(): Promise<
 		})
 		.from(d1Schema.cacheLifecycle)
 		.all();
+}
+
+async function cacheScopeRows(): Promise<
+	{ cache: string; scope: CacheScope | undefined }[]
+> {
+	const rows = await database()
+		.select({
+			cache: d1Schema.cacheLifecycle.cache,
+			cacheKind: d1Schema.cacheLifecycle.cacheKind,
+			cacheName: d1Schema.cacheLifecycle.cacheName
+		})
+		.from(d1Schema.cacheLifecycle)
+		.all();
+
+	return rows.map((row) => ({
+		cache: row.cache,
+		scope: cacheScopeFromRow({
+			kind: row.cacheKind ?? undefined,
+			name: row.cacheName ?? undefined
+		})
+	}));
+}
+
+async function edgeScopeRows(): Promise<{
+	blobReferences: (CacheScope | undefined)[];
+	attestationReferences: (CacheScope | undefined)[];
+}> {
+	const [blobRows, attestationRows] = await Promise.all([
+		database()
+			.select({
+				cacheKind: d1Schema.blobReference.cacheKind,
+				cacheName: d1Schema.blobReference.cacheName
+			})
+			.from(d1Schema.blobReference)
+			.all(),
+		database()
+			.select({
+				cacheKind: d1Schema.attestationReference.cacheKind,
+				cacheName: d1Schema.attestationReference.cacheName
+			})
+			.from(d1Schema.attestationReference)
+			.all()
+	]);
+	const scopeOf = (row: {
+		cacheKind: 'default' | 'named' | null;
+		cacheName: string | null;
+	}): CacheScope | undefined =>
+		cacheScopeFromRow({
+			kind: row.cacheKind ?? undefined,
+			name: row.cacheName ?? undefined
+		});
+
+	return {
+		blobReferences: blobRows.map((row) => scopeOf(row)),
+		attestationReferences: attestationRows.map((row) => scopeOf(row))
+	};
 }
 
 function cacheCredentialCaches(): Promise<{ cache: string }[]> {
@@ -772,7 +830,43 @@ describe('deleted private cache', () => {
 			whileDeleted: StatusCodes.NOT_FOUND,
 			freshRead: StatusCodes.OK,
 			freshNarRead: StatusCodes.OK,
-			generations: [{ cache: privateBuilds, generation: 2 }]
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: privateBuilds, generation: 2 }
+			]
+		});
+	});
+
+	it('gives every lifecycle row a cache scope', async () => {
+		await publishPrivatePath('gen-lifecycle-identity');
+
+		await deleteAndParkTeardown(privateBuilds);
+
+		expect(await cacheScopeRows()).toStrictEqual([
+			{ cache: '', scope: { kind: 'default' } },
+			{ cache: privateBuilds, scope: { kind: 'named', name: 'builds' } }
+		]);
+	});
+
+	it('gives every reference edge a cache scope', async () => {
+		await useTestServer('gen-edge-scope');
+
+		const { token } = await bootstrap();
+		const nar = await verifiableNar('edge-scope-path');
+		const metadata = indexedMetadata(0, nar);
+
+		await pushPath(token, metadata, 'builds', nar);
+		await fileAttestationReference({
+			uploadId: '00000000-0000-4000-8000-000000000002',
+			bytes: new TextEncoder().encode('{"bundle":true}'),
+			cache: 'builds',
+			storePathHash: metadata.storePathHash,
+			generation: firstNarInfoGeneration
+		});
+
+		expect(await edgeScopeRows()).toStrictEqual({
+			blobReferences: [{ kind: 'named', name: 'builds' }],
+			attestationReferences: [{ kind: 'named', name: 'builds' }]
 		});
 	});
 
@@ -1012,7 +1106,10 @@ describe('cache generation gate', () => {
 			afterDeletion: StatusCodes.NOT_FOUND,
 			undrainedEdges: paths.length,
 			edges: [],
-			generations: [{ cache: privateBuilds, generation: 2 }],
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: privateBuilds, generation: 2 }
+			],
 			credentials: [{ cache: privateBuilds }]
 		});
 	});
@@ -1047,7 +1144,10 @@ describe('cache generation gate', () => {
 		}).toStrictEqual({
 			oldRead: StatusCodes.NOT_FOUND,
 			newRead: StatusCodes.OK,
-			generations: [{ cache: buildsCache, generation: 2 }],
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: buildsCache, generation: 2 }
+			],
 			edges: [
 				{ storePathHash: oldPath.storePathHash, cacheGeneration: 1 },
 				{ storePathHash: newPath.storePathHash, cacheGeneration: 2 }
@@ -1097,7 +1197,10 @@ describe('cache generation gate', () => {
 			afterRecreation: StatusCodes.NOT_FOUND,
 			freshRead: StatusCodes.OK,
 			legacyCacheGeneration: undefined,
-			generations: [{ cache: buildsCache, generation: 2 }]
+			generations: [
+				{ cache: '', generation: 1 },
+				{ cache: buildsCache, generation: 2 }
+			]
 		});
 	});
 

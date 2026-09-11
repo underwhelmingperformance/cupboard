@@ -80,7 +80,9 @@ describe('a list bound as one JSON parameter', () => {
 
 			instance.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(inserted.insertSource([sql`${cache}`, inserted.element()]))
+				.select(
+					inserted.insertSource([sql`${cache}`, sql`null`, inserted.element()])
+				)
 				.run();
 
 			const selected = onlyList(jsonValueLists(storePathHashes));
@@ -113,7 +115,9 @@ describe('a list bound as one JSON parameter', () => {
 
 			instance.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(inserted.insertSource([sql`${cache}`, inserted.element()]))
+				.select(
+					inserted.insertSource([sql`${cache}`, sql`null`, inserted.element()])
+				)
 				.run();
 
 			const pairs = onlyList(

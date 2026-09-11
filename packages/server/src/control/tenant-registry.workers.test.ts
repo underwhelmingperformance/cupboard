@@ -889,6 +889,35 @@ describe('private cache read credentials', () => {
 		]);
 	});
 
+	// The mirroring trigger fills these columns for a write from the previous
+	// version, and only for a row whose `cache_kind` is null. Reading them back
+	// after a write from this build shows the write set them itself.
+	it('records the cache identity beside the legacy key', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
+		);
+
+		const rows = await database()
+			.select({
+				cache: d1Schema.tenantCacheReadCredential.cache,
+				cacheKind: d1Schema.tenantCacheReadCredential.cacheKind,
+				cacheName: d1Schema.tenantCacheReadCredential.cacheName
+			})
+			.from(d1Schema.tenantCacheReadCredential)
+			.where(eq(d1Schema.tenantCacheReadCredential.tenant, acme))
+			.all();
+
+		expect(rows).toStrictEqual([
+			{ cache: 'private/builds', cacheKind: 'named', cacheName: 'builds' }
+		]);
+	});
+
 	it('replaces the verifier so the previous password stops working', async () => {
 		await ensureTenant(database(), createBody(acme), now);
 		await setCacheReadCredential(

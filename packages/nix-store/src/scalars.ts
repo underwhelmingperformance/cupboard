@@ -191,6 +191,25 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 // uses the same first-character rule and alphabet as a complete cache name.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
+/**
+ * Which cache something refers to. The default cache has no name, so it is a
+ * variant of its own rather than a reserved name.
+ *
+ * A legacy cache key spells the same thing as one string: the empty string
+ * means the default cache, and a `private/` prefix means a private named cache.
+ * That spelling ties a cache's identity to its access, which is why stored rows
+ * are moving to a scope and an access mode kept apart.
+ */
+export const cacheScopeSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z.strictObject({ kind: z.literal('named'), name: cacheNameSchema })
+]);
+export type CacheScope = z.output<typeof cacheScopeSchema>;
+
+// Whether a reader must present a credential for the cache.
+export const cacheAccessModeSchema = z.enum(['public', 'private']);
+export type CacheAccessMode = z.output<typeof cacheAccessModeSchema>;
+
 // The default cache's selector. Its stored name is the empty string, which
 // cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell it
 // `_default`. The leading underscore fails `cacheNamePattern`, so the selector
@@ -326,6 +345,30 @@ export function cacheFromSelector(selector: CacheSelector): StoredCache {
 	}
 
 	return selector;
+}
+
+/**
+ * The scope and access mode encoded in a legacy cache key.
+ *
+ * Use this to write the identity columns beside a legacy key while a row
+ * stores both representations. `legacyCacheKey` converts back.
+ */
+export function identityForCache(cache: StoredCache): {
+	readonly scope: CacheScope;
+	readonly access: CacheAccessMode;
+} {
+	if (cache === DEFAULT_CACHE) {
+		return { scope: { kind: 'default' }, access: 'public' };
+	}
+
+	if (isPrivateCache(cache)) {
+		return {
+			scope: { kind: 'named', name: privateCacheLocalName(cache) },
+			access: 'private'
+		};
+	}
+
+	return { scope: { kind: 'named', name: cache }, access: 'public' };
 }
 
 export function selectorForCache(cache: StoredCache): CacheSelector {

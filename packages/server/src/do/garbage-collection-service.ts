@@ -412,7 +412,9 @@ export class GarbageCollectionService {
 		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(hashes.insertSource([sql`${cache}`, hashes.element()]))
+				.select(
+					hashes.insertSource([sql`${cache}`, sql`null`, hashes.element()])
+				)
 				.onConflictDoNothing()
 				.run();
 		}

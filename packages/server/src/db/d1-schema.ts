@@ -136,6 +136,8 @@ export const blobReference = sqliteTable(
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheName: text('cache_name'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
@@ -177,6 +179,9 @@ export const cacheLifecycle = sqliteTable(
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheName: text('cache_name'),
+		access: text('access', { enum: ['public', 'private'] }),
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
 		// When the cache was last deleted, and null while it is live. Deletion sets
 		// it in the same statement that advances the generation, and registering
@@ -256,6 +261,7 @@ export const tenant = sqliteTable(
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
+		cacheCatalogueVersion: integer('cache_catalogue_version'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		// For private tenants, these columns store the Basic-auth user, salt, and
 		// password verifier. Public tenants keep all three null. A private tenant
@@ -287,6 +293,8 @@ export const tenantCacheReadCredential = sqliteTable(
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<PrivateStoredCache>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheName: text('cache_name'),
 		readUser: text('read_user').$type<ReadUser>().notNull(),
 		readPasswordHash: text('read_password_hash')
 			.$type<ReadPasswordHash>()
@@ -407,6 +415,8 @@ export const attestationReference = sqliteTable(
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<StoredCache>().notNull(),
+		cacheKind: text('cache_kind', { enum: ['default', 'named'] }),
+		cacheName: text('cache_name'),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>().notNull(),

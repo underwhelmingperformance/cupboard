@@ -2,6 +2,8 @@ import { type Logger } from '@cupboard/logger';
 import { narFingerprint } from '@cupboard/nix-store/narinfo';
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type CacheName,
+	identityForCache,
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
@@ -37,6 +39,7 @@ import {
 import { type BatchItem } from 'drizzle-orm/batch';
 
 import { signNixFingerprint } from '../crypto/crypto.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
 import { currentCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -574,6 +577,7 @@ export class CommitPipelineService {
 		blob: { readonly fileSize: number },
 		now: IsoTimestamp
 	): BatchItem<'sqlite'>[] {
+		const identity = cacheIdentityColumns(identityForCache(cache).scope);
 		const usageRowPresent = exists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -651,6 +655,12 @@ export class CommitPipelineService {
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
 							cache: sql<string>`${cache}`.as('cache'),
+							cacheKind: sql<
+								typeof identity.cacheKind
+							>`${identity.cacheKind}`.as('cache_kind'),
+							cacheName: sql<CacheName | null>`${identity.cacheName}`.as(
+								'cache_name'
+							),
 							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
 								'store_path_hash'
 							),
@@ -1085,6 +1095,7 @@ export class CommitPipelineService {
 				.select(
 					batch.insertSource([
 						batch.column('cache'),
+						sql`null`,
 						batch.column('rootName'),
 						batch.column('storePathHash'),
 						batch.column('storePath')
