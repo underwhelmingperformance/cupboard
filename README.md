@@ -74,8 +74,12 @@ Stand up a deployment, provision a tenant, then push to it:
 ```sh
 # Deploy, then create a tenant. The --owner-* values identify the OIDC
 # principal that may administer it and sign in with `cupboard login`.
+# --access says who may read the tenant's default cache and has to be given.
+# public is what the nix.conf printed below assumes; a private cache is read
+# with the credential this command prints.
 cupboard init --instance-name cupboard
 cupboard tenant create https://cupboard.example.workers.dev acme \
+  --access public \
   --owner-issuer <issuer> --owner-subject <subject> --owner-audience <audience>
 
 # Sign in as the tenant administrator, then push.

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
 import { NixConfig } from '@cupboard/nix-store/nix-config';
+import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type Cloudflare from 'cloudflare';
@@ -143,6 +144,7 @@ export interface DeployCliOptions {
 	readonly domain?: string;
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
+	readonly access?: CacheAccessMode;
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
@@ -1400,6 +1402,7 @@ async function deployFlow(
 		tenantScriptName: agreed.config.tenant.name,
 		domain: agreed.domain,
 		instanceName: cliOptions.instanceName,
+		cacheAccess: cliOptions.access,
 		admin: onboardAdminFor(
 			agreed.owner,
 			subject !== undefined && idToken !== undefined
@@ -1573,6 +1576,18 @@ async function deployFlow(
 				.trimEnd()
 				.split('\n')
 				.map((line) => ({ label: '', value: line }));
+
+			if (outcome.read !== undefined) {
+				ui.note('Read credential', [
+					{ label: 'Read user', value: outcome.read.user },
+					{ label: 'Read password', value: outcome.read.password }
+				]);
+				ui.info(
+					'This is the only time the password is shown. A private cache is ' +
+						'read with it, and `cupboard tenant rotate-credential` ' +
+						'replaces it.'
+				);
+			}
 
 			ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
 				{ label: 'Cache URL', value: cacheUrl },

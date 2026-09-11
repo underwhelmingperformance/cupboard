@@ -149,9 +149,6 @@ export function registerCacheCommands(
 		.description('Create a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('[name]', 'cache name when the URL does not select one')
-		// Do not give `--access` a default. `tenant create` makes a tenant's
-		// default cache private unless told otherwise, so defaulting to public
-		// here would make the two commands disagree about a new cache's access.
 		.requiredOption(
 			'--access <mode>',
 			'read access: public or private',
