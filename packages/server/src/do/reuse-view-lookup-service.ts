@@ -46,10 +46,7 @@ import { parseStored } from '../http/parse.ts';
 import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
-import {
-	legacyReuseViewKeys,
-	reuseViewSelectorsFromRows
-} from './reuse-view-selectors.ts';
+import { reuseViewSelectorsFromRows } from './reuse-view-selectors.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
@@ -203,8 +200,7 @@ export class ReuseViewLookupService {
 	/**
 	 * The cache a candidate belongs to.
 	 *
-	 * `narinfo.cache_id` stays nullable until the expansion completes. A
-	 * candidate reached this service through a join on `cache_identity`, so a
+	 * A candidate reached this service through a join on `cache_identity`, so a
 	 * null here means the row refers to no cache and the repository refuses it.
 	 */
 	private candidateCache(
@@ -278,25 +274,14 @@ export class ReuseViewLookupService {
 			.all();
 	}
 
-	/**
-	 * Matches the narinfo row a candidate came from.
-	 *
-	 * `narinfo.cache_id` stays nullable until the expansion completes, and a
-	 * candidate reached this service through a join on `cache_identity`, so its
-	 * id is set. The comparison is written in SQL because a null id must match no
-	 * row, which is what a comparison against NULL already gives.
-	 */
 	private candidateRowFilter(candidate: CandidateRow): SQL | undefined {
 		return and(
-			sql`${schema.narInfos.cacheId} = ${candidate.cacheId}`,
+			eq(schema.narInfos.cacheId, candidate.cacheId),
 			eq(schema.narInfos.storePathHash, candidate.storePathHash)
 		);
 	}
 
-	private viewSelectors(
-		view: ReuseViewName,
-		keys: readonly string[]
-	): ReuseViewSelector[] {
+	private viewSelectors(view: ReuseViewName): ReuseViewSelector[] {
 		return reuseViewSelectorsFromRows(
 			view,
 			this.context.db
@@ -306,7 +291,7 @@ export class ReuseViewLookupService {
 					prefix: schema.nativeReuseViewSelectors.prefix
 				})
 				.from(schema.nativeReuseViewSelectors)
-				.where(inArray(schema.nativeReuseViewSelectors.view, keys))
+				.where(eq(schema.nativeReuseViewSelectors.view, view))
 				.all()
 		);
 	}
@@ -317,21 +302,20 @@ export class ReuseViewLookupService {
 		access: CacheAccessMode,
 		storePathHash: StorePathHash
 	): GateSnapshot | undefined {
-		const keys = legacyReuseViewKeys(view);
 		const viewRow = this.context.db
 			.select({
 				access: schema.reuseViews.access,
 				revision: schema.reuseViews.revision
 			})
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, keys))
+			.where(eq(schema.reuseViews.name, view))
 			.get();
 
 		if (viewRow?.access !== access) {
 			return undefined;
 		}
 
-		const selectors = this.viewSelectors(view, keys);
+		const selectors = this.viewSelectors(view);
 		const candidates = this.candidateRows(
 			selectors,
 			viewRow.access,
@@ -351,28 +335,24 @@ export class ReuseViewLookupService {
 		access: CacheAccessMode,
 		storePathHashes: readonly StorePathHash[]
 	): GateBatchSnapshot | undefined {
-		const keys = legacyReuseViewKeys(view);
 		const viewRow = this.context.db
 			.select({
 				access: schema.reuseViews.access,
 				revision: schema.reuseViews.revision
 			})
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, keys))
+			.where(eq(schema.reuseViews.name, view))
 			.get();
 
 		if (viewRow?.access !== access) {
 			return undefined;
 		}
 
-		// The guard above narrows the stored access, and a property's narrowing
-		// does not reach inside the callback below, so read it into a local first.
-		const viewAccess = viewRow.access;
-		const selectors = this.viewSelectors(view, keys);
+		const selectors = this.viewSelectors(view);
 		const candidates = jsonValueLists(storePathHashes).flatMap((hashes) =>
 			this.candidateRows(
 				selectors,
-				viewAccess,
+				viewRow.access,
 				inArray(schema.narInfos.storePathHash, hashes)
 			)
 		);
@@ -380,7 +360,7 @@ export class ReuseViewLookupService {
 		return {
 			tenant: this.context.requireTenant(),
 			revision: viewRow.revision,
-			access: viewAccess,
+			access: viewRow.access,
 			candidates
 		};
 	}
@@ -595,7 +575,7 @@ export class ReuseViewLookupService {
 				revision: schema.reuseViews.revision
 			})
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, legacyReuseViewKeys(view)))
+			.where(eq(schema.reuseViews.name, view))
 			.get();
 
 		if (
@@ -645,7 +625,7 @@ export class ReuseViewLookupService {
 				revision: schema.reuseViews.revision
 			})
 			.from(schema.reuseViews)
-			.where(inArray(schema.reuseViews.name, legacyReuseViewKeys(view)))
+			.where(eq(schema.reuseViews.name, view))
 			.get();
 
 		if (
@@ -656,7 +636,7 @@ export class ReuseViewLookupService {
 		}
 
 		const candidatePaths = verified.candidates.map((candidate) => ({
-			cache: candidate.cache,
+			cacheId: candidate.cacheId,
 			storePathHash: candidate.storePathHash
 		}));
 		const currentRows = jsonRowLists(candidatePaths).flatMap((candidateBatch) =>
@@ -676,7 +656,7 @@ export class ReuseViewLookupService {
 				)
 				.where(
 					candidateBatch.matches({
-						cache: schema.narInfos.cache,
+						cacheId: schema.narInfos.cacheId,
 						storePathHash: schema.narInfos.storePathHash
 					})
 				)

@@ -175,11 +175,6 @@ export const positiveIntSchema = z
 
 export const cacheNamePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
-// The default (unnamed) cache served at the bare root. Named caches carry a
-// non-empty name matching `cacheNamePattern`; the empty string is reserved for
-// the default and is deliberately not a valid cache name.
-export const DEFAULT_CACHE = '';
-
 export const cacheNameSchema = z
 	.string()
 	.regex(cacheNamePattern)
@@ -197,8 +192,8 @@ export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
  *
  * A legacy cache key spells the same thing as one string: the empty string
  * means the default cache, and a `private/` prefix means a private named cache.
- * That spelling ties a cache's identity to its access, which is why stored rows
- * are moving to a scope and an access mode kept apart.
+ * That spelling ties a cache's identity to its access, so a stored row records
+ * a scope and an access mode in separate columns instead.
  */
 export const cacheScopeSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('default') }),
@@ -225,82 +220,10 @@ export function isSameCacheScope(left: CacheScope, right: CacheScope): boolean {
 export const cacheAccessModeSchema = z.enum(['public', 'private']);
 export type CacheAccessMode = z.output<typeof cacheAccessModeSchema>;
 
-// Private stored names begin with this prefix. The local name of a public
-// cache cannot contain a slash, so no public stored name begins with this
-// prefix.
+// A private stored name begins with this prefix. A local name matches
+// `cacheNamePattern`, which has no slash, so no public stored name begins
+// with it.
 export const PRIVATE_STORED_PREFIX = 'private/';
-
-export const privateStoredCachePattern = /^private\/[a-z0-9][a-z0-9._-]{0,62}$/;
-
-/**
- * A private cache's stored name: `private/` followed by its local name. This
- * prefix makes the namespace part of the cache identity. Moving a cache between
- * the public and private namespaces therefore creates a different identity.
- */
-export const privateStoredCacheSchema = z
-	.string()
-	.regex(privateStoredCachePattern)
-	.brand('PrivateStoredCache');
-export type PrivateStoredCache = z.output<typeof privateStoredCacheSchema>;
-
-// The stored name of a public cache: `DEFAULT_CACHE` for the default cache or
-// `CacheName` for a named one.
-const publicStoredCacheSchema = z.union([
-	z.literal(DEFAULT_CACHE),
-	cacheNameSchema
-]);
-
-/**
- * The stored name of a cache: `CacheName` for a named public cache,
- * `DEFAULT_CACHE` for the default cache, or `PrivateStoredCache` for a private
- * cache. Derive one from a scope and an access mode with `legacyCacheKey`.
- * Parse a raw database value before using it as `StoredCache`.
- */
-export const storedCacheSchema = z.union([
-	publicStoredCacheSchema,
-	privateStoredCacheSchema
-]);
-export type StoredCache = z.output<typeof storedCacheSchema>;
-
-function isPrivateCache(cache: StoredCache): cache is PrivateStoredCache {
-	return privateStoredCacheSchema.safeParse(cache).success;
-}
-
-/**
- * Returns the stored name for a private cache with the given local name.
- */
-export function privateStoredCache(name: CacheName): PrivateStoredCache {
-	return privateStoredCacheSchema.parse(`${PRIVATE_STORED_PREFIX}${name}`);
-}
-
-// A private cache's local name, without the `private/` prefix.
-function privateCacheLocalName(cache: PrivateStoredCache): CacheName {
-	return cacheNameSchema.parse(cache.slice(PRIVATE_STORED_PREFIX.length));
-}
-
-/**
- * The scope and access mode encoded in a legacy cache key.
- *
- * Use this to write the identity columns beside a legacy key while a row
- * stores both representations. `legacyCacheKey` converts back.
- */
-export function identityForCache(cache: StoredCache): {
-	readonly scope: CacheScope;
-	readonly access: CacheAccessMode;
-} {
-	if (cache === DEFAULT_CACHE) {
-		return { scope: { kind: 'default' }, access: 'public' };
-	}
-
-	if (isPrivateCache(cache)) {
-		return {
-			scope: { kind: 'named', name: privateCacheLocalName(cache) },
-			access: 'private'
-		};
-	}
-
-	return { scope: { kind: 'named', name: cache }, access: 'public' };
-}
 
 // A tenant slug: the outer addressing boundary, one isolated namespace per tenant
 // at `/t/<tenant>/`. It shares the cache-name shape but is its own branded type;

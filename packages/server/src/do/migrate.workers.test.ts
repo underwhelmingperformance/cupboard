@@ -344,7 +344,7 @@ describe('admitMigrationSource', () => {
 			testServerFor('admit-verified-successor'),
 			(_instance, state) => {
 				const database = drizzle(state.storage);
-				applyMigrations(database, bundle, digests);
+				applyMigrations(database, bundle, { digests });
 				recordTrackingRow(state.storage, {
 					hash: '0002_from_a_newer_build',
 					when: 3,
@@ -364,7 +364,7 @@ describe('admitMigrationSource', () => {
 			testServerFor('admit-unverified-successor'),
 			(_instance, state) => {
 				const database = drizzle(state.storage);
-				applyMigrations(database, bundle, digests);
+				applyMigrations(database, bundle, { digests });
 				recordTrackingRow(state.storage, { hash: '0002_unrecorded', when: 3 });
 
 				return admissionOf(state.storage);

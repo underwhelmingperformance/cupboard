@@ -1,5 +1,4 @@
 import {
-	cacheNameSchema,
 	graceSecondsSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -24,14 +23,13 @@ import {
 } from '../db/schema.ts';
 import { advanceCacheRetentionMigration } from '../migration/cache-retention.ts';
 import {
+	beforeCacheIdentityContract,
 	bootstrap,
-	latestMigrationIndex,
 	migrateThrough,
+	migrateThroughConvertedCatalogue,
 	testServerFor,
 	useTestServer
 } from '../test-support.ts';
-
-const defaultCache = '';
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -76,12 +74,12 @@ describe('migrations', () => {
 					`/nix/store/${unsignedHash}-pkg`
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return {
 					narInfos: state.storage.sql
 						.exec(
-							'SELECT store_path_hash, cache, sigs_json FROM narinfo ORDER BY store_path_hash'
+							'SELECT narinfo.store_path_hash, cache_identity.kind, narinfo.sigs_json FROM narinfo JOIN cache_identity ON cache_identity.id = narinfo.cache_id ORDER BY narinfo.store_path_hash'
 						)
 						.toArray(),
 					signingKeys: state.storage.sql
@@ -95,10 +93,10 @@ describe('migrations', () => {
 			narInfos: [
 				{
 					store_path_hash: signedHash,
-					cache: '',
+					kind: 'default',
 					sigs_json: '["cupboard-1:abc"]'
 				},
-				{ store_path_hash: unsignedHash, cache: '', sigs_json: '[]' }
+				{ store_path_hash: unsignedHash, kind: 'default', sigs_json: '[]' }
 			],
 			signingKeys: [{ id: 'active', signing: 1, published: 1 }]
 		});
@@ -139,38 +137,41 @@ describe('migrations', () => {
 		]);
 	});
 
-	it('migrates and round-trips a retention policy', async () => {
-		const policy = {
-			id: 'p1',
-			scope: 'root-name-prefix' as const,
-			pattern: 'pr-',
-			defaultTtlSeconds: 1_209_600,
-			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-		};
-
+	it('migrates a legacy retention policy onto the contracted shape', async () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-retention-policy'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, 35);
 
 				state.storage.sql.exec(
-					'INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES (?, ?, ?, ?, ?)',
-					policy.id,
-					policy.scope,
-					policy.pattern,
-					policy.defaultTtlSeconds,
-					policy.createdAt
+					"INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES ('p1', 'root-name-prefix', 'pr-', 1209600, '2026-01-01T00:00:00.000Z')"
 				);
 
-				return state.storage.sql
-					.exec(
-						'SELECT id, scope, pattern, default_ttl_seconds AS defaultTtlSeconds, created_at AS createdAt FROM retention_policy'
+				await migrateThroughConvertedCatalogue(state);
+
+				const rows = state.storage.sql
+					.exec<{ cacheId: number | null }>(
+						'SELECT id, kind, cache_id AS cacheId, root_name_prefix AS rootNamePrefix, default_ttl_seconds AS defaultTtlSeconds, created_at AS createdAt FROM retention_policy'
 					)
 					.toArray();
+
+				return rows.map((row) => ({
+					...row,
+					cacheId: row.cacheId ?? undefined
+				}));
 			}
 		);
 
-		expect(rows).toStrictEqual([policy]);
+		expect(rows).toStrictEqual([
+			{
+				id: 'p1',
+				kind: 'root-name-prefix',
+				cacheId: undefined,
+				rootNamePrefix: 'pr-',
+				defaultTtlSeconds: 1_209_600,
+				createdAt: '2026-01-01T00:00:00.000Z'
+			}
+		]);
 	});
 
 	it('keeps the newest retention policy for each selector', async () => {
@@ -186,7 +187,7 @@ describe('migrations', () => {
 					"INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES ('new', 'root-name-prefix', 'pr-', 20, '2026-01-02T00:00:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return state.storage.sql
 					.exec(
@@ -208,7 +209,7 @@ describe('migrations', () => {
 				state.storage.sql.exec(
 					"INSERT INTO refresh_token (id, secret_hash, rule_id, subject, created_at, expires_at) VALUES ('live', 'hash', 'owner', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')"
 				);
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const database = drizzle(state.storage, {
 					schema: { refreshTokenFamilies, refreshTokenMembers }
@@ -407,7 +408,7 @@ describe('migrations', () => {
 	it('migrates and round-trips the verification cursor', async () => {
 		const cursor = {
 			id: 'active',
-			cache: cacheNameSchema.parse('builds'),
+			cacheId: 1,
 			lastStorePathHash: 'a'.repeat(32),
 			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
@@ -415,19 +416,23 @@ describe('migrations', () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-verification-cursor'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, beforeCacheIdentityContract);
+				state.storage.sql.exec(
+					"INSERT INTO cache_identity (id, kind, name, access, priority, created_at) VALUES (1, 'named', 'builds', 'public', 40, '2026-01-01T00:00:00.000Z')"
+				);
+				await migrateThroughConvertedCatalogue(state);
 
 				state.storage.sql.exec(
-					'INSERT INTO verification_cursor (id, cache, last_store_path_hash, updated_at) VALUES (?, ?, ?, ?)',
+					'INSERT INTO verification_cursor (id, cache_id, last_store_path_hash, updated_at) VALUES (?, ?, ?, ?)',
 					cursor.id,
-					cursor.cache,
+					cursor.cacheId,
 					cursor.lastStorePathHash,
 					cursor.updatedAt
 				);
 
 				return state.storage.sql
 					.exec(
-						'SELECT id, cache, last_store_path_hash AS lastStorePathHash, updated_at AS updatedAt FROM verification_cursor'
+						'SELECT id, cache_id AS cacheId, last_store_path_hash AS lastStorePathHash, updated_at AS updatedAt FROM verification_cursor'
 					)
 					.toArray();
 			}
@@ -453,7 +458,7 @@ describe('migrations', () => {
 				// fixed: a relative one would silently retarget the test at
 				// whatever migration lands next.
 				await migrateThrough(state, 26);
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				state.storage.sql.exec(
 					'INSERT INTO retention_grace_policy (id, cache_prefix, grace_seconds, created_at) VALUES (?, ?, ?, ?)',
@@ -476,7 +481,6 @@ describe('migrations', () => {
 
 	it('gains the retention grace table and cache marker at the latest migration', async () => {
 		const deadline = {
-			cache: defaultCache,
 			storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 			retainUntil: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z')
 		};
@@ -492,11 +496,16 @@ describe('migrations', () => {
 					"INSERT INTO cache (name, priority, created_at) VALUES ('builds', 40, '2026-01-01T00:00:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
+				const cacheId = state.storage.sql
+					.exec<{ id: number }>(
+						"SELECT id FROM cache_identity WHERE kind = 'named' AND name = 'builds'"
+					)
+					.one().id;
 				state.storage.sql.exec(
-					'INSERT INTO retention_grace (cache, store_path_hash, retain_until) VALUES (?, ?, ?)',
-					deadline.cache,
+					'INSERT INTO retention_grace (cache_id, store_path_hash, retain_until) VALUES (?, ?, ?)',
+					cacheId,
 					deadline.storePathHash,
 					deadline.retainUntil
 				);
@@ -504,11 +513,13 @@ describe('migrations', () => {
 				return {
 					deadlines: state.storage.sql
 						.exec(
-							'SELECT cache, store_path_hash AS storePathHash, retain_until AS retainUntil FROM retention_grace'
+							'SELECT store_path_hash AS storePathHash, retain_until AS retainUntil FROM retention_grace'
 						)
 						.toArray(),
 					caches: state.storage.sql
-						.exec('SELECT name, grace_managed FROM cache ORDER BY name')
+						.exec(
+							"SELECT name, grace_managed FROM cache_identity WHERE kind = 'named' ORDER BY name"
+						)
 						.toArray()
 				};
 			}
@@ -532,7 +543,7 @@ describe('migrations', () => {
 					"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const rows = state.storage.sql
 					.exec('SELECT id, grace_decision_json FROM pending_upload')
@@ -564,7 +575,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 32);
 				state.storage.sql.exec(insertPreAttachPendingUpload);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const rows = state.storage.sql.exec(selectAttachRootNames).toArray();
 
@@ -595,7 +606,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 40);
 				state.storage.sql.exec(insertPreVerdictPendingUpload);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const rows = state.storage.sql.exec(selectRecordedVerdicts).toArray();
 
@@ -613,7 +624,7 @@ describe('migrations', () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";
 		const selectScans =
-			'SELECT cache, revision, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
+			'SELECT cache_identity.name, garbage_collection_scan.revision, garbage_collection_scan.phase, garbage_collection_scan.cursor, garbage_collection_scan.allow_empty_collection FROM garbage_collection_scan JOIN cache_identity ON cache_identity.id = garbage_collection_scan.cache_id';
 
 		const migrated = await runInDurableObject(
 			testServerFor('migration-collect-phase'),
@@ -627,7 +638,7 @@ describe('migrations', () => {
 				await migrateThrough(state, 33);
 				state.storage.sql.exec(insertCollectingScan);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return state.storage.sql.exec(selectScans).toArray();
 			}
@@ -635,7 +646,7 @@ describe('migrations', () => {
 
 		expect(migrated).toStrictEqual([
 			{
-				cache: 'builds',
+				name: 'builds',
 				revision: 7,
 				phase: 'collect',
 				cursor: 'aa',
@@ -647,7 +658,7 @@ describe('migrations', () => {
 	it('gains the reuse-view tables and narinfo index at the latest migration, leaving an existing narinfo row untouched', async () => {
 		const storePathHash = 'a'.repeat(32);
 		const narInfoRow = {
-			cache: '',
+			kind: 'default',
 			store_path_hash: storePathHash,
 			store_path: `/nix/store/${storePathHash}-app`,
 			nar_hash: 'sha256:nar',
@@ -667,8 +678,8 @@ describe('migrations', () => {
 		};
 		const selector = {
 			view: viewName,
-			kind: 'exact' as const,
-			pattern: 'pr-1'
+			kind: 'named' as const,
+			cacheName: 'pr-1'
 		};
 		const revisionSeq = {
 			name: viewName,
@@ -684,8 +695,7 @@ describe('migrations', () => {
 				// silently retarget the test.
 				await migrateThrough(state, 29);
 				state.storage.sql.exec(
-					'INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-					narInfoRow.cache,
+					"INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at) VALUES ('', ?, ?, ?, ?, ?, ?, ?)",
 					narInfoRow.store_path_hash,
 					narInfoRow.store_path,
 					narInfoRow.nar_hash,
@@ -695,10 +705,10 @@ describe('migrations', () => {
 					narInfoRow.created_at
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				state.storage.sql.exec(
-					'INSERT INTO reuse_view (name, revision, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+					"INSERT INTO reuse_view (name, access, revision, priority, created_at, updated_at) VALUES (?, 'public', ?, ?, ?, ?)",
 					view.name,
 					view.revision,
 					view.priority,
@@ -706,10 +716,10 @@ describe('migrations', () => {
 					view.updatedAt
 				);
 				state.storage.sql.exec(
-					'INSERT INTO reuse_view_selector (view, kind, pattern) VALUES (?, ?, ?)',
+					'INSERT INTO reuse_view_selector_native (view, kind, cache_name) VALUES (?, ?, ?)',
 					selector.view,
 					selector.kind,
-					selector.pattern
+					selector.cacheName
 				);
 				state.storage.sql.exec(
 					'INSERT INTO reuse_view_revision_seq (name, next_revision) VALUES (?, ?)',
@@ -727,7 +737,7 @@ describe('migrations', () => {
 				return {
 					narInfos: state.storage.sql
 						.exec(
-							'SELECT cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, generation, created_at FROM narinfo'
+							'SELECT cache_identity.kind, narinfo.store_path_hash, narinfo.store_path, narinfo.nar_hash, narinfo.nar_size, narinfo.references_json, narinfo.sigs_json, narinfo.generation, narinfo.created_at FROM narinfo JOIN cache_identity ON cache_identity.id = narinfo.cache_id'
 						)
 						.toArray(),
 					views: state.storage.sql
@@ -736,7 +746,9 @@ describe('migrations', () => {
 						)
 						.toArray(),
 					selectors: state.storage.sql
-						.exec('SELECT view, kind, pattern FROM reuse_view_selector')
+						.exec(
+							'SELECT view, kind, cache_name AS cacheName FROM reuse_view_selector_native'
+						)
 						.toArray(),
 					revisionSeqs: state.storage.sql
 						.exec(
@@ -771,17 +783,17 @@ describe('migrations', () => {
 					"INSERT INTO retention_root_target (cache, root_name, store_path_hash, store_path) VALUES ('builds', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return {
 					roots: state.storage.sql
 						.exec(
-							'SELECT cache, name, expires_at FROM retention_root ORDER BY cache, name'
+							'SELECT cache_identity.name AS cache, retention_root.name, retention_root.expires_at FROM retention_root JOIN cache_identity ON cache_identity.id = retention_root.cache_id ORDER BY cache, retention_root.name'
 						)
 						.toArray(),
 					targets: state.storage.sql
 						.exec(
-							'SELECT cache, root_name, store_path_hash, store_path FROM retention_root_target ORDER BY cache, root_name, store_path_hash'
+							'SELECT cache_identity.name AS cache, retention_root_target.root_name, retention_root_target.store_path_hash, retention_root_target.store_path FROM retention_root_target JOIN cache_identity ON cache_identity.id = retention_root_target.cache_id ORDER BY cache, retention_root_target.root_name, retention_root_target.store_path_hash'
 						)
 						.toArray(),
 					indexes: state.storage.sql
@@ -838,7 +850,7 @@ describe('migrations', () => {
 		const rows = await runInDurableObject(
 			testServerFor('migration-oidc-trust'),
 			async (_instance, state) => {
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				const database = drizzle(state.storage, { schema: { oidcTrust } });
 				database.insert(oidcTrust).values(rule).run();
@@ -891,7 +903,7 @@ describe('migrations', () => {
 					state.storage.sql.exec(statement);
 				}
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return {
 					rules: state.storage.sql
@@ -993,7 +1005,7 @@ describe('migrations', () => {
 					state.storage.sql.exec(statement);
 				}
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 
 				return state.storage.sql
 					.exec('SELECT id, permitted_grants_json FROM oidc_trust ORDER BY id')
@@ -1132,7 +1144,7 @@ describe('migrations', () => {
 					'a'.repeat(32)
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThroughConvertedCatalogue(state);
 				const database = drizzle(state.storage, { schema });
 				// A batch of two caches and two rules, so the backfill has to resume
 				// from its cursor several times before it completes.

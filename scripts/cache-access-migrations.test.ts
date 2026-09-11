@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 function migrationStatements(file: string): string[] {
 	const migrationsDirectory = path.resolve(
@@ -41,6 +42,8 @@ function applyMigrations(database: DatabaseSync, through: string): void {
 		applyMigration(database, file);
 	}
 }
+
+const edgeCountSchema = z.strictObject({ edges: z.number().int() });
 
 function insertTenant(database: DatabaseSync): void {
 	database
@@ -425,5 +428,298 @@ describe('cache access backfill', () => {
 		expect(() => {
 			applyMigration(database, '0024_cache_access_backfill.sql');
 		}).toThrow(/CHECK constraint failed/u);
+	});
+});
+
+describe('cache identity contraction', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		applyMigrations(database, '0026_cache_incarnation_expand.sql');
+		insertTenant(database);
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	// The insert trigger gives each of these its default cache's lifecycle row,
+	// which is what the contraction requires of a tenant that is not offboarded.
+	function insertTenantWithStatus(
+		id: string,
+		status: 'active' | 'suspended' | 'offboarding' | 'offboarded'
+	): void {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, read_mode, owner_issuer, owner_subject,
+						owner_audience, config_version, created_at
+					) VALUES (
+						?, ?, 'public', 'issuer', 'subject', 'audience', 1,
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(id, status);
+	}
+
+	function contract(): void {
+		applyMigration(database, '0027_cache_identity_contract_assertions.sql');
+		applyMigration(database, '0028_cache_identity_compatible_contract.sql');
+		applyMigration(database, '0029_cache_identity_contract.sql');
+	}
+
+	it('contracts a named cache an offboarding tenant still references', () => {
+		insertTenantWithStatus('bob', 'offboarding');
+		database
+			.prepare(
+				`
+					INSERT INTO cache_lifecycle (
+						tenant, cache, cache_kind, cache_name, access, generation,
+						updated_at
+					) VALUES (
+						'bob', 'builds', 'named', 'builds', 'public', 3,
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run();
+		database
+			.prepare(
+				`
+					INSERT INTO blob_ref (
+						tenant, cache, cache_kind, cache_name, store_path_hash,
+						generation, nar_hash, cache_generation
+					) VALUES (
+						'bob', 'builds', 'named', 'builds', 'path', 4, 'sha256:nar', 3
+					)
+				`
+			)
+			.run();
+
+		contract();
+
+		expect(
+			database
+				.prepare(
+					`
+						SELECT cache_kind, cache_name, store_path_hash, generation,
+							cache_generation
+						FROM blob_ref
+						WHERE tenant = 'bob'
+					`
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{
+				cache_kind: 'named',
+				cache_name: 'builds',
+				store_path_hash: 'path',
+				generation: 4,
+				cache_generation: 3
+			}
+		]);
+	});
+
+	// An offboarded tenant's rows are scrubbed and its object is never woken
+	// again, so it neither holds a default cache nor needs one.
+	it('contracts around an offboarded tenant with no cache rows', () => {
+		insertTenantWithStatus('bob', 'offboarded');
+		database.prepare("DELETE FROM cache_lifecycle WHERE tenant = 'bob'").run();
+
+		contract();
+
+		expect({
+			...database
+				.prepare(
+					"SELECT count(*) AS tenants FROM tenant WHERE status = 'offboarded'"
+				)
+				.get()
+		}).toStrictEqual({ tenants: 1 });
+	});
+
+	// `blob_ref` keeps its old primary key through the compatible contract, but
+	// this build writes a null `cache` and SQLite treats nulls in a key as
+	// distinct, so that key deduplicates nothing. An edge written twice is caught
+	// by the identity index alone, both before and after the key is dropped.
+	it.each([
+		{
+			name: 'a default cache',
+			identity: "'default', NULL",
+			index: 'blob_ref_default_identity_idx'
+		},
+		{
+			name: 'a named cache',
+			identity: "'named', 'builds'",
+			index: 'blob_ref_named_identity_idx'
+		}
+	])(
+		'deduplicates a repeated edge for $name by $index alone',
+		({ identity, index }) => {
+			const edges = (): number => {
+				const row = database
+					.prepare(
+						"SELECT count(*) AS edges FROM blob_ref WHERE tenant = 'alice'"
+					)
+					.get();
+
+				return edgeCountSchema.parse(row).edges;
+			};
+			const writeEdge = (columns: string, values: string): void => {
+				database
+					.prepare(
+						`INSERT INTO blob_ref (tenant, ${columns}) VALUES ('alice', ${values}) ON CONFLICT DO NOTHING`
+					)
+					.run();
+			};
+			// Name the index that carries the uniqueness, so that removing it
+			// leads here rather than to a silently duplicated edge.
+			const hasIndex = (): boolean =>
+				database
+					.prepare(
+						"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?"
+					)
+					.all(index).length === 1;
+
+			applyMigration(database, '0027_cache_identity_contract_assertions.sql');
+			applyMigration(database, '0028_cache_identity_compatible_contract.sql');
+
+			// What this build writes while the legacy column is still there.
+			const compatibleEdge = (): void => {
+				writeEdge(
+					'cache, cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation',
+					`NULL, ${identity}, 'path', 4, 'sha256:nar', 1`
+				);
+			};
+
+			compatibleEdge();
+			compatibleEdge();
+
+			const beforeContraction = { indexed: hasIndex(), edges: edges() };
+
+			applyMigration(database, '0029_cache_identity_contract.sql');
+			writeEdge(
+				'cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation',
+				`${identity}, 'path', 4, 'sha256:nar', 1`
+			);
+
+			expect({
+				beforeContraction,
+				afterContraction: { indexed: hasIndex(), edges: edges() }
+			}).toStrictEqual({
+				beforeContraction: { indexed: true, edges: 1 },
+				afterContraction: { indexed: true, edges: 1 }
+			});
+		}
+	);
+
+	// The conversion each object performs before the contraction reads the access
+	// recorded for its tenant's default cache, so a tenant without that row could
+	// not convert and its object could not migrate.
+	it('refuses to contract while a live tenant has no default cache', () => {
+		insertTenantWithStatus('bob', 'active');
+		database
+			.prepare(
+				"DELETE FROM cache_lifecycle WHERE tenant = 'bob' AND cache_kind = 'default'"
+			)
+			.run();
+
+		expect(() => {
+			contract();
+		}).toThrow(/CHECK constraint failed/u);
+	});
+});
+
+// Deleting a cache used to leave the cache's read credential in place, so the
+// credential could open the next cache registered under the same name. The
+// migration removes the rows those deletions left behind.
+describe('cache credential lifecycle', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		applyMigrations(database, '0029_cache_identity_contract.sql');
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	function insertLifecycle(name: string, generation: number): void {
+		database
+			.prepare(
+				`
+					INSERT INTO cache_lifecycle (
+						tenant, cache_kind, cache_name, access, generation, deleted_at,
+						updated_at
+					) VALUES (
+						'alice', 'named', ?, 'private', ?, NULL, '2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(name, generation);
+	}
+
+	function markDeleted(name: string): void {
+		database
+			.prepare(
+				`
+					UPDATE cache_lifecycle
+					SET deleted_at = '2026-01-03T00:00:00.000Z'
+					WHERE tenant = 'alice' AND cache_kind = 'named' AND cache_name = ?
+				`
+			)
+			.run(name);
+	}
+
+	function insertCredential(name: string): void {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant_cache_read_credential (
+						tenant, cache_kind, cache_name, read_user, read_password_hash,
+						read_password_salt, created_at
+					) VALUES (
+						'alice', 'named', ?, 'reader', 'hash', 'salt',
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(name);
+	}
+
+	// `guides` was deleted and registered again: registration cleared the
+	// deletion timestamp and kept the generation the deletion set, and no column
+	// records whether the credential belongs to the earlier cache or to the
+	// current one, so the migration keeps it. `notes` has never been deleted.
+	// `unregistered` has no lifecycle row: the tenant Durable Object has not
+	// registered that cache.
+	it('removes the credential of a deleted cache and keeps the others', () => {
+		insertLifecycle('builds', 2);
+		markDeleted('builds');
+		insertLifecycle('guides', 2);
+		insertLifecycle('notes', 1);
+		insertCredential('builds');
+		insertCredential('guides');
+		insertCredential('notes');
+		insertCredential('unregistered');
+
+		applyMigration(database, '0030_cache_credential_lifecycle.sql');
+
+		expect(
+			database
+				.prepare(
+					'SELECT cache_name FROM tenant_cache_read_credential ORDER BY cache_name'
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{ cache_name: 'guides' },
+			{ cache_name: 'notes' },
+			{ cache_name: 'unregistered' }
+		]);
 	});
 });

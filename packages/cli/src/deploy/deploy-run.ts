@@ -1,5 +1,7 @@
 import {
 	currentLocalStep,
+	migrationsAppliedAfterCutover,
+	predecessorInvocationLifetimeMs,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
@@ -9,7 +11,8 @@ import { z } from 'zod';
 import { throwIfAborted } from '../abort.ts';
 import {
 	DeploymentPhaseUnsettledError,
-	LocalStepUnreachedError
+	LocalStepUnreachedError,
+	UnclassifiedD1MigrationError
 } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
@@ -18,9 +21,10 @@ import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
-import { applyD1Migrations } from './migrations.ts';
+import { applyD1Migrations, unclassifiedD1Migrations } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
 import {
+	type PhaseApi,
 	readDeploymentPhase,
 	readLocalStepReadiness,
 	recordDeploymentPhase
@@ -82,6 +86,9 @@ export interface DeployDependencies {
 	readonly reporter: Reporter;
 	readonly options: DeployOptions;
 	readonly signal?: AbortSignal;
+	// The clock the contraction measures the preceding release's drain against.
+	// Tests supply their own so they can place a deploy either side of it.
+	readonly now?: () => Date;
 }
 
 interface ResourcePlan {
@@ -385,14 +392,18 @@ async function performDeploy(
 	);
 
 	if (databaseId !== undefined) {
+		const unclassified = unclassifiedD1Migrations(artifact.d1Migrations);
+
+		if (unclassified.length > 0) {
+			throw new UnclassifiedD1MigrationError(unclassified);
+		}
+
 		const applied = await applyD1Migrations(
-			{
-				queryBatch: (database, statements) =>
-					api.d1QueryBatch(database, statements),
-				queryRows: (database, sql) => api.d1QueryRows(database, sql)
-			},
+			migrationApi(api),
 			databaseId,
-			artifact.d1Migrations
+			artifact.d1Migrations.filter(
+				(migration) => !migrationsAppliedAfterCutover.includes(migration.name)
+			)
 		);
 
 		if (applied.length > 0) {
@@ -546,7 +557,9 @@ async function performDeploy(
 	await configureTriggers(dependencies);
 
 	if (databaseId !== undefined) {
-		await settlePhase(dependencies, databaseId);
+		const cutover = await settlePhase(dependencies, databaseId);
+
+		await contractSchema(dependencies, databaseId, cutover);
 	}
 
 	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
@@ -597,6 +610,12 @@ function isMissingWorkerScriptError(error: unknown): boolean {
  * Returns the build a script is serving, or undefined when its deployment does
  * not send every request to one version. A gradual deployment splits traffic
  * between two versions, and there is then no single build to report.
+ *
+ * This reads the deployment's intended allocation. Cloudflare has accepted a
+ * deployment that sends every request to this build; whether every colo is
+ * already serving it is not reported, and nothing here measures that
+ * propagation. Anything that dates a deadline from the recorded cutover has to
+ * leave room for it.
  */
 async function servingBuildVersion(
 	api: CloudflareApi,
@@ -614,9 +633,18 @@ async function servingBuildVersion(
 	return configuration?.buildVersion;
 }
 
+function migrationApi(api: CloudflareApi): PhaseApi {
+	return {
+		queryBatch: (database: DatabaseId, statements: readonly string[]) =>
+			api.d1QueryBatch(database, statements),
+		queryRows: (database: DatabaseId, sql: string) =>
+			api.d1QueryRows(database, sql)
+	};
+}
+
 /**
  * Records the phase the deployment now runs in, once both Workers serve this
- * build from a single version.
+ * build from a single version, and returns the time it entered that phase.
  *
  * The phase row describes the running code, so it must not be written while an
  * earlier version can still take a request. If a script is still split across
@@ -626,16 +654,12 @@ async function servingBuildVersion(
 async function settlePhase(
 	dependencies: DeployDependencies,
 	databaseId: DatabaseId
-): Promise<void> {
+): Promise<Date> {
 	const { api, artifact, reporter } = dependencies;
-	const phaseApi = {
-		queryBatch: (database: DatabaseId, statements: readonly string[]) =>
-			api.d1QueryBatch(database, statements),
-		queryRows: (database: DatabaseId, sql: string) =>
-			api.d1QueryRows(database, sql)
-	};
+	const phaseApi = migrationApi(api);
+	const now = dependencies.now ?? ((): Date => new Date());
 
-	await reporter.phase('Recording the deployment phase', async (context) => {
+	return reporter.phase('Recording the deployment phase', async (context) => {
 		const recorded = await readDeploymentPhase(phaseApi, databaseId);
 
 		if (recorded !== undefined) {
@@ -680,8 +704,73 @@ async function settlePhase(
 			databaseId,
 			settledDeploymentPhase,
 			currentLocalStep,
-			new Date()
+			now()
 		);
 		context.fact('phase', settledDeploymentPhase);
+
+		// Read the row back rather than returning `now()`: a rerun in the same
+		// phase leaves the stored timestamp alone, so this is when the deployment
+		// entered the phase rather than when this run recorded it.
+		const settled = await readDeploymentPhase(phaseApi, databaseId);
+
+		return settled === undefined ? now() : new Date(settled.updatedAt);
+	});
+}
+
+/**
+ * Applies the migrations that remove what the preceding release still writes
+ * or goes on producing, but only once that release can no longer be running.
+ *
+ * `cutover` is when the deployment entered its settled phase, which is when
+ * this build began to serve every request. An invocation that started before
+ * then may still be running for {@link predecessorInvocationLifetimeMs}. The
+ * deploy does not hold itself open for the rest of that window: it leaves the
+ * migrations for the next deploy, which finds the window long past.
+ *
+ * Deferring costs nothing, because the schema between the two sets of
+ * migrations is a resting state. The columns those migrations remove are
+ * nullable by then, and this build neither reads nor writes them. The read
+ * credentials they remove belong to caches that earlier releases deleted, and
+ * the preceding release left those rows in place too. A deployment that stops
+ * here therefore keeps working, and differs from the contracted one only by
+ * carrying dead columns and those stale rows.
+ */
+async function contractSchema(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId,
+	cutover: Date
+): Promise<void> {
+	const { api, artifact, reporter } = dependencies;
+	const deferred = artifact.d1Migrations.filter((migration) =>
+		migrationsAppliedAfterCutover.includes(migration.name)
+	);
+
+	if (deferred.length === 0) {
+		return;
+	}
+
+	const now = dependencies.now ?? ((): Date => new Date());
+
+	await reporter.phase('Contracting the schema', async (context) => {
+		const remaining =
+			cutover.getTime() + predecessorInvocationLifetimeMs - now().getTime();
+
+		if (remaining > 0) {
+			context.fact('deferred', String(deferred.length));
+			context.fact(
+				'applied by',
+				`the next deploy, once the preceding release must have stopped, in ${String(Math.ceil(remaining / 60_000))} minutes. This deployment is complete without them.`
+			);
+
+			return;
+		}
+
+		const applied = await applyD1Migrations(
+			migrationApi(api),
+			databaseId,
+			deferred
+		);
+
+		context.fact('migrations', String(applied.length));
 	});
 }

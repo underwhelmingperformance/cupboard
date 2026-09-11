@@ -27,7 +27,6 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	hashReadPassword,
 	isReadPasswordMatching,
@@ -452,11 +451,10 @@ describe('tenant registry', () => {
 
 	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: acme,
 				status: 'active',
-				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -490,11 +488,10 @@ describe('tenant registry', () => {
 		const body = quotaBody(acme, 1000);
 
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,
@@ -876,10 +873,7 @@ describe('private cache read credentials', () => {
 		]);
 	});
 
-	// The mirroring trigger fills these columns for a write from the previous
-	// version, and only for a row whose `cache_kind` is null. Reading them back
-	// after a write from this build shows the write set them itself.
-	it('records the cache identity beside the legacy key', async () => {
+	it('records the cache identity of the cache it covers', async () => {
 		await ensureTenant(database(), createBody(acme), now);
 
 		await setCacheReadCredential(
@@ -892,7 +886,6 @@ describe('private cache read credentials', () => {
 
 		const rows = await database()
 			.select({
-				cache: d1Schema.tenantCacheReadCredential.cache,
 				cacheKind: d1Schema.tenantCacheReadCredential.cacheKind,
 				cacheName: d1Schema.tenantCacheReadCredential.cacheName
 			})
@@ -900,9 +893,7 @@ describe('private cache read credentials', () => {
 			.where(eq(d1Schema.tenantCacheReadCredential.tenant, acme))
 			.all();
 
-		expect(rows).toStrictEqual([
-			{ cache: 'private/builds', cacheKind: 'named', cacheName: 'builds' }
-		]);
+		expect(rows).toStrictEqual([{ cacheKind: 'named', cacheName: 'builds' }]);
 	});
 
 	it('replaces the verifier so the previous password stops working', async () => {

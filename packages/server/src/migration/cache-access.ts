@@ -8,20 +8,18 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
 import {
 	type CacheId,
 	cacheIdentityColumns,
 	cacheIdentityCondition,
-	cacheScopeFromRow,
-	legacyCacheKey
+	cacheScopeFromRow
 } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import type { ServerContext } from '../do/context.ts';
 import { CacheCatalogueMigrationError } from '../errors.ts';
-
-import * as migrationSchema from './cache-access-schema.ts';
 
 export const cacheCatalogueVersion = 1;
 
@@ -43,16 +41,6 @@ function scopeKey(scope: CacheScope): string {
 	return scope.kind === 'default' ? 'default' : `named:${scope.name}`;
 }
 
-export function cacheMigrationColumns(
-	scope: CacheScope,
-	access: CacheAccessMode
-) {
-	return {
-		legacyCache: legacyCacheKey(scope, access),
-		...cacheIdentityColumns(scope)
-	};
-}
-
 export async function revokeCacheLifecycle(
 	context: ServerContext,
 	tenant: TenantId,
@@ -60,18 +48,16 @@ export async function revokeCacheLifecycle(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const identity = cacheMigrationColumns(scope, access);
 	const updated = await context.d1
-		.update(migrationSchema.cacheLifecycles)
+		.update(d1Schema.cacheLifecycle)
 		.set({
-			legacyCache: identity.legacyCache,
 			access,
-			generation: sql`${migrationSchema.cacheLifecycles.generation} + 1`,
+			generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
 			deletedAt: now,
 			updatedAt: now
 		})
 		.where(
-			sql`${migrationSchema.cacheLifecycles.tenant} = ${tenant} and ${cacheIdentityCondition(migrationSchema.cacheLifecycles.cacheKind, migrationSchema.cacheLifecycles.cacheName, scope)}`
+			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
 		)
 		.run();
 
@@ -79,9 +65,9 @@ export async function revokeCacheLifecycle(
 		return;
 	}
 
-	await context.d1.insert(migrationSchema.cacheLifecycles).values({
+	await context.d1.insert(d1Schema.cacheLifecycle).values({
 		tenant,
-		...identity,
+		...cacheIdentityColumns(scope),
 		access,
 		generation: cacheGenerationSchema.parse(2),
 		deletedAt: now,
@@ -96,17 +82,15 @@ export async function clearCacheLifecycleDeletion(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const identity = cacheMigrationColumns(scope, access);
 	const updated = await context.d1
-		.update(migrationSchema.cacheLifecycles)
+		.update(d1Schema.cacheLifecycle)
 		.set({
-			legacyCache: identity.legacyCache,
 			access,
 			deletedAt: sql`null`,
 			updatedAt: now
 		})
 		.where(
-			sql`${migrationSchema.cacheLifecycles.tenant} = ${tenant} and ${cacheIdentityCondition(migrationSchema.cacheLifecycles.cacheKind, migrationSchema.cacheLifecycles.cacheName, scope)}`
+			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
 		)
 		.run();
 
@@ -114,9 +98,9 @@ export async function clearCacheLifecycleDeletion(
 		return;
 	}
 
-	await context.d1.insert(migrationSchema.cacheLifecycles).values({
+	await context.d1.insert(d1Schema.cacheLifecycle).values({
 		tenant,
-		...identity,
+		...cacheIdentityColumns(scope),
 		access,
 		generation: cacheGenerationSchema.parse(1),
 		deletedAt: sql`null`,
@@ -124,21 +108,35 @@ export async function clearCacheLifecycleDeletion(
 	});
 }
 
-async function legacyTenantAccess(
+/**
+ * The access a cache takes when the local catalogue records none for it: the
+ * access of the tenant's default cache, which every tenant has.
+ *
+ * A cache that records no access was created when one setting on the tenant row
+ * decided how all of a tenant's caches read, and the default cache's lifecycle
+ * row holds that setting's value.
+ */
+async function defaultCacheAccess(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<CacheAccessMode> {
 	const row = await context.d1
-		.select({ readMode: migrationSchema.tenants.readMode })
-		.from(migrationSchema.tenants)
-		.where(eq(migrationSchema.tenants.id, tenant))
+		.select({ access: d1Schema.cacheLifecycle.access })
+		.from(d1Schema.cacheLifecycle)
+		.where(
+			and(
+				eq(d1Schema.cacheLifecycle.tenant, tenant),
+				eq(d1Schema.cacheLifecycle.cacheKind, 'default'),
+				isNull(d1Schema.cacheLifecycle.cacheName)
+			)
+		)
 		.get();
 
 	if (row === undefined) {
 		throw new CacheCatalogueMigrationError(tenant, 'tenant-missing');
 	}
 
-	return row.readMode;
+	return row.access;
 }
 
 async function d1Lifecycles(
@@ -147,22 +145,18 @@ async function d1Lifecycles(
 ): Promise<ReadonlyMap<string, LifecycleRow>> {
 	const rows = await context.d1
 		.select({
-			kind: migrationSchema.cacheLifecycles.cacheKind,
-			name: migrationSchema.cacheLifecycles.cacheName,
-			access: migrationSchema.cacheLifecycles.access,
-			generation: migrationSchema.cacheLifecycles.generation,
-			deletedAt: migrationSchema.cacheLifecycles.deletedAt
+			kind: d1Schema.cacheLifecycle.cacheKind,
+			name: d1Schema.cacheLifecycle.cacheName,
+			access: d1Schema.cacheLifecycle.access,
+			generation: d1Schema.cacheLifecycle.generation,
+			deletedAt: d1Schema.cacheLifecycle.deletedAt
 		})
-		.from(migrationSchema.cacheLifecycles)
-		.where(eq(migrationSchema.cacheLifecycles.tenant, tenant))
+		.from(d1Schema.cacheLifecycle)
+		.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
 		.all();
 	const lifecycles = new Map<string, LifecycleRow>();
 
 	for (const row of rows) {
-		if (row.kind === null || row.access === null) {
-			throw new CacheCatalogueMigrationError(tenant, 'lifecycle-incomplete');
-		}
-
 		try {
 			const scope = cacheScopeFromRow({ kind: row.kind, name: row.name });
 			lifecycles.set(scopeKey(scope), {
@@ -190,7 +184,7 @@ function reconcileLocalCaches(
 	const defaultLifecycle = lifecycles.get(scopeKey({ kind: 'default' }));
 
 	context.db
-		.insert(migrationSchema.cacheIdentities)
+		.insert(schema.cacheIdentities)
 		.values({
 			kind: 'default',
 			name: sql<null>`null`,
@@ -203,10 +197,22 @@ function reconcileLocalCaches(
 
 	const entries: CatalogueEntry[] = [];
 
+	// These reads run before the contraction, which is the migration that makes
+	// `access` mandatory, so the rows can still hold nulls even though the
+	// declared columns say otherwise.
+	const storedAccess = sql<CacheAccessMode | null>`${schema.cacheIdentities.access}`;
+	const storedViewAccess = sql<CacheAccessMode | null>`${schema.reuseViews.access}`;
+
 	context.db.transaction((transaction) => {
 		const rows = transaction
-			.select()
-			.from(migrationSchema.cacheIdentities)
+			.select({
+				id: schema.cacheIdentities.id,
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				access: storedAccess,
+				deletedAt: schema.cacheIdentities.deletedAt
+			})
+			.from(schema.cacheIdentities)
 			.all();
 
 		for (const row of rows) {
@@ -216,9 +222,9 @@ function reconcileLocalCaches(
 			const deletedAt = lifecycle?.deletedAt ?? row.deletedAt ?? undefined;
 
 			transaction
-				.update(migrationSchema.cacheIdentities)
+				.update(schema.cacheIdentities)
 				.set({ access, deletedAt })
-				.where(eq(migrationSchema.cacheIdentities.id, row.id))
+				.where(eq(schema.cacheIdentities.id, row.id))
 				.run();
 
 			entries.push({
@@ -230,17 +236,22 @@ function reconcileLocalCaches(
 			});
 		}
 
-		const views = transaction.select().from(migrationSchema.reuseViews).all();
+		const views = transaction
+			.select({ name: schema.reuseViews.name, access: storedViewAccess })
+			.from(schema.reuseViews)
+			.all();
 
 		for (const view of views) {
+			// A view stored before reuse views recorded their own access has none,
+			// so give it the access of the tenant's default cache.
 			if (view.access !== null) {
 				continue;
 			}
 
 			transaction
-				.update(migrationSchema.reuseViews)
+				.update(schema.reuseViews)
 				.set({ access: legacyAccess })
-				.where(eq(migrationSchema.reuseViews.name, view.name))
+				.where(eq(schema.reuseViews.name, view.name))
 				.run();
 		}
 	});
@@ -259,7 +270,6 @@ async function projectCatalogueToD1(
 			kind: entry.scope.kind,
 			name: entry.scope.kind === 'named' ? entry.scope.name : undefined,
 			access: entry.access,
-			legacyCache: legacyCacheKey(entry.scope, entry.access),
 			generation: entry.generation,
 			deletedAt: entry.deletedAt
 		}))
@@ -271,13 +281,11 @@ async function projectCatalogueToD1(
 				json_extract(value, '$.kind') as kind,
 				json_extract(value, '$.name') as name,
 				json_extract(value, '$.access') as access,
-				json_extract(value, '$.legacyCache') as legacy_cache,
 				json_extract(value, '$.deletedAt') as deleted_at
 			from json_each(${document})
 		)
 		update cache_lifecycle
 		set
-			cache = (select legacy_cache from incoming where incoming.kind = cache_lifecycle.cache_kind and incoming.name is cache_lifecycle.cache_name),
 			access = (select access from incoming where incoming.kind = cache_lifecycle.cache_kind and incoming.name is cache_lifecycle.cache_name),
 			deleted_at = (select deleted_at from incoming where incoming.kind = cache_lifecycle.cache_kind and incoming.name is cache_lifecycle.cache_name),
 			updated_at = ${now}
@@ -291,15 +299,14 @@ async function projectCatalogueToD1(
 				json_extract(value, '$.kind') as kind,
 				json_extract(value, '$.name') as name,
 				json_extract(value, '$.access') as access,
-				json_extract(value, '$.legacyCache') as legacy_cache,
 				json_extract(value, '$.generation') as generation,
 				json_extract(value, '$.deletedAt') as deleted_at
 			from json_each(${document})
 		)
 		insert into cache_lifecycle (
-			tenant, cache, cache_kind, cache_name, access, generation, deleted_at, updated_at
+			tenant, cache_kind, cache_name, access, generation, deleted_at, updated_at
 		)
-		select ${tenant}, legacy_cache, kind, name, access, generation, deleted_at, ${now}
+		select ${tenant}, kind, name, access, generation, deleted_at, ${now}
 		from incoming
 		where not exists (
 			select 1 from cache_lifecycle
@@ -335,13 +342,21 @@ export async function reconcileCacheCatalogue(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<void> {
-	const legacyAccess = await legacyTenantAccess(context, tenant);
+	const legacyAccess = await defaultCacheAccess(context, tenant);
 	const lifecycles = await d1Lifecycles(context, tenant);
 	const entries = reconcileLocalCaches(context, legacyAccess, lifecycles);
 
 	await projectCatalogueToD1(context, tenant, entries);
 }
 
+/**
+ * Whether every cache and reuse view in this object's catalogue records how it
+ * reads, and the tenant's one default cache exists.
+ *
+ * This runs before the contraction, which is the migration that makes those
+ * columns mandatory, so the rows it inspects can still hold nulls even though
+ * the declared columns say otherwise.
+ */
 export function isLocalCacheCatalogueComplete(context: ServerContext): boolean {
 	const incompleteCaches = context.db
 		.select({ count: sql<number>`count(*)`.as('incomplete_cache_count') })
@@ -387,9 +402,9 @@ export async function isCacheCatalogueComplete(
 	tenant: TenantId
 ): Promise<boolean> {
 	const row = await context.d1
-		.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-		.from(migrationSchema.tenants)
-		.where(eq(migrationSchema.tenants.id, tenant))
+		.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenant))
 		.get();
 
 	return row?.version === cacheCatalogueVersion;
@@ -400,7 +415,7 @@ export async function markCacheCatalogueComplete(
 	tenant: TenantId
 ): Promise<void> {
 	await context.d1
-		.update(migrationSchema.tenants)
+		.update(d1Schema.tenant)
 		.set({ cacheCatalogueVersion })
-		.where(eq(migrationSchema.tenants.id, tenant));
+		.where(eq(d1Schema.tenant.id, tenant));
 }

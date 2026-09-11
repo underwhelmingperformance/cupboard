@@ -2,7 +2,6 @@ import {
 	currentLocalStep,
 	type LocalStep
 } from '@cupboard/protocol/deployment';
-import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -11,7 +10,6 @@ import {
 	retentionMigrationBatchSize
 } from '../migration/cache-retention.ts';
 
-import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { projectLocalCacheLifecycles } from './cache-lifecycle-projection.ts';
 import { type ServerContext } from './context.ts';
 import {
@@ -70,8 +68,6 @@ export async function recordLocalStep(
 	if (tenant === undefined) {
 		return { kind: 'unconfigured' };
 	}
-
-	reconcileCacheIdentities(context.db, isoTimestamp(new Date()));
 
 	const projection = await projectLocalCacheLifecycles(context, tenant);
 

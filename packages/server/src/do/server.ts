@@ -400,6 +400,9 @@ class CountingSemaphore {
 	}
 }
 
+// The migration whose assertions require every cache to record its access.
+const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
+
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Put the invocation's D1 allowance, Durable Object row budget and subrequest
 	// slice on every method the runtime can dispatch to: a request, an alarm, an
@@ -1482,12 +1485,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		// Every migration this build carries runs before anything reads the store.
-		// Handing this call a prefix of the bundle would refuse the object on its
-		// next start: the rows it already holds would run past the entries the
-		// prefix carries, and the migrator admits a longer history only when a
-		// newer build verified it.
-		applyMigrations(this.context.db, migrations);
+		// The contraction requires every cache to record its access, and only the
+		// catalogue reconciliation can supply one: the access comes from this
+		// tenant's rows in D1, which a migration cannot read. The run therefore
+		// stops before the contraction, reconciles, and then finishes.
+		//
+		// Both calls are given the whole bundle. A prefix would refuse the object
+		// on its next start, because the rows it already holds would run past the
+		// entries the prefix carries and the migrator admits a longer history only
+		// when a newer build verified it.
+		applyMigrations(this.context.db, migrations, {
+			stopBefore: cacheAccessContractMigration
+		});
 		await this.assertZstdAvailable();
 
 		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
@@ -1504,6 +1513,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (!isCatalogueComplete || !isLocalCacheCatalogueComplete(this.context)) {
 			await reconcileStoredCacheCatalogue(this.context, tenant);
 		}
+
+		applyMigrations(this.context.db, migrations);
 
 		if (!isCatalogueComplete) {
 			await markCacheCatalogueComplete(this.context, tenant);

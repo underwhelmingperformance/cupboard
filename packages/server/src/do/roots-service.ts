@@ -22,7 +22,7 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, sql } from 'drizzle-orm';
 
-import { legacyCacheKey, type ResolvedCache } from '../db/cache.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
 import { requireServedStorePaths } from '../policy/served-store.ts';
@@ -79,8 +79,6 @@ export class RootsService {
 				: request.retention;
 		const expiresAt = rootExpiry(resolvedRetention, now);
 
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
-
 		// The targets the replacement releases receive a grace deadline, so they
 		// are read before the wholesale delete below discards them.
 		const requested = new Set<string>(
@@ -124,7 +122,6 @@ export class RootsService {
 
 			tx.insert(schema.retentionRoots)
 				.values({
-					cache: legacyCache,
 					cacheId: cache.id,
 					name: request.name,
 					expiresAt,
@@ -137,7 +134,6 @@ export class RootsService {
 				tx.insert(schema.retentionRootTargets)
 					.select(
 						targets.insertSource([
-							sql`${legacyCache}`,
 							sql`${cache.id}`,
 							sql`${request.name}`,
 							targets.column('storePathHash'),
@@ -356,7 +352,6 @@ export class RootsService {
 		this.context.db
 			.insert(schema.retentionRoots)
 			.values({
-				cache: legacyCacheKey(cache.scope, cache.access),
 				cacheId: cache.id,
 				name,
 				expiresAt,
@@ -364,7 +359,7 @@ export class RootsService {
 				updatedAt: nowIso
 			})
 			.onConflictDoUpdate({
-				target: [schema.retentionRoots.cache, schema.retentionRoots.name],
+				target: [schema.retentionRoots.cacheId, schema.retentionRoots.name],
 				set: {
 					// SQLite `max` returns NULL when either operand is NULL, so a
 					// permanent root stays permanent. ISO-8601 UTC strings compare in
@@ -387,14 +382,11 @@ export class RootsService {
 			readonly storePath: StorePathString;
 		}[]
 	): void {
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
-
 		for (const batch of jsonRowLists(targets)) {
 			this.context.db
 				.insert(schema.retentionRootTargets)
 				.select(
 					batch.insertSource([
-						sql`${legacyCache}`,
 						sql`${cache.id}`,
 						sql`${name}`,
 						batch.column('storePathHash'),

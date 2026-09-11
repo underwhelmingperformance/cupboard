@@ -1,8 +1,8 @@
 import {
-	type CacheAccessMode,
 	type CacheGeneration,
 	cacheNameSchema,
 	type CacheScope,
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	type StorePathHash,
 	storePathHashSchema
@@ -24,7 +24,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
-import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
+import { cacheIdentityColumns, cacheScopeFromRow } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
@@ -35,8 +35,6 @@ import {
 	narObjectKey,
 	requestOriginSchema
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -101,19 +99,18 @@ const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
 	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 });
 
-function credentialHeaders(credential: {
+interface ReadCredential {
 	readonly user: string;
 	readonly password: string;
-}): Record<string, string> {
+}
+
+function credentialHeaders(credential: ReadCredential): Record<string, string> {
 	return {
 		authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
 	};
 }
 
-function basic(credential: {
-	readonly user: string;
-	readonly password: string;
-}): RequestInit {
+function basic(credential: ReadCredential): RequestInit {
 	return { headers: credentialHeaders(credential) };
 }
 
@@ -156,33 +153,30 @@ async function cacheGenerationRows(): Promise<
 		.all();
 
 	return rows.map((row) => ({
-		cache: cacheScopeFromRow({
-			kind: row.kind ?? undefined,
-			name: row.name ?? undefined
-		}),
+		cache: cacheScopeFromRow({ kind: row.kind, name: row.name ?? undefined }),
 		generation: row.generation
 	}));
 }
 
-async function cacheScopeRows(): Promise<
-	{ cache: string; scope: CacheScope | undefined }[]
-> {
+async function cacheScopeRows(): Promise<(CacheScope | undefined)[]> {
 	const rows = await database()
 		.select({
-			cache: d1Schema.cacheLifecycle.cache,
 			cacheKind: d1Schema.cacheLifecycle.cacheKind,
 			cacheName: d1Schema.cacheLifecycle.cacheName
 		})
 		.from(d1Schema.cacheLifecycle)
+		.orderBy(
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName
+		)
 		.all();
 
-	return rows.map((row) => ({
-		cache: row.cache,
-		scope: cacheScopeFromRow({
-			kind: row.cacheKind ?? undefined,
+	return rows.map((row) =>
+		cacheScopeFromRow({
+			kind: row.cacheKind,
 			name: row.cacheName ?? undefined
 		})
-	}));
+	);
 }
 
 async function edgeScopeRows(): Promise<{
@@ -232,27 +226,23 @@ async function cacheCredentialCaches(): Promise<
 		.all();
 
 	return rows.map((row) => ({
-		cache: cacheScopeFromRow({
-			kind: row.kind ?? undefined,
-			name: row.name ?? undefined
-		})
+		cache: cacheScopeFromRow({ kind: row.kind, name: row.name ?? undefined })
 	}));
 }
 
 /**
- * Writes one reference edge as a cache wrote them before the cache generation
- * existed: no `cache_generation` on the edge and no lifecycle row for its
- * cache. The NAR it points at is stored too, so only the reference check can
- * decide whether a read of it succeeds.
+ * Writes one reference edge at the cache's first generation, with no lifecycle
+ * row for the cache. This is what a cache that has never been deleted holds.
+ * The NAR it points at is stored too, so only the reference check can decide
+ * whether a read of it succeeds.
  *
  * The presence row and the usage charge come with it, because retiring the
  * edge credits both and the tenant's counters may not go negative.
  */
-async function seedUnstampedEdge(
+async function seedFirstGenerationEdge(
 	cache: CacheScope,
 	storePathHash: StorePathHash,
-	nar: VerifiableNar,
-	access: CacheAccessMode = 'public'
+	nar: VerifiableNar
 ): Promise<void> {
 	const fileSize = nar.narBytes.byteLength;
 	const insertBlob = database()
@@ -267,13 +257,14 @@ async function seedUnstampedEdge(
 		})
 		.onConflictDoNothing();
 	const insertEdge = database()
-		.insert(migrationSchema.blobReferences)
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash,
 			generation: narInfoGenerationSchema.parse(0),
-			narHash: nar.narHash
+			narHash: nar.narHash,
+			cacheGeneration: firstCacheGeneration
 		})
 		.onConflictDoNothing();
 	const insertPresence = database()
@@ -597,10 +588,12 @@ async function publishPrivatePath(
 }
 
 // Reads the narinfo, NAR, attestation-list and availability routes with the
-// cache's own credential.
+// given credential. A deleted cache has no credential of its own, so reads
+// after the deletion use the tenant's.
 async function readPrivateSurfaces(
 	metadata: UploadPathMetadata,
-	nar: VerifiableNar
+	nar: VerifiableNar,
+	credential: ReadCredential
 ): Promise<{
 	narinfo: number;
 	nar: number;
@@ -609,11 +602,11 @@ async function readPrivateSurfaces(
 }> {
 	const narinfo = await readFetch(
 		`/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`,
-		basic(cacheReader)
+		basic(credential)
 	);
 	const narRead = await readFetch(
 		await pushedNarPath(nar, `/cache/${privateBuildsName}`),
-		basic(cacheReader)
+		basic(credential)
 	);
 	const attestationList = await fetchPath(
 		`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
@@ -623,7 +616,7 @@ async function readPrivateSurfaces(
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(credential),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
@@ -642,21 +635,24 @@ async function readPrivateSurfaces(
 }
 
 // Reads one path's narinfo by GET and by HEAD, and asks availability about it,
-// all with the cache's own credential.
-async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
+// all with the given credential.
+async function readPrivateNarInfo(
+	storePathHash: StorePathHash,
+	credential: ReadCredential
+): Promise<{
 	narinfo: number;
 	head: number;
 	missing: readonly string[];
 }> {
 	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
-	const narinfo = await readFetch(path, basic(cacheReader));
-	const head = await readFetch(path, { method: 'HEAD', ...basic(cacheReader) });
+	const narinfo = await readFetch(path, basic(credential));
+	const head = await readFetch(path, { method: 'HEAD', ...basic(credential) });
 	const availability = await readFetch(
 		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(credential),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [storePathHash] })
@@ -679,15 +675,21 @@ describe('deleted private cache', () => {
 	it('refuses published reads and reports every path missing before teardown drains the objects', async () => {
 		const { metadata, nar } = await publishPrivatePath('gen-deleted-surfaces');
 
-		const beforeDeletion = await readPrivateSurfaces(metadata, nar);
+		const beforeDeletion = await readPrivateSurfaces(
+			metadata,
+			nar,
+			cacheReader
+		);
 
 		await deleteAndParkTeardown(privateBuilds);
 
 		expect({
 			beforeDeletion,
-			afterDeletion: await readPrivateSurfaces(metadata, nar),
-			// The credential a deletion deliberately keeps, and the objects the
-			// parked drain has not removed.
+			// The deletion removed the cache's own credential, so this read uses the
+			// tenant's.
+			afterDeletion: await readPrivateSurfaces(metadata, nar, tenantReader),
+			// No cache has a credential of its own, and the parked drain has not
+			// removed the objects.
 			credentials: await cacheCredentialCaches(),
 			narInfoObject:
 				(await env.BLOBS.head(
@@ -706,7 +708,7 @@ describe('deleted private cache', () => {
 				attestationList: StatusCodes.NOT_FOUND,
 				missing: [metadata.storePathHash]
 			},
-			credentials: [{ cache: privateBuilds }],
+			credentials: [],
 			narInfoObject: true
 		});
 	});
@@ -774,26 +776,28 @@ describe('deleted private cache', () => {
 
 		// Registering the name again ends the deleted state while the parked drain
 		// still holds the previous cache's published narinfo object. Only the
-		// reference edge separates the two caches' paths from here on.
+		// reference edge separates the two caches' paths from here on. The deletion
+		// removed the previous cache's own credential, so these reads use the
+		// tenant's.
 		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const previousPath = `/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`;
-		const previous = await readFetch(previousPath, basic(cacheReader));
+		const previous = await readFetch(previousPath, basic(tenantReader));
 		const previousHead = await readFetch(previousPath, {
 			method: 'HEAD',
-			...basic(cacheReader)
+			...basic(tenantReader)
 		});
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const availability = await readFetch(
 			`/cache/${privateBuildsName}/api/v1/missing-paths`,
 			{
 				method: 'POST',
 				headers: {
-					...credentialHeaders(cacheReader),
+					...credentialHeaders(tenantReader),
 					'content-type': 'application/json'
 				},
 				body: JSON.stringify({
@@ -859,7 +863,12 @@ describe('deleted private cache', () => {
 			recommittedNar
 		);
 
-		const afterRecommit = await readPrivateNarInfo(metadata.storePathHash);
+		// The deletion removed the previous cache's own credential, so the
+		// recommitted cache is read with the tenant's.
+		const afterRecommit = await readPrivateNarInfo(
+			metadata.storePathHash,
+			tenantReader
+		);
 
 		// Put the previous object at the recommitted cache's own key, modelling the
 		// interval after the new reference edge is written but before the
@@ -881,7 +890,10 @@ describe('deleted private cache', () => {
 
 		expect({
 			afterRecommit,
-			withPreviousObject: await readPrivateNarInfo(metadata.storePathHash)
+			withPreviousObject: await readPrivateNarInfo(
+				metadata.storePathHash,
+				tenantReader
+			)
 		}).toStrictEqual({
 			afterRecommit: {
 				narinfo: StatusCodes.OK,
@@ -937,9 +949,11 @@ describe('deleted private cache', () => {
 
 		await deleteAndParkTeardown(privateBuilds);
 
+		// The deletion removed the cache's own credential, so every read from here
+		// uses the tenant's.
 		const whileDeleted = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		await putTestCache(token, privateBuilds, 'private');
@@ -947,11 +961,11 @@ describe('deleted private cache', () => {
 
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const freshNarRead = await readFetch(
 			await pushedNarPath(freshNar, `/cache/${privateBuildsName}`),
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		expect({
@@ -975,10 +989,7 @@ describe('deleted private cache', () => {
 
 		await deleteAndParkTeardown(privateBuilds);
 
-		expect(await cacheScopeRows()).toStrictEqual([
-			{ cache: '', scope: defaultCache },
-			{ cache: legacyCacheKey(privateBuilds, 'private'), scope: privateBuilds }
-		]);
+		expect(await cacheScopeRows()).toStrictEqual([defaultCache, privateBuilds]);
 	});
 
 	it('gives every reference edge a cache scope', async () => {
@@ -1234,7 +1245,9 @@ describe('cache generation gate', () => {
 				return blobReferenceRows();
 			}
 		);
-		const afterDeletion = await readFetch(narUrl, basic(cacheReader));
+		// The deletion also removed the cache's own credential, so this read uses
+		// the tenant's.
+		const afterDeletion = await readFetch(narUrl, basic(tenantReader));
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
@@ -1258,7 +1271,7 @@ describe('cache generation gate', () => {
 				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
 			],
-			credentials: [{ cache: privateBuilds }]
+			credentials: []
 		});
 	});
 
@@ -1413,7 +1426,7 @@ describe('cache generation gate', () => {
 		});
 	});
 
-	it('serves an unstamped edge, stops at deletion, and does not resume at recreation', async () => {
+	it('serves a first-generation edge, stops at deletion, and does not resume at recreation', async () => {
 		await useTestServer('gen-legacy');
 		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const legacyNar = await verifiableNar('legacy-edge');
@@ -1421,7 +1434,11 @@ describe('cache generation gate', () => {
 		const legacyPath = indexedMetadata(0, legacyNar);
 		const freshPath = indexedMetadata(1, freshNar);
 
-		await seedUnstampedEdge(buildsCache, legacyPath.storePathHash, legacyNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			legacyPath.storePathHash,
+			legacyNar
+		);
 
 		const legacyPathUrl = seededNarPath(legacyNar);
 		const beforeDeletion = await readFetch(legacyPathUrl);
@@ -1429,8 +1446,8 @@ describe('cache generation gate', () => {
 		const removed = cacheRemoveResponseSchema.parse(await removal.json());
 		const afterDeletion = await readFetch(legacyPathUrl);
 
-		// A cache of the same name again. Its own paths read, while the unstamped
-		// edge of the deleted cache stays refused.
+		// A cache of the same name again. Its own paths read, while the
+		// first-generation edge of the deleted cache stays refused.
 		await putTestCache(token, buildsCache);
 		await pushPath(token, freshPath, buildsCache, freshNar);
 
@@ -1473,7 +1490,11 @@ describe('cache generation gate', () => {
 		// Seed the state left when the row transaction commits but the drain does
 		// not run: a reference edge without a narinfo row. A later deletion must
 		// still retire this edge.
-		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			stranded.storePathHash,
+			strandedNar
+		);
 
 		// Read the marker in the same invocation as the deletion. Once that
 		// invocation ends, workerd can deliver the due alarm. The first pass
@@ -1520,7 +1541,11 @@ describe('cache generation gate', () => {
 		// Seed a reference edge without a narinfo row. An interrupted earlier
 		// deletion can leave this state. The transaction that queues the teardown reads
 		// the narinfo rows, so it cannot find this one.
-		await seedUnstampedEdge(buildsCache, stranded.storePathHash, strandedNar);
+		await seedFirstGenerationEdge(
+			buildsCache,
+			stranded.storePathHash,
+			strandedNar
+		);
 
 		// Delete and drain inside one Durable Object invocation. The deletion arms
 		// an alarm, and a pass that alarm ran would drain the whole cache at the
@@ -1582,15 +1607,15 @@ describe('cache generation gate', () => {
 		const small = await deletionStatements('gen-allowance-small', 1);
 		const large = await deletionStatements('gen-allowance-large', 120);
 
-		// The generation revocation and the two maintenance-eligibility statements.
-		// A deletion that retired a chunk of paths itself would add roughly six
-		// statements for every 45 paths and pass the invocation allowance on a cache
-		// of a few hundred.
+		// The generation revocation, the credential deletion and the two
+		// maintenance-eligibility statements. A deletion that retired a chunk of
+		// paths itself would add roughly six statements for every 45 paths and pass
+		// the invocation allowance on a cache of a few hundred.
 		expect({
 			small,
 			large,
 			allowance: d1StatementsPerInvocation
-		}).toStrictEqual({ small: 3, large: 3, allowance: 50 });
+		}).toStrictEqual({ small: 4, large: 4, allowance: 50 });
 	}, 240_000);
 
 	it('keeps a full teardown pass within the D1 statements one invocation may run', async () => {

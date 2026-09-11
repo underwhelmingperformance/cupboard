@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { migrationsAppliedAfterCutover } from '@cupboard/protocol/deployment';
 import { describe, expect, it } from 'vitest';
 
 import { databaseIdSchema } from './identifiers.ts';
@@ -8,7 +9,8 @@ import {
 	type D1Migration,
 	type D1MigrationApi,
 	D1MigrationDigestError,
-	parseD1Migrations
+	parseD1Migrations,
+	unclassifiedD1Migrations
 } from './migrations.ts';
 
 function digestOf(sql: string): string {
@@ -218,5 +220,43 @@ describe('applyD1Migrations', () => {
 			second,
 			`INSERT INTO d1_migrations (name, sha256, verification_state) VALUES ('0001_b.sql', '${digestOf(second)}', 'verified');`
 		]);
+	});
+});
+
+function migrationsNamed(names: readonly string[]): D1Migration[] {
+	return parseD1Migrations(names.map((name) => ({ name, sql: 'SELECT 1;' })));
+}
+
+describe('unclassifiedD1Migrations', () => {
+	// The deferred list must be the end of the journal. A later migration applies
+	// before the deferred ones, against a schema they have not changed yet, and a
+	// deferred one applies after the Workers that need it are serving. Neither
+	// guess is safe, so the deploy reports the name instead of choosing.
+	it('reports a migration ordered after the deferred ones that is not deferred', () => {
+		expect(
+			unclassifiedD1Migrations(
+				migrationsNamed([
+					'0028_cache_identity_compatible_contract.sql',
+					'0029_cache_identity_contract.sql',
+					'0030_cache_credential_lifecycle.sql',
+					'0031_something_new.sql'
+				])
+			)
+		).toStrictEqual(['0031_something_new.sql']);
+	});
+
+	it('accepts the release its own journal ends with', () => {
+		const journal = migrationsNamed(migrationsAppliedAfterCutover);
+
+		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
+	});
+
+	it('accepts a migration ordered before the deferred ones', () => {
+		const journal = migrationsNamed([
+			'0001_early.sql',
+			...migrationsAppliedAfterCutover
+		]);
+
+		expect(unclassifiedD1Migrations(journal)).toStrictEqual([]);
 	});
 });

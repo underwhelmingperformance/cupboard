@@ -3,7 +3,6 @@ import {
 	type AuthKeyId,
 	type NarInfoGeneration,
 	type NixSha256HashString,
-	PRIVATE_STORED_PREFIX,
 	type RootName,
 	type TenantId,
 	tenantIdSchema
@@ -26,12 +25,8 @@ import {
 import { type OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import type { RootRetentionRequest } from '@cupboard/protocol/retention';
 import {
-	isPrivateReuseView,
-	type ReuseViewName,
-	reuseViewNameSchema,
 	type ReuseViewSelector,
-	type ReuseViewSummary,
-	type StoredReuseView
+	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
@@ -53,7 +48,6 @@ import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
-	CacheIdentityMissingError,
 	StoredOidcTrustInvalidError,
 	TenantNotConfiguredError
 } from '../errors.ts';
@@ -340,29 +334,12 @@ export function oidcTrustSummaryFromRow(
 	};
 }
 
-// The view table is still keyed by the stored name, which carries the
-// namespace. A summary reports the local name, so the private prefix comes off
-// again here. This is the reverse of `legacyReuseViewKey`.
-function localReuseViewName(stored: StoredReuseView): ReuseViewName {
-	if (!isPrivateReuseView(stored)) {
-		return stored;
-	}
-
-	return reuseViewNameSchema.parse(stored.slice(PRIVATE_STORED_PREFIX.length));
-}
-
 export function reuseViewSummaryFromRow(
 	row: typeof schema.reuseViews.$inferSelect,
 	selectors: readonly ReuseViewSelector[]
 ): ReuseViewSummary {
-	// A row whose access the reconciliation has not supplied cannot say who may
-	// read the view, so it is refused rather than reported as public.
-	if (row.access === null) {
-		throw new CacheIdentityMissingError({});
-	}
-
 	return {
-		name: localReuseViewName(row.name),
+		name: row.name,
 		access: row.access,
 		revision: row.revision,
 		priority: row.priority,

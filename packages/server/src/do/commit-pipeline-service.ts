@@ -39,7 +39,6 @@ import { signNixFingerprint } from '../crypto/crypto.ts';
 import {
 	cacheIdentityColumns,
 	cacheIdentityCondition,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import { currentCacheGeneration } from '../db/cache-generation.ts';
@@ -60,8 +59,6 @@ import {
 	type R2ObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
@@ -636,7 +633,7 @@ export class CommitPipelineService {
 			eq(d1Schema.blobState.narHash, metadata.narHash),
 			tenantChargeable
 		);
-		const cacheIdentity = cacheMigrationColumns(cache.scope, cache.access);
+		const cacheIdentity = cacheIdentityColumns(cache.scope);
 
 		return [
 			this.context.d1
@@ -655,14 +652,11 @@ export class CommitPipelineService {
 				})
 				.where(creditBytesFilter),
 			this.context.d1
-				.insert(migrationSchema.blobReferences)
+				.insert(d1Schema.blobReference)
 				.select((qb) =>
 					qb
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
-							legacyCache: sql<string>`${cacheIdentity.legacyCache}`.as(
-								'cache'
-							),
 							cacheKind: sql<
 								typeof cacheIdentity.cacheKind
 							>`${cacheIdentity.cacheKind}`.as('cache_kind'),
@@ -1088,7 +1082,6 @@ export class CommitPipelineService {
 			request.attachRootName !== undefined
 				? [
 						{
-							cache: legacyCacheKey(request.cache.scope, request.cache.access),
 							cacheId: request.cache.id,
 							rootName: request.attachRootName,
 							storePathHash: request.metadata.storePathHash,
@@ -1103,8 +1096,7 @@ export class CommitPipelineService {
 				.insert(schema.retentionRootTargets)
 				.select(
 					batch.insertSource([
-						batch.column('cache'),
-						sql`nullif(${batch.column('cacheId')}, 0)`,
+						batch.column('cacheId'),
 						batch.column('rootName'),
 						batch.column('storePathHash'),
 						batch.column('storePath')
@@ -1249,7 +1241,6 @@ export class CommitPipelineService {
 		this.context.db
 			.insert(schema.retentionRootTargets)
 			.values({
-				cache: legacyCacheKey(cache.scope, cache.access),
 				cacheId: cache.id,
 				rootName,
 				storePathHash,
@@ -1740,7 +1731,6 @@ export class CommitPipelineService {
 			const inserted = tx
 				.insert(schema.narInfos)
 				.values({
-					cache: legacyCacheKey(cache.scope, cache.access),
 					cacheId: cache.id,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath,
@@ -1761,20 +1751,33 @@ export class CommitPipelineService {
 			if (inserted.length > 0) {
 				const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
 
-				// The sequence is still keyed by the legacy stored name, so the
-				// upsert matches on that rather than on the identity columns.
-				tx.insert(schema.generationSeq)
-					.values({
-						cache: legacyCacheKey(cache.scope, cache.access),
-						...cacheIdentityColumns(cache.scope),
-						storePathHash: metadata.storePathHash,
-						nextGeneration
-					})
+				// Each cache kind has its own partial unique index, so name the
+				// matching conflict target.
+				const sequence = tx.insert(schema.generationSeq).values({
+					...cacheIdentityColumns(cache.scope),
+					storePathHash: metadata.storePathHash,
+					nextGeneration
+				});
+
+				if (cache.scope.kind === 'default') {
+					sequence
+						.onConflictDoUpdate({
+							target: schema.generationSeq.storePathHash,
+							targetWhere: sql`${schema.generationSeq.cacheKind} = 'default'`,
+							set: { nextGeneration }
+						})
+						.run();
+
+					return { kind: 'reserved', generation };
+				}
+
+				sequence
 					.onConflictDoUpdate({
 						target: [
-							schema.generationSeq.cache,
+							schema.generationSeq.cacheName,
 							schema.generationSeq.storePathHash
 						],
+						targetWhere: sql`${schema.generationSeq.cacheKind} = 'named'`,
 						set: { nextGeneration }
 					})
 					.run();

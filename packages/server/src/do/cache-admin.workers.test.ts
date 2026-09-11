@@ -2,7 +2,6 @@ import {
 	type CacheAccessMode,
 	cachePrioritySchema,
 	type CacheScope,
-	storedCacheSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import type {
@@ -27,11 +26,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import {
-	type CacheId,
-	cacheScopeFromRow,
-	legacyCacheKey
-} from '../db/cache.ts';
+import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
@@ -97,7 +92,7 @@ async function cacheIdentities(): Promise<
 			kind: row.kind,
 			name: row.name ?? undefined
 		}),
-		access: row.access ?? undefined,
+		access: row.access,
 		deleted: row.deletedAt !== null
 	}));
 }
@@ -125,7 +120,7 @@ function wake(): Promise<LocalStepOutcome> {
 
 async function projectedCaches(): Promise<number> {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.select({ cache: d1Schema.cacheLifecycle.cache })
+		.select({ cacheKind: d1Schema.cacheLifecycle.cacheKind })
 		.from(d1Schema.cacheLifecycle)
 		.all();
 
@@ -149,21 +144,20 @@ async function lifecycleIdentities(): Promise<
 			access: d1Schema.cacheLifecycle.access
 		})
 		.from(d1Schema.cacheLifecycle)
-		.orderBy(d1Schema.cacheLifecycle.cache)
+		.orderBy(
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName
+		)
 		.all();
 
 	return rows.map((row) => ({
-		kind: row.kind ?? undefined,
+		kind: row.kind,
 		name: row.name ?? undefined,
-		access: row.access ?? undefined
+		access: row.access
 	}));
 }
 
 const buildsCache = namedCache('builds');
-// The legacy `cache` column still keys the lifecycle row for this cache.
-const buildsLegacyCache = storedCacheSchema.parse(
-	legacyCacheKey(buildsCache, 'public')
-);
 
 interface CacheVersion {
 	readonly generation: number;
@@ -178,7 +172,12 @@ function publishedCacheVersion(): Promise<CacheVersion | undefined> {
 			readRevision: d1Schema.cacheLifecycle.readRevision
 		})
 		.from(d1Schema.cacheLifecycle)
-		.where(eq(d1Schema.cacheLifecycle.cache, buildsLegacyCache))
+		.where(
+			and(
+				eq(d1Schema.cacheLifecycle.cacheKind, 'named'),
+				eq(d1Schema.cacheLifecycle.cacheName, buildsCache.name)
+			)
+		)
 		.get();
 }
 
@@ -519,68 +518,6 @@ describe('cache registry admin', () => {
 				roots: [{ cacheId: 2 }],
 				targets: [{ cacheId: 2 }]
 			}
-		});
-	});
-
-	it('fills the identity of rows that carry only a legacy cache name', async () => {
-		await useTestServer('cache-admin-identity-reconcile');
-
-		const init = await bootstrap();
-
-		await putCache(init.token, 'builds', 40);
-		// The state an earlier release left behind: collection rows keyed by the
-		// stored cache name alone, with no identity beside them.
-		await runInDurableObject(currentServer(), (instance) => {
-			instance.context.db
-				.insert(schema.garbageCollectionRevisions)
-				.values([
-					{ cache: storedCacheSchema.parse(''), revision: 0 },
-					{ cache: buildsLegacyCache, revision: 0 }
-				])
-				.run();
-		});
-
-		const collectionState = (): Promise<
-			{ cache: string; cacheId: CacheId | undefined }[]
-		> =>
-			runInDurableObject(currentServer(), (instance) =>
-				instance.context.db
-					.select({
-						cache: schema.garbageCollectionRevisions.cache,
-						cacheId: schema.garbageCollectionRevisions.cacheId
-					})
-					.from(schema.garbageCollectionRevisions)
-					.orderBy(schema.garbageCollectionRevisions.cache)
-					.all()
-					.map((row) => ({
-						cache: row.cache,
-						cacheId: row.cacheId ?? undefined
-					}))
-			);
-
-		const beforeStep = await collectionState();
-
-		await runInDurableObject(currentServer(), (instance) =>
-			instance.reportLocalStep()
-		);
-
-		const afterStep = await collectionState();
-		const identities = await cacheIdentities();
-
-		expect({
-			beforeStep,
-			afterStep,
-			identities: identities.map(({ scope }) => scope)
-		}).toStrictEqual({
-			beforeStep: [
-				{ cache: '', cacheId: undefined },
-				{ cache: 'builds', cacheId: undefined }
-			],
-			afterStep: [
-				{ cache: '', cacheId: 1 },
-				{ cache: 'builds', cacheId: 2 }
-			],
-			identities: [{ kind: 'default' }, { kind: 'named', name: 'builds' }]
 		});
 	});
 

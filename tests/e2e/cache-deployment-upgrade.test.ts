@@ -1,10 +1,15 @@
 import {
 	currentLocalStep,
+	migrationsAppliedAfterCutover,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
 
-import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
+import {
+	applyD1Migrations,
+	type D1MigrationApi
+} from '../../packages/cli/src/deploy/migrations.ts';
 import { recordDeploymentPhase } from '../../packages/cli/src/deploy/phase.ts';
 import {
 	predecessorDurableObjectMigration,
@@ -23,32 +28,57 @@ const wakeLimit = 20;
 // towards a step.
 const activeFixtureTenants = 1 + sleepingFixtureTenants.length;
 
+function migrationApi(server: StagedDeploymentServer): D1MigrationApi {
+	return {
+		queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
+		queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
+	};
+}
+
+function isDeferredMigration(name: string): boolean {
+	return migrationsAppliedAfterCutover.includes(name);
+}
+
 /**
- * Applies the D1 migrations, swaps in the Workers built from the working tree,
- * and records the phase. These are the steps `cupboard deploy` performs against
- * Cloudflare, driven here against the harness's persisted storage.
+ * Applies the migrations that must precede the cutover, swaps in the Workers
+ * built from the working tree, and records the phase. These are the steps
+ * `cupboard deploy` performs against Cloudflare before it waits for the
+ * preceding release to drain, driven here against the harness's persisted
+ * storage.
  */
 async function deployOverPredecessor(
 	server: StagedDeploymentServer
 ): Promise<void> {
 	await applyD1Migrations(
-		{
-			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
-			queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
-		},
+		migrationApi(server),
 		stagedDeploymentDatabaseId,
-		server.artifact.d1Migrations
+		server.artifact.d1Migrations.filter(
+			(migration) => !isDeferredMigration(migration.name)
+		)
 	);
 	await server.deployCurrent();
 	await recordDeploymentPhase(
-		{
-			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
-			queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
-		},
+		migrationApi(server),
 		stagedDeploymentDatabaseId,
 		settledDeploymentPhase,
 		currentLocalStep,
 		new Date()
+	);
+}
+
+/**
+ * Applies the migrations that remove what the preceding release still writes.
+ * `cupboard deploy` runs these once that release can no longer be serving.
+ */
+async function contractOverPredecessor(
+	server: StagedDeploymentServer
+): Promise<void> {
+	await applyD1Migrations(
+		migrationApi(server),
+		stagedDeploymentDatabaseId,
+		server.artifact.d1Migrations.filter((migration) =>
+			isDeferredMigration(migration.name)
+		)
 	);
 }
 
@@ -66,16 +96,24 @@ it('upgrades a populated predecessor deployment', async () => {
 
 		await deployOverPredecessor(server);
 
+		// The contraction removes columns the preceding release still writes, so
+		// the deploy leaves it until that release can no longer be serving.
+		const beforeContraction = await server.terminalSnapshot();
+
+		await contractOverPredecessor(server);
+
 		const client = await server.deploymentClient();
 
 		const recorded = await client.phase();
 
 		expect({
+			lastMigrationBeforeContraction: beforeContraction.lastD1Migration,
 			phase: recorded.phase?.name,
 			wake: await client.wakeLocalStep(wakeLimit),
 			status: await client.localStepStatus(),
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
+			lastMigrationBeforeContraction: server.finalPreCutoverD1Migration,
 			phase: settledDeploymentPhase,
 			wake: {
 				current: currentLocalStep,
@@ -106,6 +144,7 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 	try {
 		await server.seedPredecessor();
 		await deployOverPredecessor(server);
+		await contractOverPredecessor(server);
 
 		const client = await server.deploymentClient();
 
@@ -146,10 +185,12 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 	try {
 		await server.seedPredecessor();
 		await deployOverPredecessor(server);
+		await contractOverPredecessor(server);
 
 		// A rerun repeats every step against the state the first run left.
 		await server.restart();
 		await deployOverPredecessor(server);
+		await contractOverPredecessor(server);
 
 		const client = await server.deploymentClient();
 
@@ -180,6 +221,7 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 	try {
 		await server.seedPredecessor();
 		await deployOverPredecessor(server);
+		await contractOverPredecessor(server);
 
 		const client = await server.deploymentClient();
 
@@ -243,6 +285,47 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					graceManaged: true
 				}
 			]
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
+// An offboarding tenant takes no traffic of its own and nothing wakes it during
+// a deploy, so it can reach this release with its cache catalogue still
+// unconverted. Its object has to convert and contract when it next runs, or the
+// offboard drain would fail for good and the tenant could never be finalised.
+it('starts an offboarding tenant that never converted its catalogue', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+		await contractOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+
+		// The wake covers only active tenants, so it leaves this one behind.
+		await client.wakeLocalStep(wakeLimit);
+
+		await server.announceTenant('upgrade-offboarding');
+
+		// Admission starts the object before refusing the read, so a request for a
+		// tenant that no longer serves reads is still enough to make the object
+		// migrate.
+		const response = await server.dispatch(
+			'/t/upgrade-offboarding/nix-cache-info'
+		);
+
+		// Recording the catalogue version is the last thing the object's start-up
+		// does, so reading it back proves every migration applied, the contraction
+		// among them.
+		expect({
+			read: response.status,
+			catalogueVersion: await server.catalogueVersion('upgrade-offboarding')
+		}).toStrictEqual({
+			read: StatusCodes.NOT_FOUND,
+			catalogueVersion: 1
 		});
 	} finally {
 		await server.stop();

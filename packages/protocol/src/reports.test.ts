@@ -56,9 +56,9 @@ describe('check report schemas', () => {
 		{
 			name: 'a report that carries the next cursor',
 			cursor: 'c'.repeat(32),
-			cursorCache: 'builds'
+			cursorCache: 7
 		},
-		{ name: 'a report at the end of the scan', cursor: '', cursorCache: '' }
+		{ name: 'a report at the end of the scan', cursor: '', cursorCache: 0 }
 	])('accepts $name', ({ cursor, cursorCache }) => {
 		const value = {
 			narInfosChecked: 12,

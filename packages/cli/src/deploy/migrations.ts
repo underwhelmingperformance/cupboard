@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { migrationsAppliedAfterCutover } from '@cupboard/protocol/deployment';
+
 import type { DatabaseId } from './identifiers.ts';
 
 /**
@@ -38,6 +40,36 @@ export function parseD1Migrations(
 				.map((statement) => statement.trim())
 				.filter((statement) => statement.length > 0)
 		}));
+}
+
+/**
+ * The migrations a deploy cannot place on either side of the cutover.
+ *
+ * A migration that sorts at or after the first deferred one, and is not itself
+ * deferred, has no safe default: applying it before the cutover runs it against
+ * a schema the deferred migrations have not changed yet, and deferring it runs
+ * it after the Workers that need it are already serving. Only the author knows
+ * which it is, so the deploy reports it instead of choosing.
+ */
+export function unclassifiedD1Migrations(
+	migrations: readonly D1Migration[]
+): readonly string[] {
+	const deferred = [...migrationsAppliedAfterCutover].toSorted((left, right) =>
+		left.localeCompare(right)
+	);
+	const [boundary] = deferred;
+
+	if (boundary === undefined) {
+		return [];
+	}
+
+	return migrations
+		.filter(
+			(migration) =>
+				migration.name.localeCompare(boundary) >= 0 &&
+				!migrationsAppliedAfterCutover.includes(migration.name)
+		)
+		.map((migration) => migration.name);
 }
 
 export interface D1MigrationApi {

@@ -2,7 +2,7 @@ import { type Logger, rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
@@ -1181,6 +1181,12 @@ async function tenantStatus(
 	return row?.status;
 }
 
+// Every tenant whose Durable Object can still be woken, which is every tenant
+// that has not been offboarded. An offboarding tenant is included because the
+// offboard drain keeps running its object, and the contraction refuses to
+// migrate an object whose caches record no access.
+const convertibleTenant = ne(d1Schema.tenant.status, 'offboarded');
+
 function incompleteCacheCatalogueTenants(
 	database: CronDatabase,
 	batchSize: number
@@ -1189,10 +1195,7 @@ function incompleteCacheCatalogueTenants(
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
 		.where(
-			and(
-				inArray(d1Schema.tenant.status, ['active', 'suspended']),
-				isNull(d1Schema.tenant.cacheCatalogueVersion)
-			)
+			and(convertibleTenant, isNull(d1Schema.tenant.cacheCatalogueVersion))
 		)
 		.orderBy(asc(d1Schema.tenant.id))
 		.limit(batchSize)

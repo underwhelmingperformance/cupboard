@@ -17,7 +17,7 @@ export interface CheckClient {
 	run(input: {
 		deep: boolean;
 		cursor: string;
-		cursorCache: string;
+		cursorCache: number;
 	}): Promise<CheckReport>;
 }
 
@@ -53,7 +53,7 @@ export async function runCheck(
 	client: CheckClient
 ): Promise<void> {
 	let cursor = '';
-	let cursorCache = '';
+	let cursorCache = 0;
 	let narInfosChecked = 0;
 	let narBlobsChecked = 0;
 	const discrepancies: CheckDiscrepancy[] = [];
@@ -68,7 +68,7 @@ export async function runCheck(
 		discrepancies.push(...page.discrepancies);
 		cursor = page.cursor;
 		cursorCache = page.cursorCache;
-	} while (cursor !== '' || cursorCache !== '');
+	} while (cursor !== '' || cursorCache !== 0);
 
 	reporter.result({
 		kind: 'check-report',
