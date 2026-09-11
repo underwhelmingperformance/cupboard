@@ -6,6 +6,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it, type TestContext } from 'vitest';
 
 import { Nix } from '../../packages/nix/src/nix.ts';
@@ -15,9 +16,11 @@ import {
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
 import { runCommand } from '../support/process.ts';
+import { FakeSubstituter, servedNarSize } from '../support/substituter.ts';
 
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
+const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const absentPath = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-cupboard-missing'
 );
@@ -59,6 +62,18 @@ async function withDaemon<T>(
 	return skippingPermissionDenied(context, () =>
 		run(new NixDaemonStoreClient({ socketPath, overrides }))
 	);
+}
+
+// The daemon drops an untrusted client's setting overrides, so a case that
+// points the daemon at its own substituter would be answered by the machine's
+// instead. Such a machine cannot run the case at all, so it skips.
+async function requireTrustedDaemon(
+	context: Pick<TestContext, 'skip'>,
+	daemon: NixDaemonStoreClient
+): Promise<void> {
+	if ((await daemon.daemonTrust()) !== 'trusted') {
+		context.skip();
+	}
 }
 
 // The test process itself has to run from the store for its own store path to
@@ -154,9 +169,13 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 		});
 	});
 
+	// The partition asks every permitted substituter whether it serves the path,
+	// so the connection permits none and the answer comes from the daemon alone.
 	it('classifies an absent path in exactly one partition set', async (context) => {
-		const partition = await withDaemon(context, (daemon) =>
-			daemon.queryMissing([absentPath])
+		const partition = await withDaemon(
+			context,
+			(daemon) => daemon.queryMissing([absentPath]),
+			{ substituters: '' }
 		);
 		const membership = [
 			partition.willBuild,
@@ -175,27 +194,52 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 		});
 	});
 
+	// The offers a connection receives are the ones its permitted substituters
+	// publish, so the case runs against a fixture cache that serves exactly one
+	// of the two paths asked for. The requests the fixture records show that the
+	// daemon asked it about both.
 	it('offers substitutable info only for paths a substituter serves', async (context) => {
 		const executable = requireExecutableStorePath(context);
-		const infos = await withDaemon(context, (daemon) =>
-			daemon.querySubstitutablePathInfos([executable, absentPath])
-		);
+		const substituter = await FakeSubstituter.start(storeDirectory);
 
-		expect({
-			offeredPathsWereAsked: infos.every(
-				(info) => info.storePath === executable
-			),
-			offeredTheAbsentPath: infos.some((info) => info.storePath === absentPath),
-			sizesAtLeastZero: infos.every(
-				(info) => info.downloadSize >= 0 && info.narSize >= 0
-			),
-			referencesListed: infos.every((info) => Array.isArray(info.references))
-		}).toStrictEqual({
-			offeredPathsWereAsked: true,
-			offeredTheAbsentPath: false,
-			sizesAtLeastZero: true,
-			referencesListed: true
-		});
+		try {
+			substituter.servePath(executable);
+
+			const infos = await withDaemon(
+				context,
+				async (daemon) => {
+					await requireTrustedDaemon(context, daemon);
+
+					return daemon.querySubstitutablePathInfos([executable, absentPath]);
+				},
+				{ substituters: substituter.url }
+			);
+
+			expect({
+				offers: infos.map((info) => ({
+					storePath: info.storePath,
+					downloadSize: info.downloadSize,
+					narSize: info.narSize,
+					references: info.references
+				})),
+				asked: [...new Set(substituter.narInfoRequests)].toSorted(byCodeUnit)
+			}).toStrictEqual({
+				offers: [
+					{
+						storePath: executable,
+						downloadSize: servedNarSize,
+						narSize: servedNarSize,
+						references: []
+					}
+				],
+				asked: [
+					StorePath.hash(absentPath),
+					StorePath.hash(executable)
+				].toSorted(byCodeUnit)
+			});
+		} finally {
+			await substituter.stop();
+		}
 	});
 
 	// The walk that proves a closure is held upstream depends on this: the

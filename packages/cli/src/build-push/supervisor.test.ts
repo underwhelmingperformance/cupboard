@@ -1,21 +1,23 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { waitForFile } from '../../../../tests/support/filesystem.ts';
-
 import {
 	type ChildExit,
 	childTerminationGracePeriodMs,
 	type ChildTerminationScheduler,
+	type RunChild,
 	runChild,
+	type RunChildOptions,
 	type SignalSource,
+	spawnChildProcess,
 	startTimerDelay,
 	superviseAttemptedBuild,
-	superviseBuild
+	superviseBuild,
+	type SupervisedChild
 } from './supervisor.ts';
 
 class ControlledTerminationScheduler implements ChildTerminationScheduler {
@@ -85,13 +87,49 @@ function recordingSignalSource() {
 	};
 }
 
-function blockUntilSignal(exitStatus: number): string {
-	return `mkfifo "$CUPBOARD_TEST_GATE"; trap 'exit ${String(exitStatus)}' INT TERM; : > "$CUPBOARD_TEST_READY"; read _ 2>/dev/null < "$CUPBOARD_TEST_GATE"`;
+/**
+ * A child the case drives. It is already running when `runChild` receives it
+ * and exits only when the case says so, which is what a real child needed a
+ * ready file and a wait to arrange.
+ */
+function controlledChild() {
+	const exited = Promise.withResolvers<ChildExit>();
+	const signals: NodeJS.Signals[] = [];
+	const child: SupervisedChild = {
+		kill(signal) {
+			signals.push(signal);
+		},
+		exited: exited.promise
+	};
+
+	return {
+		child,
+		signals,
+		exitWith(exit: ChildExit): void {
+			exited.resolve(exit);
+		},
+		failWith(error: Error): void {
+			exited.reject(error);
+		}
+	};
 }
 
-function ignoreSignalsUntilKilled(): string {
-	return `mkfifo "$CUPBOARD_TEST_GATE"; trap '' INT TERM; : > "$CUPBOARD_TEST_READY"; read _ 2>/dev/null < "$CUPBOARD_TEST_GATE"`;
+/**
+ * A `runChild` the case controls. It records what the supervisor asked it for
+ * and answers with the given exit.
+ */
+function recordingRunChild(exit: ChildExit) {
+	const calls: RunChildOptions[] = [];
+	const runs: RunChild = (options) => {
+		calls.push(options);
+
+		return Promise.resolve(exit);
+	};
+
+	return { calls, runChild: runs };
 }
+
+const succeeded: ChildExit = { status: 0, signal: undefined };
 
 describe('superviseBuild', () => {
 	it('preserves an on-exit failure when runtime removal also fails', async () => {
@@ -103,6 +141,7 @@ describe('superviseBuild', () => {
 				command: ['sh', '-c', 'exit 0'],
 				environment: {},
 				runtimeDirectory: '/unused/runtime',
+				runChild: () => Promise.resolve(succeeded),
 				onExit: () => Promise.reject(primary),
 				removeRuntimeDirectory: (directory) => {
 					removed.push(directory);
@@ -114,65 +153,62 @@ describe('superviseBuild', () => {
 	});
 
 	it.each([
-		{
-			name: 'a successful child',
-			script: 'exit 0',
-			expected: { status: 0, signal: undefined }
-		},
+		{ name: 'a successful child', exit: { status: 0, signal: undefined } },
 		{
 			name: 'a failing child, preserving its status',
-			script: 'exit 7',
-			expected: { status: 7, signal: undefined }
+			exit: { status: 7, signal: undefined }
+		},
+		{
+			name: 'a signalled child, preserving its signal',
+			exit: { status: undefined, signal: 'SIGINT' as const }
 		}
-	])('passes through the exit of $name', async ({ script, expected }) => {
+	])('passes through the exit of $name', async ({ exit }) => {
 		const directory = await runtimeDirectory();
 
-		const exit = await superviseBuild({
-			command: ['sh', '-c', script],
+		const observed = await superviseBuild({
+			command: ['sh', '-c', 'exit 0'],
 			environment: {},
-			runtimeDirectory: directory
+			runtimeDirectory: directory,
+			runChild: () => Promise.resolve(exit)
 		});
 
-		expect(exit).toStrictEqual(expected);
+		expect(observed).toStrictEqual(exit);
 	});
 
-	it('runs the child with the composed environment', async () => {
+	it('hands the command and the composed environment to the child', async () => {
 		const directory = await runtimeDirectory();
-		const outFile = path.join(tmpdir(), `cup-sup-env-${String(Date.now())}`);
+		const child = recordingRunChild(succeeded);
+		const environment = {
+			PATH: '/usr/bin:/bin',
+			NIX_CONFIG: 'post-build-hook = /inv/hook.sh'
+		};
 
-		try {
-			const exit = await superviseBuild({
-				command: ['sh', '-c', 'printf %s "$NIX_CONFIG" > "$CUPBOARD_TEST_OUT"'],
-				environment: {
-					PATH: '/usr/bin:/bin',
-					CUPBOARD_TEST_OUT: outFile,
-					NIX_CONFIG: 'post-build-hook = /inv/hook.sh'
-				},
-				runtimeDirectory: directory
-			});
+		await superviseBuild({
+			command: ['nix', 'build', '.#thing'],
+			environment,
+			runtimeDirectory: directory,
+			runChild: child.runChild
+		});
 
-			expect({
-				exit,
-				written: await readFile(outFile, 'utf8')
-			}).toStrictEqual({
-				exit: { status: 0, signal: undefined },
-				written: 'post-build-hook = /inv/hook.sh'
-			});
-		} finally {
-			await rm(outFile, { force: true });
-		}
+		expect(
+			child.calls.map((call) => ({
+				command: call.command,
+				environment: call.environment
+			}))
+		).toStrictEqual([{ command: ['nix', 'build', '.#thing'], environment }]);
 	});
 
 	it.each([
-		{ name: 'a successful child', script: 'exit 0' },
-		{ name: 'a failing child', script: 'exit 3' }
-	])('removes the runtime directory after $name', async ({ script }) => {
+		{ name: 'a successful child', exit: { status: 0, signal: undefined } },
+		{ name: 'a failing child', exit: { status: 3, signal: undefined } }
+	])('removes the runtime directory after $name', async ({ exit }) => {
 		const directory = await runtimeDirectory();
 
 		await superviseBuild({
-			command: ['sh', '-c', script],
+			command: ['sh', '-c', 'exit 0'],
 			environment: {},
-			runtimeDirectory: directory
+			runtimeDirectory: directory,
+			runChild: () => Promise.resolve(exit)
 		});
 
 		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -180,14 +216,16 @@ describe('superviseBuild', () => {
 
 	it('removes the runtime directory when the child cannot start', async () => {
 		const directory = await runtimeDirectory();
+		const failure = new Error('spawn failed');
 
 		await expect(
 			superviseBuild({
 				command: [path.join(directory, 'missing-executable')],
 				environment: {},
-				runtimeDirectory: directory
+				runtimeDirectory: directory,
+				runChild: () => Promise.reject(failure)
 			})
-		).rejects.toMatchObject({ code: 'ENOENT' });
+		).rejects.toBe(failure);
 
 		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
@@ -200,6 +238,7 @@ describe('superviseBuild', () => {
 			command: ['sh', '-c', 'exit 5'],
 			environment: {},
 			runtimeDirectory: directory,
+			runChild: () => Promise.resolve({ status: 5, signal: undefined }),
 			onExit: async (exit) => {
 				let didDirectoryExist = true;
 
@@ -217,164 +256,108 @@ describe('superviseBuild', () => {
 			{ exit: { status: 5, signal: undefined }, directoryExisted: true }
 		]);
 	});
-
-	it.runIf(platform === 'darwin' || platform === 'linux').each([
-		{ signal: 'SIGINT', followingSignal: 'SIGTERM' },
-		{ signal: 'SIGTERM', followingSignal: 'SIGINT' }
-	])(
-		'preserves the first $signal when the child traps signals and exits successfully',
-		async ({ signal, followingSignal }) => {
-			const directory = await runtimeDirectory();
-			const readyFile = path.join(
-				tmpdir(),
-				`cup-sup-ready-${signal}-${String(Date.now())}`
-			);
-			const gateFile = `${readyFile}.fifo`;
-			const signals = recordingSignalSource();
-
-			try {
-				const running = superviseBuild({
-					command: ['sh', '-c', blockUntilSignal(0)],
-					environment: {
-						PATH: '/usr/bin:/bin',
-						CUPBOARD_TEST_GATE: gateFile,
-						CUPBOARD_TEST_READY: readyFile
-					},
-					runtimeDirectory: directory,
-					signalSource: signals.source
-				});
-
-				await waitForFile(readyFile);
-				signals.emit(signal);
-				signals.emit(followingSignal);
-
-				expect({
-					exit: await running,
-					remainingListeners: signals.listenerCount()
-				}).toStrictEqual({
-					exit: { status: undefined, signal },
-					remainingListeners: 0
-				});
-			} finally {
-				await Promise.all([
-					rm(gateFile, { force: true }),
-					rm(readyFile, { force: true })
-				]);
-			}
-		}
-	);
-
-	it.runIf(platform === 'darwin' || platform === 'linux')(
-		'escalates an ignored signal and cleans up the completed supervision',
-		async () => {
-			const directory = await runtimeDirectory();
-			const readyFile = path.join(
-				tmpdir(),
-				`cup-sup-kill-ready-${String(Date.now())}`
-			);
-			const gateFile = `${readyFile}.fifo`;
-			const signals = recordingSignalSource();
-			const scheduler = new ControlledTerminationScheduler();
-
-			try {
-				const running = superviseBuild({
-					command: ['sh', '-c', ignoreSignalsUntilKilled()],
-					environment: {
-						PATH: '/usr/bin:/bin',
-						CUPBOARD_TEST_GATE: gateFile,
-						CUPBOARD_TEST_READY: readyFile
-					},
-					runtimeDirectory: directory,
-					signalSource: signals.source,
-					terminationScheduler: scheduler
-				});
-
-				await waitForFile(readyFile);
-				signals.emit('SIGTERM');
-
-				expect(
-					scheduler.scheduled.map(({ delayMs, cancelled }) => ({
-						delayMs,
-						cancelled
-					}))
-				).toStrictEqual([
-					{ delayMs: childTerminationGracePeriodMs, cancelled: false }
-				]);
-
-				scheduler.runPending();
-				const exit = await running;
-				let didRuntimeDirectoryExist = true;
-
-				try {
-					await stat(directory);
-				} catch {
-					didRuntimeDirectoryExist = false;
-				}
-
-				expect({
-					exit,
-					remainingListeners: signals.listenerCount(),
-					runtimeDirectoryExists: didRuntimeDirectoryExist,
-					scheduledTerminations: scheduler.scheduled.map(
-						({ delayMs, cancelled }) => ({ delayMs, cancelled })
-					)
-				}).toStrictEqual({
-					exit: { status: undefined, signal: 'SIGTERM' },
-					remainingListeners: 0,
-					runtimeDirectoryExists: false,
-					scheduledTerminations: [
-						{ delayMs: childTerminationGracePeriodMs, cancelled: true }
-					]
-				});
-			} finally {
-				await Promise.all([
-					rm(gateFile, { force: true }),
-					rm(readyFile, { force: true })
-				]);
-			}
-		}
-	);
-
-	it.runIf(platform === 'darwin' || platform === 'linux')(
-		'forwards AbortSignal cancellation to the running child',
-		async () => {
-			const readyFile = path.join(
-				tmpdir(),
-				`cup-child-abort-ready-${String(Date.now())}`
-			);
-			const gateFile = `${readyFile}.fifo`;
-			const controller = new AbortController();
-
-			try {
-				const running = runChild({
-					command: ['sh', '-c', blockUntilSignal(0)],
-					environment: {
-						PATH: '/usr/bin:/bin',
-						CUPBOARD_TEST_GATE: gateFile,
-						CUPBOARD_TEST_READY: readyFile
-					},
-					signal: controller.signal
-				});
-
-				await waitForFile(readyFile);
-				controller.abort(new Error('cancel child'));
-
-				await expect(running).resolves.toStrictEqual({
-					status: undefined,
-					signal: 'SIGTERM'
-				});
-			} finally {
-				await Promise.all([
-					rm(gateFile, { force: true }),
-					rm(readyFile, { force: true })
-				]);
-			}
-		}
-	);
 });
 
-describe('runChild cleanup', () => {
+describe('runChild', () => {
+	it.each([
+		{ signal: 'SIGINT' as const, followingSignal: 'SIGTERM' as const },
+		{ signal: 'SIGTERM' as const, followingSignal: 'SIGINT' as const }
+	])(
+		'keeps the first $signal as the result when the child traps it and exits successfully',
+		async ({ signal, followingSignal }) => {
+			const child = controlledChild();
+			const signals = recordingSignalSource();
+
+			const running = runChild({
+				command: ['sh', '-c', 'sleep 30'],
+				environment: {},
+				signalSource: signals.source,
+				spawnChild: () => child.child
+			});
+
+			signals.emit(signal);
+			signals.emit(followingSignal);
+			child.exitWith(succeeded);
+
+			expect({
+				exit: await running,
+				forwarded: child.signals,
+				remainingListeners: signals.listenerCount()
+			}).toStrictEqual({
+				exit: { status: undefined, signal },
+				forwarded: [signal],
+				remainingListeners: 0
+			});
+		}
+	);
+
+	it('escalates to SIGKILL when the child outlives the grace period', async () => {
+		const child = controlledChild();
+		const signals = recordingSignalSource();
+		const scheduler = new ControlledTerminationScheduler();
+
+		const running = runChild({
+			command: ['sh', '-c', 'sleep 30'],
+			environment: {},
+			signalSource: signals.source,
+			terminationScheduler: scheduler,
+			spawnChild: () => child.child
+		});
+
+		signals.emit('SIGTERM');
+
+		expect(
+			scheduler.scheduled.map(({ delayMs, cancelled }) => ({
+				delayMs,
+				cancelled
+			}))
+		).toStrictEqual([
+			{ delayMs: childTerminationGracePeriodMs, cancelled: false }
+		]);
+
+		scheduler.runPending();
+		child.exitWith({ status: undefined, signal: 'SIGKILL' });
+
+		expect({
+			exit: await running,
+			forwarded: child.signals,
+			remainingListeners: signals.listenerCount(),
+			scheduledTerminations: scheduler.scheduled.map(
+				({ delayMs, cancelled }) => ({ delayMs, cancelled })
+			)
+		}).toStrictEqual({
+			exit: { status: undefined, signal: 'SIGTERM' },
+			forwarded: ['SIGTERM', 'SIGKILL'],
+			remainingListeners: 0,
+			scheduledTerminations: [
+				{ delayMs: childTerminationGracePeriodMs, cancelled: true }
+			]
+		});
+	});
+
+	it('forwards AbortSignal cancellation to the running child', async () => {
+		const child = controlledChild();
+		const controller = new AbortController();
+
+		const running = runChild({
+			command: ['sh', '-c', 'sleep 30'],
+			environment: {},
+			signal: controller.signal,
+			spawnChild: () => child.child
+		});
+
+		controller.abort(new Error('cancel child'));
+		child.exitWith({ status: undefined, signal: 'SIGTERM' });
+
+		expect({ exit: await running, forwarded: child.signals }).toStrictEqual({
+			exit: { status: undefined, signal: 'SIGTERM' },
+			forwarded: ['SIGTERM']
+		});
+	});
+
 	it('preserves a child-start failure while removing every signal listener', async () => {
+		const child = controlledChild();
+		const failure = new Error('child could not start');
 		const removed: string[] = [];
 		const source: SignalSource = {
 			on: () => source,
@@ -384,14 +367,96 @@ describe('runChild cleanup', () => {
 			}
 		};
 
+		const running = runChild({
+			command: ['/definitely/missing/cupboard-child'],
+			environment: {},
+			signalSource: source,
+			spawnChild: () => child.child
+		});
+
+		child.failWith(failure);
+
+		await expect(running).rejects.toBe(failure);
+		expect(removed).toStrictEqual(['SIGINT', 'SIGTERM']);
+	});
+});
+
+// These cases start a real process, because what they assert belongs to Node
+// and the operating system rather than to this module: how a signalled child,
+// a supplied environment and a missing executable are reported back. None of
+// them waits for the child to become ready, so none waits for longer than
+// starting a process takes.
+describe('runChild against a real process', () => {
+	// The injected cases see the supervisor call `kill` and never see a real
+	// process receive the signal, which is the thing the supervisor exists to
+	// do. The kill goes out as soon as `spawn` returns, because Node has the
+	// child's process id by then and the child does not have to have finished
+	// starting to be signalled.
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'signals the process it started',
+		async () => {
+			const child = spawnChildProcess(['sh', '-c', 'sleep 30'], {
+				PATH: '/usr/bin:/bin'
+			});
+
+			child.kill('SIGTERM');
+
+			await expect(child.exited).resolves.toStrictEqual({
+				status: undefined,
+				signal: 'SIGTERM'
+			});
+		}
+	);
+
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'reports a child killed by a signal as a signal rather than a status',
+		async () => {
+			const exit = await runChild({
+				command: ['sh', '-c', 'kill -TERM $$'],
+				environment: { PATH: '/usr/bin:/bin' }
+			});
+
+			expect(exit).toStrictEqual({ status: undefined, signal: 'SIGTERM' });
+		}
+	);
+
+	it('gives the child the composed environment and nothing else', async () => {
+		// `mkdtemp` rather than a name built from the clock: two runs of this
+		// file that start in the same millisecond would otherwise choose the
+		// same path, and the first to finish deletes the other's file.
+		const directory = await runtimeDirectory();
+		const outFile = path.join(directory, 'child-environment');
+
+		try {
+			const exit = await runChild({
+				command: [
+					'sh',
+					'-c',
+					'printf %s "$NIX_CONFIG/$CUPBOARD_UNSET" > "$CUPBOARD_TEST_OUT"'
+				],
+				environment: {
+					PATH: '/usr/bin:/bin',
+					CUPBOARD_TEST_OUT: outFile,
+					NIX_CONFIG: 'post-build-hook = /inv/hook.sh'
+				}
+			});
+
+			expect({ exit, written: await readFile(outFile, 'utf8') }).toStrictEqual({
+				exit: { status: 0, signal: undefined },
+				written: 'post-build-hook = /inv/hook.sh/'
+			});
+		} finally {
+			await rm(directory, { force: true, recursive: true });
+		}
+	});
+
+	it('rejects when the executable does not exist', async () => {
 		await expect(
 			runChild({
 				command: ['/definitely/missing/cupboard-child'],
-				environment: {},
-				signalSource: source
+				environment: {}
 			})
 		).rejects.toMatchObject({ code: 'ENOENT' });
-		expect(removed).toStrictEqual(['SIGINT', 'SIGTERM']);
 	});
 });
 
@@ -405,6 +470,15 @@ function attemptIds(): () => string {
 	};
 }
 
+function immediateDelay() {
+	return {
+		completed: Promise.resolve(),
+		cancel() {
+			return;
+		}
+	};
+}
+
 describe('superviseAttemptedBuild', () => {
 	it('stops at the first success, sleeping a growing delay between attempts', async () => {
 		const directory = await runtimeDirectory();
@@ -412,28 +486,25 @@ describe('superviseAttemptedBuild', () => {
 		let calls = 0;
 
 		const result = await superviseAttemptedBuild({
-			command: (logFile) => {
-				calls += 1;
-
-				return [
-					'sh',
-					'-c',
-					`printf %s '{"call":${String(calls)}}' > "${logFile}"; exit ${calls < 2 ? '1' : '0'}`
-				];
-			},
+			command: (logFile) => ['sh', '-c', logFile],
 			attempts: 3,
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
 			nextAttemptId: attemptIds(),
+			// The command carries the attempt's log path, so writing it here is
+			// what the real child's `nix` invocation does.
+			runChild: async (options) => {
+				calls += 1;
+				await writeFile(options.command[2] ?? '', `{"call":${String(calls)}}`);
+
+				return calls < 2
+					? { status: 1, signal: undefined }
+					: { status: 0, signal: undefined };
+			},
 			startDelay: (delayMs) => {
 				sleeps.push(delayMs);
 
-				return {
-					completed: Promise.resolve(),
-					cancel() {
-						return;
-					}
-				};
+				return immediateDelay();
 			}
 		});
 
@@ -469,15 +540,11 @@ describe('superviseAttemptedBuild', () => {
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
 			nextAttemptId: attemptIds(),
+			runChild: () => Promise.resolve({ status: 2, signal: undefined }),
 			startDelay: (delayMs) => {
 				sleeps.push(delayMs);
 
-				return {
-					completed: Promise.resolve(),
-					cancel() {
-						return;
-					}
-				};
+				return immediateDelay();
 			}
 		});
 
@@ -509,61 +576,38 @@ describe('superviseAttemptedBuild', () => {
 		});
 	});
 
-	it.runIf(platform === 'darwin' || platform === 'linux')(
-		'does not retry a child interrupted by a forwarded signal',
-		async () => {
-			const directory = await runtimeDirectory();
-			const readyFile = path.join(
-				tmpdir(),
-				`cup-attempt-ready-${String(Date.now())}`
-			);
-			const gateFile = `${readyFile}.fifo`;
-			const signals = recordingSignalSource();
-			let calls = 0;
+	it('does not retry a child interrupted by a forwarded signal', async () => {
+		const directory = await runtimeDirectory();
+		let calls = 0;
 
-			try {
-				const running = superviseAttemptedBuild({
-					command: () => {
-						calls += 1;
+		const result = await superviseAttemptedBuild({
+			command: () => ['sh', '-c', 'exit 42'],
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			runChild: () => {
+				calls += 1;
 
-						return ['sh', '-c', blockUntilSignal(42)];
-					},
-					attempts: 3,
-					environment: {
-						PATH: '/usr/bin:/bin',
-						CUPBOARD_TEST_GATE: gateFile,
-						CUPBOARD_TEST_READY: readyFile
-					},
-					runtimeDirectory: directory,
-					signalSource: signals.source,
-					nextAttemptId: attemptIds()
-				});
-
-				await waitForFile(readyFile);
-				signals.emit('SIGINT');
-
-				expect({ result: await running, calls }).toStrictEqual({
-					result: {
-						exit: { status: undefined, signal: 'SIGINT' },
-						attempts: [
-							{
-								attempt: 1,
-								attemptId: 'attempt-1',
-								log: '',
-								exit: { status: undefined, signal: 'SIGINT' }
-							}
-						]
-					},
-					calls: 1
-				});
-			} finally {
-				await Promise.all([
-					rm(gateFile, { force: true }),
-					rm(readyFile, { force: true })
-				]);
+				return Promise.resolve({ status: undefined, signal: 'SIGINT' });
 			}
-		}
-	);
+		});
+
+		expect({ result, calls }).toStrictEqual({
+			result: {
+				exit: { status: undefined, signal: 'SIGINT' },
+				attempts: [
+					{
+						attempt: 1,
+						attemptId: 'attempt-1',
+						log: '',
+						exit: { status: undefined, signal: 'SIGINT' }
+					}
+				]
+			},
+			calls: 1
+		});
+	});
 
 	it('aborts a retry delay when a signal arrives', async () => {
 		const directory = await runtimeDirectory();
@@ -572,16 +616,17 @@ describe('superviseAttemptedBuild', () => {
 		let cancellations = 0;
 
 		const result = await superviseAttemptedBuild({
-			command: () => {
-				calls += 1;
-
-				return ['sh', '-c', 'exit 2'];
-			},
+			command: () => ['sh', '-c', 'exit 2'],
 			attempts: 3,
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
 			signalSource: signals.source,
 			nextAttemptId: attemptIds(),
+			runChild: () => {
+				calls += 1;
+
+				return Promise.resolve({ status: 2, signal: undefined });
+			},
 			startDelay: () => {
 				queueMicrotask(() => {
 					signals.emit('SIGTERM');
@@ -651,12 +696,8 @@ describe('superviseAttemptedBuild', () => {
 			attempts: 2,
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
-			startDelay: () => ({
-				completed: Promise.resolve(),
-				cancel() {
-					return;
-				}
-			})
+			runChild: () => Promise.resolve({ status: 1, signal: undefined }),
+			startDelay: immediateDelay
 		});
 
 		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });

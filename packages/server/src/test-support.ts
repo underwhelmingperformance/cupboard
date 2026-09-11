@@ -612,11 +612,13 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
- * The D1 statements one invocation of the current test server may run.
+ * The D1 statements one invocation of the current test server may run: the
+ * figure the Durable Object read at construction, and the figure every cap in
+ * it is a function of.
  *
- * The pool binds the deployment's environment, so this is the figure the
- * Durable Object read at construction and the figure every cap in it is a
- * function of.
+ * `vitest.config.ts` pins the Workers Free allowance for the pool, so this
+ * answers with that figure wherever the suite runs. It is not what the local
+ * environment configures.
  */
 export function deployedStatementAllowance(): Promise<number> {
 	return runInDurableObject(
