@@ -597,9 +597,10 @@ describe('attestation attach and reads', () => {
 		});
 	});
 
-	it('decides correctly when the bundle count exceeds one chunk width', async () => {
-		// 91 distinct storePathHashes crosses the maxInClauseValues (90) boundary
-		// in narInfoRowsFor, so this pins the chunked DO SQLite read in negotiate.
+	it('decides correctly for more bundles than a statement could bind', async () => {
+		// 91 distinct storePathHashes is more than the 100-parameter limit leaves
+		// room for, so this pins the Durable Object read that negotiate makes from
+		// a bound list.
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
 

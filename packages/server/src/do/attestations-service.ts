@@ -68,12 +68,11 @@ import {
 } from './attestation-cas-service.ts';
 import {
 	batchNonEmpty,
-	chunk,
 	deleteObjects,
-	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+import { jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 interface ParsedAttestationBundle {
@@ -460,24 +459,22 @@ export class AttestationsService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const queries = chunk([...new Set(digests)], maxInClauseValues).map(
-			(digestBatch) => {
-				const filter = and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
-					inArray(d1Schema.attestationReference.digest, digestBatch)
-				);
+		const queries = jsonValueLists([...new Set(digests)]).map((list) => {
+			const filter = and(
+				eq(d1Schema.attestationReference.tenant, tenant),
+				eq(d1Schema.attestationReference.cache, cache),
+				inArray(d1Schema.attestationReference.digest, list)
+			);
 
-				return this.context.d1
-					.select({
-						storePathHash: d1Schema.attestationReference.storePathHash,
-						generation: d1Schema.attestationReference.generation,
-						digest: d1Schema.attestationReference.digest
-					})
-					.from(d1Schema.attestationReference)
-					.where(filter);
-			}
-		);
+			return this.context.d1
+				.select({
+					storePathHash: d1Schema.attestationReference.storePathHash,
+					generation: d1Schema.attestationReference.generation,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(filter);
+		});
 
 		const pages = await batchNonEmpty(this.context.d1, queries);
 
@@ -501,15 +498,14 @@ export class AttestationsService {
 			return new Set();
 		}
 
-		const queries = chunk([...new Set(digests)], maxInClauseValues).map(
-			(digestBatch) =>
-				this.context.d1
-					.select({
-						digest: d1Schema.casObject.digest,
-						incarnation: d1Schema.casObject.incarnation
-					})
-					.from(d1Schema.casObject)
-					.where(inArray(d1Schema.casObject.digest, digestBatch))
+		const queries = jsonValueLists([...new Set(digests)]).map((list) =>
+			this.context.d1
+				.select({
+					digest: d1Schema.casObject.digest,
+					incarnation: d1Schema.casObject.incarnation
+				})
+				.from(d1Schema.casObject)
+				.where(inArray(d1Schema.casObject.digest, list))
 		);
 
 		const recordedPages = await batchNonEmpty(this.context.d1, queries);

@@ -35,9 +35,15 @@ import {
 	type AttestationReference
 } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import { chunk, drainStatementBatches, maxInClauseValues } from './bulk.ts';
+import { chunk, drainStatementBatches } from './bulk.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
+import {
+	type JsonRowList,
+	jsonRowLists,
+	type JsonValueList,
+	jsonValueLists
+} from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	affordableOperations,
@@ -50,24 +56,16 @@ export interface TornDownNarInfo {
 	readonly narHash: NixSha256HashString;
 }
 
-// Both statements use the same edge filter, which binds 2N + 2 parameters: a
-// path and generation for each edge, plus the tenant and cache. The credit
-// update embeds that filter in its `count(*)` subquery and also binds `updatedAt`
-// and its own tenant predicate. Its 2N + 4 parameters determine the chunk width.
-export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+// The paths one retirement chunk covers. A chunk costs the same number of D1
+// statements whatever its size, so this is a step size: a larger chunk retires
+// more paths for those statements and holds the critical section for longer.
+export const maxFencedRetireRows = 45;
 
 // Limit each flush to a few retirement batches. An alarm continues any backlog
 // without keeping the critical section open for the entire queue.
 const teardownChunksPerFlush = 4;
 export const maxNarInfoDeletionsFlushedPerRun =
 	teardownChunksPerFlush * maxFencedRetireRows;
-
-// The presence credit update embeds the tenant and hash filter twice. Together
-// with the fixed bindings, a chunk of N hashes binds 2N + 6 parameters. The
-// drain measures the statement it builds and narrows the chunk itself; this is
-// the width the parameter guard inspects, and the widest chunk a page of
-// `maxFencedRetireRows` paths can produce.
-export const maxTeardownPresenceChunk = 45;
 
 // One query finds the attestation references of every path in a chunk.
 const attestationQueryStatementsPerChunk = 1;
@@ -105,31 +103,26 @@ const maxSinglePathAttestationRetirements = Math.floor(
 
 /**
  * Builds the usage-credit update and edge delete that retire one chunk of
- * narinfo edges. Both statements use the same edge filter. The credit update
- * embeds that filter in its `count(*)` subquery and adds two fixed parameters,
- * so it binds 94 parameters at `maxFencedRetireRows`.
+ * narinfo edges. Both statements use the same edge filter, which the credit
+ * update embeds in its `count(*)` subquery.
  *
- * The parameter guard imports this builder so it inspects the production
+ * The parameter test imports this builder so it inspects the production
  * statements instead of maintaining a separate filter.
  */
 export function fencedEdgeRetirement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: StoredCache,
-	batch: readonly TornDownNarInfo[],
+	batch: JsonRowList<TornDownNarInfo>,
 	now: IsoTimestamp
 ) {
 	const edgeFilter = and(
 		eq(d1Schema.blobReference.tenant, tenant),
 		eq(d1Schema.blobReference.cache, cache),
-		or(
-			...batch.map((entry) =>
-				and(
-					eq(d1Schema.blobReference.storePathHash, entry.storePathHash),
-					eq(d1Schema.blobReference.generation, entry.generation)
-				)
-			)
-		)
+		batch.matches({
+			storePathHash: d1Schema.blobReference.storePathHash,
+			generation: d1Schema.blobReference.generation
+		})
 	);
 	const edgeCount = database
 		.select({ count: sql<number>`count(*)` })
@@ -154,7 +147,7 @@ export function fencedEdgeRetirement(
 export function teardownPresenceBatch(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	narHashes: readonly NixSha256HashString[],
+	narHashes: JsonValueList<NixSha256HashString>,
 	now: IsoTimestamp
 ) {
 	const stillReferenced = d1
@@ -470,19 +463,21 @@ export class DeletionQueueService {
 		}
 
 		const storePathHashes = batch.map((entry) => entry.storePathHash);
-		const liveRows = this.context.db
-			.select({
-				storePathHash: schema.narInfos.storePathHash,
-				generation: schema.narInfos.generation
-			})
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					inArray(schema.narInfos.storePathHash, storePathHashes)
+		const liveRows = jsonValueLists(storePathHashes).flatMap((list) =>
+			this.context.db
+				.select({
+					storePathHash: schema.narInfos.storePathHash,
+					generation: schema.narInfos.generation
+				})
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						inArray(schema.narInfos.storePathHash, list)
+					)
 				)
-			)
-			.all();
+				.all()
+		);
 		const liveGenerations = new Map(
 			liveRows.map((row) => [row.storePathHash, row.generation] as const)
 		);
@@ -502,15 +497,17 @@ export class DeletionQueueService {
 
 		// Compute the credit from edges that still exist, then delete those exact
 		// generations in the same transaction. Replays cannot double-credit.
-		const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
-			this.context.d1,
-			tenant,
-			cache,
-			batch,
-			now
-		);
+		for (const entries of jsonRowLists(batch)) {
+			const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
+				this.context.d1,
+				tenant,
+				cache,
+				entries,
+				now
+			);
 
-		await this.context.d1.batch([creditUpdate, edgeDelete]);
+			await this.context.d1.batch([creditUpdate, edgeDelete]);
+		}
 
 		// A shared hash retains its presence row until its final edge is retired.
 		// The caller's critical section makes this Durable Object the sole writer
@@ -521,16 +518,17 @@ export class DeletionQueueService {
 		const retiredHashes = await drainStatementBatches(
 			this.context.d1,
 			[...new Set(batch.map((entry) => entry.narHash))],
-			(hashes) => {
-				const { update, presenceDelete } = teardownPresenceBatch(
-					this.context.d1,
-					tenant,
-					hashes,
-					now
-				);
+			(hashes) =>
+				jsonValueLists(hashes).flatMap((list) => {
+					const { update, presenceDelete } = teardownPresenceBatch(
+						this.context.d1,
+						tenant,
+						list,
+						now
+					);
 
-				return [update, presenceDelete];
-			}
+					return [update, presenceDelete];
+				})
 		);
 
 		await this.purgeUnreferencedNars(cache, retiredHashes);
@@ -540,17 +538,20 @@ export class DeletionQueueService {
 		// Clear only the retired path and generation pairs. A later generation
 		// keeps its queue entry, and clearing each completed chunk preserves
 		// progress across a timeout.
-		const retiredPairs = batch.map((entry) =>
-			and(
-				eq(schema.narInfoDeletions.storePathHash, entry.storePathHash),
-				eq(schema.narInfoDeletions.generation, entry.generation)
-			)
-		);
-
-		this.context.db
-			.delete(schema.narInfoDeletions)
-			.where(and(eq(schema.narInfoDeletions.cache, cache), or(...retiredPairs)))
-			.run();
+		for (const entries of jsonRowLists(batch)) {
+			this.context.db
+				.delete(schema.narInfoDeletions)
+				.where(
+					and(
+						eq(schema.narInfoDeletions.cache, cache),
+						entries.matches({
+							storePathHash: schema.narInfoDeletions.storePathHash,
+							generation: schema.narInfoDeletions.generation
+						})
+					)
+				)
+				.run();
+		}
 
 		return removable.length;
 	}

@@ -1183,6 +1183,21 @@ export class StatementAllowanceExceededError extends Error {
 }
 
 /**
+ * Work that asks how much of the invocation's Durable Object row budget is
+ * left but runs outside a budget scope.
+ *
+ * Every dispatched method opens a budget. This error exposes a pass that runs
+ * outside one, where it would otherwise size itself against a budget nothing
+ * is debiting.
+ */
+export class MissingRowBudgetError extends Error {
+	constructor() {
+		super('This work requires an invocation row budget and none is in force');
+		this.name = 'MissingRowBudgetError';
+	}
+}
+
+/**
  * A D1 call with a statement count that cannot be determined before dispatch.
  * The active allowance requires an exact count.
  */
@@ -1196,8 +1211,9 @@ export class UncountableStatementError extends Error {
 }
 
 /**
- * A D1 statement with more bound parameters than the platform accepts. The
- * local binding enforces the production limit during tests.
+ * A statement with more bound parameters than Cloudflare's SQLite accepts.
+ * Both the D1 binding and the Durable Object's storage binding refuse such a
+ * statement before the runtime receives it.
  */
 export class StatementParameterLimitError extends Error {
 	constructor(
@@ -1205,9 +1221,26 @@ export class StatementParameterLimitError extends Error {
 		public readonly limit: number
 	) {
 		super(
-			`A D1 statement bound ${String(parameters)} parameters and the limit is ${String(limit)}`
+			`A statement bound ${String(parameters)} parameters and the limit is ${String(limit)}`
 		);
 		this.name = 'StatementParameterLimitError';
+	}
+}
+
+/**
+ * A single value whose serialised form is longer than the string Cloudflare's
+ * SQLite accepts as a bound parameter. A list is split until each part fits;
+ * one value that does not fit cannot be split any further.
+ */
+export class BoundValueLengthError extends Error {
+	constructor(
+		public readonly bytes: number,
+		public readonly limit: number
+	) {
+		super(
+			`A bound value of ${String(bytes)} bytes exceeds the limit of ${String(limit)}`
+		);
+		this.name = 'BoundValueLengthError';
 	}
 }
 

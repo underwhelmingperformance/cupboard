@@ -17,22 +17,22 @@ import {
 	type R2ObjectKey
 } from '../http/http.ts';
 
+import { jsonValueLists } from './json-list.ts';
 import { statementsRemaining } from './statement-scope.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
 // Cloudflare's D1 and Durable Object SQLite runtimes accept at most 100 bound
-// parameters in one query.
+// parameters in one query. Both bindings refuse a statement above that limit
+// before the runtime receives it; see `admitBoundParameters` in
+// `statement-admission.ts`.
 //
-// Local workerd and test-pool runs use a SQLite build that accepts 32,766
-// parameters, so executing a statement there does not reproduce an overrun.
-// `d1-parameter-guard.test.ts` inspects the generated parameter lists instead.
+// The local runtime enforces 100 as well: under wrangler 4.123.0 and
+// @cloudflare/vitest-pool-workers 0.21.3, D1 and Durable Object SQLite both
+// answer a 101-parameter statement with `too many SQL variables`. SQLite's own
+// default is 32,766, so which limit a build enforces depends on how it was
+// configured and the local agreement with production can drift either way.
 export const maxBoundParameters = 100;
-
-// An `IN (...)` list is chunked below the budget, leaving headroom for the fixed
-// parameters that a query also binds, such as a tenant or cache. If a statement
-// binds the list more than once, its caller must use a narrower chunk.
-export const maxInClauseValues = 90;
 
 // Cloudflare allows a Durable Object six simultaneous outgoing connections per
 // request. The commit-batch fan-out runs this many tasks concurrently; after
@@ -56,81 +56,9 @@ export async function deleteObjects(
 	}
 }
 
-/**
- * A pending statement that exposes its bound parameters before execution. The
- * caller uses the parameter count to find a safe chunk size.
- */
-export interface InspectableStatement<Result> {
-	toSQL: () => { readonly params: readonly unknown[] };
-	execute: () => Promise<Result>;
-}
-
 export type InspectableBatchItem = BatchItem<'sqlite'> & {
 	toSQL: () => { readonly params: readonly unknown[] };
 };
-
-// Finds the widest chunk that satisfies `maxBoundParameters` by building and
-// measuring the statement. A statement can bind fixed parameters and can bind
-// its list more than once, so the helper narrows the estimate until the measured
-// statement fits.
-function fittedChunkWidth(
-	items: readonly unknown[],
-	parametersFor: (width: number) => number
-): number {
-	let width = items.length;
-
-	for (;;) {
-		const parameters = parametersFor(width);
-
-		if (parameters <= maxBoundParameters) {
-			return width;
-		}
-
-		if (width === 1) {
-			throw new StatementParameterLimitError(parameters, maxBoundParameters);
-		}
-
-		width = Math.max(
-			1,
-			Math.min(width - 1, Math.floor((width * maxBoundParameters) / parameters))
-		);
-	}
-}
-
-/**
- * Runs one statement for each chunk of `items`. Returns the processed prefix
- * and the result of each statement. The caller can defer the unprocessed suffix.
- *
- * Each chunk is as wide as the measured parameter limit allows. Before building
- * another chunk, the function checks that at least one D1 statement remains.
- */
-export async function executeChunkedStatement<Item, Result>(
-	items: readonly Item[],
-	buildStatement: (chunk: readonly Item[]) => InspectableStatement<Result>
-): Promise<{
-	readonly processed: readonly Item[];
-	readonly results: readonly Result[];
-}> {
-	const results: Result[] = [];
-	let processed = 0;
-
-	while (processed < items.length) {
-		if (statementsRemaining() < 1) {
-			break;
-		}
-
-		const rest = items.slice(processed);
-		const width = fittedChunkWidth(
-			rest,
-			(candidate) =>
-				buildStatement(rest.slice(0, candidate)).toSQL().params.length
-		);
-		results.push(await buildStatement(rest.slice(0, width)).execute());
-		processed += width;
-	}
-
-	return { processed: items.slice(0, processed), results };
-}
 
 interface FittedBatch {
 	readonly width: number;
@@ -300,15 +228,14 @@ export async function recordedNarObjects(
 		readonly incarnation: number;
 	}[]
 > {
-	const queries = chunk([...new Set(narHashes)], maxInClauseValues).map(
-		(batch) =>
-			database
-				.select({
-					narHash: d1Schema.blobState.narHash,
-					incarnation: d1Schema.blobState.incarnation
-				})
-				.from(d1Schema.blobState)
-				.where(inArray(d1Schema.blobState.narHash, batch))
+	const queries = jsonValueLists([...new Set(narHashes)]).map((list) =>
+		database
+			.select({
+				narHash: d1Schema.blobState.narHash,
+				incarnation: d1Schema.blobState.incarnation
+			})
+			.from(d1Schema.blobState)
+			.where(inArray(d1Schema.blobState.narHash, list))
 	);
 
 	const pages = await batchNonEmpty(database, queries);

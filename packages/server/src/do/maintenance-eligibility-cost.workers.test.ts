@@ -21,7 +21,8 @@ import {
 	currentServer,
 	initialise,
 	negotiateViaInstance,
-	resetTestServer
+	resetTestServer,
+	underOneUnitOfWork
 } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
@@ -76,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 15,
-			largeBacklogCost: 15
+			emptyBacklogCost: 17,
+			largeBacklogCost: 17
 		});
 	});
 
@@ -224,12 +225,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 41,
+				rowsRead: 44,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 41,
+				rowsRead: 44,
 				usesIndex: true,
 				sorts: false
 			}
@@ -272,24 +273,21 @@ describe('maintenance pass cost', () => {
 		});
 	});
 
-	// A family can contain more members than one pass may delete. Both fixtures
-	// exceed that cap, so the exact cost must stay the same when the remaining
-	// backlog grows from one member to 4,001 members.
+	// A family can contain more members than one pass can afford to delete. Both
+	// fixtures hold more than the one-unit budget these passes run under, so the
+	// exact cost must stay the same when the remaining backlog grows from one
+	// member to 4,001 members.
 	it('bounds the cost of deleting an oversized refresh-token family', async () => {
 		await initialise();
 
 		await seedExpiredRefreshFamily(1001, 'small-oversized');
-		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
-			currentServer().runGarbageCollection()
-		);
+		const smallBacklog = await oneUnitCollectionCost();
 		await clearRefreshTokenFamilyFixtures();
 
 		await resetTestServer();
 		await initialise();
 		await seedExpiredRefreshFamily(5001, 'large-oversized');
-		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
-			currentServer().runGarbageCollection()
-		);
+		const largeBacklog = await oneUnitCollectionCost();
 		await clearRefreshTokenFamilyFixtures();
 
 		expect({
@@ -302,8 +300,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 5046, rowsWritten: 1011 },
-			largeBacklog: { rowsRead: 5046, rowsWritten: 1011 }
+			smallBacklog: { rowsRead: 32, rowsWritten: 8 },
+			largeBacklog: { rowsRead: 32, rowsWritten: 8 }
 		});
 	});
 
@@ -326,8 +324,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 50,
-			largeBacklogCost: 50
+			smallBacklogCost: 55,
+			largeBacklogCost: 55
 		});
 	});
 });
@@ -483,6 +481,20 @@ async function seedExpiredRefreshFamily(
 			memberCount
 		);
 	});
+}
+
+// The cost of a collection pass whose budget its first statement spends, so
+// every phase takes one unit of work whatever backlog is waiting.
+async function oneUnitCollectionCost(): Promise<{
+	isLogged: boolean;
+	rowsRead: number;
+	rowsWritten: number;
+}> {
+	return maintenancePassCost('garbage-collection', () =>
+		runInDurableObject(currentServer(), (instance) =>
+			underOneUnitOfWork(() => instance.runGarbageCollection())
+		)
+	);
 }
 
 // Rows read while the Durable Object rebuilds the eligibility projection,

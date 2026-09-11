@@ -1,15 +1,21 @@
 import {
 	DEFAULT_CACHE,
 	narInfoGenerationSchema,
+	rootNameSchema,
 	type StoredCache
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
+import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narInfoDeletions } from '../db/schema.ts';
+import {
+	narInfoDeletions,
+	retentionRoots,
+	retentionRootTargets
+} from '../db/schema.ts';
 import {
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
@@ -25,24 +31,18 @@ import {
 	setRoot,
 	syntheticNarHash,
 	syntheticStorePathHash,
+	underOneUnitOfWork,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
-import {
-	maxPathsCollectedPerRun,
-	maxRefreshTokenMembersDeletedPerRun
-} from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 const defaultCache: StoredCache = DEFAULT_CACHE;
-const tenantWideContinuation = {
-	scope: 'tenant',
-	collectLimit: maxPathsCollectedPerRun
-};
+const tenantWideContinuation = { scope: 'tenant' };
 
 async function continuation(): Promise<unknown> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
@@ -74,8 +74,54 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 async function fireAlarm(): Promise<void> {
 	// The test pool does not deliver alarms predictably, so invoke the same handler
 	// directly.
-	await runInDurableObject(currentServer(), (instance) => instance.alarm());
+	await runInDurableObject(currentServer(), (instance) =>
+		underOneUnitOfWork(() => instance.alarm())
+	);
 }
+
+/**
+ * Runs collection passes one unit of work at a time and holds the continuation
+ * they arm.
+ *
+ * The runtime can deliver an alarm it has already queued, and deleting the
+ * alarm does not cancel that delivery. Such a delivery would advance the walk
+ * under the alarm's own budget rather than the one these tests set, so each
+ * driven pass removes the continuation, so a stray delivery finds no work and
+ * returns without advancing the walk. `restore` puts the continuation back so
+ * the alarms resume the remaining work.
+ */
+class DrivenCollection {
+	private continuation: unknown;
+
+	get isContinuationArmed(): boolean {
+		return this.continuation !== undefined;
+	}
+
+	reset(): void {
+		this.continuation = undefined;
+	}
+
+	async collectOneUnitOfWork(): Promise<void> {
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await underOneUnitOfWork(() => instance.runGarbageCollection());
+			this.continuation = await state.storage.get(gcContinuationKey);
+			await state.storage.delete(gcContinuationKey);
+			await state.storage.deleteAlarm();
+		});
+	}
+
+	async restore(): Promise<void> {
+		const { continuation } = this;
+
+		await runInDurableObject(currentServer(), async (_instance, state) => {
+			if (continuation !== undefined) {
+				await state.storage.put(gcContinuationKey, continuation);
+			}
+		});
+	}
+}
+
+const driven = new DrivenCollection();
 
 async function seedExpiredRefreshFamily(memberCount: number): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
@@ -125,22 +171,63 @@ async function refreshFamilyCounts(): Promise<{
 	}));
 }
 
-// An alarm with a collect budget of one either advances the walk by one unit
-// of work (seeding a root, marking a path, or collecting a path) or completes
-// one of the six scan phases. These fixtures hold at most three paths and two
-// roots, so a drain needs at most fourteen alarms: two root seedings, three
-// markings, three collections, and six phase completions. Sixteen leaves a
-// little slack. The bound is reached only when a drain has wedged; the
-// assertions after the loop then fail, and their output shows the state the
-// drain reached.
-const maxDrainAlarms = 16;
+// A pass under a one-unit budget advances the walk by one unit of work (seeding
+// a root, marking a path, reading one reference, or collecting a path) or
+// completes one scan phase, and one alarm runs one such pass. These fixtures
+// hold at most three paths, and the longest run here was measured at eight
+// passes, so sixteen leaves slack. The bound is reached only when the walk has
+// wedged; the assertions after the loop then fail, and their output shows the
+// state it reached.
+const maxDrivenPasses = 16;
 
 async function drainContinuation(): Promise<void> {
 	await driveToCompletion(
 		fireAlarm,
 		async () => (await continuation()) === undefined,
-		maxDrainAlarms
+		maxDrivenPasses
 	);
+}
+
+// A root that has already expired, with one target, so the expiry phase has
+// exactly one unit of work to do.
+async function seedExpiredRoot(
+	target: ParsedUploadPathMetadata
+): Promise<void> {
+	const name = rootNameSchema.parse('expired');
+	const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
+
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.insert(retentionRoots)
+			.values({
+				cache: defaultCache,
+				name,
+				expiresAt,
+				createdAt: expiresAt,
+				updatedAt: expiresAt
+			})
+			.run();
+		instance.context.db
+			.insert(retentionRootTargets)
+			.values({
+				cache: defaultCache,
+				rootName: name,
+				storePathHash: target.storePathHash,
+				storePath: target.storePath
+			})
+			.run();
+	});
+}
+
+async function retentionRootCounts(): Promise<{
+	readonly roots: number;
+	readonly targets: number;
+}> {
+	return runInDurableObject(currentServer(), (instance) => ({
+		roots: instance.context.db.select().from(retentionRoots).all().length,
+		targets: instance.context.db.select().from(retentionRootTargets).all()
+			.length
+	}));
 }
 
 interface ScanProgress {
@@ -180,8 +267,59 @@ function scanProgress(state: DurableObjectState): ScanProgress | undefined {
 	};
 }
 
+async function currentScanProgress(): Promise<ScanProgress | undefined> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		scanProgress(state)
+	);
+}
+
+// Runs unit-budget passes until the scan reaches the state a test acts on.
+async function driveScanTo(
+	hasReached: (progress: ScanProgress | undefined) => boolean
+): Promise<void> {
+	await driveToCompletion(
+		() => driven.collectOneUnitOfWork(),
+		async () => hasReached(await currentScanProgress()),
+		maxDrivenPasses
+	);
+}
+
+// Where the mark phase has reached in one path's references, with the number of
+// paths waiting behind it.
+async function referenceWalk(): Promise<unknown> {
+	return runInDurableObject(currentServer(), (_instance, state) => {
+		const scan = state.storage.sql
+			.exec<{
+				phase: string;
+				markStorePathHash: string | null;
+				referenceCursor: number;
+			}>(
+				`SELECT phase,
+				        mark_store_path_hash AS markStorePathHash,
+				        reference_cursor AS referenceCursor
+				 FROM garbage_collection_scan
+				 WHERE cache = ?`,
+				DEFAULT_CACHE
+			)
+			.toArray()[0];
+		const frontier = state.storage.sql
+			.exec<{ count: number }>(
+				`SELECT count(*) AS count
+				 FROM garbage_collection_frontier
+				 WHERE cache = ?`,
+				DEFAULT_CACHE
+			)
+			.toArray()[0]?.count;
+
+		return { scan, frontier };
+	});
+}
+
 describe('garbage collection cap', () => {
-	beforeEach(resetTestServer);
+	beforeEach(async () => {
+		driven.reset();
+		await resetTestServer();
+	});
 
 	it('caps each collection and drains the remainder across alarm firings', async () => {
 		await useTestServer('gc-cap');
@@ -221,7 +359,8 @@ describe('garbage collection cap', () => {
 
 		expect(await collectableRemaining()).toBe(2);
 
-		await currentServer().runGarbageCollection(1);
+		await driven.collectOneUnitOfWork();
+		await driven.restore();
 
 		await drainContinuation();
 
@@ -233,7 +372,7 @@ describe('garbage collection cap', () => {
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
 	});
 
-	it('advances refresh-family and path collection in the same bounded pass', async () => {
+	it('spends one budget across the refresh-family and collection phases', async () => {
 		await useTestServer('gc-refresh-and-path-cap');
 		const { token } = await bootstrap();
 		const kept = uploadMetadata({
@@ -250,12 +389,12 @@ describe('garbage collection cap', () => {
 		await pushPath(token, kept);
 		await pushPath(token, collectable);
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
-		await seedExpiredRefreshFamily(maxRefreshTokenMembersDeletedPerRun + 1);
+		await seedExpiredRefreshFamily(2);
 
 		const firstPass = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				await instance.runGarbageCollection(1);
+				await underOneUnitOfWork(() => instance.runGarbageCollection());
 				const progress = scanProgress(state);
 				const refresh = {
 					families:
@@ -280,16 +419,19 @@ describe('garbage collection cap', () => {
 		const revision = firstPass.progress?.revision;
 
 		expect(typeof revision).toBe('number');
+		// The refresh-family phase spends the budget on its one member, so the
+		// collection phases that follow advance by a single unit: the scan completes
+		// the expiry phase, which has no expired root to read, and stops there.
 		expect(firstPass).toStrictEqual({
 			progress: {
-				phase: 'mark',
+				phase: 'expire-grace',
 				revision,
 				cursor: '',
 				frontier: 0,
-				marks: 1
+				marks: 0
 			},
 			refresh: { families: 1, members: 1 },
-			continuation: [{ scope: 'tenant', collectLimit: 1 }]
+			continuation: [tenantWideContinuation]
 		});
 
 		await drainContinuation();
@@ -307,6 +449,32 @@ describe('garbage collection cap', () => {
 			kept: keptGeneration,
 			refresh: { families: 0, members: 0 },
 			continuation: undefined
+		});
+	});
+
+	it('expires a root in a pass whose budget was already spent', async () => {
+		await useTestServer('gc-spent-budget');
+		const { token } = await bootstrap();
+		const expiring = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'expiring'
+		});
+
+		await pushPath(token, expiring);
+		await seedExpiredRoot(expiring);
+
+		const seeded = await retentionRootCounts();
+
+		// The work that precedes collection in this pass spends the budget, so the
+		// expiry phase becomes due with nothing left to spend. It must still take one
+		// unit: a phase that reads no rows records no progress, and the next pass
+		// would arrive at the same boundary and read nothing again.
+		await driven.collectOneUnitOfWork();
+
+		expect({ seeded, expired: await retentionRootCounts() }).toStrictEqual({
+			seeded: { roots: 1, targets: 1 },
+			expired: { roots: 0, targets: 0 }
 		});
 	});
 
@@ -337,24 +505,21 @@ describe('garbage collection cap', () => {
 		await pushPath(token, collectable);
 		await setRoot(token, { name: 'channel', targets: [parent.storePath] });
 
-		const progress = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				await instance.runGarbageCollection(1);
-				const seeded = scanProgress(state);
-				await state.storage.deleteAlarm();
-
-				await instance.alarm();
-				const parentMarked = scanProgress(state);
-				await state.storage.deleteAlarm();
-
-				await instance.alarm();
-				const closureMarked = scanProgress(state);
-				await state.storage.deleteAlarm();
-
-				return { seeded, parentMarked, closureMarked };
-			}
+		// Drive to the unit that marks the root's own path. The walk continues from
+		// there: the next unit reads the path's one reference and queues it, and the
+		// unit after that marks the reference.
+		await driveScanTo(
+			(scan) =>
+				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 0
 		);
+		const seeded = await currentScanProgress();
+
+		await driven.collectOneUnitOfWork();
+		const parentMarked = await currentScanProgress();
+
+		await driven.collectOneUnitOfWork();
+		const closureMarked = await currentScanProgress();
+		const progress = { seeded, parentMarked, closureMarked };
 		const revision = progress.seeded?.revision;
 
 		expect(typeof revision).toBe('number');
@@ -382,6 +547,8 @@ describe('garbage collection cap', () => {
 				marks: 2
 			}
 		});
+
+		await driven.restore();
 
 		await drainContinuation();
 
@@ -418,51 +585,22 @@ describe('garbage collection cap', () => {
 		await pushPath(token, newlyRetained);
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
 
-		// Deleting the alarm does not stop an already-due delivery: the runtime
-		// can still run the handler afterwards, and a delivery that finds the
-		// continuation advances the walk mid-test. Parking the continuation
-		// alongside each alarm deletion makes such a delivery a no-op, so the
-		// walk only moves when this test drives it.
-		let parked: unknown;
+		await driveScanTo((scan) => scan?.phase === 'mark' && scan.marks === 1);
+		const initial = await currentScanProgress();
 
-		const initial = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				await instance.runGarbageCollection(1);
-				const progress = scanProgress(state);
-				parked = await state.storage.get(gcContinuationKey);
-				await state.storage.delete(gcContinuationKey);
-				await state.storage.deleteAlarm();
-
-				return progress;
-			}
-		);
-
-		expect(parked).not.toBeUndefined();
+		expect(driven.isContinuationArmed).toBe(true);
 
 		await setRoot(token, {
 			name: 'channel',
 			targets: [kept.storePath, newlyRetained.storePath]
 		});
 
-		const restarted = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				if (parked !== undefined) {
-					await state.storage.put(gcContinuationKey, parked);
-				}
+		// The changed retention bumps the revision, so the next pass discards the
+		// marks and seeds the roots again.
+		await driveScanTo((scan) => scan?.phase === 'roots' && scan.frontier === 1);
+		const restarted = await currentScanProgress();
 
-				await instance.alarm();
-				const progress = scanProgress(state);
-				parked = await state.storage.get(gcContinuationKey);
-				await state.storage.delete(gcContinuationKey);
-				await state.storage.deleteAlarm();
-
-				return progress;
-			}
-		);
-
-		expect(parked).not.toBeUndefined();
+		expect(driven.isContinuationArmed).toBe(true);
 		const initialRevision = initial?.revision;
 		const restartedRevision = restarted?.revision;
 
@@ -487,11 +625,7 @@ describe('garbage collection cap', () => {
 		});
 		expect(restartedRevision).toBeGreaterThan(initialRevision ?? 0);
 
-		await runInDurableObject(currentServer(), async (_instance, state) => {
-			if (parked !== undefined) {
-				await state.storage.put(gcContinuationKey, parked);
-			}
-		});
+		await driven.restore();
 
 		await drainContinuation();
 
@@ -518,46 +652,35 @@ describe('garbage collection cap', () => {
 		await pushPath(token, parent);
 		await setRoot(token, { name: 'channel', targets: [parent.storePath] });
 
-		const progress = await runInDurableObject(
-			currentServer(),
-			async (instance, state) => {
-				await instance.runGarbageCollection(5);
-				const scan = state.storage.sql
-					.exec<{
-						phase: string;
-						markStorePathHash: string | null;
-						referenceCursor: number;
-					}>(
-						`SELECT phase,
-						        mark_store_path_hash AS markStorePathHash,
-						        reference_cursor AS referenceCursor
-						 FROM garbage_collection_scan
-						 WHERE cache = ?`,
-						DEFAULT_CACHE
-					)
-					.toArray()[0];
-				const frontier = state.storage.sql
-					.exec<{ count: number }>(
-						`SELECT count(*) AS count
-						 FROM garbage_collection_frontier
-						 WHERE cache = ?`,
-						DEFAULT_CACHE
-					)
-					.toArray()[0]?.count;
-
-				await state.storage.deleteAlarm();
-
-				return { scan, frontier };
-			}
+		// Drive to the unit that reads the path's first reference. The path holds
+		// more references than one unit can afford, so the walk records how far it
+		// reached and each later unit resumes from there.
+		await driveScanTo(
+			(scan) =>
+				scan?.phase === 'mark' && scan.marks === 1 && scan.frontier === 1
 		);
+		const firstReference = await referenceWalk();
 
-		expect(progress).toStrictEqual({
-			scan: {
-				phase: 'mark',
-				markStorePathHash: parent.storePathHash,
-				referenceCursor: 3
+		await driven.collectOneUnitOfWork();
+		const secondReference = await referenceWalk();
+
+		expect({ firstReference, secondReference }).toStrictEqual({
+			firstReference: {
+				scan: {
+					phase: 'mark',
+					markStorePathHash: parent.storePathHash,
+					referenceCursor: 0
+				},
+				frontier: 1
 			},
-			frontier: 4
+			secondReference: {
+				scan: {
+					phase: 'mark',
+					markStorePathHash: parent.storePathHash,
+					referenceCursor: 1
+				},
+				frontier: 2
+			}
 		});
 	});
 
@@ -598,7 +721,7 @@ describe('garbage collection cap', () => {
 						parent.storePathHash
 					);
 
-					await instance.runGarbageCollection(10);
+					await instance.runGarbageCollection();
 				})
 			).rejects.toStrictEqual(new ErrorClass(parent.storePathHash));
 		}

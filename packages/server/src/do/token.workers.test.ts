@@ -57,16 +57,13 @@ import {
 	readFetch,
 	resetTestServer,
 	testPushId,
+	underOneUnitOfWork,
 	uploadMetadata,
 	uploadPathNegotiation
 } from '../test-support.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
 import { ownerRuleId } from './context.ts';
-import {
-	maxPathsCollectedPerRun,
-	maxRefreshTokenMembersDeletedPerRun
-} from './garbage-collection-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { TenantIdentityService } from './tenant-identity-service.ts';
@@ -1816,9 +1813,7 @@ describe('refresh grant', () => {
 			}).toStrictEqual({
 				families: 1,
 				members: 1,
-				continuation: [
-					{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }
-				]
+				continuation: [{ scope: 'tenant' }]
 			});
 
 			await runInDurableObject(currentServer(), (instance) => instance.alarm());
@@ -1849,6 +1844,9 @@ describe('refresh grant', () => {
 	});
 
 	it('drains expired refresh families through bounded continuation passes', async () => {
+		// The large family holds one spent member beside its active one, which is one
+		// more than a one-unit page deletes, so it survives the first pass.
+		const spentMembers = 1;
 		const subjectToken = await installTrustedIdp('admin');
 		await exchange(subjectToken);
 		await exchange(subjectToken);
@@ -1868,12 +1866,12 @@ describe('refresh grant', () => {
 					.parse(database.select().from(refreshTokenFamilies).all());
 				state.storage.sql.exec(
 					"UPDATE refresh_token_family SET expires_at = '2019-01-01T00:00:00.000Z', generation = ? WHERE id = ?",
-					maxRefreshTokenMembersDeletedPerRun,
+					spentMembers,
 					largeFamily.id
 				);
 				state.storage.sql.exec(
 					'UPDATE refresh_token_member SET generation = ? WHERE id = ?',
-					maxRefreshTokenMembersDeletedPerRun,
+					spentMembers,
 					largeFamily.activeMemberId
 				);
 				state.storage.sql.exec(
@@ -1894,9 +1892,9 @@ describe('refresh grant', () => {
 					 FROM generations
 					 WHERE value < ?`,
 					largeFamily.id,
-					maxRefreshTokenMembersDeletedPerRun
+					spentMembers
 				);
-				await instance.runGarbageCollection();
+				await underOneUnitOfWork(() => instance.runGarbageCollection());
 				const continuation = await state.storage.get(gcContinuationKey);
 				await state.storage.deleteAlarm();
 
@@ -1941,16 +1939,14 @@ describe('refresh grant', () => {
 			remainingMembers: 2,
 			remainingMemberFamilies: firstPass.families.map((family) => family.id),
 			remainingFamilyIds: firstPass.families.map((family) => family.id),
-			continuation: [
-				{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }
-			],
+			continuation: [{ scope: 'tenant' }],
 			backlogs: [
 				{
 					level: 'warning',
 					properties: {
 						job: 'garbage-collection',
 						method: 'garbage-collection',
-						membersDeleted: maxRefreshTokenMembersDeletedPerRun,
+						membersDeleted: 1,
 						familiesDeleted: 0
 					}
 				}
@@ -1986,7 +1982,7 @@ describe('refresh grant', () => {
 			members: 1,
 			memberFamily: afterSecondPass.families[0]?.id,
 			familyId: afterSecondPass.families[0]?.id,
-			continuation: [{ scope: 'tenant', collectLimit: maxPathsCollectedPerRun }]
+			continuation: [{ scope: 'tenant' }]
 		});
 
 		await runInDurableObject(currentServer(), (instance) => instance.alarm());

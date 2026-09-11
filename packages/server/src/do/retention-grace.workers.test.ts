@@ -79,6 +79,7 @@ import {
 	setRoot,
 	singleDecision,
 	testPushId,
+	underOneUnitOfWork,
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
@@ -92,11 +93,7 @@ import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import {
-	maxExpiredRootTargetsPerRun,
-	maxPathsCollectedPerRun,
-	maxRootsExpiredPerRun
-} from './garbage-collection-service.ts';
+import { maxRootsExpiredPerRun } from './garbage-collection-service.ts';
 import {
 	confirmGraceBatch,
 	parseStoredGraceDecision,
@@ -113,10 +110,7 @@ import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
-const tenantWideContinuation = {
-	scope: 'tenant',
-	collectLimit: maxPathsCollectedPerRun
-};
+const tenantWideContinuation = { scope: 'tenant' };
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
@@ -361,7 +355,7 @@ describe('retention grace deadlines in garbage collection', () => {
 		);
 		await markGraceManaged(DEFAULT_CACHE);
 
-		await currentServer().runGarbageCollection(1);
+		await currentServer().runGarbageCollection();
 
 		const remaining = async (): Promise<number> => {
 			const generations = await Promise.all([
@@ -821,7 +815,7 @@ describe('retention grace transitions', () => {
 		}
 	});
 
-	it('continues target batches within a stored root over the protocol limit', async () => {
+	it('continues target batches within a stored root across passes', async () => {
 		await useTestServer('transition-expiry-target-continuation');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -831,9 +825,11 @@ describe('retention grace transitions', () => {
 			name: 'retained-across-target-batches'
 		});
 		await pushPath(token, path);
-		const rootName = rootNameSchema.parse('oversized');
+		const rootName = rootNameSchema.parse('multi-target');
 		const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
-		const targetCount = maxExpiredRootTargetsPerRun + 1;
+		// More targets than one unit of work covers, so the first pass leaves the
+		// root in place with targets outstanding.
+		const targetCount = 3;
 
 		const observed = await runInDurableObject(
 			currentServer(),
@@ -903,7 +899,7 @@ describe('retention grace transitions', () => {
 							.get()?.count ?? 0
 				});
 
-				await instance.runGarbageCollection();
+				await underOneUnitOfWork(() => instance.runGarbageCollection());
 				const firstPass = {
 					...stateSnapshot(),
 					continuation: await state.storage.get(gcContinuationKey)
@@ -926,7 +922,7 @@ describe('retention grace transitions', () => {
 		expect(observed).toStrictEqual({
 			firstPass: {
 				roots: 1,
-				targets: 1,
+				targets: targetCount - 1,
 				pathPresent: true,
 				deadlines: 1,
 				continuation: [tenantWideContinuation]
@@ -3454,9 +3450,9 @@ describe('confirming an unretained publication', () => {
 		});
 	});
 
-	// Chunk the identity checks so a request at the protocol limit stays within
-	// SQLite's bound-parameter limit.
-	it('applies a batch at the request bound through chunked transactions', async () => {
+	// The identity checks bind the whole request as one list, so a request at the
+	// protocol limit is one transaction.
+	it('applies a batch at the request bound in one transaction', async () => {
 		await useTestServer('confirm-at-bound');
 		await bootstrap();
 
@@ -3516,7 +3512,7 @@ describe('confirming an unretained publication', () => {
 			deadlines: deadlines.length
 		}).toStrictEqual({
 			matched: uploadConfirmMaxPaths,
-			transactionCount: 12,
+			transactionCount: 1,
 			deadlines: uploadConfirmMaxPaths
 		});
 	});
