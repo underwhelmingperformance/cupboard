@@ -45,9 +45,8 @@ import { runCohortSequence } from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
 import {
 	type ChildCommand,
-	type ChildExit,
-	runChild,
-	type RunChildOptions
+	type RunChild,
+	runChild
 } from '../build-push/supervisor.ts';
 import {
 	cacheTargetFromUrl,
@@ -136,7 +135,7 @@ const cohortsFileSchema = z.strictObject({
  */
 export interface BetweenCohortCollectorOptions {
 	readonly signal?: AbortSignal;
-	readonly runCollector?: (options: RunChildOptions) => Promise<ChildExit>;
+	readonly runCollector?: RunChild;
 }
 
 export function betweenCohortCollector(
