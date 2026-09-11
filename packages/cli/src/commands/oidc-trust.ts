@@ -24,6 +24,10 @@ import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
 import {
+	pullRequestCacheTemplate,
+	pullRequestRootTemplate
+} from './github/convention.ts';
+import {
 	lookupRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
@@ -305,14 +309,16 @@ const controlPlane: OidcTrustPlane = {
 };
 
 // Pin immutable repository IDs and the pull-request event. The captured PR
-// number selects both `pr-<n>` and its retention root, so one PR cannot write
-// another PR's cache.
+// number selects both `gh-<id>-pr-<n>` and its retention root, so one PR
+// cannot write another PR's cache. The rule also lets a run create that cache
+// and remove it again: no cache exists before the pull request's first run,
+// and a closing run removes the one it created.
 export function githubPrAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubPrOptions
 ): OidcTrustAddBodyInput {
-	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
+	const cacheTemplate = options.cacheTemplate ?? pullRequestCacheTemplate();
 
 	// Pin the event so a verified token from the same repository cannot select
 	// this rule for a branch or tag build.
@@ -334,9 +340,11 @@ export function githubPrAddBody(
 			buildCacheGrant({
 				cacheTemplate,
 				rootTemplate:
-					options.rootTemplate ??
-					`github:${identity.fullName}/${cacheTemplate}/`,
-				allow: withAttest(['push', 'root', 'attach'], options.attest),
+					options.rootTemplate ?? pullRequestRootTemplate(identity.fullName),
+				allow: withAttest(
+					['push', 'root', 'attach', 'create', 'remove'],
+					options.attest
+				),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-pr',
 					captures: []

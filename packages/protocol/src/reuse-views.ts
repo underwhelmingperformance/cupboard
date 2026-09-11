@@ -4,6 +4,7 @@ import {
 	cacheNamePrefixPattern,
 	cacheNameSchema,
 	type CachePriority,
+	type CacheScope,
 	PRIVATE_STORED_PREFIX
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
@@ -104,6 +105,46 @@ export const reuseViewSelectorsSchema = z
 	.refine((selectors) => !hasDuplicateSelector(selectors), {
 		message: 'Selectors must not repeat the same selector'
 	});
+
+/**
+ * Whether this selector selects the cache. Selection ignores access: a view
+ * also requires the cache's access to equal its own, and its callers check
+ * that separately.
+ */
+export function isCacheSelectedBySelector(
+	selector: ReuseViewSelector,
+	cache: CacheScope
+): boolean {
+	switch (selector.kind) {
+		case 'all': {
+			return true;
+		}
+		case 'all-named': {
+			return cache.kind === 'named';
+		}
+		case 'default': {
+			return cache.kind === 'default';
+		}
+		case 'named': {
+			return cache.kind === 'named' && cache.name === selector.name;
+		}
+		case 'prefix': {
+			return cache.kind === 'named' && cache.name.startsWith(selector.prefix);
+		}
+	}
+}
+
+/**
+ * Whether any of a view's selectors selects this cache.
+ */
+export function isCacheSelectedByView(
+	selectors: readonly ReuseViewSelector[],
+	cache: CacheScope
+): boolean {
+	return selectors.some((selector) =>
+		isCacheSelectedBySelector(selector, cache)
+	);
+}
 
 // A reuse view has its own branded Nix substituter priority, where lower numbers
 // are preferred. The brand prevents a view priority from being passed where code

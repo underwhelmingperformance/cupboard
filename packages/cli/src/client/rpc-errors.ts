@@ -25,6 +25,14 @@ export function isRpcNotFoundError(
 }
 
 /**
+ * Whether a cache creation failed because the cache is already there. A run
+ * that creates its own cache gets this on every push after the first.
+ */
+export function isRpcCacheAlreadyExistsError(error: unknown): boolean {
+	return error instanceof ORPCError && error.code === 'CACHE_ALREADY_EXISTS';
+}
+
+/**
  * Whether a prepare or commit failed because what it negotiated is no longer
  * there, so the server returns `NOT_FOUND`: the pending row expired and was
  * reaped, the staged bytes vanished before the commit ran, or the shared blob

@@ -37,10 +37,11 @@ on:
       cache:
         description:
           Named cache to publish to, whether it is public or private. Leave
-          empty to publish to the default cache. The workflow supplies one
-          read_user and read_password pair for authenticated reads, so when the
-          cache is private, supply the credential it accepts. If the cache has
-          its own verifier, the tenant-wide fallback credential is rejected by
+          empty to publish to the default cache. When the cache is private,
+          supply the credential it accepts as destination_read_user and
+          destination_read_password. A reuse view is a tenant-level resource and
+          reads with fallback_read_user and fallback_read_password. Supplying
+          the fallback where the cache has its own verifier is rejected by
           setup's initial cache-info probe, before publication starts.
         required: false
         default: ''
@@ -241,11 +242,25 @@ on:
           SSH key used while evaluating private flake inputs. Requires
           input-known-hosts.
         required: false
-      read_user:
-        description: Basic-auth user for private cache or reuse-view reads.
+      destination_read_user:
+        description:
+          Basic-auth user accepted by the private destination cache this run
+          publishes to.
         required: false
-      read_password:
-        description: Basic-auth password for private cache or reuse-view reads.
+      destination_read_password:
+        description:
+          Basic-auth password accepted by the private destination cache this run
+          publishes to.
+        required: false
+      fallback_read_user:
+        description:
+          Tenant-fallback Basic-auth user, for a private reuse view and for a
+          private cache with no verifier of its own.
+        required: false
+      fallback_read_password:
+        description:
+          Tenant-fallback Basic-auth password, for a private reuse view and for
+          a private cache with no verifier of its own.
         required: false
 
 permissions: {}
@@ -267,6 +282,9 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      provision-cache: ${{ steps.resolve.outputs.provision-cache }}
+      provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
+      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -318,14 +336,18 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
+          PUSH: ${{ inputs.push }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
           PERMANENT: ${{ inputs.permanent }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -417,17 +439,52 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                CACHE="pr-${PR_NUMBER}"
+                # GitHub withholds `id-token: write` from a fork's pull
+                # request, so such a run cannot exchange a token and cannot
+                # publish. This check does not enforce that; it reports it
+                # before the run derives a cache name and fails inside token
+                # exchange. A repository that accepts external contributions
+                # should guard its own job with
+                # `github.event.pull_request.head.repo.id == github.repository_id`.
+                if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
+                  echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
+                  exit 1
+                fi
+                # Pull-request numbers repeat across repositories and one
+                # tenant can serve several repositories, so a name without the
+                # repository id would let one repository publish to, and
+                # remove, another repository's cache.
+                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
+                # A closed pull request has nothing left to publish, so the run
+                # removes its cache instead of building. Otherwise the cache
+                # would keep its store paths until their retention expired.
+                if [ "${EVENT_ACTION}" = closed ]; then
+                  REMOVE_CACHE="${CACHE}"
+                fi
                 TTL=14d
                 PERMANENT=false
+                # No cache exists before a pull request's first run, so the run
+                # creates its own. A run that is not publishing needs none.
+                if [ "${PUSH}" = true ]; then
+                  PROVISION_CACHE="${CACHE}"
+                fi
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
                 REUSE_VIEW=''
-                ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
+                # The root already names the repository, so it stays keyed on
+                # the pull-request number alone.
+                ROOT_PREFIX="github:${REPOSITORY}/pr-${PR_NUMBER}"
               elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
                 ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
                 PERMANENT=true
+                # `cupboard github setup` writes one pull-request view per
+                # repository, under this name. A caller that passes
+                # `reuse-view` wants a view of its own, so that caller's value
+                # must win.
+                if [ -z "${REUSE_VIEW}" ]; then
+                  REUSE_VIEW="pull-requests-${REPOSITORY_ID}"
+                fi
               else
                 echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
                 exit 1
@@ -444,11 +501,16 @@ jobs:
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
+            echo "provision-cache=${PROVISION_CACHE:-}"
+            echo "provision-cache-ttl=${TTL}"
+            echo "remove-cache=${REMOVE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
     name: Plan the publication
     needs: configure
+    # A run for a closing pull request removes the cache instead of planning.
+    if: needs.configure.outputs.remove-cache == ''
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 30
     permissions:
@@ -510,15 +572,29 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
+      # The plan job runs before every cohort job, so creating the cache here
+      # puts it in place before anything negotiates an upload against it.
+      #
+      # The cache's access has to equal the reuse view's, because a view
+      # aggregates only the caches whose access matches its own. Both are
+      # derived from whether a tenant read credential is present, so they
+      # agree without the operator setting each one.
       - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          provision-cache: ${{ needs.configure.outputs.provision-cache }}
+          provision-cache-access:
+            ${{ secrets.fallback_read_user != '' && 'private' || 'public' }}
+          provision-cache-ttl:
+            ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - name: Evaluate target manifest
@@ -549,8 +625,8 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
@@ -640,8 +716,10 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: ./.cupboard-workflow/actions/build-cohort
@@ -659,8 +737,10 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
+          fallback-read-user: ${{ secrets.fallback_read_user }}
+          fallback-read-password: ${{ secrets.fallback_read_password }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}
@@ -688,8 +768,8 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
       # the bundle only after publication and only when signing produced a
@@ -702,8 +782,8 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           # Each output contains one bundle path per line. The attach input
@@ -746,3 +826,63 @@ jobs:
           if ! nix store gc; then
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
+
+  # A closed pull request will not be pushed to again, so its cache is removed
+  # now rather than left to expire. This job needs no Nix and no build, only
+  # the cupboard binary and the run's own OIDC token.
+  #
+  # The pull-request trust rule renders one cache name from the verified
+  # `repository_id` and `ref` claims, so a run can remove its own cache and no
+  # other, even when another repository on the tenant has the same
+  # pull-request number.
+  remove-cache:
+    name: Remove the pull request's cache
+    needs: configure
+    if: needs.configure.outputs.remove-cache != ''
+    runs-on: ${{ inputs.plan-runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # check out the workflow code that installs cupboard
+      id-token: write # OIDC token for the cache removal
+    steps:
+      # Every job that checks out the workflow source refuses to run when
+      # `.cupboard-workflow` already exists, so that no job can overwrite
+      # caller content. This job would overwrite nothing, but keeping the check
+      # here means no job is an exception.
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      # No cache-url, so setup installs the binary and writes no Nix
+      # configuration. Nothing in this job reads from the cache.
+      - uses: ./.cupboard-workflow/actions/setup
+        id: setup
+        with:
+          cupboard: ${{ needs.configure.outputs.cupboard }}
+
+      - name: Remove the cache
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.remove-cache }}
+        run: |
+          set -euo pipefail
+          # --force because the cache still holds the pull request's paths and
+          # this job exists to delete them. The trust rule renders the one
+          # cache name this run may remove, so `${CACHE}` cannot name another
+          # cache.
+          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
+            --github-oidc --force --yes

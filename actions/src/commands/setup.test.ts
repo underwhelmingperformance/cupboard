@@ -16,7 +16,12 @@ import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ProbeTimeoutError,
+	ProvisionCacheAccessRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError,
@@ -271,6 +276,7 @@ describe('resolveSetupInputs', () => {
 		addToPath: true,
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
+		provisionCache: undefined,
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -1110,5 +1116,176 @@ describe('resolveSetupInputs reuse view', () => {
 		);
 
 		expect(inputs.reuseView).toBe('reuse');
+	});
+});
+
+// Drives `setupAction` with stubbed dependencies and records the cupboard
+// invocations, plus whether each ran before `configureNix` wrote its file.
+async function runSetup(options: {
+	readonly provisionCache?: string;
+	readonly provisionCacheAccess?: string;
+	readonly provisionCacheTtl?: string;
+}): Promise<{
+	readonly invocations: readonly (readonly string[])[];
+	readonly wroteNixConfigFirst: readonly boolean[];
+}> {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-setup-provision-')
+	);
+	const invocations: (readonly string[])[] = [];
+	const wroteNixConfigFirst: boolean[] = [];
+
+	await setupAction(
+		{
+			installDir: path.join(directory, 'bin'),
+			addToPath: 'false',
+			cacheUrl: 'https://cache.example.test/t/acme',
+			cache: 'pr-1',
+			trustedPublicKey: 'acme:AAAA',
+			...options
+		},
+		{
+			RUNNER_TEMP: directory,
+			GITHUB_ENV: path.join(directory, 'github-env'),
+			GITHUB_OUTPUT: path.join(directory, 'github-output')
+		},
+		createGithubReporter(),
+		{
+			installRelease: () =>
+				Promise.resolve({
+					binaryPath: path.join(directory, 'bin', 'cupboard'),
+					version: 'v1.2.3',
+					sourceCommit: 'd'.repeat(40)
+				}),
+			run: (_binaryPath, arguments_) => {
+				invocations.push(arguments_);
+				// `configureNix` writes the generated file before anything else,
+				// so if that file is missing this call ran first.
+				wroteNixConfigFirst.push(
+					readdirSync(directory).some((entry) =>
+						entry.startsWith('cupboard-nix-')
+					)
+				);
+
+				return Promise.resolve([]);
+			},
+			fetch: stubFetch(() => cacheInfoBody(40))
+		}
+	);
+
+	return { invocations, wroteNixConfigFirst };
+}
+
+// A private destination cache and a private reuse view can accept different
+// credentials. `destination-read-user` names the one the cache accepts; the
+// `read-user` pair remains the tenant fallback a view reads with.
+describe('destination read credentials', () => {
+	const environment = { RUNNER_TEMP: '/runner/temp' };
+
+	it('attaches the destination credential to the single selected cache', () => {
+		const inputs = resolveSetupInputs(
+			{
+				cache: 'builds',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword,
+				readUser: 'tenant',
+				readPassword: 'tenant-secret'
+			},
+			environment
+		);
+
+		expect({
+			caches: inputs.caches,
+			fallbackUser: inputs.readUser
+		}).toStrictEqual({
+			caches: [
+				{
+					cache: namedCache('builds'),
+					credential: { user: 'ci', password: readPassword }
+				}
+			],
+			// The tenant fallback is untouched; a reuse view still reads with it.
+			fallbackUser: 'tenant'
+		});
+	});
+
+	it.each([
+		[
+			'its password is absent',
+			{ destinationReadUser: 'ci' },
+			DestinationReadPasswordRequiredError
+		],
+		[
+			'its user is absent',
+			{ destinationReadPassword: readPassword },
+			DestinationReadUserRequiredError
+		],
+		[
+			'cache-credentials names one too',
+			{
+				cache: 'builds',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword,
+				cacheCredentials: JSON.stringify([
+					{
+						cache: namedCache('builds'),
+						credential: { user: 'other', password: readPassword }
+					}
+				])
+			},
+			DestinationReadCredentialConflictError
+		],
+		[
+			'several caches are selected',
+			{
+				cache: 'builds, archive',
+				destinationReadUser: 'ci',
+				destinationReadPassword: readPassword
+			},
+			DestinationReadCredentialCacheCountError
+		]
+	])('refuses a destination credential when %s', (_name, options, error) => {
+		expect(() => resolveSetupInputs(options, environment)).toThrow(error);
+	});
+});
+
+describe('setupAction cache provisioning', () => {
+	it('creates nothing when no cache is named', async () => {
+		expect(await runSetup({})).toStrictEqual({
+			invocations: [],
+			wroteNixConfigFirst: []
+		});
+	});
+
+	it('creates the named cache with the run token before configuring Nix', async () => {
+		expect(
+			await runSetup({
+				provisionCache: 'pr-1',
+				provisionCacheAccess: 'public',
+				provisionCacheTtl: '14d'
+			})
+		).toStrictEqual({
+			invocations: [
+				[
+					'cache',
+					'create',
+					'https://cache.example.test/t/acme',
+					'pr-1',
+					'--github-oidc',
+					'--if-absent',
+					'--access',
+					'public',
+					'--root-ttl',
+					'14d'
+				]
+			],
+			wroteNixConfigFirst: [false]
+		});
+	});
+
+	it('refuses to create a cache whose access the workflow did not state', async () => {
+		await expect(runSetup({ provisionCache: 'pr-1' })).rejects.toBeInstanceOf(
+			ProvisionCacheAccessRequiredError
+		);
 	});
 });

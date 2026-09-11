@@ -42,11 +42,44 @@ inputs:
       Named caches to use at the tenant URL, one per line or comma-separated.
       Leave empty to use the tenant's default cache.
     required: false
+  include-default-cache:
+    description:
+      When true, also configure the tenant's default cache alongside any named
+      caches. The `cache` list cannot name it, because a cache may itself be
+      called `default`.
+    required: false
   cache-credentials:
     description:
       JSON array of cache scopes and cache-specific read credentials. Populate
       it from workflow secrets. A cache without an entry uses read-user and
       read-password.
+    required: false
+  destination-read-user:
+    description:
+      Username accepted by the single selected destination cache. Use
+      cache-credentials instead when several caches are selected.
+    required: false
+  destination-read-password:
+    description: Password accepted by the single selected destination cache.
+    required: false
+  provision-cache:
+    description:
+      Named cache to create with this run's own OIDC token before anything reads
+      it. A pull request's first run has no cache to publish to. Leave empty for
+      a run that publishes to a cache that already exists.
+    required: false
+  provision-cache-access:
+    description:
+      Read access for the created cache, public or private. Required with
+      provision-cache. It must equal the access of the reuse view that
+      aggregates the cache, because a view aggregates only the caches whose
+      access equals its own.
+    required: false
+  provision-cache-ttl:
+    description:
+      Default root TTL for the created cache, for example 14d. A pull request
+      that is abandoned never removes its cache, and this TTL is what expires
+      the cache's contents. Leave empty for permanent retention.
     required: false
   trusted-public-key:
     description: Nix signing key to trust for cache reads.
@@ -145,7 +178,13 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        INCLUDE_DEFAULT_CACHE: ${{ inputs.include-default-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
+        DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
+        DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
+        PROVISION_CACHE: ${{ inputs.provision-cache }}
+        PROVISION_CACHE_ACCESS: ${{ inputs.provision-cache-access }}
+        PROVISION_CACHE_TTL: ${{ inputs.provision-cache-ttl }}
         REUSE_VIEW: ${{ inputs.reuse-view }}
         TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
         READ_USER: ${{ inputs.read-user }}
@@ -164,7 +203,13 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --include-default-cache "$INCLUDE_DEFAULT_CACHE"
           --cache-credentials "$CACHE_CREDENTIALS"
+          --destination-read-user "$DESTINATION_READ_USER"
+          --destination-read-password "$DESTINATION_READ_PASSWORD"
+          --provision-cache "$PROVISION_CACHE"
+          --provision-cache-access "$PROVISION_CACHE_ACCESS"
+          --provision-cache-ttl "$PROVISION_CACHE_TTL"
           --reuse-view "$REUSE_VIEW"
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"

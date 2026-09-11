@@ -177,8 +177,7 @@ runs:
         BUILT_CHECKSUMS_FILE: ${{ steps.subjects.outputs.built-checksums-file }}
         PREDICATE_FILE: ${{ steps.subjects.outputs.predicate-file }}
         PREDICATE_TYPE: ${{ steps.subjects.outputs.predicate-type }}
-        DESTINATION_VISIBILITY:
-          ${{ steps.subjects.outputs.destination-visibility }}
+        DESTINATION_ACCESS: ${{ steps.subjects.outputs.destination-access }}
         SIGNING_PROFILE: ${{ inputs.signing-profile }}
         UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
         SUBJECT_GROUPING: ${{ inputs.subject-grouping }}
@@ -191,7 +190,7 @@ runs:
           --built-checksums-file "$BUILT_CHECKSUMS_FILE" \
           --predicate-file "$PREDICATE_FILE" \
           --predicate-type "$PREDICATE_TYPE" \
-          --destination-visibility "$DESTINATION_VISIBILITY" \
+          --destination-access "$DESTINATION_ACCESS" \
           --signing-profile "$SIGNING_PROFILE" \
           --upload-to-github "$UPLOAD_TO_GITHUB" \
           --subject-grouping "$SUBJECT_GROUPING" \

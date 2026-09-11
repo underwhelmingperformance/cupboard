@@ -22,16 +22,20 @@ import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
 import {
+	cacheCreateAuthorizationDetails,
+	cacheRemoveAuthorizationDetails,
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails,
 	rootListAuthorizationDetails
 } from '../../auth/attenuate.ts';
+import { cacheLabel } from '../../client/client.ts';
 import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError
 } from '../../errors.ts';
 import { parseRootName } from '../../root-name.ts';
+import { type CacheClient } from '../cache.ts';
 import {
 	lookupRepository,
 	type RepositoryIdentity
@@ -41,12 +45,14 @@ import { type ReuseViewClient } from '../reuse-view.ts';
 import { githubBranchClaims, githubPullRequestClaims } from './claims.ts';
 import {
 	parseExactWorkflowReference,
-	pullRequestPrefix,
+	pullRequestCacheName,
+	pullRequestCachePrefix,
 	pullRequestViewName
 } from './convention.ts';
 import {
 	CheckFinding,
 	PassedCheckFinding,
+	ReuseViewCacheAccessMismatchFinding,
 	ReuseViewMissingFinding,
 	ReuseViewPriorityInsufficientFinding,
 	ReuseViewSelectorsMismatchFinding,
@@ -74,6 +80,7 @@ export interface GithubCheckOptions {
 }
 
 export interface GithubCheckClient {
+	readonly caches: Pick<CacheClient, 'list'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list'>;
 	readonly oidcTrust: {
 		list(): Promise<{ rules: OidcTrustSummary[] }>;
@@ -188,43 +195,50 @@ function checkTrustRule(
 }
 
 function hasPullRequestViewSelectors(
-	selectors: readonly ReuseViewSelectorInput[]
+	selectors: readonly ReuseViewSelectorInput[],
+	prefix: string
 ): boolean {
 	return (
 		selectors.length === 1 &&
 		selectors[0]?.kind === 'prefix' &&
-		selectors[0].prefix === pullRequestPrefix
+		selectors[0].prefix === prefix
 	);
 }
 
 async function checkReuseView(
 	url: URL,
+	identity: RepositoryIdentity,
 	client: GithubCheckClient,
 	fetchCacheInfo: (url: URL) => Promise<CacheInfo>
 ): Promise<CheckFinding> {
 	const check = 'reuse view';
+	// Setup writes one view per repository, so derive the same name and prefix
+	// here. A single shared name would report another repository's view as this
+	// repository's drift.
+	const viewName = pullRequestViewName(identity.repositoryId);
+	const prefix = pullRequestCachePrefix(identity.repositoryId);
 	const { views } = await client.reuseViews.list();
-	const definition = views.find((view) => view.name === pullRequestViewName);
+	const definition = views.find((view) => view.name === viewName);
 
 	if (definition === undefined) {
-		return new ReuseViewMissingFinding(check, pullRequestViewName);
+		return new ReuseViewMissingFinding(check, viewName);
 	}
 
-	if (!hasPullRequestViewSelectors(definition.selectors)) {
-		return new ReuseViewSelectorsMismatchFinding(check, pullRequestPrefix);
+	if (!hasPullRequestViewSelectors(definition.selectors, prefix)) {
+		return new ReuseViewSelectorsMismatchFinding(check, prefix);
 	}
 
 	const destination = await fetchCacheInfo(url);
 	let view: CacheInfo;
 
 	try {
-		view = await fetchCacheInfo(reuseViewUrl(url, pullRequestViewName));
+		view = await fetchCacheInfo(reuseViewUrl(url, viewName));
 	} catch (error) {
 		if (isAbortError(error)) {
 			throw error;
 		}
 
-		return new ReuseViewUnreadableFinding(check, pullRequestViewName);
+		return new ReuseViewUnreadableFinding(check, viewName);
 	}
 
 	// Nix only uses a substituter for paths in its advertised store directory. A
@@ -246,6 +260,49 @@ async function checkReuseView(
 	}
 
 	return new PassedCheckFinding(check);
+}
+
+/**
+ * Reports a pull-request cache the reuse view cannot aggregate. A view
+ * aggregates only the caches whose access equals its own and returns no error
+ * for the rest, so a cache created with the other access never appears in a
+ * lookup through the view. Only existing caches can be compared, so this check
+ * passes on a tenant whose first pull request has not run.
+ */
+async function checkPullRequestCacheAccess(
+	identity: RepositoryIdentity,
+	client: GithubCheckClient
+): Promise<CheckFinding> {
+	const check = 'pull-request cache access';
+	const viewName = pullRequestViewName(identity.repositoryId);
+	const prefix = pullRequestCachePrefix(identity.repositoryId);
+	const { views } = await client.reuseViews.list();
+	const definition = views.find((view) => view.name === viewName);
+
+	if (definition === undefined) {
+		return new ReuseViewMissingFinding(check, viewName);
+	}
+
+	const { caches } = await client.caches.list();
+	const mismatched = caches.filter(
+		(summary) =>
+			summary.scope.kind === 'named' &&
+			summary.scope.name.startsWith(prefix) &&
+			summary.access !== definition.access
+	);
+	const [first] = mismatched;
+
+	if (first === undefined) {
+		return new PassedCheckFinding(check);
+	}
+
+	return new ReuseViewCacheAccessMismatchFinding(
+		check,
+		viewName,
+		definition.access,
+		mismatched.map((summary) => cacheLabel(summary.scope)),
+		first.access
+	);
 }
 
 // The branch rule grants a root prefix. Every root that the caller writes must
@@ -311,13 +368,21 @@ export async function runGithubCheck(
 	);
 	const branchRoot = parseRootName(`${branchRootPrefix}/target`);
 	const branchRunRoot = parseRootName(`${branchRootPrefix}/_cupboard-run/1`);
-	const pullRequestCache: CacheName = cacheNameSchema.parse('pr-1');
+	const pullRequestCache: CacheName = cacheNameSchema.parse(
+		pullRequestCacheName(identity.repositoryId, 1)
+	);
 	const pullRequestCacheScope: CacheScope = {
 		kind: 'named',
 		name: pullRequestCache
 	};
 	const branchCacheScope: CacheScope = { kind: 'default' };
 	const pullRequestRequests = [
+		// A pull request creates its own cache on its first run and removes it
+		// when it closes. The branch requests below have no counterpart: the
+		// branch rule publishes to the default cache, which already exists and
+		// outlives every run.
+		cacheCreateAuthorizationDetails({ cache: pullRequestCacheScope }),
+		cacheRemoveAuthorizationDetails({ cache: pullRequestCacheScope }),
 		pushAuthorizationDetails({
 			cache: pullRequestCacheScope,
 			attest: true,
@@ -374,7 +439,8 @@ export async function runGithubCheck(
 				}),
 				branchRequests
 			),
-			await checkReuseView(url, client, dependencies.fetchCacheInfo),
+			await checkReuseView(url, identity, client, dependencies.fetchCacheInfo),
+			await checkPullRequestCacheAccess(identity, client),
 			checkRootPrefix(options, identity)
 		]
 	);

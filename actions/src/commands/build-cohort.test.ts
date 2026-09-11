@@ -4922,6 +4922,65 @@ describe('rootGroups', () => {
 		]);
 	});
 
+	// A reuse view is a tenant-level resource and a cache is not, so the two can
+	// accept different credentials. The reference source URL is what tells the
+	// two apart.
+	it.each([
+		{
+			name: 'the reuse view',
+			referenceSource: 'https://cache.example.test/t/acme/reuse/pr-view',
+			expected: [
+				'--read-user',
+				'fallback',
+				'--read-password',
+				'fallback-secret'
+			]
+		},
+		{
+			name: 'a named cache',
+			referenceSource: 'https://cache.example.test/t/acme/cache/release',
+			expected: [
+				'--read-user',
+				'destination',
+				'--read-password',
+				'destination-secret'
+			]
+		}
+	])(
+		'reads a reference from $name with its own credential',
+		({ referenceSource, expected }) => {
+			const inputs = resolveBuildCohortInputs(
+				{
+					...baseOptions(),
+					push: 'true',
+					reuseView: 'pr-view',
+					readUser: 'destination',
+					readPassword: 'destination-secret',
+					fallbackReadUser: 'fallback',
+					fallbackReadPassword: 'fallback-secret'
+				},
+				{ RUNNER_TEMP: '/tmp' }
+			);
+
+			const arguments_ = cohortPushArguments(
+				inputs,
+				{
+					root: 'github:owner/repo/main/app',
+					paths: [appPath],
+					referencePaths: [appPath],
+					complete: true
+				},
+				{
+					intermediatePathsFile: '',
+					referencePathsFile: '/tmp/reference-paths',
+					referenceSource
+				}
+			);
+
+			expect(arguments_.slice(-4)).toStrictEqual(expected);
+		}
+	);
+
 	it('keeps floating and multi-output remote paths with their keyed target root', () => {
 		const ownedMembers = members.map((member) =>
 			member.attr === 'floating'

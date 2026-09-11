@@ -25,14 +25,22 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
+import {
+	cacheCreateAuthorizationDetails,
+	cacheRemoveAuthorizationDetails
+} from '../auth/attenuate.ts';
+import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { parseCacheAccess } from '../cache-access.ts';
 import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { type CacheScopedClient, callInCache } from '../client/cache-scoped.ts';
-import { cacheLabel } from '../client/client.ts';
+import { cacheLabel, CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
-import { isRpcNotFoundError } from '../client/rpc-errors.ts';
+import {
+	isRpcCacheAlreadyExistsError,
+	isRpcNotFoundError
+} from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import {
@@ -48,6 +56,9 @@ interface CacheCreateOptions {
 	readonly priority?: CachePriority;
 	readonly rootTtl?: TtlSeconds;
 	readonly grace?: GraceSeconds;
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
+	readonly ifAbsent?: boolean;
 }
 
 interface CacheSetAccessOptions {
@@ -75,6 +86,8 @@ interface CacheSetGraceOptions {
 interface CacheRemoveOptions {
 	readonly force?: boolean;
 	readonly yes?: boolean;
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
 }
 
 export interface CacheClient {
@@ -159,6 +172,19 @@ export function registerCacheCommands(
 			'retention grace period (e.g. 24h, 0s)',
 			parseGrace
 		)
+		.option(
+			'--if-absent',
+			'report the existing cache instead of failing when it is already there'
+		)
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
 		.action(
 			async (
 				url: URL,
@@ -174,19 +200,34 @@ export function registerCacheCommands(
 				}
 
 				const reporter = commandUi(program, programOptions).reporter();
-				const rpc = tenantRpc(target.tenantUrl, {
-					credential: cachedOwnerProvider(target.tenantUrl, {
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
 						signal: programOptions.signal
 					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: cacheCreateAuthorizationDetails({
+							cache: target.cache
+						})
+					}
+				);
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
 					signal: programOptions.signal
 				});
 
 				await runCacheCreate(
-					target.cache,
-					options.access,
-					options.priority ?? CacheInfo.default.priority,
-					options.rootTtl,
-					options.grace,
+					{
+						cache: target.cache,
+						access: options.access,
+						priority: options.priority ?? CacheInfo.default.priority,
+						...(options.rootTtl !== undefined && { rootTtl: options.rootTtl }),
+						...(options.grace !== undefined && { grace: options.grace }),
+						...(options.ifAbsent === true && { ifAbsent: true })
+					},
 					reporter,
 					rpc.caches
 				);
@@ -377,6 +418,15 @@ export function registerCacheCommands(
 		.argument('[name]', 'cache name when the URL does not select one')
 		.option('--force', 'remove even when the cache still holds store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
 		.action(
 			async (
 				url: URL,
@@ -394,10 +444,22 @@ export function registerCacheCommands(
 				const ui = commandUi(program, programOptions, {
 					assumeYes: options.yes
 				});
-				const rpc = tenantRpc(target.tenantUrl, {
-					credential: cachedOwnerProvider(target.tenantUrl, {
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(target.tenantUrl, {
+						cache: target.cache,
 						signal: programOptions.signal
 					}),
+					{
+						githubOidc: options.githubOidc,
+						audience:
+							options.audience ?? audienceSchema.parse(target.tenantUrl),
+						authorizationDetails: cacheRemoveAuthorizationDetails({
+							cache: target.cache
+						})
+					}
+				);
+				const rpc = tenantRpc(target.tenantUrl, {
+					credential,
 					signal: programOptions.signal
 				});
 
@@ -447,29 +509,47 @@ export async function runCacheList(
 	});
 }
 
+export interface CacheCreateRequest {
+	readonly cache: Extract<CacheScope, { readonly kind: 'named' }>;
+	readonly access: CacheAccessMode;
+	readonly priority: CachePriority;
+	readonly rootTtl?: TtlSeconds;
+	readonly grace?: GraceSeconds;
+	/**
+	 * Report the cache that is already there instead of failing. A run that
+	 * creates its own cache finds an existing one on every push after the
+	 * first, so the server's `CACHE_ALREADY_EXISTS` is the expected answer.
+	 */
+	readonly ifAbsent?: boolean;
+}
+
 export async function runCacheCreate(
-	cache: Extract<CacheScope, { readonly kind: 'named' }>,
-	access: CacheAccessMode,
-	priority: CachePriority,
-	rootTtl: TtlSeconds | undefined,
-	grace: GraceSeconds | undefined,
+	request: CacheCreateRequest,
 	reporter: Reporter,
-	client: Pick<CacheClient, 'put'>
+	client: Pick<CacheClient, 'put' | 'get'>
 ): Promise<void> {
-	const summary = await reporter.phase('Creating cache', () =>
-		callInCache(client.put, cache, {
-			access,
-			priority,
-			defaultRootRetention:
-				rootTtl === undefined
-					? { kind: 'permanent' }
-					: { kind: 'duration', seconds: rootTtl },
-			grace:
-				grace === undefined
-					? { kind: 'none' }
-					: { kind: 'duration', graceSeconds: grace }
-		})
-	);
+	const summary = await reporter.phase('Creating cache', async () => {
+		try {
+			return await callInCache(client.put, request.cache, {
+				access: request.access,
+				priority: request.priority,
+				defaultRootRetention:
+					request.rootTtl === undefined
+						? { kind: 'permanent' }
+						: { kind: 'duration', seconds: request.rootTtl },
+				grace:
+					request.grace === undefined
+						? { kind: 'none' }
+						: { kind: 'duration', graceSeconds: request.grace }
+			});
+		} catch (error) {
+			if (request.ifAbsent !== true || !isRpcCacheAlreadyExistsError(error)) {
+				throw error;
+			}
+
+			return callInCache(client.get, request.cache, {});
+		}
+	});
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
 }

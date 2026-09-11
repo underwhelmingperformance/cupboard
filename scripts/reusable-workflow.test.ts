@@ -334,9 +334,34 @@ describe('cupboard acquisition', () => {
 		}
 	);
 
-	it('gives every flake publish job the coordinate configure resolved', async () => {
+	// Only the plan job creates the cache, so its inputs are compared without
+	// the provisioning ones. The test below covers those.
+	const provisionInputNames = new Set([
+		'provision-cache',
+		'provision-cache-access',
+		'provision-cache-ttl'
+	]);
+
+	type StepInputs = Record<string, string | number | boolean> | undefined;
+
+	function selectInputs(
+		inputs: StepInputs,
+		isKept: (name: string) => boolean
+	): Record<string, string | number | boolean> {
+		return Object.fromEntries(
+			Object.entries(inputs ?? {}).filter(([name]) => isKept(name))
+		);
+	}
+
+	it('gives every publishing flake job the coordinate configure resolved', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const setupInputs = inputsOf(workflow, cupboardAction('setup'));
+		// The removal job reads nothing from the cache, so it passes no
+		// destination. Every job that does read one passes the same coordinate.
+		const setupInputs = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) =>
+				selectInputs(inputs, (name) => !provisionInputNames.has(name))
+			)
+			.filter((inputs) => 'cache-url' in inputs);
 
 		expect({
 			configureOutput: workflow.jobs.configure?.steps.find(
@@ -350,11 +375,47 @@ describe('cupboard acquisition', () => {
 				cache: '${{ needs.configure.outputs.cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'destination-read-user': '${{ secrets.destination_read_user }}',
+				'destination-read-password': '${{ secrets.destination_read_password }}',
+				'read-user': '${{ secrets.fallback_read_user }}',
+				'read-password': '${{ secrets.fallback_read_password }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
 			}))
 		});
+	});
+
+	// The removal job must not configure a substituter: it runs for a closed
+	// pull request whose cache it is about to remove.
+	it('installs only the binary for the removal job', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const removalSetup = (workflow.jobs['remove-cache']?.steps ?? []).filter(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect(removalSetup.map((step) => step.with)).toStrictEqual([
+			{ cupboard: '${{ needs.configure.outputs.cupboard }}' }
+		]);
+	});
+
+	// The plan job runs before every cohort job, so it is the only job that can
+	// create the cache before anything negotiates an upload against it.
+	it('creates the pull-request cache from the plan job alone', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const provisioning = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) =>
+				selectInputs(inputs, (name) => provisionInputNames.has(name))
+			)
+			.filter((inputs) => Object.keys(inputs).length > 0);
+
+		expect(provisioning).toStrictEqual([
+			{
+				'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
+				'provision-cache-access':
+					"${{ secrets.fallback_read_user != '' && 'private' || 'public' }}",
+				'provision-cache-ttl':
+					'${{ needs.configure.outputs.provision-cache-ttl }}'
+			}
+		]);
 	});
 
 	it('rebuilds a cached output when the publish workflow attests', async () => {
@@ -477,8 +538,10 @@ describe('SSH credential isolation', () => {
 				'store_ssh_key',
 				'store_ssh_config',
 				'input_ssh_key',
-				'read_user',
-				'read_password'
+				'destination_read_user',
+				'destination_read_password',
+				'fallback_read_user',
+				'fallback_read_password'
 			]
 		);
 	});
@@ -535,8 +598,8 @@ describe('cohort planning and publication', () => {
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				optimise: '${{ inputs.push }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				store: '${{ inputs.store }}',
@@ -551,7 +614,10 @@ describe('cohort planning and publication', () => {
 		expect(Object.keys(workflow.jobs)).toStrictEqual([
 			'configure',
 			'plan',
-			'cohort'
+			'cohort',
+			// A closed pull request runs this job alone, and it neither plans nor
+			// builds.
+			'remove-cache'
 		]);
 	});
 
@@ -578,7 +644,9 @@ describe('cohort planning and publication', () => {
 				cupboardAction('setup'),
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
-				cupboardAction('attest-attach')
+				cupboardAction('attest-attach'),
+				// The removal job installs the binary and nothing else.
+				cupboardAction('setup')
 			],
 			artifactSteps: []
 		});
@@ -597,8 +665,10 @@ describe('cohort planning and publication', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
+				'fallback-read-user': '${{ secrets.fallback_read_user }}',
+				'fallback-read-password': '${{ secrets.fallback_read_password }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
@@ -676,8 +746,8 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}'
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}'
 				}
 			],
 			publish: [
@@ -719,8 +789,8 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}',
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle:
@@ -814,6 +884,30 @@ describe('resolved publication inputs', () => {
 			defaultCache: '',
 			output: '${{ steps.resolve.outputs.cache }}',
 			written: true
+		});
+	});
+
+	// A fork's pull request gets no id-token, so it cannot publish at all. The
+	// refusal belongs before the cache name is derived, so the run reports the
+	// reason rather than failing later in token exchange.
+	it('refuses a pull request from a fork before deriving anything', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
+		const refusal =
+			'if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then';
+
+		expect({
+			headRepositoryId: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Resolve inputs'
+			)?.env?.HEAD_REPOSITORY_ID,
+			refuses: resolve.includes(refusal),
+			beforeTheCacheName:
+				resolve.indexOf(refusal) <
+				resolve.indexOf('CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"')
+		}).toStrictEqual({
+			headRepositoryId: '${{ github.event.pull_request.head.repo.id }}',
+			refuses: true,
+			beforeTheCacheName: true
 		});
 	});
 

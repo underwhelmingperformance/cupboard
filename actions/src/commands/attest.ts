@@ -35,7 +35,7 @@ import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
-import type { DestinationVisibility } from '../attestation-signing.ts';
+import type { DestinationAccess } from '../attestation-signing.ts';
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
 	CacheAccessProbeError,
@@ -96,10 +96,10 @@ interface AttestationSubjects {
 	readonly skipped: readonly string[];
 }
 
-async function cacheVisibility(
+async function cacheAccess(
 	fetcher: typeof fetch,
 	cacheUrl: URL
-): Promise<DestinationVisibility> {
+): Promise<DestinationAccess> {
 	const target = `${canonicalHref(cacheUrl)}/nix-cache-info`;
 
 	return fetchWithProbeDeadline(
@@ -484,7 +484,7 @@ export async function attestAction(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
 	const fetcher = dependencies.fetch ?? fetch;
-	const destinationVisibility = await cacheVisibility(
+	const destinationAccess = await cacheAccess(
 		retryingFetcher(fetcher, 'replay-safe'),
 		cacheUrlFor(inputs.url, inputs.cache)
 	);
@@ -526,5 +526,5 @@ export async function attestAction(
 	await setOutput(environment, 'built-subject-count', String(built.length));
 	await setOutput(environment, 'predicate-file', predicateFile);
 	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
-	await setOutput(environment, 'destination-visibility', destinationVisibility);
+	await setOutput(environment, 'destination-access', destinationAccess);
 }

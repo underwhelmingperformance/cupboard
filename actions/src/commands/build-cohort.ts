@@ -70,6 +70,8 @@ import {
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
+	FallbackReadPasswordRequiredError,
+	FallbackReadUserRequiredError,
 	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
@@ -365,6 +367,8 @@ export interface BuildCohortOptions {
 	readonly permanent?: string;
 	readonly audience?: string;
 	readonly readUser?: string;
+	readonly fallbackReadUser?: string;
+	readonly fallbackReadPassword?: string;
 	readonly readPassword?: string;
 	readonly maxJobs?: string;
 	readonly store?: string;
@@ -393,6 +397,8 @@ export interface BuildCohortInputs {
 	readonly permanent: boolean;
 	readonly audience: string;
 	readonly readUser: string;
+	readonly fallbackReadUser: string;
+	readonly fallbackReadPassword: string;
 	readonly readPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
@@ -461,6 +467,17 @@ export function resolveBuildCohortInputs(
 		throw new ReadUserRequiredError();
 	}
 
+	const fallbackReadUser = providedReadUser(options.fallbackReadUser);
+	const fallbackReadPassword = options.fallbackReadPassword ?? '';
+
+	if (fallbackReadUser !== '' && fallbackReadPassword === '') {
+		throw new FallbackReadPasswordRequiredError();
+	}
+
+	if (fallbackReadPassword !== '' && fallbackReadUser === '') {
+		throw new FallbackReadUserRequiredError();
+	}
+
 	const maxJobs = provided(options.maxJobs) ?? '';
 
 	if (
@@ -522,6 +539,8 @@ export function resolveBuildCohortInputs(
 		permanent: isPermanent,
 		audience: provided(options.audience) ?? '',
 		readUser,
+		fallbackReadUser,
+		fallbackReadPassword,
 		readPassword,
 		maxJobs,
 		store: provided(options.store) ?? '',
@@ -598,6 +617,14 @@ export function registerBuildCohortCommand(
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--read-user <user>', 'username for cache reads')
 		.option('--read-password <password>', 'password for cache reads')
+		.option(
+			'--fallback-read-user <user>',
+			'tenant-fallback username for private reuse-view reads'
+		)
+		.option(
+			'--fallback-read-password <password>',
+			'tenant-fallback password for private reuse-view reads'
+		)
 		.option('--max-jobs <count>', 'maximum local build jobs')
 		.option(
 			'--store <uri>',
@@ -1862,6 +1889,9 @@ export function cohortPushArguments(
 		| 'runRootPermanent'
 		| 'readUser'
 		| 'readPassword'
+		| 'fallbackReadUser'
+		| 'fallbackReadPassword'
+		| 'reuseView'
 	>,
 	group: CohortRootGroup,
 	extras: CohortPushExtras
@@ -1903,13 +1933,26 @@ export function cohortPushArguments(
 			extras.referenceSource
 		);
 
-		if (inputs.readUser !== '') {
-			arguments_.push(
-				'--read-user',
-				inputs.readUser,
-				'--read-password',
-				inputs.readPassword
-			);
+		// A reuse view and a destination cache can accept different credentials.
+		// The view is a tenant-level resource, so a reference drawn from it
+		// reads with the tenant fallback. Everything else reads with the
+		// destination credential, so compare the reference source against the
+		// view's URL.
+		const viewSource =
+			inputs.reuseView === ''
+				? ''
+				: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
+		const isViewReference =
+			viewSource !== '' && extras.referenceSource === viewSource;
+		const readUser = isViewReference
+			? inputs.fallbackReadUser
+			: inputs.readUser;
+		const readPassword = isViewReference
+			? inputs.fallbackReadPassword
+			: inputs.readPassword;
+
+		if (readUser !== '') {
+			arguments_.push('--read-user', readUser, '--read-password', readPassword);
 		}
 	}
 

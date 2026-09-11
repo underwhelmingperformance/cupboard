@@ -262,11 +262,13 @@ describe('runCacheCreate', () => {
 		});
 
 		await runCacheCreate(
-			{ kind: 'named', name: cacheName('builds') },
-			'private',
-			cachePrioritySchema.parse(30),
-			ttlSecondsSchema.parse(1_209_600),
-			graceSecondsSchema.parse(86_400),
+			{
+				cache: { kind: 'named', name: cacheName('builds') },
+				access: 'private',
+				priority: cachePrioritySchema.parse(30),
+				rootTtl: ttlSecondsSchema.parse(1_209_600),
+				grace: graceSecondsSchema.parse(86_400)
+			},
 			reporter(results),
 			cacheClient({
 				put: {
@@ -303,6 +305,82 @@ describe('runCacheCreate', () => {
 		});
 	});
 
+	// Every push after a pull request's first finds the cache that the first
+	// push created, so a repeat run must report that cache rather than fail.
+	it('reports the existing cache when --if-absent finds one already there', async () => {
+		const results: ResultRow[][] = [];
+		const existing = cacheSummary({
+			scope: { kind: 'named', name: 'pr-1' },
+			access: 'public',
+			priority: 30,
+			storePaths: 4
+		});
+		let creations = 0;
+
+		await runCacheCreate(
+			{
+				cache: { kind: 'named', name: cacheName('pr-1') },
+				access: 'public',
+				priority: cachePrioritySchema.parse(30),
+				ifAbsent: true
+			},
+			reporter(results),
+			cacheClient({
+				put: {
+					inDefaultCache: () => Promise.reject(new Error('unused')),
+					inNamedCache: () => {
+						creations += 1;
+
+						return Promise.reject(
+							new ORPCError('CACHE_ALREADY_EXISTS', { status: 409 })
+						);
+					}
+				},
+				get: {
+					inDefaultCache: () => Promise.reject(new Error('unused')),
+					inNamedCache: () => Promise.resolve(existing)
+				}
+			})
+		);
+
+		expect({ creations, results }).toStrictEqual({
+			creations: 1,
+			results: [
+				[
+					{ label: 'Cache', value: 'pr-1' },
+					{ label: 'Access', value: 'public' },
+					{ label: 'Priority', value: '30' },
+					{ label: 'Store paths', value: '4' },
+					{ label: 'Default root retention', value: 'permanent' },
+					{ label: 'Grace', value: 'none' },
+					{ label: 'Root retention overrides', value: 'none' }
+				]
+			]
+		});
+	});
+
+	it('refuses an existing cache without --if-absent', async () => {
+		await expect(
+			runCacheCreate(
+				{
+					cache: { kind: 'named', name: cacheName('pr-1') },
+					access: 'public',
+					priority: cachePrioritySchema.parse(30)
+				},
+				reporter([]),
+				cacheClient({
+					put: {
+						inDefaultCache: () => Promise.reject(new Error('unused')),
+						inNamedCache: () =>
+							Promise.reject(
+								new ORPCError('CACHE_ALREADY_EXISTS', { status: 409 })
+							)
+					}
+				})
+			)
+		).rejects.toBeInstanceOf(ORPCError);
+	});
+
 	it('creates a permanent cache without grace when retention options are omitted', async () => {
 		const calls: unknown[] = [];
 		const summary = cacheSummary({
@@ -313,11 +391,11 @@ describe('runCacheCreate', () => {
 		});
 
 		await runCacheCreate(
-			{ kind: 'named', name: cacheName('builds') },
-			'public',
-			cachePrioritySchema.parse(40),
-			undefined,
-			undefined,
+			{
+				cache: { kind: 'named', name: cacheName('builds') },
+				access: 'public',
+				priority: cachePrioritySchema.parse(40)
+			},
 			reporter([]),
 			cacheClient({
 				put: {

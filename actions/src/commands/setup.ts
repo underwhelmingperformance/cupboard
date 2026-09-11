@@ -31,12 +31,19 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
+import { runCupboard } from '../cupboard-run.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
+	ProvisionCacheAccessRequiredError,
+	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -79,13 +86,32 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly includeDefaultCache?: string;
+	readonly provisionCache?: string;
+	readonly provisionCacheAccess?: string;
+	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly nixConfigFile?: string;
 	readonly checkoutDir?: string;
+}
+
+/**
+ * The cache a run creates before it publishes. A pull-request cache does not
+ * exist before the pull request's first run, and the run holds only its own
+ * token, so it creates the cache itself. The access and TTL come from the
+ * workflow, not from a server default: a workflow that names no access is
+ * refused, and the TTL is what expires an abandoned pull request's contents.
+ */
+export interface ProvisionCache {
+	readonly name: string;
+	readonly access: string;
+	readonly rootTtl: string;
 }
 
 export interface SetupInputs {
@@ -99,6 +125,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
+	readonly provisionCache: ProvisionCache | undefined;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -112,6 +139,7 @@ export interface SetupActionDependencies {
 	readonly fetch?: typeof fetch;
 	readonly installRelease?: typeof installCupboard;
 	readonly mask?: (value: string) => void;
+	readonly run?: typeof runCupboard;
 	readonly signal?: AbortSignal;
 }
 
@@ -181,6 +209,30 @@ export function registerSetupCommand(
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
+			'--include-default-cache <boolean>',
+			"Also configure the tenant's default cache, alongside any named caches."
+		)
+		.option(
+			'--destination-read-user <user>',
+			'Username accepted by the single selected destination cache.'
+		)
+		.option(
+			'--destination-read-password <password>',
+			'Password accepted by the single selected destination cache.'
+		)
+		.option(
+			'--provision-cache <name>',
+			"Create this cache with the run's own OIDC token before anything reads it."
+		)
+		.option(
+			'--provision-cache-access <mode>',
+			'Read access for the created cache: public or private.'
+		)
+		.option(
+			'--provision-cache-ttl <duration>',
+			'Default root TTL for the created cache, e.g. 14d.'
+		)
+		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to add as a second substituter'
 		)
@@ -213,6 +265,16 @@ export function resolveSetupInputs(
 	// part of a credential, so only its complete absence means "not set".
 	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
+	const destinationReadUser = providedReadUser(options.destinationReadUser);
+	const destinationReadPassword = options.destinationReadPassword ?? '';
+
+	if (destinationReadUser !== '' && destinationReadPassword === '') {
+		throw new DestinationReadPasswordRequiredError();
+	}
+
+	if (destinationReadPassword !== '' && destinationReadUser === '') {
+		throw new DestinationReadUserRequiredError();
+	}
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -263,7 +325,12 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options),
+		caches: resolveCaches(
+			options,
+			destinationReadUser,
+			destinationReadPassword
+		),
+		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -281,23 +348,87 @@ export function resolveSetupInputs(
 }
 
 /**
+ * Reads the cache the run should create, if any. `provision-cache` names it,
+ * and the remaining inputs supply its access and default root TTL.
+ */
+function resolveProvisionCache(
+	options: SetupOptions,
+	cacheUrl: URL | undefined
+): ProvisionCache | undefined {
+	const name = provided(options.provisionCache);
+
+	if (name === undefined) {
+		return undefined;
+	}
+
+	if (cacheUrl === undefined) {
+		throw new ProvisionCacheUrlRequiredError();
+	}
+
+	const access = provided(options.provisionCacheAccess);
+
+	if (access === undefined) {
+		throw new ProvisionCacheAccessRequiredError();
+	}
+
+	return {
+		name,
+		access,
+		rootTtl: provided(options.provisionCacheTtl) ?? ''
+	};
+}
+
+/**
  * Resolves the caches to configure and attaches cache-specific credentials.
  * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+function resolveCaches(
+	options: SetupOptions,
+	destinationReadUser: ReadUser | '',
+	destinationReadPassword: string
+): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+	const hasDefaultCache = isEnabled(
+		'include-default-cache',
+		options.includeDefaultCache,
+		false
+	);
+
+	// Two inputs can supply the destination's credential: `cache-credentials`
+	// gives one per cache, and `destination-read-user` is the shorthand for a
+	// single destination. Supplying both is ambiguous.
+	if (
+		destinationReadUser !== '' &&
+		provided(options.cacheCredentials) !== undefined
+	) {
+		throw new DestinationReadCredentialConflictError();
+	}
+
 	const defaultCache: CacheScope = { kind: 'default' };
-	const selected = caches.length === 0 ? [defaultCache] : caches;
+	const named = caches.length === 0 ? [defaultCache] : caches;
+	const selected = hasDefaultCache
+		? [defaultCache, ...named.filter((cache) => cache.kind !== 'default')]
+		: named;
+
+	// The shorthand names no cache, so it can only mean the one destination.
+	if (destinationReadUser !== '' && selected.length !== 1) {
+		throw new DestinationReadCredentialCacheCountError(selected.length);
+	}
 
 	const credentials = providedCacheCredentials(
 		options.cacheCredentials,
 		selected
 	);
+	const destinationCredential =
+		destinationReadUser === ''
+			? undefined
+			: { user: destinationReadUser, password: destinationReadPassword };
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
-			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		const credential =
+			destinationCredential ??
+			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
+				?.credential;
 
 		return {
 			cache,
@@ -403,6 +534,22 @@ export async function setupAction(
 		return;
 	}
 
+	// Create the cache before anything reads it. A pull request's first run has
+	// no cache to publish to, and every later step, from the substituter probe
+	// to upload negotiation, expects one to exist.
+	if (inputs.provisionCache !== undefined) {
+		await (dependencies.run ?? runCupboard)(
+			acquired.binaryPath,
+			provisionCacheArguments(inputs.cacheUrl, inputs.provisionCache),
+			environment,
+			{
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			}
+		);
+	}
+
 	await configureNix(
 		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
 		reporter,
@@ -411,6 +558,29 @@ export async function setupAction(
 			...(dependencies.signal !== undefined && { signal: dependencies.signal })
 		}
 	);
+}
+
+/**
+ * The `cupboard cache create` argv a run uses to create its own cache. The run
+ * authenticates with its GitHub Actions token, so the trust rule's binding
+ * decides which cache it may create.
+ */
+function provisionCacheArguments(
+	cacheUrl: URL,
+	provision: ProvisionCache
+): readonly string[] {
+	return [
+		'cache',
+		'create',
+		canonicalHref(cacheUrl),
+		provision.name,
+		'--github-oidc',
+		// Every push after the first finds the cache the first run created.
+		'--if-absent',
+		'--access',
+		provision.access,
+		...(provision.rootTtl === '' ? [] : ['--root-ttl', provision.rootTtl])
+	];
 }
 
 export function cupboardPathEntry(binaryPath: string): string {

@@ -149,6 +149,20 @@ CUPBOARD_CACHE_CREDENTIALS=$credentials \
     builds release
 ```
 
+To describe the tenant's default cache and named caches in one snippet, add
+`--include-default-cache`. The default cache comes first, then the names in
+argument order:
+
+```sh
+cupboard config "$url" "$(cupboard pubkey "$url")" \
+  --include-default-cache builds release
+```
+
+The default cache has a flag rather than a name in the list because a cache may
+itself be called `default`. Such a cache stays addressable as a positional name.
+The setup action takes the same selection through its `include-default-cache`
+input.
+
 Write the complete snippet to the destination file. The credentials are a JSON
 array whose entries pair an explicit cache scope with its `user` and `password`.
 Supply it in `CUPBOARD_CACHE_CREDENTIALS` or `--cache-credentials`. The option
@@ -272,10 +286,17 @@ caches. Knowing the hash does not bypass these checks. Deleting the last path
 that references a NAR in a cache stops that cache serving the NAR before the
 deletion reports success.
 
-All of a tenant's public caches share one authorisation range. A reader admitted
-to one public cache can address every other public cache. A NAR referenced by
-any public cache is served from every public prefix of the tenant, including
-`/t/<tenant>/nar/<hash>.nar.zst`.
+All of a tenant's public caches are read without a credential, so a reader who
+can address one can address any of them. Each still serves only the NARs its own
+paths reference. A NAR request looks for a reference row belonging to the cache
+the route addresses and no other, so `/t/<tenant>/nar/<hash>.nar.zst` serves
+what the default cache references and
+`/t/<tenant>/cache/<name>/nar/<hash>.nar.zst` serves what that cache references.
+
+A reuse view is the route that spans caches. Its NAR route accepts a reference
+row from any cache the view's selectors select, at the view's own access, which
+is why one view route serves the NARs of every cache it selects, while a cache
+route serves only that cache's.
 
 Publishing a NAR hash does not bypass cache authorisation. It does disclose that
 the path exists and identifies its contents to anyone holding a copy from
@@ -286,7 +307,7 @@ append-only, so a published NAR hash cannot be withdrawn.
 
 ### Attesting to a private cache
 
-`actions/attest` derives its defaults from the destination cache's visibility. A
+`actions/attest` derives its defaults from the destination cache's access. A
 private destination signs in the public-good trust domain with an RFC 3161
 timestamp and no transparency-log entry. It does not record the bundle in the
 repository's attestation store, and it signs a separate statement for each

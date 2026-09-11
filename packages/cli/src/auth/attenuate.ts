@@ -49,6 +49,14 @@ export interface PreviewGrantIntent {
 	readonly cache: CacheScope;
 }
 
+export interface CacheCreateGrantIntent {
+	readonly cache: CacheScope;
+}
+
+export interface CacheRemoveGrantIntent {
+	readonly cache: CacheScope;
+}
+
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
@@ -176,6 +184,40 @@ export function previewAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:preview'],
+			cache: intent.cache
+		}
+	]);
+}
+
+/**
+ * The authority `cupboard cache create` needs in CI: exactly `cache:create` on
+ * the cache being created, and no upload or root operation.
+ */
+export function cacheCreateAuthorizationDetails(
+	intent: CacheCreateGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['cache:create'],
+			cache: intent.cache
+		}
+	]);
+}
+
+/**
+ * The authority `cupboard cache remove` needs in CI: exactly `cache:delete` on
+ * the cache being removed. A pull-request rule renders that cache name from
+ * the `repository_id` and `ref` claims of the verified token, so a closing run
+ * can remove its own cache and no other.
+ */
+export function cacheRemoveAuthorizationDetails(
+	intent: CacheRemoveGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['cache:delete'],
 			cache: intent.cache
 		}
 	]);

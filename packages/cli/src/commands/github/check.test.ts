@@ -4,6 +4,10 @@ import {
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheListResponseSchema,
+	type CacheSummaryInput
+} from '@cupboard/protocol/caches';
 import { type Operation, type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	oidcTrustListResponseSchema,
@@ -99,11 +103,11 @@ const branchRule = storedRule(
 
 function pullRequestView(
 	selectors: readonly ReuseViewSelectorInput[] = [
-		{ kind: 'prefix', prefix: 'pr-' }
+		{ kind: 'prefix', prefix: 'gh-1234-pr-' }
 	]
 ): ReuseViewSummaryInput {
 	return {
-		name: 'pull-requests',
+		name: 'pull-requests-1234',
 		access: 'public',
 		revision: 1,
 		priority: 50,
@@ -113,13 +117,35 @@ function pullRequestView(
 	};
 }
 
+function pullRequestCache(
+	name: string,
+	access: 'public' | 'private'
+): CacheSummaryInput {
+	return {
+		scope: { kind: 'named', name },
+		access,
+		priority: 30,
+		storePaths: 0,
+		defaultRootRetention: { kind: 'permanent' },
+		grace: { kind: 'none' },
+		rootRetentionOverrides: []
+	};
+}
+
 function checkClient(overrides: {
 	graceSeconds?: number | undefined;
 	extraPolicies?: { cachePrefix: string; graceSeconds: number }[];
 	rules?: OidcTrustSummaryInput[];
 	views?: ReuseViewSummaryInput[];
+	caches?: CacheSummaryInput[];
 }): GithubCheckClient {
 	return {
+		caches: {
+			list: () =>
+				Promise.resolve(
+					cacheListResponseSchema.parse({ caches: overrides.caches ?? [] })
+				)
+		},
 		reuseViews: {
 			list: () =>
 				Promise.resolve(
@@ -295,6 +321,80 @@ describe('runGithubCheck', () => {
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
+			{ label: 'pull-request cache access', value: 'ok' },
+			{ label: 'root prefix', value: 'ok' }
+		]);
+	});
+
+	// A cache whose access differs from the view's is absent from every lookup
+	// the view answers, and no other check reports it.
+	it('reports a pull-request cache the reuse view cannot aggregate', async () => {
+		const results: ResultRow[][] = [];
+
+		let failure: unknown;
+		try {
+			await runGithubCheck(
+				url,
+				options,
+				reporter(results),
+				checkClient({
+					rules: [prRule, branchRule],
+					caches: [
+						pullRequestCache('gh-1234-pr-1', 'private'),
+						pullRequestCache('gh-1234-pr-2', 'public')
+					]
+				}),
+				checkDependencies({})
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectFailed(failure);
+		expect({ checks: failure.checks, rows: findings(results) }).toStrictEqual({
+			checks: ['pull-request cache access'],
+			rows: [
+				{ label: 'pull-request trust rule', value: 'ok' },
+				{ label: 'main trust rule', value: 'ok' },
+				{ label: 'reuse view', value: 'ok' },
+				{
+					label: 'pull-request cache access',
+					value:
+						'failed: gh-1234-pr-1 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
+				},
+				{ label: 'root prefix', value: 'ok' }
+			]
+		});
+	});
+
+	// Views are named per tenant and setup writes one per repository, so a
+	// second repository's view exists in the same tenant. Treating that view as
+	// this repository's would report drift on a converged setup.
+	it("ignores another repository's pull-request view", async () => {
+		const results: ResultRow[][] = [];
+
+		await runGithubCheck(
+			url,
+			options,
+			reporter(results),
+			checkClient({
+				rules: [prRule, branchRule],
+				views: [
+					{
+						...pullRequestView([{ kind: 'prefix', prefix: 'gh-9999-pr-' }]),
+						name: 'pull-requests-9999'
+					},
+					pullRequestView()
+				]
+			}),
+			checkDependencies({})
+		);
+
+		expect(findings(results)).toStrictEqual([
+			{ label: 'pull-request trust rule', value: 'ok' },
+			{ label: 'main trust rule', value: 'ok' },
+			{ label: 'reuse view', value: 'ok' },
+			{ label: 'pull-request cache access', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);
 	});
@@ -329,28 +429,36 @@ describe('runGithubCheck', () => {
 		{
 			name: 'missing',
 			views: [],
-			detail: 'the pull-requests view is not defined'
+			detail: 'the pull-requests-1234 view is not defined',
+			// The access check reads the view's access, so a missing view fails
+			// that check as well as this one.
+			accessValue: 'failed: the pull-requests-1234 view is not defined',
+			alsoFails: ['pull-request cache access']
 		},
 		{
 			name: 'wrong selector',
 			views: [pullRequestView([{ kind: 'prefix', prefix: 'pull-' }])],
 			detail:
-				'stored selectors differ from the single pr- prefix setup would write'
+				'stored selectors differ from the single gh-1234-pr- prefix setup would write',
+			accessValue: 'ok',
+			alsoFails: []
 		},
 		{
 			name: 'extra selector',
 			views: [
 				pullRequestView([
-					{ kind: 'prefix', prefix: 'pr-' },
+					{ kind: 'prefix', prefix: 'gh-1234-pr-' },
 					{ kind: 'named', name: 'release' }
 				])
 			],
 			detail:
-				'stored selectors differ from the single pr- prefix setup would write'
+				'stored selectors differ from the single gh-1234-pr- prefix setup would write',
+			accessValue: 'ok',
+			alsoFails: []
 		}
 	])(
 		'fails when the reuse-view definition is $name',
-		async ({ views, detail }) => {
+		async ({ views, detail, accessValue, alsoFails }) => {
 			const results: ResultRow[][] = [];
 
 			let failure: unknown;
@@ -373,11 +481,12 @@ describe('runGithubCheck', () => {
 			expectFailed(failure);
 			expect({ checks: failure.checks, rows: findings(results) }).toStrictEqual(
 				{
-					checks: ['reuse view'],
+					checks: ['reuse view', ...alsoFails],
 					rows: [
 						{ label: 'pull-request trust rule', value: 'ok' },
 						{ label: 'main trust rule', value: 'ok' },
 						{ label: 'reuse view', value: `failed: ${detail}` },
+						{ label: 'pull-request cache access', value: accessValue },
 						{ label: 'root prefix', value: 'ok' }
 					]
 				}
@@ -432,6 +541,7 @@ describe('runGithubCheck', () => {
 					label: 'reuse view',
 					value: "failed: view priority 40 does not exceed the destination's 40"
 				},
+				{ label: 'pull-request cache access', value: 'ok' },
 				{
 					label: 'root prefix',
 					value:
@@ -653,7 +763,8 @@ describe('runGithubCheck', () => {
 			rules: [withoutOperation(prRule, 'root:list'), branchRule],
 			check: 'pull-request trust rule',
 			row: 0,
-			detail: 'root:list on cache pr-1 with root github:acme/app/pr-1/target'
+			detail:
+				'root:list on cache gh-1234-pr-1 with root github:acme/app/pr-1/target'
 		},
 		{
 			name: 'pull-request run-root attachment',
@@ -662,7 +773,7 @@ describe('runGithubCheck', () => {
 			check: 'pull-request trust rule',
 			row: 0,
 			detail:
-				'root:attach on cache pr-1 with root ' +
+				'root:attach on cache gh-1234-pr-1 with root ' +
 				'github:acme/app/pr-1/_cupboard-run/1'
 		},
 		{
@@ -772,6 +883,7 @@ describe('runGithubCheck', () => {
 			{ label: 'pull-request trust rule', value: 'ok' },
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
+			{ label: 'pull-request cache access', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);
 	});

@@ -40,6 +40,13 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 // Keep `root:list` in `root`: publication reads the reconciled target list
 // before replacing it. `attach` remains separate because attachment requires a
 // root binding, while an ordinary push does not.
+//
+// `create` and `remove` manage the cache itself rather than its contents, so
+// they stay separate from `push`. A pull-request rule needs both: the first run
+// of a pull request has no cache to publish to, and the cache is
+// removed when the pull request closes. Both bind to the cache the rest of the
+// grant names, so a rule that templates its cache from a claim confines them to
+// the single cache that claim renders.
 const allowExpansions = {
 	push: [
 		'upload:negotiate',
@@ -49,7 +56,9 @@ const allowExpansions = {
 	],
 	attest: ['attestation:negotiate', 'attestation:attach'],
 	root: ['root:set', 'root:list'],
-	attach: ['root:attach']
+	attach: ['root:attach'],
+	create: ['cache:create'],
+	remove: ['cache:delete']
 } as const;
 
 export type AllowShorthand = keyof typeof allowExpansions;
@@ -65,17 +74,27 @@ function isAllowShorthand(value: string): value is AllowShorthand {
 	return Object.hasOwn(allowExpansions, value);
 }
 
+// `claims` names claims a template can substitute whole. `capture` names one
+// claim a pattern picks a value out of, and each of its groups becomes a
+// template variable. The pull-request source supplies both, because a
+// pull-request cache is named for its repository as well as its number.
 const templateSources = {
 	'github-pr': {
-		claim: 'ref',
-		pattern: '^refs/pull/(?<pr>[0-9]+)/merge$'
+		claims: ['repository_id'],
+		capture: {
+			claim: 'ref',
+			pattern: '^refs/pull/(?<pr>[0-9]+)/merge$'
+		}
 	},
 	// The capture excludes characters that would make a `{tag}` substitution
 	// invalid in a cache or root name. Tags outside this subset do not match the
 	// trust rule.
 	'github-tag': {
-		claim: 'ref',
-		pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$'
+		claims: [],
+		capture: {
+			claim: 'ref',
+			pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$'
+		}
 	}
 } as const;
 
@@ -190,7 +209,11 @@ export function collectSubstitutions(options: {
 
 		const source = templateSources[options.templateSource as TemplateSource];
 
-		add(parseCapture(`${source.claim}=${source.pattern}`));
+		for (const claim of source.claims) {
+			add({ [claim]: { claim } });
+		}
+
+		add(parseCapture(`${source.capture.claim}=${source.capture.pattern}`));
 	}
 
 	for (const capture of options.captures) {

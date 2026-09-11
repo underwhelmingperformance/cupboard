@@ -832,8 +832,8 @@ describe('attestAction committed cache verification', () => {
 				expect(
 					outputs
 						.split('\n')
-						.find((line) => line.startsWith('destination-visibility='))
-				).toBe(`destination-visibility=${access}`);
+						.find((line) => line.startsWith('destination-access='))
+				).toBe(`destination-access=${access}`);
 			} finally {
 				await rm(directory, { recursive: true, force: true });
 			}

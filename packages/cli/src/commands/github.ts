@@ -1,6 +1,9 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import { type CachePriority } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	type CachePriority
+} from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
 	type OidcTrustListResponse,
@@ -10,6 +13,8 @@ import {
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import {
 	isDestinationPreferred,
+	reuseViewNameSchema,
+	type ReuseViewPriority,
 	reuseViewPrioritySchema,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
@@ -49,13 +54,16 @@ import {
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,
-	pullRequestPrefix,
+	pullRequestCachePrefix,
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
-import { lookupRepository } from './oidc-trust/github.ts';
+import {
+	lookupRepository,
+	type RepositoryIdentity
+} from './oidc-trust/github.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
@@ -550,25 +558,37 @@ interface PlannedSetupStep {
 	readonly apply?: () => Promise<void>;
 }
 
+// One view per repository, selecting that repository's pull-request caches. A
+// tenant serving several repositories gets one view each, so a branch build
+// reads only what its own repository's pull requests produced. An operator who
+// wants reuse across repositories defines a view of their own with a wider
+// prefix, or one selector per repository, and names it through the workflow's
+// `reuse-view` input.
 async function planReuseView(
 	client: GithubSetupClient,
-	destinationPriority: CachePriority
+	identity: RepositoryIdentity,
+	destinationPriority: CachePriority,
+	access: CacheAccessMode
 ): Promise<PlannedSetupStep> {
-	const selectors = [{ kind: 'prefix' as const, prefix: pullRequestPrefix }];
+	const prefix = pullRequestCachePrefix(identity.repositoryId);
+	const name = reuseViewNameSchema.parse(
+		pullRequestViewName(identity.repositoryId)
+	);
+	const selectors = [{ kind: 'prefix' as const, prefix }];
 	const { views } = await client.reuseViews.list();
-	const existing = views.find((view) => view.name === pullRequestViewName);
+	const existing = views.find((view) => view.name === name);
 
 	if (existing === undefined) {
 		return {
 			step: {
 				step: 'reuse view',
 				outcome: 'created',
-				detail: `${pullRequestPrefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
+				detail: `${access} ${prefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
 			},
 			apply: async () => {
 				await client.reuseViews.set({
-					name: pullRequestViewName,
-					access: 'public',
+					name,
+					access,
 					selectors,
 					priority: reuseViewPrioritySchema.parse(
 						destinationPriority + viewPriorityMargin
@@ -580,6 +600,7 @@ async function planReuseView(
 
 	if (
 		isDeepEqual([...existing.selectors], selectors) &&
+		existing.access === access &&
 		isDestinationPreferred(destinationPriority, existing.priority)
 	) {
 		return { step: { step: 'reuse view', outcome: 'unchanged' } };
@@ -589,11 +610,39 @@ async function planReuseView(
 		step: {
 			step: 'reuse view',
 			outcome: 'drift',
-			detail: isDestinationPreferred(destinationPriority, existing.priority)
-				? 'stored selectors differ from the pr- prefix setup would write'
-				: `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
+			detail: reuseViewDrift({
+				existing,
+				access,
+				prefix,
+				destinationPriority
+			})
 		}
 	};
+}
+
+// A view's access decides which caches it aggregates, so a stored view with the
+// other access is drift rather than something to overwrite: changing it would
+// silently change what the view serves.
+function reuseViewDrift(state: {
+	readonly existing: {
+		readonly access: CacheAccessMode;
+		readonly priority: ReuseViewPriority;
+	};
+	readonly access: CacheAccessMode;
+	readonly prefix: string;
+	readonly destinationPriority: CachePriority;
+}): string {
+	if (state.existing.access !== state.access) {
+		return `stored view is ${state.existing.access}; setup was ${state.access === 'private' ? 'given a read credential' : 'given no read credential'}, so it would write a ${state.access} view`;
+	}
+
+	if (
+		!isDestinationPreferred(state.destinationPriority, state.existing.priority)
+	) {
+		return `stored priority ${String(state.existing.priority)} does not exceed the destination's ${String(state.destinationPriority)}`;
+	}
+
+	return `stored selectors differ from the ${state.prefix} prefix setup would write`;
 }
 
 function planTrustRule(
@@ -747,7 +796,18 @@ export async function runGithubSetup(
 	);
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
-		async () => [await planReuseView(client, destination.priority)]
+		async () => [
+			await planReuseView(
+				client,
+				identity,
+				destination.priority,
+				// A view aggregates only the caches whose access equals its own,
+				// so a public view over a private tenant's caches matches
+				// nothing. The read credential is the only signal setup has
+				// about the tenant's access.
+				options.readUser === undefined ? 'public' : 'private'
+			)
+		]
 	);
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'
@@ -1047,6 +1107,7 @@ export function registerGithubCommands(
 				options,
 				reporter,
 				{
+					caches: rpc.caches,
 					reuseViews: rpc.reuseViews,
 					oidcTrust: rpc.oidcTrust
 				},
