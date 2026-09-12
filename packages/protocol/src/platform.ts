@@ -10,3 +10,5 @@
  * default is 10,000. The request caps use the Free figure for both plans.
  */
 export const subrequestsPerInvocation = 1000;
+
+export const subrequestSafetyReserve = 100;
