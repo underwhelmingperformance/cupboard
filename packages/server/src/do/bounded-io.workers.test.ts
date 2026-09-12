@@ -8,6 +8,7 @@ import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
 import { boundedBlobs, boundedD1, boundedWorkerEnv } from './bounded-io.ts';
 import { withDeadlineBudget } from './deadline.ts';
+import { hasSubrequestsFor, withSubrequestSlice } from './subrequest-slice.ts';
 
 describe('bounded gated subrequest', () => {
 	beforeEach(resetTestServer);
@@ -103,5 +104,32 @@ describe('bounded Worker environment', () => {
 			timedOut: rejection instanceof SubrequestTimeoutError,
 			isSameCronState: worker.CRON_STATE === env.CRON_STATE
 		}).toStrictEqual({ timedOut: true, isSameCronState: true });
+	});
+});
+
+describe('subrequest accounting', () => {
+	// One D1 batch is one call to the platform, however many statements it
+	// carries, and the slice refuses nothing: the batch runs although it spends
+	// the slice's only call.
+	it('spends one subrequest for a D1 batch', async () => {
+		const database = boundedD1(env.CUPBOARD_DB);
+		const select = database.prepare('SELECT 1');
+
+		const answers = await withSubrequestSlice(async () => {
+			const isBefore = hasSubrequestsFor(1);
+			const results = await database.batch([select, select]);
+
+			return {
+				before: isBefore,
+				after: hasSubrequestsFor(1),
+				statementsRun: results.length
+			};
+		}, 1);
+
+		expect(answers).toStrictEqual({
+			before: true,
+			after: false,
+			statementsRun: 2
+		});
 	});
 });

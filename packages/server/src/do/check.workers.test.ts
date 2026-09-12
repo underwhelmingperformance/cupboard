@@ -37,6 +37,7 @@ import {
 	type CheckCursor,
 	IntegrityCheckService
 } from './integrity-check-service.ts';
+import { withSubrequestSlice } from './subrequest-slice.ts';
 
 const startOfScan: CheckCursor = { cache: '', storePathHash: '' };
 
@@ -176,6 +177,61 @@ describe('storage check', () => {
 			second: {
 				narInfosChecked: 1,
 				narBlobsChecked: 1,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			}
+		});
+	});
+
+	// The page bounds the rows a pass reads; the slice bounds the R2 calls it
+	// makes. A pass that runs out of slice reports the last row it checked, and
+	// the next pass starts after it.
+	it('stops on its subrequest slice and resumes after the last row it checked', async () => {
+		const token = await initialise();
+
+		for (const letter of ['a', 'b', 'c'] as const) {
+			const { metadata, nar } = await verifiablePath(`slice-${letter}`, {
+				storePathHash: letter.repeat(32),
+				name: `slice-${letter}`
+			});
+			await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		}
+
+		// Three subrequests buy the pass's one D1 read of the page's blob facts and
+		// then one shallow row: its narinfo head and its NAR head. Reading the page
+		// itself costs none, being the object's own SQLite. The second pass runs
+		// under the whole slice and finishes the scan.
+		const passes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const service = new IntegrityCheckService(instance.context);
+				const first = await withSubrequestSlice(
+					() => service.check(false, startOfScan),
+					3
+				);
+				const second = await withSubrequestSlice(() =>
+					service.check(false, {
+						cache: first.cursorCache,
+						storePathHash: first.cursor
+					})
+				);
+
+				return { first, second };
+			}
+		);
+
+		expect(passes).toStrictEqual({
+			first: {
+				narInfosChecked: 1,
+				narBlobsChecked: 1,
+				cursor: 'a'.repeat(32),
+				cursorCache: DEFAULT_CACHE,
+				discrepancies: []
+			},
+			second: {
+				narInfosChecked: 2,
+				narBlobsChecked: 2,
 				cursor: '',
 				cursorCache: '',
 				discrepancies: []

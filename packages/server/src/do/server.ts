@@ -172,6 +172,7 @@ import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { enterStatementAllowanceOnDispatch } from './statement-scope.ts';
 import { StatsService } from './stats-service.ts';
+import { enterSubrequestSliceOnDispatch } from './subrequest-slice.ts';
 import {
 	type TenantIdentity,
 	TenantIdentityService
@@ -376,13 +377,14 @@ class CountingSemaphore {
 }
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
-	// Put the invocation's D1 allowance and Durable Object row budget on every
-	// method the runtime can dispatch to: a request, an alarm, an RPC, and any
-	// method added later. No dispatched method can run without them, and none
-	// has to remember to open them itself.
+	// Put the invocation's D1 allowance, Durable Object row budget and subrequest
+	// slice on every method the runtime can dispatch to: a request, an alarm, an
+	// RPC, and any method added later. No dispatched method can run without them,
+	// and none has to remember to open them itself.
 	static {
 		enterStatementAllowanceOnDispatch(this.prototype);
 		enterRowBudgetOnDispatch(this.prototype);
+		enterSubrequestSliceOnDispatch(this.prototype);
 	}
 
 	private readonly app = new Hono<TenantHonoEnv>();

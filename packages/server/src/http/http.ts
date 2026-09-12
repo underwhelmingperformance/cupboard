@@ -38,9 +38,9 @@ export const internalOrigin = requestOriginSchema.parse(
 
 // The narinfo rows one `GET /check` pass examines. A pass probes every row's
 // narinfo object and every distinct NAR, and a deep pass also reads each NAR
-// back, so a pass makes at most 900 R2 requests, which
-// `subrequest-budget.test.ts` checks against `subrequestsPerInvocation`.
-export const checkBatchSize = 300;
+// back. The pass stops when its shared D1 and R2 slice cannot cover another
+// unit; the batch size only limits the rows read at once.
+export const checkBatchSize = 1000;
 
 // Each `POST /verify` pass advances one cursor batch and wraps after the final
 // row.
