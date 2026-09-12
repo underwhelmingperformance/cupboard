@@ -6,7 +6,8 @@ import { SubrequestTimeoutError, UnboundableIoError } from '../errors.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
-import { boundedBlobs, boundedD1 } from './bounded-io.ts';
+import { boundedBlobs, boundedD1, boundedWorkerEnv } from './bounded-io.ts';
+import { withDeadlineBudget } from './deadline.ts';
 
 describe('bounded gated subrequest', () => {
 	beforeEach(resetTestServer);
@@ -77,5 +78,30 @@ describe('unboundable members', () => {
 		const database = boundedD1(env.CUPBOARD_DB);
 
 		expect(() => database.withSession()).toThrow(UnboundableIoError);
+	});
+});
+
+describe('bounded Worker environment', () => {
+	// The deadline is the test's own. The 15-second figure a Worker applies is
+	// not exercised here.
+	it('times out a hung R2 head and serves the other bindings as they are', async () => {
+		const hang = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation(() => Promise.race([]));
+		const worker = boundedWorkerEnv(env);
+
+		let rejection: unknown;
+		try {
+			await withDeadlineBudget(100, () => worker.BLOBS.head('hung-key'));
+		} catch (error) {
+			rejection = error;
+		} finally {
+			hang.mockRestore();
+		}
+
+		expect({
+			timedOut: rejection instanceof SubrequestTimeoutError,
+			isSameCronState: worker.CRON_STATE === env.CRON_STATE
+		}).toStrictEqual({ timedOut: true, isSameCronState: true });
 	});
 });

@@ -172,10 +172,11 @@ export class ServerContext {
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
 		//
-		// These wrappers reach only the bindings this object holds. Worker code,
-		// such as the availability route in `read/read.ts`, calls `env.BLOBS` and
-		// `env.CUPBOARD_DB` as the runtime supplies them, with no deadline,
-		// statement allowance or row meter.
+		// These wrappers reach only the bindings this object holds. Worker code
+		// reaches R2 through `boundedWorkerEnv`, which applies the per-call
+		// deadline and nothing else: no statement allowance, no row meter, and
+		// `env.CUPBOARD_DB` as the runtime supplies it. The limits described in
+		// this class bound Durable Object code only.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
