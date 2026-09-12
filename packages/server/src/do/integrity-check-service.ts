@@ -24,6 +24,7 @@ import {
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { jsonValueLists } from './json-list.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
  * Where a pass starts: the last row the previous pass checked, or two empty
@@ -151,9 +152,9 @@ export class IntegrityCheckService {
 	/**
 	 * Checks one page of narinfo rows in (cache, store path hash) order, starting
 	 * after the row the cursor names. The pass reads one row beyond its page;
-	 * when that row exists the report names the last row checked as the cursor,
-	 * and a caller checks every path by passing it back until it comes back
-	 * empty.
+	 * when that row exists, or the pass stops on its subrequest slice, the report
+	 * names the last row checked as the cursor, and a caller checks every path
+	 * by passing it back until it comes back empty.
 	 */
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReport> {
 		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
@@ -170,7 +171,6 @@ export class IntegrityCheckService {
 			.all();
 		const rows = page.slice(0, this.pageSize);
 		const hasMore = page.length > this.pageSize;
-		const last = rows.at(-1);
 
 		const discrepancies: CheckDiscrepancy[] = [];
 
@@ -188,7 +188,19 @@ export class IntegrityCheckService {
 		const distinctNarHashes = [...new Set(rows.map((row) => row.narHash))];
 		const blobFacts = await this.blobFactsFor(distinctNarHashes);
 
+		// A row costs a narinfo head, a NAR head for a hash not seen yet, and in
+		// deep mode a read of that NAR. Ask for all three, so a row that starts is
+		// a row that can finish and the report never describes half of one.
+		const subrequestsPerRow = isDeep ? 3 : 2;
+		let hasStoppedOnSlice = false;
+		let checked = 0;
+
 		for (const row of rows) {
+			if (!hasSubrequestsFor(subrequestsPerRow)) {
+				hasStoppedOnSlice = true;
+				break;
+			}
+
 			const narInfoObject = await this.context.env.BLOBS.head(
 				narInfoObjectKey(tenant, row.storePathHash, row.cache)
 			);
@@ -220,13 +232,25 @@ export class IntegrityCheckService {
 					narHash: row.narHash
 				});
 			}
+
+			checked += 1;
+		}
+
+		// The cursor names the last row this pass checked; the next pass starts
+		// after it. A pass that stopped on its slice therefore reports the row
+		// before the one it did not start, and a pass that checked nothing
+		// returns the cursor it was given.
+		let resumeAfter: CheckCursor | undefined;
+
+		if (hasStoppedOnSlice || hasMore) {
+			resumeAfter = checked === 0 ? cursor : rows[checked - 1];
 		}
 
 		return {
-			narInfosChecked: rows.length,
+			narInfosChecked: checked,
 			narBlobsChecked,
-			cursor: hasMore && last !== undefined ? last.storePathHash : '',
-			cursorCache: hasMore && last !== undefined ? last.cache : '',
+			cursor: resumeAfter?.storePathHash ?? '',
+			cursorCache: resumeAfter?.cache ?? '',
 			discrepancies
 		};
 	}
