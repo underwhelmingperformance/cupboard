@@ -51,6 +51,26 @@ function passThrough(target: object, property: PropertyKey): unknown {
 }
 
 /**
+ * Wraps the environment a Worker entry point receives so its R2 metadata
+ * calls carry the same per-call deadline as a Durable Object's. `get` and
+ * `put` stay unbounded, because a NAR body takes as long as it takes. D1 and
+ * every other binding are served as they are.
+ */
+export function boundedWorkerEnv<T extends { readonly BLOBS: R2Bucket }>(
+	env: T
+): T {
+	// A proxy, not a spread: tests supply a service binding through a `get`
+	// trap, which a spread would not copy.
+	return new Proxy(env, {
+		get(target, property) {
+			return property === 'BLOBS'
+				? boundedBlobs(target.BLOBS)
+				: passThrough(target, property);
+		}
+	});
+}
+
+/**
  * Wraps an {@link R2Bucket} with deadlines. `head`, `delete` and `list` use the
  * per-call limit. `get` and `put` transfer blob bytes, so they use the enclosing
  * critical-section deadline and can continue without the input gate.
