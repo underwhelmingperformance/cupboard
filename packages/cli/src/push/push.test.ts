@@ -4604,9 +4604,8 @@ function reporter(
 		phase: (_label, body) =>
 			Promise.resolve(
 				body({
-					fact(label, value) {
-						void label;
-						void value;
+					fact() {
+						return;
 					},
 					warn: recordWarn
 				})
@@ -4654,14 +4653,14 @@ function reporter(
 			return;
 		},
 		warn: recordWarn,
-		info(message) {
-			void message;
+		info() {
+			return;
 		},
-		success(message) {
-			void message;
+		success() {
+			return;
 		},
-		step(message) {
-			void message;
+		step() {
+			return;
 		}
 	};
 }

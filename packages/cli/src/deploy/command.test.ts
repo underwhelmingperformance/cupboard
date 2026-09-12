@@ -88,34 +88,29 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 		warn: recordUiCall(uiCalls, 'warn'),
 		note: recordUiCall(uiCalls, 'note'),
 		data: recordUiCall(uiCalls, 'data'),
-		confirm: (options) => {
+		confirm: () => {
 			uiCalls.push({ method: 'confirm' });
-			void options;
 
 			return Promise.resolve('no');
 		},
-		menu: (_message, entries) => {
+		menu: () => {
 			uiCalls.push({ method: 'menu' });
-			void entries;
 
 			return Promise.resolve(absentValues.choice);
 		},
 		multiSelect: () => Promise.resolve(undefined),
-		editText: (options) => {
+		editText: () => {
 			uiCalls.push({ method: 'editText' });
-			void options;
 
 			return Promise.resolve({ kind: 'cancelled' });
 		},
-		prefixedText: (options) => {
+		prefixedText: () => {
 			uiCalls.push({ method: 'prefixedText' });
-			void options;
 
 			return Promise.resolve(absentString());
 		},
-		secret: (message) => {
+		secret: () => {
 			uiCalls.push({ method: 'secret' });
-			void message;
 
 			return Promise.resolve(absentString());
 		},

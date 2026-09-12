@@ -196,8 +196,7 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		data: () => {
 			unscriptedInteractiveCalls.push({ method: 'data' });
 		},
-		confirm: (options) => {
-			void options;
+		confirm: () => {
 			unscriptedInteractiveCalls.push({ method: 'confirm' });
 
 			return Promise.resolve('no');

@@ -925,6 +925,11 @@ describe('deviceLogin', () => {
 
 	it('stops polling once the device code has expired', async () => {
 		const requests: string[] = [];
+		const prompts: {
+			readonly userCode: string;
+			readonly verificationUri: string;
+			readonly verificationUriComplete?: string;
+		}[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requests.push(requestUrl(input));
 
@@ -950,7 +955,9 @@ describe('deviceLogin', () => {
 			deviceLogin({
 				endpoints,
 				clientId: 'client-123',
-				prompt: (verification) => void verification,
+				prompt: (verification) => {
+					prompts.push(verification);
+				},
 				fetcher,
 				sleep: () => Promise.resolve(),
 				now: () => {
@@ -970,9 +977,17 @@ describe('deviceLogin', () => {
 
 		expect({
 			error: { name: caught.name, kind: caught.kind },
+			prompts,
 			requests
 		}).toStrictEqual({
 			error: { name: 'OidcLoginError', kind: 'device-expired' },
+			prompts: [
+				{
+					userCode: 'WXYZ-1234',
+					verificationUri: 'https://idp.example.com/activate',
+					verificationUriComplete: undefined
+				}
+			],
 			requests: [endpoints.deviceAuthorizationEndpoint]
 		});
 	});

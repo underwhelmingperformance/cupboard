@@ -94,10 +94,7 @@ describe('createBuildPushDaemon', () => {
 			connect: () =>
 				Promise.resolve({
 					write: () => Promise.resolve(),
-					read: () =>
-						new Promise<Uint8Array>((resolve) => {
-							void resolve;
-						}),
+					read: () => Promise.withResolvers<Uint8Array>().promise,
 					close: () => {
 						closes += 1;
 

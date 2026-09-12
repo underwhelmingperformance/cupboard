@@ -81,12 +81,8 @@ class PausableByteSource {
 		this.dataListener = listener;
 	}
 
-	once(
-		_event: 'end' | 'close' | 'error',
-		_listener: (error: Error) => void
-	): void {
-		void _event;
-		void _listener;
+	once(): void {
+		return;
 	}
 
 	pause(): void {
@@ -848,10 +844,7 @@ describe('NixDaemonStoreClient', () => {
 			connect: () =>
 				Promise.resolve({
 					write: () => Promise.resolve(),
-					read: () =>
-						new Promise<Uint8Array>((resolve) => {
-							void resolve;
-						}),
+					read: () => Promise.withResolvers<Uint8Array>().promise,
 					close: () => {
 						closes += 1;
 						return Promise.resolve();
@@ -1903,7 +1896,7 @@ describe('NixDaemonStoreClient', () => {
 		let outcome: { drained: true } | { error: { name: string } };
 		try {
 			for await (const chunk of client.narFromPath(appPath)) {
-				void chunk;
+				expect(chunk).toBeInstanceOf(Uint8Array);
 			}
 			outcome = { drained: true };
 		} catch (error_: unknown) {
@@ -1944,7 +1937,7 @@ describe('NixDaemonStoreClient', () => {
 
 		const drain = async (): Promise<void> => {
 			for await (const chunk of client.narFromPath(appPath)) {
-				void chunk;
+				expect(chunk).toBeInstanceOf(Uint8Array);
 			}
 		};
 
@@ -1970,7 +1963,7 @@ describe('NixDaemonStoreClient', () => {
 		});
 
 		for await (const chunk of client.narFromPath(appPath)) {
-			void chunk;
+			expect(chunk).toBeInstanceOf(Uint8Array);
 			break;
 		}
 

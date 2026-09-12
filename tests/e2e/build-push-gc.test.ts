@@ -114,7 +114,7 @@ describe.skipIf(
 				await hooks.onUploadNar?.();
 
 				for await (const chunk of body) {
-					void chunk;
+					expect(chunk).toBeInstanceOf(Uint8Array);
 				}
 			},
 			commit(target) {
