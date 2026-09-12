@@ -18,7 +18,7 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.21.0",
+		"@cloudflare/vitest-pool-workers": "^0.22.0",
 		"@cloudflare/workers-types": "^5.20260705.1",
 		"@orpc/client": "^1.15.0",
 		"@orpc/contract": "^1.15.0",
@@ -26,7 +26,7 @@
 		"drizzle-kit": "^0.31.10",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8",
-		"wrangler": "^4.116.0"
+		"wrangler": "^4.123.0"
 	},
 	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
