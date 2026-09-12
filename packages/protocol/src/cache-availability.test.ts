@@ -44,7 +44,7 @@ describe('cache availability protocol', () => {
 		);
 	});
 
-	it('accepts 50 reuse-view hashes and rejects 51', () => {
+	it('accepts 900 reuse-view hashes and rejects 901', () => {
 		const bounded = {
 			storePathHashes: Array.from(
 				{ length: reuseViewAvailabilityMaxPaths },

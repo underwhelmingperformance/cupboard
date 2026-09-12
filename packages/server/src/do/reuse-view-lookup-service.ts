@@ -39,6 +39,7 @@ import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type JsonRowList, jsonRowLists, jsonValueLists } from './json-list.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
+import { requireSubrequestsFor } from './subrequest-slice.ts';
 
 /**
  * The most distinct NARs one store path may have among its backed copies
@@ -49,6 +50,14 @@ import { storedSignaturesSchema } from './signing-keys.ts';
  * it in any case.
  */
 export const reuseDistinctNarLimit = 16;
+
+/**
+ * The D1 calls a batch probe makes before its NAR heads: one batch each for
+ * the committed edges, the blob metadata and the tenant ownership of its
+ * candidates. Each list is bound as one parameter, so the count does not grow
+ * with the batch.
+ */
+export const reuseViewProbeD1CallsPerChunk = 3;
 
 type CandidateRow = typeof schema.narInfos.$inferSelect;
 
@@ -102,6 +111,28 @@ function candidateVersions(
 }
 
 /**
+ * How many distinct NARs each path has among `candidates`, which is the number
+ * of heads its probe costs.
+ */
+function distinctNarCounts(
+	candidates: readonly CandidateRow[]
+): ReadonlyMap<StorePathHash, number> {
+	const narHashesByPath = new Map<StorePathHash, Set<NixSha256HashString>>();
+
+	for (const candidate of candidates) {
+		const narHashes = narHashesByPath.get(candidate.storePathHash) ?? new Set();
+		narHashes.add(candidate.narHash);
+		narHashesByPath.set(candidate.storePathHash, narHashes);
+	}
+
+	return new Map(
+		narHashesByPath
+			.entries()
+			.map(([storePathHash, narHashes]) => [storePathHash, narHashes.size])
+	);
+}
+
+/**
  * The backed candidates without those of any path over
  * `reuseDistinctNarLimit`. Each path over the limit is logged once.
  */
@@ -110,18 +141,10 @@ function withinDistinctNarLimit(
 	view: StoredReuseView,
 	backed: readonly CandidateRow[]
 ): CandidateRow[] {
-	const narHashesByPath = new Map<StorePathHash, Set<NixSha256HashString>>();
-
-	for (const candidate of backed) {
-		const narHashes = narHashesByPath.get(candidate.storePathHash) ?? new Set();
-		narHashes.add(candidate.narHash);
-		narHashesByPath.set(candidate.storePathHash, narHashes);
-	}
-
 	const overLimit = new Set(
-		narHashesByPath
+		distinctNarCounts(backed)
 			.entries()
-			.filter(([, narHashes]) => narHashes.size > reuseDistinctNarLimit)
+			.filter(([, distinctNars]) => distinctNars > reuseDistinctNarLimit)
 			.map(([storePathHash]) => storePathHash)
 	);
 
@@ -638,6 +661,15 @@ export class ReuseViewLookupService {
 					ownedHashes.has(candidate.narHash)
 			)
 		);
+		// The Worker sized this batch so that its worst case, `reuseDistinctNarLimit`
+		// heads per hash, fits one invocation's slice; a batch that does not fit is
+		// a defect in that sizing.
+		requireSubrequestsFor(
+			distinctNarCounts(backed)
+				.values()
+				.reduce((heads, count) => heads + count, 0),
+			'reuse-view availability probe'
+		);
 		const presentHashes = await this.sharedFacts(() =>
 			presentNarObjects(
 				this.context.env.BLOBS,
@@ -911,7 +943,9 @@ export class ReuseViewLookupService {
 	/**
 	 * Deduplicates the requested hashes and returns those without one verified,
 	 * unambiguous candidate. A concurrent view mutation invalidates the complete
-	 * batch rather than mixing revisions.
+	 * batch rather than mixing revisions. The Worker sends one chunk of a page
+	 * per request, sized so the batch's worst-case heads fit this invocation's
+	 * subrequest slice (`chunked-availability.ts`).
 	 */
 	async missingStorePathHashes(
 		logger: Logger,

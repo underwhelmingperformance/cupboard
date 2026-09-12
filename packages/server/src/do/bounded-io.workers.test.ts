@@ -115,16 +115,19 @@ describe('subrequest accounting', () => {
 		const database = boundedD1(env.CUPBOARD_DB);
 		const select = database.prepare('SELECT 1');
 
-		const answers = await withSubrequestSlice(async () => {
-			const isBefore = hasSubrequestsFor(1);
-			const results = await database.batch([select, select]);
+		const answers = await withSubrequestSlice(
+			async () => {
+				const isBefore = hasSubrequestsFor(1);
+				const results = await database.batch([select, select]);
 
-			return {
-				before: isBefore,
-				after: hasSubrequestsFor(1),
-				statementsRun: results.length
-			};
-		}, 1);
+				return {
+					before: isBefore,
+					after: hasSubrequestsFor(1),
+					statementsRun: results.length
+				};
+			},
+			{ subrequests: 1, reserve: 0 }
+		);
 
 		expect(answers).toStrictEqual({
 			before: true,
