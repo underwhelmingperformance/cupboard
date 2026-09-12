@@ -29,6 +29,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { batchNonEmpty, maxOutgoingConnections } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
+import { requireSubrequestsFor } from '../do/subrequest-slice.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import { narCacheTag, narInfoCacheTag } from '../http/cache-tags.ts';
 import {
@@ -313,6 +314,9 @@ export function narInfoReferenceQuery(
 		);
 }
 
+// One D1 call, however many hashes: the list is bound as one parameter.
+export const cacheProbeD1CallsPerChunk = 1;
+
 /**
  * Returns the current commit of each requested path in this private cache,
  * taken from the reference edges the cache generation authorises.
@@ -327,13 +331,11 @@ export function narInfoReferenceQuery(
  * retryable refusal instead of a 404 reporting the path as absent.
  */
 async function authorisedNarInfoVersions(
-	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
+	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: StoredCache,
 	storePathHashes: readonly StorePathHash[]
 ): Promise<ReadonlyMap<StorePathHash, NarInfoReferenceVersion>> {
-	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-
 	try {
 		const pages = await readWithOneRetry(() =>
 			batchNonEmpty(
@@ -388,9 +390,12 @@ export async function serveNarInfo(
 		return serveR2(request, env, key, headersFor, !isPrivate);
 	}
 
-	const versions = await authorisedNarInfoVersions(env, tenant, cache, [
-		storePathHash
-	]);
+	const versions = await authorisedNarInfoVersions(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		tenant,
+		cache,
+		[storePathHash]
+	);
 	const current = versions.get(storePathHash);
 
 	if (current === undefined) {
@@ -403,10 +408,15 @@ export async function serveNarInfo(
 }
 
 /**
- * Which of the requested paths the cache cannot serve.
+ * Which of the requested paths the cache cannot serve. Runs in the tenant
+ * Durable Object, one chunk of a page per request: each hash costs one narinfo
+ * head, and the Worker sizes a chunk so the heads fit one invocation's
+ * subrequest slice (`chunked-availability.ts`). A chunk that does not fit is
+ * refused, because the sizing is derived from the same limits.
  */
 export async function missingStorePathHashes(
-	env: Env,
+	blobs: R2Bucket,
+	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	cache: StoredCache,
 	storePathHashes: readonly StorePathHash[]
@@ -417,8 +427,9 @@ export async function missingStorePathHashes(
 	// commit. A narinfo GET would refuse that object, so the push must not skip
 	// the path.
 	const versions = isPrivateCache(cache)
-		? await authorisedNarInfoVersions(env, tenant, cache, unique)
+		? await authorisedNarInfoVersions(database, tenant, cache, unique)
 		: undefined;
+	requireSubrequestsFor(unique.length, 'cache availability probe');
 	const missing = await mapWithConcurrency(
 		unique,
 		maxOutgoingConnections,
@@ -429,7 +440,7 @@ export async function missingStorePathHashes(
 				return storePathHash;
 			}
 
-			const object = await env.BLOBS.head(
+			const object = await blobs.head(
 				narInfoObjectKey(tenant, storePathHash, cache)
 			);
 			const isServable =

@@ -11,6 +11,7 @@ import {
 	cacheAvailabilityResponseSchema,
 	reuseViewAvailabilityMaxPaths
 } from '@cupboard/protocol/cache-availability';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -21,8 +22,12 @@ import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { SubrequestSliceExceededError } from '../errors.ts';
+import { rootLogger } from '../observability/logging.ts';
+import { reuseViewAvailabilityChunkSize } from '../routing/chunked-availability.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	asOneInvocation,
 	currentNarObjectKey,
 	fixtureWorkerServer,
 	provisionFixtureTenant,
@@ -30,7 +35,11 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-import { reuseDistinctNarLimit } from './reuse-view-lookup-service.ts';
+import {
+	reuseDistinctNarLimit,
+	ReuseViewLookupService,
+	reuseViewProbeD1CallsPerChunk
+} from './reuse-view-lookup-service.ts';
 import {
 	committedPath,
 	insertAgreeingCopy,
@@ -41,6 +50,7 @@ import {
 	setView
 } from './reuse-view-read.test-support.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
+import { withSubrequestSlice } from './subrequest-slice.ts';
 
 function sharedFacts() {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -55,36 +65,105 @@ const reuseLookupEventSchema = z.object({
 	caches: z.array(z.string()).optional()
 });
 
+const requestFinishedSchema = z.object({ path: z.string() });
+
+function generatedMissingHashes(count: number): string[] {
+	return Array.from({ length: count }, (_, index) =>
+		storePathHashSchema.parse(String(index + 100).padStart(32, '0'))
+	);
+}
+
 describe('reuse-view narinfo lookup', () => {
 	beforeEach(resetTestServer);
 
+	// A view page may cost `reuseDistinctNarLimit` heads per hash at worst, and
+	// the Worker sends it to the object in chunks that fit one invocation's
+	// slice at that cost. A page one hash over a chunk takes two object
+	// requests and is answered completely, in request order.
 	it('returns present and missing hashes through the bulk availability route', async () => {
 		const present = await committedPath('reuse-bulk', 'pr-1');
-		const missing = Array.from(
-			{ length: reuseViewAvailabilityMaxPaths - 1 },
-			(_, index) =>
-				storePathHashSchema.parse(String(index + 100).padStart(32, '0'))
-		);
+		const missing = generatedMissingHashes(reuseViewAvailabilityMaxPaths - 1);
 		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		const response = await readFetch('/reuse/reuse/api/v1/missing-paths', {
-			body: JSON.stringify({
-				storePathHashes: [present.storePathHash, ...missing]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		});
-		const body = cacheAvailabilityResponseSchema.parse(await response.json());
+		const capture = startCapture();
+		let status: number;
+		let cacheControl: string | null;
+		let body: unknown;
 
-		expect({
-			status: response.status,
-			cacheControl: response.headers.get('cache-control'),
-			body
-		}).toStrictEqual({
+		try {
+			const response = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+				body: JSON.stringify({
+					storePathHashes: [present.storePathHash, ...missing]
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+			status = response.status;
+			cacheControl = response.headers.get('cache-control');
+			body = cacheAvailabilityResponseSchema.parse(await response.json());
+		} finally {
+			capture.stop();
+		}
+
+		const objectRequests = capture.logs.filter(
+			(entry) =>
+				entry.message === 'request finished' &&
+				requestFinishedSchema.parse(entry.properties).path ===
+					'/reuse/reuse/api/v1/missing-paths'
+		).length;
+
+		expect({ status, cacheControl, body, objectRequests }).toStrictEqual({
 			status: StatusCodes.OK,
 			cacheControl: 'no-store',
-			body: { missingStorePathHashes: missing }
+			body: { missingStorePathHashes: missing },
+			objectRequests: Math.ceil(
+				reuseViewAvailabilityMaxPaths / reuseViewAvailabilityChunkSize
+			)
 		});
+	});
+
+	// A chunk is sized so that its worst case fits the object's slice after
+	// the probe's D1 reads; a chunk that does not fit is a sizing defect, and
+	// the object refuses it instead of running into the platform's ceiling.
+	it('refuses a chunk whose worst-case heads exceed the subrequest slice', async () => {
+		const path = await committedPath('reuse-slice', 'pr-1', {
+			storePathHash: 'a'.repeat(32)
+		});
+		await committedPath('reuse-slice-other', 'pr-2', {
+			storePathHash: path.storePathHash,
+			name: 'divergent'
+		});
+		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+
+		let refusal: unknown;
+
+		try {
+			await runInDurableObject(fixtureWorkerServer(), (instance) =>
+				withSubrequestSlice(
+					() =>
+						asOneInvocation(() =>
+							new ReuseViewLookupService(
+								instance.context
+							).missingStorePathHashes(
+								rootLogger(),
+								reuseViewNameSchema.parse('reuse'),
+								[storePathHashSchema.parse(path.storePathHash)]
+							)
+						),
+					{ subrequests: reuseViewProbeD1CallsPerChunk + 1, reserve: 0 }
+				)
+			);
+		} catch (error) {
+			refusal = error;
+		}
+
+		expect({
+			isRefused: refusal instanceof SubrequestSliceExceededError,
+			subrequests:
+				refusal instanceof SubrequestSliceExceededError
+					? refusal.subrequests
+					: undefined
+		}).toStrictEqual({ isRefused: true, subrequests: 2 });
 	});
 
 	it.each([

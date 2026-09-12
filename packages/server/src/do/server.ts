@@ -13,6 +13,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
+	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
@@ -93,6 +94,7 @@ import {
 	commitSocketCeiling,
 	maxUncreditedCommitSessions
 } from '../policy/commit-sockets.ts';
+import { missingStorePathHashes } from '../read/read.ts';
 
 import {
 	armAlarmNoLaterThan,
@@ -665,6 +667,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					'cache-control': 'no-store'
 				}
 			)
+		);
+
+		// One chunk of a cache availability page. The Worker has authenticated
+		// the reader and refused a deleted cache before sending it.
+		this.app.on(
+			'POST',
+			[
+				'/api/v1/missing-paths',
+				'/cache/:cacheName/api/v1/missing-paths',
+				'/private-cache/:cacheName/api/v1/missing-paths'
+			],
+			async (context) => {
+				const request = await parseRequestBody(
+					cacheAvailabilityRequestSchema,
+					context.req.raw
+				);
+				const response: CacheAvailabilityResponse = {
+					missingStorePathHashes: await missingStorePathHashes(
+						this.context.env.BLOBS,
+						this.context.d1,
+						this.context.requireTenant(),
+						context.get('cache'),
+						request.storePathHashes
+					)
+				};
+
+				return context.json(response, StatusCodes.OK, {
+					'cache-control': 'no-store'
+				});
+			}
 		);
 
 		// Apply `no-store` to thrown reuse errors as well as ordinary responses.
