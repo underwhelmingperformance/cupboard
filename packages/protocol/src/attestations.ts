@@ -6,6 +6,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import {
+	subrequestSafetyReserve,
+	subrequestsPerInvocation
+} from './platform.ts';
 import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
@@ -28,7 +32,31 @@ const attestationBundleRequestSchema = z.strictObject({
 	digest: sha256HexDigestSchema
 });
 
-export const attestationNegotiateMaxBundles = 100_000;
+// Negotiation makes three D1 calls besides the per-bundle R2 heads: it reads
+// committed reference edges, filed reference keys and recorded CAS objects.
+// Each page fits in one bound list per read. Keep a margin for changes to
+// these reads when calculating the maximum page size.
+const attestationNegotiateOverhead = 50;
+
+/**
+ * The bundles one negotiate request carries.
+ *
+ * A re-run over an unchanged closure sends one bundle for each already-attested
+ * path. The server heads one CAS object per distinct recorded digest, so the
+ * worst case is one subrequest per bundle when every digest differs.
+ *
+ * The page size follows from the Free allowance and safety reserve.
+ * A page above the ceiling cannot be served at all: the head that exceeds it
+ * throws and the caller gets nothing back, so such a page refuses outright
+ * instead of degrading.
+ *
+ * The CLI chunks at this value, so a closure larger than a page is attested in
+ * several requests.
+ */
+export const attestationNegotiateMaxBundles =
+	subrequestsPerInvocation -
+	subrequestSafetyReserve -
+	attestationNegotiateOverhead;
 
 export const attestationNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
