@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { subrequestsPerInvocation } from './platform.ts';
 import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
@@ -28,7 +29,34 @@ const attestationBundleRequestSchema = z.strictObject({
 	digest: sha256HexDigestSchema
 });
 
-export const attestationNegotiateMaxBundles = 100_000;
+// The subrequests a negotiate spends besides its per-bundle heads: three D1
+// calls, one for each list it reads (committed reference edges, filed
+// reference keys, recorded CAS objects). A list is bound as one parameter and
+// a page's digests fit one list. Fifty is the whole statement allowance of a
+// Durable Object invocation (`d1StatementsPerInvocation`), which the D1
+// binding refuses to exceed, so the margin cannot be overspent however those
+// reads are rearranged. This package cannot import that constant.
+const attestationNegotiateOverhead = 50;
+
+/**
+ * The bundles one negotiate request carries.
+ *
+ * A re-run over an unchanged closure sends one bundle for each already-attested
+ * path, and the server heads the CAS object of every one it already records. A
+ * bundle's digest is the hash of its own document, so no two bundles of a closure
+ * share one and deduplicating by digest saves nothing: the cost is one subrequest
+ * per bundle.
+ *
+ * The page size follows from the pinned ceiling, so it moves if the pin moves.
+ * A page above the ceiling cannot be served at all: the head that exceeds it
+ * throws and the caller gets nothing back, so such a page refuses outright
+ * instead of degrading.
+ *
+ * The CLI chunks at this value, so a closure larger than a page is attested in
+ * several requests.
+ */
+export const attestationNegotiateMaxBundles =
+	subrequestsPerInvocation - attestationNegotiateOverhead;
 
 export const attestationNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
