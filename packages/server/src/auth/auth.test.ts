@@ -349,8 +349,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		{
 			name: 'a token without the Cupboard access-token type header',
 			expected: { name: 'AccessTokenVerificationError', hasCause: true },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
+			token: async (_privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
@@ -370,8 +369,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		{
 			name: 'an RFC 9068 access-token type header',
 			expected: { name: 'AccessTokenVerificationError', hasCause: true },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
+			token: async (_privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
@@ -392,8 +390,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		{
 			name: 'a token without an authorization_details claim',
 			expected: { name: 'MissingGrantsError' },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
+			token: async (_privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
 				const jwt = new SignJWT({});
@@ -413,8 +410,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		{
 			name: 'a token whose authorization_details claim is malformed',
 			expected: { name: 'InvalidGrantsError' },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
+			token: async (_privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
 				const jwt = new SignJWT({
@@ -460,8 +456,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		{
 			name: 'a token without a subject claim',
 			expected: { name: 'MissingSubjectError' },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
+			token: async (_privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
