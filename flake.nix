@@ -57,9 +57,15 @@
           inherit (pkgs) lib stdenv;
           nodejs = pkgs.nodejs_24;
 
-          # pnpm 11 keeps its store index in a SQLite database it opens through
-          # `node:sqlite`, and on darwin that dies with an EXC_GUARD file
-          # descriptor violation during install. pnpm 10 has no store database.
+          # This is not the pnpm pinned in `packageManager`: nixpkgs does not
+          # package pnpm 12 right now. It is fine that they differ. This pnpm
+          # is only for fetching packages into the store and installing from
+          # the lockfile, and pnpm 10 can read a pnpm 12 lockfile: pnpm 12
+          # writes two YAML documents and puts the project graph last, and
+          # pnpm 10 reads that document. pnpm 11 keeps its store index in a
+          # SQLite database opened through `node:sqlite`, and on darwin the
+          # install dies with an EXC_GUARD file descriptor violation. pnpm 10
+          # has no store database.
           pnpm = pkgs.pnpm_10;
         in
         stdenv.mkDerivation (finalAttrs: {
