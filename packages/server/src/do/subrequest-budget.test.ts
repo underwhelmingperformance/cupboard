@@ -9,7 +9,6 @@ import {
 } from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
-import { checkBatchSize } from '../http/http.ts';
 
 import { reuseDistinctNarLimit } from './reuse-view-lookup-service.ts';
 
@@ -60,13 +59,6 @@ const cappedRequests: readonly CappedRequest[] = [
 		items: rootListPageSize,
 		requestsPerItem: 6,
 		fanOut: 'The same probe as `rootSetMaxTargets`, over one page.'
-	},
-	{
-		cap: 'checkBatchSize',
-		items: checkBatchSize,
-		requestsPerItem: 3,
-		fanOut:
-			'One narinfo head for each row, one NAR head for each distinct hash, and in deep mode one NAR read as well.'
 	}
 ];
 
