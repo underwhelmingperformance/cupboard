@@ -254,7 +254,7 @@ jobs:
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 10
     permissions:
-      contents: read # resolve cupboard releases and check out workflow code
+      contents: read # resolve cupboard releases
     outputs:
       cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
       cache: ${{ steps.resolve.outputs.cache }}
@@ -272,33 +272,7 @@ jobs:
             exit 1
           fi
 
-      - name: Reserve the cupboard workflow checkout
-        env:
-          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
-          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
-        run: |
-          set -euo pipefail
-          if [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
-            echo '::error::.cupboard-workflow is a symlink; refusing to replace it'
-            exit 1
-          fi
-          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
-            origin="$(git -C "${CUPBOARD_WORKFLOW_CHECKOUT}" remote get-url origin 2>/dev/null || true)"
-            expected="https://github.com/${WORKFLOW_REPOSITORY}"
-            if [ "${origin}" != "${expected}" ] && [ "${origin}" != "${expected}.git" ]; then
-              echo '::error::.cupboard-workflow is not a prior checkout of the called workflow; refusing to replace it'
-              exit 1
-            fi
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .cupboard-workflow
-          persist-credentials: false
-
-      - uses: ./.cupboard-workflow/actions/resolve-cupboard
+      - uses: $/actions/resolve-cupboard
         id: resolve-cupboard
         with:
           cupboard-version: ${{ inputs.cupboard-version }}
@@ -460,26 +434,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Reserve the cupboard workflow checkout
-        env:
-          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
-        run: |
-          set -euo pipefail
-          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
-            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
-            exit 1
-          fi
-
-      # Checked out at the called workflow's own commit, not `main`, so a
-      # tagged or SHA-pinned caller executes matching action code.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .cupboard-workflow
-          persist-credentials: false
-
-      - uses: ./.cupboard-workflow/actions/prepare
+      - uses: $/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
           input-known-hosts: ${{ inputs.input-known-hosts }}
@@ -507,7 +462,29 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
-      - uses: ./.cupboard-workflow/actions/setup
+      # A source acquisition builds cupboard from a git checkout, so fetch the
+      # workflow's own source for that case. Reserve the path first so
+      # actions/checkout cannot replace caller-controlled content.
+      - name: Reserve the cupboard workflow checkout
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      - uses: $/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
@@ -518,6 +495,7 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
+          checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
       - name: Evaluate target manifest
         id: targets
@@ -536,7 +514,7 @@ jobs:
           fi
           echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
 
-      - uses: ./.cupboard-workflow/actions/plan
+      - uses: $/actions/plan
         id: plan
         with:
           targets: ${{ steps.targets.outputs.manifest }}
@@ -586,24 +564,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Reserve the cupboard workflow checkout
-        env:
-          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
-        run: |
-          set -euo pipefail
-          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
-            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .cupboard-workflow
-          persist-credentials: false
-
-      - uses: ./.cupboard-workflow/actions/prepare
+      - uses: $/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
           input-known-hosts: ${{ inputs.input-known-hosts }}
@@ -631,7 +592,29 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
-      - uses: ./.cupboard-workflow/actions/setup
+      # A source acquisition builds cupboard from a git checkout, so fetch the
+      # workflow's own source for that case. Reserve the path first so
+      # actions/checkout cannot replace caller-controlled content.
+      - name: Reserve the cupboard workflow checkout
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      - uses: $/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
@@ -642,8 +625,9 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
+          checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
-      - uses: ./.cupboard-workflow/actions/build-cohort
+      - uses: $/actions/build-cohort
         id: build-cohort
         with:
           cohort-json: ${{ toJSON(matrix) }}
@@ -679,7 +663,7 @@ jobs:
       # as results of this invocation. Substituted, already-valid and floating
       # paths are not build evidence. A cohort that published nothing writes no
       # receipt.
-      - uses: ./.cupboard-workflow/actions/attest
+      - uses: $/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
         with:
@@ -693,7 +677,7 @@ jobs:
       # Attestation verifies the receipt against committed narinfos, so attach
       # the bundle only after publication and only when signing produced a
       # bundle.
-      - uses: ./.cupboard-workflow/actions/attest-attach
+      - uses: $/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
           steps.attest.outputs.bundle-path != '' }}

@@ -59,11 +59,13 @@ administrator must approve every workflow revision. Release API calls use the
 workflow token, which also avoids unnecessary rate-limit failures for public
 repositories.
 
-The reusable workflows require GitHub Cloud. They fail before checkout on GitHub
-Enterprise Server because GHES does not expose the `job.workflow_*` identity
-fields needed to fetch and verify the called workflow's exact source. This
-restriction is at the reusable-workflow boundary; the lower-level resolver still
-accepts explicit API endpoints and workflow identity inputs.
+The reusable workflows require GitHub Cloud. They fail before any action runs on
+GitHub Enterprise Server, which neither exposes the `job.workflow_*` identity
+fields needed to resolve and verify the called workflow's exact source nor
+supports the self-repository `uses:` syntax the workflows reference their own
+actions through. This restriction is at the reusable-workflow boundary; the
+lower-level resolver still accepts explicit API endpoints and workflow identity
+inputs.
 
 [github-latest-release]:
   https://docs.github.com/en/rest/releases/releases#get-the-latest-release
@@ -326,6 +328,13 @@ build; `cupboard` identifies the acquisition in both source and release modes.
 Reusable workflows pass a canonical release-or-source JSON coordinate through
 the `cupboard` input. Direct action callers normally leave that internal
 coordinate unset and select a released binary with `cupboard-version` instead.
+
+A source acquisition builds cupboard from a git checkout of the resolved commit,
+and setup verifies that checkout's remote, commit and cleanliness before
+building. Setup reads the checkout from the directory it was materialised in,
+which is a git checkout for a workspace-relative reference. A caller that
+references the action through a self-repository `$/` coordinate, or as a release
+on another repository, passes the checkout as `checkout-dir`.
 
 The action writes generated Nix config under `$RUNNER_TEMP` with mode `0600`.
 `NIX_CONFIG` contains a required absolute include of that file, and the action
