@@ -104,10 +104,14 @@ export class UploadStateService {
 		);
 	}
 
-	// Promotion creates the canonical object before `blob_state`; the reaper
-	// removes `blob_state` before the object. The row is therefore positive
-	// evidence that the object is available, so classification needs no R2 head.
-	// Negotiated reconciliation repairs storage drift outside those transitions.
+	// Promotion writes the canonical object before `blob_state` and the reaper
+	// deletes `blob_state` before the object, so a row means the object was
+	// created and has not yet been deliberately removed. It does not mean the
+	// object is present: the reaper's `demoteMissingBlobs` pass finds rows whose
+	// object has gone. A caller that answers `skip` from this set must repair a
+	// wrong answer some other way; the upload negotiate enqueues every skipped
+	// path for reconciliation, which heads the NAR and removes the path when the
+	// object is gone.
 	async presentNarHashes(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Set<NixSha256HashString>> {
