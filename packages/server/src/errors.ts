@@ -1201,6 +1201,21 @@ export class MissingRowBudgetError extends Error {
  * A D1 call with a statement count that cannot be determined before dispatch.
  * The active allowance requires an exact count.
  */
+// A unit of work sized to fit one invocation's subrequest slice did not. The
+// sender derives the size from the same limits the slice applies, so this is a
+// defect in that derivation, not a condition a retry can clear.
+export class SubrequestSliceExceededError extends Error {
+	constructor(
+		public readonly subject: string,
+		public readonly subrequests: number
+	) {
+		super(
+			`${subject} needs ${String(subrequests)} subrequests and this invocation's slice cannot afford them`
+		);
+		this.name = 'SubrequestSliceExceededError';
+	}
+}
+
 export class UncountableStatementError extends Error {
 	constructor(public readonly subject: string) {
 		super(

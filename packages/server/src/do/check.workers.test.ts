@@ -208,7 +208,7 @@ describe('storage check', () => {
 				const service = new IntegrityCheckService(instance.context);
 				const first = await withSubrequestSlice(
 					() => service.check(false, startOfScan),
-					3
+					{ subrequests: 3, reserve: 0 }
 				);
 				const second = await withSubrequestSlice(() =>
 					service.check(false, {
