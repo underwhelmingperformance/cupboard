@@ -30,6 +30,7 @@ import {
 	storedCacheSchema,
 	storeDirectoryMaxLength,
 	storeDirectorySchema,
+	storedReferencesSchema,
 	storePathBasenameSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -569,6 +570,20 @@ describe('scalar schemas', () => {
 		}
 	])('references: $name', ({ value, accepted }) => {
 		expect(referencesSchema.safeParse(value).success).toBe(accepted);
+	});
+
+	// Ingest bounds the list; a read of a stored row does not, because the row
+	// may have been written under a larger bound.
+	it.each([
+		{ name: 'ingest', schema: referencesSchema, accepted: false },
+		{ name: 'a stored row', schema: storedReferencesSchema, accepted: true }
+	])('references one longer than the bound: $name', ({ schema, accepted }) => {
+		const value = Array.from(
+			{ length: referencesMaxLength + 1 },
+			() => `${storePathHash}-a`
+		);
+
+		expect(schema.safeParse(value).success).toBe(accepted);
 	});
 });
 
