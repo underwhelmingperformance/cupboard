@@ -1,6 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
+import { boundedWorkerEnv } from './do/bounded-io.ts';
 import {
 	WorkersCachePurgeError,
 	WorkersCacheUnavailableError
@@ -34,7 +35,7 @@ Serves cacheable reads admitted by the control Worker.
 */
 export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	override fetch(request: Request): Promise<Response> {
-		return tenantReadFetch(request, this.env, this.ctx);
+		return tenantReadFetch(request, boundedWorkerEnv(this.env), this.ctx);
 	}
 
 	/**

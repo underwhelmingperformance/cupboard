@@ -17,6 +17,7 @@ import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
+import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import {
 	TenantAdmissionUnavailableError,
@@ -513,16 +514,17 @@ function buildApp(): Hono<WorkerHonoEnv> {
 const app = buildApp();
 
 export default {
-	fetch: app.fetch,
+	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
+		app.fetch(request, boundedWorkerEnv(env), ctx),
 
 	async scheduled(_controller, env) {
 		// Enqueue bounded jobs so execution failures retry per message rather than
 		// repeating the whole cron plan.
-		await enqueueMaintenanceJobs(env);
+		await enqueueMaintenanceJobs(boundedWorkerEnv(env));
 	},
 
 	async queue(batch, env) {
-		await handleMaintenanceQueue(batch, env);
+		await handleMaintenanceQueue(batch, boundedWorkerEnv(env));
 	}
 } satisfies ExportedHandler<Env>;
 
