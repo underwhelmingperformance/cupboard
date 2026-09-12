@@ -41,12 +41,13 @@ const checkoutAction =
 const nixInstaller =
 	'nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c';
 const nixClientVersion = '2.34.7';
-const workflowCheckoutPath = '.cupboard-workflow';
-const reservationStep = 'Reserve the cupboard workflow checkout';
 const cloudGuardStep = 'Require GitHub Cloud workflow identity';
+const reservationStep = 'Reserve the cupboard workflow checkout';
+const workflowCheckoutPath = '.cupboard-workflow';
+const sourceCheckoutDirectory = '${{ github.workspace }}/.cupboard-workflow';
+const cupboardActionPrefix = '$/actions/';
 
-const cupboardAction = (name: string) =>
-	`./${workflowCheckoutPath}/actions/${name}`;
+const cupboardAction = (name: string) => `${cupboardActionPrefix}${name}`;
 
 /**
  * The scalar forms GitHub accepts for a step input or an environment value.
@@ -172,9 +173,31 @@ const reusableWorkflows = [
 	{ name: 'publish', file: publishWorkflow, entryJob: 'publish' }
 ];
 
-describe('workflow source checkout', () => {
+describe('workflow action references', () => {
 	it.each(reusableWorkflows)(
-		'checks out its own actions at the called commit in $name',
+		'resolves its own actions from the called revision in $name',
+		async ({ file }) => {
+			const workflow = await loadWorkflow(file);
+			const uses = allSteps(workflow).flatMap(({ step }) =>
+				step.uses === undefined ? [] : [step.uses]
+			);
+
+			expect({
+				referencesItsOwnActions: uses.some((spec) =>
+					spec.startsWith(cupboardActionPrefix)
+				),
+				// Earlier releases checked cupboard's actions out and referenced
+				// them through the workspace.
+				workspaceRelativeActions: uses.filter((spec) => spec.startsWith('./'))
+			}).toStrictEqual({
+				referencesItsOwnActions: true,
+				workspaceRelativeActions: []
+			});
+		}
+	);
+
+	it.each(reusableWorkflows)(
+		'checks its own source out only for a source acquisition in $name',
 		async ({ file }) => {
 			const workflow = await loadWorkflow(file);
 			const checkouts = stepsUsing(workflow, checkoutAction);
@@ -184,15 +207,19 @@ describe('workflow source checkout', () => {
 			const workflowSource = checkouts.filter(
 				({ step }) => step.with?.repository !== undefined
 			);
+			// The source build is the checkout's one reader.
+			const sourceGates = allSteps(workflow)
+				.filter(({ step }) => step.uses === cupboardAction('setup'))
+				.map(({ step }) => step.with?.['checkout-dir']);
 
 			expect({
 				workflowSource: workflowSource.map(({ step }) => step.with),
 				callerCheckouts: callerCheckouts.map(({ step }) => step.with),
-				// A step must never find cupboard's actions at the path an earlier
-				// release checked them out to.
-				legacyActionPath: allSteps(workflow).some(({ step }) =>
-					step.uses?.startsWith('./.cupboard/')
-				)
+				sourceGates,
+				reservedFirst: workflowSource.map(({ job, index }) => ({
+					job,
+					precedingStep: workflow.jobs[job]?.steps[index - 1]?.name
+				}))
 			}).toStrictEqual({
 				workflowSource: workflowSource.map(() => ({
 					repository: '${{ job.workflow_repository }}',
@@ -203,28 +230,68 @@ describe('workflow source checkout', () => {
 				callerCheckouts: callerCheckouts.map(() => ({
 					'persist-credentials': false
 				})),
-				legacyActionPath: false
+				sourceGates: sourceGates.map(() => sourceCheckoutDirectory),
+				reservedFirst: workflowSource.map(({ job }) => ({
+					job,
+					precedingStep: reservationStep
+				}))
 			});
 		}
 	);
 
 	it.each(reusableWorkflows)(
-		'reserves the checkout path before every workflow-source checkout in $name',
+		'gates the source checkout on the resolved coordinate in $name',
 		async ({ file }) => {
 			const workflow = await loadWorkflow(file);
-			const workflowSource = stepsUsing(workflow, checkoutAction).filter(
-				({ step }) => step.with?.repository !== undefined
+			const gated = allSteps(workflow).filter(
+				({ step }) =>
+					step.name === reservationStep ||
+					step.with?.path === workflowCheckoutPath
 			);
 
 			expect(
-				workflowSource.map(({ job, index }) => ({
+				gated.map(({ job, step }) => ({ job, gate: step.if }))
+			).toStrictEqual(
+				gated.map(({ job }) => ({
 					job,
-					precedingStep: workflow.jobs[job]?.steps[index - 1]?.name
+					// The coordinate comes from the resolver step in the job that runs
+					// it, and from the configure job's output everywhere else.
+					gate: workflow.jobs[job]?.steps.some(
+						(step) => step.uses === cupboardAction('resolve-cupboard')
+					)
+						? "${{ fromJSON(steps.resolve-cupboard.outputs.cupboard).kind == 'source' }}"
+						: "${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}"
+				}))
+			);
+		}
+	);
+
+	it.each(reusableWorkflows)(
+		'refuses to replace caller content at the checkout path in $name',
+		async ({ file }) => {
+			const workflow = await loadWorkflow(file);
+			const guards = allSteps(workflow).filter(
+				({ step }) => step.name === reservationStep
+			);
+
+			// The guard is an inline script, so its conditions are read as text.
+			expect(
+				guards.map(({ job, step }) => ({
+					job,
+					checksOrdinaryPaths: step.run?.includes(
+						'[ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
+					),
+					checksSymlinks: step.run?.includes(
+						'[ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
+					),
+					failsClosed: step.run?.includes('exit 1')
 				}))
 			).toStrictEqual(
-				workflowSource.map(({ job }) => ({
+				guards.map(({ job }) => ({
 					job,
-					precedingStep: reservationStep
+					checksOrdinaryPaths: true,
+					checksSymlinks: true,
+					failsClosed: true
 				}))
 			);
 		}
@@ -251,41 +318,6 @@ describe('workflow source checkout', () => {
 					.filter((job) => job !== entryJob)
 					.map(() => true)
 			});
-		}
-	);
-
-	it.each(reusableWorkflows)(
-		'refuses to replace caller content at the checkout path in $name',
-		async ({ file, entryJob }) => {
-			const workflow = await loadWorkflow(file);
-			const guards = allSteps(workflow).filter(
-				({ step }) => step.name === reservationStep
-			);
-
-			// The guard is an inline script, so its conditions are read as text.
-			expect(
-				guards.map(({ job, step }) => ({
-					job,
-					checksOrdinaryPaths: step.run?.includes(
-						'[ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
-					),
-					checksSymlinks: step.run?.includes(
-						'[ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
-					),
-					failsClosed: step.run?.includes('exit 1'),
-					// Only the first job may find its own earlier checkout, which it
-					// recognises by the origin URL before refreshing it.
-					acceptsItsOwnCheckout: step.run?.includes('remote get-url origin')
-				}))
-			).toStrictEqual(
-				guards.map(({ job }) => ({
-					job,
-					checksOrdinaryPaths: true,
-					checksSymlinks: true,
-					failsClosed: true,
-					acceptsItsOwnCheckout: job === entryJob && file === flakeWorkflow
-				}))
-			);
 		}
 	);
 });
@@ -353,7 +385,8 @@ describe('cupboard acquisition', () => {
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
 				'read-user': '${{ secrets.read_user }}',
 				'read-password': '${{ secrets.read_password }}',
-				'reuse-view': '${{ needs.configure.outputs.reuse-view }}'
+				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
+				'checkout-dir': sourceCheckoutDirectory
 			}))
 		});
 	});
@@ -385,7 +418,8 @@ describe('cupboard acquisition', () => {
 					'cache-url': '${{ inputs.url }}',
 					cache: '${{ inputs.cache }}',
 					'trusted-public-key': '${{ inputs.trusted-public-key }}',
-					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}'
+					cupboard: '${{ steps.resolve-cupboard.outputs.cupboard }}',
+					'checkout-dir': sourceCheckoutDirectory
 				}
 			],
 			pushBinary: ['${{ steps.setup.outputs.cupboard-path }}']
@@ -560,7 +594,7 @@ describe('cohort planning and publication', () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
 		const cupboardActions = allSteps(workflow)
 			.map(({ step }) => step.uses)
-			.filter((uses) => uses?.startsWith(`./${workflowCheckoutPath}/actions/`));
+			.filter((uses) => uses?.startsWith(cupboardActionPrefix));
 
 		expect({
 			cupboardActions,

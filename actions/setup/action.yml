@@ -75,6 +75,13 @@ inputs:
       Existing Nix config file. Setup appends an optional include of the
       protected runner-local config file.
     required: false
+  checkout-dir:
+    description: >
+      Git checkout of the cupboard revision to build when the resolved
+      coordinate is a source acquisition. Defaults to the directory this action
+      was materialised in, which is a git checkout for a workspace-relative
+      reference.
+    required: false
 outputs:
   cupboard-path:
     description: Path to the acquired cupboard executable.
@@ -159,7 +166,9 @@ runs:
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
         NIX_CONFIG_FILE: ${{ inputs.nix-config-file }}
-        CHECKOUT_DIR: ${{ github.action_path }}/../..
+        CHECKOUT_DIR:
+          ${{ inputs.checkout-dir != '' && inputs.checkout-dir ||
+          format('{0}/../..', github.action_path) }}
       run: |
         args=(setup
           --cupboard "$CUPBOARD"

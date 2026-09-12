@@ -139,10 +139,11 @@ jobs:
             '{kind:"source", $repository, $sourceCommit}')
           echo "cupboard=${cupboard}" >> "$GITHUB_OUTPUT"
 
-      - uses: ./actions/setup
+      - uses: $/actions/setup
         id: source-setup
         with:
           cupboard: ${{ steps.source.outputs.cupboard }}
+          checkout-dir: ${{ github.workspace }}
 
       - name: Verify the source installation
         env:
@@ -231,7 +232,7 @@ jobs:
       # clean runner and verifies a release attestation through the GitHub and
       # Sigstore APIs end to end. Tracking the latest release means a new one
       # that breaks attestation verification fails here.
-      - uses: ./actions/setup
+      - uses: $/actions/setup
         id: setup
         with:
           cupboard-version: latest
@@ -254,18 +255,9 @@ jobs:
     steps:
       # A caller can run the action before checking out a project of its own,
       # so the workspace root holds no package.json that pins a pnpm version.
-      # Check this repository out under a subdirectory to leave the root empty
-      # and run the action from there: it must install the pnpm version it pins
-      # itself rather than failing to find one in the caller's workspace. A
-      # local action has to live on disk to be referenced, so the checkout
-      # cannot be dropped entirely; placing it off the root is what reproduces
-      # the missing-caller-manifest case.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          path: action
-
-      - uses: ./action/actions/setup
+      # This job leaves the workspace empty: the action installs the pnpm
+      # version it pins itself.
+      - uses: $/actions/setup
         id: setup
         with:
           cupboard-version: latest
