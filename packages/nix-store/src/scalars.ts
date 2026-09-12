@@ -392,6 +392,14 @@ export const referencesSchema = z
 	.array(storePathBasenameSchema)
 	.max(referencesMaxLength);
 
+/**
+ * A narinfo's references read back from the row that holds them. It has no
+ * maximum: rows written under an earlier `referencesMaxLength` cannot be
+ * revalidated, so a read that enforced the bound would refuse a narinfo the
+ * server itself accepted. Ingest applies the bound through `referencesSchema`.
+ */
+export const storedReferencesSchema = z.array(storePathBasenameSchema);
+
 // A single free-form narinfo metadata line (`Deriver`, `CA`): bounded and free
 // of control characters, so a value that parses here always renders back to a
 // well-formed narinfo line. The render path rejects control characters, so an
