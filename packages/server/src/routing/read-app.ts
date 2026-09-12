@@ -17,12 +17,15 @@ import { parseRequestBody } from '../http/parse.ts';
 import {
 	cacheInfoResponse,
 	guardScopedRead,
-	missingStorePathHashes,
 	narAuthorityForScope,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
 
+import {
+	answerAvailabilityInChunks,
+	cacheAvailabilityChunkSize
+} from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import {
@@ -175,22 +178,24 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			cacheAvailabilityRequestSchema,
 			context.req.raw
 		);
+
 		// A deleted cache cannot satisfy an availability request, even while its
 		// teardown drain is still removing narinfo objects.
-		const response: CacheAvailabilityResponse = {
-			missingStorePathHashes: context.get('isCacheDeleted')
-				? [...new Set(request.storePathHashes)]
-				: await missingStorePathHashes(
-						context.env,
-						context.get('tenant'),
-						context.get('readScope').cache,
-						request.storePathHashes
-					)
-		};
+		if (context.get('isCacheDeleted')) {
+			const response: CacheAvailabilityResponse = {
+				missingStorePathHashes: [...new Set(request.storePathHashes)]
+			};
 
-		return context.json(response, StatusCodes.OK, {
-			'cache-control': 'no-store'
-		});
+			return context.json(response, StatusCodes.OK, {
+				'cache-control': 'no-store'
+			});
+		}
+
+		return answerAvailabilityInChunks(
+			context,
+			request.storePathHashes,
+			cacheAvailabilityChunkSize
+		);
 	});
 
 	return app;

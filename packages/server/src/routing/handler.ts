@@ -8,6 +8,7 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { reuseViewAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -31,6 +32,7 @@ import {
 	textResponse,
 	uncachedNotFoundResponse
 } from '../http/http.ts';
+import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
 import {
 	guardPrivateViewRead,
@@ -41,6 +43,10 @@ import {
 import { unauthorisedResponse } from '../read/read-auth.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
+import {
+	answerAvailabilityInChunks,
+	reuseViewAvailabilityChunkSize
+} from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
@@ -294,12 +300,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			context.get('readScope')
 		);
 
-		return (
-			denied ??
-			tenantServer(context.env, context.get('tenant')).fetch(
-				innerRequest(context)
-			)
-		);
+		return denied ?? answerReuseViewAvailability(context);
 	});
 
 	// Reuse-view metadata has its own priority and is never cached. Bypass the
@@ -410,7 +411,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	app.post(
 		'/t/:tenant/private-reuse/:view/api/v1/missing-paths',
-		servePrivateReuse
+		async (context) =>
+			withoutStoring(await answerReuseViewAvailability(context))
 	);
 
 	// Public reuse views expose no NAR route under `/reuse/`. Authenticate private
@@ -527,6 +529,23 @@ export default {
 		await handleMaintenanceQueue(batch, boundedWorkerEnv(env));
 	}
 } satisfies ExportedHandler<Env>;
+
+// The object resolves the view and answers each chunk; an unknown view is a
+// miss for every hash of every chunk.
+async function answerReuseViewAvailability(
+	context: Context<WorkerHonoEnv>
+): Promise<Response> {
+	const request = await parseRequestBody(
+		reuseViewAvailabilityRequestSchema,
+		context.req.raw
+	);
+
+	return answerAvailabilityInChunks(
+		context,
+		request.storePathHashes,
+		reuseViewAvailabilityChunkSize
+	);
+}
 
 // Confirm mutable requests against authoritative D1 status before Durable
 // Object dispatch. The tenant Durable Object then applies its own authorisation.

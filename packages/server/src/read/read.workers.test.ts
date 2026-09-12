@@ -560,9 +560,13 @@ describe('private narinfo reference gate', () => {
 				referencingPath,
 				true
 			);
-			const missing = await missingStorePathHashes(env, tenant, privateCache, [
-				referencingPath
-			]);
+			const missing = await missingStorePathHashes(
+				env.BLOBS,
+				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+				tenant,
+				privateCache,
+				[referencingPath]
+			);
 
 			expect({ status: response.status, missing }).toStrictEqual({
 				status: isServed ? StatusCodes.OK : StatusCodes.NOT_FOUND,
@@ -603,9 +607,13 @@ describe('private narinfo reference gate', () => {
 				referencingPath,
 				true
 			);
-			const missing = await missingStorePathHashes(env, tenant, privateCache, [
-				referencingPath
-			]);
+			const missing = await missingStorePathHashes(
+				env.BLOBS,
+				drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+				tenant,
+				privateCache,
+				[referencingPath]
+			);
 
 			expect({
 				status: response.status,

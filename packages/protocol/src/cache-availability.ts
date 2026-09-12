@@ -1,16 +1,25 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-// The server deduplicates the request before probing R2, so at most 900 distinct
-// hashes produce at most 900 head requests. Every cap in this file and in
-// `retention.ts` is checked against `subrequestsPerInvocation` by
-// `packages/server/src/do/subrequest-budget.test.ts`.
+// The hashes one availability request carries.
+//
+// This is a page size, not a bound on what a caller may ask. The CLI chunks
+// at it in `packages/cli/src/plan/destination-probe.ts` and the Action's
+// publication planner in `actions/src/publish-plan.ts`. The tenant Worker
+// answers a page through its Durable Object in chunks sized to one
+// invocation's subrequest allowance (`chunked-availability.ts` in the server),
+// so the page is not bounded by that allowance. What bounds it is elapsed
+// time: the object heads one narinfo object per hash, six at a time, so a
+// page costs 150 sequential rounds of R2 latency, which has not been measured.
 export const cacheAvailabilityMaxPaths = 900;
 
-// The reuse-view route accepts at most 50 requested hashes. The lookup heads
-// one NAR for each distinct NAR among a hash's verified copies, at most
-// `reuseDistinctNarLimit`, so one request makes at most 800 head requests.
-export const reuseViewAvailabilityMaxPaths = 50;
+// A view probe heads one NAR for each distinct NAR among a hash's candidate
+// caches, so a hash whose copies agree costs one head, the same as a cache
+// probe. A hash whose copies disagree costs up to `reuseDistinctNarLimit`
+// heads and is answered as missing; the Worker's chunks are sized to that
+// worst case. Derived from the cache page size so that one measurement
+// changes both.
+export const reuseViewAvailabilityMaxPaths = cacheAvailabilityMaxPaths;
 
 export const cacheAvailabilityRequestSchema = z.strictObject({
 	storePathHashes: z.array(storePathHashSchema).max(cacheAvailabilityMaxPaths)

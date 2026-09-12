@@ -1,7 +1,3 @@
-import {
-	cacheAvailabilityMaxPaths,
-	reuseViewAvailabilityMaxPaths
-} from '@cupboard/protocol/cache-availability';
 import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
 import {
 	rootListPageSize,
@@ -9,8 +5,17 @@ import {
 } from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
+import { cacheProbeD1CallsPerChunk } from '../read/read.ts';
+import {
+	cacheAvailabilityChunkSize,
+	reuseViewAvailabilityChunkSize
+} from '../routing/chunked-availability.ts';
 
-import { reuseDistinctNarLimit } from './reuse-view-lookup-service.ts';
+import {
+	reuseDistinctNarLimit,
+	reuseViewProbeD1CallsPerChunk
+} from './reuse-view-lookup-service.ts';
+import { subrequestSliceReserve } from './subrequest-slice.ts';
 
 // Each cap below bounds how many items one request accepts, so the binding
 // calls the server makes for those items stay under the subrequest ceiling.
@@ -34,20 +39,6 @@ interface CappedRequest {
 
 const cappedRequests: readonly CappedRequest[] = [
 	{
-		cap: 'cacheAvailabilityMaxPaths',
-		items: cacheAvailabilityMaxPaths,
-		requestsPerItem: 1,
-		fanOut:
-			'One narinfo head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
-	},
-	{
-		cap: 'reuseViewAvailabilityMaxPaths',
-		items: reuseViewAvailabilityMaxPaths,
-		requestsPerItem: reuseDistinctNarLimit,
-		fanOut:
-			"One NAR head for each distinct NAR among a hash's verified copies; the lookup refuses a hash with more than the limit before the probe."
-	},
-	{
 		cap: 'rootSetMaxTargets',
 		items: rootSetMaxTargets,
 		requestsPerItem: 6,
@@ -62,6 +53,42 @@ const cappedRequests: readonly CappedRequest[] = [
 	}
 ];
 
+// An availability page is not one request to the object: the Worker sends it
+// in chunks, each an invocation of its own. A chunk's worst case, after the D1
+// calls the probe makes first, must fit the slice the object opens for it less
+// the reserve the slice keeps; otherwise the object refuses the chunk. The
+// chunk sizes are derived from these figures, so this checks the derivation,
+// not a literal.
+interface ChunkedRequest {
+	readonly chunk: string;
+	readonly items: number;
+	readonly requestsPerItem: number;
+	/**
+	D1 calls the probe makes before its R2 heads.
+	*/
+	readonly d1Calls: number;
+	readonly fanOut: string;
+}
+
+const chunkedRequests: readonly ChunkedRequest[] = [
+	{
+		chunk: 'cacheAvailabilityChunkSize',
+		items: cacheAvailabilityChunkSize,
+		requestsPerItem: 1,
+		d1Calls: cacheProbeD1CallsPerChunk,
+		fanOut:
+			'One narinfo head for each distinct hash, in `missingStorePathHashes` in `read/read.ts`.'
+	},
+	{
+		chunk: 'reuseViewAvailabilityChunkSize',
+		items: reuseViewAvailabilityChunkSize,
+		requestsPerItem: reuseDistinctNarLimit,
+		d1Calls: reuseViewProbeD1CallsPerChunk,
+		fanOut:
+			"One NAR head for each distinct NAR among a hash's verified copies; the lookup refuses a hash with more than the limit before the probe."
+	}
+];
+
 describe('the subrequest ceiling', () => {
 	it('covers the fan-out of every capped request', () => {
 		const overBudget = cappedRequests.filter(
@@ -73,6 +100,24 @@ describe('the subrequest ceiling', () => {
 			overBudget.map(
 				(request) =>
 					`${request.cap}: ${String(request.items * request.requestsPerItem)} calls`
+			)
+		).toStrictEqual([]);
+	});
+
+	it('leaves the slice its reserve after the worst case of every chunk', () => {
+		const overBudget = chunkedRequests.filter(
+			(request) =>
+				request.items < 1 ||
+				request.items * request.requestsPerItem +
+					request.d1Calls +
+					subrequestSliceReserve >
+					subrequestsPerInvocation
+		);
+
+		expect(
+			overBudget.map(
+				(request) =>
+					`${request.chunk}: ${String(request.items)} hashes at ${String(request.requestsPerItem)} heads`
 			)
 		).toStrictEqual([]);
 	});
