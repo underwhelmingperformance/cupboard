@@ -79,6 +79,7 @@ describe('collectSubstitutions', () => {
 		expect(
 			collectSubstitutions({ templateSource: 'github-pr', captures: [] })
 		).toStrictEqual({
+			repository_id: { claim: 'repository_id' },
 			pr: {
 				claim: 'ref',
 				capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }
