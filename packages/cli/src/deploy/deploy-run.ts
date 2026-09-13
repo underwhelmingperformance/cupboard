@@ -4,6 +4,7 @@ import {
 	type LocalStep,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
@@ -156,7 +157,12 @@ export function derivedPlanRows(
 
 	return [
 		{ label: 'Build', value: artifact.buildVersion },
-
+		{
+			label: 'D1 statements per invocation',
+			value:
+				artifact.config.tenant.vars.CUPBOARD_D1_STATEMENTS_PER_INVOCATION ??
+				String(freeTierD1StatementsPerInvocation)
+		},
 		{
 			label: 'Control worker',
 			value: `${(artifact.controlBundle.code.length / 1024).toFixed(0)} KiB`

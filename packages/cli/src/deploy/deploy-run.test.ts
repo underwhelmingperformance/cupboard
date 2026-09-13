@@ -30,7 +30,11 @@ import {
 	zoneIdSchema
 } from './identifiers.ts';
 import { UnknownDeploymentPhaseError } from './phase.ts';
-import { planDeployment, transitionPlanRows } from './transition.ts';
+import {
+	planDeployment,
+	planOfflineDeployment,
+	transitionPlanRows
+} from './transition.ts';
 import { buildScriptMetadata } from './upload.ts';
 
 const scriptName = (value: string) => scriptNameSchema.parse(value);
@@ -192,6 +196,8 @@ function recordingApi(
 				Promise.resolve([
 					{ id: cloudflareAccountIdSchema.parse('acc'), name: 'Acme' }
 				]),
+			listAccountSubscriptions: () =>
+				Promise.resolve({ kind: 'listed' as const, subscriptions: [] }),
 			r2BucketExists: () => {
 				recordFallbackApiCall(calls, 'r2BucketExists');
 				return Promise.resolve(false);
@@ -1338,6 +1344,29 @@ describe('refused deployment contractions', () => {
 });
 
 describe('reviewed deployment plan', () => {
+	it.each([
+		{ override: 'paid' as const, allowance: '1000' },
+		{ override: 'free' as const, allowance: '50' }
+	])(
+		'applies the explicit $override allowance in an offline plan',
+		({ override, allowance }) => {
+			const plan = planOfflineDeployment(artifact, override);
+			expect({
+				control:
+					plan.artifact.config.control.vars
+						.CUPBOARD_D1_STATEMENTS_PER_INVOCATION,
+				tenant:
+					plan.artifact.config.tenant.vars
+						.CUPBOARD_D1_STATEMENTS_PER_INVOCATION,
+				observation: plan.observation
+			}).toStrictEqual({
+				control: allowance,
+				tenant: allowance,
+				observation: { kind: 'offline' }
+			});
+		}
+	);
+
 	it('keeps preparation and contraction in the reviewed execution plan', () => {
 		const contraction = {
 			name: '0028_cache_identity_contract.sql',
