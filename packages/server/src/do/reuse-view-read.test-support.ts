@@ -30,6 +30,20 @@ import {
 } from '../test-support.ts';
 
 /**
+ * Removes the fixture tenant's view if it exists.
+ */
+export async function removeView(name = 'reuse'): Promise<void> {
+	const token = await initialiseViaWorker();
+	const response = await authorisedWorkerFetch(
+		`/reuse-views/${encodeURIComponent(name)}`,
+		token,
+		{ method: 'DELETE' }
+	);
+
+	expect([StatusCodes.OK, StatusCodes.NOT_FOUND]).toContain(response.status);
+}
+
+/**
  * Defines or replaces one of the fixture tenant's views through the admin API.
  */
 export async function setView(

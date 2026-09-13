@@ -8,6 +8,7 @@ import {
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
 	CacheRetentionMigrationPendingError,
+	CacheViewAccessMismatchError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -83,6 +84,18 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache }
+		});
+	}
+
+	if (error instanceof CacheViewAccessMismatchError) {
+		return new ORPCError('CACHE_VIEW_ACCESS_MISMATCH', {
+			status: error.status,
+			message: error.message,
+			data: {
+				cache: error.cache,
+				views: error.views,
+				viewAccess: error.viewAccess
+			}
 		});
 	}
 

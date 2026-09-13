@@ -1,5 +1,6 @@
 import {
 	type AuthKeyId,
+	type CacheAccessMode,
 	type CacheScope,
 	type NixSha256HashString,
 	type RootName,
@@ -170,6 +171,26 @@ export class CacheAlreadyExistsError extends ServerHttpError {
 	constructor(public readonly cache: CacheScope) {
 		super('The requested cache already exists');
 		this.name = 'CacheAlreadyExistsError';
+	}
+}
+
+export class CacheViewAccessMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly cache: CacheScope,
+		public readonly views: readonly string[],
+		public readonly viewAccess: readonly CacheAccessMode[]
+	) {
+		const accesses = [...new Set(viewAccess)].join(' and ');
+		const [only] = views;
+
+		super(
+			only !== undefined && views.length === 1
+				? `Reuse view ${only} selects this cache and reads ${accesses} caches, so it cannot serve the cache with the requested access. Create the cache with that access, or narrow the view's selectors.`
+				: `Reuse views ${views.join(', ')} select this cache and read ${accesses} caches, so they cannot serve the cache with the requested access. Narrow their selectors, or use another cache name.`
+		);
+		this.name = 'CacheViewAccessMismatchError';
 	}
 }
 
