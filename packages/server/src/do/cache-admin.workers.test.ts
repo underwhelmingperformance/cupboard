@@ -1,6 +1,8 @@
 import {
 	type CacheAccessMode,
+	cacheGenerationSchema,
 	cachePrioritySchema,
+	cacheReadRevisionSchema,
 	type CacheScope,
 	cacheScopeSchema,
 	storePathHashSchema,
@@ -28,6 +30,7 @@ import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
+import { canonicalCacheRequest } from '../routing/cache-request.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -1156,6 +1159,46 @@ describe('cache registry admin', () => {
 			reregistered: { local: { generation: 1 }, published: first },
 			deleted: second,
 			recreated: { local: { generation: 2 }, published: second }
+		});
+	});
+
+	it('bumps the read revision when a cache changes access', async () => {
+		await useTestServer('cache-admin-access-revision');
+		await recordDeploymentPhase('contracted');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+
+		const before = await cacheVersions();
+
+		await updateCacheAccess(init.token, 'builds', 'private');
+
+		const after = await cacheVersions();
+		const narInfo = new Request('https://cache.example/t/acme/abc.narinfo');
+		const cacheKey = (version: CacheVersion): string =>
+			canonicalCacheRequest(narInfo, {
+				generation: cacheGenerationSchema.parse(version.generation),
+				readRevision: cacheReadRevisionSchema.parse(version.readRevision)
+			}).url;
+
+		expect({
+			before,
+			after,
+			keyMoved:
+				before.published === undefined || after.published === undefined
+					? 'a version was missing'
+					: cacheKey(before.published) !== cacheKey(after.published)
+		}).toStrictEqual({
+			before: {
+				local: { generation: 1 },
+				published: { generation: 1, readRevision: 1 }
+			},
+			after: {
+				local: { generation: 1 },
+				published: { generation: 1, readRevision: 2 }
+			},
+			keyMoved: true
 		});
 	});
 
