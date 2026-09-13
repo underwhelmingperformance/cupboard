@@ -213,14 +213,12 @@ describe('maintenance pass cost', () => {
 			currentServer().runGarbageCollection()
 		);
 
-		// The first pass finds no collection revision row for the default cache
-		// and creates one; the second reads the row it created.
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 171,
-			largeBacklogCost: 170
+			smallBacklogCost: 154,
+			largeBacklogCost: 154
 		});
 	});
 
@@ -230,12 +228,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 168,
+				rowsRead: 151,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 168,
+				rowsRead: 151,
 				usesIndex: true,
 				sorts: false
 			}
@@ -272,8 +270,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 166,
-			largeBacklogCost: 166
+			smallBacklogCost: 148,
+			largeBacklogCost: 148
 		});
 	});
 
@@ -304,8 +302,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 798, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 798, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 780, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 780, rowsWritten: 131 }
 		});
 	});
 
@@ -328,8 +326,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 179,
-			largeBacklogCost: 179
+			smallBacklogCost: 162,
+			largeBacklogCost: 162
 		});
 	});
 });

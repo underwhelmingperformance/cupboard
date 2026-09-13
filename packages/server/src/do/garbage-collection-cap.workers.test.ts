@@ -16,7 +16,6 @@ import { cacheIdSchema } from '../db/cache.ts';
 import {
 	garbageCollectionFrontier,
 	garbageCollectionMarks,
-	garbageCollectionRevisions,
 	garbageCollectionScans,
 	garbageCollectionTenantRuns,
 	narInfoDeletions,
@@ -45,7 +44,8 @@ import {
 	syntheticStorePathHash,
 	underOneUnitOfWork,
 	uploadMetadata,
-	useTestServer
+	useTestServer,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
@@ -233,8 +233,6 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 	});
 }
 
-// Queue a path without changing the revision, so the scan must process the
-// frontier itself instead of restarting.
 async function queueFrontier(storePathHash: StorePathHash): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
 		instance.context.db
@@ -258,7 +256,6 @@ async function retentionRootCounts(): Promise<{
 
 interface ScanProgress {
 	readonly phase: string;
-	readonly revision: number;
 	readonly cursor: string;
 	readonly frontier: number;
 	readonly marks: number;
@@ -270,8 +267,8 @@ function scanProgress(
 ): ScanProgress | undefined {
 	const cache = resolvedCache(context);
 	const scan = state.storage.sql
-		.exec<{ phase: string; revision: number; cursor: string }>(
-			`SELECT phase, revision, cursor
+		.exec<{ phase: string; cursor: string }>(
+			`SELECT phase, cursor
 			 FROM garbage_collection_scan
 			 WHERE cache_id = ?`,
 			cache.id
@@ -457,9 +454,6 @@ describe('garbage collection cap', () => {
 				return { progress, refresh, continuation: pending };
 			}
 		);
-		const revision = firstPass.progress?.revision;
-
-		expect(typeof revision).toBe('number');
 		// The refresh-family phase spends the budget on its first step of members
 		// and leaves the rest, so the collection phases that follow advance by a
 		// single step: the scan completes the expiry phase, which has no expired
@@ -467,7 +461,6 @@ describe('garbage collection cap', () => {
 		expect(firstPass).toStrictEqual({
 			progress: {
 				phase: 'expire-grace',
-				revision,
 				cursor: '',
 				frontier: 0,
 				marks: 0
@@ -562,28 +555,22 @@ describe('garbage collection cap', () => {
 		await driven.collectOneUnitOfWork();
 		const closureMarked = await currentScanProgress();
 		const progress = { seeded, parentMarked, closureMarked };
-		const revision = progress.seeded?.revision;
-
-		expect(typeof revision).toBe('number');
 
 		expect(progress).toStrictEqual({
 			seeded: {
 				phase: 'mark',
-				revision,
 				cursor: '',
 				frontier: 0,
 				marks: 1
 			},
 			parentMarked: {
 				phase: 'mark',
-				revision: progress.seeded?.revision,
 				cursor: '',
 				frontier: 1,
 				marks: 1
 			},
 			closureMarked: {
 				phase: 'mark',
-				revision: progress.seeded?.revision,
 				cursor: '',
 				frontier: 0,
 				marks: 2
@@ -647,9 +634,6 @@ describe('garbage collection cap', () => {
 		// arrives after the mark phase finished and before anything is deleted.
 		await driveScanTo((scan) => scan?.phase === 'collect');
 		const collecting = await currentScanProgress();
-		const revision = collecting?.revision;
-
-		expect(typeof revision).toBe('number');
 
 		await queueFrontier(parent.storePathHash);
 
@@ -668,14 +652,12 @@ describe('garbage collection cap', () => {
 		}).toStrictEqual({
 			collecting: {
 				phase: 'collect',
-				revision,
 				cursor: '',
 				frontier: 0,
 				marks: 1
 			},
 			requeued: {
 				phase: 'mark',
-				revision,
 				cursor: '',
 				frontier: 1,
 				marks: 1
@@ -686,7 +668,7 @@ describe('garbage collection cap', () => {
 		});
 	});
 
-	it('restarts an in-progress walk when retention changes between chunks', async () => {
+	it('continues an in-progress walk and marks a target attached between chunks', async () => {
 		await useTestServer('gc-bounded-mutation');
 		const { token } = await bootstrap();
 		const kept = uploadMetadata({
@@ -708,7 +690,6 @@ describe('garbage collection cap', () => {
 
 		await driveScanTo((scan) => scan?.phase === 'mark' && scan.marks === 1);
 		const initial = await currentScanProgress();
-		const initialRevision = initial?.revision;
 
 		expect(driven.isContinuationArmed).toBe(true);
 
@@ -717,46 +698,96 @@ describe('garbage collection cap', () => {
 			targets: [kept.storePath, newlyRetained.storePath]
 		});
 
-		// The changed retention bumps the revision, so the next pass discards the
-		// marks and seeds the roots again. One seeding step covers both targets,
-		// so the restarted scan is observed once it has queued them.
-		await driveScanTo(
-			(scan) => scan?.revision !== initialRevision && scan?.frontier === 2
-		);
-		const restarted = await currentScanProgress();
+		// The write rewrites both targets of the root, so the barrier queues both
+		// the marked path and the new one. Observe the scan once the queue holds
+		// them.
+		await driveScanTo((scan) => scan?.frontier === 2);
+		const attached = await currentScanProgress();
 
 		expect(driven.isContinuationArmed).toBe(true);
-		const restartedRevision = restarted?.revision;
 
-		expect(typeof initialRevision).toBe('number');
-		expect(typeof restartedRevision).toBe('number');
-
-		expect({ initial, restarted }).toStrictEqual({
+		expect({ initial, attached }).toStrictEqual({
 			initial: {
 				phase: 'mark',
-				revision: initialRevision,
 				cursor: '',
 				frontier: 0,
 				marks: 1
 			},
-			restarted: {
-				phase: 'grace',
-				revision: restartedRevision,
+			attached: {
+				phase: 'mark',
 				cursor: '',
 				frontier: 2,
-				marks: 0
+				marks: 1
 			}
 		});
-		expect(restartedRevision).toBeGreaterThan(initialRevision ?? 0);
 
 		await driven.restore();
 
 		await drainContinuation();
 
-		expect(await continuation()).toBeUndefined();
-		expect(await narInfoGeneration(newlyRetained.storePathHash)).toEqual(
-			expect.any(Number)
+		expect({
+			continuation: await continuation(),
+			scan: await currentScanProgress(),
+			kept: await narInfoGeneration(kept.storePathHash),
+			newlyRetained: await narInfoGeneration(newlyRetained.storePathHash)
+		}).toStrictEqual({
+			continuation: undefined,
+			scan: undefined,
+			kept: 0,
+			newlyRetained: 0
+		});
+	});
+
+	it('reaches the collect phase while commits land between invocations', async () => {
+		await useTestServer('gc-sustained-commits');
+		const { token } = await bootstrap();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept',
+			references: []
+		});
+		const collectable = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'collectable',
+			references: []
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, collectable);
+		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+
+		let committed = 0;
+		const hasCollectablePath = async (): Promise<boolean> =>
+			(await narInfoGeneration(collectable.storePathHash)) !== undefined;
+
+		// Each committed path is unmarked, so the barrier does not add it to the
+		// frontier. The scan must finish despite these intervening writes.
+		await withoutAlarmArming(() =>
+			driveToCompletion(
+				async () => {
+					await driven.collectOneUnitOfWork();
+					await pushPath(
+						token,
+						uploadMetadata({
+							fileSize: narBytes.byteLength,
+							storePathHash: syntheticStorePathHash(committed),
+							name: `committed-${String(committed)}`,
+							references: []
+						})
+					);
+					committed += 1;
+				},
+				async () => !(await hasCollectablePath()),
+				maxDrivenPasses
+			)
 		);
+
+		expect({
+			collectable: await narInfoGeneration(collectable.storePathHash),
+			kept: await narInfoGeneration(kept.storePathHash)
+		}).toStrictEqual({ collectable: undefined, kept: 0 });
 	});
 
 	it('pages one high-fanout path across bounded mark chunks', async () => {
@@ -909,7 +940,6 @@ interface CollectionStateIdentities {
 	readonly frontier: { cacheId: number }[];
 	readonly marks: { cacheId: number }[];
 	readonly tenantRun: { cacheId: number }[];
-	readonly revisions: { cacheId: number }[];
 	readonly cursor: { cacheId: number }[];
 }
 
@@ -932,7 +962,6 @@ async function collectionStateIdentities(): Promise<CollectionStateIdentities> {
 			frontier: read(garbageCollectionFrontier),
 			marks: read(garbageCollectionMarks),
 			tenantRun: read(garbageCollectionTenantRuns),
-			revisions: read(garbageCollectionRevisions),
 			cursor: read(verificationCursor)
 		};
 	});
@@ -1019,7 +1048,7 @@ describe('garbage collection identity columns', () => {
 		const builds = { cacheId: 2 };
 
 		expect({
-			seeded: { ...seeded, revisions: undefined, cursor: undefined },
+			seeded: { ...seeded, cursor: undefined },
 			marked: {
 				scans: marked.scans,
 				frontier: marked.frontier,
@@ -1036,7 +1065,6 @@ describe('garbage collection identity columns', () => {
 				frontier: [builds],
 				marks: [],
 				tenantRun: [builds],
-				revisions: undefined,
 				cursor: undefined
 			},
 			marked: {
@@ -1050,7 +1078,6 @@ describe('garbage collection identity columns', () => {
 				frontier: [],
 				marks: [],
 				tenantRun: [],
-				revisions: [{ cacheId: 1 }, builds],
 				cursor: [],
 				stoppedCursor: [builds]
 			}

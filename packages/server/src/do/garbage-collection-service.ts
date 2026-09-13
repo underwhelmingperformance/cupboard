@@ -195,29 +195,6 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private currentRevision(cache: ResolvedCache): number {
-		const stored = this.context.db
-			.select({
-				revision: schema.garbageCollectionRevisions.revision,
-				cacheId: schema.garbageCollectionRevisions.cacheId
-			})
-			.from(schema.garbageCollectionRevisions)
-			.where(eq(schema.garbageCollectionRevisions.cacheId, cache.id))
-			.get();
-
-		if (stored === undefined) {
-			this.context.db
-				.insert(schema.garbageCollectionRevisions)
-				.values({ cacheId: cache.id, revision: 0 })
-				.onConflictDoNothing()
-				.run();
-
-			return 0;
-		}
-
-		return stored.revision;
-	}
-
 	private clearScan(cache: ResolvedCache): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
@@ -232,37 +209,17 @@ export class GarbageCollectionService {
 		});
 	}
 
-	private resetScan(cache: ResolvedCache, revision: number): void {
-		this.context.db.transaction((tx) => {
-			tx.delete(schema.garbageCollectionFrontier)
-				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
-				.run();
-			tx.delete(schema.garbageCollectionMarks)
-				.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
-				.run();
-			tx.insert(schema.garbageCollectionScans)
-				.values({
-					cacheId: cache.id,
-					revision,
-					phase: 'expire-roots',
-					cursor: '',
-					referenceCursor: -1,
-					allowEmptyCollection: false
-				})
-				.onConflictDoUpdate({
-					target: schema.garbageCollectionScans.cacheId,
-					set: {
-						cacheId: sql`excluded.cache_id`,
-						revision,
-						phase: 'expire-roots',
-						cursor: '',
-						markStorePathHash: sql`null`,
-						referenceCursor: -1,
-						allowEmptyCollection: false
-					}
-				})
-				.run();
-		});
+	private startScan(cache: ResolvedCache): void {
+		this.context.db
+			.insert(schema.garbageCollectionScans)
+			.values({
+				cacheId: cache.id,
+				phase: 'expire-roots',
+				cursor: '',
+				referenceCursor: -1,
+				allowEmptyCollection: false
+			})
+			.run();
 	}
 
 	private scanRow(
@@ -275,31 +232,23 @@ export class GarbageCollectionService {
 			.get();
 	}
 
-	/**
-	 * Reads the scan, restarting it when the cache's revision no longer matches
-	 * the one the scan recorded. Reading the revision costs one statement once
-	 * the revision row exists and is bound to its identity; `collectUnreachable`
-	 * calls this once, at the start of a pass, and reads the row with
-	 * {@link scanRow} after that.
-	 */
 	private scan(
 		cache: ResolvedCache
 	): typeof schema.garbageCollectionScans.$inferSelect {
-		const revision = this.currentRevision(cache);
 		const stored = this.scanRow(cache);
 
-		if (stored?.revision !== revision) {
-			this.resetScan(cache, revision);
-			const reset = this.scanRow(cache);
-
-			if (reset === undefined) {
-				throw new Error('garbage-collection scan reset did not persist');
-			}
-
-			return reset;
+		if (stored !== undefined) {
+			return stored;
 		}
 
-		return stored;
+		this.startScan(cache);
+		const started = this.scanRow(cache);
+
+		if (started === undefined) {
+			throw new Error('garbage-collection scan did not persist');
+		}
+
+		return started;
 	}
 
 	private updateScan(
@@ -307,11 +256,7 @@ export class GarbageCollectionService {
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
-				| 'phase'
-				| 'cursor'
-				| 'referenceCursor'
-				| 'allowEmptyCollection'
-				| 'revision'
+				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptyCollection'
 			>
 		> & {
 			readonly markStorePathHash?: StorePathHash | SQL;
@@ -322,10 +267,6 @@ export class GarbageCollectionService {
 			.set(set)
 			.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 			.run();
-	}
-
-	private synchroniseScanRevision(cache: ResolvedCache): void {
-		this.updateScan(cache, { revision: this.currentRevision(cache) });
 	}
 
 	private expireRoots(
@@ -927,7 +868,6 @@ export class GarbageCollectionService {
 			this.updateScan(cache, {
 				cursor: batch.at(-1)?.storePathHash ?? cursor
 			});
-			this.synchroniseScanRevision(cache);
 		} else {
 			this.clearScan(cache);
 		}
@@ -1035,10 +975,6 @@ export class GarbageCollectionService {
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
 		let hasMoreExpiredRoots = false;
-		// Compare the revision once. This method never awaits, so no request or
-		// alarm runs on the object between its steps and nothing else writes the
-		// tables that change the revision during a pass. Each phase adopts the
-		// revision its own writes produce, so later steps read the row alone.
 		let scan: typeof schema.garbageCollectionScans.$inferSelect | undefined =
 			this.scan(cache);
 
@@ -1051,7 +987,6 @@ export class GarbageCollectionService {
 				// can finish the roots an earlier one left behind.
 				hasMoreExpiredRoots = expired.hasMoreExpiredRoots;
 				this.updateScan(cache, {
-					revision: this.currentRevision(cache),
 					allowEmptyCollection:
 						scan.allowEmptyCollection ||
 						expired.rootsExpired > 0 ||
@@ -1071,7 +1006,6 @@ export class GarbageCollectionService {
 				const expired = this.expireGraceStep(cache, now);
 
 				this.updateScan(cache, {
-					revision: this.currentRevision(cache),
 					allowEmptyCollection:
 						scan.allowEmptyCollection || this.cacheGraceManaged(cache),
 					...(!expired.hasMoreDeadlines && { phase: 'roots' })
@@ -1532,13 +1466,6 @@ export class GarbageCollectionService {
 
 			const narInfosDeleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
-
-			// Queue retirement can change the scan revision by deleting grace rows. It
-			// runs under this critical section, so adopting that revision ignores only
-			// the scan's own cleanup and still detects external changes.
-			if (collectionCache !== undefined && collected.hasMoreWork) {
-				this.synchroniseScanRevision(collectionCache);
-			}
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
