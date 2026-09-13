@@ -45,7 +45,8 @@ import {
 	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
@@ -106,15 +107,13 @@ function indexedMetadata(index: number): ParsedUploadPathMetadata {
 async function publishCommittedPaths(server: string): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	await withoutAlarmArming(async () => {
+		const { token } = await bootstrap();
 
-	for (let start = 0; start < committedPaths; start += pushConcurrency) {
-		await Promise.all(
-			Array.from({ length: pushConcurrency }, (_, offset) =>
-				pushPath(token, indexedMetadata(start + offset), 'builds')
-			)
-		);
-	}
+		for (let index = 0; index < committedPaths; index += 1) {
+			await pushPath(token, indexedMetadata(index), 'builds');
+		}
+	});
 }
 
 /**
@@ -159,9 +158,8 @@ async function driveAlarms(
 
 		const alarms = await measureInvocations(state, counting, {
 			attempts: maxAlarms,
-			// Filling the cache runs alarms of its own, which leave the maintenance
-			// pass cursor wherever they finished. This fixture asserts which pass
-			// each alarm runs, so start the rotation from the first pass.
+			// Start the pass rotation from the first pass so this fixture can
+			// assert which pass each explicitly driven alarm runs.
 			prepare: () => state.storage.delete(maintenancePassCursorKey),
 			isDue: async () =>
 				(await state.storage.get(teardownKey)) !== undefined ||
@@ -232,7 +230,7 @@ describe('alarm D1 statement allowance', () => {
 			collectionPending: undefined,
 			queuedDeletions: 0
 		});
-	}, 240_000);
+	});
 
 	it('finishes both the teardown backlog and the collection continuation across successive alarms', async () => {
 		const driven = await driveAlarms('alarm-allowance-fairness', 12);
@@ -254,7 +252,7 @@ describe('alarm D1 statement allowance', () => {
 			collectionPending: undefined,
 			queuedDeletions: 0
 		});
-	}, 240_000);
+	});
 });
 
 // More queued reconcile targets than one pass can probe within its statement
