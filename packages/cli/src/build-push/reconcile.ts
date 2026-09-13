@@ -14,18 +14,18 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
 	autoBuildStore,
+	type BuildReceiptV3,
 	buildReceiptV3Schema,
-	type BuildSubjectV3,
+	type BuildSubjectV3Input,
 	type DerivationPath,
 	type NixStoreUri,
-	type ParsedBuildReceiptV3,
 	type TargetFailureReason,
-	type TargetOutcome,
-	type TerminalBuildFailure
+	type TargetOutcomeInput,
+	type TerminalBuildFailureInput
 } from '@cupboard/protocol/build';
 import {
-	type ParsedUploadDecision,
-	type UploadAttachRoot,
+	type UploadAttachRootInput,
+	type UploadDecision,
 	uploadNegotiateMaxPaths
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
@@ -96,7 +96,7 @@ export interface ReconcileOptions {
 		'queryValidPathsInfo' | 'queryDerivationOutputPaths'
 	>;
 	readonly client: PushClient;
-	readonly runRoot?: UploadAttachRoot;
+	readonly runRoot?: UploadAttachRootInput;
 	readonly ttlSeconds?: TtlSeconds;
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
@@ -109,12 +109,12 @@ export interface ReconcileOptions {
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	readonly childExitStatus?: number;
-	readonly terminalFailure?: TerminalBuildFailure;
+	readonly terminalFailure?: TerminalBuildFailureInput;
 	/**
 	 * Subjects established before reconciliation take precedence over store
 	 * metadata read afterward.
 	 */
-	readonly subjects?: readonly BuildSubjectV3[];
+	readonly subjects?: readonly BuildSubjectV3Input[];
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
@@ -131,7 +131,7 @@ export interface ReconcileFailure {
 }
 
 export interface ReconcileResult {
-	readonly receipt: ParsedBuildReceiptV3;
+	readonly receipt: BuildReceiptV3;
 	readonly roots: readonly ReconciledRoot[];
 	readonly failures: readonly ReconcileFailure[];
 }
@@ -317,7 +317,7 @@ function settleLocallyMissing(
 }
 
 type PublishableDecision = Extract<
-	ParsedUploadDecision,
+	UploadDecision,
 	{ action: 'upload' | 'commit' }
 >;
 
@@ -385,7 +385,7 @@ async function publishInfoBatch(
 	ledger: PublicationLedger
 ): Promise<void> {
 	const paths = infos.map((info) => prepareStorePathNegotiation(info));
-	let decisions: readonly ParsedUploadDecision[];
+	let decisions: readonly UploadDecision[];
 
 	try {
 		const negotiation = await options.client.negotiate({
@@ -490,7 +490,7 @@ async function publishRequired(
 function targetOutcome(
 	resolved: ResolvedTarget,
 	ledger: PublicationLedger
-): TargetOutcome {
+): TargetOutcomeInput {
 	const { target, classification, resolution } = resolved;
 
 	if (classification === 'left-upstream') {

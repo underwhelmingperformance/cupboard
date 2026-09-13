@@ -40,7 +40,7 @@ function errorResponse(error: unknown): Response | undefined {
 	return undefined;
 }
 
-function serverHttpErrorResponse(error: ServerHttpError): Response {
+export function serverHttpErrorResponse(error: ServerHttpError): Response {
 	// A retryable refusal must never be cached, on any route: a reader that
 	// stored this response would keep retrying against a cache instead of the
 	// origin, well past whatever made it transient.

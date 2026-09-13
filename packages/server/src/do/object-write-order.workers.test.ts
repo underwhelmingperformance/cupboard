@@ -11,8 +11,10 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
 	currentServer,
+	defaultCache,
 	initialise,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -20,7 +22,7 @@ import {
 import { boundedBlobs } from './bounded-io.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
-const cache = '';
+const cacheScope = defaultCache();
 
 async function settled(pending: Promise<unknown>): Promise<void> {
 	await pending;
@@ -78,7 +80,7 @@ async function narInfoObjectText(
 		narInfoObjectKey(
 			fixtureTenant,
 			storePathHashSchema.parse(storePathHash),
-			cache
+			cacheScope
 		)
 	);
 
@@ -111,8 +113,9 @@ describe('path-keyed object write ordering', () => {
 
 		await runInDurableObject(currentServer(), async (instance) => {
 			const context = instance.context;
+			const cache = resolvedCache(context, cacheScope);
 			const storePathHash = storePathHashSchema.parse(metadata.storePathHash);
-			const key = narInfoObjectKey(fixtureTenant, storePathHash, cache);
+			const key = narInfoObjectKey(fixtureTenant, storePathHash, cache.scope);
 			const { bucket, release, landed } = stallingBucket(
 				context.env.BLOBS,
 				key
@@ -140,7 +143,7 @@ describe('path-keyed object write ordering', () => {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, storePathHash)
 					)
 				)

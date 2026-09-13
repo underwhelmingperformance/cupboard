@@ -1,5 +1,4 @@
 import {
-	DEFAULT_CACHE,
 	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -13,10 +12,12 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
 	currentServer,
+	defaultCache,
 	fileAttestationReference,
 	publishAttestationList,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	useTestServer,
 	verifiableNar
@@ -28,6 +29,7 @@ import {
 	listGenerationMetadataKey
 } from './attestations-service.ts';
 import { boundedBlobs } from './bounded-io.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const storePathHash = storePathHashSchema.parse('a'.repeat(32));
@@ -36,7 +38,7 @@ const currentGeneration = narInfoGenerationSchema.parse(1);
 const listKey = attestationListObjectKey(
 	fixtureTenant,
 	storePathHash,
-	DEFAULT_CACHE
+	defaultCache()
 );
 
 // Leave enough time for the D1 reads before publication. The deadline must
@@ -127,7 +129,7 @@ describe('attestation list write ordering', () => {
 			narSize: nar.narSize
 		});
 
-		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await pushPath(token, metadata, defaultCache(), nar);
 		await fileAttestationReference({
 			uploadId: '00000000-0000-4000-8000-000000000001',
 			bytes: new TextEncoder().encode('{"bundle":"current"}'),
@@ -156,16 +158,18 @@ describe('attestation list write ordering', () => {
 
 				const attestations = new AttestationsService(
 					context,
+					new CacheRegistrationService(context),
 					new AttestationCasService(context),
 					new NarInfoObjectsService(context)
 				);
+				const cache = resolvedCache(context);
 
 				let publishError: unknown;
 
 				try {
 					await context.criticalSection(() =>
 						attestations.materialiseList(
-							DEFAULT_CACHE,
+							cache,
 							storePathHash,
 							currentGeneration
 						)
@@ -179,7 +183,7 @@ describe('attestation list write ordering', () => {
 				let hasRetired = false;
 				const retirement = (async () => {
 					await attestations.discardListOfGeneration(
-						DEFAULT_CACHE,
+						cache,
 						storePathHash,
 						retiredGeneration
 					);

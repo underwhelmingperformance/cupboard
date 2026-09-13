@@ -9,6 +9,7 @@ import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import type { CacheId } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -16,8 +17,10 @@ import {
 	commitPath,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
 	initialise,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -25,11 +28,14 @@ import {
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
-const cache = '';
+const cacheScope = defaultCache();
 
-function narInfoRowFilter(storePathHash: string): ReturnType<typeof and> {
+function narInfoRowFilter(
+	cacheId: CacheId,
+	storePathHash: string
+): ReturnType<typeof and> {
 	return and(
-		eq(schema.narInfos.cache, cache),
+		eq(schema.narInfos.cacheId, cacheId),
 		eq(schema.narInfos.storePathHash, storePathHashSchema.parse(storePathHash))
 	);
 }
@@ -37,10 +43,15 @@ function narInfoRowFilter(storePathHash: string): ReturnType<typeof and> {
 async function committedRow(
 	storePathHash: string
 ): Promise<typeof schema.narInfos.$inferSelect> {
-	const filter = narInfoRowFilter(storePathHash);
-	const row = await runInDurableObject(currentServer(), (instance) =>
-		instance.context.db.select().from(schema.narInfos).where(filter).get()
-	);
+	const row = await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context, cacheScope);
+
+		return instance.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(narInfoRowFilter(cache.id, storePathHash))
+			.get();
+	});
 
 	expect(row).toBeDefined();
 
@@ -58,7 +69,7 @@ async function narInfoObjectText(
 		narInfoObjectKey(
 			fixtureTenant,
 			storePathHashSchema.parse(storePathHash),
-			cache
+			cacheScope
 		)
 	);
 
@@ -149,6 +160,7 @@ describe('narinfo publication after a concurrent row change', () => {
 		const current = await narInfoObjectText(metadata.storePathHash);
 
 		await runInDurableObject(currentServer(), async (instance) => {
+			const cache = resolvedCache(instance.context, cacheScope);
 			const service = new NarInfoObjectsService(instance.context);
 			const staleNarInfo = await service.narInfoFromRow({
 				...row,
@@ -191,9 +203,13 @@ describe('narinfo publication after a concurrent row change', () => {
 
 		const row = await committedRow(metadata.storePathHash);
 
-		const filter = narInfoRowFilter(metadata.storePathHash);
 		await runInDurableObject(currentServer(), async (instance) => {
-			instance.context.db.delete(schema.narInfos).where(filter).run();
+			const cache = resolvedCache(instance.context, cacheScope);
+
+			instance.context.db
+				.delete(schema.narInfos)
+				.where(narInfoRowFilter(cache.id, metadata.storePathHash))
+				.run();
 
 			const service = new NarInfoObjectsService(instance.context);
 			const narInfo = await service.narInfoFromRow(row);
@@ -232,6 +248,7 @@ describe('narinfo publication after a concurrent row change', () => {
 		const row = await committedRow(metadata.storePathHash);
 
 		await runInDurableObject(currentServer(), async (instance) => {
+			const cache = resolvedCache(instance.context, cacheScope);
 			const service = new NarInfoObjectsService(instance.context);
 			const staleNarInfo = await service.narInfoFromRow(row);
 
@@ -244,7 +261,7 @@ describe('narinfo publication after a concurrent row change', () => {
 			const key = narInfoObjectKey(
 				fixtureTenant,
 				storePathHashSchema.parse(metadata.storePathHash),
-				cache
+				cache.scope
 			);
 			const stalled = stallingPutBucket(instance.context.env.BLOBS, key);
 			instance.context.env = {
@@ -276,7 +293,7 @@ describe('narinfo publication after a concurrent row change', () => {
 					sigsJson: JSON.stringify([signature, signature]),
 					pendingSignatureGeneration: signingKeyGenerationSchema.parse(2)
 				})
-				.where(narInfoRowFilter(metadata.storePathHash))
+				.where(narInfoRowFilter(cache.id, metadata.storePathHash))
 				.run();
 			stalled.release();
 			await publish;
@@ -286,7 +303,7 @@ describe('narinfo publication after a concurrent row change', () => {
 			narInfoObjectKey(
 				fixtureTenant,
 				storePathHashSchema.parse(metadata.storePathHash),
-				cache
+				cacheScope
 			)
 		);
 		const body = await object?.text();
@@ -314,7 +331,7 @@ describe('narinfo publication after a concurrent row change', () => {
 		const key = narInfoObjectKey(
 			fixtureTenant,
 			storePathHashSchema.parse(metadata.storePathHash),
-			cache
+			cacheScope
 		);
 		const current = await narInfoObjectText(metadata.storePathHash);
 
@@ -338,12 +355,14 @@ describe('narinfo publication after a concurrent row change', () => {
 			}
 		);
 
-		await runInDurableObject(currentServer(), (instance) =>
-			new NarInfoObjectsService(instance.context).ensureNarInfoObject(
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context, cacheScope);
+
+			return new NarInfoObjectsService(instance.context).ensureNarInfoObject(
 				cache,
 				row.storePathHash
-			)
-		);
+			);
+		});
 
 		const repaired = await env.BLOBS.get(key);
 

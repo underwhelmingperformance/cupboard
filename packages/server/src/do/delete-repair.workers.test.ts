@@ -63,7 +63,9 @@ describe('delete marker replay', () => {
 			blobState: await blobStateNarHashes(),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			markers: [],
@@ -104,7 +106,9 @@ describe('delete marker replay', () => {
 			blobState: await blobStateNarHashes(),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			markers: [],
@@ -131,7 +135,9 @@ describe('delete marker replay', () => {
 		await deleteNarInfoRow(metadata.storePathHash);
 		await deleteBlobReferenceEdge(metadata.storePathHash, 0);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
@@ -180,7 +186,9 @@ describe('delete marker replay', () => {
 			generation: await narInfoGeneration(metadata.storePathHash),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null,
 			blobPresent:
 				(await env.BLOBS.head(await currentNarObjectKey(nar.narHash))) !== null
@@ -189,7 +197,7 @@ describe('delete marker replay', () => {
 			edges: [
 				{
 					tenant: 'v1',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 1,
 					narHash: nar.narHash,

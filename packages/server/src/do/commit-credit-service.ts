@@ -1,7 +1,4 @@
-import {
-	type StoredCache,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
+import { type CacheScope, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import {
 	commitAuthenticationExpiredCloseCode,
 	commitAuthenticationExpiredCloseReason,
@@ -46,7 +43,7 @@ type CommitCreditState = z.infer<typeof commitCreditStateSchema>;
 // after hibernation. An absent `credit` field denotes an unpaced session, and
 // older deployments can omit the other optional fields.
 export const commitSessionAttachmentSchema = z.object({
-	cache: storedCacheSchema,
+	cache: cacheScopeSchema,
 	sessionId: sessionIdSchema,
 	authenticatedUntil: epochMillisSchema.optional(),
 	isClosing: z.boolean().optional(),
@@ -348,7 +345,7 @@ export class CommitCreditService {
 	openSession(
 		socket: WebSocket,
 		session: {
-			readonly cache: StoredCache;
+			readonly cache: CacheScope;
 			readonly sessionId: SessionId;
 			readonly authenticatedUntil: number;
 		},

@@ -1,63 +1,42 @@
-import {
-	type CacheName,
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import type { PrivateCacheCredentials } from '@cupboard/protocol/private-cache-credentials';
+import type { CacheCredentials } from '@cupboard/protocol/cache-credentials';
 import type { Reporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
-import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
-	InvalidCacheNameError,
-	InvalidPrivateCacheCredentialsError,
-	PrivateCacheCredentialRequiredError,
-	UnknownPrivateCacheCredentialError
+	InvalidCacheCredentialsError,
+	UnknownCacheCredentialError
 } from '../errors.ts';
 
 import {
-	addConfigCacheOptions,
 	cacheSubstituterUrl,
 	type ConfigInput,
-	parsePrivateCacheCredentials,
+	parseCacheCredentials,
 	resolveConfigSubstituters,
 	runConfig
 } from './config.ts';
 
-const cacheName = (value: string): CacheName => cacheNameSchema.parse(value);
+const defaultCache: CacheScope = { kind: 'default' };
+const buildsCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('builds')
+};
+const releaseCache: CacheScope = {
+	kind: 'named',
+	name: cacheNameSchema.parse('release')
+};
 const alice = readUserInputSchema.parse('alice');
-const bob = readUserInputSchema.parse('bob');
 const ci = readUserInputSchema.parse('ci');
-const buildsCache = cacheName('builds');
-const guidesCache = cacheName('guides');
-const releaseCache = privateStoredCache(cacheName('release'));
-const stagingCache = privateStoredCache(cacheName('staging'));
 const correctHorse = 'correct-horse-battery-staple';
-// A read password is 32 random bytes rendered as 43 base64url characters.
 const readPassword = 'A'.repeat(43);
-const otherReadPassword = 'B'.repeat(43);
 const publishedPublicKey =
 	'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 
 interface CapturedOutput {
 	readonly data: string[];
 	readonly infos: string[];
-}
-
-function thrownBy(run: () => unknown): unknown {
-	let thrown: unknown;
-
-	try {
-		run();
-	} catch (error) {
-		thrown = error;
-	}
-
-	return thrown;
 }
 
 function capturingReporter(captured: CapturedOutput): Reporter {
@@ -133,36 +112,6 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 	};
 }
 
-const tenantUrl = new URL('https://cupboard.example.workers.dev');
-const trustedKeysLine = `extra-trusted-public-keys = ${publishedPublicKey}`;
-const nixConfig = [
-	'extra-substituters = https://cupboard.example.workers.dev',
-	trustedKeysLine
-].join('\n');
-const netrcGuidance = (machine: string, password: string): string =>
-	[
-		'# Private tenant: add this line to your Nix netrc-file ' +
-			'(e.g. ~/.config/nix/netrc):',
-		`machine ${machine} login alice password ${password}`
-	].join('\n');
-const userinfoGuidance = [
-	'# Every private-cache read requires authentication. The substituter URL ' +
-		'above contains its read credential.',
-	'# Keep this snippet as secret as the credential itself.'
-].join('\n');
-
-function selected(
-	isPrivate: boolean,
-	name: string,
-	position: number
-): {
-	readonly isPrivate: boolean;
-	readonly name: string;
-	readonly position: number;
-} {
-	return { isPrivate, name, position };
-}
-
 function captureConfig(input: ConfigInput): CapturedOutput {
 	const captured: CapturedOutput = { data: [], infos: [] };
 
@@ -172,65 +121,34 @@ function captureConfig(input: ConfigInput): CapturedOutput {
 }
 
 describe('runConfig', () => {
-	it('writes a nix.conf snippet to the payload stream', () => {
+	it('writes a default-cache nix.conf snippet', () => {
 		expect(
 			captureConfig({
-				url: tenantUrl,
+				url: new URL('https://cupboard.example.workers.dev/t/acme'),
 				publicKey: publishedPublicKey,
-				substituters: [{ cache: DEFAULT_CACHE }]
-			})
-		).toStrictEqual({ data: [nixConfig], infos: [] });
-	});
-
-	it('writes the nix.conf to the payload and the netrc as guidance', () => {
-		expect(
-			captureConfig({
-				url: tenantUrl,
-				publicKey: publishedPublicKey,
-				substituters: [{ cache: DEFAULT_CACHE }],
-				netrcCredential: { user: alice, password: correctHorse }
-			})
-		).toStrictEqual({
-			data: [nixConfig],
-			infos: [netrcGuidance('cupboard.example.workers.dev', correctHorse)]
-		});
-	});
-
-	it('uses the URL hostname for the netrc machine', () => {
-		expect(
-			captureConfig({
-				url: new URL('http://localhost:1234'),
-				publicKey: publishedPublicKey,
-				substituters: [{ cache: DEFAULT_CACHE }],
-				netrcCredential: { user: alice, password: correctHorse }
+				substituters: [{ cache: defaultCache }]
 			})
 		).toStrictEqual({
 			data: [
-				['extra-substituters = http://localhost:1234', trustedKeysLine].join(
-					'\n'
-				)
+				[
+					'extra-substituters = https://cupboard.example.workers.dev/t/acme',
+					`extra-trusted-public-keys = ${publishedPublicKey}`
+				].join('\n')
 			],
-			infos: [netrcGuidance('localhost', correctHorse)]
+			infos: []
 		});
 	});
 
-	it('renders every selected cache on one substituters line', () => {
-		const base = new URL('https://cupboard.example.workers.dev/t/acme');
-
+	it('renders named caches under one URL namespace regardless of access', () => {
 		expect(
 			captureConfig({
-				url: base,
+				url: new URL('https://cupboard.example.workers.dev/t/acme'),
 				publicKey: publishedPublicKey,
 				substituters: [
-					{ cache: DEFAULT_CACHE },
 					{ cache: buildsCache },
 					{
 						cache: releaseCache,
-						credential: { user: alice, password: correctHorse }
-					},
-					{
-						cache: stagingCache,
-						credential: { user: bob, password: 'p@ss%20word' }
+						credential: { user: ci, password: readPassword }
 					}
 				]
 			})
@@ -238,338 +156,151 @@ describe('runConfig', () => {
 			data: [
 				[
 					'extra-substituters = ' +
-						[
-							'https://cupboard.example.workers.dev/t/acme',
-							'https://cupboard.example.workers.dev/t/acme/cache/builds',
-							'https://alice:correct-horse-battery-staple@cupboard.example.workers.dev/t/acme/private-cache/release',
-							'https://bob:p%40ss%2520word@cupboard.example.workers.dev/t/acme/private-cache/staging'
-						].join(' '),
-					trustedKeysLine
+						'https://cupboard.example.workers.dev/t/acme/cache/builds ' +
+						`https://ci:${readPassword}@cupboard.example.workers.dev/t/acme/cache/release`,
+					`extra-trusted-public-keys = ${publishedPublicKey}`
 				].join('\n')
 			],
-			infos: [userinfoGuidance]
+			infos: [
+				[
+					'# A substituter URL above contains a cache-specific read credential.',
+					'# Keep this snippet as secret as the credential itself.'
+				].join('\n')
+			]
 		});
 	});
 
-	it('composes tenant netrc guidance with a private-cache userinfo URL', () => {
-		const base = new URL('https://cupboard.example.workers.dev/t/acme');
-
+	it('prints a shared read credential as netrc guidance', () => {
 		expect(
 			captureConfig({
-				url: base,
+				url: new URL('https://cupboard.example.workers.dev/t/acme'),
 				publicKey: publishedPublicKey,
-				substituters: [
-					{ cache: DEFAULT_CACHE },
-					{
-						cache: releaseCache,
-						credential: { user: bob, password: 'hunter2' }
-					}
-				],
+				substituters: [{ cache: defaultCache }],
 				netrcCredential: { user: alice, password: correctHorse }
 			})
 		).toStrictEqual({
 			data: [
 				[
-					'extra-substituters = ' +
-						[
-							'https://cupboard.example.workers.dev/t/acme',
-							'https://bob:hunter2@cupboard.example.workers.dev/t/acme/private-cache/release'
-						].join(' '),
-					trustedKeysLine
+					'extra-substituters = https://cupboard.example.workers.dev/t/acme',
+					`extra-trusted-public-keys = ${publishedPublicKey}`
 				].join('\n')
 			],
 			infos: [
-				netrcGuidance('cupboard.example.workers.dev', correctHorse),
-				userinfoGuidance
+				[
+					'# Add this line to your Nix netrc-file (for example, ~/.config/nix/netrc):',
+					`machine cupboard.example.workers.dev login alice password ${correctHorse}`
+				].join('\n')
 			]
 		});
 	});
 });
 
-describe('parsePrivateCacheCredentials', () => {
-	it.each([
-		{ name: 'an absent value', value: undefined },
-		{ name: 'a blank value', value: '  ' }
-	])('reads $name as no credential', ({ value }) => {
-		expect(parsePrivateCacheCredentials(value)).toStrictEqual(new Map());
+describe('parseCacheCredentials', () => {
+	it.each([undefined, '  '])('reads %j as no credentials', (value) => {
+		expect(parseCacheCredentials(value)).toStrictEqual([]);
 	});
 
-	it('reads the credential of every cache the document names', () => {
-		expect(
-			parsePrivateCacheCredentials(
-				JSON.stringify({
-					release: { user: 'ci', password: readPassword },
-					staging: { user: 'bob', password: otherReadPassword }
-				})
-			)
-		).toStrictEqual(
-			new Map([
-				[cacheName('release'), { user: ci, password: readPassword }],
-				[cacheName('staging'), { user: bob, password: otherReadPassword }]
-			])
-		);
-	});
+	it('reads explicit default and named cache scopes', () => {
+		const document = JSON.stringify([
+			{
+				cache: defaultCache,
+				credential: { user: 'alice', password: readPassword }
+			},
+			{
+				cache: releaseCache,
+				credential: { user: 'ci', password: readPassword }
+			}
+		]);
 
-	it('returns no credential for an unlisted cache named constructor', () => {
-		const credentials = parsePrivateCacheCredentials(
-			JSON.stringify({ release: { user: 'ci', password: readPassword } })
-		);
-
-		expect(credentials.get(cacheName('constructor'))).toBeUndefined();
+		expect(parseCacheCredentials(document)).toStrictEqual([
+			{
+				cache: defaultCache,
+				credential: { user: alice, password: readPassword }
+			},
+			{
+				cache: releaseCache,
+				credential: { user: ci, password: readPassword }
+			}
+		]);
 	});
 
 	it.each([
-		{ name: 'is not JSON', value: 'not json' },
-		{ name: 'is not an object', value: '"release"' },
-		{ name: 'omits the password', value: '{"release":{"user":"ci"}}' },
-		{
-			name: 'carries a password of the wrong shape',
-			value: '{"release":{"user":"ci","password":"short"}}'
-		},
-		{
-			name: 'names a cache the name schema refuses',
-			value: `{"Not A Cache":{"user":"ci","password":"${readPassword}"}}`
-		}
-	])('refuses a document that $name', ({ value }) => {
-		expect(() => parsePrivateCacheCredentials(value)).toThrow(
-			InvalidPrivateCacheCredentialsError
+		'not json',
+		'{}',
+		JSON.stringify([
+			{ cache: { kind: 'default' }, credential: { user: 'ci' } }
+		]),
+		JSON.stringify([
+			{
+				cache: { kind: 'named', name: 'Bad!' },
+				credential: { user: 'ci', password: readPassword }
+			}
+		])
+	])('refuses the invalid document %j', (value) => {
+		expect(() => parseCacheCredentials(value)).toThrow(
+			InvalidCacheCredentialsError
 		);
 	});
 });
 
 describe('resolveConfigSubstituters', () => {
-	const shared = { user: alice, password: correctHorse };
-	const noCredentials: PrivateCacheCredentials = new Map();
+	const releaseCredential: CacheCredentials[number] = {
+		cache: releaseCache,
+		credential: { user: ci, password: readPassword }
+	};
 
-	it('configures the default cache when no cache is named', () => {
-		expect(
-			resolveConfigSubstituters([], undefined, noCredentials)
-		).toStrictEqual([{ cache: DEFAULT_CACHE }]);
-	});
-
-	it('returns the caches in the order they were named', () => {
+	it('preserves selected order and attaches matching credentials', () => {
 		expect(
 			resolveConfigSubstituters(
-				[
-					selected(false, 'builds', 0),
-					selected(false, 'guides', 2),
-					selected(true, 'release', 1)
-				],
-				shared,
-				noCredentials
+				[defaultCache, releaseCache, buildsCache],
+				[releaseCredential]
 			)
 		).toStrictEqual([
-			{ cache: buildsCache },
-			{
-				cache: releaseCache,
-				credential: shared
-			},
-			{ cache: guidesCache }
+			{ cache: defaultCache },
+			{ cache: releaseCache, credential: releaseCredential.credential },
+			{ cache: buildsCache }
 		]);
 	});
 
-	it('keeps a-b and a.b as distinct credential keys', () => {
-		const credentials = parsePrivateCacheCredentials(
-			JSON.stringify({
-				'a-b': { user: 'ci', password: readPassword },
-				'a.b': { user: 'bob', password: otherReadPassword }
-			})
+	it('refuses a credential for an unselected cache', () => {
+		const credentials: CacheCredentials = [releaseCredential];
+
+		expect(() => resolveConfigSubstituters([buildsCache], credentials)).toThrow(
+			UnknownCacheCredentialError
 		);
-
-		expect(
-			resolveConfigSubstituters(
-				[
-					selected(true, 'a-b', 0),
-					selected(true, 'a.b', 1),
-					selected(true, 'release', 2)
-				],
-				shared,
-				credentials
-			)
-		).toStrictEqual([
-			{
-				cache: privateStoredCache(cacheName('a-b')),
-				credential: { user: ci, password: readPassword }
-			},
-			{
-				cache: privateStoredCache(cacheName('a.b')),
-				credential: { user: bob, password: otherReadPassword }
-			},
-			{ cache: releaseCache, credential: shared }
-		]);
-	});
-
-	it.each([
-		{ name: 'an ordinary name', cache: 'release' },
-		{
-			name: 'a name that is a property of Object.prototype',
-			cache: 'constructor'
-		}
-	])(
-		'refuses a private cache with no resolvable credential and $name',
-		({ cache }) => {
-			const error = thrownBy(() =>
-				resolveConfigSubstituters(
-					[selected(false, 'builds', 0), selected(true, cache, 1)],
-					undefined,
-					noCredentials
-				)
-			);
-
-			expect(error).toBeInstanceOf(PrivateCacheCredentialRequiredError);
-
-			if (error instanceof PrivateCacheCredentialRequiredError) {
-				expect({ name: error.name, cache: error.cache }).toStrictEqual({
-					name: 'PrivateCacheCredentialRequiredError',
-					cache
-				});
-			}
-		}
-	);
-
-	it('requires every credential to match a selected private cache', () => {
-		const credentials = parsePrivateCacheCredentials(
-			JSON.stringify({ staging: { user: 'ci', password: readPassword } })
-		);
-		const error = thrownBy(() =>
-			resolveConfigSubstituters(
-				[selected(true, 'release', 0)],
-				shared,
-				credentials
-			)
-		);
-
-		expect(error).toBeInstanceOf(UnknownPrivateCacheCredentialError);
-
-		if (error instanceof UnknownPrivateCacheCredentialError) {
-			expect({ name: error.name, cache: error.cache }).toStrictEqual({
-				name: 'UnknownPrivateCacheCredentialError',
-				cache: 'staging'
-			});
-		}
-	});
-
-	it('rejects an invalid private cache name', () => {
-		const error = thrownBy(() =>
-			resolveConfigSubstituters(
-				[selected(true, 'Bad!', 0)],
-				shared,
-				noCredentials
-			)
-		);
-
-		expect(error).toBeInstanceOf(InvalidCacheNameError);
-
-		if (error instanceof InvalidCacheNameError) {
-			expect({ name: error.name, cache: error.cache }).toStrictEqual({
-				name: 'InvalidCacheNameError',
-				cache: 'Bad!'
-			});
-		}
-	});
-});
-
-function parseSelection(arguments_: readonly string[]): readonly unknown[] {
-	const command = addConfigCacheOptions(new Command());
-
-	command.parse([...arguments_], { from: 'user' });
-
-	const options = command.opts<{
-		readonly cache: readonly unknown[];
-		readonly privateCache: readonly unknown[];
-	}>();
-
-	return [...options.cache, ...options.privateCache];
-}
-
-describe('addConfigCacheOptions', () => {
-	it('preserves command-line order across --cache and --private-cache', () => {
-		expect(
-			parseSelection([
-				'--private-cache',
-				'release',
-				'--cache',
-				'builds',
-				'--private-cache',
-				'staging'
-			])
-		).toStrictEqual([
-			selected(false, 'builds', 1),
-			selected(true, 'release', 0),
-			selected(true, 'staging', 2)
-		]);
-	});
-
-	it('names no cache when neither option is given', () => {
-		expect(parseSelection([])).toStrictEqual([]);
 	});
 });
 
 describe('cacheSubstituterUrl', () => {
-	it.each<{
-		readonly name: string;
-		readonly cache: StoredCache;
-		readonly url: string;
-		readonly expected: string;
-	}>([
+	it.each([
 		{
-			name: 'the default cache returns the bare URL',
-			cache: DEFAULT_CACHE,
-			url: 'https://cupboard.example.workers.dev',
-			expected: 'https://cupboard.example.workers.dev'
+			name: 'the default cache',
+			cache: defaultCache,
+			expected: 'https://cupboard.example.workers.dev/t/acme'
 		},
 		{
-			name: 'a named cache appends the cache path to a bare host',
-			cache: buildsCache,
-			url: 'https://cupboard.example.workers.dev',
-			expected: 'https://cupboard.example.workers.dev/cache/builds'
-		},
-		{
-			name: 'a named cache preserves a tenant path prefix',
-			cache: buildsCache,
-			url: 'https://cupboard.example.workers.dev/t/acme',
-			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
-		},
-		{
-			name: 'a private cache uses the private namespace',
+			name: 'a named cache',
 			cache: releaseCache,
-			url: 'https://cupboard.example.workers.dev/t/acme',
-			expected:
-				'https://cupboard.example.workers.dev/t/acme/private-cache/release'
+			expected: 'https://cupboard.example.workers.dev/t/acme/cache/release'
 		}
-	])('$name', ({ cache, expected, url }) => {
-		const substituter = cacheSubstituterUrl(new URL(url), cache);
+	])('renders $name', ({ cache, expected }) => {
+		const substituter = cacheSubstituterUrl(
+			new URL('https://cupboard.example.workers.dev/t/acme'),
+			cache
+		);
 
 		expect(canonicalHref(substituter)).toBe(expected);
 	});
 
-	it.each([
-		{
-			name: 'a plain credential',
-			credential: { user: alice, password: correctHorse },
-			expected:
-				'https://alice:correct-horse-battery-staple@cupboard.example.workers.dev/t/acme/private-cache/release'
-		},
-		{
-			name: 'a credential containing userinfo delimiters',
-			credential: { user: bob, password: 'p@ss word/:%' },
-			expected:
-				'https://bob:p%40ss%20word%2F%3A%25@cupboard.example.workers.dev/t/acme/private-cache/release'
-		}
-	])('escapes $name', ({ credential, expected }) => {
+	it('escapes a credential in URL userinfo', () => {
 		const substituter = cacheSubstituterUrl(
 			new URL('https://cupboard.example.workers.dev/t/acme'),
 			releaseCache,
-			credential
+			{ user: alice, password: 'p@ss word/:%' }
 		);
 
-		expect(canonicalHref(substituter)).toBe(expected);
-		expect({
-			user: decodeURIComponent(substituter.username),
-			password: decodeURIComponent(substituter.password)
-		}).toStrictEqual({
-			user: credential.user,
-			password: credential.password
-		});
+		expect(canonicalHref(substituter)).toBe(
+			'https://alice:p%40ss%20word%2F%3A%25@cupboard.example.workers.dev/t/acme/cache/release'
+		);
 	});
 });

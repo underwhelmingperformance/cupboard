@@ -1,11 +1,11 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import type {
-	ParsedBackfillStatus,
-	ParsedKeyAbortResponse,
-	ParsedKeyListResponse,
-	ParsedKeyRetireResponse,
-	ParsedKeyRotateResponse,
-	ParsedSigningKeyEntry
+	BackfillStatus,
+	KeyAbortResponse,
+	KeyListResponse,
+	KeyRetireResponse,
+	KeyRotateResponse,
+	SigningKeyEntry
 } from '@cupboard/protocol/keys';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -22,10 +22,10 @@ interface RetireOptions {
 }
 
 export interface KeyClient {
-	list(): Promise<ParsedKeyListResponse>;
-	rotate(): Promise<ParsedKeyRotateResponse>;
-	retire(input: { id: string }): Promise<ParsedKeyRetireResponse>;
-	abort(input: { id: string }): Promise<ParsedKeyAbortResponse>;
+	list(): Promise<KeyListResponse>;
+	rotate(): Promise<KeyRotateResponse>;
+	retire(input: { id: string }): Promise<KeyRetireResponse>;
+	abort(input: { id: string }): Promise<KeyAbortResponse>;
 }
 
 export function registerKeyCommands(
@@ -252,14 +252,14 @@ export async function runKeyAbort(
 	});
 }
 
-function keyRow(entry: ParsedSigningKeyEntry): ResultRow {
+function keyRow(entry: SigningKeyEntry): ResultRow {
 	return {
 		label: entry.key.id,
 		value: `${describeState(entry.state)}; ${entry.key.publicKey}`
 	};
 }
 
-function keyStatusRow(entry: ParsedSigningKeyEntry): ResultRow {
+function keyStatusRow(entry: SigningKeyEntry): ResultRow {
 	const backfill = entry.state === 'signing' ? entry.backfill : undefined;
 
 	return {
@@ -272,7 +272,7 @@ function keyStatusRow(entry: ParsedSigningKeyEntry): ResultRow {
 	};
 }
 
-function describeBackfill(status: ParsedBackfillStatus): string {
+function describeBackfill(status: BackfillStatus): string {
 	if (status.state === 'complete') {
 		return `backfill complete (${String(status.resigned)} re-signed)`;
 	}
@@ -287,7 +287,7 @@ function describeBackfill(status: ParsedBackfillStatus): string {
 }
 
 export function describeState(
-	state: ParsedSigningKeyEntry['state'] | ParsedKeyRetireResponse['state']
+	state: SigningKeyEntry['state'] | KeyRetireResponse['state']
 ): string {
 	if (state === 'signing') {
 		return 'signing and published';

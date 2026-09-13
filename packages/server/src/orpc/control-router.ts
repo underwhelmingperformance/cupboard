@@ -23,7 +23,6 @@ import {
 	controlTenantResume,
 	controlTenantRotateCacheReadCredential,
 	controlTenantRotateReadCredential,
-	controlTenantSetReadMode,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
 import { controlDeploymentPhase } from '../control/deployment-phase.ts';
@@ -98,9 +97,6 @@ export const controlRouter = os.router({
 		resume: os.tenants.resume.handler(({ input, context }) =>
 			controlTenantResume(context.env, input.id)
 		),
-		setReadMode: os.tenants.setReadMode.handler(({ input, context }) =>
-			controlTenantSetReadMode(context.env, input.id, input.readMode)
-		),
 		rotateReadCredential: os.tenants.rotateReadCredential.handler(
 			({ input, context }) =>
 				controlTenantRotateReadCredential(context.env, input.id, input.read)
@@ -109,23 +105,38 @@ export const controlRouter = os.router({
 			({ input, context }) =>
 				controlTenantClearReadCredential(context.env, input.id)
 		),
-		rotateCacheReadCredential: os.tenants.rotateCacheReadCredential.handler(
-			({ input, context }) =>
+		rotateDefaultCacheReadCredential:
+			os.tenants.rotateDefaultCacheReadCredential.handler(
+				({ input, context }) =>
+					controlTenantRotateCacheReadCredential(
+						context.env,
+						input.id,
+						{ kind: 'default' },
+						input.read
+					)
+			),
+		rotateNamedCacheReadCredential:
+			os.tenants.rotateNamedCacheReadCredential.handler(({ input, context }) =>
 				controlTenantRotateCacheReadCredential(
 					context.env,
 					input.id,
-					input.cacheName,
+					{ kind: 'named', name: input.cacheName },
 					input.read
 				)
-		),
-		clearCacheReadCredential: os.tenants.clearCacheReadCredential.handler(
-			({ input, context }) =>
-				controlTenantClearCacheReadCredential(
-					context.env,
-					input.id,
-					input.cacheName
-				)
-		),
+			),
+		clearDefaultCacheReadCredential:
+			os.tenants.clearDefaultCacheReadCredential.handler(({ input, context }) =>
+				controlTenantClearCacheReadCredential(context.env, input.id, {
+					kind: 'default'
+				})
+			),
+		clearNamedCacheReadCredential:
+			os.tenants.clearNamedCacheReadCredential.handler(({ input, context }) =>
+				controlTenantClearCacheReadCredential(context.env, input.id, {
+					kind: 'named',
+					name: input.cacheName
+				})
+			),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)
 		)

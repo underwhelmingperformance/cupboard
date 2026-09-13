@@ -1,7 +1,7 @@
 import type {
 	ReuseViewListResponse,
 	ReuseViewRemoveResponse,
-	ReuseViewSetBody,
+	ReuseViewSetBodyInput,
 	ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import {
@@ -61,7 +61,7 @@ function setViewRaw(
 async function setView(
 	token: string,
 	name: string,
-	body: ReuseViewSetBody
+	body: ReuseViewSetBodyInput
 ): Promise<{ readonly status: number; readonly body: ReuseViewSummary }> {
 	const response = await setViewRaw(token, name, body);
 
@@ -130,7 +130,8 @@ describe('reuse views', () => {
 		const before = await derivedStateSnapshot();
 
 		const added = await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 		const listed = await listViews(token);
 		const removed = await removeView(token, 'reuse');
@@ -151,9 +152,10 @@ describe('reuse views', () => {
 			addStatus: StatusCodes.OK,
 			added: {
 				name: 'reuse',
+				access: 'public',
 				revision: 1,
 				priority: 50,
-				selectors: [{ kind: 'exact', pattern: 'pr-1' }],
+				selectors: [{ kind: 'named', name: 'pr-1' }],
 				createdAt: added.body.createdAt,
 				updatedAt: added.body.createdAt
 			},
@@ -171,7 +173,8 @@ describe('reuse views', () => {
 		const token = await initialise();
 
 		const added = await setView(token, 'reuse', {
-			selectors: [{ kind: 'prefix', pattern: '' }],
+			access: 'public',
+			selectors: [{ kind: 'all' }],
 			priority: 10
 		});
 
@@ -181,11 +184,12 @@ describe('reuse views', () => {
 		}).toStrictEqual({ status: StatusCodes.OK, priority: 10 });
 	});
 
-	it('accepts the empty prefix, matching every cache', async () => {
+	it('accepts an all selector', async () => {
 		const token = await initialise();
 
 		const added = await setView(token, 'reuse', {
-			selectors: [{ kind: 'prefix', pattern: '' }]
+			access: 'public',
+			selectors: [{ kind: 'all' }]
 		});
 
 		expect({
@@ -193,7 +197,7 @@ describe('reuse views', () => {
 			selectors: added.body.selectors
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			selectors: [{ kind: 'prefix', pattern: '' }]
+			selectors: [{ kind: 'all' }]
 		});
 	});
 
@@ -201,14 +205,16 @@ describe('reuse views', () => {
 		const token = await initialise();
 
 		const first = await setView(token, 'reuse', {
+			access: 'public',
 			selectors: [
-				{ kind: 'exact', pattern: 'pr-1' },
-				{ kind: 'prefix', pattern: 'pr-' }
+				{ kind: 'named', name: 'pr-1' },
+				{ kind: 'prefix', prefix: 'pr-' }
 			],
 			priority: 10
 		});
 		const second = await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-2' }],
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-2' }],
 			priority: 20
 		});
 		const listed = await listViews(token);
@@ -225,9 +231,10 @@ describe('reuse views', () => {
 			secondStatus: StatusCodes.OK,
 			second: {
 				name: 'reuse',
+				access: 'public',
 				revision: 2,
 				priority: 20,
-				selectors: [{ kind: 'exact', pattern: 'pr-2' }],
+				selectors: [{ kind: 'named', name: 'pr-2' }],
 				createdAt: first.body.createdAt,
 				updatedAt: second.body.updatedAt
 			},
@@ -242,19 +249,22 @@ describe('reuse views', () => {
 	// CI convergence re-applies the same definition constantly.
 	it('keeps the revision and updatedAt across an identical re-apply', async () => {
 		const token = await initialise();
-		const definition = {
+		const definition: ReuseViewSetBodyInput = {
+			access: 'public',
 			selectors: [
-				{ kind: 'exact', pattern: 'pr-1' },
-				{ kind: 'prefix', pattern: 'pr-' }
-			] as const,
+				{ kind: 'named', name: 'pr-1' },
+				{ kind: 'prefix', prefix: 'pr-' }
+			],
 			priority: 10
 		};
 
 		const first = await setView(token, 'reuse', {
+			access: definition.access,
 			selectors: [...definition.selectors],
 			priority: definition.priority
 		});
 		const reapplied = await setView(token, 'reuse', {
+			access: definition.access,
 			selectors: definition.selectors.toReversed(),
 			priority: definition.priority
 		});
@@ -274,14 +284,17 @@ describe('reuse views', () => {
 		const token = await initialise();
 
 		const created = await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 		const updated = await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-2' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-2' }]
 		});
 		await removeView(token, 'reuse');
 		const recreated = await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-3' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-3' }]
 		});
 
 		expect({
@@ -300,28 +313,31 @@ describe('reuse views', () => {
 	it.each([
 		{
 			name: 'no selectors',
-			body: { selectors: [] }
+			body: { access: 'public', selectors: [] }
 		},
 		{
 			name: 'a selector count over the cap',
 			body: {
+				access: 'public',
 				selectors: Array.from(
 					{ length: reuseViewMaxSelectors + 1 },
-					(_, index) => ({ kind: 'prefix', pattern: `p${String(index)}` })
+					(_, index) => ({ kind: 'prefix', prefix: `p${String(index)}` })
 				)
 			}
 		},
 		{
 			name: 'a pattern over the length bound',
-			body: { selectors: [{ kind: 'prefix', pattern: 'a'.repeat(64) }] }
+			body: {
+				access: 'public',
+				selectors: [{ kind: 'prefix', prefix: 'a'.repeat(64) }]
+			}
 		},
 		{
 			name: 'an exact selector with an invalid cache name',
-			body: { selectors: [{ kind: 'exact', pattern: 'PR-1' }] }
-		},
-		{
-			name: 'an exact selector naming a private cache',
-			body: { selectors: [{ kind: 'exact', pattern: '_private-builds' }] }
+			body: {
+				access: 'public',
+				selectors: [{ kind: 'named', name: 'PR-1' }]
+			}
 		}
 	])('rejects $name', async ({ body }) => {
 		const token = await initialise();
@@ -355,10 +371,12 @@ describe('reuse views', () => {
 		const before = await derivedStateSnapshot();
 
 		await setView(token, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 		await setView(token, 'reuse', {
-			selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+			access: 'public',
+			selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 		});
 		await removeView(token, 'reuse');
 
@@ -373,7 +391,8 @@ describe('reuse views', () => {
 
 		const list = await authorisedFetch('/reuse-views', writeToken);
 		const set = await setViewRaw(writeToken, 'reuse', {
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			access: 'public',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		});
 		const remove = await authorisedFetch('/reuse-views/reuse', writeToken, {
 			method: 'DELETE'

@@ -1,12 +1,15 @@
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type AuthKeyId,
+	type CacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
+	PRIVATE_STORED_PREFIX,
 	type RootName,
 	type TenantId,
 	tenantIdSchema,
-	type TtlSeconds
+	type TtlSeconds,
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
 import {
@@ -29,9 +32,12 @@ import {
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
 import {
-	contractNameForReuseView,
-	type ParsedReuseViewSelector,
-	type ReuseViewSummary
+	isPrivateReuseView,
+	type ReuseViewName,
+	reuseViewNameSchema,
+	type ReuseViewSelector,
+	type ReuseViewSummary,
+	type StoredReuseView
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
@@ -48,10 +54,14 @@ import {
 	PushCredentialIssuer,
 	pushIdSigningKey
 } from '../blob/push-credential.ts';
+import type { ResolvedCache } from '../db/cache.ts';
+import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	CacheIdentityMissingError,
 	StoredOidcTrustInvalidError,
+	StoredRetentionPolicyInvalidError,
 	TenantNotConfiguredError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
@@ -113,6 +123,10 @@ export interface GarbageCollectionOutcome {
 	readonly orphanStagingDeleted: number;
 }
 
+export type GarbageCollectionTarget =
+	| { readonly scope: 'tenant' }
+	| { readonly scope: 'cache'; readonly cache: ResolvedCache };
+
 // The newest non-retired key signs tokens. Every non-retired key verifies
 // tokens and appears in the JWKS; retirement removes it from all three uses.
 export interface AuthKey {
@@ -157,6 +171,7 @@ export class ServerContext {
 	// One gate per object, so every service answers from the same reading of
 	// the deployment phase.
 	readonly phases: DeploymentPhaseGate;
+	readonly cacheRepository: CacheRepository;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
@@ -191,6 +206,7 @@ export class ServerContext {
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 		this.phases = new DeploymentPhaseGate(this.d1);
+		this.cacheRepository = new CacheRepository(this.db);
 	}
 
 	// Do not let an error escape from `blockConcurrencyWhile`: the runtime would
@@ -329,13 +345,31 @@ export function oidcTrustSummaryFromRow(
 }
 
 export function policySummaryFromRow(
-	row: typeof schema.retentionPolicies.$inferSelect
+	row: typeof schema.retentionPolicies.$inferSelect,
+	cache: CacheScope | undefined
 ): RetentionPolicySummary {
+	if (row.kind === 'cache') {
+		if (cache === undefined) {
+			throw new StoredRetentionPolicyInvalidError(row.id);
+		}
+
+		return {
+			id: row.id,
+			scope: 'cache',
+			cache,
+			ttlSeconds: ttlSecondsSchema.parse(row.defaultTtlSeconds)
+		};
+	}
+
+	if (row.rootNamePrefix === null) {
+		throw new StoredRetentionPolicyInvalidError(row.id);
+	}
+
 	return {
 		id: row.id,
-		scope: row.scope,
-		pattern: row.pattern,
-		ttlSeconds: row.defaultTtlSeconds
+		scope: 'root-name-prefix',
+		pattern: row.rootNamePrefix,
+		ttlSeconds: ttlSecondsSchema.parse(row.defaultTtlSeconds)
 	};
 }
 
@@ -350,12 +384,30 @@ export function gracePolicySummaryFromRow(
 	};
 }
 
+// The view table is still keyed by the stored name, which carries the
+// namespace. A summary reports the local name, so the private prefix comes off
+// again here. This is the reverse of `legacyReuseViewKey`.
+function localReuseViewName(stored: StoredReuseView): ReuseViewName {
+	if (!isPrivateReuseView(stored)) {
+		return stored;
+	}
+
+	return reuseViewNameSchema.parse(stored.slice(PRIVATE_STORED_PREFIX.length));
+}
+
 export function reuseViewSummaryFromRow(
 	row: typeof schema.reuseViews.$inferSelect,
-	selectors: readonly ParsedReuseViewSelector[]
+	selectors: readonly ReuseViewSelector[]
 ): ReuseViewSummary {
+	// A row whose access the reconciliation has not supplied cannot say who may
+	// read the view, so it is refused rather than reported as public.
+	if (row.access === null) {
+		throw new CacheIdentityMissingError({});
+	}
+
 	return {
-		name: contractNameForReuseView(row.name),
+		name: localReuseViewName(row.name),
+		access: row.access,
 		revision: row.revision,
 		priority: row.priority,
 		selectors: [...selectors],

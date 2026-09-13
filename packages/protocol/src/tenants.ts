@@ -1,4 +1,8 @@
-import { cacheNameSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheAccessModeSchema,
+	cacheScopeSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
@@ -9,9 +13,6 @@ import {
 	oidcTrustIssuerInputSchema
 } from './oidc.ts';
 import { isoTimestampSchema } from './scalars.ts';
-
-export const tenantReadModeSchema = z.enum(['public', 'private']);
-export type TenantReadMode = z.infer<typeof tenantReadModeSchema>;
 
 export const tenantStatusSchema = z.enum([
 	'active',
@@ -42,18 +43,14 @@ export const tenantReadCredentialSchema = z.strictObject({
 	user: readUserInputSchema,
 	password: readPasswordSchema
 });
-export type ParsedTenantReadCredential = z.output<
-	typeof tenantReadCredentialSchema
->;
+export type TenantReadCredential = z.output<typeof tenantReadCredentialSchema>;
 
-// The caller selects the read mode and supplies the OIDC identity for the first
-// admin trust rule. Deployment onboarding creates its first tenant in public
-// mode; `tenant create` defaults to private unless the operator passes
-// `--public`. A private tenant may include its read credential. Without one,
-// every read fails closed.
+// The caller selects the initial access of the default cache and supplies the
+// OIDC identity for the first admin trust rule. A read credential is the
+// fallback credential for private caches that have no credential of their own.
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
-	readMode: tenantReadModeSchema,
+	defaultCacheAccess: cacheAccessModeSchema,
 	ownerIssuer: oidcTrustIssuerInputSchema,
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
@@ -62,38 +59,35 @@ export const tenantCreateBodySchema = z.strictObject({
 	// attestation CAS objects. Omission means unlimited storage.
 	quotaBytes: z.number().int().nonnegative().optional()
 });
-export type ParsedTenantCreateBody = z.output<typeof tenantCreateBodySchema>;
-export type TenantCreateBody = z.input<typeof tenantCreateBodySchema>;
+export type TenantCreateBody = z.output<typeof tenantCreateBodySchema>;
+export type TenantCreateBodyInput = z.input<typeof tenantCreateBodySchema>;
 
 export const tenantSummarySchema = z.strictObject({
 	id: tenantIdSchema,
 	status: tenantStatusSchema,
-	readMode: tenantReadModeSchema,
 	ownerIssuer: oidcIssuerSchema,
 	ownerSubject: oidcSubjectSchema,
 	ownerAudience: oidcAudienceSchema,
 	configVersion: z.number().int(),
 	createdAt: isoTimestampSchema
 });
-export type ParsedTenantSummary = z.output<typeof tenantSummarySchema>;
-export type TenantSummary = z.input<typeof tenantSummarySchema>;
+export type TenantSummary = z.output<typeof tenantSummarySchema>;
+export type TenantSummaryInput = z.input<typeof tenantSummarySchema>;
 
 export const tenantListResponseSchema = z.strictObject({
 	tenants: z.array(tenantSummarySchema)
 });
-export type ParsedTenantListResponse = z.output<
-	typeof tenantListResponseSchema
->;
-export type TenantListResponse = z.input<typeof tenantListResponseSchema>;
+export type TenantListResponse = z.output<typeof tenantListResponseSchema>;
+export type TenantListResponseInput = z.input<typeof tenantListResponseSchema>;
 
 export const tenantMutateResponseSchema = z.strictObject({
 	id: tenantIdSchema,
 	status: tenantStatusSchema
 });
-export type ParsedTenantMutateResponse = z.output<
+export type TenantMutateResponse = z.output<typeof tenantMutateResponseSchema>;
+export type TenantMutateResponseInput = z.input<
 	typeof tenantMutateResponseSchema
 >;
-export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
 
 // A membership rebuild reasserts every live tenant's marker and reconstructs
 // the admission filter from the registry. The response reports how many tenants
@@ -101,38 +95,35 @@ export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
 export const membershipRebuildResponseSchema = z.strictObject({
 	tenants: z.number().int().nonnegative()
 });
-export type ParsedMembershipRebuildResponse = z.output<
+export type MembershipRebuildResponse = z.output<
 	typeof membershipRebuildResponseSchema
 >;
-export type MembershipRebuildResponse = z.input<
+export type MembershipRebuildResponseInput = z.input<
 	typeof membershipRebuildResponseSchema
 >;
 
-// Read-mode and read-credential mutations return the resulting mode. A read
-// credential gates requests only when the tenant is private.
-export const tenantReadModeResponseSchema = z.strictObject({
+export const tenantReadCredentialResponseSchema = z.strictObject({
 	id: tenantIdSchema,
-	readMode: tenantReadModeSchema
-});
-export type ParsedTenantReadModeResponse = z.output<
-	typeof tenantReadModeResponseSchema
->;
-export type TenantReadModeResponse = z.input<
-	typeof tenantReadModeResponseSchema
->;
-
-// The result of setting or clearing one private cache's read credential.
-// `cacheName` is the local name. `hasCredential` reports whether that cache now
-// has a credential of its own; when it has none, readers authenticate with the
-// tenant credential.
-export const cacheReadCredentialResponseSchema = z.strictObject({
-	id: tenantIdSchema,
-	cacheName: cacheNameSchema,
 	hasCredential: z.boolean()
 });
-export type ParsedCacheReadCredentialResponse = z.output<
+export type TenantReadCredentialResponse = z.output<
+	typeof tenantReadCredentialResponseSchema
+>;
+export type TenantReadCredentialResponseInput = z.input<
+	typeof tenantReadCredentialResponseSchema
+>;
+
+// The result of setting or clearing one cache's read credential. When a private
+// cache has no credential of its own, readers authenticate with the tenant
+// credential.
+export const cacheReadCredentialResponseSchema = z.strictObject({
+	id: tenantIdSchema,
+	cache: cacheScopeSchema,
+	hasCredential: z.boolean()
+});
+export type CacheReadCredentialResponse = z.output<
 	typeof cacheReadCredentialResponseSchema
 >;
-export type CacheReadCredentialResponse = z.input<
+export type CacheReadCredentialResponseInput = z.input<
 	typeof cacheReadCredentialResponseSchema
 >;

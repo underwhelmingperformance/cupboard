@@ -1,6 +1,6 @@
 import { startCapture } from '@cupboard/logger/testing';
 import {
-	DEFAULT_CACHE,
+	type CacheScope,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
@@ -19,10 +19,14 @@ import {
 	asOneInvocation,
 	bootstrap,
 	currentServer,
+	defaultCache,
 	handlerFetch,
+	namedCache,
 	narBytes,
 	provisionFixtureTenant,
 	pushPath,
+	putTestCache,
+	recordDeploymentPhase,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -63,13 +67,23 @@ async function objectRequestsAt<T>(
 describe('cache availability query', () => {
 	beforeEach(resetTestServer);
 
-	it.each([
-		{ name: 'the default cache', cache: undefined, path: '' },
-		{ name: 'a named cache', cache: 'builds', path: '/cache/builds' }
+	it.each<{
+		name: string;
+		cache: CacheScope;
+		path: string;
+	}>([
+		{ name: 'the default cache', cache: defaultCache(), path: '' },
+		{
+			name: 'a named cache',
+			cache: namedCache('builds'),
+			path: '/cache/builds'
+		}
 	])(
 		'reports only absent store-path hashes for $name',
 		async ({ cache, path }) => {
-			const init = await bootstrap();
+			const init = await bootstrap({
+				caches: cache.kind === 'named' ? [{ scope: cache }] : []
+			});
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 			await pushPath(init.token, metadata, cache);
 
@@ -98,11 +112,12 @@ describe('cache availability query', () => {
 	);
 
 	it("requires the tenant's Basic credentials when reads are private", async () => {
-		await bootstrap();
+		await recordDeploymentPhase('contracted');
+		const { token } = await bootstrap();
 		await provisionFixtureTenant({
-			readMode: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
+		await putTestCache(token, defaultCache(), 'private');
 		const request = {
 			body: JSON.stringify({ storePathHashes: [missingStorePathHash] }),
 			headers: { 'content-type': 'application/json' },
@@ -191,7 +206,7 @@ describe('cache availability query', () => {
 								instance.context.env.BLOBS,
 								instance.context.d1,
 								fixtureTenant,
-								DEFAULT_CACHE,
+								defaultCache(),
 								[missingStorePathHash, otherMissingStorePathHash]
 							)
 						),

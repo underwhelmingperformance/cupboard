@@ -14,12 +14,14 @@ import {
 	currentServer,
 	initialise,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	testPushId
 } from '../test-support.ts';
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	GarbageCollectionService,
@@ -100,11 +102,13 @@ describe('garbage collection best-effort staging deletes', () => {
 		const { outcome, failedDeletes } = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cacheId = resolvedCache(instance.context).id;
+
 				drizzle(state.storage, { schema: { pendingUploads } })
 					.insert(pendingUploads)
 					.values({
 						id: uploadIdSchema.parse('reaped-upload'),
-						cache: '',
+						cacheId,
 						narHash: syntheticNarHash(1),
 						r2Key: reapedKey,
 						metadataJson: '{}',
@@ -129,6 +133,7 @@ describe('garbage collection best-effort staging deletes', () => {
 				const attestationCas = new AttestationCasService(instance.context);
 				const attestations = new AttestationsService(
 					instance.context,
+					new CacheRegistrationService(instance.context),
 					attestationCas,
 					narInfoObjects
 				);
@@ -146,7 +151,7 @@ describe('garbage collection best-effort staging deletes', () => {
 
 				return {
 					outcome: await asOneInvocation(() =>
-						garbageCollection.collectGarbage(rootLogger())
+						garbageCollection.collectGarbage(rootLogger(), { scope: 'tenant' })
 					),
 					failedDeletes
 				};
@@ -181,6 +186,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
 				state.storage.sql.exec(
 					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
 					 rows(value) AS (
@@ -191,10 +197,11 @@ describe('garbage collection best-effort staging deletes', () => {
 					   CROSS JOIN digits AS thousands
 					 )
 					 INSERT INTO pending_upload
-					   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at)
-					 SELECT printf('expired-upload-%d', value), '', ?,
+					   (id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at)
+					 SELECT printf('expired-upload-%d', value), ?, ?,
 					        printf('staging/expired/upload-%d', value), '{}', ?, ?
 					 FROM rows WHERE value < ?`,
+					cache.id,
 					syntheticNarHash(1),
 					expired,
 					expired,
@@ -210,10 +217,11 @@ describe('garbage collection best-effort staging deletes', () => {
 					   CROSS JOIN digits AS thousands
 					 )
 					 INSERT INTO pending_attestation
-					   (id, cache, store_path_hash, digest, r2_key, created_at, expires_at)
-					 SELECT printf('expired-attestation-%d', value), '', ?, ?,
+					   (id, cache_id, store_path_hash, digest, r2_key, created_at, expires_at)
+					 SELECT printf('expired-attestation-%d', value), ?, ?, ?,
 					        printf('staging/expired/attestation-%d', value), ?, ?
 					 FROM rows WHERE value < ?`,
+					cache.id,
 					'a'.repeat(32),
 					'b'.repeat(64),
 					expired,
@@ -225,6 +233,7 @@ describe('garbage collection best-effort staging deletes', () => {
 				const attestationCas = new AttestationCasService(instance.context);
 				const attestations = new AttestationsService(
 					instance.context,
+					new CacheRegistrationService(instance.context),
 					attestationCas,
 					narInfoObjects
 				);
@@ -240,7 +249,7 @@ describe('garbage collection best-effort staging deletes', () => {
 					new RetentionService(instance.context)
 				);
 				const first = await asOneInvocation(() =>
-					garbageCollection.collectGarbage(rootLogger())
+					garbageCollection.collectGarbage(rootLogger(), { scope: 'tenant' })
 				);
 				const remainingAfterFirst = {
 					uploads: drizzle(state.storage, { schema: { pendingUploads } })
@@ -255,7 +264,7 @@ describe('garbage collection best-effort staging deletes', () => {
 						.all().length
 				};
 				const second = await asOneInvocation(() =>
-					garbageCollection.collectGarbage(rootLogger())
+					garbageCollection.collectGarbage(rootLogger(), { scope: 'tenant' })
 				);
 
 				return {

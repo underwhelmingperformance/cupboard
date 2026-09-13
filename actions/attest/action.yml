@@ -33,14 +33,11 @@ inputs:
   cache:
     description: Named destination cache. Leave empty to use the default cache.
     required: false
-  private-cache:
-    description: Private destination cache.
-    required: false
   read-user:
-    description: Basic-auth username for a private destination cache.
+    description: Basic-auth username for the destination cache.
     required: false
   read-password:
-    description: Basic-auth password for a private destination cache.
+    description: Basic-auth password for the destination cache.
     required: false
   github-token:
     description: GitHub token used to record the attestations on the repository.
@@ -51,8 +48,8 @@ inputs:
       Sigstore instance according to the repository's visibility. tsa-only and
       rekor-and-tsa use a Sigstore client in the public-good trust domain.
       tsa-only adds an RFC 3161 timestamp and no Rekor entry; rekor-and-tsa adds
-      both. Defaults to tsa-only for a private destination cache and to
-      sigstore-default otherwise.
+      both. Defaults to tsa-only when the destination cache requires
+      authentication, and to sigstore-default otherwise.
     required: false
   upload-to-github:
     description:
@@ -61,7 +58,8 @@ inputs:
       subject digest is a NAR hash. Because the attestation store is
       append-only, publishing a bundle permanently reveals that each subject
       path exists. A reader with a matching copy can also identify its contents.
-      Defaults to false for a private destination cache and to true otherwise.
+      Defaults to false when the destination cache requires authentication, and
+      to true otherwise.
     required: false
   subject-grouping:
     description:
@@ -69,7 +67,8 @@ inputs:
       for the whole run, so each bundle contains every subject. individual signs
       a separate statement for each subject, so each bundle contains one
       subject. Individual statements do not attest to the complete run. Defaults
-      to individual for a private destination cache and to run otherwise.
+      to individual when the destination cache requires authentication, and to
+      run otherwise.
     required: false
 outputs:
   bundle-path:
@@ -154,7 +153,6 @@ runs:
         PREDICATE_FILE: ${{ inputs.predicate-file }}
         URL: ${{ inputs.url }}
         CACHE: ${{ inputs.cache }}
-        PRIVATE_CACHE: ${{ inputs.private-cache }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
       run: |
@@ -167,7 +165,6 @@ runs:
           --predicate-file "$PREDICATE_FILE" \
           --url "$URL" \
           --cache "$CACHE" \
-          --private-cache "$PRIVATE_CACHE" \
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 

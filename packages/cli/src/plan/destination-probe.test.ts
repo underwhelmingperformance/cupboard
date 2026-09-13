@@ -1,6 +1,6 @@
 import {
-	DEFAULT_CACHE,
-	storedCacheSchema,
+	cacheNameSchema,
+	type CacheScope,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { readUserSchema } from '@cupboard/shared/http';
@@ -11,6 +11,7 @@ import { attestedServedPaths } from './destination-probe.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const baseUrl = new URL('https://cupboard.example.test/t/owner');
+const defaultCache: CacheScope = { kind: 'default' };
 const appHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const otherHash = '3123456789abcdfghijklmnpqrsvwxyz';
 const appPath = storePathSchema.parse(`/nix/store/${appHash}-app`);
@@ -74,7 +75,7 @@ describe('attestedServedPaths', () => {
 	it('passes over a path whose only attestation is not build provenance', async () => {
 		const attested = await attestedServedPaths({
 			baseUrl,
-			cache: DEFAULT_CACHE,
+			cache: defaultCache,
 			paths: [appPath],
 			fetcher: () =>
 				Promise.resolve(
@@ -92,7 +93,7 @@ describe('attestedServedPaths', () => {
 
 		const attested = await attestedServedPaths({
 			baseUrl,
-			cache: DEFAULT_CACHE,
+			cache: defaultCache,
 			paths: [appPath, otherPath],
 			fetcher: recordingFetcher(new Set([appHash]), requests)
 		});
@@ -115,7 +116,7 @@ describe('attestedServedPaths', () => {
 
 		const attested = await attestedServedPaths({
 			baseUrl,
-			cache: storedCacheSchema.parse('nightly'),
+			cache: { kind: 'named', name: cacheNameSchema.parse('nightly') },
 			paths: [appPath, appDevelopmentPath],
 			credentials: { user: readUserSchema.parse('alice'), password: 'secret' },
 			fetcher: recordingFetcher(new Set([appHash]), requests)
@@ -137,7 +138,7 @@ describe('attestedServedPaths', () => {
 
 		const attested = await attestedServedPaths({
 			baseUrl,
-			cache: DEFAULT_CACHE,
+			cache: defaultCache,
 			paths: [],
 			fetcher: recordingFetcher(new Set(), requests)
 		});
@@ -157,7 +158,7 @@ describe('attestedServedPaths', () => {
 	])('reads $name as no attestation', async ({ response }) => {
 		const attested = await attestedServedPaths({
 			baseUrl,
-			cache: DEFAULT_CACHE,
+			cache: defaultCache,
 			paths: [appPath],
 			fetcher: () => Promise.resolve(response())
 		});
@@ -195,7 +196,7 @@ describe('attestedServedPaths', () => {
 		try {
 			await attestedServedPaths({
 				baseUrl,
-				cache: DEFAULT_CACHE,
+				cache: defaultCache,
 				paths: [appPath],
 				fetcher: () => Promise.resolve(response())
 			});

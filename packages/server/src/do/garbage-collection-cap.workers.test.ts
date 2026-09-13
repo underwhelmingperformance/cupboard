@@ -1,18 +1,18 @@
 import {
-	DEFAULT_CACHE,
+	cacheNameSchema,
 	narInfoGenerationSchema,
-	rootNameSchema,
-	type StoredCache
+	rootNameSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { type SQLiteColumn, type SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdSchema, legacyCacheKey } from '../db/cache.ts';
 import {
 	garbageCollectionFrontier,
 	garbageCollectionMarks,
@@ -33,10 +33,13 @@ import {
 	bootstrap,
 	currentServer,
 	driveToCompletion,
+	namedCache,
 	narBytes,
 	narInfoGeneration,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
+	runGcResult,
 	setRoot,
 	syntheticNarHash,
 	syntheticStorePathHash,
@@ -46,12 +49,13 @@ import {
 } from '../test-support.ts';
 
 import { chunk } from './bulk.ts';
+import { teardownEntryPrefix } from './cache-admin-service.ts';
+import type { ServerContext } from './context.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
 import { phaseStepSize } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
-const defaultCache: StoredCache = DEFAULT_CACHE;
 const tenantWideContinuation = { scope: 'tenant' };
 
 async function continuation(): Promise<unknown> {
@@ -62,20 +66,22 @@ async function continuation(): Promise<unknown> {
 
 async function seedNarInfoDeletions(count: number): Promise<void> {
 	const createdAt = isoTimestamp(new Date());
-	const rows = Array.from({ length: count }, (_unused, index) => ({
-		cache: defaultCache,
-		storePathHash: syntheticStorePathHash(index),
-		narHash: syntheticNarHash(index),
-		generation: narInfoGenerationSchema.parse(1),
-		createdAt
-	}));
 
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const cache = resolvedCache(instance.context);
+		const rows = Array.from({ length: count }, (_unused, index) => ({
+			cache: legacyCacheKey(cache.scope, cache.access),
+			cacheId: cache.id,
+			storePathHash: syntheticStorePathHash(index),
+			narHash: syntheticNarHash(index),
+			generation: narInfoGenerationSchema.parse(1),
+			createdAt
+		}));
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
-		// Each row binds five parameters, so the insert is chunked under the
+		// Each row binds six parameters, so the insert is chunked under the
 		// driver's bound-parameter limit.
-		for (const batch of chunk(rows, 18)) {
+		for (const batch of chunk(rows, 16)) {
 			database.insert(narInfoDeletions).values(batch).run();
 		}
 	});
@@ -199,17 +205,19 @@ async function drainContinuation(): Promise<void> {
 
 // A root that has already expired, with one target, so the expiry phase has
 // exactly one unit of work to do.
-async function seedExpiredRoot(
-	target: ParsedUploadPathMetadata
-): Promise<void> {
+async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 	const name = rootNameSchema.parse('expired');
 	const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
 
 	await runInDurableObject(currentServer(), (instance) => {
+		const cache = resolvedCache(instance.context);
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
+
 		instance.context.db
 			.insert(retentionRoots)
 			.values({
-				cache: defaultCache,
+				cache: legacyCache,
+				cacheId: cache.id,
 				name,
 				expiresAt,
 				createdAt: expiresAt,
@@ -219,7 +227,8 @@ async function seedExpiredRoot(
 		instance.context.db
 			.insert(retentionRootTargets)
 			.values({
-				cache: defaultCache,
+				cache: legacyCache,
+				cacheId: cache.id,
 				rootName: name,
 				storePathHash: target.storePathHash,
 				storePath: target.storePath
@@ -247,13 +256,17 @@ interface ScanProgress {
 	readonly marks: number;
 }
 
-function scanProgress(state: DurableObjectState): ScanProgress | undefined {
+function scanProgress(
+	context: ServerContext,
+	state: DurableObjectState
+): ScanProgress | undefined {
+	const cache = resolvedCache(context);
 	const scan = state.storage.sql
 		.exec<{ phase: string; revision: number; cursor: string }>(
 			`SELECT phase, revision, cursor
 			 FROM garbage_collection_scan
-			 WHERE cache = ?`,
-			DEFAULT_CACHE
+			 WHERE cache_id = ?`,
+			cache.id
 		)
 		.toArray()[0];
 
@@ -264,8 +277,8 @@ function scanProgress(state: DurableObjectState): ScanProgress | undefined {
 	const count = (table: string): number =>
 		state.storage.sql
 			.exec<{ count: number }>(
-				`SELECT count(*) AS count FROM ${table} WHERE cache = ?`,
-				DEFAULT_CACHE
+				`SELECT count(*) AS count FROM ${table} WHERE cache_id = ?`,
+				cache.id
 			)
 			.toArray()[0]?.count ?? 0;
 
@@ -277,8 +290,8 @@ function scanProgress(state: DurableObjectState): ScanProgress | undefined {
 }
 
 async function currentScanProgress(): Promise<ScanProgress | undefined> {
-	return runInDurableObject(currentServer(), (_instance, state) =>
-		scanProgress(state)
+	return runInDurableObject(currentServer(), (instance, state) =>
+		scanProgress(instance.context, state)
 	);
 }
 
@@ -296,7 +309,8 @@ async function driveScanTo(
 // Where the mark phase has reached in one path's references, with the number of
 // paths waiting behind it.
 async function referenceWalk(): Promise<unknown> {
-	return runInDurableObject(currentServer(), (_instance, state) => {
+	return runInDurableObject(currentServer(), (instance, state) => {
+		const cache = resolvedCache(instance.context);
 		const scan = state.storage.sql
 			.exec<{
 				phase: string;
@@ -307,16 +321,16 @@ async function referenceWalk(): Promise<unknown> {
 				        mark_store_path_hash AS markStorePathHash,
 				        reference_cursor AS referenceCursor
 				 FROM garbage_collection_scan
-				 WHERE cache = ?`,
-				DEFAULT_CACHE
+				 WHERE cache_id = ?`,
+				cache.id
 			)
 			.toArray()[0];
 		const frontier = state.storage.sql
 			.exec<{ count: number }>(
 				`SELECT count(*) AS count
 				 FROM garbage_collection_frontier
-				 WHERE cache = ?`,
-				DEFAULT_CACHE
+				 WHERE cache_id = ?`,
+				cache.id
 			)
 			.toArray()[0]?.count;
 
@@ -414,7 +428,7 @@ describe('garbage collection cap', () => {
 			currentServer(),
 			async (instance, state) => {
 				await underOneUnitOfWork(() => instance.runGarbageCollection());
-				const progress = scanProgress(state);
+				const progress = scanProgress(instance.context, state);
 				const refresh = {
 					families:
 						state.storage.sql
@@ -741,10 +755,12 @@ describe('garbage collection cap', () => {
 
 			await expect(
 				runInDurableObject(currentServer(), async (instance, state) => {
+					const cache = resolvedCache(instance.context);
+
 					state.storage.sql.exec(
-						'UPDATE narinfo SET references_json = ? WHERE cache = ? AND store_path_hash = ?',
+						'UPDATE narinfo SET references_json = ? WHERE cache_id = ? AND store_path_hash = ?',
 						stored,
-						DEFAULT_CACHE,
+						cache.id,
 						parent.storePathHash
 					);
 
@@ -855,8 +871,8 @@ describe('garbage collection identity columns', () => {
 			references: []
 		});
 
-		await pushPath(token, kept, 'builds');
-		await pushPath(token, collectable, 'builds');
+		await pushPath(token, kept, namedCache('builds'));
+		await pushPath(token, collectable, namedCache('builds'));
 		await authorisedFetch('/cache/builds/roots/channel', token, {
 			body: JSON.stringify({ targets: [kept.storePath] }),
 			headers: { 'content-type': 'application/json' },
@@ -949,9 +965,60 @@ describe('garbage collection identity columns', () => {
 				marks: [],
 				tenantRun: [],
 				revisions: [{ cache: '', cacheId: 1 }, builds],
-				cursor: [{ cache: '', cacheId: undefined }],
+				cursor: [],
 				stoppedCursor: [builds]
 			}
+		});
+	});
+
+	// A teardown keeps the cache's identity row, so a run row that still refers
+	// to the cache resolves and the pass moves on to the next cache.
+	it('advances a tenant-wide pass past a cache torn down between passes', async () => {
+		await useTestServer('gc-identity-torn-down');
+		const { token } = await bootstrap({
+			caches: [{ scope: namedCache('builds') }, { scope: namedCache('docs') }]
+		});
+		const markers = (): Promise<number> =>
+			runInDurableObject(currentServer(), async (_instance, state) => {
+				const entries = await state.storage.list({
+					prefix: teardownEntryPrefix,
+					limit: 1
+				});
+
+				return entries.size;
+			});
+
+		await authorisedFetch('/caches/builds?force=true', token, {
+			method: 'DELETE'
+		});
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => (await markers()) === 0,
+			3
+		);
+		// The run row a pass left pointing at `builds` before its teardown. The
+		// identities are numbered in creation order: the default cache, `builds`,
+		// `docs`.
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(garbageCollectionTenantRuns)
+				.values({
+					id: 1,
+					cache: cacheNameSchema.parse('builds'),
+					cacheId: cacheIdSchema.parse(2)
+				})
+				.run();
+		});
+
+		// The run continues on the alarm until every cache has been walked and
+		// the run row is removed.
+		const result = await runGcResult();
+		await drainContinuation();
+		const state = await collectionStateIdentities();
+
+		expect({ ok: result.ok, tenantRun: state.tenantRun }).toStrictEqual({
+			ok: true,
+			tenantRun: []
 		});
 	});
 });

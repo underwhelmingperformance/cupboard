@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
@@ -79,6 +80,10 @@ describe('OIDC federation', () => {
 
 	it('federates a CI token into a grant confined to its cache and root prefix', () =>
 		withFederation('cupboard-e2e-ci-', async ({ server, directory }) => {
+			const cache: CacheScope = {
+				kind: 'named',
+				name: cacheNameSchema.parse('owner-ci')
+			};
 			const adminToken = await server.ownerAdminToken();
 			const rpc = tenantRpc(server.tenantUrl, {
 				credential: adminToken
@@ -115,7 +120,7 @@ describe('OIDC federation', () => {
 					{
 						type: 'cupboard_cache',
 						actions: ['root:set'],
-						cache: { kind: 'named', name: 'owner-ci' },
+						cache,
 						root: 'github:owner/'
 					}
 				]
@@ -123,12 +128,16 @@ describe('OIDC federation', () => {
 
 			// Root activation gates on servability, so create the CI cache the rule
 			// names and push a real target into it first.
-			await rpc.caches.put({ cacheName: 'owner-ci', priority: 30 });
+			await rpc.caches.put.inNamedCache({
+				cacheName: cache.name,
+				access: 'public',
+				priority: 30
+			});
 			const source = await NixStore.host(path.join(directory, 'source-home'));
 			const target = await source.add(contentAddressedFixture);
 			await pushStorePaths(
 				{
-					client: server.pushClient(adminToken, { cache: 'owner-ci' }),
+					client: server.pushClient(adminToken, { cache }),
 					store: source
 				},
 				[target]
@@ -140,7 +149,7 @@ describe('OIDC federation', () => {
 				credential: ciToken
 			}).roots;
 			const permitted = await ciRoots.set.inNamedCache({
-				cacheName: 'owner-ci',
+				cacheName: cacheNameSchema.parse('owner-ci'),
 				name: 'github:owner/repo',
 				targets: [target]
 			});
@@ -148,7 +157,7 @@ describe('OIDC federation', () => {
 			let outsidePrefix: string;
 			try {
 				await ciRoots.set.inNamedCache({
-					cacheName: 'owner-ci',
+					cacheName: cacheNameSchema.parse('owner-ci'),
 					name: 'github:other/repo',
 					targets: [target]
 				});
@@ -181,11 +190,7 @@ describe('OIDC federation', () => {
 						type: 'cupboard_cache',
 						actions: ['upload:commit'],
 						resources: {
-							cache: {
-								kind: 'named',
-								exact: 'owner-ci',
-								validate: 'cacheName'
-							}
+							cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
 						}
 					}
 				]

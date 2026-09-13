@@ -239,7 +239,7 @@ export function substituterSection(options: {
 		'```',
 		// A substituter is matched by exact string, so the URL is rendered in its
 		// one canonical form.
-		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, releaseCacheName))}`,
+		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, { kind: 'named', name: releaseCacheName }))}`,
 		`extra-trusted-public-keys = ${options.publicKey}`,
 		'```'
 	].join('\n');

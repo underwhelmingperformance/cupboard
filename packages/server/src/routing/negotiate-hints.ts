@@ -1,7 +1,7 @@
 import {
+	type CacheScope,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
@@ -14,6 +14,7 @@ import { z } from 'zod';
 
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { isPushIdValid } from '../blob/push-id.ts';
+import { cacheIdentityCondition } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty } from '../do/bulk.ts';
 import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
@@ -45,7 +46,7 @@ export async function computeNegotiateHints(
 	request: Request,
 	env: Env,
 	tenant: TenantId,
-	cache: StoredCache | undefined
+	cache: CacheScope
 ): Promise<NegotiateHints | undefined> {
 	if (
 		parseAuthenticationHeader(
@@ -143,7 +144,7 @@ export function ownedBlobHintSelect(
 export function committedEdgeHintSelect(
 	database: HintDatabase,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	storePathHashes: JsonValueList<StorePathHash>
 ) {
 	return database
@@ -156,7 +157,11 @@ export function committedEdgeHintSelect(
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),
-				eq(d1Schema.blobReference.cache, cache),
+				cacheIdentityCondition(
+					d1Schema.blobReference.cacheKind,
+					d1Schema.blobReference.cacheName,
+					cache
+				),
 				inArray(d1Schema.blobReference.storePathHash, storePathHashes)
 			)
 		);
@@ -165,7 +170,7 @@ export function committedEdgeHintSelect(
 async function readHints(
 	database: HintDatabase,
 	tenant: TenantId,
-	cache: StoredCache | undefined,
+	cache: CacheScope,
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {
@@ -177,24 +182,19 @@ async function readHints(
 	const ownedQueries = jsonValueLists(narHashes).map((list) =>
 		ownedBlobHintSelect(database, tenant, list)
 	);
-	const edgeQueries =
-		cache === undefined
-			? []
-			: jsonValueLists(storePathHashes).map((list) =>
-					committedEdgeHintSelect(database, tenant, cache, list)
-				);
+	const edgeQueries = jsonValueLists(storePathHashes).map((list) =>
+		committedEdgeHintSelect(database, tenant, cache, list)
+	);
 
 	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
 		batchNonEmpty(database, blobStateQueries),
 		batchNonEmpty(database, ownedQueries),
-		cache === undefined
-			? Promise.resolve(undefined)
-			: batchNonEmpty(database, edgeQueries)
+		batchNonEmpty(database, edgeQueries)
 	]);
 
 	return {
 		blobStates: blobStatePages.flat(),
 		ownedNarHashes: ownedPages.flat().map((row) => row.narHash),
-		committedEdges: edgePages?.flat()
+		committedEdges: edgePages.flat()
 	};
 }

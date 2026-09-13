@@ -60,6 +60,9 @@ export const reuseViewAvailabilityChunkSize = chunkSizeFor(
  * within one, sent with bounded concurrency, and merged in request order. A
  * chunk the object refuses is returned as it is, so its status and retry
  * advice reach the client.
+ *
+ * Each chunk carries the request's credential: the object authenticates a
+ * read of a private reuse view itself.
  */
 export async function answerAvailabilityInChunks(
 	context: Context<WorkerHonoEnv>,
@@ -69,12 +72,17 @@ export async function answerAvailabilityInChunks(
 	const target = new URL(context.req.url);
 	target.pathname = context.get('tenantRest');
 	const object = tenantServer(context.env, context.get('tenant'));
+	const authorization = context.req.header('authorization');
+	const headers = {
+		'content-type': 'application/json',
+		...(authorization !== undefined && { authorization })
+	};
 
 	return mergeAvailabilityChunks(
 		(hashes) =>
 			object.fetch(target, {
 				body: JSON.stringify({ storePathHashes: hashes }),
-				headers: { 'content-type': 'application/json' },
+				headers,
 				method: 'POST'
 			}),
 		storePathHashes,

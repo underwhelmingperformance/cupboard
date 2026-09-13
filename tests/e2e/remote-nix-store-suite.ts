@@ -2234,7 +2234,7 @@ function attestationCupboard(
 		);
 		const pathInfos = await readCommittedAttestationPathInfos(paths, {
 			url: plan.server.tenantUrl,
-			cache: ''
+			cache: { kind: 'default' }
 		});
 		const results: ReporterResultEvent[] = [];
 		const reporter = {
