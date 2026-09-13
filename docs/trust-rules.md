@@ -210,6 +210,12 @@ the branch run through the reuse view, and their roots expire according to their
 TTL. All closed events skip planning and building. The caller must include
 `closed` in its `pull_request` trigger for the removal job to run.
 
+The workflow requests private access when `fallback_read_user` is set and public
+access otherwise. `cupboard github setup` makes the same choice for a new reuse
+view from its `--read-user` input. Supply consistent credentials to both. Setup
+reports an existing view with different access as drift and leaves it unchanged;
+`--if-absent` also leaves an existing cache's access and retention unchanged.
+
 A default root TTL lets roots expire even if a later writer supplies no TTL.
 Collection can then reclaim paths that have no other retention. An abandoned
 pull request does not have to run a deletion job for those paths to expire. The
