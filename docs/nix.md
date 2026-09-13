@@ -294,6 +294,10 @@ references its hash, for a public cache as for a private one. A NAR that two
 caches reference is served under both URLs, and the tenant's bare
 `/t/<tenant>/nar/<hash>.nar.zst` route serves what the default cache references.
 
+A reuse view can serve NARs referenced by any cache selected by its current
+definition whose access matches the view. The view's access determines whether
+the reader must authenticate.
+
 Publishing a NAR hash does not bypass cache authorisation. It does disclose that
 the path exists and identifies its contents to anyone holding a copy from
 elsewhere. The in-toto subject digest of a cupboard attestation is the NAR hash.
