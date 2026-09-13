@@ -190,6 +190,9 @@ concurrency:
 
 jobs:
   publish:
+    if:
+      ${{ github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.id == github.repository_id }}
     permissions:
       attestations: write
       contents: read
@@ -203,10 +206,23 @@ jobs:
 
 The preset derives the cache, root prefix, and TTL from the triggering event. A
 `pull_request` run publishes to `gh-<repository-id>-pr-<number>` with a 14-day
-root TTL. The PR trust rule permits publication, creation and deletion of that
-cache and management of its retention roots. The workflow does not yet call the
-create and remove commands automatically. [Creating and removing a cache from
-CI][ci-cache-lifecycle] describes how to call them from a run.
+root TTL. Before building, the plan job creates the cache with that default root
+TTL and the run's OIDC token. It requests private access when `read_user` is
+set, public access otherwise. Repeated runs keep the existing cache's
+properties, but setup refuses an access mismatch before publication. If the
+workflow changes from public to private publication, an administrator must
+change the existing cache's access before rerunning it. The PR trust rule
+permits publication, creation and deletion of that cache and management of its
+retention roots. The workflow does not yet remove closed pull requests' caches.
+Expired roots let collection reclaim unretained paths; the empty cache row
+remains until it is removed.
+
+The preset accepts only pull requests from the caller repository. A caller that
+accepts fork contributions can skip publication for those runs with
+`github.event.pull_request.head.repo.id == github.repository_id` on its job.
+
+[Creating and removing a cache from CI][ci-cache-lifecycle] describes the
+lifecycle commands and their grants.
 
 A run whose ref matches the configured `branch` uses the default cache,
 permanent retention under `github:<repository>/<branch>`, and the repository's

@@ -24,6 +24,10 @@ export function isRpcNotFoundError(
 	);
 }
 
+export function isRpcCacheAlreadyExistsError(error: unknown): boolean {
+	return error instanceof ORPCError && error.code === 'CACHE_ALREADY_EXISTS';
+}
+
 /**
  * Whether a prepare or commit failed because what it negotiated is no longer
  * there, so the server returns `NOT_FOUND`: the pending row expired and was
