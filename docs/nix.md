@@ -283,13 +283,22 @@ caches reference is served under both URLs, and the tenant's bare
 Publishing a NAR hash does not bypass cache authorisation. It does disclose that
 the path exists and identifies its contents to anyone holding a copy from
 elsewhere. The in-toto subject digest of a cupboard attestation is the NAR hash.
-A public transparency log exposes that digest to everyone, and a repository's
-attestation store exposes it to every reader of that repository. Both are
-append-only, so a published NAR hash cannot be withdrawn.
+Uploading the bundle to GitHub exposes its subjects to repository readers.
+GitHub supports deleting attestations, but deletion cannot retract copies
+readers already have.
+
+The `rekor-and-tsa` profile sends the signed statement to Rekor. Its public
+[DSSE entry][rekor-dsse-entry] records the signature, certificate and statement
+hash, without the full statement. Rekor also indexes the subject digests, so
+someone who knows a NAR hash can associate it with that entry. The log record
+cannot be deleted.
+
+[rekor-dsse-entry]:
+  https://github.com/sigstore/rekor/blob/main/pkg/types/dsse/v0.0.1/entry.go
 
 ### Attesting to a private cache
 
-`actions/attest` derives its defaults from the destination cache's visibility. A
+`actions/attest` derives its defaults from the destination cache's access. A
 private destination signs in the public-good trust domain with an RFC 3161
 timestamp and no transparency-log entry. It does not record the bundle in the
 repository's attestation store, and it signs a separate statement for each
@@ -299,8 +308,8 @@ in the repository's attestation store, and signs one statement for the whole
 run.
 
 Explicit inputs override these defaults and set the action's disclosure policy.
-Before signing, the action prints the services it will contact and every
-location where it will publish the complete bundle.
+Before signing, the action reports the services it may contact and where it may
+publish signature records or bundles.
 
 Verifying a bundle that carries no transparency-log entry requires
 `--tlog-threshold 0`; `cupboard attest verify --help` prints the complete
