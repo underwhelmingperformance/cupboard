@@ -34,7 +34,8 @@ import {
 	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
@@ -95,15 +96,13 @@ function indexedMetadata(index: number): ParsedUploadPathMetadata {
 async function commitScannedPaths(server: string): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	await withoutAlarmArming(async () => {
+		const { token } = await bootstrap();
 
-	for (let start = 0; start < committedPaths; start += pushConcurrency) {
-		await Promise.all(
-			Array.from({ length: pushConcurrency }, (_, offset) =>
-				pushPath(token, indexedMetadata(start + offset), 'builds')
-			)
-		);
-	}
+		for (let index = 0; index < committedPaths; index += 1) {
+			await pushPath(token, indexedMetadata(index), 'builds');
+		}
+	});
 }
 
 /**
@@ -288,12 +287,11 @@ describe('cron verification D1 statement allowance', () => {
 
 		// All rows are committed, so the pass can use the complete maintenance
 		// allowance for the scan: one statement to invalidate maintenance
-		// eligibility, one probe
-		// for each row of the page, and one to reconcile eligibility afterwards.
+		// eligibility, one probe for each row of the page, and one to reconcile
+		// eligibility afterwards.
 		// Every row is healthy, so the pass runs neither the committed reference
-		// edge query nor a repair. The bootstrap leaves two committed paths of its
-		// own beside the pushed ones, so the third pass scans 26 rows, reaches the
-		// end and wraps, which resets the cursor.
+		// edge query nor a repair. The third pass scans the remaining 24 rows,
+		// reaches the end and wraps, which resets the cursor.
 		expect({
 			pageSize: scanPageSize,
 			committedRows: driven.committedRows,
@@ -305,8 +303,8 @@ describe('cron verification D1 statement allowance', () => {
 			cursors: driven.passes.map((pass) => pass.cursor)
 		}).toStrictEqual({
 			pageSize: 38,
-			committedRows: committedPaths + 2,
-			passStatements: [40, 40, 28],
+			committedRows: committedPaths,
+			passStatements: [40, 40, 26],
 			overAllowancePasses: [],
 			statementAllowance: 50,
 			cursors: [
@@ -315,7 +313,7 @@ describe('cron verification D1 statement allowance', () => {
 				''
 			]
 		});
-	}, 240_000);
+	});
 });
 
 describe('verification claim D1 statement allowance', () => {
@@ -346,7 +344,7 @@ describe('verification claim D1 statement allowance', () => {
 			passRequests: [1, 1, 1, 0],
 			pendingRows: 0
 		});
-	}, 240_000);
+	});
 });
 
 // A queue batch at the consumer's claim ceiling. Applying every verdict in the

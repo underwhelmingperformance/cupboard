@@ -1,16 +1,21 @@
 import {
 	cacheNameSchema,
-	signingKeyGenerationSchema
+	narInfoGenerationSchema,
+	signingKeyGenerationSchema,
+	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, ne, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { firstCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	cachePurgeContinuations,
@@ -42,13 +47,16 @@ import {
 	negotiateUploads,
 	pushPath,
 	resetTestServer,
+	seedCanonicalBlob,
 	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
+import { chunk, maxBoundParameters } from './bulk.ts';
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import { verifyBackstopKey } from './commit-pipeline-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -103,18 +111,94 @@ function indexedMetadata(index: number): ParsedUploadPathMetadata {
 	});
 }
 
-async function publishCommittedPaths(server: string): Promise<void> {
+async function seedCommittedPaths(server: string): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
-
-	for (let start = 0; start < committedPaths; start += pushConcurrency) {
-		await Promise.all(
-			Array.from({ length: pushConcurrency }, (_, offset) =>
-				pushPath(token, indexedMetadata(start + offset), 'builds')
-			)
+	await withoutAlarmArming(async () => {
+		const { token } = await bootstrap();
+		const registered = await authorisedFetch('/caches/builds', token, {
+			body: JSON.stringify({ priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		expect(registered.status).toBe(StatusCodes.OK);
+		const paths = Array.from({ length: committedPaths }, (_, index) =>
+			indexedMetadata(index)
 		);
-	}
+		const first = indexedMetadata(0);
+		await seedCanonicalBlob({
+			narBytes,
+			narHash: first.narHash,
+			narSize: first.narSize,
+			fileHash: first.fileHash
+		});
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const cache = storedCacheSchema.parse(buildsCache);
+			const now = isoTimestamp(new Date());
+			const generation = narInfoGenerationSchema.parse(1);
+			const narInfoRow = (path: ParsedUploadPathMetadata) => ({
+				cache,
+				storePathHash: path.storePathHash,
+				storePath: path.storePath,
+				narHash: path.narHash,
+				narSize: path.narSize,
+				referencesJson: '[]',
+				generation,
+				createdAt: now
+			});
+			const referenceRow = (path: ParsedUploadPathMetadata) => ({
+				tenant: fixtureTenant,
+				cache,
+				storePathHash: path.storePathHash,
+				generation,
+				narHash: path.narHash,
+				cacheGeneration: firstCacheGeneration
+			});
+			const parametersPerRow = Math.max(
+				instance.context.db.insert(narInfos).values(narInfoRow(first)).toSQL()
+					.params.length,
+				instance.context.d1
+					.insert(d1Schema.blobReference)
+					.values(referenceRow(first))
+					.toSQL().params.length
+			);
+			const rowsPerBatch = Math.max(
+				1,
+				Math.floor(maxBoundParameters / parametersPerRow)
+			);
+
+			for (const batch of chunk(paths, rowsPerBatch)) {
+				instance.context.db
+					.insert(narInfos)
+					.values(batch.map((path) => narInfoRow(path)))
+					.run();
+				await instance.context.d1
+					.insert(d1Schema.blobReference)
+					.values(batch.map((path) => referenceRow(path)))
+					.run();
+			}
+
+			await instance.context.d1
+				.insert(d1Schema.tenantBlob)
+				.values({
+					tenant: fixtureTenant,
+					narHash: first.narHash,
+					fileSize: first.fileSize
+				})
+				.run();
+			await instance.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					bytes: first.fileSize,
+					narinfos: committedPaths,
+					blobs: 1,
+					updatedAt: now
+				})
+				.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+				.run();
+		});
+	});
 }
 
 /**
@@ -133,62 +217,63 @@ async function driveAlarms(
 	readonly collectionPending: unknown;
 	readonly queuedDeletions: number;
 }> {
-	await publishCommittedPaths(server);
+	await seedCommittedPaths(server);
 
 	const counting = countingD1(env.CUPBOARD_DB);
 
-	return runInDurableObject(currentServer(), async (instance, state) => {
-		const real = instance.context.d1;
+	return withoutAlarmArming(() =>
+		runInDurableObject(currentServer(), async (instance, state) => {
+			const real = instance.context.d1;
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
-		});
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
+			});
 
-		await instance.runCacheTeardown(buildsCache, origin);
-		await state.storage.put(gcContinuationKey, [
-			{ scope: 'tenant', collectLimit }
-		]);
+			await instance.runCacheTeardown(buildsCache, origin);
+			await state.storage.put(gcContinuationKey, [
+				{ scope: 'tenant', collectLimit }
+			]);
 
-		const teardownKey = `${teardownEntryPrefix}${buildsCache}`;
-		const queueDepth = (): number =>
-			drizzle(state.storage, { schema: { narInfoDeletions } })
-				.select({ storePathHash: narInfoDeletions.storePathHash })
-				.from(narInfoDeletions)
-				.all().length;
+			const teardownKey = `${teardownEntryPrefix}${buildsCache}`;
+			const queueDepth = (): number =>
+				drizzle(state.storage, { schema: { narInfoDeletions } })
+					.select({ storePathHash: narInfoDeletions.storePathHash })
+					.from(narInfoDeletions)
+					.all().length;
 
-		const alarms = await measureInvocations(state, counting, {
-			attempts: maxAlarms,
-			// Filling the cache runs alarms of its own, which leave the maintenance
-			// pass cursor wherever they finished. This fixture asserts which pass
-			// each alarm runs, so start the rotation from the first pass.
-			prepare: () => state.storage.delete(maintenancePassCursorKey),
-			isDue: async () =>
-				(await state.storage.get(teardownKey)) !== undefined ||
-				(await state.storage.get(gcContinuationKey)) !== undefined,
-			run: async () => {
-				const queuedDeletions = queueDepth();
-				await instance.alarm();
+			const alarms = await measureInvocations(state, counting, {
+				attempts: maxAlarms,
+				// Start the pass rotation from the first pass so this fixture can
+				// assert which pass each explicitly driven alarm runs.
+				prepare: () => state.storage.delete(maintenancePassCursorKey),
+				isDue: async () =>
+					(await state.storage.get(teardownKey)) !== undefined ||
+					(await state.storage.get(gcContinuationKey)) !== undefined,
+				run: async () => {
+					const queuedDeletions = queueDepth();
+					await instance.alarm();
 
-				return {
-					pass: await currentMaintenancePass(state),
-					queuedDeletions
-				};
-			}
-		});
+					return {
+						pass: await currentMaintenancePass(state),
+						queuedDeletions
+					};
+				}
+			});
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: real
-		});
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: real
+			});
 
-		return {
-			alarms,
-			teardownPending: await state.storage.get(teardownKey),
-			collectionPending: await state.storage.get(gcContinuationKey),
-			queuedDeletions: queueDepth()
-		};
-	});
+			return {
+				alarms,
+				teardownPending: await state.storage.get(teardownKey),
+				collectionPending: await state.storage.get(gcContinuationKey),
+				queuedDeletions: queueDepth()
+			};
+		})
+	);
 }
 
 describe('alarm D1 statement allowance', () => {
@@ -232,7 +317,7 @@ describe('alarm D1 statement allowance', () => {
 			collectionPending: undefined,
 			queuedDeletions: 0
 		});
-	}, 240_000);
+	});
 
 	it('finishes both the teardown backlog and the collection continuation across successive alarms', async () => {
 		const driven = await driveAlarms('alarm-allowance-fairness', 12);
@@ -254,7 +339,7 @@ describe('alarm D1 statement allowance', () => {
 			collectionPending: undefined,
 			queuedDeletions: 0
 		});
-	}, 240_000);
+	});
 });
 
 // More queued reconcile targets than one pass can probe within its statement
