@@ -15,13 +15,16 @@ import { tenantProbesFor } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-import { readCohortTargets, readCredentials } from './plan-cohort.ts';
+import { readCohortTargets } from './plan-cohort.ts';
+import { readCredentials } from './read-credentials.ts';
 
 export interface PlanReprobeOptions {
 	readonly targetsFile: string;
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
+	readonly viewReadUser?: ReadUser;
+	readonly viewReadPassword?: string;
 }
 
 export interface PlanReprobeRunOptions {
@@ -60,15 +63,25 @@ export function registerPlanReprobeCommand(
 			parseReadUser
 		)
 		.option('--read-password <password>', 'password for private cache reads')
+		.option(
+			'--view-read-user <user>',
+			'username for private reuse-view reads',
+			parseReadUser
+		)
+		.option(
+			'--view-read-password <password>',
+			'password for private reuse-view reads'
+		)
 		.action(
 			async (
 				url: URL,
 				cacheName: string | undefined,
 				options: PlanReprobeOptions
 			) => {
+				const credentials = readCredentials(options);
+				const viewCredentials = readCredentials(options, 'view');
 				const reporter = commandUi(program, programOptions).reporter();
 				const targets = await readCohortTargets(options.targetsFile);
-				const credentials = readCredentials(options);
 				const urlTarget = cacheTargetFromUrl(url);
 				const target =
 					cacheName === undefined
@@ -80,7 +93,8 @@ export function registerPlanReprobeCommand(
 						baseUrl: target.tenantUrl,
 						cache: target.cache,
 						...(options.reuseView !== undefined && { view: options.reuseView }),
-						...(credentials !== undefined && { credentials })
+						...(credentials !== undefined && { credentials }),
+						...(viewCredentials !== undefined && { viewCredentials })
 					})
 				});
 			}

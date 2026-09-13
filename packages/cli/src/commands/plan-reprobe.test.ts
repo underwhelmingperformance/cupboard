@@ -12,10 +12,7 @@ import type { Reporter, ResultPayload } from '@cupboard/reporter';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import {
-	InvalidCohortTargetsFileError,
-	ReadCredentialPairError
-} from '../errors.ts';
+import { InvalidCohortTargetsFileError } from '../errors.ts';
 import type { DestinationProbes } from '../plan/availability-partition.ts';
 import type { CohortTarget } from '../plan/cohort-target.ts';
 
@@ -162,6 +159,58 @@ const tenantUrl = 'https://cache.example.workers.dev/t/acme';
 
 describe('plan reprobe command', () => {
 	it.each([
+		{
+			flag: '--read-user',
+			value: 'reader',
+			pair: '--read-user and --read-password'
+		},
+		{
+			flag: '--read-password',
+			value: 'synthetic-secret',
+			pair: '--read-user and --read-password'
+		},
+		{
+			flag: '--view-read-user',
+			value: 'reader',
+			pair: '--view-read-user and --view-read-password'
+		},
+		{
+			flag: '--view-read-password',
+			value: 'synthetic-secret',
+			pair: '--view-read-user and --view-read-password'
+		}
+	])(
+		'rejects an incomplete $flag pair before reading targets',
+		async ({ flag, value, pair }) => {
+			const directory = mkdtempSync(
+				path.join(tmpdir(), 'cupboard-plan-credentials-')
+			);
+
+			try {
+				await expect(
+					silentProgram().parseAsync(
+						[
+							'plan',
+							'reprobe',
+							'https://cache.example.workers.dev/t/acme',
+							'--targets-file',
+							path.join(directory, 'missing.json'),
+							flag,
+							value
+						],
+						{ from: 'user' }
+					)
+				).rejects.toMatchObject({
+					name: 'ReadCredentialPairError',
+					message: `${pair} must be supplied together`
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it.each([
 		['is not JSON', 'not json'],
 		[
 			'does not match the cohort targets schema',
@@ -198,39 +247,4 @@ describe('plan reprobe command', () => {
 			}
 		}
 	);
-
-	it('refuses a read user supplied without its password', async () => {
-		const directory = mkdtempSync(
-			path.join(tmpdir(), 'cupboard-plan-reprobe-')
-		);
-		const targetsFile = path.join(directory, 'targets.json');
-
-		try {
-			await writeFile(
-				targetsFile,
-				JSON.stringify({
-					targets: [
-						{
-							attr: appTarget.attr,
-							installable: appTarget.installable,
-							expectedPath: appTarget.expectedPath,
-							root: appTarget.root
-						}
-					]
-				})
-			);
-
-			const error = await runReprobeCommand([
-				tenantUrl,
-				'--targets-file',
-				targetsFile,
-				'--read-user',
-				'reader'
-			]);
-
-			expect(error).toBeInstanceOf(ReadCredentialPairError);
-		} finally {
-			rmSync(directory, { recursive: true, force: true });
-		}
-	});
 });

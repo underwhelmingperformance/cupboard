@@ -905,6 +905,58 @@ function silentProgram(): Command {
 }
 
 describe('plan cohort command', () => {
+	it.each([
+		{
+			flag: '--read-user',
+			value: 'reader',
+			pair: '--read-user and --read-password'
+		},
+		{
+			flag: '--read-password',
+			value: 'synthetic-secret',
+			pair: '--read-user and --read-password'
+		},
+		{
+			flag: '--view-read-user',
+			value: 'reader',
+			pair: '--view-read-user and --view-read-password'
+		},
+		{
+			flag: '--view-read-password',
+			value: 'synthetic-secret',
+			pair: '--view-read-user and --view-read-password'
+		}
+	])(
+		'rejects an incomplete $flag pair before reading targets',
+		async ({ flag, value, pair }) => {
+			const directory = mkdtempSync(
+				path.join(tmpdir(), 'cupboard-plan-credentials-')
+			);
+
+			try {
+				await expect(
+					silentProgram().parseAsync(
+						[
+							'plan',
+							'cohort',
+							'https://cache.example.workers.dev/t/acme',
+							'--targets-file',
+							path.join(directory, 'missing.json'),
+							flag,
+							value
+						],
+						{ from: 'user' }
+					)
+				).rejects.toMatchObject({
+					name: 'ReadCredentialPairError',
+					message: `${pair} must be supplied together`
+				});
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
 	it('rejects a --store URI that names no ssh-ng destination before authenticating', async () => {
 		let error: unknown;
 

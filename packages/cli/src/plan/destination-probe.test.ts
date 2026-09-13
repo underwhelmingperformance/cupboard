@@ -7,7 +7,7 @@ import { readUserSchema } from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
-import { attestedServedPaths } from './destination-probe.ts';
+import { attestedServedPaths, tenantProbesFor } from './destination-probe.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const baseUrl = new URL('https://cupboard.example.test/t/owner');
@@ -218,4 +218,73 @@ describe('attestedServedPaths', () => {
 			status
 		});
 	});
+});
+
+describe('tenantProbesFor read credentials', () => {
+	it.each([
+		{ name: 'separate view credentials', viewPassword: 'view-secret' },
+		{ name: 'the shared credential fallback', viewPassword: undefined }
+	])(
+		'uses $name without changing destination reads',
+		async ({ viewPassword }) => {
+			const requests: ProbeRequest[] = [];
+			const destination = {
+				user: readUserSchema.parse('reader'),
+				password: 'cache-secret'
+			};
+			const probes = tenantProbesFor({
+				baseUrl,
+				cache: { kind: 'named', name: cacheNameSchema.parse('builds') },
+				view: 'reuse',
+				credentials: destination,
+				...(viewPassword !== undefined && {
+					viewCredentials: {
+						user: readUserSchema.parse('view-reader'),
+						password: viewPassword
+					}
+				}),
+				fetcher: (input, init) => {
+					const url = requestUrl(input);
+					const authorization = new Headers(init?.headers).get('authorization');
+					requests.push({
+						url,
+						...(authorization !== null && { authorization })
+					});
+					return Promise.resolve(
+						url.includes('/attestations/')
+							? attestationList()
+							: Response.json({ missingStorePathHashes: [] })
+					);
+				}
+			});
+			const destinationPaths = await probes.destinationServed([appPath]);
+			const viewPaths = await probes.viewServed([appPath]);
+			const attestedPaths = await probes.attestedServed([appPath]);
+
+			expect({
+				destination: [...destinationPaths],
+				view: [...viewPaths],
+				attested: [...attestedPaths],
+				requests
+			}).toStrictEqual({
+				destination: [appPath],
+				view: [appPath],
+				attested: [appPath],
+				requests: [
+					{
+						url: `${baseUrl.href}/cache/builds/api/v1/missing-paths`,
+						authorization: `Basic ${btoa('reader:cache-secret')}`
+					},
+					{
+						url: `${baseUrl.href}/reuse/reuse/api/v1/missing-paths`,
+						authorization: `Basic ${btoa(`${viewPassword === undefined ? 'reader' : 'view-reader'}:${viewPassword ?? 'cache-secret'}`)}`
+					},
+					{
+						url: `${baseUrl.href}/cache/builds/attestations/${appHash}`,
+						authorization: `Basic ${btoa('reader:cache-secret')}`
+					}
+				]
+			});
+		}
+	);
 });
