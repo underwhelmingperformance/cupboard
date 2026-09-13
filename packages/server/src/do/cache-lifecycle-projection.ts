@@ -1,6 +1,5 @@
 import {
 	type CacheAccessMode,
-	cacheAccessModeSchema,
 	type CacheGeneration,
 	type CacheScope,
 	firstCacheGeneration,
@@ -10,7 +9,7 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
+import { cacheScopeFromRow } from '../db/cache.ts';
 import { firstCacheReadRevision } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -90,7 +89,7 @@ export async function projectLocalCacheLifecycles(
 		.filter((row) => row.deletedAt === null)
 		.map((row) => ({
 			scope: cacheScopeFromRow(row),
-			access: cacheAccessModeSchema.parse(row.access)
+			access: row.access
 		}));
 	const projected = await readCacheLifecycles(
 		context,
@@ -110,7 +109,6 @@ export async function projectLocalCacheLifecycles(
 	// JSON list values cannot be null. Cache names are non-empty, so an empty
 	// string can represent the default cache and is restored to null in SQL.
 	const listed = projecting.map((cache) => ({
-		legacyCache: legacyCacheKey(cache.scope, cache.access),
 		cacheKind: cache.scope.kind,
 		cacheName: cache.scope.kind === 'named' ? cache.scope.name : '',
 		access: cache.access
@@ -122,7 +120,6 @@ export async function projectLocalCacheLifecycles(
 			.select(
 				rows.insertSource([
 					sql`${tenant}`,
-					rows.column('legacyCache'),
 					rows.column('cacheKind'),
 					sql`nullif(${rows.column('cacheName')}, '')`,
 					rows.column('access'),

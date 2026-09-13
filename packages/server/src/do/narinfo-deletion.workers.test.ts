@@ -1,6 +1,5 @@
 import {
 	type CacheScope,
-	DEFAULT_CACHE,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -17,7 +16,6 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
@@ -95,14 +93,12 @@ async function seedQueuedDeletions(
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 		const cache = resolvedCache(instance.context);
 
-		// Each row binds six parameters. Keep the insert below the driver's
-		// bound-parameter limit.
+		// Each row binds five parameters; sixteen rows stay below maxBoundParameters.
 		for (const batch of chunk(entries, 16)) {
 			database
 				.insert(narInfoDeletions)
 				.values(
 					batch.map((entry) => ({
-						cache: legacyCacheKey(cache.scope, cache.access),
 						cacheId: cache.id,
 						storePathHash: entry.storePathHash,
 						narHash: entry.narHash,
@@ -156,20 +152,12 @@ describe('narinfo deletion queue', () => {
 					.insert(narInfoDeletions)
 					.values([
 						{
-							cache: legacyCacheKey(
-								defaultResolved.scope,
-								defaultResolved.access
-							),
 							cacheId: defaultResolved.id,
 							storePathHash: hash,
 							narHash,
 							createdAt
 						},
 						{
-							cache: legacyCacheKey(
-								buildsResolved.scope,
-								buildsResolved.access
-							),
 							cacheId: buildsResolved.id,
 							storePathHash: hash,
 							narHash,
@@ -251,7 +239,6 @@ describe('narinfo deletion queue', () => {
 
 		expect(rows).toStrictEqual([
 			{
-				cache: DEFAULT_CACHE,
 				cacheId: 1,
 				storePathHash: entry.storePathHash,
 				narHash: replacement,

@@ -483,7 +483,12 @@ export class TokenExchangeService {
 			if (refreshToken !== undefined) {
 				transaction
 					.insert(schema.refreshTokenFamilies)
-					.values(refreshToken.family)
+					.values({
+						...refreshToken.family,
+						grantsJson: this.grantSpelling.authorizationDetailsForWrite(
+							refreshToken.family.grantsJson
+						)
+					})
 					.run();
 				transaction
 					.insert(schema.refreshTokenMembers)
@@ -611,7 +616,9 @@ export class TokenExchangeService {
 				.set({
 					activeMemberId: successor.family.activeMemberId,
 					generation: successor.family.generation,
-					grantsJson: successor.family.grantsJson
+					grantsJson: this.grantSpelling.authorizationDetailsForWrite(
+						successor.family.grantsJson
+					)
 				})
 				.where(
 					and(

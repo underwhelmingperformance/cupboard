@@ -7,7 +7,7 @@ import type { CacheRootRetention } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { legacyCacheKey, type ResolvedCache } from '../db/cache.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 
 import { type SchemaWriter, type ServerContext } from './context.ts';
@@ -61,14 +61,11 @@ export class RetentionService {
 		}[],
 		writer: SchemaWriter
 	): void {
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
-
 		for (const rows of jsonRowLists(entries)) {
 			writer
 				.insert(schema.retentionGrace)
 				.select(
 					rows.insertSource([
-						sql`${legacyCache}`,
 						sql`${cache.id}`,
 						rows.column('storePathHash'),
 						rows.column('retainUntil')
@@ -76,7 +73,7 @@ export class RetentionService {
 				)
 				.onConflictDoUpdate({
 					target: [
-						schema.retentionGrace.cache,
+						schema.retentionGrace.cacheId,
 						schema.retentionGrace.storePathHash
 					],
 					set: {

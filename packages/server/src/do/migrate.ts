@@ -451,6 +451,21 @@ function applyMigration<TSchema extends Record<string, unknown>>(
 	});
 }
 
+// The journal index of the migration with this tag. A caller names a migration
+// rather than a position, because positions move as migrations are added.
+function migrationIndexOf(bundle: MigrationBundle, tag: string): number {
+	const entry = bundle.journal.entries.find((item) => item.tag === tag);
+
+	if (entry === undefined) {
+		throw new DurableObjectMigrationJournalError(
+			tag,
+			'this build carries no migration with that tag'
+		);
+	}
+
+	return entry.idx;
+}
+
 /**
  * Brings a Durable Object's SQLite schema up to the bundled migrations, after
  * {@link admitMigrationSource} has accepted the store's recorded history.
@@ -460,11 +475,21 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  * edit to that migration is refused. Each migration still to run executes in
  * its own transaction and records the digest it was applied from, so a later
  * build can tell what this store actually ran.
+ *
+ * `stopBefore` names a migration to leave unapplied, along with everything
+ * after it, for a caller with work to do before that migration can run.
+ * Admission still sees the whole bundle, so a store already past that migration
+ * is admitted rather than refused for holding rows this run would not reach.
  */
 export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,
-	bundle: MigrationBundle
+	bundle: MigrationBundle,
+	options: { readonly stopBefore?: string } = {}
 ): Promise<void> {
+	const throughIndex =
+		options.stopBefore === undefined
+			? Number.MAX_SAFE_INTEGER
+			: migrationIndexOf(bundle, options.stopBefore) - 1;
 	const digests = await digestsOf(bundle);
 	const rows = admit(database, bundle, digests);
 	const entries = bundle.journal.entries.toSorted((a, b) => a.idx - b.idx);
@@ -483,6 +508,10 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	}
 
 	for (const entry of entries.slice(rows.length)) {
+		if (entry.idx > throughIndex) {
+			return;
+		}
+
 		applyMigration(
 			database,
 			entry,

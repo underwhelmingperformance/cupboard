@@ -1,5 +1,6 @@
 import {
 	type DeploymentPhaseName,
+	deploymentPhaseNameSchema,
 	deploymentPhaseRowId,
 	deploymentPhaseSchema,
 	type LocalStep,
@@ -172,8 +173,11 @@ export async function readDeploymentPhase(
 }
 
 /**
- * Records the phase the deployment has reached. Rerunning it with the same
- * phase rewrites the row with a later timestamp and changes nothing else.
+ * Records the phase the deployment has reached.
+ *
+ * The timestamp says when the deployment entered the phase, so rerunning the
+ * deploy in the same phase leaves it unchanged. A rerun cannot lower a phase
+ * that an earlier run already completed.
  */
 export async function recordDeploymentPhase(
 	api: PhaseApi,
@@ -182,12 +186,17 @@ export async function recordDeploymentPhase(
 	requiredLocalStep: LocalStep,
 	now: Date
 ): Promise<void> {
+	const phases = deploymentPhaseNameSchema.options;
+	const storedRank = `CASE deployment_phase.phase ${phases.map((name, index) => `WHEN ${quote(name)} THEN ${String(index)}`).join(' ')} ELSE ${String(phases.length)} END`;
 	await api.queryBatch(databaseId, [
 		`INSERT INTO deployment_phase (id, phase, required_local_step, updated_at) ` +
 			`VALUES (${quote(deploymentPhaseRowId)}, ${quote(phase)}, ${String(requiredLocalStep)}, ${quote(isoTimestamp(now))}) ` +
 			`ON CONFLICT (id) DO UPDATE SET phase = excluded.phase, ` +
 			`required_local_step = excluded.required_local_step, ` +
-			`updated_at = excluded.updated_at;`
+			`updated_at = CASE WHEN deployment_phase.phase = excluded.phase ` +
+			`AND deployment_phase.required_local_step = excluded.required_local_step ` +
+			`THEN deployment_phase.updated_at ELSE excluded.updated_at END ` +
+			`WHERE ${storedRank} <= ${String(phases.indexOf(phase))};`
 	]);
 }
 

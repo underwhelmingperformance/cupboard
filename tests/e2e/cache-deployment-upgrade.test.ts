@@ -1,13 +1,17 @@
 import {
+	contractionMigrations,
 	currentLocalStep,
+	expansionLocalStep,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
 
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
 	type LocalStepReadiness,
 	type PhaseApi,
+	recordDeploymentPhase,
 	recordPhaseWhenTenantsReady
 } from '../../packages/cli/src/deploy/phase.ts';
 import { LocalStepUnreachedError } from '../../packages/cli/src/errors.ts';
@@ -46,7 +50,9 @@ async function deployOverPredecessor(
 	await applyD1Migrations(
 		phaseApi(server),
 		stagedDeploymentDatabaseId,
-		server.artifact.d1Migrations
+		server.artifact.d1Migrations.filter(
+			(migration) => !contractionMigrations.includes(migration.name)
+		)
 	);
 	await server.deployCurrent();
 }
@@ -57,9 +63,30 @@ function recordPhase(
 	return recordPhaseWhenTenantsReady(
 		phaseApi(server),
 		stagedDeploymentDatabaseId,
+		'native-reads',
+		expansionLocalStep,
+		new Date()
+	);
+}
+
+async function contractOverPredecessor(
+	server: StagedDeploymentServer,
+	now = new Date()
+): Promise<void> {
+	await recordPhase(server);
+	await applyD1Migrations(
+		phaseApi(server),
+		stagedDeploymentDatabaseId,
+		server.artifact.d1Migrations.filter((migration) =>
+			contractionMigrations.includes(migration.name)
+		)
+	);
+	await recordDeploymentPhase(
+		phaseApi(server),
+		stagedDeploymentDatabaseId,
 		settledDeploymentPhase,
 		currentLocalStep,
-		new Date()
+		now
 	);
 }
 
@@ -105,13 +132,15 @@ it('upgrades a populated predecessor deployment', async () => {
 		const client = await server.deploymentClient();
 		const wake = await client.wakeLocalStep(wakeLimit);
 
-		await recordPhase(server);
+		await contractOverPredecessor(server);
+		const contractionWake = await client.wakeLocalStep(wakeLimit);
 
 		const recorded = await client.phase();
 
 		expect({
 			refused,
 			wake,
+			contractionWake,
 			status: await client.localStepStatus(),
 			phase: recorded.phase?.name,
 			terminal: await server.terminalSnapshot()
@@ -123,7 +152,18 @@ it('upgrades a populated predecessor deployment', async () => {
 			wake: {
 				current: currentLocalStep,
 				woken: activeFixtureTenants,
-				failed: 0
+				failed: 0,
+				outcomes: ['upgrade-active', ...sleepingFixtureTenants].map(
+					(tenant) => ({ tenant, kind: 'recorded', step: expansionLocalStep })
+				)
+			},
+			contractionWake: {
+				current: currentLocalStep,
+				woken: activeFixtureTenants,
+				failed: 0,
+				outcomes: ['upgrade-active', ...sleepingFixtureTenants].map(
+					(tenant) => ({ tenant, kind: 'recorded', step: currentLocalStep })
+				)
 			},
 			status: {
 				current: currentLocalStep,
@@ -157,6 +197,8 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 		// since the deploy, so none has recorded a step.
 		const before = await client.localStepStatus();
 
+		await client.wakeLocalStep(wakeLimit);
+		await contractOverPredecessor(server);
 		await client.wakeLocalStep(wakeLimit);
 
 		// Each sleeping tenant stopped at a different migration under the
@@ -194,21 +236,33 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 		const first = await server.deploymentClient();
 
 		await first.wakeLocalStep(wakeLimit);
-		await recordPhase(server);
+		await contractOverPredecessor(server, new Date('2026-01-01T00:00:00.000Z'));
+		await first.wakeLocalStep(wakeLimit);
+		const initial = await first.phase();
 
 		// A rerun repeats every step against the state the first run left.
 		await server.restart();
 		await deployOverPredecessor(server);
-		await recordPhase(server);
+		await contractOverPredecessor(server, new Date('2026-01-02T00:00:00.000Z'));
 
 		const client = await server.deploymentClient();
 		const recorded = await client.phase();
 
 		expect({
-			phase: recorded.phase?.name,
+			initial: initial.phase,
+			repeated: recorded.phase,
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			phase: settledDeploymentPhase,
+			initial: {
+				name: settledDeploymentPhase,
+				requiredLocalStep: currentLocalStep,
+				updatedAt: '2026-01-01T00:00:00.000Z'
+			},
+			repeated: {
+				name: settledDeploymentPhase,
+				requiredLocalStep: currentLocalStep,
+				updatedAt: '2026-01-01T00:00:00.000Z'
+			},
 			terminal: {
 				lastD1Migration: server.finalD1Migration,
 				phase: settledDeploymentPhase,
@@ -230,6 +284,8 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 
 		const client = await server.deploymentClient();
 
+		await client.wakeLocalStep(wakeLimit);
+		await contractOverPredecessor(server);
 		await client.wakeLocalStep(wakeLimit);
 
 		// The predecessor seeded retention policies for the default cache and
@@ -289,6 +345,48 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					graceManaged: true
 				}
 			]
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
+// An offboarding tenant takes no traffic of its own and nothing wakes it during
+// a deploy, so it can reach this release with its cache catalogue still
+// unconverted. Its object has to convert and contract when it next runs, or the
+// offboard drain would fail for good and the tenant could never be finalised.
+it('starts an offboarding tenant that never converted its catalogue', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+
+		// The wake covers only active tenants, so it leaves this one behind.
+		await client.wakeLocalStep(wakeLimit);
+		await contractOverPredecessor(server);
+		await client.wakeLocalStep(wakeLimit);
+
+		await server.announceTenant('upgrade-offboarding');
+
+		// Admission starts the object before refusing the read, so a request for a
+		// tenant that no longer serves reads is still enough to make the object
+		// migrate.
+		const response = await server.dispatch(
+			'/t/upgrade-offboarding/nix-cache-info'
+		);
+
+		// Recording the catalogue version is the last thing the object's start-up
+		// does, so reading it back proves every migration applied, the contraction
+		// among them.
+		expect({
+			read: response.status,
+			catalogueVersion: await server.catalogueVersion('upgrade-offboarding')
+		}).toStrictEqual({
+			read: StatusCodes.NOT_FOUND,
+			catalogueVersion: 2
 		});
 	} finally {
 		await server.stop();
