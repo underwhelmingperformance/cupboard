@@ -1,16 +1,22 @@
 import {
 	cacheNameSchema,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	storedCacheSchema,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { firstCacheGeneration } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import * as schema from '../db/schema.ts';
 import {
 	attestationListObjectKey,
 	narInfoObjectKey,
@@ -35,7 +41,7 @@ import {
 	tenantUsageRow,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
@@ -222,44 +228,101 @@ describe('cache teardown', () => {
 
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
-		const { token } = await bootstrap();
 
-		// Enough paths that the presence delete spans several parameter sub-chunks.
-		// Each path must carry a distinct narHash so the IN list does not collapse
-		// to a single value; verifiableNar produces self-consistent compressed bytes
-		// whose decompressed content actually hashes to the declared narHash.
+		// Distinct NAR hashes prevent the presence delete from collapsing to one row.
+		const pathCount = 95;
 		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
-		const nars = await Promise.all(
-			Array.from({ length: 95 }, (_, index) => verifiableNar(String(index)))
-		);
-		const paths = nars.map((nar, index) => {
+		const paths = Array.from({ length: pathCount }, (_, index) => {
 			const suffix =
 				alphabet.charAt(Math.floor(index / 32)) + alphabet.charAt(index % 32);
+			const narHash = nixSha256HashSchema.parse(
+				`sha256:0${'0'.repeat(49)}${suffix}`
+			);
 
 			return uploadMetadata({
-				fileSize: nar.narBytes.byteLength,
+				fileSize: 1,
 				storePathHash: `${'0'.repeat(30)}${suffix}`,
 				name: `path-${suffix}`,
-				narHash: nar.narHash,
-				fileHash: nar.fileHash,
-				narSize: nar.narSize
+				narHash,
+				fileHash: narHash,
+				narSize: 1
 			});
 		});
 
-		const pathsWithNars = paths.map((p, index) => [p, nars[index]] as const);
-
-		const pushConcurrency = 8;
-		for (
-			let start = 0;
-			start < pathsWithNars.length;
-			start += pushConcurrency
-		) {
-			await Promise.all(
-				pathsWithNars
-					.slice(start, start + pushConcurrency)
-					.map(([metadata, nar]) => pushPath(token, metadata, 'builds', nar))
+		const { token } = await withoutAlarmArming(async () => {
+			const initial = await bootstrap();
+			const registered = await authorisedFetch(
+				'/caches/builds',
+				initial.token,
+				{
+					body: JSON.stringify({ priority: 30 }),
+					headers: { 'content-type': 'application/json' },
+					method: 'PUT'
+				}
 			);
-		}
+			expect(registered.status).toBe(StatusCodes.OK);
+
+			await runInDurableObject(currentServer(), async (instance) => {
+				const now = isoTimestamp(new Date());
+				const cache = storedCacheSchema.parse(buildsCache);
+				const generation = narInfoGenerationSchema.parse(0);
+
+				for (let offset = 0; offset < paths.length; offset += 10) {
+					const batch = paths.slice(offset, offset + 10);
+					instance.context.db
+						.insert(schema.narInfos)
+						.values(
+							batch.map((path) => ({
+								cache,
+								storePathHash: path.storePathHash,
+								storePath: path.storePath,
+								narHash: path.narHash,
+								narSize: path.narSize,
+								referencesJson: '[]',
+								generation,
+								createdAt: now
+							}))
+						)
+						.run();
+					await instance.context.d1
+						.insert(d1Schema.blobReference)
+						.values(
+							batch.map((path) => ({
+								tenant: fixtureTenant,
+								cache,
+								storePathHash: path.storePathHash,
+								generation,
+								narHash: path.narHash,
+								cacheGeneration: firstCacheGeneration
+							}))
+						)
+						.run();
+					await instance.context.d1
+						.insert(d1Schema.tenantBlob)
+						.values(
+							batch.map((path) => ({
+								tenant: fixtureTenant,
+								narHash: path.narHash,
+								fileSize: path.fileSize
+							}))
+						)
+						.run();
+				}
+
+				await instance.context.d1
+					.update(d1Schema.tenantUsage)
+					.set({
+						bytes: pathCount,
+						narinfos: pathCount,
+						blobs: pathCount,
+						updatedAt: now
+					})
+					.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+					.run();
+			});
+
+			return initial;
+		});
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
 			method: 'DELETE'
@@ -295,7 +358,7 @@ describe('cache teardown', () => {
 			presence: [],
 			usage: { bytes: 0, narinfos: 0, blobs: 0 }
 		});
-	}, 120_000);
+	});
 
 	it('clears only the generations a chunk actually retired', async () => {
 		await useTestServer('teardown-generations');
