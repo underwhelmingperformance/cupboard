@@ -3,6 +3,7 @@ import {
 	expansionLocalStep,
 	type ParsedDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import type { ResultRow } from '@cupboard/reporter';
 
 import { UnclassifiedD1MigrationError } from '../errors.ts';
@@ -10,12 +11,18 @@ import { UnclassifiedD1MigrationError } from '../errors.ts';
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import { type D1Migration, unclassifiedD1Migrations } from './migrations.ts';
+import { withWorkersInvocationAllowance } from './overrides.ts';
 import type { LocalStepReadiness } from './phase.ts';
 import {
 	parseTenantReadinessCount,
 	readDeploymentPhase,
 	readLocalStepReadiness
 } from './phase.ts';
+import {
+	type WorkersAllowanceSource,
+	workersAllowanceSourceText,
+	type WorkersPlanOverride
+} from './workers-plan.ts';
 
 export type DeploymentObservation =
 	| { readonly kind: 'offline' }
@@ -32,6 +39,7 @@ The reviewed artifact and migration stages that one deployment executes.
 export interface DeploymentPlan {
 	readonly artifact: DeploymentArtifact;
 	readonly transition: 'cache-identity-v1';
+	readonly allowanceSource: WorkersAllowanceSource;
 	readonly observation: DeploymentObservation;
 	readonly preparation: readonly D1Migration[];
 	readonly contraction: readonly D1Migration[];
@@ -39,7 +47,8 @@ export interface DeploymentPlan {
 
 export function planDeployment(
 	artifact: DeploymentArtifact,
-	observation: DeploymentObservation
+	observation: DeploymentObservation,
+	allowanceSource?: WorkersAllowanceSource
 ): DeploymentPlan {
 	const unclassified = unclassifiedD1Migrations(artifact.d1Migrations);
 	if (unclassified.length > 0) {
@@ -49,6 +58,7 @@ export function planDeployment(
 	return {
 		artifact,
 		transition: 'cache-identity-v1',
+		allowanceSource: allowanceSource ?? { kind: 'configuration' },
 		observation,
 		preparation: artifact.d1Migrations.filter(
 			(migration) => !contractionMigrations.includes(migration.name)
@@ -63,6 +73,10 @@ export function transitionPlanRows(plan: DeploymentPlan): ResultRow[] {
 	const observed = plan.observation;
 	return [
 		{ label: 'Storage transition', value: plan.transition },
+		{
+			label: 'Subrequest allowance source',
+			value: workersAllowanceSourceText(plan.allowanceSource)
+		},
 		{
 			label: 'Current phase',
 			value:
@@ -155,4 +169,23 @@ export async function observeDeployment(
 			)
 		}
 	};
+}
+
+export function planOfflineDeployment(
+	artifact: DeploymentArtifact,
+	override?: WorkersPlanOverride
+): DeploymentPlan {
+	return planDeployment(
+		{
+			...artifact,
+			config: withWorkersInvocationAllowance(
+				artifact.config,
+				workersInvocationAllowances[override ?? 'free']
+			)
+		},
+		{ kind: 'offline' },
+		override === undefined
+			? { kind: 'offline' }
+			: { kind: 'override', plan: override }
+	);
 }

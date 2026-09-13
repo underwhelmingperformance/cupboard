@@ -17,6 +17,3 @@ export const workersInvocationAllowances = {
 export type WorkersPlanTier = keyof typeof workersInvocationAllowances;
 
 export const subrequestSafetyReserve = 100;
-
-export const freeTierD1StatementsPerInvocation = 50;
-export const paidTierD1StatementsPerInvocation = 1000;

@@ -50,7 +50,7 @@ const tenantSource = `{
 }`;
 
 describe('parseDeploymentConfig', () => {
-	it('limits production maintenance batches to one D1-budgeted operation', async () => {
+	it('limits production maintenance batches to one subrequest-budgeted operation', async () => {
 		const productionControlSource = await readFile(
 			new URL('../../../server/wrangler.jsonc', import.meta.url),
 			'utf8'

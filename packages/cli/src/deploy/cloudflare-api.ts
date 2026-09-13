@@ -34,6 +34,28 @@ export interface AccountSummary {
 	readonly name: string;
 }
 
+/**
+ * An account product subscription. Read `rate_plan.id` as a string because
+ * the SDK's zone-plan union does not cover account product subscriptions.
+ */
+export interface AccountSubscription {
+	readonly state: string | undefined;
+	readonly ratePlanId: string | undefined;
+}
+
+/**
+ * The result of subscription lookup. An empty list and a failed lookup must
+ * remain distinct so deployment can explain why it selected an allowance.
+ */
+export type AccountSubscriptions =
+	| {
+			readonly kind: 'listed';
+			readonly subscriptions: readonly AccountSubscription[];
+	  }
+	| { readonly kind: 'unreadable' }
+	| { readonly kind: 'unavailable' }
+	| { readonly kind: 'unparsed' };
+
 export interface QueueConsumerSettings {
 	readonly maxBatchSize: number | undefined;
 	readonly maxBatchTimeout: number | undefined;
@@ -126,6 +148,13 @@ export interface WorkerLogEvent {
  */
 export interface CloudflareApi {
 	listAccounts(): Promise<AccountSummary[]>;
+
+	/**
+	 * Lists account subscriptions for plan detection. Lookup failures produce a
+	 * typed result; request cancellation propagates. Pass the run's signal so
+	 * the SDK can distinguish cancellation from other request failures.
+	 */
+	listAccountSubscriptions(signal?: AbortSignal): Promise<AccountSubscriptions>;
 
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
@@ -285,6 +314,24 @@ const liveConsumerSchema = z.object({
 		})
 		.optional()
 });
+
+const liveSubscriptionSchema = z.object({
+	state: z.string().optional(),
+	rate_plan: z.object({ id: z.string().optional() }).loose().optional()
+});
+
+/**
+ * Whether Cloudflare rejected the request with an authentication or
+ * authorisation error.
+ */
+function isTokenRefusal(error: unknown): boolean {
+	return (
+		error instanceof Cloudflare.APIError &&
+		(error.status === StatusCodes.FORBIDDEN ||
+			error.status === StatusCodes.UNAUTHORIZED)
+	);
+}
+
 const defaultQueueBatchSize = 10;
 const defaultQueueBatchWaitMilliseconds = 5000;
 const defaultQueueRetries = 3;
@@ -413,6 +460,40 @@ export function createCloudflareApi(
 				id: cloudflareAccountIdSchema.parse(item.id),
 				name: item.name
 			}));
+		},
+
+		async listAccountSubscriptions(signal) {
+			let listed: unknown[];
+
+			try {
+				listed = await filterCloudflareItems(
+					client.accounts.subscriptions.get(account, {
+						...(signal !== undefined && { signal })
+					}),
+					() => true,
+					'Cloudflare account subscription list'
+				);
+			} catch (error) {
+				if (error instanceof Cloudflare.APIUserAbortError) {
+					throw error;
+				}
+
+				return isTokenRefusal(error)
+					? { kind: 'unreadable' as const }
+					: { kind: 'unavailable' as const };
+			}
+
+			const parsed = z.array(liveSubscriptionSchema).safeParse(listed);
+
+			return parsed.success
+				? {
+						kind: 'listed' as const,
+						subscriptions: parsed.data.map((subscription) => ({
+							state: subscription.state,
+							ratePlanId: subscription.rate_plan?.id
+						}))
+					}
+				: { kind: 'unparsed' as const };
 		},
 
 		r2BucketExists: isBucketPresent,
