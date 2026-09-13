@@ -182,6 +182,93 @@ export class CacheAdminService {
 		return cache;
 	}
 
+	private async tearDownCacheInSection(
+		cache: ResolvedCache,
+		origin: RequestOrigin
+	): Promise<void> {
+		if (this.context.cacheRepository.resolve(cache.scope)?.id !== cache.id) {
+			throw new CacheNotFoundError(cache.scope);
+		}
+
+		await this.deletionQueue.revokeCacheGenerationAndClearCredential(cache);
+
+		const now = isoTimestamp(new Date());
+
+		const pending = this.context.db
+			.select({
+				r2Key: schema.pendingUploads.r2Key,
+				narHash: schema.pendingUploads.narHash
+			})
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.cacheId, cache.id))
+			.all();
+		const pendingAttestations = this.context.db
+			.select({ r2Key: schema.pendingAttestations.r2Key })
+			.from(schema.pendingAttestations)
+			.where(eq(schema.pendingAttestations.cacheId, cache.id))
+			.all();
+
+		await deleteObjects(
+			this.context.env.BLOBS,
+			pending
+				.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
+				.map((upload) => upload.r2Key)
+		);
+		await deleteObjects(
+			this.context.env.BLOBS,
+			pendingAttestations.map((upload) => upload.r2Key)
+		);
+
+		// Remove every narinfo row in the same transaction that queues its
+		// retirement. A later recommit creates a new generation that the queued
+		// deletion cannot remove.
+		this.context.db.transaction((tx) => {
+			tx.run(
+				sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
+						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
+						FROM narinfo WHERE cache_id = ${cache.id}
+						ON CONFLICT (cache_id, store_path_hash, generation)
+						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
+			);
+			tx.delete(schema.narInfos)
+				.where(eq(schema.narInfos.cacheId, cache.id))
+				.run();
+			tx.delete(schema.verificationCursor)
+				.where(eq(schema.verificationCursor.cacheId, cache.id))
+				.run();
+			tx.delete(schema.retentionRootTargets)
+				.where(eq(schema.retentionRootTargets.cacheId, cache.id))
+				.run();
+			tx.delete(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.cacheId, cache.id))
+				.run();
+			// Deleting the cache is the only transition out of grace-managed state;
+			// released paths receive no grace deadline.
+			tx.delete(schema.retentionGrace)
+				.where(eq(schema.retentionGrace.cacheId, cache.id))
+				.run();
+			tx.update(schema.cacheIdentities)
+				.set({ deletedAt: now })
+				.where(eq(schema.cacheIdentities.id, cache.id))
+				.run();
+			// A policy scoped to the cache would match nothing once the cache is
+			// gone, and its `cache_id` would refer to a deleted identity.
+			tx.delete(schema.legacyRetentionPolicies)
+				.where(eq(schema.legacyRetentionPolicies.cacheId, cache.id))
+				.run();
+			// Remove in-flight uploads so a later commit cannot recreate the cache.
+			tx.delete(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.cacheId, cache.id))
+				.run();
+			tx.delete(schema.pendingAttestations)
+				.where(eq(schema.pendingAttestations.cacheId, cache.id))
+				.run();
+		});
+
+		await this.context.ctx.storage.put(this.teardownKey(cache), origin);
+		await this.context.ctx.storage.setAlarm(Date.now());
+	}
+
 	cacheInfoBody(scope: CacheScope): string {
 		const cache = this.context.cacheRepository.require(scope);
 		const row = this.context.db
@@ -448,25 +535,25 @@ export class CacheAdminService {
 		origin: RequestOrigin
 	): Promise<CacheRemoveResponse> {
 		const scope: CacheScope = { kind: 'named', name };
-		const cache = this.context.cacheRepository.resolve(scope);
-		const committedCount =
-			cache === undefined ? 0 : this.cacheStorePathCount(cache);
+		return this.context.criticalSection(async () => {
+			const cache = this.context.cacheRepository.resolve(scope);
+			const committedCount =
+				cache === undefined ? 0 : this.cacheStorePathCount(cache);
 
-		if (!shouldForce && committedCount > 0) {
-			throw new CacheNotEmptyError(scope);
-		}
+			if (!shouldForce && committedCount > 0) {
+				throw new CacheNotEmptyError(scope);
+			}
 
-		if (cache !== undefined) {
-			await this.tearDownCache(cache, origin);
-		}
+			if (cache !== undefined) {
+				await this.tearDownCacheInSection(cache, origin);
+			}
 
-		// Report the number removed from the registry, even when object and edge
-		// cleanup continues across later alarms.
-		return {
-			scope,
-			removed: cache !== undefined,
-			storePathsRemoved: committedCount
-		};
+			return {
+				scope,
+				removed: cache !== undefined,
+				storePathsRemoved: committedCount
+			};
+		});
 	}
 
 	cacheStorePathCount(cache: ResolvedCache): number {
@@ -561,103 +648,26 @@ export class CacheAdminService {
 	}
 
 	/**
-	 * Deletes a cache by revoking its read authority and removing its local state
-	 * atomically. Bounded alarm passes run by {@link resumeTeardownPass} retire the
-	 * published state.
+	 * Revokes a cache's read authority, then removes its local state. Bounded
+	 * alarm passes run by {@link resumeTeardownPass} retire published state.
 	 *
-	 * Revocation advances the cache generation and records the deletion in one D1
-	 * statement, independently of the number of reference edges. The local
-	 * transaction starts after this statement succeeds. Read queries then exclude
-	 * earlier generations while cleanup continues.
+	 * Revocation advances the generation, records deletion and clears the cache
+	 * credential in one D1 transaction. Reads then exclude earlier generations
+	 * while cleanup continues.
 	 *
-	 * The request runs one D1 statement regardless of the number of committed
-	 * paths. It always writes the teardown marker because the first pass must also
-	 * sweep for edges left by an interrupted earlier deletion.
+	 * The normal path runs two D1 statements in one batch, independently of the
+	 * number of committed paths. A missing lifecycle row needs an additional
+	 * lookup and insert batch. The teardown marker also starts the sweep for
+	 * edges left by an interrupted earlier deletion.
 	 *
 	 * The deletion queue is durable, so garbage collection can resume it after a
 	 * crash before the alarm marker is written. The blob reaper later collects
 	 * unreferenced canonical objects.
 	 */
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
-		return this.context.criticalSection(async () => {
-			await this.deletionQueue.revokeCacheGeneration(cache);
-
-			const now = isoTimestamp(new Date());
-
-			const pending = this.context.db
-				.select({
-					r2Key: schema.pendingUploads.r2Key,
-					narHash: schema.pendingUploads.narHash
-				})
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.cacheId, cache.id))
-				.all();
-			const pendingAttestations = this.context.db
-				.select({ r2Key: schema.pendingAttestations.r2Key })
-				.from(schema.pendingAttestations)
-				.where(eq(schema.pendingAttestations.cacheId, cache.id))
-				.all();
-
-			await deleteObjects(
-				this.context.env.BLOBS,
-				pending
-					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-					.map((upload) => upload.r2Key)
-			);
-			await deleteObjects(
-				this.context.env.BLOBS,
-				pendingAttestations.map((upload) => upload.r2Key)
-			);
-
-			// Remove every narinfo row in the same transaction that queues its
-			// retirement. A later recommit creates a new generation that the queued
-			// deletion cannot remove.
-			this.context.db.transaction((tx) => {
-				tx.run(
-					sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
-						FROM narinfo WHERE cache_id = ${cache.id}
-						ON CONFLICT (cache_id, store_path_hash, generation)
-						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
-				);
-				tx.delete(schema.narInfos)
-					.where(eq(schema.narInfos.cacheId, cache.id))
-					.run();
-				tx.delete(schema.verificationCursor)
-					.where(eq(schema.verificationCursor.cacheId, cache.id))
-					.run();
-				tx.delete(schema.retentionRootTargets)
-					.where(eq(schema.retentionRootTargets.cacheId, cache.id))
-					.run();
-				tx.delete(schema.retentionRoots)
-					.where(eq(schema.retentionRoots.cacheId, cache.id))
-					.run();
-				// Deleting the cache is the only transition out of grace-managed state;
-				// released paths receive no grace deadline.
-				tx.delete(schema.retentionGrace)
-					.where(eq(schema.retentionGrace.cacheId, cache.id))
-					.run();
-				tx.update(schema.cacheIdentities)
-					.set({ deletedAt: now })
-					.where(eq(schema.cacheIdentities.id, cache.id))
-					.run();
-				// A policy scoped to the cache would match nothing once the cache is
-				// gone, and its `cache_id` would refer to a deleted identity.
-				tx.delete(schema.legacyRetentionPolicies)
-					.where(eq(schema.legacyRetentionPolicies.cacheId, cache.id))
-					.run();
-				// Remove in-flight uploads so a later commit cannot recreate the cache.
-				tx.delete(schema.pendingUploads)
-					.where(eq(schema.pendingUploads.cacheId, cache.id))
-					.run();
-				tx.delete(schema.pendingAttestations)
-					.where(eq(schema.pendingAttestations.cacheId, cache.id))
-					.run();
-			});
-
-			await this.context.ctx.storage.put(this.teardownKey(cache), origin);
-			await this.context.ctx.storage.setAlarm(Date.now());
-		});
+		return this.context.criticalSection(() =>
+			this.tearDownCacheInSection(cache, origin)
+		);
 	}
 
 	// Retire one more chunk from an alarm. The caller re-arms the alarm while any

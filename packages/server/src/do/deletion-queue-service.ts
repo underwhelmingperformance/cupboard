@@ -8,7 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
-import { and, eq, exists, inArray, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, isNull, notExists, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
@@ -27,6 +27,7 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { CacheNotFoundError } from '../errors.ts';
 import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
 
 import {
@@ -1015,11 +1016,25 @@ export class DeletionQueueService {
 	 * Cache key, so a response the deleted cache produced is not served to a
 	 * reader of the next cache of this name.
 	 */
-	async revokeCacheGeneration(cache: ResolvedCache): Promise<void> {
+	async revokeCacheGenerationAndClearCredential(
+		cache: ResolvedCache
+	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 		const { scope, access } = cache;
-		const revoked = await this.context.d1
+		const credential = and(
+			eq(d1Schema.tenantCacheReadCredential.tenant, tenant),
+			cacheIdentityCondition(
+				d1Schema.tenantCacheReadCredential.cacheKind,
+				d1Schema.tenantCacheReadCredential.cacheName,
+				scope
+			),
+			sql`changes() > 0`
+		);
+		const credentialDeleteStatement = this.context.d1
+			.delete(d1Schema.tenantCacheReadCredential)
+			.where(credential);
+		const update = this.context.d1
 			.update(d1Schema.cacheLifecycle)
 			.set({
 				access,
@@ -1028,22 +1043,53 @@ export class DeletionQueueService {
 				deletedAt: now,
 				updatedAt: now
 			})
-			.where(cacheLifecycleFilter(tenant, scope))
-			.run();
+			.where(
+				and(
+					cacheLifecycleFilter(tenant, scope),
+					eq(d1Schema.cacheLifecycle.generation, cache.generation),
+					isNull(d1Schema.cacheLifecycle.deletedAt)
+				)
+			);
+		const [revoked] = await this.context.d1.batch([
+			update,
+			credentialDeleteStatement
+		]);
 
 		if (revoked.meta.changes > 0) {
 			return;
 		}
 
-		await this.context.d1.insert(d1Schema.cacheLifecycle).values({
-			tenant,
-			...cacheIdentityColumns(scope),
-			access,
-			generation: secondCacheGeneration,
-			readRevision: secondCacheReadRevision,
-			deletedAt: now,
-			updatedAt: now
-		});
+		const lifecycle = await this.context.d1
+			.select({ deletedAt: d1Schema.cacheLifecycle.deletedAt })
+			.from(d1Schema.cacheLifecycle)
+			.where(cacheLifecycleFilter(tenant, scope))
+			.get();
+		if (lifecycle !== undefined) {
+			if (lifecycle.deletedAt !== null) {
+				return;
+			}
+			throw new CacheNotFoundError(scope);
+		}
+
+		const insert = this.context.d1
+			.insert(d1Schema.cacheLifecycle)
+			.values({
+				tenant,
+				...cacheIdentityColumns(scope),
+				access,
+				generation: secondCacheGeneration,
+				readRevision: secondCacheReadRevision,
+				deletedAt: now,
+				updatedAt: now
+			})
+			.onConflictDoNothing();
+		const [inserted] = await this.context.d1.batch([
+			insert,
+			credentialDeleteStatement
+		]);
+		if (inserted.meta.changes === 0) {
+			throw new CacheNotFoundError(scope);
+		}
 	}
 
 	/**

@@ -211,6 +211,13 @@
 			"when": 1788789969518,
 			"tag": "0029_cache_grant_contract",
 			"breakpoints": true
+		},
+		{
+			"idx": 30,
+			"version": "6",
+			"when": 1788801075143,
+			"tag": "0030_cache_credential_lifecycle",
+			"breakpoints": true
 		}
 	]
 }
