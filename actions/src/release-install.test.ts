@@ -1139,7 +1139,9 @@ describe('publishReleaseArchive', () => {
 		).rejects.toMatchObject({ code: 'ENOENT' });
 	});
 
-	it('recovers an orphan reaper while reclaiming an expired lease', async () => {
+	it('recovers an orphan reaper while reclaiming an expired lease', async ({
+		signal
+	}) => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
 		);
@@ -1166,7 +1168,8 @@ describe('publishReleaseArchive', () => {
 		});
 
 		await publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
-			signal: AbortSignal.timeout(1000)
+			processIdentity: () => Promise.resolve('replacement process start'),
+			signal
 		});
 		const stateEntries = await readdir(stateDirectory);
 
