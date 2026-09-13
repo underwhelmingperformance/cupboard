@@ -1,5 +1,4 @@
 import {
-	cacheNameSchema,
 	narInfoGenerationSchema,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
@@ -12,7 +11,7 @@ import { type SQLiteColumn, type SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { cacheIdSchema, legacyCacheKey } from '../db/cache.ts';
+import { cacheIdSchema } from '../db/cache.ts';
 import {
 	garbageCollectionFrontier,
 	garbageCollectionMarks,
@@ -70,7 +69,6 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 	await runInDurableObject(currentServer(), (instance, state) => {
 		const cache = resolvedCache(instance.context);
 		const rows = Array.from({ length: count }, (_unused, index) => ({
-			cache: legacyCacheKey(cache.scope, cache.access),
 			cacheId: cache.id,
 			storePathHash: syntheticStorePathHash(index),
 			narHash: syntheticNarHash(index),
@@ -79,9 +77,9 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 		}));
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
-		// Each row binds six parameters, so the insert is chunked under the
-		// driver's bound-parameter limit.
-		for (const batch of chunk(rows, 16)) {
+		// Each row binds five parameters; eighteen rows stay below the driver's
+		// bound-parameter limit.
+		for (const batch of chunk(rows, 18)) {
 			database.insert(narInfoDeletions).values(batch).run();
 		}
 	});
@@ -211,12 +209,10 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 
 	await runInDurableObject(currentServer(), (instance) => {
 		const cache = resolvedCache(instance.context);
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		instance.context.db
 			.insert(retentionRoots)
 			.values({
-				cache: legacyCache,
 				cacheId: cache.id,
 				name,
 				expiresAt,
@@ -227,7 +223,6 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 		instance.context.db
 			.insert(retentionRootTargets)
 			.values({
-				cache: legacyCache,
 				cacheId: cache.id,
 				rootName: name,
 				storePathHash: target.storePathHash,
@@ -818,27 +813,26 @@ describe('garbage collection narinfo-deletion continuation', () => {
  * cursor. A cache-keyed table is read in cache order.
  */
 interface CollectionStateIdentities {
-	readonly scans: { cache: string; cacheId: number | undefined }[];
-	readonly frontier: { cache: string; cacheId: number | undefined }[];
-	readonly marks: { cache: string; cacheId: number | undefined }[];
-	readonly tenantRun: { cache: string; cacheId: number | undefined }[];
-	readonly revisions: { cache: string; cacheId: number | undefined }[];
-	readonly cursor: { cache: string; cacheId: number | undefined }[];
+	readonly scans: { cacheId: number }[];
+	readonly frontier: { cacheId: number }[];
+	readonly marks: { cacheId: number }[];
+	readonly tenantRun: { cacheId: number }[];
+	readonly revisions: { cacheId: number }[];
+	readonly cursor: { cacheId: number }[];
 }
 
 async function collectionStateIdentities(): Promise<CollectionStateIdentities> {
 	return runInDurableObject(currentServer(), (instance) => {
 		const read = (
-			table: SQLiteTable & { cache: SQLiteColumn; cacheId: SQLiteColumn }
-		): { cache: string; cacheId: number | undefined }[] =>
+			table: SQLiteTable & { cacheId: SQLiteColumn }
+		): { cacheId: number }[] =>
 			instance.context.db
-				.select({ cache: table.cache, cacheId: table.cacheId })
+				.select({ cacheId: table.cacheId })
 				.from(table)
-				.orderBy(table.cache)
+				.orderBy(table.cacheId)
 				.all()
 				.map((row) => ({
-					cache: String(row.cache),
-					cacheId: row.cacheId === null ? undefined : Number(row.cacheId)
+					cacheId: Number(row.cacheId)
 				}));
 
 		return {
@@ -888,7 +882,7 @@ describe('garbage collection identity columns', () => {
 				const rows = await collectionStateIdentities();
 
 				return (
-					rows.scans.some((scan) => scan.cache === 'builds') &&
+					rows.scans.some((scan) => scan.cacheId === 2) &&
 					rows.frontier.length === 1
 				);
 			},
@@ -930,7 +924,7 @@ describe('garbage collection identity columns', () => {
 			}
 		}
 
-		const builds = { cache: 'builds', cacheId: 2 };
+		const builds = { cacheId: 2 };
 
 		expect({
 			seeded: { ...seeded, revisions: undefined, cursor: undefined },
@@ -964,7 +958,7 @@ describe('garbage collection identity columns', () => {
 				frontier: [],
 				marks: [],
 				tenantRun: [],
-				revisions: [{ cache: '', cacheId: 1 }, builds],
+				revisions: [{ cacheId: 1 }, builds],
 				cursor: [],
 				stoppedCursor: [builds]
 			}
@@ -1004,7 +998,6 @@ describe('garbage collection identity columns', () => {
 				.insert(garbageCollectionTenantRuns)
 				.values({
 					id: 1,
-					cache: cacheNameSchema.parse('builds'),
 					cacheId: cacheIdSchema.parse(2)
 				})
 				.run();

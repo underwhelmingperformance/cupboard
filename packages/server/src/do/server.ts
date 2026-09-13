@@ -410,6 +410,9 @@ class CountingSemaphore {
 	}
 }
 
+// The migration whose assertions require every cache to record its access.
+const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
+
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Put the invocation's D1 allowance, Durable Object row budget and subrequest
 	// slice on every method the runtime can dispatch to: a request, an alarm, an
@@ -1533,16 +1536,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		// Every migration this build includes runs before application reads.
-		// Admission compares the complete journal with the recorded history.
-		const migration = await applyMigrations(this.context.db, migrations, {
+		// Cache access comes from this tenant's D1 catalogue, which a SQLite
+		// migration cannot read. Reconcile it before the contraction assertions.
+		// Both calls need the whole bundle so admission can verify an object
+		// that already applied migrations beyond the stopping point.
+		const expansion = await applyMigrations(this.context.db, migrations, {
+			stopBefore: cacheAccessContractMigration,
 			budget: migrationBudget
 		});
 
-		if (migration.kind === 'pending') {
+		if (expansion.kind === 'pending') {
 			throw new LocalSchemaMigrationPendingError(
-				migration.migration,
-				migration.stage
+				expansion.migration,
+				expansion.stage
 			);
 		}
 		await this.assertZstdAvailable();
@@ -1565,6 +1571,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				throw new CacheCatalogueMigrationPendingError();
 			}
 		}
+
+		const contraction = await applyMigrations(this.context.db, migrations, {
+			budget: migrationBudget
+		});
+
+		if (contraction.kind === 'pending') {
+			throw new LocalSchemaMigrationPendingError(
+				contraction.migration,
+				contraction.stage
+			);
+		}
+		this.context.grantsContracted =
+			this.context.db
+				.select({ complete: schema.grantContraction.complete })
+				.from(schema.grantContraction)
+				.get()?.complete ?? false;
 
 		if (!isCatalogueComplete) {
 			await markCacheCatalogueComplete(this.context, tenant);
@@ -2211,6 +2233,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			) {
 				return serverHttpErrorResponse(error);
 			}
+
 			throw error;
 		}
 
@@ -2265,7 +2288,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		try {
 			await this.initialise();
 		} catch (error) {
-			if (!(error instanceof LocalSchemaMigrationPendingError)) {
+			if (
+				!(error instanceof LocalSchemaMigrationPendingError) &&
+				!(error instanceof CacheCatalogueMigrationPendingError)
+			) {
 				throw error;
 			}
 
@@ -2556,16 +2582,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Applies any pending migrations and records the step this object has
-	 * reached in its tenant row. This is the only path that records the step;
-	 * serving traffic does not. Reports an unconfigured object or unfinished
-	 * work without advancing the recorded step.
+	 * Runs the work this build's steps require, applying any pending migrations
+	 * first, and records the step this object has reached in its tenant row.
+	 * This is the only path that records the step; serving traffic does not.
+	 * Reports `unconfigured` when the control plane has not configured this
+	 * object, which then has no tenant row to update, and `incomplete` when the
+	 * step's work did not fit one invocation.
 	 */
 	async reportLocalStep(): Promise<LocalStepOutcome> {
 		try {
 			await this.initialise();
 		} catch (error) {
-			if (error instanceof CacheCatalogueMigrationPendingError) {
+			if (
+				error instanceof CacheCatalogueMigrationPendingError ||
+				error instanceof LocalSchemaMigrationPendingError
+			) {
 				return { kind: 'incomplete', projected: 0 };
 			}
 

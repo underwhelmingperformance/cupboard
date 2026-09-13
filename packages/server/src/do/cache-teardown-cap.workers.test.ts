@@ -252,7 +252,7 @@ describe('cache teardown', () => {
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
 
-		// Distinct NAR hashes prevent the presence delete from collapsing to one row.
+		// Ninety-five distinct hashes span several 45-row retirement chunks.
 		const pathCount = 95;
 		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 		const paths = Array.from({ length: pathCount }, (_, index) => {
@@ -276,35 +276,16 @@ describe('cache teardown', () => {
 			const initial = await bootstrap({
 				caches: [{ scope: buildsCache }, { scope: otherCache }]
 			});
-
 			await runInDurableObject(currentServer(), async (instance) => {
+				const cache = instance.context.cacheRepository.require(buildsCache);
 				const now = isoTimestamp(new Date());
-				const cache = instance.context.db
-					.select({
-						id: schema.cacheIdentities.id,
-						generation: schema.cacheIdentities.generation
-					})
-					.from(schema.cacheIdentities)
-					.where(
-						cacheIdentityCondition(
-							schema.cacheIdentities.kind,
-							schema.cacheIdentities.name,
-							buildsCache
-						)
-					)
-					.get();
-				if (cache === undefined) {
-					throw new Error('Missing builds cache');
-				}
 				const generation = narInfoGenerationSchema.parse(0);
-
-				for (let offset = 0; offset < paths.length; offset += 8) {
-					const batch = paths.slice(offset, offset + 8);
+				for (let offset = 0; offset < paths.length; offset += 10) {
+					const batch = paths.slice(offset, offset + 10);
 					instance.context.db
 						.insert(schema.narInfos)
 						.values(
 							batch.map((path) => ({
-								cache: buildsCache.name,
 								cacheId: cache.id,
 								storePathHash: path.storePathHash,
 								storePath: path.storePath,
@@ -321,7 +302,6 @@ describe('cache teardown', () => {
 						.values(
 							batch.map((path) => ({
 								tenant: fixtureTenant,
-								cache: buildsCache.name,
 								cacheKind: 'named' as const,
 								cacheName: buildsCache.name,
 								storePathHash: path.storePathHash,

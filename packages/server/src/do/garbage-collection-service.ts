@@ -1,7 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import {
 	type RootName,
-	type StoredCache,
 	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema
@@ -21,11 +20,7 @@ import {
 	sql
 } from 'drizzle-orm';
 
-import {
-	type CacheId,
-	legacyCacheKey,
-	type ResolvedCache
-} from '../db/cache.ts';
+import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredReferencesInvalidError,
@@ -138,14 +133,6 @@ const maxOrphanReclaim = 1000;
 // staging namespace; later passes and the lifecycle rule provide recovery.
 export const maxOrphanListPages = maxOutgoingConnections;
 
-// The legacy stored name of the cache a pass is sweeping. Every scan table
-// still keys its rows by that name, so a row cannot be written from the id
-// alone. A pass carries its resolved cache and derives the name here, rather
-// than reading the identity again for each statement.
-function legacyCacheOf(cache: ResolvedCache): StoredCache {
-	return legacyCacheKey(cache.scope, cache.access);
-}
-
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
@@ -154,38 +141,23 @@ export class GarbageCollectionService {
 	) {}
 
 	private currentRevision(cache: ResolvedCache): number {
-		// The revision triggers key their row by the legacy `cache` column alone
-		// and leave `cache_id` null, so a scan that matched on the id would read
-		// no row and see revision zero through every mutation.
-		const legacyCache = legacyCacheOf(cache);
 		const stored = this.context.db
 			.select({
 				revision: schema.garbageCollectionRevisions.revision,
 				cacheId: schema.garbageCollectionRevisions.cacheId
 			})
 			.from(schema.garbageCollectionRevisions)
-			.where(eq(schema.garbageCollectionRevisions.cache, legacyCache))
+			.where(eq(schema.garbageCollectionRevisions.cacheId, cache.id))
 			.get();
 
 		if (stored === undefined) {
 			this.context.db
 				.insert(schema.garbageCollectionRevisions)
-				.values({ cache: legacyCache, cacheId: cache.id, revision: 0 })
+				.values({ cacheId: cache.id, revision: 0 })
 				.onConflictDoNothing()
 				.run();
 
 			return 0;
-		}
-
-		// The triggers of migration 0032 create this row without an identity on
-		// the first narinfo, root, target or grace write, and advance the
-		// revision. Bind such a row once; a bound row costs the one read above.
-		if (stored.cacheId === null) {
-			this.context.db
-				.update(schema.garbageCollectionRevisions)
-				.set({ cacheId: cache.id })
-				.where(eq(schema.garbageCollectionRevisions.cache, legacyCache))
-				.run();
 		}
 
 		return stored.revision;
@@ -215,7 +187,6 @@ export class GarbageCollectionService {
 				.run();
 			tx.insert(schema.garbageCollectionScans)
 				.values({
-					cache: legacyCacheOf(cache),
 					cacheId: cache.id,
 					revision,
 					phase: 'expire-roots',
@@ -224,7 +195,7 @@ export class GarbageCollectionService {
 					allowEmptyCollection: false
 				})
 				.onConflictDoUpdate({
-					target: schema.garbageCollectionScans.cache,
+					target: schema.garbageCollectionScans.cacheId,
 					set: {
 						cacheId: sql`excluded.cache_id`,
 						revision,
@@ -316,11 +287,6 @@ export class GarbageCollectionService {
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
 		//
-		// `retention_root` is still keyed by the legacy `cache` column, and its
-		// expiry index leads with that column, so both the ordered page below and
-		// the delete further down match on it. Matching on `cache_id` would read
-		// every root of the tenant.
-		const legacyCache = legacyCacheOf(cache);
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
@@ -329,7 +295,7 @@ export class GarbageCollectionService {
 			.from(schema.retentionRoots)
 			.where(
 				and(
-					eq(schema.retentionRoots.cache, legacyCache),
+					eq(schema.retentionRoots.cacheId, cache.id),
 					lte(schema.retentionRoots.expiresAt, now)
 				)
 			)
@@ -426,7 +392,7 @@ export class GarbageCollectionService {
 				tx.delete(schema.retentionRoots)
 					.where(
 						and(
-							eq(schema.retentionRoots.cache, legacyCache),
+							eq(schema.retentionRoots.cacheId, cache.id),
 							inArray(schema.retentionRoots.name, names)
 						)
 					)
@@ -451,18 +417,10 @@ export class GarbageCollectionService {
 		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
-		const legacyCache = legacyCacheOf(cache);
-
 		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(
-					hashes.insertSource([
-						sql`${legacyCache}`,
-						sql`${cache.id}`,
-						hashes.element()
-					])
-				)
+				.select(hashes.insertSource([sql`${cache.id}`, hashes.element()]))
 				.onConflictDoNothing()
 				.run();
 		}
@@ -663,7 +621,6 @@ export class GarbageCollectionService {
 						.run();
 					tx.insert(schema.garbageCollectionMarks)
 						.values({
-							cache: legacyCacheOf(cache),
 							cacheId: cache.id,
 							storePathHash: frontier.storePathHash
 						})
@@ -1210,7 +1167,6 @@ export class GarbageCollectionService {
 			.insert(schema.garbageCollectionTenantRuns)
 			.values({
 				id: 1,
-				cache: legacyCacheOf(cache),
 				cacheId: cache.id
 			})
 			.run();
@@ -1239,10 +1195,7 @@ export class GarbageCollectionService {
 
 		this.context.db
 			.update(schema.garbageCollectionTenantRuns)
-			.set({
-				cache: legacyCacheOf(next),
-				cacheId: next.id
-			})
+			.set({ cacheId: next.id })
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.run();
 

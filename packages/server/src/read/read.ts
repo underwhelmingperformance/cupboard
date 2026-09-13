@@ -2,7 +2,6 @@ import {
 	type CacheAccessMode,
 	type CacheGeneration,
 	type CacheScope,
-	firstCacheGeneration,
 	type NixSha256HashString,
 	type StorePathHash,
 	type TenantId
@@ -279,12 +278,10 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
  * Builds the reference-edge lookup that authorises narinfo reads.
  *
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
- * `blob_ref` through `blob_ref_native_identity_idx`, which leads with the
- * tenant and the cache's identity columns, joined to the cache lifecycle row.
- * The legacy primary key cannot serve this lookup: it leads with the stored
- * name, which encodes the access, so a cache whose access changed would no
- * longer match the edges it committed earlier. Availability binds the hashes
- * of each chunk as one list parameter, so its lookup is one statement.
+ * `blob_ref` through the partial unique index for the cache's kind
+ * (`blob_ref_default_identity_idx` or `blob_ref_named_identity_idx`), joined
+ * to the cache lifecycle row. Availability binds the hashes of each chunk
+ * as one list parameter, so its lookup is one statement.
  *
  * A recommit publishes its object after its edge, so the object at a path's key
  * can still record an earlier commit of the same cache. Object presence
@@ -365,7 +362,7 @@ async function authorisedNarInfoVersions(
 				current.set(edge.storePathHash, {
 					generation: edge.generation,
 					narHash: edge.narHash,
-					cacheGeneration: edge.cacheGeneration ?? firstCacheGeneration
+					cacheGeneration: edge.cacheGeneration
 				});
 			}
 		}

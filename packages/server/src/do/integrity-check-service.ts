@@ -27,11 +27,11 @@ import { jsonValueLists } from './json-list.ts';
 import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 /**
- * Where a pass starts: the last row the previous pass checked, or two empty
- * strings for the beginning of the scan.
+ * The last row checked by the previous pass. The next pass resumes after it.
+ * Cache `0` and an empty hash start a new scan.
  */
 export interface CheckCursor {
-	readonly cache: string;
+	readonly cache: number;
 	readonly storePathHash: string;
 }
 
@@ -157,16 +157,16 @@ export class IntegrityCheckService {
 	 * by passing it back until it comes back empty.
 	 */
 	async check(isDeep: boolean, cursor: CheckCursor): Promise<CheckReportInput> {
-		const isResuming = cursor.cache !== '' || cursor.storePathHash !== '';
+		const isResuming = cursor.cache !== 0 || cursor.storePathHash !== '';
 		const page = this.context.db
 			.select()
 			.from(schema.narInfos)
 			.where(
 				isResuming
-					? sql`(${schema.narInfos.cache}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
+					? sql`(${schema.narInfos.cacheId}, ${schema.narInfos.storePathHash}) > (${cursor.cache}, ${cursor.storePathHash})`
 					: undefined
 			)
-			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.orderBy(asc(schema.narInfos.cacheId), asc(schema.narInfos.storePathHash))
 			.limit(this.pageSize + 1)
 			.all();
 		const rows = page.slice(0, this.pageSize);
@@ -249,14 +249,20 @@ export class IntegrityCheckService {
 		let resumeAfter: CheckCursor | undefined;
 
 		if (hasStoppedOnSlice || hasMore) {
-			resumeAfter = checked === 0 ? cursor : rows[checked - 1];
+			const last = rows[checked - 1];
+			resumeAfter =
+				checked === 0
+					? cursor
+					: last === undefined
+						? undefined
+						: { cache: last.cacheId, storePathHash: last.storePathHash };
 		}
 
 		return {
 			narInfosChecked: checked,
 			narBlobsChecked,
 			cursor: resumeAfter?.storePathHash ?? '',
-			cursorCache: resumeAfter?.cache ?? '',
+			cursorCache: resumeAfter?.cache ?? 0,
 			discrepancies
 		};
 	}

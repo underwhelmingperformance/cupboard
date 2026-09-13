@@ -434,7 +434,7 @@ export async function moveObjectsToCacheIncarnation(
 				return { moved, hasMore: true };
 			}
 			const scope = cacheScopeFromRow({
-				kind: row.cacheKind ?? undefined,
+				kind: row.cacheKind,
 				name: row.cacheName
 			});
 			let claimant = context.cacheRepository.resolve(scope);

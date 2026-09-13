@@ -90,7 +90,7 @@ function reporter(captured: Captured): Reporter {
 interface CheckCall {
 	readonly deep: boolean;
 	readonly cursor: string;
-	readonly cursorCache: string;
+	readonly cursorCache: number;
 }
 
 // Answers each call with the next page, so a test states the pages the server
@@ -116,7 +116,7 @@ function checkClient(
 	};
 }
 
-const endOfScan = { cursor: '', cursorCache: '' } as const;
+const endOfScan = { cursor: '', cursorCache: 0 } as const;
 
 const narHash = `sha256:${'1'.repeat(52)}`;
 
@@ -134,7 +134,7 @@ describe('runCheck', () => {
 		await runCheck(false, reporter(captured), checkClient([report], calls));
 
 		expect({ calls, captured }).toStrictEqual({
-			calls: [{ deep: false, cursor: '', cursorCache: '' }],
+			calls: [{ deep: false, cursor: '', cursorCache: 0 }],
 			captured: {
 				results: [
 					[
@@ -159,7 +159,7 @@ describe('runCheck', () => {
 				narInfosChecked: 1000,
 				narBlobsChecked: 900,
 				cursor: 'c'.repeat(32),
-				cursorCache: 'builds',
+				cursorCache: 1,
 				discrepancies: []
 			}),
 			checkReportSchema.parse({
@@ -178,8 +178,8 @@ describe('runCheck', () => {
 			infos: captured.infos
 		}).toStrictEqual({
 			calls: [
-				{ deep: false, cursor: '', cursorCache: '' },
-				{ deep: false, cursor: 'c'.repeat(32), cursorCache: 'builds' }
+				{ deep: false, cursor: '', cursorCache: 0 },
+				{ deep: false, cursor: 'c'.repeat(32), cursorCache: 1 }
 			],
 			results: [
 				[
@@ -218,7 +218,7 @@ describe('runCheck', () => {
 		await runCheck(true, reporter(captured), checkClient([report], calls));
 
 		expect({ calls, captured }).toStrictEqual({
-			calls: [{ deep: true, cursor: '', cursorCache: '' }],
+			calls: [{ deep: true, cursor: '', cursorCache: 0 }],
 			captured: {
 				results: [
 					[

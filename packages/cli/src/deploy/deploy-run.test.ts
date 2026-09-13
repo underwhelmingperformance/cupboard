@@ -1,17 +1,26 @@
-import { currentLocalStep } from '@cupboard/protocol/deployment';
-import type { Reporter } from '@cupboard/reporter';
+import {
+	contractionMigrations,
+	currentLocalStep,
+	expansionLocalStep
+} from '@cupboard/protocol/deployment';
+import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
 	DeploymentPhaseUnsettledError,
-	LocalStepUnreachedError
+	LocalStepUnreachedError,
+	UnclassifiedD1MigrationError
 } from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
-import { collectResources, runDeploy } from './deploy-run.ts';
+import type { DeployDependencies } from './deploy-run.ts';
+import {
+	collectResources,
+	runDeploy as runPlannedDeploy
+} from './deploy-run.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
@@ -21,6 +30,7 @@ import {
 	zoneIdSchema
 } from './identifiers.ts';
 import { UnknownDeploymentPhaseError } from './phase.ts';
+import { planDeployment, transitionPlanRows } from './transition.ts';
 import { buildScriptMetadata } from './upload.ts';
 
 const scriptName = (value: string) => scriptNameSchema.parse(value);
@@ -109,6 +119,18 @@ const artifact: DeploymentArtifact = {
 	],
 	buildVersion: 'abc123def456'
 };
+
+async function runDeploy(
+	dependencies: Omit<DeployDependencies, 'plan'> & {
+		readonly artifact: DeploymentArtifact;
+	}
+): Promise<ResultRow[]> {
+	const { artifact: source, ...rest } = dependencies;
+	return runPlannedDeploy({
+		...rest,
+		plan: planDeployment(source, { kind: 'offline' })
+	});
+}
 
 const silentReporter: Reporter = {
 	phase: (_label, body) =>
@@ -209,6 +231,7 @@ function recordingApi(
 				calls.push(`lifecycle:${name}`);
 				return Promise.resolve();
 			},
+			findD1Database: () => Promise.resolve(undefined),
 			ensureD1Database(name) {
 				calls.push(`d1:${name}`);
 				return Promise.resolve(databaseId('db-id'));
@@ -442,6 +465,7 @@ describe('runDeploy', () => {
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
 			'd1qr:SELECT CAST(',
+			'd1q:INSERT INTO ',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -749,6 +773,7 @@ describe('runDeploy', () => {
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
 				'd1qr:SELECT CAST(',
+				'd1q:INSERT INTO ',
 				'd1q:INSERT INTO '
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
@@ -836,6 +861,7 @@ describe('runDeploy', () => {
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
 			'd1qr:SELECT CAST(',
+			'd1q:INSERT INTO ',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -925,6 +951,7 @@ describe('runDeploy', () => {
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
 				'd1qr:SELECT CAST(',
+				'd1q:INSERT INTO ',
 				'd1q:INSERT INTO '
 			],
 			warnings: [
@@ -1029,7 +1056,7 @@ describe('runDeploy', () => {
 			recorded: calls.filter((call) => call.startsWith('d1q:INSERT INTO'))
 		}).toStrictEqual({
 			pending: 2,
-			requiredStep: currentLocalStep,
+			requiredStep: expansionLocalStep,
 			stragglers: ['alpha', 'beta'],
 			recorded: []
 		});
@@ -1132,6 +1159,7 @@ describe('runDeploy', () => {
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
 				'd1qr:SELECT CAST(',
+				'd1q:INSERT INTO ',
 				'd1q:INSERT INTO '
 			],
 			facts: [
@@ -1139,8 +1167,207 @@ describe('runDeploy', () => {
 				['build', 'abc123def456'],
 				['from', 'current'],
 				['tenants behind', '0'],
-				['phase', 'native-reads']
+				['phase', 'native-reads'],
+				['migrations', '0'],
+				['phase', 'contracted']
 			]
 		});
+	});
+});
+
+describe('contraction within a deploy', () => {
+	const contraction = {
+		name: contractionMigrations[0] ?? '',
+		sha256: 'a'.repeat(64),
+		statements: ['ALTER TABLE prior DROP COLUMN legacy;']
+	};
+	it('contracts after both Workers settle and records contracted afterwards', async () => {
+		const { api } = recordingApi();
+		const events: string[] = [];
+		const observed: CloudflareApi = {
+			...api,
+			async uploadScript(name, metadata, bundle) {
+				events.push(`upload:${name}`);
+				return api.uploadScript(name, metadata, bundle);
+			},
+			async listDeployedVersions(name) {
+				events.push(`settle:${name}`);
+				return api.listDeployedVersions(name);
+			},
+			async d1QueryBatch(database, statements) {
+				for (const statement of statements) {
+					if (statement === contraction.statements[0]) {
+						events.push('contract');
+					}
+					if (statement.startsWith('INSERT INTO deployment_phase')) {
+						events.push(
+							statement.includes("VALUES ('current', 'native-reads'")
+								? 'native-reads'
+								: 'contracted'
+						);
+					}
+				}
+				return api.d1QueryBatch(database, statements);
+			}
+		};
+		await runDeploy({
+			artifact: {
+				...artifact,
+				d1Migrations: [...artifact.d1Migrations, contraction]
+			},
+			api: observed,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } }
+		});
+		expect(events).toStrictEqual([
+			'upload:cupboard-tenant',
+			'upload:cupboard',
+			'settle:cupboard',
+			'settle:cupboard-tenant',
+			'native-reads',
+			'contract',
+			'contracted'
+		]);
+	});
+});
+
+describe('automatic tenant settlement', () => {
+	it('settles expansion before contraction and finishes current local work afterwards', async () => {
+		const { api } = recordingApi();
+		const steps: number[] = [];
+		let isPending = true;
+		await runDeploy({
+			artifact,
+			api: {
+				...api,
+				d1QueryRows(database, query) {
+					if (query.startsWith('SELECT CAST(count(*) AS TEXT) FROM tenant')) {
+						return Promise.resolve([
+							isPending || query.includes('local_step < 5') ? '1' : '0'
+						]);
+					}
+					return api.d1QueryRows(database, query);
+				}
+			},
+			settleTenants: (requiredStep) => {
+				steps.push(requiredStep);
+				isPending = false;
+				return Promise.resolve();
+			},
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } }
+		});
+		expect(steps).toStrictEqual([expansionLocalStep, currentLocalStep]);
+	});
+});
+
+describe('refused deployment contractions', () => {
+	it.each(['versions', 'tenants'] as const)(
+		'does not contract when %s have not settled',
+		async (reason) => {
+			const { api } = recordingApi();
+			const mutations: string[] = [];
+			const observed: CloudflareApi = {
+				...api,
+				listDeployedVersions: (name) =>
+					reason === 'versions'
+						? Promise.resolve([])
+						: api.listDeployedVersions(name),
+				d1QueryRows: (id, query) =>
+					reason === 'tenants' && query.startsWith('SELECT CAST(')
+						? Promise.resolve(['1'])
+						: api.d1QueryRows(id, query),
+				d1QueryBatch: async (id, statements) => {
+					mutations.push(...statements);
+					await api.d1QueryBatch(id, statements);
+				}
+			};
+			const contraction = {
+				name: contractionMigrations[0] ?? '',
+				sha256: 'a'.repeat(64),
+				statements: ['ALTER TABLE prior DROP COLUMN legacy;']
+			};
+			await expect(
+				runDeploy({
+					artifact: {
+						...artifact,
+						d1Migrations: [...artifact.d1Migrations, contraction]
+					},
+					api: observed,
+					reporter: silentReporter,
+					options: { domain: undefined, secrets: { control: [], tenant: [] } }
+				})
+			).rejects.toBeInstanceOf(
+				reason === 'versions'
+					? DeploymentPhaseUnsettledError
+					: LocalStepUnreachedError
+			);
+			expect(
+				mutations.filter(
+					(query) =>
+						query === contraction.statements[0] ||
+						query.startsWith('INSERT INTO deployment_phase')
+				)
+			).toStrictEqual([]);
+		}
+	);
+	it('rejects an unclassified migration before changing D1 or uploading a Worker', async () => {
+		const { api, calls } = recordingApi();
+		const migration = {
+			name: '9999_unclassified.sql',
+			sha256: 'a'.repeat(64),
+			statements: ['SELECT 1;']
+		};
+		await expect(
+			runDeploy({
+				artifact: {
+					...artifact,
+					d1Migrations: [...artifact.d1Migrations, migration]
+				},
+				api,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			})
+		).rejects.toBeInstanceOf(UnclassifiedD1MigrationError);
+		expect(
+			calls.filter(
+				(call) => call.startsWith('d1q:') || call.startsWith('upload:')
+			)
+		).toStrictEqual([]);
+	});
+});
+
+describe('reviewed deployment plan', () => {
+	it('keeps preparation and contraction in the reviewed execution plan', () => {
+		const contraction = {
+			name: '0028_cache_identity_contract.sql',
+			sha256: 'digest',
+			statements: ['SELECT 1;']
+		};
+		const source = {
+			...artifact,
+			d1Migrations: [...artifact.d1Migrations, contraction]
+		};
+		const plan = planDeployment(source, { kind: 'new' });
+		expect({
+			preparation: plan.preparation,
+			contraction: plan.contraction,
+			artifact: plan.artifact
+		}).toStrictEqual({
+			preparation: artifact.d1Migrations,
+			contraction: [contraction],
+			artifact: source
+		});
+		expect(
+			transitionPlanRows(plan).filter(
+				(row) => row.label === 'Rollback boundary'
+			)
+		).toStrictEqual([
+			{
+				label: 'Rollback boundary',
+				value:
+					'Uploading the tenant Worker allows each object to contract its local SQLite schema. After that point, recover by completing this deployment; redeploying an older Worker cannot restore removed tables.'
+			}
+		]);
 	});
 });

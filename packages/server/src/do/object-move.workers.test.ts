@@ -12,7 +12,6 @@ import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -162,7 +161,6 @@ async function commitPath(
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
-				cache: legacyCacheKey(cache.scope, cache.access),
 				cacheId: cache.id,
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				storePath: storePathSchema.parse(`/nix/store/${storePathHash}-seeded`),
@@ -401,6 +399,7 @@ async function useServerWithAdvancedCache(name: string): Promise<string> {
 	await bootstrap({ caches: [{ scope: advancedCache }] });
 	await runInDurableObject(currentServer(), async (instance) => {
 		const tenant = instance.context.requireTenant();
+		const name = cacheNameSchema.parse(advancedName);
 
 		await instance.context.d1
 			.update(d1Schema.cacheLifecycle)
@@ -408,7 +407,7 @@ async function useServerWithAdvancedCache(name: string): Promise<string> {
 			.where(
 				and(
 					eq(d1Schema.cacheLifecycle.tenant, tenant),
-					eq(d1Schema.cacheLifecycle.cacheName, advancedName)
+					eq(d1Schema.cacheLifecycle.cacheName, name)
 				)
 			)
 			.run();
@@ -426,9 +425,6 @@ describe('cache incarnation object move', () => {
 			for (let index = 0; index < 80; index++) {
 				await instance.context.d1.insert(d1Schema.cacheLifecycle).values({
 					tenant: instance.context.requireTenant(),
-					cache: cacheNameSchema.parse(
-						`retired-${String(index).padStart(3, '0')}`
-					),
 					cacheKind: 'named',
 					cacheName: cacheNameSchema.parse(
 						`retired-${String(index).padStart(3, '0')}`
@@ -471,7 +467,6 @@ describe('cache incarnation object move', () => {
 				.insert(d1Schema.cacheLifecycle)
 				.values({
 					tenant: instance.context.requireTenant(),
-					cache: legacyCacheKey({ kind: 'named', name }, 'public'),
 					cacheKind: 'named',
 					cacheName: name,
 					access: 'public',

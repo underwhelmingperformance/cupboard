@@ -1,16 +1,17 @@
-import {
-	DEFAULT_CACHE,
-	storedCacheSchema,
-	storePathHashSchema
-} from '@cupboard/nix-store/scalars';
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../db/schema.ts';
 import { MissingRowBudgetError } from '../errors.ts';
-import { currentServer, initialise, resetTestServer } from '../test-support.ts';
+import {
+	currentServer,
+	initialise,
+	resetTestServer,
+	resolvedCache
+} from '../test-support.ts';
 
-import { type SchemaDatabase } from './context.ts';
+import { type SchemaDatabase, type ServerContext } from './context.ts';
 import { withDeadlineBudget } from './deadline.ts';
 import {
 	isRowBudgetExhausted,
@@ -60,16 +61,16 @@ function runPass(
 	}, budgetRows);
 }
 
-function seedMarks(database: SchemaDatabase): void {
-	const cache = storedCacheSchema.parse(DEFAULT_CACHE);
+function seedMarks(context: ServerContext): void {
+	const cache = resolvedCache(context);
 	const rows = Array.from({ length: rowsPerUnit }, (_, index) => ({
-		cache,
+		cacheId: cache.id,
 		storePathHash: storePathHashSchema.parse(
 			`${'0'.repeat(30)}${nixBase32.charAt(Math.floor(index / nixBase32.length))}${nixBase32.charAt(index % nixBase32.length)}`
 		)
 	}));
 
-	database.insert(schema.garbageCollectionMarks).values(rows).run();
+	context.db.insert(schema.garbageCollectionMarks).values(rows).run();
 }
 
 describe('Durable Object row budget', () => {
@@ -79,7 +80,7 @@ describe('Durable Object row budget', () => {
 		await initialise();
 
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
-			seedMarks(instance.context.db);
+			seedMarks(instance.context);
 
 			// Room for three of the ten units the pass offers.
 			return runPass(instance.context.db, 10, rowsPerUnit * 3);
@@ -92,7 +93,7 @@ describe('Durable Object row budget', () => {
 		await initialise();
 
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
-			seedMarks(instance.context.db);
+			seedMarks(instance.context);
 
 			return runPass(instance.context.db, 10, ampleRows);
 		});
@@ -106,7 +107,7 @@ describe('Durable Object row budget', () => {
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				seedMarks(instance.context.db);
+				seedMarks(instance.context);
 				let observed: PassOutcome | undefined;
 
 				try {

@@ -192,29 +192,45 @@ describe('control contract round trip', () => {
 			stored: controlRuleGrants
 		}
 	])('stores a control rule in $name', async ({ phase, stored }) => {
-		await recordDeploymentPhase(phase);
-		const client = controlClient(await issueControlAdminToken());
+		const { results: triggers } = await env.CUPBOARD_DB.prepare(
+			"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'control_trust_native_grants_%'"
+		).all<{ name: string; sql: string }>();
+		if (phase === 'native-reads') {
+			for (const trigger of triggers) {
+				await env.CUPBOARD_DB.prepare(`DROP TRIGGER ${trigger.name}`).run();
+			}
+		}
+		try {
+			await recordDeploymentPhase(phase);
+			const client = controlClient(await issueControlAdminToken());
 
-		const added = await client.oidcTrust.add({
-			issuer: 'https://token.actions.githubusercontent.com',
-			audience: 'https://cupboard.example/control',
-			claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
-			permittedGrants: controlRuleGrants
-		});
-		const row = await env.CUPBOARD_DB.prepare(
-			'SELECT permitted_grants_json FROM control_trust WHERE id = ?'
-		)
-			.bind(added.id)
-			.first<{ permitted_grants_json: string }>();
-		const storedGrants: unknown = JSON.parse(
-			z.string().parse(row?.permitted_grants_json)
-		);
-		const fetched = await client.oidcTrust.get({ id: added.id });
+			const added = await client.oidcTrust.add({
+				issuer: 'https://token.actions.githubusercontent.com',
+				audience: 'https://cupboard.example/control',
+				claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+				permittedGrants: controlRuleGrants
+			});
+			const row = await env.CUPBOARD_DB.prepare(
+				'SELECT permitted_grants_json FROM control_trust WHERE id = ?'
+			)
+				.bind(added.id)
+				.first<{ permitted_grants_json: string }>();
+			const storedGrants: unknown = JSON.parse(
+				z.string().parse(row?.permitted_grants_json)
+			);
+			const fetched = await client.oidcTrust.get({ id: added.id });
 
-		expect({
-			stored: storedGrants,
-			read: fetched.permittedGrants
-		}).toStrictEqual({ stored, read: controlRuleGrants });
+			expect({
+				stored: storedGrants,
+				read: fetched.permittedGrants
+			}).toStrictEqual({ stored, read: controlRuleGrants });
+		} finally {
+			if (phase === 'native-reads') {
+				for (const trigger of triggers) {
+					await env.CUPBOARD_DB.prepare(trigger.sql).run();
+				}
+			}
+		}
 	});
 
 	it('refuses a loopback HTTP control issuer outside local development', async () => {

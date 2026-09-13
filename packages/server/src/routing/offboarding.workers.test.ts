@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	type CacheScope,
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -22,9 +23,8 @@ import {
 	refreshTenantMembership
 } from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	afterGrace,
 	attemptPushToTenant,
@@ -270,38 +270,41 @@ describe('offboarding drain', () => {
 		const { id } = await provisionedWritingTenant();
 		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
 		const database = drizzleD1(env.CUPBOARD_DB, {
-			schema: { blobReferences: migrationSchema.blobReferences }
+			schema: { blobReference: d1Schema.blobReference }
 		});
 
 		await database
-			.insert(migrationSchema.blobReferences)
+			.insert(d1Schema.blobReference)
 			.values([
 				{
 					tenant: id,
-					...cacheMigrationColumns(defaultCache(), 'public'),
+					...cacheIdentityColumns(defaultCache()),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(0),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				},
 				{
 					tenant: id,
-					...cacheMigrationColumns(namedCache('builds'), 'public'),
+					...cacheIdentityColumns(namedCache('builds')),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(1),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				},
 				{
 					tenant: id,
-					...cacheMigrationColumns(namedCache('tests'), 'public'),
+					...cacheIdentityColumns(namedCache('tests')),
 					storePathHash,
 					generation: narInfoGenerationSchema.parse(2),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
-					)
+					),
+					cacheGeneration: firstCacheGeneration
 				}
 			])
 			.run();

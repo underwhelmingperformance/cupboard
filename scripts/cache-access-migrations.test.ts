@@ -3,6 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 // SQLite's extended result code for a failed CHECK constraint, which each
 // precondition of the backfill raises.
@@ -37,7 +38,11 @@ function applyMigrations(database: DatabaseSync, through: string): void {
 		'server',
 		'drizzle-d1'
 	);
-	const files = readdirSync(migrationsDirectory)
+	const available = readdirSync(migrationsDirectory);
+	if (!available.includes(through)) {
+		throw new Error(`Unknown D1 migration boundary: ${through}`);
+	}
+	const files = available
 		.filter((file) => file.endsWith('.sql') && file <= through)
 		.toSorted((left, right) => left.localeCompare(right));
 
@@ -45,6 +50,8 @@ function applyMigrations(database: DatabaseSync, through: string): void {
 		applyMigration(database, file);
 	}
 }
+
+const edgeCountSchema = z.strictObject({ edges: z.number().int() });
 
 function insertTenant(database: DatabaseSync): void {
 	database
@@ -444,5 +451,298 @@ describe('cache access backfill', () => {
 				errcode: sqliteConstraintCheck
 			})
 		);
+	});
+});
+
+describe('cache identity contraction', () => {
+	let database: DatabaseSync;
+
+	beforeEach(() => {
+		database = new DatabaseSync(':memory:');
+		applyMigrations(database, '0025_cache_incarnation_expand.sql');
+		insertTenant(database);
+	});
+
+	afterEach(() => {
+		database.close();
+	});
+
+	// The insert trigger gives each of these its default cache's lifecycle row,
+	// which is what the contraction requires of a tenant that is not offboarded.
+	function insertTenantWithStatus(
+		id: string,
+		status: 'active' | 'suspended' | 'offboarding' | 'offboarded'
+	): void {
+		database
+			.prepare(
+				`
+					INSERT INTO tenant (
+						id, status, read_mode, owner_issuer, owner_subject,
+						owner_audience, config_version, created_at
+					) VALUES (
+						?, ?, 'public', 'issuer', 'subject', 'audience', 1,
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run(id, status);
+	}
+
+	function contract(): void {
+		applyMigration(database, '0026_cache_identity_contract_assertions.sql');
+		applyMigration(database, '0027_cache_identity_compatible_contract.sql');
+		applyMigration(database, '0028_cache_identity_contract.sql');
+	}
+
+	it.each([
+		'0026_cache_identity_contract_assertions.sql',
+		'0027_cache_identity_compatible_contract.sql'
+	])('accepts predecessor writes after %s', (boundary) => {
+		applyMigration(database, '0026_cache_identity_contract_assertions.sql');
+		if (boundary.startsWith('0027')) {
+			applyMigration(database, boundary);
+		}
+		database.exec(`INSERT INTO blob_ref
+			(tenant, cache, store_path_hash, generation, nar_hash)
+			VALUES ('alice', 'private/builds', 'old-path', 1, 'sha256:old')`);
+		expect(
+			database
+				.prepare(
+					`SELECT cache, cache_kind, cache_name,
+			cache_generation FROM blob_ref WHERE store_path_hash = 'old-path'`
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{
+				cache: 'private/builds',
+				cache_kind: 'named',
+				cache_name: 'builds',
+				cache_generation: 1
+			}
+		]);
+	});
+
+	it('materialises predecessor keys for successor writes before contraction', () => {
+		applyMigration(database, '0026_cache_identity_contract_assertions.sql');
+		applyMigration(database, '0027_cache_identity_compatible_contract.sql');
+		database.exec(`INSERT INTO cache_lifecycle
+			(tenant, cache_kind, cache_name, access, generation, updated_at)
+			VALUES ('alice', 'named', 'builds', 'private', 1, '2026-01-02T00:00:00.000Z');
+			INSERT INTO blob_ref
+			(tenant, cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation)
+			VALUES ('alice', 'named', 'builds', 'new-path', 1, 'sha256:new', 1);
+			INSERT INTO attestation_ref
+			(tenant, cache_kind, cache_name, store_path_hash, generation, predicate_type, digest)
+			VALUES ('alice', 'named', 'builds', 'new-path', 1, 'predicate', 'digest');
+			INSERT INTO tenant_cache_read_credential
+			(tenant, cache_kind, cache_name, read_user, read_password_hash, read_password_salt, created_at)
+			VALUES ('alice', 'named', 'builds', 'reader', 'hash', 'salt', '2026-01-02T00:00:00.000Z');`);
+		const tables = [
+			'cache_lifecycle',
+			'blob_ref',
+			'attestation_ref',
+			'tenant_cache_read_credential'
+		];
+		expect(
+			tables.map((table) => ({
+				table,
+				rows: database
+					.prepare(
+						`SELECT cache FROM ${table} WHERE tenant = 'alice' AND cache_name = 'builds'`
+					)
+					.all()
+					.map((row) => ({ ...row }))
+			}))
+		).toStrictEqual(
+			tables.map((table) => ({
+				table,
+				rows: [{ cache: 'private/builds' }]
+			}))
+		);
+	});
+
+	it.each(['public', 'private'])(
+		'preserves a successor tenant with %s default access',
+		(access) => {
+			applyMigration(database, '0026_cache_identity_contract_assertions.sql');
+			applyMigration(database, '0027_cache_identity_compatible_contract.sql');
+			database.exec(`INSERT INTO tenant (id, status, owner_issuer, owner_subject,
+			owner_audience, config_version, created_at)
+			VALUES ('new-tenant', 'active', 'issuer', 'subject', 'audience', 1, '2026-01-02T00:00:00.000Z')`);
+			database
+				.prepare(
+					`INSERT INTO cache_lifecycle
+			(tenant, cache_kind, cache_name, access, generation, updated_at)
+			VALUES ('new-tenant', 'default', NULL, ?, 1, '2026-01-02T00:00:00.000Z')
+			ON CONFLICT DO NOTHING`
+				)
+				.run(access);
+			expect(
+				database
+					.prepare(
+						`SELECT tenant.read_mode, cache_lifecycle.access
+			FROM tenant JOIN cache_lifecycle ON tenant.id = cache_lifecycle.tenant
+			WHERE tenant.id = 'new-tenant'`
+					)
+					.all()
+					.map((row) => ({ ...row }))
+			).toStrictEqual([{ read_mode: access, access }]);
+		}
+	);
+
+	it('contracts a named cache an offboarding tenant still references', () => {
+		insertTenantWithStatus('bob', 'offboarding');
+		database
+			.prepare(
+				`
+					INSERT INTO cache_lifecycle (
+						tenant, cache, cache_kind, cache_name, access, generation,
+						updated_at
+					) VALUES (
+						'bob', 'builds', 'named', 'builds', 'public', 3,
+						'2026-01-02T00:00:00.000Z'
+					)
+				`
+			)
+			.run();
+		database
+			.prepare(
+				`
+					INSERT INTO blob_ref (
+						tenant, cache, cache_kind, cache_name, store_path_hash,
+						generation, nar_hash, cache_generation
+					) VALUES (
+						'bob', 'builds', 'named', 'builds', 'path', 4, 'sha256:nar', 3
+					)
+				`
+			)
+			.run();
+
+		contract();
+
+		expect(
+			database
+				.prepare(
+					`
+						SELECT cache_kind, cache_name, store_path_hash, generation,
+							cache_generation
+						FROM blob_ref
+						WHERE tenant = 'bob'
+					`
+				)
+				.all()
+				.map((row) => ({ ...row }))
+		).toStrictEqual([
+			{
+				cache_kind: 'named',
+				cache_name: 'builds',
+				store_path_hash: 'path',
+				generation: 4,
+				cache_generation: 3
+			}
+		]);
+	});
+
+	// An offboarded tenant's rows are scrubbed and its object is never woken
+	// again, so it neither holds a default cache nor needs one.
+	it('contracts around an offboarded tenant with no cache rows', () => {
+		insertTenantWithStatus('bob', 'offboarded');
+		database.prepare("DELETE FROM cache_lifecycle WHERE tenant = 'bob'").run();
+
+		contract();
+
+		expect({
+			...database
+				.prepare(
+					"SELECT count(*) AS tenants FROM tenant WHERE status = 'offboarded'"
+				)
+				.get()
+		}).toStrictEqual({ tenants: 1 });
+	});
+
+	it.each([
+		{
+			name: 'a default cache',
+			identity: "'default', NULL",
+			index: 'blob_ref_default_identity_idx'
+		},
+		{
+			name: 'a named cache',
+			identity: "'named', 'builds'",
+			index: 'blob_ref_named_identity_idx'
+		}
+	])(
+		'deduplicates a repeated edge for $name across contraction',
+		({ identity, index }) => {
+			const edges = (): number => {
+				const row = database
+					.prepare(
+						"SELECT count(*) AS edges FROM blob_ref WHERE tenant = 'alice'"
+					)
+					.get();
+
+				return edgeCountSchema.parse(row).edges;
+			};
+			const writeEdge = (columns: string, values: string): void => {
+				database
+					.prepare(
+						`INSERT INTO blob_ref (tenant, ${columns}) VALUES ('alice', ${values}) ON CONFLICT DO NOTHING`
+					)
+					.run();
+			};
+			const hasIndex = (): boolean =>
+				database
+					.prepare(
+						"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?"
+					)
+					.all(index).length === 1;
+
+			applyMigration(database, '0026_cache_identity_contract_assertions.sql');
+			applyMigration(database, '0027_cache_identity_compatible_contract.sql');
+
+			// What this build writes while the legacy column is still there.
+			const compatibleEdge = (): void => {
+				writeEdge(
+					'cache, cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation',
+					`NULL, ${identity}, 'path', 4, 'sha256:nar', 1`
+				);
+			};
+
+			compatibleEdge();
+			compatibleEdge();
+
+			const beforeContraction = { indexed: hasIndex(), edges: edges() };
+
+			applyMigration(database, '0028_cache_identity_contract.sql');
+			writeEdge(
+				'cache_kind, cache_name, store_path_hash, generation, nar_hash, cache_generation',
+				`${identity}, 'path', 4, 'sha256:nar', 1`
+			);
+
+			expect({
+				beforeContraction,
+				afterContraction: { indexed: hasIndex(), edges: edges() }
+			}).toStrictEqual({
+				beforeContraction: { indexed: true, edges: 1 },
+				afterContraction: { indexed: true, edges: 1 }
+			});
+		}
+	);
+
+	// The conversion each object performs before the contraction reads the access
+	// recorded for its tenant's default cache, so a tenant without that row could
+	// not convert and its object could not migrate.
+	it('refuses to contract while a live tenant has no default cache', () => {
+		insertTenantWithStatus('bob', 'active');
+		database
+			.prepare(
+				"DELETE FROM cache_lifecycle WHERE tenant = 'bob' AND cache_kind = 'default'"
+			)
+			.run();
+
+		expect(() => {
+			contract();
+		}).toThrow(/CHECK constraint failed/u);
 	});
 });

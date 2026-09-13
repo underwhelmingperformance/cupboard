@@ -7,6 +7,49 @@ const rowsPerPage = 1000;
 const sourceRowsPerInvocation = 1000;
 const structuralOperationsPerInvocation = 256;
 
+interface RebuildTable {
+	readonly table: string;
+	readonly create: number;
+	readonly copy: number;
+	readonly indexes: readonly number[];
+}
+
+const reuseSelectorNativeColumns = [
+	'id',
+	'view',
+	'kind',
+	'cache_name',
+	'prefix'
+] as const;
+
+function reuseSelectorNativeTable(table: string): string {
+	return `CREATE TABLE \`${table}\` (
+	\`id\` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	\`view\` text NOT NULL,
+	\`kind\` text NOT NULL,
+	\`cache_name\` text,
+	\`prefix\` text,
+	CONSTRAINT "reuse_view_selector_native_shape_check" CHECK(("${table}"."kind" IN ('default', 'all-named', 'all') AND "${table}"."cache_name" IS NULL AND "${table}"."prefix" IS NULL) OR ("${table}"."kind" = 'named' AND "${table}"."cache_name" IS NOT NULL AND "${table}"."prefix" IS NULL) OR ("${table}"."kind" = 'prefix' AND "${table}"."cache_name" IS NULL AND "${table}"."prefix" IS NOT NULL AND length("${table}"."prefix") > 0))
+);`;
+}
+
+function copyReuseSelectorNativeStage(
+	target: string,
+	name: string
+): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name,
+		source: 'reuse_view_selector_native',
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`INSERT OR REPLACE INTO \`${target}\` (${reuseSelectorNativeColumns.map((column) => `\`${column}\``).join(', ')})
+SELECT ${reuseSelectorNativeColumns.map((column) => `\`${column}\``).join(', ')} FROM \`reuse_view_selector_native\`
+WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+		]
+	};
+}
+
 interface LegacyCacheSource {
 	readonly table: string;
 	readonly column: string;
@@ -417,6 +460,82 @@ function statementAt(statements: readonly string[], index: number): string {
 	return statement;
 }
 
+function shadowIndex(statement: string, table: string): string {
+	const named = statement
+		.replace('CREATE UNIQUE INDEX `', 'CREATE UNIQUE INDEX `__bounded_')
+		.replace('CREATE INDEX `', 'CREATE INDEX `__bounded_');
+
+	return named
+		.replace(` ON \`${table}\``, () => ` ON \`__new_${table}\``)
+		.replaceAll(`"${table}".`, () => `"__new_${table}".`);
+}
+
+function canonicalTableName(table: string): string {
+	return `__bounded_canonical_${table}`;
+}
+
+function canonicalTable(statement: string, table: string): string {
+	return statement.replaceAll(`__new_${table}`, () =>
+		canonicalTableName(table)
+	);
+}
+
+function canonicalIndex(statement: string, table: string): string {
+	const canonical = canonicalTableName(table);
+
+	return statement
+		.replace(` ON \`${table}\``, () => ` ON \`${canonical}\``)
+		.replaceAll(`"${table}".`, () => `"${canonical}".`);
+}
+
+function boundedCopy(
+	statement: string,
+	table: string,
+	cursor: number,
+	last: number
+): string {
+	if (!statement.endsWith(';')) {
+		throw new Error(`Bounded copy for ${table} is not terminated`);
+	}
+
+	return `${statement.slice(0, -1)} WHERE \`${table}\`.rowid > ${String(cursor)} AND \`${table}\`.rowid <= ${String(last)};`;
+}
+
+function assertionStage(table: string, predicate: string): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name: `assert-${table}`,
+		source: table,
+		writesPerSourceRow: 0,
+		statements: (cursor, last) => [
+			`INSERT INTO \`_cache_identity_contract_assertion\` (\`valid\`)
+SELECT 0 WHERE EXISTS (
+	SELECT 1 FROM \`${table}\`
+	WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)} AND (${predicate})
+);`
+		]
+	};
+}
+
+function uniquenessStage(
+	table: string,
+	family: string,
+	key: string,
+	predicate?: string
+): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name: `assert-unique-${family}`,
+		source: table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`INSERT INTO \`__bounded_cache_identity_keys\` (\`family\`, \`key\`)
+SELECT '${family}', json_array(${key}) FROM \`${table}\`
+WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)}${predicate === undefined ? '' : ` AND (${predicate})`};`
+		]
+	};
+}
+
 function boundedMutation(
 	statement: string,
 	table: string,
@@ -696,12 +815,420 @@ WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
 	};
 }
 
+const finalTables: readonly RebuildTable[] = [
+	{ table: 'retention_policy', create: 33, copy: 34, indexes: [38, 39] },
+	{ table: 'narinfo', create: 40, copy: 41, indexes: [44, 45, 46] },
+	{ table: 'retention_root', create: 47, copy: 48, indexes: [51, 52] },
+	{ table: 'garbage_collection_frontier', create: 53, copy: 54, indexes: [] },
+	{ table: 'garbage_collection_mark', create: 57, copy: 58, indexes: [] },
+	{ table: 'generation_seq', create: 61, copy: 62, indexes: [65, 66] },
+	{ table: 'narinfo_deletion', create: 67, copy: 68, indexes: [] },
+	{ table: 'retention_grace', create: 71, copy: 72, indexes: [75] },
+	{ table: 'retention_root_target', create: 76, copy: 77, indexes: [] },
+	{ table: 'cache_identity', create: 80, copy: 81, indexes: [84, 85, 86, 87] },
+	{ table: 'garbage_collection_revision', create: 88, copy: 89, indexes: [] },
+	{ table: 'garbage_collection_scan', create: 92, copy: 93, indexes: [] },
+	{ table: 'garbage_collection_tenant_run', create: 96, copy: 97, indexes: [] },
+	{ table: 'pending_attestation', create: 100, copy: 101, indexes: [104, 105] },
+	{
+		table: 'pending_upload',
+		create: 106,
+		copy: 107,
+		indexes: [110, 111, 112, 113, 114]
+	},
+	{ table: 'reuse_view', create: 115, copy: 116, indexes: [119] },
+	{ table: 'verification_cursor', create: 120, copy: 121, indexes: [] }
+];
+
+function copyStage(
+	table: RebuildTable,
+	statements: readonly string[]
+): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name: `copy-${table.table}`,
+		source: table.table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			boundedCopy(
+				statementAt(statements, table.copy),
+				table.table,
+				cursor,
+				last
+			)
+		]
+	};
+}
+
+function drainStage(table: string): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name: `drain-old-${table}`,
+		source: `__bounded_old_${table}`,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`DELETE FROM \`__bounded_old_${table}\` WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+		]
+	};
+}
+
+function canonicalCopyStage(
+	table: RebuildTable,
+	statements: readonly string[]
+): LocalMigrationStage {
+	return {
+		kind: 'page',
+		name: `copy-canonical-${table.table}`,
+		source: table.table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			boundedCopy(
+				canonicalTable(statementAt(statements, table.copy), table.table),
+				table.table,
+				cursor,
+				last
+			)
+		]
+	};
+}
+
+function drainNoncanonicalStage(table: string): LocalMigrationStage {
+	const source = `__bounded_noncanonical_${table}`;
+
+	return {
+		kind: 'page',
+		name: `drain-noncanonical-${table}`,
+		source,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`DELETE FROM \`${source}\` WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+		]
+	};
+}
+
+function finalContractRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const discarded = ['cache', 'reuse_view_selector'] as const;
+	const indexedFinalTables = finalTables.filter(
+		(table) => table.indexes.length > 0
+	);
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation: 365,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-indexed-final-shadows',
+				statements: [
+					...finalTables.flatMap((table) => [
+						statementAt(statements, table.create),
+						...table.indexes.map((index) =>
+							shadowIndex(statementAt(statements, index), table.table)
+						)
+					]),
+					reuseSelectorNativeTable('__new_reuse_view_selector_native'),
+					'CREATE INDEX `__bounded_reuse_view_selector_native_view_idx` ON `__new_reuse_view_selector_native` (`view`);',
+					'CREATE TABLE `__bounded_reuse_selector_native_sequence` (`seq` integer NOT NULL);',
+					"INSERT INTO `__bounded_reuse_selector_native_sequence` (`seq`) SELECT `seq` FROM `sqlite_sequence` WHERE `name` = 'reuse_view_selector_native';"
+				]
+			},
+			...finalTables.map((table) => copyStage(table, statements)),
+			copyReuseSelectorNativeStage(
+				'__new_reuse_view_selector_native',
+				'copy-reuse-view-selector-native'
+			),
+			{
+				kind: 'batch',
+				name: 'switch-final-shadows',
+				statements: [
+					...legacyCacheSources.flatMap((source) => [
+						`DROP TRIGGER IF EXISTS \`${source.table}_backfill_insert\`;`,
+						`DROP TRIGGER IF EXISTS \`${source.table}_backfill_update\`;`
+					]),
+					'DROP TRIGGER IF EXISTS `cache_identity_backfill_insert`;',
+					'DROP TRIGGER IF EXISTS `cache_identity_backfill_revive`;',
+					...discarded.map(
+						(table) =>
+							`ALTER TABLE \`${table}\` RENAME TO \`__bounded_old_${table}\`;`
+					),
+					'PRAGMA foreign_keys=OFF;',
+					...finalTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_old_${table.table}\`;`,
+						`ALTER TABLE \`__new_${table.table}\` RENAME TO \`${table.table}\`;`
+					]),
+					'ALTER TABLE `reuse_view_selector_native` RENAME TO `__bounded_old_reuse_view_selector_native`;',
+					'ALTER TABLE `__new_reuse_view_selector_native` RENAME TO `reuse_view_selector_native`;',
+					'PRAGMA foreign_keys=ON;'
+				]
+			},
+			...discarded.map((table) => drainStage(table)),
+			...finalTables.map((table) => drainStage(table.table)),
+			drainStage('reuse_view_selector_native'),
+			{
+				kind: 'batch',
+				name: 'drop-empty-expanded-tables',
+				statements: [
+					...discarded.map((table) => `DROP TABLE \`__bounded_old_${table}\`;`),
+					...finalTables.map(
+						(table) => `DROP TABLE \`__bounded_old_${table.table}\`;`
+					),
+					'DROP TABLE `__bounded_old_reuse_view_selector_native`;',
+					statementAt(statements, 124)
+				]
+			},
+			{
+				kind: 'batch',
+				name: 'prepare-canonical-final-shadows',
+				statements: [
+					...indexedFinalTables.flatMap((table) => [
+						canonicalTable(statementAt(statements, table.create), table.table),
+						...table.indexes.map((index) =>
+							canonicalIndex(statementAt(statements, index), table.table)
+						)
+					]),
+					reuseSelectorNativeTable(
+						'__bounded_canonical_reuse_view_selector_native'
+					),
+					'CREATE INDEX `reuse_view_selector_native_view_idx` ON `__bounded_canonical_reuse_view_selector_native` (`view`);'
+				]
+			},
+			...indexedFinalTables.map((table) =>
+				canonicalCopyStage(table, statements)
+			),
+			copyReuseSelectorNativeStage(
+				'__bounded_canonical_reuse_view_selector_native',
+				'copy-canonical-reuse-view-selector-native'
+			),
+			{
+				kind: 'batch',
+				name: 'switch-canonical-final-shadows',
+				statements: [
+					...indexedFinalTables.flatMap((table) => [
+						`ALTER TABLE \`${table.table}\` RENAME TO \`__bounded_noncanonical_${table.table}\`;`,
+						`ALTER TABLE \`${canonicalTableName(table.table)}\` RENAME TO \`${table.table}\`;`
+					]),
+					'ALTER TABLE `reuse_view_selector_native` RENAME TO `__bounded_noncanonical_reuse_view_selector_native`;',
+					"DELETE FROM `sqlite_sequence` WHERE `name` = '__bounded_canonical_reuse_view_selector_native';",
+					"INSERT INTO `sqlite_sequence` (`name`, `seq`) SELECT '__bounded_canonical_reuse_view_selector_native', `seq` FROM `__bounded_reuse_selector_native_sequence`;",
+					'ALTER TABLE `__bounded_canonical_reuse_view_selector_native` RENAME TO `reuse_view_selector_native`;'
+				]
+			},
+			...indexedFinalTables.map((table) => drainNoncanonicalStage(table.table)),
+			drainNoncanonicalStage('reuse_view_selector_native'),
+			{
+				kind: 'batch',
+				name: 'drop-noncanonical-final-tables',
+				statements: [
+					...indexedFinalTables.map(
+						(table) => `DROP TABLE \`__bounded_noncanonical_${table.table}\`;`
+					),
+					'DROP TABLE `__bounded_noncanonical_reuse_view_selector_native`;',
+					'DROP TABLE `__bounded_reuse_selector_native_sequence`;'
+				]
+			}
+		]
+	};
+}
+
+function generationSourceStage(
+	table: 'generation_seq' | 'narinfo' | 'narinfo_deletion'
+): LocalMigrationStage {
+	const selection =
+		table === 'generation_seq'
+			? '`cache`, `cache_kind`, `cache_name`, `store_path_hash`, `next_generation`'
+			: `\`cache\`, CASE WHEN \`cache\` = '' THEN 'default' ELSE 'named' END,
+	CASE WHEN \`cache\` = '' THEN NULL WHEN \`cache\` LIKE 'private/%' THEN substr(\`cache\`, 9) ELSE \`cache\` END,
+	\`store_path_hash\`, \`generation\` + 1`;
+
+	return {
+		kind: 'page',
+		name: `collect-generation-${table}`,
+		source: table,
+		writesPerSourceRow: 1,
+		statements: (cursor, last) => [
+			`INSERT INTO \`__bounded_generation_seq\` (
+	\`cache\`, \`cache_kind\`, \`cache_name\`, \`store_path_hash\`, \`next_generation\`
+)
+SELECT ${selection} FROM \`${table}\`
+WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)}
+ON CONFLICT (\`cache\`, \`store_path_hash\`) DO UPDATE SET
+	\`next_generation\` = max(\`next_generation\`, excluded.\`next_generation\`);`
+		]
+	};
+}
+
+function cacheIdentityAssertionRecipe(
+	tag: string,
+	statements: readonly string[]
+): LocalMigrationRecipe {
+	const updates: readonly [number, string, boolean][] = [
+		[2, 'reuse_view', true],
+		[3, 'reuse_view_revision_seq', true],
+		[4, 'reuse_view_selector_native', true],
+		[5, 'narinfo', true],
+		[6, 'narinfo_deletion', true],
+		[7, 'pending_upload', true],
+		[8, 'pending_attestation', true],
+		[9, 'retention_root', true],
+		[10, 'retention_root_target', true],
+		[11, 'retention_grace', true],
+		[12, 'garbage_collection_revision', true],
+		[13, 'garbage_collection_scan', true],
+		[14, 'garbage_collection_frontier', true],
+		[15, 'garbage_collection_mark', true],
+		[16, 'garbage_collection_tenant_run', true],
+		[17, 'verification_cursor', true],
+		[18, 'retention_policy', true],
+		[19, 'retention_policy', true],
+		[20, 'retention_policy', true]
+	];
+	const nullableColumns: readonly [string, string][] = [
+		['cache_identity', '`access` IS NULL'],
+		['reuse_view', '`access` IS NULL'],
+		['narinfo', '`cache_id` IS NULL'],
+		['narinfo_deletion', '`cache_id` IS NULL'],
+		['pending_upload', '`cache_id` IS NULL'],
+		['pending_attestation', '`cache_id` IS NULL'],
+		['retention_root', '`cache_id` IS NULL'],
+		['retention_root_target', '`cache_id` IS NULL'],
+		['retention_grace', '`cache_id` IS NULL'],
+		['garbage_collection_revision', '`cache_id` IS NULL'],
+		['garbage_collection_scan', '`cache_id` IS NULL'],
+		['garbage_collection_frontier', '`cache_id` IS NULL'],
+		['garbage_collection_mark', '`cache_id` IS NULL'],
+		['garbage_collection_tenant_run', '`cache_id` IS NULL'],
+		['verification_cursor', '`cache_id` IS NULL'],
+		['retention_policy', '`kind` IS NULL']
+	];
+	const uniqueKeys: readonly [string, string, string, string?][] = [
+		['narinfo', 'narinfo', '`cache_id`, `store_path_hash`'],
+		[
+			'narinfo_deletion',
+			'narinfo-deletion',
+			'`cache_id`, `store_path_hash`, `generation`'
+		],
+		['retention_root', 'retention-root', '`cache_id`, `name`'],
+		[
+			'retention_root_target',
+			'retention-root-target',
+			'`cache_id`, `root_name`, `store_path_hash`'
+		],
+		['retention_grace', 'retention-grace', '`cache_id`, `store_path_hash`'],
+		['garbage_collection_revision', 'gc-revision', '`cache_id`'],
+		['garbage_collection_scan', 'gc-scan', '`cache_id`'],
+		[
+			'garbage_collection_frontier',
+			'gc-frontier',
+			'`cache_id`, `store_path_hash`'
+		],
+		['garbage_collection_mark', 'gc-mark', '`cache_id`, `store_path_hash`'],
+		['retention_policy', 'policy-cache', '`cache_id`', "`kind` = 'cache'"],
+		[
+			'retention_policy',
+			'policy-root-prefix',
+			'`root_name_prefix`',
+			"`kind` = 'root-name-prefix'"
+		]
+	];
+
+	return {
+		tag,
+		rowsPerPage,
+		sourceRowsPerInvocation,
+		structuralOperationsPerInvocation: 365,
+		stages: [
+			{
+				kind: 'batch',
+				name: 'prepare-contract-assertions',
+				statements: [
+					statementAt(statements, 0),
+					'CREATE TABLE `__bounded_reuse_revision_names` (`name` text PRIMARY KEY NOT NULL);',
+					'CREATE TABLE `__bounded_cache_identity_keys` (`family` text NOT NULL, `key` text NOT NULL, PRIMARY KEY (`family`, `key`));'
+				]
+			},
+			{
+				kind: 'page',
+				name: 'assert-reuse-revision-names',
+				source: 'reuse_view_revision_seq',
+				writesPerSourceRow: 1,
+				statements: (cursor, last) => [
+					`INSERT INTO \`__bounded_reuse_revision_names\` (\`name\`)
+SELECT CASE WHEN \`name\` LIKE 'private/%' THEN substr(\`name\`, 9) ELSE \`name\` END
+FROM \`reuse_view_revision_seq\`
+WHERE rowid > ${String(cursor)} AND rowid <= ${String(last)};`
+				]
+			},
+			{
+				kind: 'batch',
+				name: 'finish-reuse-revision-assertion',
+				statements: ['DROP TABLE `__bounded_reuse_revision_names`;']
+			},
+			...updates.map(([index, table, hasWhere]) =>
+				mutationStage(statements, index, table, hasWhere)
+			),
+			{
+				kind: 'batch',
+				name: 'prepare-generation-shadow',
+				statements: [
+					`CREATE TABLE \`__bounded_generation_seq\` (
+	\`cache\` text DEFAULT '' NOT NULL,
+	\`store_path_hash\` text NOT NULL,
+	\`next_generation\` integer DEFAULT 0 NOT NULL,
+	\`cache_kind\` text, \`cache_name\` text,
+	PRIMARY KEY(\`cache\`, \`store_path_hash\`)
+);`
+				]
+			},
+			...(['generation_seq', 'narinfo', 'narinfo_deletion'] as const).map(
+				(table) => generationSourceStage(table)
+			),
+			{
+				kind: 'batch',
+				name: 'switch-generation-shadow',
+				statements: [
+					'ALTER TABLE `generation_seq` RENAME TO `__bounded_old_generation_seq`;',
+					'ALTER TABLE `__bounded_generation_seq` RENAME TO `generation_seq`;'
+				]
+			},
+			drainStage('generation_seq'),
+			...nullableColumns.map(([table, predicate]) =>
+				assertionStage(table, predicate)
+			),
+			...uniqueKeys.map(([table, family, key, predicate]) =>
+				uniquenessStage(table, family, key, predicate)
+			),
+			{
+				kind: 'batch',
+				name: 'drop-old-generation-sequence',
+				statements: [
+					'DROP TABLE `__bounded_old_generation_seq`;',
+					'DROP TABLE `__bounded_cache_identity_keys`;',
+					statementAt(statements, 28)
+				]
+			}
+		]
+	};
+}
+
 export function localMigrationRecipe(
 	tag: string,
 	statements: readonly string[]
 ): LocalMigrationRecipe | undefined {
 	if (tag === '0043_cache_access_backfill') {
 		return cacheAccessBackfillRecipe(tag, statements);
+	}
+
+	if (tag === '0052_cache_identity_contract') {
+		return finalContractRecipe(tag, statements);
+	}
+
+	if (tag === '0051_cache_identity_contract_assertions') {
+		return cacheIdentityAssertionRecipe(tag, statements);
 	}
 
 	return undefined;

@@ -3,9 +3,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	isDestinationPreferred,
-	isPrivateReuseView,
-	privateStoredReuseView,
-	privateStoredReuseViewSchema,
 	reuseViewDefaultPriority,
 	reuseViewListResponseSchema,
 	reuseViewMaxSelectors,
@@ -15,7 +12,6 @@ import {
 	reuseViewSelectorSchema,
 	reuseViewSetBodySchema,
 	reuseViewSummarySchema,
-	storedReuseViewSchema,
 	viewPriorityMargin
 } from './reuse-views.ts';
 
@@ -222,51 +218,6 @@ describe('isDestinationPreferred', () => {
 				viewPriority(40 + viewPriorityMargin)
 			)
 		).toBe(true);
-	});
-});
-
-describe('stored reuse-view names', () => {
-	it.each([
-		{ localName: 'reuse' },
-		{ localName: 'pr-1' },
-		{ localName: 'a'.repeat(63) }
-	])('stores $localName under the private prefix', ({ localName }) => {
-		const stored = privateStoredReuseView(reuseViewNameSchema.parse(localName));
-
-		expect({
-			stored,
-			isPrivate: isPrivateReuseView(stored),
-			isPrivateLocalName: isPrivateReuseView(
-				reuseViewNameSchema.parse(localName)
-			)
-		}).toStrictEqual({
-			stored: `private/${localName}`,
-			isPrivate: true,
-			isPrivateLocalName: false
-		});
-	});
-
-	it.each([
-		['a local name alone', 'reuse'],
-		['the stored prefix alone', 'private/'],
-		['an uppercase local name', 'private/Reuse'],
-		['a local name over the length bound', `private/${'a'.repeat(64)}`],
-		['a nested name', 'private/private/reuse'],
-		['a local name starting with a separator', 'private/-reuse']
-	])('rejects %s as a private stored name', (_name, value) => {
-		expect(privateStoredReuseViewSchema.safeParse(value).success).toBe(false);
-	});
-
-	it('accepts both a local name and a private stored name', () => {
-		expect({
-			localName: storedReuseViewSchema.safeParse('reuse').success,
-			privateName: storedReuseViewSchema.safeParse('private/reuse').success,
-			nested: storedReuseViewSchema.safeParse('private/private/reuse').success
-		}).toStrictEqual({
-			localName: true,
-			privateName: true,
-			nested: false
-		});
 	});
 });
 

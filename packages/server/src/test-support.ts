@@ -127,7 +127,6 @@ import {
 	cacheIdentityColumns,
 	cacheIdSchema,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from './db/cache.ts';
 import * as d1Schema from './db/d1-schema.ts';
@@ -169,8 +168,6 @@ import {
 	type R2ObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
-import { cacheMigrationColumns } from './migration/cache-access.ts';
-import * as migrationSchema from './migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -328,11 +325,10 @@ export async function provisionFixtureTenant(
 	const now = isoTimestamp(testBase);
 
 	await database
-		.insert(migrationSchema.tenants)
+		.insert(d1Schema.tenant)
 		.values({
 			id: fixtureTenant,
 			status: 'active',
-			readMode: defaultCacheAccess,
 			ownerIssuer: fixtureOwner.issuer,
 			ownerSubject: fixtureOwner.subject,
 			ownerAudience: fixtureOwner.audience,
@@ -343,9 +339,8 @@ export async function provisionFixtureTenant(
 			readPasswordSalt
 		})
 		.onConflictDoUpdate({
-			target: migrationSchema.tenants.id,
+			target: d1Schema.tenant.id,
 			set: {
-				readMode: defaultCacheAccess,
 				readUser,
 				readPasswordHash,
 				readPasswordSalt
@@ -404,11 +399,10 @@ export async function provisionNamedTenant(
 	await stub.purgeStorage();
 
 	await database
-		.insert(migrationSchema.tenants)
+		.insert(d1Schema.tenant)
 		.values({
 			id,
 			status: 'active',
-			readMode: defaultCacheAccess,
 			ownerIssuer: '',
 			ownerSubject: '',
 			ownerAudience: '',
@@ -416,10 +410,9 @@ export async function provisionNamedTenant(
 			createdAt: isoTimestamp(testBase)
 		})
 		.onConflictDoUpdate({
-			target: migrationSchema.tenants.id,
+			target: d1Schema.tenant.id,
 			set: {
 				status: 'active',
-				readMode: defaultCacheAccess,
 				configVersion,
 				cacheCatalogueVersion: sql`null`
 			}
@@ -468,21 +461,18 @@ async function provisionD1Cache(
 	updatedAt: IsoTimestamp
 ): Promise<void> {
 	await database
-		.insert(migrationSchema.cacheLifecycles)
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns({ kind: 'default' }, access),
+			...cacheIdentityColumns({ kind: 'default' }),
 			access,
 			generation: cacheGenerationSchema.parse(1),
 			updatedAt
 		})
 		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheLifecycles.tenant,
-				migrationSchema.cacheLifecycles.legacyCache
-			],
+			target: d1Schema.cacheLifecycle.tenant,
+			targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
 			set: {
-				...cacheMigrationColumns({ kind: 'default' }, access),
 				access,
 				deletedAt: sql`null`,
 				updatedAt
@@ -523,44 +513,6 @@ export async function offboardTenant(id: string): Promise<void> {
 		.run();
 	await invalidateTenantRow(tenantIdSchema.parse(id));
 	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
-}
-
-const cacheMirrorTriggerCount = 6;
-
-/**
- * Runs `write` with the six D1 mirroring triggers of migrations 0023 and
- * 0024 dropped, then recreates them from the definitions `sqlite_master`
- * recorded.
- *
- * The triggers fill `cache_kind`, `cache_name` and `access` on a row inserted
- * with them null, with the same values the code writes, so a row read back
- * after a write cannot show which of the two filled it. A test that checks
- * what the code wrote runs the write inside this.
- */
-export async function withoutCacheMirrorTriggers<T>(
-	write: () => Promise<T>
-): Promise<T> {
-	const { results: triggers } = await env.CUPBOARD_DB.prepare(
-		"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'cache_access_mirror_%'"
-	).all<{ readonly name: string; readonly sql: string }>();
-
-	if (triggers.length !== cacheMirrorTriggerCount) {
-		throw new Error(
-			`Expected ${String(cacheMirrorTriggerCount)} cache mirroring triggers, found ${String(triggers.length)}`
-		);
-	}
-
-	for (const trigger of triggers) {
-		await env.CUPBOARD_DB.prepare(`DROP TRIGGER \`${trigger.name}\``).run();
-	}
-
-	try {
-		return await write();
-	} finally {
-		for (const trigger of triggers) {
-			await env.CUPBOARD_DB.prepare(trigger.sql).run();
-		}
-	}
 }
 
 /**
@@ -3864,12 +3816,10 @@ export async function seedReservedNarInfo(
 		const reserved = narInfoGenerationSchema.parse(generation);
 		const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
 		const cache = resolvedCache(instance.context);
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		database
 			.insert(narInfos)
 			.values({
-				cache: legacyCache,
 				cacheId: cache.id,
 				storePathHash: metadata.storePathHash,
 				storePath: metadata.storePath,
@@ -3886,13 +3836,13 @@ export async function seedReservedNarInfo(
 		database
 			.insert(generationSeq)
 			.values({
-				cache: legacyCache,
 				...cacheIdentityColumns(cache.scope),
 				storePathHash: metadata.storePathHash,
 				nextGeneration
 			})
 			.onConflictDoUpdate({
-				target: [generationSeq.cache, generationSeq.storePathHash],
+				target: generationSeq.storePathHash,
+				targetWhere: sql`${generationSeq.cacheKind} = 'default'`,
 				set: { nextGeneration }
 			})
 			.run();
@@ -4106,6 +4056,28 @@ export const latestMigrationIndex = Math.max(
 );
 
 /**
+ * The index of the migration with this tag, so a test can migrate to a point in
+ * the history by name rather than by a number that shifts as migrations are
+ * added.
+ */
+export function migrationIndexNamed(tag: string): number {
+	const entry = migrations.journal.entries.find((item) => item.tag === tag);
+
+	if (entry === undefined) {
+		throw new Error(`no migration is tagged ${tag}`);
+	}
+
+	return entry.idx;
+}
+
+/**
+ * The last migration before the one that makes every cache's access mandatory.
+ * Rows in the legacy shape can be planted up to here.
+ */
+export const beforeCacheIdentityContract =
+	migrationIndexNamed('0051_cache_identity_contract_assertions') - 1;
+
+/**
  * Applies the registered migrations up to and including `throughIndex` against
  * a Durable Object's raw storage. Calling it twice with seeding in between lets
  * a test plant rows in an older table shape and then assert how a later
@@ -4125,6 +4097,47 @@ export async function migrateThrough(
 			return;
 		}
 	}
+}
+
+/**
+ * Applies every migration to a store seeded in a shape older than the cache
+ * catalogue, giving each of its caches a public access on the way.
+ *
+ * The contraction refuses an object whose caches record no access. A deployment
+ * converts every tenant's catalogue before that release reaches its object, and
+ * this stands in for that conversion so a test can seed an old row shape and
+ * still migrate to the end of the history.
+ */
+export async function migrateThroughConvertedCatalogue(
+	state: DurableObjectState
+): Promise<void> {
+	const hasJournal =
+		state.storage.sql
+			.exec(
+				"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'"
+			)
+			.toArray().length > 0;
+	const isAlreadyContracted =
+		hasJournal &&
+		state.storage.sql
+			.exec(
+				"SELECT 1 FROM __drizzle_migrations WHERE hash = '0052_cache_identity_contract' LIMIT 1"
+			)
+			.toArray().length > 0;
+
+	if (isAlreadyContracted) {
+		await migrateThrough(state, latestMigrationIndex);
+		return;
+	}
+
+	await migrateThrough(state, beforeCacheIdentityContract);
+	state.storage.sql.exec(
+		"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
+	);
+	state.storage.sql.exec(
+		"UPDATE reuse_view SET access = 'public' WHERE access IS NULL"
+	);
+	await migrateThrough(state, latestMigrationIndex);
 }
 
 export interface SigningKeySeed {

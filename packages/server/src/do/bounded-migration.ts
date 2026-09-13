@@ -45,6 +45,7 @@ export type LocalMigrationResult =
 export interface LocalMigrationBudget {
 	sourceRowsRemaining: number;
 	structuralOperationsRemaining: number;
+	freshStore?: boolean;
 }
 
 export const localMigrationStructuralOperationLimit = 365;

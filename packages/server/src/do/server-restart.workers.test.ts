@@ -6,6 +6,7 @@ import {
 	currentServer,
 	latestMigrationIndex,
 	migrateThrough,
+	recordDeploymentPhase,
 	testServerFor,
 	useTestServer
 } from '../test-support.ts';
@@ -20,6 +21,7 @@ describe('server initialisation over a migrated store', () => {
 	const serverName = 'server-restart';
 
 	it('initialises over a store it has already migrated', async () => {
+		await recordDeploymentPhase('contracted');
 		// Migrate the storage without initialising the object, which leaves it
 		// exactly as a first start would and as an eviction would find it.
 		await runInDurableObject(testServerFor(serverName), (_instance, state) =>

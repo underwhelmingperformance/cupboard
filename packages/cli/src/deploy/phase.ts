@@ -1,5 +1,6 @@
 import {
 	type DeploymentPhaseName,
+	deploymentPhaseNameSchema,
 	deploymentPhaseRowId,
 	deploymentPhaseSchema,
 	type LocalStep,
@@ -58,9 +59,8 @@ export interface LocalStepReadiness {
 }
 
 /**
- * Counts the active tenants whose object has not recorded the step this build
- * requires, and returns up to {@link localStepStragglerSampleSize} of their
- * ids in slug order.
+ * Counts active and suspended tenants below the required step and returns up
+ * to {@link localStepStragglerSampleSize} of their ids in slug order.
  *
  * This only reads. An object records its step when the control Worker wakes
  * it, which the hourly sweep does for the tenants that are behind, so the
@@ -71,7 +71,7 @@ export async function readLocalStepReadiness(
 	databaseId: DatabaseId,
 	requiredStep: LocalStep
 ): Promise<LocalStepReadiness> {
-	const behind = `status = 'active' AND (local_step IS NULL OR local_step < ${String(requiredStep)})`;
+	const behind = `status IN ('active', 'suspended') AND (local_step IS NULL OR local_step < ${String(requiredStep)})`;
 	// `d1QueryRows` keeps only string columns, so the count is cast to text; a
 	// bare `count(*)` comes back as a number and is dropped.
 	const counted = await api.queryRows(
@@ -96,10 +96,10 @@ export async function readLocalStepReadiness(
 }
 
 /**
- * Records `phase` once every active tenant has reached `requiredStep`. A phase
- * describes what every tenant's object has already done, so while any tenant
- * is behind this throws `LocalStepUnreachedError` and leaves the row
- * unchanged.
+ * Records `phase` once every active or suspended tenant has reached
+ * `requiredStep`. A phase describes what every tenant's object has already
+ * done. If a tenant is behind, this throws `LocalStepUnreachedError` and
+ * leaves the row unchanged.
  */
 export async function recordPhaseWhenTenantsReady(
 	api: PhaseApi,
@@ -172,8 +172,11 @@ export async function readDeploymentPhase(
 }
 
 /**
- * Records the phase the deployment has reached. Rerunning it with the same
- * phase rewrites the row with a later timestamp and changes nothing else.
+ * Records the phase the deployment has reached.
+ *
+ * The timestamp says when the deployment entered the phase, so rerunning the
+ * deploy in the same phase leaves it unchanged. A rerun cannot lower a phase
+ * that an earlier run already completed.
  */
 export async function recordDeploymentPhase(
 	api: PhaseApi,
@@ -182,12 +185,17 @@ export async function recordDeploymentPhase(
 	requiredLocalStep: LocalStep,
 	now: Date
 ): Promise<void> {
+	const phases = deploymentPhaseNameSchema.options;
+	const storedRank = `CASE deployment_phase.phase ${phases.map((name, index) => `WHEN ${quote(name)} THEN ${String(index)}`).join(' ')} ELSE ${String(phases.length)} END`;
 	await api.queryBatch(databaseId, [
 		`INSERT INTO deployment_phase (id, phase, required_local_step, updated_at) ` +
 			`VALUES (${quote(deploymentPhaseRowId)}, ${quote(phase)}, ${String(requiredLocalStep)}, ${quote(isoTimestamp(now))}) ` +
 			`ON CONFLICT (id) DO UPDATE SET phase = excluded.phase, ` +
 			`required_local_step = excluded.required_local_step, ` +
-			`updated_at = excluded.updated_at;`
+			`updated_at = CASE WHEN deployment_phase.phase = excluded.phase ` +
+			`AND deployment_phase.required_local_step = excluded.required_local_step ` +
+			`THEN deployment_phase.updated_at ELSE excluded.updated_at END ` +
+			`WHERE ${storedRank} <= ${String(phases.indexOf(phase))};`
 	]);
 }
 

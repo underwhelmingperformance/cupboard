@@ -27,7 +27,6 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	hashReadPassword,
 	isReadPasswordMatching,
@@ -36,7 +35,6 @@ import {
 	type ReadPasswordSalt,
 	readPasswordSaltSchema
 } from '../read/read-auth.ts';
-import { withoutCacheMirrorTriggers } from '../test-support.ts';
 
 import {
 	clearCacheReadCredential,
@@ -467,13 +465,13 @@ describe('tenant registry', () => {
 		{
 			table: 'blob_ref',
 			insert:
-				"INSERT INTO blob_ref (tenant, nar_hash, cache, store_path_hash, generation) VALUES (?, ?, '', '00000000000000000000000000000000', 0)",
+				"INSERT INTO blob_ref (tenant, nar_hash, cache_kind, store_path_hash, generation, cache_generation) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 1)",
 			digest: `sha256:${'0'.repeat(52)}`
 		},
 		{
 			table: 'attestation_ref',
 			insert:
-				"INSERT INTO attestation_ref (tenant, digest, cache, store_path_hash, generation, predicate_type) VALUES (?, ?, '', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
+				"INSERT INTO attestation_ref (tenant, digest, cache_kind, store_path_hash, generation, predicate_type) VALUES (?, ?, 'default', '00000000000000000000000000000000', 0, 'https://slsa.dev/provenance/v1')",
 			digest: 'a'.repeat(64)
 		}
 	])(
@@ -516,11 +514,10 @@ describe('tenant registry', () => {
 
 	it('repairs a tenant row created before provisioning became atomic', async () => {
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: acme,
 				status: 'active',
-				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud',
@@ -554,11 +551,10 @@ describe('tenant registry', () => {
 		const body = quotaBody(acme, 1000);
 
 		await database()
-			.insert(migrationSchema.tenants)
+			.insert(d1Schema.tenant)
 			.values({
 				id: body.id,
 				status: 'active',
-				readMode: body.defaultCacheAccess,
 				ownerIssuer: body.ownerIssuer,
 				ownerSubject: body.ownerSubject,
 				ownerAudience: body.ownerAudience,
@@ -940,24 +936,19 @@ describe('private cache read credentials', () => {
 		]);
 	});
 
-	// The mirroring trigger writes the same values for a row inserted with
-	// them null, so the write runs with the triggers dropped.
-	it('records the cache identity beside the legacy key', async () => {
+	it('records the cache identity of the cache it covers', async () => {
 		await ensureTenant(database(), createBody(acme), now);
 
-		await withoutCacheMirrorTriggers(() =>
-			setCacheReadCredential(
-				database(),
-				acme,
-				builds,
-				readCredential('reader'),
-				now
-			)
+		await setCacheReadCredential(
+			database(),
+			acme,
+			builds,
+			readCredential('reader'),
+			now
 		);
 
 		const rows = await database()
 			.select({
-				cache: d1Schema.tenantCacheReadCredential.cache,
 				cacheKind: d1Schema.tenantCacheReadCredential.cacheKind,
 				cacheName: d1Schema.tenantCacheReadCredential.cacheName
 			})
@@ -965,9 +956,7 @@ describe('private cache read credentials', () => {
 			.where(eq(d1Schema.tenantCacheReadCredential.tenant, acme))
 			.all();
 
-		expect(rows).toStrictEqual([
-			{ cache: 'private/builds', cacheKind: 'named', cacheName: 'builds' }
-		]);
+		expect(rows).toStrictEqual([{ cacheKind: 'named', cacheName: 'builds' }]);
 	});
 
 	it('replaces the verifier so the previous password stops working', async () => {

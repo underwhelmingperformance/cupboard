@@ -8,35 +8,357 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
+import migrations from '../../drizzle/migrations.js';
 import { cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { LocalSchemaMigrationPendingError } from '../errors.ts';
 import { reconcileCacheCatalogue } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
+	beforeCacheIdentityContract,
 	latestMigrationIndex,
 	migrateThrough,
 	testServerFor
 } from '../test-support.ts';
 
-import { DurableObjectMigrationError } from './migrate.ts';
+import {
+	applyMigrations,
+	DurableObjectMigrationError,
+	migrationsThrough
+} from './migrate.ts';
 import { CupboardServer } from './server.ts';
 
 describe('cache access migration', () => {
+	it('contracts 3,001 cache identities in persisted pages and preserves selector sequence', async () => {
+		const result = await runInDurableObject(
+			testServerFor('bounded-cache-identity-contract'),
+			async (_instance, state) => {
+				await migrateThrough(state, 50);
+
+				for (let index = 0; index < 3001; index++) {
+					state.storage.sql.exec(
+						"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', ?, 'public', 40, '2026-01-01T00:00:00.000Z')",
+						`contract-${String(index).padStart(4, '0')}`
+					);
+				}
+
+				state.storage.sql.exec(
+					"INSERT INTO reuse_view_selector_native (id, view, kind) VALUES (9000, 'builds', 'all')"
+				);
+				state.storage.sql.exec(
+					'DELETE FROM reuse_view_selector_native WHERE id = 9000'
+				);
+				const database = drizzle(state.storage);
+				const assertionFirst = await applyMigrations(
+					database,
+					migrationsThrough(migrations, 51)
+				);
+				const assertionProgress = state.storage.sql
+					.exec(
+						"SELECT stage, cursor FROM __bounded_migration_progress WHERE migration = '0051_cache_identity_contract_assertions'"
+					)
+					.toArray();
+				let assertionResult = assertionFirst;
+				for (
+					let pass = 1;
+					assertionResult.kind === 'pending' && pass < 100;
+					pass++
+				) {
+					assertionResult = await applyMigrations(
+						database,
+						migrationsThrough(migrations, 51)
+					);
+				}
+
+				const bundle = migrationsThrough(migrations, 52);
+				const first = await applyMigrations(database, bundle);
+				const progress = state.storage.sql
+					.exec(
+						"SELECT stage, cursor FROM __bounded_migration_progress WHERE migration = '0052_cache_identity_contract'"
+					)
+					.toArray();
+
+				let contractResult = first;
+				for (
+					let pass = 1;
+					contractResult.kind === 'pending' && pass < 100;
+					pass++
+				) {
+					contractResult = await applyMigrations(database, bundle);
+				}
+				state.storage.sql.exec(
+					"INSERT INTO reuse_view_selector_native (view, kind) VALUES ('builds', 'all')"
+				);
+
+				return {
+					assertionFirst,
+					assertionProgress,
+					assertionResult,
+					first,
+					progress,
+					contractResult,
+					cacheCount: state.storage.sql
+						.exec('SELECT count(*) AS count FROM cache_identity')
+						.one().count,
+					selectorId: state.storage.sql
+						.exec('SELECT id FROM reuse_view_selector_native')
+						.one().id
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			assertionFirst: {
+				kind: 'pending',
+				migration: '0051_cache_identity_contract_assertions',
+				stage: 'assert-cache_identity',
+				cursor: 1000,
+				sourceRows: 1000,
+				declaredSourceWrites: 0
+			},
+			assertionProgress: [{ stage: 28, cursor: 1000 }],
+			assertionResult: { kind: 'complete' },
+			first: {
+				kind: 'pending',
+				migration: '0052_cache_identity_contract',
+				stage: 'copy-cache_identity',
+				cursor: 1000,
+				sourceRows: 1000,
+				declaredSourceWrites: 1000
+			},
+			progress: [{ stage: 10, cursor: 1000 }],
+			contractResult: { kind: 'complete' },
+			cacheCount: 3001,
+			selectorId: 9001
+		});
+	});
+	it('refuses application work while request, RPC, and alarm dispatches resume its pages', async () => {
+		const tenant = tenantIdSchema.parse('bounded-local-entrypoints');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://owner.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'https://owner.test',
+			configVersion: 1,
+			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'public',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
+		});
+		const result = await runInDurableObject(
+			testServerFor(tenant),
+			async (instance, state) => {
+				await migrateThrough(state, 42);
+				state.storage.sql.exec(
+					"INSERT INTO tenant_identity (id, tenant, issuer, audience, owner_issuer, owner_subject, owner_audience, config_version) VALUES ('singleton', 'bounded-local-entrypoints', 'https://tenant.test', 'https://tenant.test', 'https://owner.test', 'owner', 'https://owner.test', 1)"
+				);
+
+				for (let index = 0; index < 3001; index++) {
+					state.storage.sql.exec(
+						'INSERT INTO cache (name, priority, created_at) VALUES (?, 40, ?)',
+						`cache-${String(index).padStart(4, '0')}`,
+						'2026-01-01T00:00:00.000Z'
+					);
+				}
+
+				const request = new Request(
+					'https://tenant.test/cache/_default/nix-cache-info'
+				);
+				const firstResponse = await instance.fetch(request);
+				const first = {
+					status: firstResponse.status,
+					retryAfter: firstResponse.headers.get('retry-after'),
+					cacheControl: firstResponse.headers.get('cache-control'),
+					body: await firstResponse.text()
+				};
+
+				let rpcError:
+					| {
+							readonly name: string;
+							readonly migration: string;
+							readonly stage: string;
+					  }
+					| undefined;
+
+				try {
+					await instance.runGarbageCollection();
+				} catch (error) {
+					if (!(error instanceof LocalSchemaMigrationPendingError)) {
+						throw error;
+					}
+
+					rpcError = {
+						name: error.name,
+						migration: error.migration,
+						stage: error.stage
+					};
+				}
+
+				await instance.alarm();
+				const alarmAt = await state.storage.getAlarm();
+				const progress = state.storage.sql
+					.exec(
+						"SELECT stage, cursor FROM __bounded_migration_progress WHERE migration = '0043_cache_access_backfill'"
+					)
+					.toArray();
+				const defaultsWhilePending = state.storage.sql
+					.exec("SELECT count(*) AS count FROM cache WHERE name = ''")
+					.one().count;
+
+				const requestRetries = [];
+
+				for (let attempt = 0; attempt < 7; attempt++) {
+					const response = await instance.fetch(request);
+					const hasProgressTable =
+						state.storage.sql
+							.exec(
+								"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '__bounded_migration_progress'"
+							)
+							.toArray().length > 0;
+					const migrationProgress = hasProgressTable
+						? state.storage.sql
+								.exec(
+									"SELECT stage, cursor FROM __bounded_migration_progress WHERE migration = '0043_cache_access_backfill'"
+								)
+								.toArray()[0]
+						: undefined;
+					requestRetries.push({
+						status: response.status,
+						retryAfter: response.headers.get('retry-after') ?? undefined,
+						stage: migrationProgress?.stage,
+						cursor: migrationProgress?.cursor
+					});
+				}
+
+				const migrationRecorded = state.storage.sql
+					.exec(
+						"SELECT hash FROM __drizzle_migrations WHERE hash = '0043_cache_access_backfill'"
+					)
+					.toArray();
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES ('builds', 40, '2026-01-02T00:00:00.000Z'), ('private/builds', 40, '2026-01-02T00:00:00.000Z')"
+				);
+				const registeredCaches = state.storage.sql
+					.exec(
+						"SELECT name FROM cache WHERE name IN ('builds', 'private/builds') ORDER BY name"
+					)
+					.toArray();
+				const migrationObjects = state.storage.sql
+					.exec(
+						"SELECT type, name FROM sqlite_master WHERE name GLOB '__bounded_*' OR tbl_name GLOB '__bounded_*' ORDER BY type, name"
+					)
+					.toArray();
+
+				return {
+					first,
+					rpcError,
+					alarmWasRearmed: typeof alarmAt === 'number',
+					progress,
+					defaultsWhilePending,
+					requestRetries,
+					migrationRecorded,
+					registeredCaches,
+					migrationObjects
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			first: {
+				status: StatusCodes.SERVICE_UNAVAILABLE,
+				retryAfter: '1',
+				cacheControl: 'no-store',
+				body: 'Durable Object migration 0043_cache_access_backfill is still running stage catalogue-cache; retry shortly\n'
+			},
+			rpcError: {
+				name: 'LocalSchemaMigrationPendingError',
+				migration: '0043_cache_access_backfill',
+				stage: 'catalogue-cache'
+			},
+			alarmWasRearmed: true,
+			progress: [{ stage: 1, cursor: 3000 }],
+			defaultsWhilePending: 0,
+			requestRetries: [
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 18,
+					cursor: 999
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 18,
+					cursor: 1999
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 18,
+					cursor: 2999
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 46,
+					cursor: 998
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 46,
+					cursor: 1998
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: 46,
+					cursor: 2998
+				},
+				{
+					status: StatusCodes.SERVICE_UNAVAILABLE,
+					retryAfter: '1',
+					stage: undefined,
+					cursor: undefined
+				}
+			],
+			migrationRecorded: [{ hash: '0043_cache_access_backfill' }],
+			registeredCaches: [{ name: 'builds' }, { name: 'private/builds' }],
+			migrationObjects: []
+		});
+	});
+
 	it('resumes catalogue pages before admitting traffic or contracting', async () => {
 		const tenant = tenantIdSchema.parse('catalogue-pending-initialisation');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
 			configVersion: 1,
 			createdAt: now
+		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'public',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
 		});
 		const server = testServerFor(tenant);
 		await runInDurableObject(server, async (_instance, state) => {
@@ -81,9 +403,9 @@ describe('cache access migration', () => {
 			legacyTables: [{ name: 'cache' }]
 		});
 		const pendingTenant = await d1
-			.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-			.from(migrationSchema.tenants)
-			.where(eq(migrationSchema.tenants.id, tenant))
+			.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant))
 			.get();
 		expect({ version: pendingTenant?.version ?? undefined }).toStrictEqual({
 			version: undefined
@@ -104,8 +426,28 @@ describe('cache access migration', () => {
 						results.push(error.name);
 					}
 				}
+				let hasCompleted = false;
+				for (let attempt = 0; attempt < 100; attempt++) {
+					const restarted = new CupboardServer(state, instance.context.env);
+					try {
+						await restarted.migrateCacheCatalogue(tenant);
+						hasCompleted = true;
+						break;
+					} catch (error) {
+						if (
+							!(error instanceof Error) ||
+							![
+								'LocalSchemaMigrationPendingError',
+								'CacheCatalogueMigrationPendingError'
+							].includes(error.name)
+						) {
+							throw error;
+						}
+					}
+				}
 				return {
 					results,
+					hasCompleted,
 					legacyTables: state.storage.sql
 						.exec(
 							"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cache'"
@@ -118,17 +460,118 @@ describe('cache access migration', () => {
 			results: [
 				'CacheCatalogueMigrationPendingError',
 				'CacheCatalogueMigrationPendingError',
-				'complete'
+				'LocalSchemaMigrationPendingError'
 			],
-			legacyTables: [{ name: 'cache' }]
+			hasCompleted: true,
+			legacyTables: []
 		});
 		expect(
 			await d1
-				.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-				.from(migrationSchema.tenants)
-				.where(eq(migrationSchema.tenants.id, tenant))
+				.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, tenant))
 				.get()
 		).toStrictEqual({ version: 2 });
+	});
+
+	it('removes legacy backfill markers and indexes at contraction', async () => {
+		const structures = await runInDurableObject(
+			testServerFor('legacy-backfill-index-lifecycle'),
+			async (_instance, state) => {
+				await migrateThrough(state, beforeCacheIdentityContract);
+				const before = {
+					revisionTables: state.storage.sql
+						.exec(
+							'SELECT table_name FROM cache_identity_backfill_revision ORDER BY table_name'
+						)
+						.toArray(),
+					revisionTriggers: state.storage.sql
+						.exec<{ count: number }>(
+							"SELECT count(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%backfill%'"
+						)
+						.one().count,
+					marker: state.storage.sql
+						.exec(
+							"SELECT name, type FROM pragma_table_info('cache') WHERE name = 'migration_identity_id'"
+						)
+						.toArray(),
+					indexes: state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE '%missing_cache_identity_idx' ORDER BY name"
+						)
+						.toArray()
+				};
+				state.storage.sql.exec(
+					"UPDATE cache_identity SET access = 'public' WHERE access IS NULL"
+				);
+				await migrateThrough(state, latestMigrationIndex);
+				return {
+					before,
+					after: state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE name = 'cache' OR name = 'cache_identity_backfill_revision' OR (type = 'trigger' AND name LIKE '%backfill%') OR (type = 'index' AND name LIKE '%missing_cache_identity_idx') ORDER BY name"
+						)
+						.toArray()
+				};
+			}
+		);
+		expect(structures).toStrictEqual({
+			before: {
+				revisionTables: [
+					{ table_name: 'cache_identity' },
+					{ table_name: 'garbage_collection_frontier' },
+					{ table_name: 'garbage_collection_mark' },
+					{ table_name: 'garbage_collection_revision' },
+					{ table_name: 'garbage_collection_scan' },
+					{ table_name: 'garbage_collection_tenant_run' },
+					{ table_name: 'narinfo' },
+					{ table_name: 'narinfo_deletion' },
+					{ table_name: 'pending_attestation' },
+					{ table_name: 'pending_upload' },
+					{ table_name: 'retention_grace' },
+					{ table_name: 'retention_policy' },
+					{ table_name: 'retention_root' },
+					{ table_name: 'retention_root_target' },
+					{ table_name: 'verification_cursor' }
+				],
+				revisionTriggers: 30,
+				marker: [{ name: 'migration_identity_id', type: 'INTEGER' }],
+				indexes: [
+					{ name: 'cache_missing_cache_identity_idx' },
+					{ name: 'garbage_collection_frontier_missing_cache_identity_idx' },
+					{ name: 'garbage_collection_mark_missing_cache_identity_idx' },
+					{ name: 'garbage_collection_revision_missing_cache_identity_idx' },
+					{ name: 'garbage_collection_scan_missing_cache_identity_idx' },
+					{ name: 'garbage_collection_tenant_run_missing_cache_identity_idx' },
+					{ name: 'narinfo_deletion_missing_cache_identity_idx' },
+					{ name: 'narinfo_missing_cache_identity_idx' },
+					{ name: 'pending_attestation_missing_cache_identity_idx' },
+					{ name: 'pending_upload_missing_cache_identity_idx' },
+					{ name: 'retention_grace_missing_cache_identity_idx' },
+					{ name: 'retention_policy_missing_cache_identity_idx' },
+					{ name: 'retention_root_missing_cache_identity_idx' },
+					{ name: 'retention_root_target_missing_cache_identity_idx' },
+					{ name: 'verification_cursor_missing_cache_identity_idx' }
+				]
+			},
+			after: []
+		});
+	});
+
+	it('uses the identity index to find a retained incarnation', async () => {
+		const plan = await runInDurableObject(
+			testServerFor('catalogue-identity-query-plan'),
+			async (_instance, state) => {
+				await migrateThrough(state, beforeCacheIdentityContract);
+				const query = state.storage.sql.exec(
+					"EXPLAIN QUERY PLAN SELECT id FROM cache_identity WHERE kind = 'named' AND name = 'again' AND deleted_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+				);
+				return Array.from(query, (row) => row.detail);
+			}
+		);
+		expect(plan).toStrictEqual([
+			'SEARCH cache_identity USING INDEX cache_identity_history_scope_id_idx (kind=? AND name=?)'
+		]);
 	});
 
 	it.each([false, true])(
@@ -139,44 +582,38 @@ describe('cache access migration', () => {
 			);
 			const now = isoTimestampSchema.parse('2026-03-01T00:00:00.000Z');
 			const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-			await d1.insert(migrationSchema.tenants).values({
+			await d1.insert(d1Schema.tenant).values({
 				id: tenant,
 				status: 'active',
-				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'cupboard',
 				configVersion: 1,
 				createdAt: now
 			});
-			await d1
-				.insert(migrationSchema.cacheLifecycles)
-				.values([
-					{
-						tenant,
-						cacheKind: 'default',
-						legacyCache: '',
-						cacheName: sql`null`,
-						access: 'public',
-						generation: cacheGenerationSchema.parse(1),
-						updatedAt: now
-					},
-					{
-						tenant,
-						cacheKind: 'named',
-						legacyCache: 'again',
-						cacheName: cacheNameSchema.parse('again'),
-						access: 'public',
-						generation: cacheGenerationSchema.parse(isDeleted ? 3 : 2),
-						deletedAt: isDeleted ? now : sql`null`,
-						updatedAt: now
-					}
-				])
-				.onConflictDoNothing();
+			await d1.insert(d1Schema.cacheLifecycle).values([
+				{
+					tenant,
+					cacheKind: 'default',
+					cacheName: sql`null`,
+					access: 'public',
+					generation: cacheGenerationSchema.parse(1),
+					updatedAt: now
+				},
+				{
+					tenant,
+					cacheKind: 'named',
+					cacheName: cacheNameSchema.parse('again'),
+					access: 'public',
+					generation: cacheGenerationSchema.parse(isDeleted ? 3 : 2),
+					deletedAt: isDeleted ? now : sql`null`,
+					updatedAt: now
+				}
+			]);
 			const local = await runInDurableObject(
 				testServerFor(tenant),
 				async (instance, state) => {
-					await migrateThrough(state, latestMigrationIndex);
+					await migrateThrough(state, beforeCacheIdentityContract);
 					state.storage.sql.exec(
 						"INSERT INTO cache_identity (kind, name, access, priority, created_at, deleted_at) VALUES ('named', 'again', 'public', 40, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z'), ('named', 'again', 'public', 40, '2026-02-01T00:00:00.000Z', NULL)"
 					);
@@ -190,15 +627,12 @@ describe('cache access migration', () => {
 			);
 			const lifecycle = await d1
 				.select({
-					deletedAt: migrationSchema.cacheLifecycles.deletedAt,
-					generation: migrationSchema.cacheLifecycles.generation
+					deletedAt: d1Schema.cacheLifecycle.deletedAt,
+					generation: d1Schema.cacheLifecycle.generation
 				})
-				.from(migrationSchema.cacheLifecycles)
+				.from(d1Schema.cacheLifecycle)
 				.where(
-					eq(
-						migrationSchema.cacheLifecycles.cacheName,
-						cacheNameSchema.parse('again')
-					)
+					eq(d1Schema.cacheLifecycle.cacheName, cacheNameSchema.parse('again'))
 				)
 				.get();
 			expect({
@@ -230,19 +664,26 @@ describe('cache access migration', () => {
 		const tenant = tenantIdSchema.parse('paged-catalogue');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
 			configVersion: 1,
 			createdAt: now
 		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'public',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
+		});
 		const server = testServerFor(tenant);
 		await runInDurableObject(server, async (_instance, state) => {
-			await migrateThrough(state, latestMigrationIndex);
+			await migrateThrough(state, beforeCacheIdentityContract);
 			for (let index = 0; index < 80; index++) {
 				state.storage.sql.exec(
 					"INSERT INTO cache_identity (kind, name, access, priority, created_at) VALUES ('named', ?, 'public', 40, ?)",
@@ -260,9 +701,9 @@ describe('cache access migration', () => {
 			);
 		}
 		const rows = await d1
-			.select({ deletedAt: migrationSchema.cacheLifecycles.deletedAt })
-			.from(migrationSchema.cacheLifecycles)
-			.where(eq(migrationSchema.cacheLifecycles.tenant, tenant))
+			.select({ deletedAt: d1Schema.cacheLifecycle.deletedAt })
+			.from(d1Schema.cacheLifecycle)
+			.where(eq(d1Schema.cacheLifecycle.tenant, tenant))
 			.all();
 		expect({
 			outcomes,
@@ -346,10 +787,10 @@ describe('cache access migration', () => {
 					"INSERT INTO reuse_view_selector (view, kind, pattern) VALUES ('private/all', 'prefix', '')"
 				);
 
-				await migrateThrough(state, latestMigrationIndex);
+				await migrateThrough(state, beforeCacheIdentityContract);
 				const generationRows = state.storage.sql
 					.exec<{
-						cache_kind: 'default' | 'named' | null;
+						cache_kind: 'default' | 'named';
 						cache_name: string | null;
 						store_path_hash: string;
 						next_generation: number;
@@ -511,7 +952,7 @@ describe('cache access migration', () => {
 						);
 					}
 
-					await migrateThrough(state, latestMigrationIndex);
+					await migrateThrough(state, beforeCacheIdentityContract);
 
 					return state.storage.sql
 						.exec(
@@ -539,24 +980,127 @@ describe('cache access migration', () => {
 		}
 	);
 
-	it('reconciles every cache of a legacy private tenant before contraction', async () => {
-		const tenant = tenantIdSchema.parse('migration-private-tenant');
+	it('refuses the contraction while a cache records no access', async () => {
+		const server = testServerFor('migration-unconverted-catalogue');
+
+		await expect(
+			runInDurableObject(server, async (_instance, state) => {
+				await migrateThrough(state, 41);
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, '2026-01-01T00:00:00.000Z'), ('builds', 41, '2026-01-01T00:00:00.000Z')"
+				);
+				await migrateThrough(state, beforeCacheIdentityContract);
+
+				return migrateThrough(state, latestMigrationIndex);
+			})
+		).rejects.toMatchObject({
+			name: 'DurableObjectMigrationError',
+			tag: '0051_cache_identity_contract_assertions'
+		});
+	});
+
+	it('converts an unreconciled catalogue before the contraction runs', async () => {
+		const tenant = tenantIdSchema.parse('migration-self-converting');
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
-			status: 'active',
-			readMode: 'private',
+			status: 'offboarding',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
 			configVersion: 1,
 			createdAt: now
 		});
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'private',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
+		});
 
 		const server = testServerFor(tenant);
 		await runInDurableObject(server, async (_instance, state) => {
+			await migrateThrough(state, 41);
+			state.storage.sql.exec(
+				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?), ('builds', 41, ?)",
+				now,
+				now
+			);
+		});
+
+		let hasCompleted = false;
+		for (let attempt = 0; attempt < 20; attempt++) {
+			try {
+				await server.migrateCacheCatalogue(tenant);
+				hasCompleted = true;
+				break;
+			} catch (error) {
+				if (
+					!(error instanceof Error) ||
+					![
+						'LocalSchemaMigrationPendingError',
+						'CacheCatalogueMigrationPendingError'
+					].includes(error.name)
+				) {
+					throw error;
+				}
+			}
+		}
+		const caches = await runInDurableObject(server, (_instance, state) => {
+			const rows = state.storage.sql
+				.exec<{
+					kind: 'default' | 'named';
+					name: string | null;
+					access: string;
+				}>('SELECT kind, name, access FROM cache_identity ORDER BY id')
+				.toArray();
+
+			return rows.map((row) => ({
+				cache: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+				access: row.access
+			}));
+		});
+
+		expect({ hasCompleted, caches }).toStrictEqual({
+			hasCompleted: true,
+			caches: [
+				{ cache: { kind: 'default' }, access: 'private' },
+				{ cache: { kind: 'named', name: 'builds' }, access: 'private' }
+			]
+		});
+	});
+
+	it('contracts once the reconciliation has supplied every access', async () => {
+		const tenant = tenantIdSchema.parse('migration-private-tenant');
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+		await d1.insert(d1Schema.tenant).values({
+			id: tenant,
+			status: 'active',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard',
+			configVersion: 1,
+			createdAt: now
+		});
+		// The default cache's recorded access is what a cache with none of its own
+		// inherits.
+		await d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cacheKind: 'default',
+			cacheName: sql`null`,
+			access: 'private',
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt: now
+		});
+
+		const server = testServerFor(tenant);
+		await runInDurableObject(server, async (instance, state) => {
 			await migrateThrough(state, 41);
 			state.storage.sql.exec(
 				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?), ('builds', 41, ?), ('private/releases', 42, ?)",
@@ -571,17 +1115,17 @@ describe('cache access migration', () => {
 				now,
 				now
 			);
+			await migrateThrough(state, beforeCacheIdentityContract);
+			await reconcileCacheCatalogue(instance.context, tenant);
+			await migrateThrough(state, latestMigrationIndex);
 		});
-
-		await server.migrateCacheCatalogue(tenant);
-		await server.migrateCacheCatalogue(tenant);
 
 		const local = await runInDurableObject(server, (_instance, state) => {
 			const cacheRows = state.storage.sql
 				.exec<{
-					kind: 'default' | 'named' | null;
+					kind: 'default' | 'named';
 					name: string | null;
-					access: string | null;
+					access: string;
 					priority: number;
 				}>(
 					'SELECT kind, name, access, priority FROM cache_identity ORDER BY id'
@@ -600,11 +1144,6 @@ describe('cache access migration', () => {
 					.toArray()
 			};
 		});
-		const tenantRow = await d1
-			.select({ version: d1Schema.tenant.cacheCatalogueVersion })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, tenant))
-			.get();
 		const lifecycleRows = await d1
 			.select({
 				kind: d1Schema.cacheLifecycle.cacheKind,
@@ -619,7 +1158,7 @@ describe('cache access migration', () => {
 			access: row.access
 		}));
 
-		expect({ local, tenantRow, lifecycles }).toStrictEqual({
+		expect({ local, lifecycles }).toStrictEqual({
 			local: {
 				caches: [
 					{ cache: { kind: 'default' }, access: 'private', priority: 40 },
@@ -634,12 +1173,13 @@ describe('cache access migration', () => {
 						priority: 42
 					}
 				],
+				// The contraction renames a view to its local name, so the private
+				// namespace no longer appears in the stored key.
 				views: [
 					{ name: 'ordinary', access: 'private' },
-					{ name: 'private/secure', access: 'private' }
+					{ name: 'secure', access: 'private' }
 				]
 			},
-			tenantRow: { version: 2 },
 			lifecycles: [
 				{ cache: { kind: 'default' }, access: 'private' },
 				{ cache: { kind: 'named', name: 'builds' }, access: 'private' },
@@ -653,36 +1193,44 @@ describe('cache access migration', () => {
 		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 		const d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await d1.insert(migrationSchema.tenants).values({
+		await d1.insert(d1Schema.tenant).values({
 			id: tenant,
 			status: 'active',
-			readMode: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'cupboard',
 			configVersion: 1,
 			createdAt: now
 		});
-		await d1.insert(migrationSchema.cacheLifecycles).values({
-			tenant,
-			legacyCache: 'phantom',
-			cacheKind: 'named',
-			cacheName: cacheNameSchema.parse('phantom'),
-			access: 'public',
-			generation: cacheGenerationSchema.parse(4),
-			updatedAt: now
-		});
+		await d1.insert(d1Schema.cacheLifecycle).values([
+			{
+				tenant,
+				cacheKind: 'default',
+				cacheName: sql`null`,
+				access: 'public',
+				generation: cacheGenerationSchema.parse(1),
+				updatedAt: now
+			},
+			{
+				tenant,
+				cacheKind: 'named',
+				cacheName: cacheNameSchema.parse('phantom'),
+				access: 'public',
+				generation: cacheGenerationSchema.parse(4),
+				updatedAt: now
+			}
+		]);
 
 		const server = testServerFor(tenant);
-		await runInDurableObject(server, async (_instance, state) => {
+		await runInDurableObject(server, async (instance, state) => {
 			await migrateThrough(state, 41);
 			state.storage.sql.exec(
 				"INSERT INTO cache (name, priority, created_at) VALUES ('', 40, ?)",
 				now
 			);
+			await migrateThrough(state, beforeCacheIdentityContract);
+			await reconcileCacheCatalogue(instance.context, tenant);
 		});
-
-		await server.migrateCacheCatalogue(tenant);
 
 		const rows = await d1
 			.select({

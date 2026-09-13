@@ -137,7 +137,6 @@ async function seedCommittedPaths(server: string): Promise<void> {
 			const now = isoTimestamp(new Date());
 			const generation = narInfoGenerationSchema.parse(1);
 			const narInfoRow = (path: UploadPathMetadata) => ({
-				cache: buildsCache.name,
 				cacheId: cache.id,
 				storePathHash: path.storePathHash,
 				storePath: path.storePath,
@@ -149,7 +148,6 @@ async function seedCommittedPaths(server: string): Promise<void> {
 			});
 			const referenceRow = (path: UploadPathMetadata) => ({
 				tenant: fixtureTenant,
-				cache: buildsCache.name,
 				cacheKind: 'named' as const,
 				cacheName: buildsCache.name,
 				storePathHash: path.storePathHash,
