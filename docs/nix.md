@@ -162,6 +162,20 @@ A private cache without its own entry uses `--read-user` and `--read-password`,
 which specify the tenant-wide fallback credential. Every cache-specific entry
 must match a selected cache.
 
+To include the tenant's default cache in the same configuration, add
+`--include-default-cache`. The default cache comes first, followed by the named
+caches in argument order:
+
+```sh
+CUPBOARD_CACHE_CREDENTIALS=$credentials \
+  cupboard config "$url" "$(cupboard pubkey "$url")" \
+    --include-default-cache builds release
+```
+
+A positional `default` selects a named cache called `default`; the flag selects
+the tenant's default cache. The setup Action has the same
+`include-default-cache` input.
+
 ### Keeping the credential out of `nix.conf`
 
 A netrc entry is keyed only by host, so netrc cannot provide different
