@@ -382,6 +382,22 @@ export class ReadUserRequiredError extends UsageError {
 	}
 }
 
+export class ProvisionCacheAccessRequiredError extends UsageError {
+	constructor() {
+		super(
+			'provision-cache-access is required when provision-cache names a cache'
+		);
+		this.name = 'ProvisionCacheAccessRequiredError';
+	}
+}
+
+export class ProvisionCacheUrlRequiredError extends UsageError {
+	constructor() {
+		super('cache-url is required when provision-cache names a cache');
+		this.name = 'ProvisionCacheUrlRequiredError';
+	}
+}
+
 export class InvalidMaxJobsError extends UsageError {
 	constructor(public readonly value: string) {
 		super('max-jobs must be a non-negative 32-bit integer');
@@ -1682,5 +1698,15 @@ export class CacheGraceMissingError extends CodedError {
 			`${cache.kind === 'default' ? 'The default cache' : `Cache ${cache.name}`} has no configured grace: set it with \`cupboard cache set-grace\` or publish without require-grace`
 		);
 		this.name = 'CacheGraceMissingError';
+	}
+}
+
+/**
+The provisioned cache must satisfy the workflow's required read access.
+*/
+export class ProvisionCacheResultError extends CodedError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'ProvisionCacheResultError';
 	}
 }

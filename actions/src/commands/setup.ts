@@ -13,6 +13,7 @@ import {
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import {
 	isDestinationPreferred,
 	reuseViewPrioritySchema
@@ -31,12 +32,16 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
+import { runCupboard } from '../cupboard-run.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	ProvisionCacheAccessRequiredError,
+	ProvisionCacheResultError,
+	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -79,6 +84,9 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly provisionCache?: string;
+	readonly provisionCacheAccess?: string;
+	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
@@ -86,6 +94,16 @@ export interface SetupOptions {
 	readonly readPassword?: string;
 	readonly nixConfigFile?: string;
 	readonly checkoutDir?: string;
+}
+
+/**
+ * Properties to use when setup creates a missing cache before configuring Nix.
+ * An existing cache keeps its properties, but its access must match.
+ */
+export interface ProvisionCache {
+	readonly name: string;
+	readonly access: string;
+	readonly rootTtl: string;
 }
 
 export interface SetupInputs {
@@ -99,6 +117,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
+	readonly provisionCache: ProvisionCache | undefined;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -112,6 +131,7 @@ export interface SetupActionDependencies {
 	readonly fetch?: typeof fetch;
 	readonly installRelease?: typeof installCupboard;
 	readonly mask?: (value: string) => void;
+	readonly run?: typeof runCupboard;
 	readonly signal?: AbortSignal;
 }
 
@@ -179,6 +199,18 @@ export function registerSetupCommand(
 		.option(
 			'--cache-credentials <json>',
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
+		)
+		.option(
+			'--provision-cache <name>',
+			"Create a missing cache with the run's OIDC token before configuring Nix."
+		)
+		.option(
+			'--provision-cache-access <mode>',
+			'Required read access for the cache: public or private.'
+		)
+		.option(
+			'--provision-cache-ttl <duration>',
+			'Default root TTL for the created cache, e.g. 14d.'
 		)
 		.option(
 			'--reuse-view <name>',
@@ -264,6 +296,7 @@ export function resolveSetupInputs(
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
 		caches: resolveCaches(options),
+		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -277,6 +310,33 @@ export function resolveSetupInputs(
 						'../..'
 					)
 				: '')
+	};
+}
+
+function resolveProvisionCache(
+	options: SetupOptions,
+	cacheUrl: URL | undefined
+): ProvisionCache | undefined {
+	const name = provided(options.provisionCache);
+
+	if (name === undefined) {
+		return undefined;
+	}
+
+	if (cacheUrl === undefined) {
+		throw new ProvisionCacheUrlRequiredError();
+	}
+
+	const access = provided(options.provisionCacheAccess);
+
+	if (access === undefined) {
+		throw new ProvisionCacheAccessRequiredError();
+	}
+
+	return {
+		name,
+		access,
+		rootTtl: provided(options.provisionCacheTtl) ?? ''
 	};
 }
 
@@ -403,6 +463,35 @@ export async function setupAction(
 		return;
 	}
 
+	if (inputs.provisionCache !== undefined) {
+		const results = await (dependencies.run ?? runCupboard)(
+			acquired.binaryPath,
+			provisionCacheArguments(inputs.cacheUrl, inputs.provisionCache),
+			environment,
+			{
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			}
+		);
+		const result = results.findLast((event) => event.kind === 'cache');
+		const parsed = cacheSummarySchema.safeParse(result?.data);
+		if (
+			!parsed.success ||
+			parsed.data.scope.kind !== 'named' ||
+			parsed.data.scope.name !== inputs.provisionCache.name
+		) {
+			throw new ProvisionCacheResultError(
+				'The cache creation command did not report the requested cache. Upgrade cupboard and retry.'
+			);
+		}
+		if (parsed.data.access !== inputs.provisionCache.access) {
+			throw new ProvisionCacheResultError(
+				`Cache "${inputs.provisionCache.name}" has ${parsed.data.access} access; ${inputs.provisionCache.access} access is required. Ask the cache administrator to change its access before rerunning this workflow.`
+			);
+		}
+	}
+
 	await configureNix(
 		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
 		reporter,
@@ -411,6 +500,23 @@ export async function setupAction(
 			...(dependencies.signal !== undefined && { signal: dependencies.signal })
 		}
 	);
+}
+
+function provisionCacheArguments(
+	cacheUrl: URL,
+	provision: ProvisionCache
+): readonly string[] {
+	return [
+		'cache',
+		'create',
+		canonicalHref(cacheUrl),
+		provision.name,
+		'--github-oidc',
+		'--if-absent',
+		'--access',
+		provision.access,
+		...(provision.rootTtl === '' ? [] : ['--root-ttl', provision.rootTtl])
+	];
 }
 
 export function cupboardPathEntry(binaryPath: string): string {
