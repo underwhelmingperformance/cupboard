@@ -617,10 +617,8 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
- * The D1 statements one invocation of the current test server may run.
- *
- * Returns the allowance currently configured on the object, including an
- * override made with `withDeployedStatementAllowance`.
+ * Returns the current test server's D1 statement allowance. The pool defaults
+ * to Workers Free; `withDeployedStatementAllowance` can override that value.
  */
 export function deployedStatementAllowance(): Promise<number> {
 	return runInDurableObject(
