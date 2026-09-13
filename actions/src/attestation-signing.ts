@@ -1,5 +1,4 @@
 import { attest, buildSLSAProvenancePredicate } from '@actions/attest';
-import { isPrivateCache, type StoredCache } from '@cupboard/nix-store/scalars';
 import type { Reporter } from '@cupboard/reporter';
 import { backoffDelay } from '@cupboard/shared/retry';
 import type { InternalError } from '@sigstore/sign';
@@ -204,10 +203,6 @@ export function subjectsPerStatement(
 	runBatchSize: number
 ): number {
 	return grouping === 'individual' ? 1 : runBatchSize;
-}
-
-export function cacheVisibility(cache: StoredCache): DestinationVisibility {
-	return isPrivateCache(cache) ? 'private' : 'public';
 }
 
 /**

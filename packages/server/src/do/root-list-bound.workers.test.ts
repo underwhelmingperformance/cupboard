@@ -1,5 +1,4 @@
 import {
-	DEFAULT_CACHE,
 	rootNameSchema,
 	storePathHashSchema,
 	storePathSchema
@@ -16,6 +15,7 @@ import {
 	narBytes,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
 	setRoot,
 	uploadMetadata
 } from '../test-support.ts';
@@ -36,6 +36,7 @@ async function seedTargets(
 	indexes: readonly number[]
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
 		const rootName = rootNameSchema.parse(name);
 
 		for (const index of indexes) {
@@ -44,7 +45,7 @@ async function seedTargets(
 			instance.context.db
 				.insert(schema.retentionRootTargets)
 				.values({
-					cache: DEFAULT_CACHE,
+					cacheId,
 					rootName,
 					storePathHash: storePathHashSchema.parse(storePathHash),
 					storePath: storePathSchema.parse(

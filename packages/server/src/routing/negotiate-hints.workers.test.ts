@@ -1,9 +1,8 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
-	type ParsedUploadPathMetadata,
 	uploadGraceFactsCapability,
-	uploadNegotiateResponseSchema
+	uploadNegotiateResponseSchema,
+	type UploadPathMetadata
 } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -18,6 +17,7 @@ import {
 	CommitSocketError,
 	commitUploadRejection,
 	currentServer,
+	defaultCache,
 	deleteBlobReferenceEdge,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
@@ -47,7 +47,7 @@ function expectCommitSocketError(
 
 async function negotiateViaWorker(
 	token: string,
-	paths: readonly ParsedUploadPathMetadata[],
+	paths: readonly UploadPathMetadata[],
 	extraHeaders: Record<string, string> = {}
 ) {
 	const response = await handlerFetch(`/t/${fixtureTenant}/uploads`, {
@@ -100,13 +100,13 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 		const forged = await computeNegotiateHints(
 			probeRequest({ pushId: 'a'.repeat(96), paths: [path] }),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect({ signed, forged }).toStrictEqual({
@@ -126,7 +126,7 @@ describe('computing negotiate hints', () => {
 			),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect(hints).toStrictEqual({
@@ -141,7 +141,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect(hints).toBeUndefined();
@@ -152,7 +152,7 @@ describe('computing negotiate hints', () => {
 			probeRequest('{not json'),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect(hints).toBeUndefined();
@@ -164,7 +164,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths }),
 			env,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect(hints).toBeUndefined();
@@ -181,7 +181,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }),
 			faultyEnv,
 			fixtureTenant,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 
 		expect(hints).toBeUndefined();

@@ -39,13 +39,15 @@ describe('Nix substitution from a private-read cache', () => {
 			async (directory) => {
 				const server = await CupboardTestServer.start(directory, {
 					provision: {
-						readMode: 'private',
+						defaultCacheAccess: 'private',
 						read: { user: readUser, password: readPassword }
 					}
 				});
 
 				try {
-					const client = new CupboardClient(server.tenantUrl);
+					const client = new CupboardClient(server.tenantUrl, fetch, {
+						kind: 'default'
+					});
 					const token = await server.ownerAdminToken();
 					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
@@ -115,7 +117,7 @@ describe('Nix substitution from a private-read cache', () => {
 			async (directory) => {
 				const server = await CupboardTestServer.start(directory, {
 					provision: {
-						readMode: 'private',
+						defaultCacheAccess: 'private',
 						read: { user: readUser, password: readPassword }
 					}
 				});

@@ -1,29 +1,31 @@
 import {
-	type CacheAccessMode,
-	identityForCache,
-	isPrivateCache,
+	type CacheScope,
+	isSameCacheScope,
 	type NarInfoGeneration,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { type DeletePathResponse } from '@cupboard/protocol/upload';
+import { type DeletePathResponseInput } from '@cupboard/protocol/upload';
 import { and, eq, exists, inArray, notExists, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { type CacheId, cacheIdentityColumns } from '../db/cache.ts';
 import {
-	type CacheLifecycleVersion,
-	firstCacheGeneration,
-	firstCacheReadRevision,
+	type CacheId,
+	cacheIdentityColumns,
+	cacheIdentityCondition,
+	cacheScopeFromRow,
+	legacyCacheKey,
+	type ResolvedCache
+} from '../db/cache.ts';
+import {
+	authorisedByCacheGeneration,
 	referencedCacheLifecycle,
 	revokedByCacheGeneration,
 	secondCacheGeneration,
 	secondCacheReadRevision
 } from '../db/cache-generation.ts';
-import { outsidePrivateCaches } from '../db/cache-range.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
@@ -35,6 +37,7 @@ import {
 import { type AttestationsService } from './attestations-service.ts';
 import { chunk, drainStatementBatches } from './bulk.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
+import { cacheLifecycleFilter } from './cache-registration-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import {
 	type JsonRowList,
@@ -78,8 +81,9 @@ const attestationQueryStatementsPerChunk = 1;
 const attestationRetirementStatements = 5;
 
 // After retiring all attestation references, the chunk credits usage, deletes
-// edges, updates presence accounting and queries the public references needed
-// for cache purges.
+// edges, updates presence accounting and queues exact-cache purges. A chunk
+// contains at most `maxFencedRetireRows` paths, so all of its distinct NAR
+// hashes fit in one presence batch.
 const narInfoRetirementStatementsPerChunk = 5;
 
 // The fixed D1 statement cost of retiring one teardown chunk.
@@ -107,13 +111,12 @@ const maxSinglePathAttestationRetirements = Math.floor(
 export function capturedReferenceSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	batch: JsonRowList<TornDownNarInfo>,
 	limit: number
 ) {
 	return database
 		.select({
-			cache: d1Schema.attestationReference.cache,
 			storePathHash: d1Schema.attestationReference.storePathHash,
 			generation: d1Schema.attestationReference.generation,
 			predicateType: d1Schema.attestationReference.predicateType,
@@ -123,7 +126,11 @@ export function capturedReferenceSelect(
 		.where(
 			and(
 				eq(d1Schema.attestationReference.tenant, tenant),
-				eq(d1Schema.attestationReference.cache, cache),
+				cacheIdentityCondition(
+					d1Schema.attestationReference.cacheKind,
+					d1Schema.attestationReference.cacheName,
+					cache
+				),
 				batch.matches({
 					storePathHash: d1Schema.attestationReference.storePathHash,
 					generation: d1Schema.attestationReference.generation
@@ -134,22 +141,32 @@ export function capturedReferenceSelect(
 }
 
 /**
- * Builds the query for the public caches that still reference a retired
- * chunk's NAR hashes. The parameter test imports this builder.
+ * Builds the query for the edges of one cache that still reference a retired
+ * chunk's NAR hashes. The hashes travel as a list, so the query binds the same
+ * parameters however many the chunk retired.
+ *
+ * The parameter test imports this builder and inspects the statement it makes.
  */
-export function publicReferenceSelect(
+export function cacheReferenceSelect(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
+	cache: CacheScope,
 	narHashes: JsonValueList<NixSha256HashString>
 ) {
 	return database
 		.select({ narHash: d1Schema.blobReference.narHash })
 		.from(d1Schema.blobReference)
+		.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
 		.where(
 			and(
 				eq(d1Schema.blobReference.tenant, tenant),
+				cacheIdentityCondition(
+					d1Schema.blobReference.cacheKind,
+					d1Schema.blobReference.cacheName,
+					cache
+				),
 				inArray(d1Schema.blobReference.narHash, narHashes),
-				outsidePrivateCaches(d1Schema.blobReference.cache)
+				authorisedByCacheGeneration()
 			)
 		);
 }
@@ -165,13 +182,17 @@ export function publicReferenceSelect(
 export function fencedEdgeRetirement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
-	cache: StoredCache,
+	cache: CacheScope,
 	batch: JsonRowList<TornDownNarInfo>,
 	now: IsoTimestamp
 ) {
 	const edgeFilter = and(
 		eq(d1Schema.blobReference.tenant, tenant),
-		eq(d1Schema.blobReference.cache, cache),
+		cacheIdentityCondition(
+			d1Schema.blobReference.cacheKind,
+			d1Schema.blobReference.cacheName,
+			cache
+		),
 		batch.matches({
 			storePathHash: d1Schema.blobReference.storePathHash,
 			generation: d1Schema.blobReference.generation
@@ -245,8 +266,7 @@ export class DeletionQueueService {
 	) {}
 
 	private async retireBlobRefEdge(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
@@ -259,7 +279,11 @@ export class DeletionQueueService {
 		// remove a newer edge.
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
-			eq(d1Schema.blobReference.cache, cache),
+			cacheIdentityCondition(
+				d1Schema.blobReference.cacheKind,
+				d1Schema.blobReference.cacheName,
+				cache.scope
+			),
 			eq(d1Schema.blobReference.storePathHash, storePathHash),
 			eq(d1Schema.blobReference.generation, generation)
 		);
@@ -293,28 +317,34 @@ export class DeletionQueueService {
 			eq(d1Schema.tenantBlob.tenant, tenant),
 			eq(d1Schema.tenantBlob.narHash, narHash)
 		);
+		const authorisedReferenceFilter = and(
+			hashReferencedFilter,
+			authorisedByCacheGeneration()
+		);
 
 		const [stillReferencedRows, presenceRows] = await this.context.d1.batch([
 			this.context.d1
-				.select({ cache: d1Schema.blobReference.cache })
+				.select({
+					kind: d1Schema.blobReference.cacheKind,
+					name: d1Schema.blobReference.cacheName
+				})
 				.from(d1Schema.blobReference)
-				.where(hashReferencedFilter),
+				.innerJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
+				.where(authorisedReferenceFilter),
 			this.context.d1
 				.select({ fileSize: d1Schema.tenantBlob.fileSize })
 				.from(d1Schema.tenantBlob)
 				.where(presenceFilter)
 		]);
-		// Invalidate a cached public NAR after the tenant's final public reference
-		// is retired. Retiring a private edge does not change public authorisation.
-		//
-		// `blob_ref` has no access column, so the access of the remaining edges'
-		// caches can only be read from the legacy name.
-		const hasPublicReference = stillReferencedRows.some(
-			(row) => !isPrivateCache(row.cache)
+		const hasExactReference = stillReferencedRows.some((row) =>
+			isSameCacheScope(
+				cacheScopeFromRow({ kind: row.kind, name: row.name }),
+				cache.scope
+			)
 		);
 
-		if (!hasPublicReference && access === 'public') {
-			await this.cachePurges.enqueueNars([narHash]);
+		if (!hasExactReference && cache.access === 'public') {
+			await this.cachePurges.enqueueNars(cache, [narHash]);
 		}
 
 		if (stillReferencedRows[0] !== undefined) {
@@ -353,37 +383,35 @@ export class DeletionQueueService {
 		]);
 	}
 
-	// Queues a cache-tag purge for each hash the tenant's public caches have
-	// stopped referencing. Retiring an edge of a private cache leaves the public
-	// references untouched, so only a public cache needs the check.
-	//
-	// `blob_ref` has no access column, so `outsidePrivateCaches` selects the
-	// public edges by a range over the legacy cache name.
-	private async purgeUnreferencedNars(
-		access: CacheAccessMode,
+	// Queues a cache-tag purge for each hash this public cache no longer
+	// references.
+	private async purgeRetiredNars(
+		cache: ResolvedCache,
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
-		if (access === 'private' || narHashes.length === 0) {
+		if (cache.access === 'private' || narHashes.length === 0) {
 			return;
 		}
 
 		const tenant = this.context.requireTenant();
-		const stillPublic = new Set<NixSha256HashString>();
+		const stillReferenced = new Set<NixSha256HashString>();
 
 		for (const list of jsonValueLists(narHashes)) {
-			const publicRows = await publicReferenceSelect(
+			const rows = await cacheReferenceSelect(
 				this.context.d1,
 				tenant,
+				cache.scope,
 				list
 			).all();
 
-			for (const row of publicRows) {
-				stillPublic.add(row.narHash);
+			for (const row of rows) {
+				stillReferenced.add(row.narHash);
 			}
 		}
 
 		await this.cachePurges.enqueueNars(
-			narHashes.filter((narHash) => !stillPublic.has(narHash))
+			cache,
+			narHashes.filter((narHash) => !stillReferenced.has(narHash))
 		);
 	}
 
@@ -402,7 +430,7 @@ export class DeletionQueueService {
 	}
 
 	private clearQueuedNarInfoDeletion(
-		cache: StoredCache,
+		cacheId: CacheId,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): void {
@@ -410,7 +438,7 @@ export class DeletionQueueService {
 			.delete(schema.narInfoDeletions)
 			.where(
 				and(
-					eq(schema.narInfoDeletions.cache, cache),
+					eq(schema.narInfoDeletions.cacheId, cacheId),
 					eq(schema.narInfoDeletions.storePathHash, storePathHash),
 					eq(schema.narInfoDeletions.generation, generation)
 				)
@@ -430,7 +458,7 @@ export class DeletionQueueService {
 	 * jointly limit the page.
 	 */
 	private async retireAttestationRefs(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<boolean> {
@@ -441,7 +469,6 @@ export class DeletionQueueService {
 		const tenant = this.context.requireTenant();
 		const references = await this.context.d1
 			.select({
-				cache: d1Schema.attestationReference.cache,
 				storePathHash: d1Schema.attestationReference.storePathHash,
 				generation: d1Schema.attestationReference.generation,
 				predicateType: d1Schema.attestationReference.predicateType,
@@ -451,7 +478,11 @@ export class DeletionQueueService {
 			.where(
 				and(
 					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.attestationReference.cacheKind,
+						d1Schema.attestationReference.cacheName,
+						cache.scope
+					),
 					eq(d1Schema.attestationReference.storePathHash, storePathHash),
 					eq(d1Schema.attestationReference.generation, generation)
 				)
@@ -463,7 +494,10 @@ export class DeletionQueueService {
 		const retiring = references.slice(0, affordable);
 
 		for (const reference of retiring) {
-			await this.attestationCas.removeCapturedReference(reference);
+			await this.attestationCas.removeCapturedReference({
+				...reference,
+				cache: cache.scope
+			});
 		}
 
 		return references.length <= affordable;
@@ -486,8 +520,7 @@ export class DeletionQueueService {
 	 * interrupted.
 	 */
 	private async retireTornDownChunk(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		tenant: TenantId,
 		batch: readonly TornDownNarInfo[],
 		now: IsoTimestamp
@@ -534,7 +567,7 @@ export class DeletionQueueService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						inArray(schema.narInfos.storePathHash, list)
 					)
 				)
@@ -563,7 +596,7 @@ export class DeletionQueueService {
 			const { creditUpdate, edgeDelete } = fencedEdgeRetirement(
 				this.context.d1,
 				tenant,
-				cache,
+				cache.scope,
 				entries,
 				now
 			);
@@ -593,7 +626,7 @@ export class DeletionQueueService {
 				})
 		);
 
-		await this.purgeUnreferencedNars(access, retiredHashes);
+		await this.purgeRetiredNars(cache, retiredHashes);
 
 		await this.discardRetiredLists(cache, removable, superseded);
 
@@ -605,7 +638,7 @@ export class DeletionQueueService {
 				.delete(schema.narInfoDeletions)
 				.where(
 					and(
-						eq(schema.narInfoDeletions.cache, cache),
+						eq(schema.narInfoDeletions.cacheId, cache.id),
 						entries.matches({
 							storePathHash: schema.narInfoDeletions.storePathHash,
 							generation: schema.narInfoDeletions.generation
@@ -624,7 +657,7 @@ export class DeletionQueueService {
 	// in place.
 	private async capturedAttestationReferences(
 		tenant: TenantId,
-		cache: StoredCache,
+		cache: ResolvedCache,
 		batch: readonly TornDownNarInfo[],
 		limit: number
 	): Promise<AttestationReference[]> {
@@ -634,12 +667,12 @@ export class DeletionQueueService {
 			const rows = await capturedReferenceSelect(
 				this.context.d1,
 				tenant,
-				cache,
+				cache.scope,
 				entries,
 				limit - references.length
 			).all();
 
-			references.push(...rows);
+			references.push(...rows.map((row) => ({ ...row, cache: cache.scope })));
 
 			if (references.length >= limit) {
 				break;
@@ -661,7 +694,7 @@ export class DeletionQueueService {
 	 * reference removal and list removal still discards the stale object.
 	 */
 	private async discardRetiredLists(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		removable: readonly TornDownNarInfo[],
 		superseded: readonly TornDownNarInfo[]
 	): Promise<void> {
@@ -679,10 +712,11 @@ export class DeletionQueueService {
 		}
 	}
 
+	// Takes the resolved cache rather than its id: the queue row is keyed by the
+	// legacy stored name, which needs the cache's access as well as its scope.
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
-		cache: StoredCache,
-		cacheId: CacheId | undefined,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString,
 		generation: NarInfoGeneration,
@@ -691,7 +725,6 @@ export class DeletionQueueService {
 		this.enqueueNarInfoDeletions(
 			handle,
 			cache,
-			cacheId,
 			[{ storePathHash, narHash, generation }],
 			now
 		);
@@ -701,30 +734,22 @@ export class DeletionQueueService {
 	 * Queues narinfo versions for deletion, one statement per bound list. A
 	 * version already queued keeps its `created_at` and takes the incoming NAR
 	 * hash.
-	 *
-	 * `cacheId` is the identity the rows were published under, which a caller
-	 * reads from the narinfo row it retires. A lookup by name would be wrong
-	 * here: a teardown queues after it has marked the identity deleted, and
-	 * the name may be registered again before the revoked-edge sweep runs.
 	 */
 	enqueueNarInfoDeletions(
 		handle: SchemaWriter,
-		cache: StoredCache,
-		cacheId: CacheId | undefined,
+		cache: ResolvedCache,
 		entries: readonly TornDownNarInfo[],
 		now: IsoTimestamp
 	): void {
-		if (entries.length === 0) {
-			return;
-		}
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		for (const rows of jsonRowLists(entries)) {
 			handle
 				.insert(schema.narInfoDeletions)
 				.select(
 					rows.insertSource([
-						sql`${cache}`,
-						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						sql`${legacyCache}`,
+						sql`${cache.id}`,
 						rows.column('storePathHash'),
 						rows.column('narHash'),
 						rows.column('generation'),
@@ -756,33 +781,35 @@ export class DeletionQueueService {
 			.select()
 			.from(schema.narInfoDeletions)
 			.orderBy(
-				schema.narInfoDeletions.cache,
+				schema.narInfoDeletions.cacheId,
 				schema.narInfoDeletions.storePathHash,
 				schema.narInfoDeletions.generation
 			)
 			.limit(limit)
 			.all();
 
-		const byCache = new Map<StoredCache, TornDownNarInfo[]>();
+		// A queue row whose `cache_id` the backfill has not supplied refers to no
+		// cache. Grouping it under the null key defers the refusal to the resolve
+		// below rather than repeating the check here.
+		const byCache = new Map<CacheId | null, TornDownNarInfo[]>();
 
 		for (const entry of queued) {
-			const entries = byCache.get(entry.cache) ?? [];
+			const entries = byCache.get(entry.cacheId) ?? [];
 			entries.push({
 				storePathHash: entry.storePathHash,
 				generation: entry.generation,
 				narHash: entry.narHash
 			});
-			byCache.set(entry.cache, entries);
+			byCache.set(entry.cacheId, entries);
 		}
 
 		// Every cache in this flush draws on the same invocation allowance, so a
 		// cache that exhausts it leaves the rest of the queue for the next pass.
 		let deleted = 0;
 
-		for (const [cache, entries] of byCache) {
+		for (const [cacheId, entries] of byCache) {
 			deleted += await this.retireTornDownNarInfos(
-				cache,
-				identityForCache(cache).access,
+				this.context.cacheRepository.resolvedForId(cacheId),
 				entries,
 				origin
 			);
@@ -814,8 +841,7 @@ export class DeletionQueueService {
 	 * The caller must hold the critical section.
 	 */
 	async retireQueuedNarInfoEdge(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration
 	): Promise<typeof schema.narInfoDeletions.$inferSelect | undefined> {
@@ -824,7 +850,7 @@ export class DeletionQueueService {
 			.from(schema.narInfoDeletions)
 			.where(
 				and(
-					eq(schema.narInfoDeletions.cache, cache),
+					eq(schema.narInfoDeletions.cacheId, cache.id),
 					eq(schema.narInfoDeletions.storePathHash, storePathHash),
 					eq(schema.narInfoDeletions.generation, generation)
 				)
@@ -837,7 +863,6 @@ export class DeletionQueueService {
 
 		await this.retireBlobRefEdge(
 			cache,
-			access,
 			storePathHash,
 			queued.generation,
 			queued.narHash
@@ -849,15 +874,13 @@ export class DeletionQueueService {
 	// The caller must hold the critical section because the row check, object
 	// deletion, edge retirement, and queue clear span asynchronous operations.
 	async deleteQueuedNarInfo(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		origin?: RequestOrigin
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		const queued = await this.retireQueuedNarInfoEdge(
 			cache,
-			access,
 			storePathHash,
 			generation
 		);
@@ -884,7 +907,7 @@ export class DeletionQueueService {
 	 * keeps its queue entry, so garbage collection retires the rest.
 	 */
 	async cleanUpQueuedNarInfo(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
 		queued: typeof schema.narInfoDeletions.$inferSelect,
@@ -895,7 +918,7 @@ export class DeletionQueueService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					eq(schema.narInfos.storePathHash, storePathHash)
 				)
 			)
@@ -924,7 +947,7 @@ export class DeletionQueueService {
 			);
 
 			if (hasRetiredEveryReference) {
-				this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
+				this.clearQueuedNarInfoDeletion(cache.id, storePathHash, generation);
 			}
 
 			return {
@@ -953,7 +976,7 @@ export class DeletionQueueService {
 		);
 
 		if (hasRetiredEveryReference) {
-			this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
+			this.clearQueuedNarInfoDeletion(cache.id, storePathHash, generation);
 		}
 
 		return {
@@ -963,91 +986,55 @@ export class DeletionQueueService {
 	}
 
 	/**
-	 * Advances the lifecycle generation and records the cache as deleted in one
-	 * statement. This revokes a cache of any size before physical cleanup drains
-	 * its edges.
+	 * Advances the lifecycle generation and records the cache as deleted in the
+	 * same statement. This revokes a cache of any size before physical cleanup
+	 * drains its edges. A cache with no lifecycle row yet takes one insert
+	 * instead.
 	 *
 	 * A later cache with the same name uses the advanced generation. Its reads
 	 * therefore exclude every edge left by the deleted cache.
 	 *
-	 * For the private namespace, the deletion timestamp makes content reads
-	 * return absent-object results and makes availability report every requested
-	 * path as missing while path-keyed objects await teardown.
-	 * {@link recordCacheRegistration} removes the timestamp when the cache name is
-	 * registered again.
+	 * For a private cache, the deletion timestamp makes content reads return
+	 * absent-object results and makes availability report every requested path as
+	 * missing while path-keyed objects await teardown.
+	 * `CacheRegistrationService.recordLifecycle` removes the timestamp when the
+	 * cache name is registered again.
 	 *
 	 * The read revision advances with the generation. Both are in the Workers
 	 * Cache key, so a response the deleted cache produced is not served to a
 	 * reader of the next cache of this name.
 	 */
-	async revokeCacheGeneration(cache: StoredCache): Promise<void> {
+	async revokeCacheGeneration(cache: ResolvedCache): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
-		const identity = cacheIdentityColumns(identityForCache(cache).scope);
-
-		await this.context.d1
-			.insert(d1Schema.cacheLifecycle)
-			.values({
-				tenant,
-				cache,
-				...identity,
-				generation: secondCacheGeneration,
-				readRevision: secondCacheReadRevision,
+		const { scope, access } = cache;
+		const revoked = await this.context.d1
+			.update(d1Schema.cacheLifecycle)
+			.set({
+				cache: legacyCacheKey(scope, access),
+				access,
+				generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
+				readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
 				deletedAt: now,
 				updatedAt: now
 			})
-			.onConflictDoUpdate({
-				target: [d1Schema.cacheLifecycle.tenant, d1Schema.cacheLifecycle.cache],
-				set: {
-					...identity,
-					generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
-					readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
-					deletedAt: now,
-					updatedAt: now
-				}
-			});
-	}
+			.where(cacheLifecycleFilter(tenant, scope))
+			.run();
 
-	/**
-	 * Writes this cache's lifecycle row when the tenant registers the cache,
-	 * clears the deletion timestamp when a deleted name is registered again,
-	 * and returns the generation and read revision the row then holds.
-	 *
-	 * Only the insert sets the generation and the read revision. A name
-	 * registered again keeps the generation its deletion advanced to, so the
-	 * deleted cache's reference edges stay revoked while the new cache commits
-	 * its own. It keeps the read revision too: advancing it on every
-	 * registration would evict the cache's public responses from Workers Cache
-	 * on each commit.
-	 */
-	async recordCacheRegistration(
-		cache: StoredCache
-	): Promise<CacheLifecycleVersion> {
-		const tenant = this.context.requireTenant();
-		const identity = cacheIdentityColumns(identityForCache(cache).scope);
-		const now = isoTimestamp(new Date());
+		if (revoked.meta.changes > 0) {
+			return;
+		}
 
-		return this.context.d1
-			.insert(d1Schema.cacheLifecycle)
-			.values({
-				tenant,
-				cache,
-				...identity,
-				// `access` is omitted so the D1 insert trigger fills it from the
-				// tenant's read mode, as the projection's insert leaves it.
-				generation: firstCacheGeneration,
-				readRevision: firstCacheReadRevision,
-				updatedAt: now
-			})
-			.onConflictDoUpdate({
-				target: [d1Schema.cacheLifecycle.tenant, d1Schema.cacheLifecycle.cache],
-				set: { ...identity, deletedAt: sql`null`, updatedAt: now }
-			})
-			.returning({
-				generation: d1Schema.cacheLifecycle.generation,
-				readRevision: d1Schema.cacheLifecycle.readRevision
-			})
-			.get();
+		await this.context.d1.insert(d1Schema.cacheLifecycle).values({
+			tenant,
+			cache: legacyCacheKey(scope, access),
+			...cacheIdentityColumns(scope),
+			access,
+			generation: secondCacheGeneration,
+			readRevision: secondCacheReadRevision,
+			deletedAt: now,
+			updatedAt: now
+		});
 	}
 
 	/**
@@ -1069,7 +1056,7 @@ export class DeletionQueueService {
 	 * section.
 	 */
 	async queueRevokedCacheEdges(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		limit: number
 	): Promise<number> {
 		const tenant = this.context.requireTenant();
@@ -1084,7 +1071,11 @@ export class DeletionQueueService {
 			.where(
 				and(
 					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.cache, cache),
+					cacheIdentityCondition(
+						d1Schema.blobReference.cacheKind,
+						d1Schema.blobReference.cacheName,
+						cache.scope
+					),
 					revokedByCacheGeneration()
 				)
 			)
@@ -1099,13 +1090,9 @@ export class DeletionQueueService {
 
 		this.context.db.transaction((tx) => {
 			for (const edge of page) {
-				// These edges belong to an earlier cache of the same name, since
-				// deleted. The live identity, if there is one, is a later cache, so
-				// no identity is recorded.
 				this.enqueueNarInfoDeletion(
 					tx,
 					cache,
-					undefined,
 					edge.storePathHash,
 					edge.narHash,
 					edge.generation,
@@ -1130,8 +1117,7 @@ export class DeletionQueueService {
 	 * The durable queue retains every unprocessed entry for the next pass.
 	 */
 	async retireTornDownNarInfos(
-		cache: StoredCache,
-		access: CacheAccessMode,
+		cache: ResolvedCache,
 		entries: readonly TornDownNarInfo[],
 		_origin?: RequestOrigin
 	): Promise<number> {
@@ -1145,13 +1131,7 @@ export class DeletionQueueService {
 		let deletedObjects = 0;
 
 		for (const batch of chunk(entries, maxFencedRetireRows)) {
-			const retired = await this.retireTornDownChunk(
-				cache,
-				access,
-				tenant,
-				batch,
-				now
-			);
+			const retired = await this.retireTornDownChunk(cache, tenant, batch, now);
 
 			if (retired === undefined) {
 				break;
@@ -1163,12 +1143,21 @@ export class DeletionQueueService {
 		return deletedObjects;
 	}
 
-	deleteStorePath(
-		cache: StoredCache,
-		access: CacheAccessMode,
+	async deleteStorePath(
+		cacheScope: CacheScope,
 		storePathHash: StorePathHash,
 		origin: RequestOrigin
-	): Promise<DeletePathResponse> {
+	): Promise<DeletePathResponseInput> {
+		const cache = this.context.cacheRepository.resolve(cacheScope);
+
+		if (cache === undefined) {
+			return {
+				storePathHash,
+				deleted: false,
+				narScheduledForDeletion: false
+			};
+		}
+
 		// Keep row removal and opportunistic object cleanup in one critical section
 		// so healing cannot recreate the object between them.
 		return this.context.criticalSection(async () => {
@@ -1177,7 +1166,7 @@ export class DeletionQueueService {
 				.from(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, storePathHash)
 					)
 				)
@@ -1200,7 +1189,7 @@ export class DeletionQueueService {
 				tx.delete(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, row.cache),
+							eq(schema.narInfos.cacheId, cache.id),
 							eq(schema.narInfos.storePathHash, storePathHash)
 						)
 					)
@@ -1208,15 +1197,14 @@ export class DeletionQueueService {
 				tx.delete(schema.retentionGrace)
 					.where(
 						and(
-							eq(schema.retentionGrace.cache, row.cache),
+							eq(schema.retentionGrace.cacheId, cache.id),
 							eq(schema.retentionGrace.storePathHash, storePathHash)
 						)
 					)
 					.run();
 				this.enqueueNarInfoDeletion(
 					tx,
-					row.cache,
-					row.cacheId ?? undefined,
+					cache,
 					storePathHash,
 					row.narHash,
 					row.generation,
@@ -1225,8 +1213,7 @@ export class DeletionQueueService {
 			});
 
 			const queued = await this.retireQueuedNarInfoEdge(
-				row.cache,
-				access,
+				cache,
 				storePathHash,
 				row.generation
 			);
@@ -1244,7 +1231,7 @@ export class DeletionQueueService {
 			try {
 				({ narScheduledForDeletion: isNarScheduledForDeletion } =
 					await this.cleanUpQueuedNarInfo(
-						row.cache,
+						cache,
 						storePathHash,
 						row.generation,
 						queued,
@@ -1279,12 +1266,13 @@ export class DeletionQueueService {
 		origin?: RequestOrigin
 	): Promise<void> {
 		const now = isoTimestamp(new Date());
+		const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
 		const wasRemoved = this.context.db.transaction((tx) => {
 			const deleted = tx
 				.delete(schema.narInfos)
 				.where(
 					and(
-						eq(schema.narInfos.cache, row.cache),
+						eq(schema.narInfos.cacheId, cache.id),
 						eq(schema.narInfos.storePathHash, row.storePathHash),
 						eq(schema.narInfos.generation, row.generation),
 						eq(schema.narInfos.narHash, row.narHash)
@@ -1300,15 +1288,14 @@ export class DeletionQueueService {
 			tx.delete(schema.retentionGrace)
 				.where(
 					and(
-						eq(schema.retentionGrace.cache, row.cache),
+						eq(schema.retentionGrace.cacheId, cache.id),
 						eq(schema.retentionGrace.storePathHash, row.storePathHash)
 					)
 				)
 				.run();
 			this.enqueueNarInfoDeletion(
 				tx,
-				row.cache,
-				row.cacheId ?? undefined,
+				cache,
 				row.storePathHash,
 				row.narHash,
 				row.generation,
@@ -1324,8 +1311,7 @@ export class DeletionQueueService {
 
 		try {
 			await this.deleteQueuedNarInfo(
-				row.cache,
-				identityForCache(row.cache).access,
+				cache,
 				row.storePathHash,
 				row.generation,
 				origin

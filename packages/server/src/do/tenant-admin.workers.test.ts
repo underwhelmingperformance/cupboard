@@ -19,7 +19,7 @@ import {
 
 const creationBody = {
 	id: 'acme',
-	readMode: 'private',
+	defaultCacheAccess: 'private',
 	ownerIssuer: 'https://idp.test',
 	ownerSubject: 'owner',
 	ownerAudience: 'aud'
@@ -78,15 +78,14 @@ describe('control plane tenant administration', () => {
 			createStatus: create.status,
 			created: {
 				id: created.id,
-				status: created.status,
-				readMode: created.readMode
+				status: created.status
 			},
 			listedIds: listed.tenants.map((entry) => entry.id),
 			suspended,
 			offboarded
 		}).toStrictEqual({
 			createStatus: StatusCodes.OK,
-			created: { id: 'acme', status: 'active', readMode: 'private' },
+			created: { id: 'acme', status: 'active' },
 			listedIds: ['acme', 'v1'],
 			suspended: { id: 'acme', status: 'suspended' },
 			offboarded: { id: 'acme', status: 'offboarding' }
@@ -139,7 +138,7 @@ describe('control plane tenant administration', () => {
 		);
 		const conflicting = await controlFetch(
 			'/control/tenants',
-			authed(token, 'POST', { ...creationBody, readMode: 'public' })
+			authed(token, 'POST', { ...creationBody, defaultCacheAccess: 'public' })
 		);
 
 		expect({

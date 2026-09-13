@@ -1,13 +1,12 @@
-import { namedCacheSelectorSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { type AuthzMeta, baseProcedure, type ResourceSpec } from './base.ts';
 
 // A cache-scoped operation has two paths: a bare one for the tenant's default
-// cache, and one under `/cache/<selector>` for a named cache. The named-cache
-// path accepts only a named cache's selector, and the server reads the cache
-// each request addresses from its path unless the procedure declares another
-// location.
+// cache, and one under `/cache/<name>` for a named cache. The server reads the
+// cache each request addresses from its path, and a cache's access does not
+// change which path reaches it.
 const namedCachePrefix = '/cache/{cacheName}';
 
 interface CacheScopedRoute {
@@ -48,7 +47,7 @@ export function namedCacheProcedure<
 	return baseProcedure
 		.meta(scopedMeta(route))
 		.route({ method: route.method, path: `${namedCachePrefix}${route.suffix}` })
-		.input(z.strictObject({ cacheName: namedCacheSelectorSchema, ...shape }))
+		.input(z.strictObject({ cacheName: cacheNameSchema, ...shape }))
 		.output(output);
 }
 

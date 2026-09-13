@@ -4,9 +4,9 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	ParsedControlKeyListResponse,
-	ParsedControlKeyRotateResponse,
-	ParsedControlKeySummary
+	ControlKeyListResponse,
+	ControlKeyRotateResponse,
+	ControlKeySummary
 } from '@cupboard/protocol/control-keys';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
@@ -20,8 +20,8 @@ import {
 } from './control-key.ts';
 
 function summary(
-	overrides: Omit<Partial<ParsedControlKeySummary>, 'kid'> & { kid?: string }
-): ParsedControlKeySummary {
+	overrides: Omit<Partial<ControlKeySummary>, 'kid'> & { kid?: string }
+): ControlKeySummary {
 	const { kid = 'kid-1', ...rest } = overrides;
 
 	return { kid: authKeyIdSchema.parse(kid), retired: false, ...rest };
@@ -47,7 +47,7 @@ function controlKeyClient(
 describe('runControlKeyList', () => {
 	it('reports a row per key, flagging retired ones', async () => {
 		const results: ResultRow[][] = [];
-		const response: ParsedControlKeyListResponse = {
+		const response: ControlKeyListResponse = {
 			keys: [
 				summary({
 					kid: 'kid-old',
@@ -93,7 +93,7 @@ describe('runControlKeyRotate', () => {
 		let rotateCalls = 0;
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: ParsedControlKeyRotateResponse = {
+		const response: ControlKeyRotateResponse = {
 			kid: authKeyIdSchema.parse('kid-new'),
 			retiring: {
 				kid: authKeyIdSchema.parse('kid-old'),

@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, type StoredCache } from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
@@ -8,7 +8,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
 import { callInCache } from '../client/cache-scoped.ts';
-import { cachePrefixFor, CupboardClient } from '../client/client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 
@@ -19,7 +19,7 @@ import { type BlobUploader, r2BlobUploader } from './r2-upload.ts';
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface PushClientOptions {
-	readonly cache?: StoredCache;
+	readonly cache: CacheScope;
 	readonly signal?: AbortSignal;
 	readonly fetcher?: typeof fetch;
 }
@@ -32,9 +32,9 @@ export interface PushClientOptions {
 export function pushClientFor(
 	url: URL,
 	credential: AccessCredential,
-	options: PushClientOptions = {}
+	options: PushClientOptions
 ): PushClient {
-	const cache = options.cache ?? DEFAULT_CACHE;
+	const cache = options.cache;
 	const baseFetcher = options.fetcher ?? fetch;
 	let hasUploadGraceFacts = false;
 	const uploadFetcher: typeof fetch = async (input, init) => {
@@ -65,7 +65,7 @@ export function pushClientFor(
 	const raw = new CupboardClient(
 		new URL(url),
 		options.fetcher ?? fetch,
-		cachePrefixFor(cache),
+		cache,
 		options.signal
 	);
 
@@ -117,8 +117,8 @@ export function pushClientFor(
 			return hasUploadGraceFacts;
 		},
 		hasUploadGraceFacts: () => hasUploadGraceFacts,
-		// Every server version implements nix-cache-info. A private tenant returns
-		// 401, so only a routing 404 means that the tenant does not exist.
+		// Every server version implements nix-cache-info. A private default cache
+		// returns 401, so only a routing 404 means that the tenant does not exist.
 		tenantServes: async () => {
 			const target = new URL(url);
 			target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;

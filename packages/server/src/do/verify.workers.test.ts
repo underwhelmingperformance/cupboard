@@ -1,5 +1,4 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
-import type { VerifyReport } from '@cupboard/protocol/reports';
+import type { VerifyReportInput } from '@cupboard/protocol/reports';
 import { verifyReportSchema } from '@cupboard/protocol/reports';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -16,10 +15,13 @@ import {
 	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	currentNarObjectKey,
+	defaultCache,
 	initialise,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	pushPath,
+	putTestCache,
 	resetTestServer,
 	seedReservedNarInfo,
 	testServerFor,
@@ -29,18 +31,19 @@ import {
 
 import { maxOutgoingConnections } from './bulk.ts';
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 
 const healthy = {
 	scanned: 1,
 	narInfoObjectsRestored: 0,
 	danglingNarInfosRemoved: 0,
-	cursor: '',
-	cursorCache: '',
 	wrapped: true
-} satisfies VerifyReport;
+} satisfies VerifyReportInput;
 
-async function runVerify(token: string, limit?: number): Promise<VerifyReport> {
+async function runVerify(
+	token: string,
+	limit?: number
+): Promise<VerifyReportInput> {
 	const response = await authorisedFetch('/verify', token, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -61,12 +64,16 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({
@@ -74,8 +81,6 @@ describe('background verification', () => {
 				scanned: 1,
 				narInfoObjectsRestored: 1,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			restored: true
@@ -104,10 +109,10 @@ describe('background verification', () => {
 		await corruptCommittedNarInfo(poison.storePathHash, { deriver: 'a\nb' });
 
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, sound.storePathHash)
+			narInfoObjectKey(fixtureTenant, sound.storePathHash, { kind: 'default' })
 		);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, poison.storePathHash)
+			narInfoObjectKey(fixtureTenant, poison.storePathHash, { kind: 'default' })
 		);
 
 		const report = await runVerify(token);
@@ -116,19 +121,21 @@ describe('background verification', () => {
 			report,
 			soundRestored:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, sound.storePathHash)
+					narInfoObjectKey(fixtureTenant, sound.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null,
 			poisonRestored:
 				(await env.BLOBS.head(
-					narInfoObjectKey(fixtureTenant, poison.storePathHash)
+					narInfoObjectKey(fixtureTenant, poison.storePathHash, {
+						kind: 'default'
+					})
 				)) !== null
 		}).toStrictEqual({
 			report: {
 				scanned: 2,
 				narInfoObjectsRestored: 1,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			soundRestored: true,
@@ -138,9 +145,10 @@ describe('background verification', () => {
 
 	it('restores a missing narinfo object in a named cache', async () => {
 		const token = await initialise();
+		await putTestCache(token, buildsCache);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		await pushPath(token, metadata, 'builds');
+		await pushPath(token, metadata, buildsCache);
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);
@@ -155,8 +163,6 @@ describe('background verification', () => {
 				scanned: 1,
 				narInfoObjectsRestored: 1,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			restored: true
@@ -173,7 +179,9 @@ describe('background verification', () => {
 
 		const report = await runVerify(token);
 		const narInfoObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect({
@@ -185,8 +193,6 @@ describe('background verification', () => {
 				scanned: 1,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 1,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			narInfoObjectGone: true,
@@ -197,6 +203,7 @@ describe('background verification', () => {
 	it('advances the composite cursor across caches and wraps at the end', async () => {
 		await useTestServer('verify-advance');
 		const token = await initialise();
+		await putTestCache(token, buildsCache);
 
 		for (const hash of ['a', 'b']) {
 			await pushPath(
@@ -216,7 +223,7 @@ describe('background verification', () => {
 					storePathHash: hash.repeat(32),
 					name: hash
 				}),
-				'builds'
+				buildsCache
 			);
 		}
 
@@ -230,7 +237,7 @@ describe('background verification', () => {
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
 				cursor: 'b'.repeat(32),
-				cursorCache: '',
+				cursorCache: defaultCache(),
 				wrapped: false
 			},
 			second: {
@@ -238,15 +245,13 @@ describe('background verification', () => {
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
 				cursor: 'd'.repeat(32),
-				cursorCache: 'builds',
+				cursorCache: buildsCache,
 				wrapped: false
 			},
 			third: {
 				scanned: 0,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 0,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			}
 		});
@@ -269,10 +274,11 @@ describe('background verification', () => {
 	it('removes dangling narinfos for one NAR across caches and retires both edges', async () => {
 		await useTestServer('verify-cross-cache');
 		const token = await initialise();
+		await putTestCache(token, buildsCache);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(token, metadata);
-		await pushPath(token, metadata, 'builds');
+		await pushPath(token, metadata, buildsCache);
 		await env.BLOBS.delete(await currentNarObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
@@ -294,8 +300,6 @@ describe('background verification', () => {
 				scanned: 2,
 				narInfoObjectsRestored: 0,
 				danglingNarInfosRemoved: 2,
-				cursor: '',
-				cursorCache: '',
 				wrapped: true
 			},
 			state: { blobs: 1, narInfos: 0 }
@@ -316,6 +320,7 @@ describe('background verification', () => {
 	it('keeps a present named-cache object unchanged when its R2 key sorts before the scan cursor', async () => {
 		await useTestServer('verify-crossorder');
 		const token = await initialise();
+		await putTestCache(token, namedCache('aa'));
 
 		// R2 puts the named-cache object (`narinfo/aa/…`) before the default-cache
 		// object (`narinfo/zzz…`), while the database scan visits them in the
@@ -335,7 +340,7 @@ describe('background verification', () => {
 				storePathHash: 'b'.repeat(32),
 				name: 'b'
 			}),
-			'aa'
+			namedCache('aa')
 		);
 
 		// One-row batches make the named-cache scan resume after the default `z`
@@ -352,6 +357,7 @@ describe('background verification', () => {
 	it('avoids an R2 list when scan order and object-key order diverge', async () => {
 		await useTestServer('verify-divergent');
 		const token = await initialise();
+		await putTestCache(token, namedCache('aa'));
 
 		await pushPath(
 			token,
@@ -368,7 +374,7 @@ describe('background verification', () => {
 				storePathHash: 'b'.repeat(32),
 				name: 'b'
 			}),
-			'aa'
+			namedCache('aa')
 		);
 
 		await runVerify(token, 1);
@@ -393,7 +399,9 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		const list = vi
@@ -403,7 +411,9 @@ describe('background verification', () => {
 		try {
 			const report = await runVerify(token);
 			const restored = await env.BLOBS.head(
-				narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+				narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+					kind: 'default'
+				})
 			);
 
 			expect({
@@ -442,7 +452,11 @@ describe('background verification', () => {
 
 		try {
 			const report = await runVerify(token, 1);
-			const targetKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
+			const targetKey = narInfoObjectKey(
+				fixtureTenant,
+				metadata.storePathHash,
+				{ kind: 'default' }
+			);
 
 			expect({
 				listCalls: list.mock.calls.length,
@@ -483,7 +497,7 @@ describe('background verification', () => {
 
 		const report = await runVerify(token);
 		const secondObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, second.storePathHash)
+			narInfoObjectKey(fixtureTenant, second.storePathHash, { kind: 'default' })
 		);
 
 		expect({

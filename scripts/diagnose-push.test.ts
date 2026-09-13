@@ -302,7 +302,7 @@ describe('parseWorkerLog', () => {
 			{
 				timestamp: 1,
 				source: {
-					message: 'POST https://cupboard.supply/cache/_default/uploads'
+					message: 'POST https://cupboard.supply/uploads'
 				}
 			}
 		]

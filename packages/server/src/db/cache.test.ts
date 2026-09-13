@@ -6,6 +6,8 @@ import {
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { CacheIdentityMissingError } from '../errors.ts';
+
 import { cacheScopeFromRow, legacyCacheKey } from './cache.ts';
 
 describe('cache identity', () => {
@@ -44,11 +46,6 @@ describe('cache identity', () => {
 
 	it.each([
 		{
-			name: 'a row the backfill has not reached',
-			row: {},
-			scope: undefined
-		},
-		{
 			name: 'a default row',
 			row: { kind: 'default' },
 			scope: { kind: 'default' }
@@ -67,5 +64,11 @@ describe('cache identity', () => {
 		{ name: 'a named row without a name', row: { kind: 'named' } }
 	] as const)('refuses $name', ({ row }) => {
 		expect(() => cacheScopeFromRow(row)).toThrow(z.ZodError);
+	});
+
+	// A row with no kind belongs to no cache. Reading it as the default cache
+	// would attribute it to the wrong one, so it is refused instead.
+	it('refuses a row the backfill has not reached', () => {
+		expect(() => cacheScopeFromRow({})).toThrow(CacheIdentityMissingError);
 	});
 });

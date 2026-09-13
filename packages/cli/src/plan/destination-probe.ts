@@ -1,6 +1,6 @@
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import {
-	type StoredCache,
+	type CacheScope,
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -36,7 +36,7 @@ export interface DestinationProbeOptions {
 export function destinationServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;
-		readonly cache: StoredCache;
+		readonly cache: CacheScope;
 	}
 ): Promise<ReadonlySet<StorePathString>> {
 	return availablePathsAt(
@@ -75,7 +75,7 @@ export function viewServedPaths(
 export function attestedServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;
-		readonly cache: StoredCache;
+		readonly cache: CacheScope;
 	}
 ): Promise<ReadonlySet<StorePathString>> {
 	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), options);
@@ -83,7 +83,7 @@ export function attestedServedPaths(
 
 export interface TenantProbeOptions {
 	readonly baseUrl: URL;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly view?: string;
 	readonly credentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;

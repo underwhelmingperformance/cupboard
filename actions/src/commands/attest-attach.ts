@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { buildReceiptSchema } from '@cupboard/protocol/build';
@@ -25,7 +25,6 @@ import {
 } from '../errors.ts';
 import { type Environment } from '../inputs.ts';
 import {
-	cacheArguments,
 	collectLines,
 	provided,
 	providedCacheSelection,
@@ -33,12 +32,12 @@ import {
 	providedUrl
 } from '../options.ts';
 import { parseChecksums } from '../release-install.ts';
+import { cacheUrlFor } from '../substituters.ts';
 
 export interface AttestAttachOptions {
 	readonly url?: string;
 	readonly cupboardPath?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
 	readonly audience?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -50,7 +49,7 @@ export interface AttestAttachOptions {
 export interface AttestAttachInputs {
 	readonly url: URL;
 	readonly cupboardPath: string;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly audience: string;
 	readonly readUser: string;
 	readonly readPassword: string;
@@ -80,15 +79,11 @@ export function registerAttestAttachCommand(
 			'path to the cupboard binary installed by actions/setup'
 		)
 		.option('--cache <name>', 'named cache that received the paths')
-		.option('--private-cache <name>', 'private cache that received the paths')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
-		.option(
-			'--read-user <user>',
-			'username for private destination-cache reads'
-		)
+		.option('--read-user <user>', 'username for destination-cache reads')
 		.option(
 			'--read-password <password>',
-			'password for private destination-cache reads'
+			'password for destination-cache reads'
 		)
 		.requiredOption(
 			'--receipt-file <path>',
@@ -155,7 +150,7 @@ export function resolveAttestAttachInputs(
 	return {
 		url,
 		cupboardPath,
-		cache: providedCacheSelection(options.cache, options.privateCache),
+		cache: providedCacheSelection(options.cache),
 		audience: provided(options.audience) ?? '',
 		readUser,
 		readPassword,
@@ -177,7 +172,7 @@ export function attestAttachArguments(
 		'--no-colour',
 		'attest',
 		'attach',
-		canonicalHref(inputs.url),
+		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		...paths,
 		'--github-oidc'
 	];
@@ -185,8 +180,6 @@ export function attestAttachArguments(
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
 	}
-
-	arguments_.push(...cacheArguments(inputs.cache));
 
 	if (inputs.readUser !== '') {
 		arguments_.push(

@@ -12,6 +12,11 @@ import {
 	resetCacheLifecycleProjection
 } from './cache-lifecycle-projection.ts';
 import { type ServerContext } from './context.ts';
+import {
+	type LegacyObjectFamily,
+	moveLegacyPrivateObjects,
+	resetObjectMoves
+} from './legacy-object-move.ts';
 
 /**
  * Matches a tenant row whose object has not recorded the current step. A null
@@ -53,7 +58,8 @@ export type LocalStepOutcome =
  * the control plane wakes the object again until it records the step.
  */
 export async function recordLocalStep(
-	context: ServerContext
+	context: ServerContext,
+	families: readonly LegacyObjectFamily[]
 ): Promise<LocalStepOutcome> {
 	const tenant = context.tenant();
 
@@ -72,13 +78,22 @@ export async function recordLocalStep(
 		return { kind: 'incomplete', projected: projection.projected };
 	}
 
+	const move = await moveLegacyPrivateObjects(context, tenant, families);
+
+	if (move.hasMore) {
+		return { kind: 'incomplete', projected: move.moved };
+	}
+
 	await context.d1
 		.update(d1Schema.tenant)
 		.set({ localStep: currentLocalStep })
 		.where(and(eq(d1Schema.tenant.id, tenant), belowCurrentLocalStep))
 		.run();
 
-	await resetCacheLifecycleProjection(context);
+	await Promise.all([
+		resetCacheLifecycleProjection(context),
+		resetObjectMoves(context)
+	]);
 
 	return { kind: 'recorded', step: currentLocalStep };
 }

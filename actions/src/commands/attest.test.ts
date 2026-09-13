@@ -14,6 +14,7 @@ import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
+	CacheAccessProbeError,
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
 	MissingInputError,
@@ -534,7 +535,7 @@ describe('resolveAttestInputs', () => {
 		expect(inputs).toStrictEqual({
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
-			cache: 'builds',
+			cache: { kind: 'named', name: 'builds' },
 			readUser: 'reader',
 			readPassword: 'secret',
 			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt',
@@ -584,7 +585,7 @@ describe('resolveAttestInputs', () => {
 		expect(inputs).toStrictEqual({
 			receiptFile,
 			url: new URL('https://cache.example.test/t/acme'),
-			cache: '',
+			cache: { kind: 'default' },
 			readUser: '',
 			readPassword: '',
 			checksumsFile: '/somewhere/subjects.txt',
@@ -722,6 +723,10 @@ describe('attestAction committed cache verification', () => {
 			}).toStrictEqual({
 				requests: [
 					{
+						url: 'https://cache.example.test/t/acme/cache/builds/nix-cache-info',
+						authorization: undefined
+					},
+					{
 						url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
 						authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
 					}
@@ -793,12 +798,11 @@ describe('attestAction committed cache verification', () => {
 	});
 
 	it.each([
-		{ selection: {}, expected: 'public' },
-		{ selection: { cache: 'builds' }, expected: 'public' },
-		{ selection: { privateCache: 'ci' }, expected: 'private' }
+		{ access: 'public', status: 200, selection: {} },
+		{ access: 'private', status: 401, selection: { cache: 'builds' } }
 	])(
-		'reports a $expected destination for $selection',
-		async ({ selection, expected }) => {
+		'reports a $access destination for $selection',
+		async ({ access, selection, status }) => {
 			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 			const receiptFile = await receiptFileIn(directory);
 			const outputFile = path.join(directory, 'output');
@@ -814,8 +818,12 @@ describe('attestAction committed cache verification', () => {
 					{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
 					createGithubReporter(),
 					{
-						fetch: () =>
-							Promise.resolve(new Response(committedNarInfo(remotePath, 0xbb)))
+						fetch: (input) =>
+							Promise.resolve(
+								requestUrl(input).endsWith('/nix-cache-info')
+									? new Response(undefined, { status })
+									: new Response(committedNarInfo(remotePath, 0xbb))
+							)
 					}
 				);
 
@@ -825,12 +833,37 @@ describe('attestAction committed cache verification', () => {
 					outputs
 						.split('\n')
 						.find((line) => line.startsWith('destination-visibility='))
-				).toBe(`destination-visibility=${expected}`);
+				).toBe(`destination-visibility=${access}`);
 			} finally {
 				await rm(directory, { recursive: true, force: true });
 			}
 		}
 	);
+
+	it('rejects a response that cannot identify the cache access mode', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+
+		try {
+			await expect(
+				attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme'
+					},
+					{ RUNNER_TEMP: directory },
+					createGithubReporter(),
+					{
+						fetch: () =>
+							Promise.resolve(new Response(undefined, { status: 404 }))
+					}
+				)
+			).rejects.toBeInstanceOf(CacheAccessProbeError);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 
 	it('reports no predicate file for a receipt that records no origin', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
@@ -897,8 +930,12 @@ describe('attestAction committed cache verification', () => {
 					{ RUNNER_TEMP: directory },
 					createGithubReporter(),
 					{
-						fetch: () =>
-							Promise.resolve(new Response(undefined, { status: 404 }))
+						fetch: (input) =>
+							Promise.resolve(
+								requestUrl(input).endsWith('/nix-cache-info')
+									? new Response()
+									: new Response(undefined, { status: 404 })
+							)
 					}
 				)
 			).rejects.toBeInstanceOf(CommittedSubjectUnavailableError);
@@ -907,7 +944,7 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	it('reports a private-cache authentication refusal', async () => {
+	it('reports a cache authentication refusal', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 		const receiptFile = await receiptFileIn(directory);
 
@@ -926,8 +963,12 @@ describe('attestAction committed cache verification', () => {
 					{ RUNNER_TEMP: directory },
 					createGithubReporter(),
 					{
-						fetch: () =>
-							Promise.resolve(new Response(undefined, { status: 401 }))
+						fetch: (input) =>
+							Promise.resolve(
+								requestUrl(input).endsWith('/nix-cache-info')
+									? new Response()
+									: new Response(undefined, { status: 401 })
+							)
 					}
 				);
 			} catch (error) {

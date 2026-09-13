@@ -1,10 +1,10 @@
 import type { NixValidPathInfo } from '@cupboard/nix';
-import type { ParsedUploadDecision } from '@cupboard/protocol/upload';
+import type { UploadDecision } from '@cupboard/protocol/upload';
 
 import { BuildOutputDivergedError } from '../errors.ts';
 import { narDivergence } from '../push/divergence.ts';
 
-type SkipDecision = Extract<ParsedUploadDecision, { action: 'skip' }>;
+type SkipDecision = Extract<UploadDecision, { action: 'skip' }>;
 
 export function requireMatchingBuildOutput(
 	info: NixValidPathInfo,

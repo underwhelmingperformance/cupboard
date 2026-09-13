@@ -20,9 +20,8 @@ export const phaseCacheMs = 60_000;
 /**
  * Reads the phase the deployment runs in, and answers from that reading for
  * `phaseCacheMs`. Answering from a stale reading is safe only while what the
- * gate chooses between is read either way: both the legacy and the identity
- * representation are written, and a stored grant is read in either spelling.
- * That holds for every phase this gate distinguishes.
+ * gate chooses between is read either way: a stored grant is read in either
+ * spelling. That holds for every phase this gate distinguishes.
  */
 export class DeploymentPhaseGate {
 	private cached: DeploymentPhaseName | undefined;
@@ -61,6 +60,14 @@ export class DeploymentPhaseGate {
 		const parsed = deploymentPhaseSchema.safeParse(row);
 
 		return parsed.success ? parsed.data.name : undefined;
+	}
+
+	/**
+	Refreshes the phase before advancing irreversible local work.
+	*/
+	async refresh(): Promise<void> {
+		this.cached = await this.read();
+		this.readAt = this.now();
 	}
 
 	/**
