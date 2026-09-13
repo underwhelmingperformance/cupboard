@@ -196,15 +196,16 @@ A run can authenticate these commands with its own OIDC token:
 
 ```bash
 cupboard cache create "$tenant" "gh-$repository_id-pr-$number" \
-  --github-oidc --access public --root-ttl 14d
+  --github-oidc --if-absent --access public --root-ttl 14d
 cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
   --github-oidc --force --yes
 ```
 
 Create the cache explicitly to choose its access and default root TTL before
 publication. A first push can also create a missing cache, but it inherits the
-default cache's access and has no default root TTL. The reusable workflow does
-not yet invoke these lifecycle commands automatically.
+default cache's access and has no default root TTL. The flake publish workflow
+invokes creation from its plan job before publishing. It does not yet remove a
+cache when the pull request closes.
 
 A default root TTL lets roots expire even if a later writer supplies no TTL.
 Collection can then reclaim paths that have no other retention. An abandoned

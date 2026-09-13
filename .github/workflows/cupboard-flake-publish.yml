@@ -268,6 +268,8 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      provision-cache: ${{ steps.resolve.outputs.provision-cache }}
+      provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -293,6 +295,7 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
+          PUSH: ${{ inputs.push }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
@@ -302,6 +305,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -393,11 +397,18 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
+                if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
+                  echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
+                  exit 1
+                fi
                 # Match pullRequestCacheTemplate and the prefix used by
                 # cupboard github setup's repository view.
                 CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
+                if [ "${PUSH}" = true ]; then
+                  PROVISION_CACHE="${CACHE}"
+                fi
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
@@ -427,6 +438,8 @@ jobs:
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
+            echo "provision-cache=${PROVISION_CACHE:-}"
+            echo "provision-cache-ttl=${TTL}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
@@ -502,6 +515,11 @@ jobs:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          provision-cache: ${{ needs.configure.outputs.provision-cache }}
+          provision-cache-access:
+            ${{ secrets.read_user != '' && 'private' || 'public' }}
+          provision-cache-ttl:
+            ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}

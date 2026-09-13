@@ -1,5 +1,5 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { access, mkdtemp, readFile, stat } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -17,6 +17,8 @@ import {
 	CacheInfoInvalidError,
 	CupboardReleaseSelectionConflictError,
 	ProbeTimeoutError,
+	ProvisionCacheAccessRequiredError,
+	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError,
@@ -271,6 +273,7 @@ describe('resolveSetupInputs', () => {
 		addToPath: true,
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
+		provisionCache: undefined,
 		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
@@ -1110,5 +1113,141 @@ describe('resolveSetupInputs reuse view', () => {
 		);
 
 		expect(inputs.reuseView).toBe('reuse');
+	});
+});
+
+// Drives `setupAction` with stubbed dependencies and records the cupboard
+// invocations, plus whether each ran before `configureNix` wrote its file.
+async function runSetup(options: {
+	readonly provisionCache?: string;
+	readonly provisionCacheAccess?: string;
+	readonly provisionCacheTtl?: string;
+	readonly existingAccess?: 'public' | 'private';
+}): Promise<{
+	readonly invocations: readonly (readonly string[])[];
+	readonly wroteNixConfigFirst: readonly boolean[];
+}> {
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-setup-provision-')
+	);
+	const invocations: (readonly string[])[] = [];
+	const wroteNixConfigFirst: boolean[] = [];
+
+	try {
+		await setupAction(
+			{
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test/t/acme',
+				cache: 'pr-1',
+				trustedPublicKey: 'acme:AAAA',
+				...options
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ENV: path.join(directory, 'github-env'),
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			createGithubReporter(),
+			{
+				installRelease: () =>
+					Promise.resolve({
+						binaryPath: path.join(directory, 'bin', 'cupboard'),
+						version: 'v1.2.3',
+						sourceCommit: 'd'.repeat(40)
+					}),
+				run: (_binaryPath, arguments_) => {
+					invocations.push(arguments_);
+					wroteNixConfigFirst.push(
+						readdirSync(directory).some((entry) =>
+							entry.startsWith('cupboard-nix-')
+						)
+					);
+
+					return Promise.resolve([
+						{
+							kind: 'cache',
+							data: {
+								scope: namedCache(options.provisionCache ?? 'pr-1'),
+								access: options.existingAccess ?? options.provisionCacheAccess,
+								priority: 40,
+								storePaths: 0,
+								defaultRootRetention: { kind: 'permanent' },
+								grace: { kind: 'none' },
+								rootRetentionOverrides: []
+							}
+						}
+					]);
+				},
+				fetch: stubFetch(() => cacheInfoBody(40))
+			}
+		);
+
+		return { invocations, wroteNixConfigFirst };
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('setupAction cache provisioning', () => {
+	it('refuses a previously public cache before configuring private publication', async () => {
+		await expect(
+			runSetup({
+				provisionCache: 'pr-1',
+				provisionCacheAccess: 'private',
+				existingAccess: 'public'
+			})
+		).rejects.toThrow('has public access; private access is required');
+	});
+	it('creates nothing when no cache is named', async () => {
+		expect(await runSetup({})).toStrictEqual({
+			invocations: [],
+			wroteNixConfigFirst: []
+		});
+	});
+
+	it('creates the named cache with the run token before configuring Nix', async () => {
+		expect(
+			await runSetup({
+				provisionCache: 'pr-1',
+				provisionCacheAccess: 'public',
+				provisionCacheTtl: '14d'
+			})
+		).toStrictEqual({
+			invocations: [
+				[
+					'cache',
+					'create',
+					'https://cache.example.test/t/acme',
+					'pr-1',
+					'--github-oidc',
+					'--if-absent',
+					'--access',
+					'public',
+					'--root-ttl',
+					'14d'
+				]
+			],
+			wroteNixConfigFirst: [false]
+		});
+	});
+
+	it('requires a tenant URL when provisioning a cache', () => {
+		expect(() =>
+			resolveSetupInputs(
+				{
+					provisionCache: 'gh-1234-pr-1',
+					provisionCacheAccess: 'public',
+					installDir: '/opt/cupboard'
+				},
+				{}
+			)
+		).toThrow(ProvisionCacheUrlRequiredError);
+	});
+
+	it('refuses to create a cache whose access the workflow did not state', async () => {
+		await expect(runSetup({ provisionCache: 'pr-1' })).rejects.toBeInstanceOf(
+			ProvisionCacheAccessRequiredError
+		);
 	});
 });
