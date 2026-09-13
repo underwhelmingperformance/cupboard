@@ -234,6 +234,8 @@ describe('unclassifiedD1Migrations', () => {
 				migrationsNamed([
 					'0027_cache_identity_compatible_contract.sql',
 					'0028_cache_identity_contract.sql',
+					'0029_cache_grant_contract.sql',
+					'0030_cache_credential_lifecycle.sql',
 					'0031_something_new.sql'
 				])
 			)

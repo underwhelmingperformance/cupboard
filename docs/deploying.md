@@ -126,6 +126,56 @@ value prepared before local contraction is converted if contraction finished
 while its caller awaited another operation. Database triggers enforce the
 resulting format. Tolerant readers remain throughout the transition.
 
+## Cache read credentials
+
+Deleting a cache advances its lifecycle generation and removes its read
+credential in one D1 batch. The credential deletion runs only when the lifecycle
+transition changes a row. A private cache with no credential of its own accepts
+the tenant credential, so the batch prevents a live cache from briefly gaining
+that broader access. If the batch commits but its response is lost, a retry
+completes local teardown without deleting a credential that was provisioned
+afterwards. A credential provisioned before a private cache is registered also
+remains available for that new cache.
+
+The contraction migration `0030_cache_credential_lifecycle` removes credentials
+whose cache lifecycle row is still marked deleted. It keeps credentials set
+before a cache was registered. It also keeps credentials on live caches whose
+names have been reused: registration clears the deletion timestamp, and the
+stored data cannot establish whether a credential belongs to the current cache
+or an earlier cache with that name.
+
+After migration, this query lists credentials on recreated named caches for an
+operator to review:
+
+```sql
+SELECT c.tenant, c.cache_name, c.access, c.generation, r.created_at
+FROM cache_lifecycle AS c
+JOIN tenant_cache_read_credential AS r
+    ON r.tenant = c.tenant
+    AND r.cache_kind = c.cache_kind
+    AND r.cache_name IS c.cache_name
+WHERE c.cache_kind = 'named'
+    AND c.deleted_at IS NULL
+    AND c.generation > 1
+ORDER BY c.tenant, c.cache_name;
+```
+
+A generation above one means the cache name has been deleted at least once. The
+credential's `created_at` records when it was set, but does not prove which
+incarnation it belongs to. Confirm with the tenant whether its readers should
+still use that password.
+
+For a private cache that should keep its own credential, replace the password
+with `cupboard tenant rotate-cache-credential <url> <tenant> <cache>` and update
+its readers with the returned credential. Rotation replaces the existing
+verifier without first switching the cache to the tenant credential.
+
+Use `cupboard tenant clear-cache-credential <url> <tenant> <cache>` only when
+readers should use the tenant credential instead, or when removing an unused
+credential from a public cache. Clearing a credential does not lock a private
+cache: everyone with the tenant credential can then read it. Both commands check
+the tenant's lifecycle; use them rather than deleting rows directly in D1.
+
 ## Rolling back
 
 Rolling back the Workers does not roll back D1, tenant SQLite, R2, the recorded
