@@ -99,7 +99,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 			edges: [
 				{
 					tenant: 'v1',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 0,
 					narHash: nar.narHash,
@@ -167,7 +167,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 			edges: [
 				{
 					tenant: 'v1',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 1,
 					narHash: nar.narHash,
@@ -277,7 +277,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 			beforeFlush: [
 				{
 					tenant: 'v1',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 0,
 					narHash: nar.narHash,
@@ -285,7 +285,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 				},
 				{
 					tenant: 'v1',
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 1,
 					narHash: nar.narHash,
@@ -313,7 +313,9 @@ describe('blob_ref / tenant_blob reference edges', () => {
 			storePathHash: metadata.storePathHash
 		});
 
-		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
+		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+			kind: 'default'
+		});
 		const deleteObject = env.BLOBS.delete.bind(env.BLOBS);
 		let edgesAtObjectDelete:
 			Awaited<ReturnType<typeof blobReferenceRows>> | undefined;
@@ -348,7 +350,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 			edgesAtObjectDelete: [
 				{
 					tenant: fixtureTenant,
-					cache: '',
+					cache: { kind: 'default' },
 					storePathHash: metadata.storePathHash,
 					generation: 0,
 					narHash: nar.narHash,

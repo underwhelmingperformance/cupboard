@@ -11,7 +11,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import type { RootEnsureResponse } from '@cupboard/protocol/retention';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { describe, expect, it } from 'vitest';
 
@@ -77,7 +77,7 @@ async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 	return error;
 }
 
-function retained(name: RootName): ParsedRootEnsureResponse {
+function retained(name: RootName): RootEnsureResponse {
 	return {
 		status: 'retained',
 		root: {
@@ -92,7 +92,7 @@ function retained(name: RootName): ParsedRootEnsureResponse {
 
 function buildRequired(
 	unavailable: readonly StorePathString[]
-): ParsedRootEnsureResponse {
+): RootEnsureResponse {
 	return { status: 'build-required', unavailable: [...unavailable] };
 }
 

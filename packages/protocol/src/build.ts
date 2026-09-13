@@ -33,7 +33,7 @@ export const buildEventSchema = z.strictObject({
 	 */
 	outputProtection: z.literal('failed').optional()
 });
-export type ParsedBuildEvent = z.output<typeof buildEventSchema>;
+export type BuildEvent = z.output<typeof buildEventSchema>;
 
 // A version 2 subject links a path built during this run to the attempt that
 // produced it. Before emitting a checksum, the attestation step verifies the
@@ -45,7 +45,7 @@ export const buildSubjectV2Schema = z.strictObject({
 	attempt: positiveIntSchema,
 	attemptId: z.string().min(1)
 });
-export type ParsedBuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
+export type BuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
 
 // The store containing the realised paths: the selected `--store` value, or
 // `auto` when Nix selects the store. Store values are opaque here; the schema
@@ -160,8 +160,8 @@ export const observedCopiesSchema = z.record(
 	storePathSchema,
 	z.array(nixStoreUriSchema).min(1)
 );
-export type ParsedObservedCopies = z.output<typeof observedCopiesSchema>;
-export type ObservedCopies = z.input<typeof observedCopiesSchema>;
+export type ObservedCopies = z.output<typeof observedCopiesSchema>;
+export type ObservedCopiesInput = z.input<typeof observedCopiesSchema>;
 
 // A version 3 subject describes one published path and the origin that the run
 // observed. A supervised build includes the attempt that produced the path. A
@@ -181,8 +181,8 @@ export const buildSubjectV3Schema = z.discriminatedUnion('origin', [
 		...republishedOriginFields
 	})
 ]);
-export type ParsedBuildSubjectV3 = z.output<typeof buildSubjectV3Schema>;
-export type SubjectOrigin = ParsedBuildSubjectV3['origin'];
+export type BuildSubjectV3 = z.output<typeof buildSubjectV3Schema>;
+export type SubjectOrigin = BuildSubjectV3['origin'];
 
 // Why a failed target failed: the build itself, the upload of its NAR, the
 // destination's verification of the upload, the retention root that should
@@ -230,7 +230,7 @@ export const targetOutcomeSchema = z.discriminatedUnion('outcome', [
 		storePath: storePathSchema
 	})
 ]);
-export type ParsedTargetOutcome = z.output<typeof targetOutcomeSchema>;
+export type TargetOutcome = z.output<typeof targetOutcomeSchema>;
 
 // The planner's estimate after the action copies the selected local paths.
 // `unknown` counts store paths that neither the store nor its substituters can
@@ -246,7 +246,7 @@ export const plannerPartitionSchema = z.strictObject({
 	adopted: countSchema,
 	leftUpstream: countSchema
 });
-export type ParsedPlannerPartition = z.output<typeof plannerPartitionSchema>;
+export type PlannerPartition = z.output<typeof plannerPartitionSchema>;
 
 // The estimated substitution capacity after planned local paths are copied:
 // the compressed transfer and unpacked NAR bytes. These values include the
@@ -255,9 +255,7 @@ export const substitutableSizesSchema = z.strictObject({
 	downloadSize: countSchema,
 	narSize: countSchema
 });
-export type ParsedSubstitutableSizes = z.output<
-	typeof substitutableSizesSchema
->;
+export type SubstitutableSizes = z.output<typeof substitutableSizesSchema>;
 
 // Why the supervised child failed. A target-build failure identifies the
 // failed installables. A command failure does not, because Nix may have exited
@@ -271,9 +269,7 @@ export const terminalBuildFailureSchema = z.discriminatedUnion('kind', [
 	}),
 	z.strictObject({ kind: z.literal('command') })
 ]);
-export type ParsedTerminalBuildFailure = z.output<
-	typeof terminalBuildFailureSchema
->;
+export type TerminalBuildFailure = z.output<typeof terminalBuildFailureSchema>;
 
 // What every receipt version records besides its subjects: the realised paths
 // and, when the run planned and published, the per-target outcomes, the
@@ -299,7 +295,7 @@ export const buildReceiptV2Schema = z.strictObject({
 	subjects: z.array(buildSubjectV2Schema),
 	...buildReceiptFields
 });
-export type ParsedBuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
+export type BuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
 
 // Version 3 records one subject per path the run published: each path it read
 // from the build store, whether the run built the path or found it already
@@ -309,21 +305,23 @@ export const buildReceiptV3Schema = z.strictObject({
 	subjects: z.array(buildSubjectV3Schema),
 	...buildReceiptFields
 });
-export type ParsedBuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
+export type BuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
 
 export const buildReceiptSchema = z.discriminatedUnion('version', [
 	buildReceiptV2Schema,
 	buildReceiptV3Schema
 ]);
-export type ParsedBuildReceipt = z.output<typeof buildReceiptSchema>;
+export type BuildReceipt = z.output<typeof buildReceiptSchema>;
 
-export type BuildEvent = z.input<typeof buildEventSchema>;
-export type BuildSubjectV2 = z.input<typeof buildSubjectV2Schema>;
-export type BuildSubjectV3 = z.input<typeof buildSubjectV3Schema>;
-export type TargetOutcome = z.input<typeof targetOutcomeSchema>;
-export type PlannerPartition = z.input<typeof plannerPartitionSchema>;
-export type SubstitutableSizes = z.input<typeof substitutableSizesSchema>;
-export type TerminalBuildFailure = z.input<typeof terminalBuildFailureSchema>;
-export type BuildReceiptV2 = z.input<typeof buildReceiptV2Schema>;
-export type BuildReceiptV3 = z.input<typeof buildReceiptV3Schema>;
-export type BuildReceipt = z.input<typeof buildReceiptSchema>;
+export type BuildEventInput = z.input<typeof buildEventSchema>;
+export type BuildSubjectV2Input = z.input<typeof buildSubjectV2Schema>;
+export type BuildSubjectV3Input = z.input<typeof buildSubjectV3Schema>;
+export type TargetOutcomeInput = z.input<typeof targetOutcomeSchema>;
+export type PlannerPartitionInput = z.input<typeof plannerPartitionSchema>;
+export type SubstitutableSizesInput = z.input<typeof substitutableSizesSchema>;
+export type TerminalBuildFailureInput = z.input<
+	typeof terminalBuildFailureSchema
+>;
+export type BuildReceiptV2Input = z.input<typeof buildReceiptV2Schema>;
+export type BuildReceiptV3Input = z.input<typeof buildReceiptV3Schema>;
+export type BuildReceiptInput = z.input<typeof buildReceiptSchema>;

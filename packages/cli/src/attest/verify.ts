@@ -8,7 +8,7 @@ import {
 	NixPublicKey,
 	parsePublishedNixPublicKeys
 } from '@cupboard/nix-store/public-key';
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
@@ -42,7 +42,7 @@ export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions 
 export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly url: URL;
 	readonly storePathHash: string;
-	readonly cache?: StoredCache;
+	readonly cache: CacheScope;
 	readonly bundleDigest?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;

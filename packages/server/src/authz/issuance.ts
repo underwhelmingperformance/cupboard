@@ -9,7 +9,7 @@ import {
 	issuedAccessTokenType,
 	type OidcAudience,
 	type OidcIssuer,
-	type TokenResponse
+	type TokenResponseInput
 } from '@cupboard/protocol/oidc';
 import {
 	isRuleInteractive,
@@ -139,7 +139,7 @@ interface AttenuatedAccessTokenOptions {
 export async function issueAttenuatedAccessToken(
 	options: AttenuatedAccessTokenOptions,
 	now: Date
-): Promise<TokenResponse> {
+): Promise<TokenResponseInput> {
 	const granted = attenuatedGrants(options.presented.grants, options.requested);
 	const issuedAtSeconds = Math.floor(now.getTime() / 1000);
 	const presentedExpirySeconds = Math.floor(

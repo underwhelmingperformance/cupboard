@@ -1,19 +1,10 @@
 import type { AttestOptions, Predicate } from '@actions/attest';
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	type StoredCache,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
 import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
 	type AttestationStatement,
-	cacheVisibility,
 	defaultSigningPolicy,
-	type DestinationVisibility,
 	disclosureLines,
 	githubStatementSigner,
 	isTransientSigningFailure,
@@ -296,27 +287,6 @@ describe('signStatement', () => {
 			delays: []
 		});
 	});
-});
-
-const visibilityCases: readonly {
-	readonly cache: StoredCache;
-	readonly expected: DestinationVisibility;
-}[] = [
-	{ cache: DEFAULT_CACHE, expected: 'public' },
-	{ cache: storedCacheSchema.parse('releases'), expected: 'public' },
-	{
-		cache: privateStoredCache(cacheNameSchema.parse('ci')),
-		expected: 'private'
-	}
-];
-
-describe('cacheVisibility', () => {
-	it.each(visibilityCases)(
-		'reads $cache as a $expected destination',
-		({ cache, expected }) => {
-			expect(cacheVisibility(cache)).toBe(expected);
-		}
-	);
 });
 
 describe('defaultSigningPolicy', () => {

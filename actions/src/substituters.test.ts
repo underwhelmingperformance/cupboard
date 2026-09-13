@@ -1,9 +1,4 @@
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
@@ -15,18 +10,19 @@ import {
 } from './substituters.ts';
 
 describe('cacheUrlFor', () => {
-	it.each([
+	it.each<readonly [string, CacheScope, string]>([
 		[
 			'https://cache.example.test/',
-			DEFAULT_CACHE,
+			{ kind: 'default' },
 			'https://cache.example.test'
 		],
-		['https://cache.example.test', 'ci', 'https://cache.example.test/cache/ci']
+		[
+			'https://cache.example.test',
+			{ kind: 'named', name: cacheNameSchema.parse('ci') },
+			'https://cache.example.test/cache/ci'
+		]
 	])('builds a substituter URL', (baseUrl, cache, expected) => {
-		const substituter = cacheUrlFor(
-			new URL(baseUrl),
-			storedCacheSchema.parse(cache)
-		);
+		const substituter = cacheUrlFor(new URL(baseUrl), cache);
 
 		expect(canonicalHref(substituter)).toBe(expected);
 	});
@@ -38,10 +34,10 @@ describe('substituterUrlFor', () => {
 		password: 'p@ss word/%'
 	};
 
-	it('leaves a public cache URL without a credential', () => {
+	it('leaves a cache URL without a credential', () => {
 		const substituter = substituterUrlFor(
 			new URL('https://cache.example.test/t/acme'),
-			{ cache: cacheNameSchema.parse('builds') }
+			{ cache: { kind: 'named', name: cacheNameSchema.parse('builds') } }
 		);
 
 		expect(canonicalHref(substituter)).toBe(
@@ -49,11 +45,11 @@ describe('substituterUrlFor', () => {
 		);
 	});
 
-	it('carries a private cache credential in the URL', () => {
+	it('carries a cache credential in the URL', () => {
 		const substituter = substituterUrlFor(
 			new URL('https://cache.example.test/t/acme'),
 			{
-				cache: privateStoredCache(cacheNameSchema.parse('release')),
+				cache: { kind: 'named', name: cacheNameSchema.parse('release') },
 				credential
 			}
 		);
@@ -63,7 +59,7 @@ describe('substituterUrlFor', () => {
 			user: decodeURIComponent(substituter.username),
 			password: decodeURIComponent(substituter.password)
 		}).toStrictEqual({
-			href: 'https://ci:p%40ss%20word%2F%25@cache.example.test/t/acme/private-cache/release',
+			href: 'https://ci:p%40ss%20word%2F%25@cache.example.test/t/acme/cache/release',
 			user: credential.user,
 			password: credential.password
 		});

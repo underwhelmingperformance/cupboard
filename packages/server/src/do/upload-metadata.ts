@@ -1,11 +1,11 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import {
-	type ParsedUploadBlobMetadata,
-	type ParsedUploadPathMetadata,
-	type ParsedUploadPathNegotiation,
+	type UploadBlobMetadata,
 	type UploadId,
+	type UploadPathMetadata,
 	uploadPathMetadataSchema,
+	type UploadPathNegotiation,
 	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
 
@@ -25,9 +25,9 @@ export interface CanonicalBlob {
 }
 
 export function commitMetadataFromPathAndBlob(
-	path: ParsedUploadPathNegotiation,
-	blob: ParsedUploadBlobMetadata
-): ParsedUploadPathMetadata {
+	path: UploadPathNegotiation,
+	blob: UploadBlobMetadata
+): UploadPathMetadata {
 	return {
 		...path,
 		fileHash: blob.fileHash,
@@ -55,7 +55,7 @@ export function canonicalBlobOf(
 export function parseStoredUploadPathMetadata(
 	uploadId: UploadId,
 	source: string
-): ParsedUploadPathNegotiation {
+): UploadPathNegotiation {
 	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
 		new StoredUploadMetadataInvalidError(uploadId, cause);
 	const json = parseStoredJson(source, onInvalid);

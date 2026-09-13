@@ -1,3 +1,4 @@
+import { type CacheAccessMode } from '@cupboard/nix-store/scalars';
 import type {
 	OidcTrustAddBodyInput,
 	OidcTrustSummary
@@ -42,7 +43,7 @@ const additionBody: OidcTrustAddBodyInput = {
 			actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 			resources: {
 				cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' },
-				root: { equalsResource: 'cache', validate: 'rootName' }
+				root: { exact: 'owner-ci', validate: 'rootName' }
 			}
 		}
 	]
@@ -313,9 +314,13 @@ describe('oidc-trust admin API', () => {
 	});
 });
 
-async function createCache(token: string, selector: string): Promise<void> {
-	const response = await authorisedFetch(`/caches/${selector}`, token, {
-		body: JSON.stringify({ priority: 40 }),
+async function createCache(
+	token: string,
+	name: string,
+	access: CacheAccessMode
+): Promise<void> {
+	const response = await authorisedFetch(`/caches/${name}`, token, {
+		body: JSON.stringify({ access, priority: 40 }),
 		headers: { 'content-type': 'application/json' },
 		method: 'PUT'
 	});
@@ -354,7 +359,7 @@ describe('stored spelling of a rule', () => {
 			actions: ['upload:commit'],
 			resources: {
 				cache: { kind: 'named', exact: 'ci', validate: 'cacheName' },
-				root: { equalsResource: 'cache', validate: 'rootName' }
+				root: { exact: 'pr-1', validate: 'rootName' }
 			}
 		},
 		{
@@ -396,7 +401,7 @@ describe('stored spelling of a rule', () => {
 			actions: ['upload:commit'],
 			resources: {
 				cache: { exact: '_private-ci', validate: 'cacheName' },
-				root: { equalsResource: 'cache', validate: 'rootName' }
+				root: { exact: 'pr-1', validate: 'rootName' }
 			}
 		},
 		{
@@ -453,8 +458,8 @@ describe('stored spelling of a rule', () => {
 	])('stores a rule in $name', async ({ phase, stored }) => {
 		await recordDeploymentPhase(phase);
 		const token = await adminToken();
-		await createCache(token, '_private-ci');
-		await createCache(token, 'docs');
+		await createCache(token, 'ci', 'private');
+		await createCache(token, 'docs', 'public');
 
 		const added = await addRule(token, { ...additionBody, permittedGrants });
 		const { id } = oidcTrustSummarySchema.parse(await added.json());

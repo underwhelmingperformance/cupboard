@@ -1,8 +1,8 @@
 import { rootLogger } from '@cupboard/logger';
 import { type Capture, startCapture } from '@cupboard/logger/testing';
 import {
-	signingKeyIdSchema,
-	storedCacheSchema
+	cacheNameSchema,
+	signingKeyIdSchema
 } from '@cupboard/nix-store/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
@@ -10,6 +10,7 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+	CacheAlreadyExistsError,
 	CacheNotEmptyError,
 	CommitSessionLimitError,
 	SigningKeyBackfillIncompleteError,
@@ -37,7 +38,10 @@ describe('bridgedError', () => {
 	it('returns CACHE_NOT_EMPTY with the cache name', () => {
 		const bridged = bridgedError(
 			rootLogger(),
-			new CacheNotEmptyError(storedCacheSchema.parse('builds'))
+			new CacheNotEmptyError({
+				kind: 'named',
+				name: cacheNameSchema.parse('builds')
+			})
 		);
 
 		expect(bridged).toBeInstanceOf(ORPCError);
@@ -46,7 +50,23 @@ describe('bridgedError', () => {
 			status: StatusCodes.CONFLICT,
 			message:
 				'The cache contains store paths. Set force to true to delete it.',
-			data: { cache: 'builds' }
+			data: { cache: { kind: 'named', name: 'builds' } }
+		});
+		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('returns CACHE_ALREADY_EXISTS with the cache scope', () => {
+		const bridged = bridgedError(
+			rootLogger(),
+			new CacheAlreadyExistsError({ kind: 'default' })
+		);
+
+		expect(bridged).toBeInstanceOf(ORPCError);
+		expect(bridged).toMatchObject({
+			code: 'CACHE_ALREADY_EXISTS',
+			status: StatusCodes.CONFLICT,
+			message: 'The requested cache already exists',
+			data: { cache: { kind: 'default' } }
 		});
 		expect(capture.logs).toStrictEqual([]);
 	});

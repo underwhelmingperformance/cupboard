@@ -907,7 +907,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 	return {
 		targets: [],
 		url: new URL('https://cupboard.example/t/acme'),
-		cache: '',
+		cache: { kind: 'default' },
 		rootPrefix: 'github:owner/repo/main',
 		ttl: '',
 		readUser: '',

@@ -248,13 +248,14 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --allow push
 ```
 
-`--cache` also accepts the `_private-ci` selector, and `--cache-template` a
-template that begins with `_private-`; both bind the same cache as the plain
-name. A rendered template must be a valid cache name, so a capture whose value
-begins with an underscore matches no cache.
+Changing `ci` between public and private access does not create a second cache
+and does not need a new trust rule. A rendered `--cache-template` must be a
+valid cache name, and the captured value selects the same cache whatever its
+access.
 
 A trust rule governs writes. Reads are separate: a reader of a private cache
-presents that cache's Basic credential. Trust rules do not grant read
-credentials. See [Private caches][nix-private-caches].
+presents the tenant-wide fallback credential, or the cache's own credential when
+it has one. Trust rules do not grant read credentials. See [Private
+caches][nix-cache-access].
 
-[nix-private-caches]: ./nix.md#private-caches
+[nix-cache-access]: ./nix.md#private-caches

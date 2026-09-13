@@ -1,23 +1,21 @@
 import {
-	cacheNameSchema,
 	narInfoGenerationSchema,
-	signingKeyGenerationSchema,
-	storedCacheSchema
+	signingKeyGenerationSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, ne, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
-import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { firstCacheGeneration } from '../db/cache-generation.ts';
+import type { CacheId } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	cacheIdentities,
 	cachePurgeContinuations,
 	narInfoDeletions,
 	narInfos,
@@ -43,10 +41,12 @@ import {
 	initialise,
 	type MeasuredInvocation,
 	measureInvocations,
+	namedCache,
 	narBytes,
 	negotiateUploads,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
 	seedCanonicalBlob,
 	syntheticStorePathHash,
 	uploadMetadata,
@@ -71,7 +71,7 @@ import {
 } from './server.ts';
 import { backfillEntriesPerPass } from './signing-keys-service.ts';
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
 const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
@@ -95,7 +95,7 @@ async function currentMaintenancePass(
 	return (await state.storage.get<string>(maintenancePassCursorKey)) ?? 'none';
 }
 
-function indexedMetadata(index: number): ParsedUploadPathMetadata {
+function indexedMetadata(index: number): UploadPathMetadata {
 	const suffix =
 		storePathAlphabet.charAt(Math.floor(index / 32)) +
 		storePathAlphabet.charAt(index % 32);
@@ -111,13 +111,7 @@ async function seedCommittedPaths(server: string): Promise<void> {
 	await useTestServer(server);
 
 	await withoutAlarmArming(async () => {
-		const { token } = await bootstrap();
-		const registered = await authorisedFetch('/caches/builds', token, {
-			body: JSON.stringify({ priority: 30 }),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		});
-		expect(registered.status).toBe(StatusCodes.OK);
+		await bootstrap({ caches: [{ scope: buildsCache }] });
 		const paths = Array.from({ length: committedPaths }, (_, index) =>
 			indexedMetadata(index)
 		);
@@ -130,11 +124,21 @@ async function seedCommittedPaths(server: string): Promise<void> {
 		});
 
 		await runInDurableObject(currentServer(), async (instance) => {
-			const cache = storedCacheSchema.parse(buildsCache);
+			const cache = resolvedCache(instance.context, buildsCache);
+			const cacheIdentity = instance.context.db
+				.select({ generation: cacheIdentities.generation })
+				.from(cacheIdentities)
+				.where(eq(cacheIdentities.id, cache.id))
+				.get();
+			if (cacheIdentity === undefined) {
+				throw new TypeError('Seeded cache identity is missing');
+			}
+
 			const now = isoTimestamp(new Date());
 			const generation = narInfoGenerationSchema.parse(1);
-			const narInfoRow = (path: ParsedUploadPathMetadata) => ({
-				cache,
+			const narInfoRow = (path: UploadPathMetadata) => ({
+				cache: buildsCache.name,
+				cacheId: cache.id,
 				storePathHash: path.storePathHash,
 				storePath: path.storePath,
 				narHash: path.narHash,
@@ -143,13 +147,15 @@ async function seedCommittedPaths(server: string): Promise<void> {
 				generation,
 				createdAt: now
 			});
-			const referenceRow = (path: ParsedUploadPathMetadata) => ({
+			const referenceRow = (path: UploadPathMetadata) => ({
 				tenant: fixtureTenant,
-				cache,
+				cache: buildsCache.name,
+				cacheKind: 'named' as const,
+				cacheName: buildsCache.name,
 				storePathHash: path.storePathHash,
 				generation,
 				narHash: path.narHash,
-				cacheGeneration: firstCacheGeneration
+				cacheGeneration: cacheIdentity.generation
 			});
 			const parametersPerRow = Math.max(
 				instance.context.db.insert(narInfos).values(narInfoRow(first)).toSQL()
@@ -226,10 +232,11 @@ async function driveAlarms(
 				value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
 			});
 
+			const cache = resolvedCache(instance.context, buildsCache);
 			await instance.runCacheTeardown(buildsCache, origin);
 			await state.storage.put(gcContinuationKey, [{ scope: 'tenant' }]);
 
-			const teardownKey = `${teardownEntryPrefix}${buildsCache}`;
+			const teardownKey = `${teardownEntryPrefix}${String(cache.id)}`;
 			const queueDepth = (): number =>
 				drizzle(state.storage, { schema: { narInfoDeletions } })
 					.select({ storePathHash: narInfoDeletions.storePathHash })
@@ -328,7 +335,12 @@ describe('alarm D1 statement allowance', () => {
 			queuedDeletions: driven.queuedDeletions
 		}).toStrictEqual({
 			queuedDeletionsAtFirstAlarm: committedPaths,
-			passes: ['teardown', 'garbage-collection', 'teardown'],
+			passes: [
+				'teardown',
+				'garbage-collection',
+				'teardown',
+				'garbage-collection'
+			],
 			teardownPending: undefined,
 			collectionPending: undefined,
 			queuedDeletions: 0
@@ -364,17 +376,17 @@ type BackstopAlarmObservation = MeasuredInvocation<{
  */
 async function commitReconcilePaths(
 	server: string
-): Promise<readonly ParsedUploadPathMetadata[]> {
+): Promise<readonly UploadPathMetadata[]> {
 	await useTestServer(server);
 
 	return withoutAlarmArming(async () => {
-		const { token } = await bootstrap();
+		const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 		const paths = Array.from({ length: reconciledPaths }, (_, index) =>
 			indexedMetadata(index)
 		);
 
 		for (const metadata of paths) {
-			await pushPath(token, metadata, 'builds');
+			await pushPath(token, metadata, buildsCache);
 		}
 
 		return paths;
@@ -393,7 +405,8 @@ async function commitReconcilePaths(
  */
 async function queueReconcileTargets(
 	queue: ReconcileQueueService,
-	paths: readonly ParsedUploadPathMetadata[]
+	cacheId: CacheId,
+	paths: readonly UploadPathMetadata[]
 ): Promise<void> {
 	for (const metadata of paths.slice(0, brokenNarInfoObjects)) {
 		await env.BLOBS.delete(
@@ -404,7 +417,7 @@ async function queueReconcileTargets(
 	await queue.enqueue(
 		origin,
 		paths.map((metadata) => ({
-			cache: buildsCache,
+			cacheId,
 			storePathHash: metadata.storePathHash
 		}))
 	);
@@ -439,6 +452,7 @@ async function driveReconcileAlarms(
 			});
 
 			const queue = new ReconcileQueueService(instance.context);
+			const cache = resolvedCache(instance.context, buildsCache);
 			const queueDepth = async (): Promise<number> => {
 				const queuedTargets = await queue.claimChunk(reconciledPaths + 1);
 
@@ -447,7 +461,7 @@ async function driveReconcileAlarms(
 
 			const alarms = await measureInvocations(state, counting, {
 				attempts: maxAlarms,
-				prepare: () => queueReconcileTargets(queue, paths),
+				prepare: () => queueReconcileTargets(queue, cache.id, paths),
 				isDue: () => queue.hasPending(),
 				run: async () => {
 					const queuedTargets = await queueDepth();
@@ -688,10 +702,11 @@ async function driveReconcileWithFault(
 	readonly alarms: readonly ReconcileFaultObservation[];
 	readonly narInfoPublications: number;
 	readonly unusedProbeFaults: number;
+	readonly queueKey: string;
 }> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 	const paths = Array.from({ length: faultyReconcilePaths }, (_, index) =>
 		indexedMetadata(index)
 	);
@@ -703,7 +718,7 @@ async function driveReconcileWithFault(
 	);
 
 	await Promise.all(
-		paths.map((metadata) => pushPath(token, metadata, 'builds'))
+		paths.map((metadata) => pushPath(token, metadata, buildsCache))
 	);
 
 	const publication = vi.spyOn(
@@ -723,6 +738,7 @@ async function driveReconcileWithFault(
 			currentServer(),
 			async (instance, state) => {
 				const queue = new ReconcileQueueService(instance.context);
+				const cache = resolvedCache(instance.context, buildsCache);
 				const queuedKeys = async (): Promise<string[]> => {
 					const queued = await queue.claimChunk(faultyReconcilePaths + 1);
 
@@ -736,7 +752,7 @@ async function driveReconcileWithFault(
 						await queue.enqueue(
 							origin,
 							paths.map((metadata) => ({
-								cache: buildsCache,
+								cacheId: cache.id,
 								storePathHash: metadata.storePathHash
 							}))
 						);
@@ -765,7 +781,11 @@ async function driveReconcileWithFault(
 				return {
 					alarms,
 					narInfoPublications: publication.mock.calls.length,
-					unusedProbeFaults: probePlan.failures
+					unusedProbeFaults: probePlan.failures,
+					queueKey: queue.entryKey({
+						cacheId: cache.id,
+						storePathHash: broken.storePathHash
+					})
 				};
 			}
 		);
@@ -794,7 +814,7 @@ describe('reconcile queue retention', () => {
 				`alarm-allowance-reconcile-${fault}`,
 				fault
 			);
-			const queueKey = `maintenance:reconcile:${buildsCache}:${indexedMetadata(0).storePathHash}`;
+			const queueKey = driven.queueKey;
 
 			expect({
 				alarms: driven.alarms.map(({ keys, restored }) => ({
@@ -867,7 +887,7 @@ type BackfillAlarmObservation = MeasuredInvocation<{
 async function queueSigningKeyBackfill(server: string): Promise<void> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
+	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 	const paths = Array.from({ length: resignedPaths }, (_, index) =>
 		indexedMetadata(index)
 	);
@@ -876,7 +896,7 @@ async function queueSigningKeyBackfill(server: string): Promise<void> {
 		await Promise.all(
 			paths
 				.slice(start, start + pushConcurrency)
-				.map((metadata) => pushPath(token, metadata, 'builds'))
+				.map((metadata) => pushPath(token, metadata, buildsCache))
 		);
 	}
 

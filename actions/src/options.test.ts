@@ -1,37 +1,34 @@
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	type StoredCache
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
 import {
 	BooleanInputInvalidError,
+	CacheCredentialsInvalidError,
 	CacheNameInvalidError,
-	CacheSelectionConflictError,
-	PrivateCacheCredentialsInvalidError,
 	ReadUserInvalidError,
-	UnknownPrivateCacheCredentialError,
+	UnknownCacheCredentialError,
 	UrlInputInvalidError
 } from './errors.ts';
 import {
-	cacheArguments,
 	collectLines,
 	isEnabled,
 	isNixPositionalArgument,
 	provided,
 	providedCache,
+	providedCacheCredentials,
 	providedCaches,
 	providedCacheSelection,
-	providedPrivateCacheCredentials,
-	providedPrivateCacheNames,
 	providedReadUser,
 	providedUrl
 } from './options.ts';
 
 const cacheName = (value: string) => cacheNameSchema.parse(value);
+const defaultCache: CacheScope = { kind: 'default' };
+const namedCache = (value: string): CacheScope => ({
+	kind: 'named',
+	name: cacheName(value)
+});
 const readPassword = 'A'.repeat(43);
 
 describe('isNixPositionalArgument', () => {
@@ -118,16 +115,16 @@ describe('providedUrl', () => {
 
 describe('providedCache', () => {
 	it.each([
-		['trims a padded cache name', ' pr-1 ', 'pr-1'],
-		['reads a blank value as the default cache', ' ', DEFAULT_CACHE],
-		['reads an absent value as the default cache', undefined, DEFAULT_CACHE]
+		['trims a padded cache name', ' pr-1 ', namedCache('pr-1')],
+		['reads a blank value as the default cache', ' ', defaultCache],
+		['reads an absent value as the default cache', undefined, defaultCache]
 	])('%s', (_name, value, expected) => {
-		expect(providedCache(value)).toBe(expected);
+		expect(providedCache(value)).toStrictEqual(expected);
 	});
 
 	it.each([
 		{ name: 'is not a legal cache name', value: 'Not A Cache' },
-		{ name: 'is a private stored name', value: 'private/release' }
+		{ name: 'contains a path separator', value: 'cache/release' }
 	])('refuses a value that $name', ({ value }) => {
 		expect(() => providedCache(value)).toThrow(CacheNameInvalidError);
 	});
@@ -154,95 +151,86 @@ describe('providedCaches', () => {
 		}
 	])('$name', ({ expected, value }) => {
 		expect(providedCaches(value)).toStrictEqual(
-			expected.map((value) => cacheName(value))
+			expected.map((value) => namedCache(value))
 		);
 	});
 
 	it.each([
 		{ name: 'is not a legal cache name', value: 'builds,Not A Cache' },
-		{ name: 'is a private stored name', value: 'builds,private/release' }
+		{ name: 'contains a path separator', value: 'builds,cache/release' }
 	])('refuses a list entry that $name', ({ value }) => {
 		expect(() => providedCaches(value)).toThrow(CacheNameInvalidError);
 	});
 });
 
-describe('providedPrivateCacheNames', () => {
-	it('reads a mixed list as local names in order', () => {
-		expect(
-			providedPrivateCacheNames('release, staging\nteam.eu\n')
-		).toStrictEqual(
-			['release', 'staging', 'team.eu'].map((value) => cacheName(value))
-		);
-	});
-
-	it('refuses a value that is not a legal cache name', () => {
-		expect(() => providedPrivateCacheNames('Not A Cache')).toThrow(
-			CacheNameInvalidError
-		);
-	});
-});
-
-describe('providedPrivateCacheCredentials', () => {
+describe('providedCacheCredentials', () => {
 	it.each([
 		{ name: 'an absent input', value: undefined },
 		{ name: 'a blank input', value: '  ' }
 	])('reads $name as no credential', ({ value }) => {
 		expect(
-			providedPrivateCacheCredentials(value, [cacheName('release')])
-		).toStrictEqual(new Map());
+			providedCacheCredentials(value, [namedCache('release')])
+		).toStrictEqual([]);
 	});
 
 	it('reads a credential for each named cache', () => {
+		const release = namedCache('release');
+
 		expect(
-			providedPrivateCacheCredentials(
-				JSON.stringify({ release: { user: 'ci', password: readPassword } }),
-				[cacheName('release')]
+			providedCacheCredentials(
+				JSON.stringify([
+					{
+						cache: release,
+						credential: { user: 'ci', password: readPassword }
+					}
+				]),
+				[release]
 			)
-		).toStrictEqual(
-			new Map([
-				[
-					cacheName('release'),
-					{ user: readUserInputSchema.parse('ci'), password: readPassword }
-				]
-			])
-		);
-	});
-
-	it('returns no credential for an unlisted cache named constructor', () => {
-		const credentials = providedPrivateCacheCredentials(
-			JSON.stringify({ release: { user: 'ci', password: readPassword } }),
-			[cacheName('release')]
-		);
-
-		expect(credentials.get(cacheName('constructor'))).toBeUndefined();
+		).toStrictEqual([
+			{
+				cache: release,
+				credential: {
+					user: readUserInputSchema.parse('ci'),
+					password: readPassword
+				}
+			}
+		]);
 	});
 
 	it.each([
 		{ name: 'is not JSON', value: 'not json' },
-		{ name: 'is not an object', value: '"release"' },
-		{ name: 'omits the password', value: '{"release":{"user":"ci"}}' },
+		{ name: 'is not an array', value: '"release"' },
+		{
+			name: 'omits the password',
+			value:
+				'[{"cache":{"kind":"named","name":"release"},"credential":{"user":"ci"}}]'
+		},
 		{
 			name: 'carries a password of the wrong shape',
-			value: '{"release":{"user":"ci","password":"short"}}'
+			value:
+				'[{"cache":{"kind":"named","name":"release"},"credential":{"user":"ci","password":"short"}}]'
 		},
 		{
 			name: 'names a cache the name schema refuses',
-			value: `{"Not A Cache":{"user":"ci","password":"${readPassword}"}}`
+			value: `[{"cache":{"kind":"named","name":"Not A Cache"},"credential":{"user":"ci","password":"${readPassword}"}}]`
 		}
 	])('refuses an input that $name', ({ value }) => {
 		expect(() =>
-			providedPrivateCacheCredentials(value, [cacheName('release')])
-		).toThrow(PrivateCacheCredentialsInvalidError);
+			providedCacheCredentials(value, [namedCache('release')])
+		).toThrow(CacheCredentialsInvalidError);
 	});
 
 	it('refuses a credential for a cache the run does not configure', () => {
-		const credentials = JSON.stringify({
-			staging: { user: 'ci', password: readPassword }
-		});
+		const credentials = JSON.stringify([
+			{
+				cache: namedCache('staging'),
+				credential: { user: 'ci', password: readPassword }
+			}
+		]);
 
 		expect(() =>
-			providedPrivateCacheCredentials(credentials, [cacheName('release')])
-		).toThrow(UnknownPrivateCacheCredentialError);
+			providedCacheCredentials(credentials, [namedCache('release')])
+		).toThrow(UnknownCacheCredentialError);
 	});
 });
 
@@ -250,73 +238,26 @@ describe('providedCacheSelection', () => {
 	it.each<{
 		readonly name: string;
 		readonly cache: string | undefined;
-		readonly privateCache: string | undefined;
-		readonly expected: StoredCache;
+		readonly expected: CacheScope;
 	}>([
 		{
-			name: 'neither input targets the default cache',
+			name: 'an absent input targets the default cache',
 			cache: undefined,
-			privateCache: undefined,
-			expected: DEFAULT_CACHE
+			expected: defaultCache
 		},
 		{
-			name: 'a public name targets that cache',
+			name: 'a name targets that cache',
 			cache: ' builds ',
-			privateCache: '  ',
-			expected: cacheName('builds')
-		},
-		{
-			name: 'a private name targets the private stored cache',
-			cache: '',
-			privateCache: 'release',
-			expected: privateStoredCache(cacheName('release'))
-		}
-	])('$name', ({ cache, expected, privateCache }) => {
-		expect(providedCacheSelection(cache, privateCache)).toBe(expected);
-	});
-
-	it('refuses both inputs together', () => {
-		expect(() => providedCacheSelection('builds', 'release')).toThrow(
-			CacheSelectionConflictError
-		);
-	});
-
-	it('refuses a private name that is not a legal cache name', () => {
-		expect(() => providedCacheSelection(undefined, 'Not A Cache')).toThrow(
-			CacheNameInvalidError
-		);
-	});
-
-	it('refuses a private stored name in the public input', () => {
-		expect(() => providedCacheSelection('private/release', undefined)).toThrow(
-			CacheNameInvalidError
-		);
-	});
-});
-
-describe('cacheArguments', () => {
-	it.each<{
-		readonly name: string;
-		readonly cache: StoredCache;
-		readonly expected: readonly string[];
-	}>([
-		{
-			name: 'the default cache is addressed by naming no cache',
-			cache: DEFAULT_CACHE,
-			expected: []
-		},
-		{
-			name: 'a public cache',
-			cache: cacheName('builds'),
-			expected: ['--cache', 'builds']
-		},
-		{
-			name: 'a private cache is addressed by local name',
-			cache: privateStoredCache(cacheName('release')),
-			expected: ['--private-cache', 'release']
+			expected: namedCache('builds')
 		}
 	])('$name', ({ cache, expected }) => {
-		expect(cacheArguments(cache)).toStrictEqual(expected);
+		expect(providedCacheSelection(cache)).toStrictEqual(expected);
+	});
+
+	it('refuses an invalid cache name', () => {
+		expect(() => providedCacheSelection('cache/release')).toThrow(
+			CacheNameInvalidError
+		);
 	});
 });
 

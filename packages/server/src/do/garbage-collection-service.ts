@@ -1,6 +1,5 @@
 import { type Logger } from '@cupboard/logger';
 import {
-	identityForCache,
 	type RootName,
 	type StoredCache,
 	storePathBasenameSchema,
@@ -22,8 +21,11 @@ import {
 	sql
 } from 'drizzle-orm';
 
-import { type CacheId } from '../db/cache.ts';
-import { CacheRepository } from '../db/cache-repository.ts';
+import {
+	type CacheId,
+	legacyCacheKey,
+	type ResolvedCache
+} from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
 	StoredReferencesInvalidError,
@@ -41,6 +43,7 @@ import {
 import { deleteObjects, maxOutgoingConnections } from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
+	type GarbageCollectionTarget,
 	type SchemaDatabase,
 	type ServerContext
 } from './context.ts';
@@ -83,7 +86,7 @@ export const maxRootsExpiredPerRun = 32;
  */
 export function expiredRootTargetSelect(
 	database: SchemaDatabase,
-	cache: StoredCache,
+	cacheId: CacheId,
 	rootNames: JsonValueList<RootName>,
 	limit: number
 ) {
@@ -95,7 +98,7 @@ export function expiredRootTargetSelect(
 		.from(schema.retentionRootTargets)
 		.where(
 			and(
-				eq(schema.retentionRootTargets.cache, cache),
+				eq(schema.retentionRootTargets.cacheId, cacheId),
 				inArray(schema.retentionRootTargets.rootName, rootNames)
 			)
 		)
@@ -135,6 +138,14 @@ const maxOrphanReclaim = 1000;
 // staging namespace; later passes and the lifecycle rule provide recovery.
 export const maxOrphanListPages = maxOutgoingConnections;
 
+// The legacy stored name of the cache a pass is sweeping. Every scan table
+// still keys its rows by that name, so a row cannot be written from the id
+// alone. A pass carries its resolved cache and derives the name here, rather
+// than reading the identity again for each statement.
+function legacyCacheOf(cache: ResolvedCache): StoredCache {
+	return legacyCacheKey(cache.scope, cache.access);
+}
+
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
@@ -142,27 +153,24 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private cacheIdOf(cache: StoredCache): CacheId | undefined {
-		return new CacheRepository(this.context.db).find(cache);
-	}
-
-	private currentRevision(cache: StoredCache): number {
+	private currentRevision(cache: ResolvedCache): number {
+		// The revision triggers key their row by the legacy `cache` column alone
+		// and leave `cache_id` null, so a scan that matched on the id would read
+		// no row and see revision zero through every mutation.
+		const legacyCache = legacyCacheOf(cache);
 		const stored = this.context.db
 			.select({
 				revision: schema.garbageCollectionRevisions.revision,
 				cacheId: schema.garbageCollectionRevisions.cacheId
 			})
 			.from(schema.garbageCollectionRevisions)
-			.where(eq(schema.garbageCollectionRevisions.cache, cache))
+			.where(eq(schema.garbageCollectionRevisions.cache, legacyCache))
 			.get();
-		const liveIdentityId = new CacheRepository(this.context.db).liveIdentityId(
-			cache
-		);
 
 		if (stored === undefined) {
 			this.context.db
 				.insert(schema.garbageCollectionRevisions)
-				.values({ cache, cacheId: sql`(${liveIdentityId})`, revision: 0 })
+				.values({ cache: legacyCache, cacheId: cache.id, revision: 0 })
 				.onConflictDoNothing()
 				.run();
 
@@ -175,40 +183,40 @@ export class GarbageCollectionService {
 		if (stored.cacheId === null) {
 			this.context.db
 				.update(schema.garbageCollectionRevisions)
-				.set({ cacheId: sql`(${liveIdentityId})` })
-				.where(eq(schema.garbageCollectionRevisions.cache, cache))
+				.set({ cacheId: cache.id })
+				.where(eq(schema.garbageCollectionRevisions.cache, legacyCache))
 				.run();
 		}
 
 		return stored.revision;
 	}
 
-	private clearScan(cache: StoredCache): void {
+	private clearScan(cache: ResolvedCache): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
-				.where(eq(schema.garbageCollectionFrontier.cache, cache))
+				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
 				.run();
 			tx.delete(schema.garbageCollectionMarks)
-				.where(eq(schema.garbageCollectionMarks.cache, cache))
+				.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
 				.run();
 			tx.delete(schema.garbageCollectionScans)
-				.where(eq(schema.garbageCollectionScans.cache, cache))
+				.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 				.run();
 		});
 	}
 
-	private resetScan(cache: StoredCache, revision: number): void {
+	private resetScan(cache: ResolvedCache, revision: number): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
-				.where(eq(schema.garbageCollectionFrontier.cache, cache))
+				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
 				.run();
 			tx.delete(schema.garbageCollectionMarks)
-				.where(eq(schema.garbageCollectionMarks.cache, cache))
+				.where(eq(schema.garbageCollectionMarks.cacheId, cache.id))
 				.run();
 			tx.insert(schema.garbageCollectionScans)
 				.values({
-					cache,
-					cacheId: this.cacheIdOf(cache),
+					cache: legacyCacheOf(cache),
+					cacheId: cache.id,
 					revision,
 					phase: 'expire-roots',
 					cursor: '',
@@ -232,12 +240,12 @@ export class GarbageCollectionService {
 	}
 
 	private scanRow(
-		cache: StoredCache
+		cache: ResolvedCache
 	): typeof schema.garbageCollectionScans.$inferSelect | undefined {
 		return this.context.db
 			.select()
 			.from(schema.garbageCollectionScans)
-			.where(eq(schema.garbageCollectionScans.cache, cache))
+			.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 			.get();
 	}
 
@@ -249,7 +257,7 @@ export class GarbageCollectionService {
 	 * {@link scanRow} after that.
 	 */
 	private scan(
-		cache: StoredCache
+		cache: ResolvedCache
 	): typeof schema.garbageCollectionScans.$inferSelect {
 		const revision = this.currentRevision(cache);
 		const stored = this.scanRow(cache);
@@ -269,7 +277,7 @@ export class GarbageCollectionService {
 	}
 
 	private updateScan(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
@@ -286,16 +294,16 @@ export class GarbageCollectionService {
 		this.context.db
 			.update(schema.garbageCollectionScans)
 			.set(set)
-			.where(eq(schema.garbageCollectionScans.cache, cache))
+			.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 			.run();
 	}
 
-	private synchroniseScanRevision(cache: StoredCache): void {
+	private synchroniseScanRevision(cache: ResolvedCache): void {
 		this.updateScan(cache, { revision: this.currentRevision(cache) });
 	}
 
 	private expireRoots(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		now: IsoTimestamp
 	): {
 		rootsExpired: number;
@@ -307,6 +315,12 @@ export class GarbageCollectionService {
 
 		// Expire roots even when no unreachable path is collected. Permanent roots
 		// have a null expiry and cannot match this query.
+		//
+		// `retention_root` is still keyed by the legacy `cache` column, and its
+		// expiry index leads with that column, so both the ordered page below and
+		// the delete further down match on it. Matching on `cache_id` would read
+		// every root of the tenant.
+		const legacyCache = legacyCacheOf(cache);
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
@@ -315,7 +329,7 @@ export class GarbageCollectionService {
 			.from(schema.retentionRoots)
 			.where(
 				and(
-					eq(schema.retentionRoots.cache, cache),
+					eq(schema.retentionRoots.cache, legacyCache),
 					lte(schema.retentionRoots.expiresAt, now)
 				)
 			)
@@ -340,7 +354,12 @@ export class GarbageCollectionService {
 		const expiredRootTargetCandidates = jsonValueLists(
 			expiredRootNames
 		).flatMap((names) =>
-			expiredRootTargetSelect(this.context.db, cache, names, targetPage).all()
+			expiredRootTargetSelect(
+				this.context.db,
+				cache.id,
+				names,
+				targetPage
+			).all()
 		);
 		const expiredRootTargets = expiredRootTargetCandidates.slice(0, targetPage);
 		let rootsExpired = 0;
@@ -348,9 +367,10 @@ export class GarbageCollectionService {
 		this.context.db.transaction((tx) => {
 			// Add the grace deadline and remove the root target atomically. A crash
 			// between separate operations could leave the path with no retention source.
+			// A collection pass sweeps every cache, so the cache comes from stored
+			// state rather than from the request.
 			this.retention.applyGraceTransitions(
 				cache,
-				identityForCache(cache).access,
 				expiredRootTargets.flatMap((target) => {
 					const anchorIso = expiryByRoot.get(target.rootName);
 
@@ -365,7 +385,7 @@ export class GarbageCollectionService {
 				tx.delete(schema.retentionRootTargets)
 					.where(
 						and(
-							eq(schema.retentionRootTargets.cache, cache),
+							eq(schema.retentionRootTargets.cacheId, cache.id),
 							targets.matches({
 								rootName: schema.retentionRootTargets.rootName,
 								storePathHash: schema.retentionRootTargets.storePathHash
@@ -387,7 +407,7 @@ export class GarbageCollectionService {
 					.from(schema.retentionRootTargets)
 					.where(
 						and(
-							eq(schema.retentionRootTargets.cache, cache),
+							eq(schema.retentionRootTargets.cacheId, cache.id),
 							eq(schema.retentionRootTargets.rootName, rootName)
 						)
 					)
@@ -406,7 +426,7 @@ export class GarbageCollectionService {
 				tx.delete(schema.retentionRoots)
 					.where(
 						and(
-							eq(schema.retentionRoots.cache, cache),
+							eq(schema.retentionRoots.cache, legacyCache),
 							inArray(schema.retentionRoots.name, names)
 						)
 					)
@@ -428,22 +448,18 @@ export class GarbageCollectionService {
 	}
 
 	private insertFrontier(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
-		if (storePathHashes.length === 0) {
-			return;
-		}
-
-		const cacheId = this.cacheIdOf(cache);
+		const legacyCache = legacyCacheOf(cache);
 
 		for (const hashes of jsonValueLists(storePathHashes)) {
 			this.context.db
 				.insert(schema.garbageCollectionFrontier)
 				.select(
 					hashes.insertSource([
-						sql`${cache}`,
-						cacheId === undefined ? sql`null` : sql`${cacheId}`,
+						sql`${legacyCache}`,
+						sql`${cache.id}`,
 						hashes.element()
 					])
 				)
@@ -453,7 +469,7 @@ export class GarbageCollectionService {
 	}
 
 	private advanceSeed(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		phase: 'roots' | 'grace',
 		cursor: string
 	): void {
@@ -467,7 +483,7 @@ export class GarbageCollectionService {
 						.from(schema.retentionRootTargets)
 						.where(
 							and(
-								eq(schema.retentionRootTargets.cache, cache),
+								eq(schema.retentionRootTargets.cacheId, cache.id),
 								sql`${schema.retentionRootTargets.storePathHash} > ${cursor}`
 							)
 						)
@@ -479,7 +495,7 @@ export class GarbageCollectionService {
 						.from(schema.retentionGrace)
 						.where(
 							and(
-								eq(schema.retentionGrace.cache, cache),
+								eq(schema.retentionGrace.cacheId, cache.id),
 								sql`${schema.retentionGrace.storePathHash} > ${cursor}`
 							)
 						)
@@ -508,7 +524,7 @@ export class GarbageCollectionService {
 	}
 
 	private existingMarks(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHashes: readonly StorePathHash[]
 	): ReadonlySet<StorePathHash> {
 		const marks = new Set<StorePathHash>();
@@ -519,7 +535,7 @@ export class GarbageCollectionService {
 				.from(schema.garbageCollectionMarks)
 				.where(
 					and(
-						eq(schema.garbageCollectionMarks.cache, cache),
+						eq(schema.garbageCollectionMarks.cacheId, cache.id),
 						inArray(schema.garbageCollectionMarks.storePathHash, hashes)
 					)
 				)
@@ -551,7 +567,7 @@ export class GarbageCollectionService {
 	}
 
 	private validateReferencesContainer(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		storePathHash: StorePathHash
 	): void {
 		const shape = this.context.db
@@ -565,7 +581,7 @@ export class GarbageCollectionService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					eq(schema.narInfos.storePathHash, storePathHash)
 				)
 			)
@@ -598,15 +614,11 @@ export class GarbageCollectionService {
 	 * stay equal to what the row holds.
 	 */
 	private advanceMark(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): { readonly complete: boolean } {
 		let pending = scan.markStorePathHash ?? undefined;
 		let referenceCursor = scan.referenceCursor;
-		// Resolve the cache once for the paths this step marks. A lookup per
-		// frontier row would add a row read per marked path to a pass that is
-		// bounded by rows read.
-		const cacheId = this.cacheIdOf(cache);
 
 		for (;;) {
 			let storePathHash: StorePathHash;
@@ -617,7 +629,7 @@ export class GarbageCollectionService {
 						storePathHash: schema.garbageCollectionFrontier.storePathHash
 					})
 					.from(schema.garbageCollectionFrontier)
-					.where(eq(schema.garbageCollectionFrontier.cache, cache))
+					.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
 					.orderBy(asc(schema.garbageCollectionFrontier.storePathHash))
 					.limit(1)
 					.get();
@@ -631,7 +643,7 @@ export class GarbageCollectionService {
 					.from(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, cache),
+							eq(schema.narInfos.cacheId, cache.id),
 							eq(schema.narInfos.storePathHash, frontier.storePathHash)
 						)
 					)
@@ -641,7 +653,7 @@ export class GarbageCollectionService {
 					tx.delete(schema.garbageCollectionFrontier)
 						.where(
 							and(
-								eq(schema.garbageCollectionFrontier.cache, cache),
+								eq(schema.garbageCollectionFrontier.cacheId, cache.id),
 								eq(
 									schema.garbageCollectionFrontier.storePathHash,
 									frontier.storePathHash
@@ -651,8 +663,8 @@ export class GarbageCollectionService {
 						.run();
 					tx.insert(schema.garbageCollectionMarks)
 						.values({
-							cache,
-							cacheId,
+							cache: legacyCacheOf(cache),
+							cacheId: cache.id,
 							storePathHash: frontier.storePathHash
 						})
 						.onConflictDoNothing()
@@ -664,7 +676,7 @@ export class GarbageCollectionService {
 								markStorePathHash: row.storePathHash,
 								referenceCursor: -1
 							})
-							.where(eq(schema.garbageCollectionScans.cache, cache))
+							.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 							.run();
 					}
 				});
@@ -698,7 +710,7 @@ export class GarbageCollectionService {
 				SELECT CAST(json_each.key AS INTEGER) AS referenceIndex,
 				       json_each.value AS reference
 				FROM ${schema.narInfos}, json_each(${schema.narInfos.referencesJson})
-				WHERE ${schema.narInfos.cache} = ${cache}
+				WHERE ${schema.narInfos.cacheId} = ${cache.id}
 				  AND ${schema.narInfos.storePathHash} = ${storePathHash}
 				  AND CAST(json_each.key AS INTEGER) > ${referenceCursor}
 				ORDER BY CAST(json_each.key AS INTEGER)
@@ -737,7 +749,7 @@ export class GarbageCollectionService {
 	}
 
 	private finishMark(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): boolean {
 		const retained = this.context.db
@@ -746,14 +758,14 @@ export class GarbageCollectionService {
 			.innerJoin(
 				schema.garbageCollectionMarks,
 				and(
-					eq(schema.garbageCollectionMarks.cache, schema.narInfos.cache),
+					eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
 					eq(
 						schema.garbageCollectionMarks.storePathHash,
 						schema.narInfos.storePathHash
 					)
 				)
 			)
-			.where(eq(schema.narInfos.cache, cache))
+			.where(eq(schema.narInfos.cacheId, cache.id))
 			.limit(1)
 			.get();
 
@@ -767,13 +779,13 @@ export class GarbageCollectionService {
 	}
 
 	// A mark for the path the outer statement is looking at.
-	private markedPath(cache: StoredCache) {
+	private markedPath(cache: ResolvedCache) {
 		return this.context.db
 			.select({ one: sql`1` })
 			.from(schema.garbageCollectionMarks)
 			.where(
 				and(
-					eq(schema.garbageCollectionMarks.cache, cache),
+					eq(schema.garbageCollectionMarks.cacheId, cache.id),
 					eq(
 						schema.garbageCollectionMarks.storePathHash,
 						schema.narInfos.storePathHash
@@ -793,7 +805,7 @@ export class GarbageCollectionService {
 	 * does not declare it, so Drizzle gives no warning when this predicate stops
 	 * matching the index expression.
 	 */
-	private inFlightUpload(cache: StoredCache) {
+	private inFlightUpload(cache: ResolvedCache) {
 		const reservedVerdict = or(
 			eq(schema.pendingUploads.verdict, 'committing'),
 			eq(schema.pendingUploads.verdict, 'pending')
@@ -805,7 +817,7 @@ export class GarbageCollectionService {
 			.from(schema.pendingUploads)
 			.where(
 				and(
-					eq(schema.pendingUploads.cache, cache),
+					eq(schema.pendingUploads.cacheId, cache.id),
 					reservedVerdict,
 					eq(uploadPath, schema.narInfos.storePathHash)
 				)
@@ -820,7 +832,7 @@ export class GarbageCollectionService {
 	 * found its limit, however far that is.
 	 */
 	private advanceCollect(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		now: IsoTimestamp,
 		cursor: string
 	): {
@@ -837,7 +849,7 @@ export class GarbageCollectionService {
 			.from(schema.narInfos)
 			.where(
 				and(
-					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.cacheId, cache.id),
 					sql`${schema.narInfos.storePathHash} > ${cursor}`
 				)
 			)
@@ -845,7 +857,6 @@ export class GarbageCollectionService {
 			.limit(page + 1)
 			.all();
 		const batch = rows.slice(0, page);
-		const cacheId = this.cacheIdOf(cache);
 		let pathsCollected = 0;
 
 		for (const paths of jsonRowLists(batch)) {
@@ -859,7 +870,7 @@ export class GarbageCollectionService {
 					.delete(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, cache),
+							eq(schema.narInfos.cacheId, cache.id),
 							paths.matches({
 								storePathHash: schema.narInfos.storePathHash,
 								generation: schema.narInfos.generation
@@ -875,13 +886,7 @@ export class GarbageCollectionService {
 					})
 					.all();
 
-				this.deletionQueue.enqueueNarInfoDeletions(
-					tx,
-					cache,
-					cacheId,
-					collected,
-					now
-				);
+				this.deletionQueue.enqueueNarInfoDeletions(tx, cache, collected, now);
 				pathsCollected += collected.length;
 			});
 		}
@@ -901,7 +906,7 @@ export class GarbageCollectionService {
 	// Deletes one step of the grace deadlines that have passed and reports
 	// whether any remain.
 	private expireGraceStep(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		now: IsoTimestamp
 	): { readonly hasMoreDeadlines: boolean } {
 		const page = phaseStepSize;
@@ -910,7 +915,7 @@ export class GarbageCollectionService {
 			.from(schema.retentionGrace)
 			.where(
 				and(
-					eq(schema.retentionGrace.cache, cache),
+					eq(schema.retentionGrace.cacheId, cache.id),
 					lte(schema.retentionGrace.retainUntil, now)
 				)
 			)
@@ -920,7 +925,7 @@ export class GarbageCollectionService {
 			.delete(schema.retentionGrace)
 			.where(
 				and(
-					eq(schema.retentionGrace.cache, cache),
+					eq(schema.retentionGrace.cacheId, cache.id),
 					inArray(schema.retentionGrace.storePathHash, due)
 				)
 			)
@@ -936,7 +941,7 @@ export class GarbageCollectionService {
 			.from(schema.retentionGrace)
 			.where(
 				and(
-					eq(schema.retentionGrace.cache, cache),
+					eq(schema.retentionGrace.cacheId, cache.id),
 					lte(schema.retentionGrace.retainUntil, now)
 				)
 			)
@@ -960,7 +965,7 @@ export class GarbageCollectionService {
 	 * while work remains.
 	 */
 	private collectUnreachable(
-		cache: StoredCache,
+		cache: ResolvedCache,
 		now: IsoTimestamp
 	): {
 		rootsExpired: number;
@@ -1062,18 +1067,18 @@ export class GarbageCollectionService {
 			hasMoreExpiredRoots,
 			hasMoreWork:
 				this.context.db
-					.select({ cache: schema.garbageCollectionScans.cache })
+					.select({ cache: schema.garbageCollectionScans.cacheId })
 					.from(schema.garbageCollectionScans)
-					.where(eq(schema.garbageCollectionScans.cache, cache))
+					.where(eq(schema.garbageCollectionScans.cacheId, cache.id))
 					.get() !== undefined
 		};
 	}
 
-	private cacheGraceManaged(cache: StoredCache): boolean {
+	private cacheGraceManaged(cache: ResolvedCache): boolean {
 		const row = this.context.db
-			.select({ graceManaged: schema.caches.graceManaged })
-			.from(schema.caches)
-			.where(eq(schema.caches.name, cache))
+			.select({ graceManaged: schema.cacheIdentities.graceManaged })
+			.from(schema.cacheIdentities)
+			.where(eq(schema.cacheIdentities.id, cache.id))
 			.get();
 
 		return row?.graceManaged ?? false;
@@ -1177,21 +1182,21 @@ export class GarbageCollectionService {
 		return keys.length;
 	}
 
-	private tenantCollectionCache(): StoredCache | undefined {
+	private tenantCollectionCache(): ResolvedCache | undefined {
 		const current = this.context.db
-			.select({ cache: schema.garbageCollectionTenantRuns.cache })
+			.select({ cache: schema.garbageCollectionTenantRuns.cacheId })
 			.from(schema.garbageCollectionTenantRuns)
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.get();
 
 		if (current !== undefined) {
-			return current.cache;
+			return this.context.cacheRepository.resolvedForId(current.cache);
 		}
 
 		const first = this.context.db
-			.select({ cache: schema.caches.name })
-			.from(schema.caches)
-			.orderBy(asc(schema.caches.name))
+			.select({ cache: schema.cacheIdentities.id })
+			.from(schema.cacheIdentities)
+			.orderBy(asc(schema.cacheIdentities.name))
 			.limit(1)
 			.get();
 
@@ -1199,28 +1204,30 @@ export class GarbageCollectionService {
 			return undefined;
 		}
 
+		const cache = this.context.cacheRepository.resolvedForId(first.cache);
+
 		this.context.db
 			.insert(schema.garbageCollectionTenantRuns)
 			.values({
 				id: 1,
-				cache: first.cache,
-				cacheId: this.cacheIdOf(first.cache)
+				cache: legacyCacheOf(cache),
+				cacheId: cache.id
 			})
 			.run();
 
-		return first.cache;
+		return cache;
 	}
 
-	private advanceTenantCollection(cache: StoredCache): boolean {
-		const next = this.context.db
-			.select({ cache: schema.caches.name })
-			.from(schema.caches)
-			.where(gt(schema.caches.name, cache))
-			.orderBy(asc(schema.caches.name))
+	private advanceTenantCollection(cache: ResolvedCache): boolean {
+		const row = this.context.db
+			.select({ cache: schema.cacheIdentities.id })
+			.from(schema.cacheIdentities)
+			.where(gt(schema.cacheIdentities.id, cache.id))
+			.orderBy(asc(schema.cacheIdentities.id))
 			.limit(1)
 			.get();
 
-		if (next === undefined) {
+		if (row === undefined) {
 			this.context.db
 				.delete(schema.garbageCollectionTenantRuns)
 				.where(eq(schema.garbageCollectionTenantRuns.id, 1))
@@ -1228,9 +1235,14 @@ export class GarbageCollectionService {
 			return false;
 		}
 
+		const next = this.context.cacheRepository.resolvedForId(row.cache);
+
 		this.context.db
 			.update(schema.garbageCollectionTenantRuns)
-			.set({ cache: next.cache, cacheId: this.cacheIdOf(next.cache) })
+			.set({
+				cache: legacyCacheOf(next),
+				cacheId: next.id
+			})
 			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
 			.run();
 
@@ -1342,12 +1354,13 @@ export class GarbageCollectionService {
 
 	async collectGarbage(
 		logger: Logger,
-		cache?: StoredCache,
+		target: GarbageCollectionTarget,
 		purgeOrigin?: RequestOrigin
 	): Promise<GarbageCollectionOutcome> {
+		const cache = target.scope === 'cache' ? target.cache : undefined;
 		const log = logger.with({
 			job: 'garbage-collection',
-			...(cache !== undefined && { cache })
+			...(cache !== undefined && { cache: cache.scope })
 		});
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
@@ -1425,7 +1438,8 @@ export class GarbageCollectionService {
 			// Tenant-wide collection advances through registered caches one at a time.
 			// Scoped collection uses only the requested cache. Persistent mark and
 			// frontier state resumes each pass without rereading earlier chunks.
-			const collectionCache = cache ?? this.tenantCollectionCache();
+			const collectionCache =
+				target.scope === 'cache' ? target.cache : this.tenantCollectionCache();
 			const collected =
 				collectionCache === undefined
 					? {
@@ -1436,9 +1450,9 @@ export class GarbageCollectionService {
 						}
 					: this.collectUnreachable(collectionCache, now);
 			const hasMoreCollectionWork =
-				cache === undefined &&
 				collectionCache !== undefined &&
-				!collected.hasMoreWork
+				!collected.hasMoreWork &&
+				target.scope === 'tenant'
 					? this.advanceTenantCollection(collectionCache)
 					: collected.hasMoreWork;
 			const hasMoreWork =

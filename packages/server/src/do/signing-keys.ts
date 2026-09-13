@@ -8,9 +8,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import {
-	type BackfillStatus,
-	type SigningKey as PublicSigningKey,
-	type SigningKeyEntry
+	type BackfillStatusInput,
+	type SigningKeyEntryInput,
+	type SigningKeyInput as PublicSigningKey
 } from '@cupboard/protocol/keys';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { z } from 'zod';
@@ -70,8 +70,8 @@ export function publicSigningKey(key: SigningKey): PublicSigningKey {
 
 export function keyEntry(
 	key: SigningKey,
-	backfill?: BackfillStatus
-): SigningKeyEntry {
+	backfill?: BackfillStatusInput
+): SigningKeyEntryInput {
 	const publicKey = publicSigningKey(key);
 
 	if (key.signing) {

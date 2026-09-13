@@ -1,22 +1,30 @@
-import { identityForCache, type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cacheAccessModeSchema,
+	type CacheGeneration,
+	type CacheScope,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { cacheIdentityColumns } from '../db/cache.ts';
-import { firstCacheGeneration } from '../db/cache-generation.ts';
+import { cacheScopeFromRow, legacyCacheKey } from '../db/cache.ts';
+import {
+	firstCacheGeneration,
+	firstCacheReadRevision
+} from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { readCacheLifecycles } from '../migration/lifecycle-read.ts';
 
-import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
-import { jsonValueLists } from './json-list.ts';
+import { jsonRowLists } from './json-list.ts';
 
-const projectionProgressKey = 'migration/lifecycle-projection/v1';
-const progressSchema = z.discriminatedUnion('status', [
-	z.object({ status: z.literal('pending'), afterName: z.string() }),
-	z.object({ status: z.literal('complete') })
-]);
+// The most caches one wake projects. A tenant with more missing rows finishes
+// over subsequent wakes.
+export const maxCachesProjectedPerRun = 36;
+const projectionProgressKey = 'migration/lifecycle-projection/v2';
 
 export async function resetCacheLifecycleProjection(
 	context: ServerContext
@@ -24,28 +32,33 @@ export async function resetCacheLifecycleProjection(
 	await context.ctx.storage.delete(projectionProgressKey);
 }
 
-// A lifecycle row binds at most six values, so twelve rows stay within the 100
-// bound parameters D1 accepts.
-const projectedRowsPerStatement = 12;
-
-// Rows inserted per wake, in three statements. With the read before them and
-// the step's own update of `tenant.local_step`, a wake spends at most five D1
-// statements. A tenant with more caches finishes over the wakes that follow.
-export const maxCachesProjectedPerRun = projectedRowsPerStatement * 3;
+export interface CacheLifecycleRecord {
+	readonly scope: CacheScope;
+	readonly generation: CacheGeneration;
+	readonly isLive: boolean;
+}
 
 export interface CacheProjectionOutcome {
+	readonly lifecycles: readonly CacheLifecycleRecord[];
 	readonly projected: number;
 	readonly hasMore: boolean;
 }
 
+interface LocalCache {
+	readonly scope: CacheScope;
+	readonly access: CacheAccessMode;
+}
+
+function identityKey(scope: CacheScope): string {
+	return scope.kind === 'default' ? 'default' : `named\0${scope.name}`;
+}
+
 /**
- * Writes the missing `cache_lifecycle` rows for this tenant's local caches, up
+ * Writes the missing `cache_lifecycle` rows for this tenant's live caches, up
  * to {@link maxCachesProjectedPerRun} of them per call.
  *
- * The backfill projects a named cache only where a reference or a credential
- * mentions it, and a build before this one wrote no row when it registered a
- * cache, so a registered cache without references or credentials may have no
- * row. That row is the only D1 record that the cache exists.
+ * Older builds did not create a lifecycle row when registering an empty
+ * cache. Fill those gaps so D1 records every live cache in the local catalogue.
  *
  * A tenant with more caches than fit one call keeps rows to project. The
  * caller then leaves the local step unrecorded, so the control plane wakes
@@ -55,72 +68,89 @@ export async function projectLocalCacheLifecycles(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<CacheProjectionOutcome> {
-	const stored = await context.ctx.storage.get(projectionProgressKey);
-	const progress =
-		stored === undefined ? undefined : progressSchema.parse(stored);
-	if (progress?.status === 'complete') {
-		return { projected: 0, hasMore: false };
+	const saved = z
+		.union([z.number().int().nonnegative(), z.literal('complete')])
+		.parse((await context.ctx.storage.get(projectionProgressKey)) ?? 0);
+	if (saved === 'complete') {
+		return { lifecycles: [], projected: 0, hasMore: false };
 	}
-	const local = context.db
-		.select({ name: schema.caches.name })
-		.from(schema.caches)
-		.where(
-			progress === undefined
-				? undefined
-				: sql`${schema.caches.name} > ${progress.afterName}`
-		)
-		.orderBy(schema.caches.name)
+	const afterId = saved;
+	const localRows = context.db
+		.select({
+			id: schema.cacheIdentities.id,
+			kind: schema.cacheIdentities.kind,
+			name: schema.cacheIdentities.name,
+			access: schema.cacheIdentities.access,
+			deletedAt: schema.cacheIdentities.deletedAt
+		})
+		.from(schema.cacheIdentities)
+		.where(sql`${schema.cacheIdentities.id} > ${afterId}`)
+		.orderBy(schema.cacheIdentities.id)
 		.limit(maxCachesProjectedPerRun)
-		.all()
-		.map((row) => row.name);
-	const known = new Set<string>();
-	for (const listed of jsonValueLists(local)) {
-		const projected = await context.d1
-			.select({ cache: d1Schema.cacheLifecycle.cache })
-			.from(d1Schema.cacheLifecycle)
-			.where(
-				and(
-					eq(d1Schema.cacheLifecycle.tenant, tenant),
-					inArray(d1Schema.cacheLifecycle.cache, listed)
-				)
-			)
-			.all();
-		for (const row of projected) {
-			known.add(row.cache);
-		}
-	}
-	const missing = local.filter((cache) => !known.has(cache));
-	const now = isoTimestamp(new Date());
-	const batches = chunk(
-		missing.slice(0, maxCachesProjectedPerRun),
-		projectedRowsPerStatement
+		.all();
+	const local: LocalCache[] = localRows
+		.filter((row) => row.deletedAt === null)
+		.map((row) => ({
+			scope: cacheScopeFromRow(row),
+			access: cacheAccessModeSchema.parse(row.access)
+		}));
+	const projected = await readCacheLifecycles(
+		context,
+		tenant,
+		local.map((cache) => cache.scope)
 	);
+	const known = new Set<string>(
+		projected.map((row) =>
+			identityKey(
+				cacheScopeFromRow({ kind: row.cacheKind, name: row.cacheName })
+			)
+		)
+	);
+	const missing = local.filter((cache) => !known.has(identityKey(cache.scope)));
+	const now = isoTimestamp(new Date());
+	const projecting = missing.slice(0, maxCachesProjectedPerRun);
+	// JSON list values cannot be null. Cache names are non-empty, so an empty
+	// string can represent the default cache and is restored to null in SQL.
+	const listed = projecting.map((cache) => ({
+		legacyCache: legacyCacheKey(cache.scope, cache.access),
+		cacheKind: cache.scope.kind,
+		cacheName: cache.scope.kind === 'named' ? cache.scope.name : '',
+		access: cache.access
+	}));
 
-	for (const batch of batches) {
+	for (const rows of jsonRowLists(listed)) {
 		await context.d1
 			.insert(d1Schema.cacheLifecycle)
-			.values(
-				// `access` is omitted so the D1 insert trigger fills it from the
-				// tenant's read mode, as the backfill did for the rows it wrote.
-				batch.map((cache) => ({
-					tenant,
-					cache,
-					...cacheIdentityColumns(identityForCache(cache).scope),
-					generation: firstCacheGeneration,
-					updatedAt: now
-				}))
+			.select(
+				rows.insertSource([
+					sql`${tenant}`,
+					rows.column('legacyCache'),
+					rows.column('cacheKind'),
+					sql`nullif(${rows.column('cacheName')}, '')`,
+					rows.column('access'),
+					sql`${firstCacheGeneration}`,
+					sql`${firstCacheReadRevision}`,
+					sql`null`,
+					sql`${now}`
+				])
 			)
 			.onConflictDoNothing()
 			.run();
 	}
 
-	const last = local.at(-1);
-	const hasMore = local.length === maxCachesProjectedPerRun;
-	await context.ctx.storage.put(
-		projectionProgressKey,
-		last !== undefined && hasMore
-			? { status: 'pending', afterName: last }
-			: { status: 'complete' }
-	);
-	return { projected: missing.length, hasMore };
+	const last = localRows.at(-1);
+	if (last !== undefined && localRows.length === maxCachesProjectedPerRun) {
+		await context.ctx.storage.put(projectionProgressKey, last.id);
+	} else {
+		await context.ctx.storage.put(projectionProgressKey, 'complete');
+	}
+	return {
+		lifecycles: projected.map((row) => ({
+			scope: cacheScopeFromRow({ kind: row.cacheKind, name: row.cacheName }),
+			generation: row.generation,
+			isLive: row.deletedAt === null
+		})),
+		projected: Math.min(missing.length, maxCachesProjectedPerRun),
+		hasMore: localRows.length === maxCachesProjectedPerRun
+	};
 }

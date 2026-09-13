@@ -10,6 +10,7 @@ import {
 	authorisedFetch,
 	bootstrap,
 	currentOrigin,
+	namedCache,
 	narBytes,
 	pushPath,
 	resetTestServer,
@@ -23,9 +24,9 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 const forwardedBody = 'served by the tenant Worker';
 
 // The workers pool does not provide the cache-owning tenant Worker binding used
-// by public reads that require no credential. This helper supplies that binding
-// and records each forwarded request so the test can inspect its headers. The
-// proxy preserves every other binding.
+// by public cache reads. This helper supplies that binding and records each
+// forwarded request so the test can inspect its headers. The proxy preserves
+// every other binding.
 function envWithRecordingTenantWorker(forwarded: Request[]): Env {
 	return new Proxy(env, {
 		get(target, property, receiver): unknown {
@@ -107,11 +108,11 @@ describe('read forwards to the cache-owning tenant Worker', () => {
 			narSize: nar.narSize,
 			fileHash: nar.fileHash
 		});
-		await pushPath(init.token, previous, 'builds');
+		await pushPath(init.token, previous, namedCache('builds'));
 		await authorisedFetch('/caches/builds?force=true', init.token, {
 			method: 'DELETE'
 		});
-		await pushPath(init.token, current, 'builds', nar);
+		await pushPath(init.token, current, namedCache('builds'), nar);
 		const forwarded: Request[] = [];
 		const ctx = createExecutionContext();
 		const request = new Request<unknown, IncomingRequestCfProperties>(

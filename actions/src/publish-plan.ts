@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import {
-	type StoredCache,
+	type CacheScope,
 	type StoreDirectory,
 	type StorePathHash,
 	storePathSchema,
@@ -582,7 +582,7 @@ const derivationNodeBaseSchema = z.looseObject({
 	env: z.record(z.string(), z.string()).default({})
 });
 
-type ParsedDerivationNode = z.output<typeof derivationNodeBaseSchema>;
+type DerivationNodeDocumentEntry = z.output<typeof derivationNodeBaseSchema>;
 
 function derivationNodeSchema(storeDirectory: StoreDirectory) {
 	return derivationNodeBaseSchema.transform((node) => ({
@@ -630,7 +630,7 @@ function derivationNodes(
 }
 
 function nodeInputs(
-	node: ParsedDerivationNode,
+	node: DerivationNodeDocumentEntry,
 	storeDirectory: StoreDirectory
 ): Map<string, readonly string[]> {
 	const drvs = node.inputs?.drvs ?? node.inputDrvs ?? {};
@@ -647,7 +647,7 @@ function nodeInputs(
 }
 
 function nodeOutputs(
-	node: ParsedDerivationNode,
+	node: DerivationNodeDocumentEntry,
 	storeDirectory: StoreDirectory
 ): DerivationOutput[] {
 	return Object.entries(node.outputs).map(([name, output]) => {
@@ -685,7 +685,7 @@ interface ProbeOptions {
 export function availableCachePaths(
 	options: ProbeOptions & {
 		readonly baseUrl: URL;
-		readonly cache: StoredCache;
+		readonly cache: CacheScope;
 	}
 ): Promise<Set<StorePathString>> {
 	return availablePathsAt(

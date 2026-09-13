@@ -54,11 +54,16 @@ every step recorded after about N / 20 ticks, later if some wakes fail.
 of those below it.
 
 The stored step is a watermark: rolling back to a build that defines fewer steps
-does not lower what a newer build recorded. This build defines step 1. When
-woken, an object creates an identity for every registered cache that lacks one,
-fills the `cache_id` of every row that still refers to its cache by the stored
-name alone, and writes the tenant's missing `cache_lifecycle` rows to D1, at
-most 36 per wake; a tenant with more caches records the step on a later wake.
+does not lower what a newer build recorded. This build defines step 2. Step 1
+gave every registered cache an identity, filled the `cache_id` of every row that
+still refers to its cache by the stored name alone, and wrote the tenant's
+missing `cache_lifecycle` rows to D1, at most 36 per wake. Step 2 repeats that
+work and then moves each private cache's narinfo and attestation-list objects
+from the keys their `private/` name gave them to the keys their name alone gives
+them, at most a hundred objects per wake; a tenant with more records the step on
+a later wake. A private cache serves nothing until its objects have moved, so
+after deploying this build run `localStep.wake` until `localStep.status` reports
+every tenant ready, or wait for the hourly sweep.
 
 `cupboard deploy` records a phase only once every active tenant has recorded the
 step the build requires. It checks after both Workers serve the build and stops

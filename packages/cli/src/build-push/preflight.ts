@@ -5,11 +5,7 @@ import type {
 	NixStoreConfig,
 	NixStoreKind
 } from '@cupboard/nix';
-import {
-	type CacheSelector,
-	type RootName,
-	scopeFromSelector
-} from '@cupboard/nix-store/scalars';
+import type { CacheScope, RootName } from '@cupboard/nix-store/scalars';
 import type { InvocationId } from '@cupboard/protocol/build';
 import {
 	type AuthorizationDetail,
@@ -41,7 +37,7 @@ export interface BuildPushPreflightOptions {
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	readonly invocationId: InvocationId;
 	readonly grants: readonly AuthorizationDetail[];
-	readonly cache: CacheSelector;
+	readonly cache: CacheScope;
 	readonly runRoot?: RootName;
 	readonly targetRoots?: readonly RootName[];
 	readonly helper?: HelperResolutionOptions;
@@ -62,12 +58,10 @@ export interface BuildPushPreflight {
 function requireGrant(
 	grants: readonly AuthorizationDetail[],
 	operation: Operation,
-	cache: CacheSelector,
+	cache: CacheScope,
 	root: RootName
 ): void {
-	const scope = scopeFromSelector(cache);
-
-	if (isCoveredByToken(grants, operation, { cache: scope, root })) {
+	if (isCoveredByToken(grants, operation, { cache, root })) {
 		return;
 	}
 

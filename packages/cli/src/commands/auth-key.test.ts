@@ -4,9 +4,9 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	ParsedAuthKeyListResponse,
-	ParsedAuthKeyRotateResponse,
-	ParsedAuthKeySummary
+	AuthKeyListResponse,
+	AuthKeyRotateResponse,
+	AuthKeySummary
 } from '@cupboard/protocol/keys';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
@@ -20,8 +20,8 @@ import {
 } from './auth-key.ts';
 
 function summary(
-	overrides: Omit<Partial<ParsedAuthKeySummary>, 'kid'> & { kid?: string }
-): ParsedAuthKeySummary {
+	overrides: Omit<Partial<AuthKeySummary>, 'kid'> & { kid?: string }
+): AuthKeySummary {
 	const { kid = 'kid-1', ...rest } = overrides;
 
 	return {
@@ -48,7 +48,7 @@ function authKeyClient(overrides: Partial<AuthKeyClient>): AuthKeyClient {
 describe('runAuthKeyList', () => {
 	it('reports a row per live key, flagging the active one', async () => {
 		const results: ResultRow[][] = [];
-		const response: ParsedAuthKeyListResponse = {
+		const response: AuthKeyListResponse = {
 			keys: [
 				summary({
 					kid: 'kid-old',
@@ -97,7 +97,7 @@ describe('runAuthKeyRotate', () => {
 	it('rotates and reports the scheduled retirement', async () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: ParsedAuthKeyRotateResponse = {
+		const response: AuthKeyRotateResponse = {
 			rotated: authKeyIdSchema.parse('kid-new'),
 			retiring: {
 				kid: authKeyIdSchema.parse('kid-old'),
