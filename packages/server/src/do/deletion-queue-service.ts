@@ -16,7 +16,6 @@ import {
 	cacheIdentityColumns,
 	cacheIdentityCondition,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import {
@@ -720,8 +719,6 @@ export class DeletionQueueService {
 		}
 	}
 
-	// Takes the resolved cache rather than its id: the queue row is keyed by the
-	// legacy stored name, which needs the cache's access as well as its scope.
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
 		cache: ResolvedCache,
@@ -749,14 +746,11 @@ export class DeletionQueueService {
 		entries: readonly TornDownNarInfo[],
 		now: IsoTimestamp
 	): void {
-		const legacyCache = legacyCacheKey(cache.scope, cache.access);
-
 		for (const rows of jsonRowLists(entries)) {
 			handle
 				.insert(schema.narInfoDeletions)
 				.select(
 					rows.insertSource([
-						sql`${legacyCache}`,
 						sql`${cache.id}`,
 						rows.column('storePathHash'),
 						rows.column('narHash'),
@@ -766,7 +760,7 @@ export class DeletionQueueService {
 				)
 				.onConflictDoUpdate({
 					target: [
-						schema.narInfoDeletions.cache,
+						schema.narInfoDeletions.cacheId,
 						schema.narInfoDeletions.storePathHash,
 						schema.narInfoDeletions.generation
 					],
@@ -796,10 +790,7 @@ export class DeletionQueueService {
 			.limit(limit)
 			.all();
 
-		// A queue row whose `cache_id` the backfill has not supplied refers to no
-		// cache. Grouping it under the null key defers the refusal to the resolve
-		// below rather than repeating the check here.
-		const byCache = new Map<CacheId | null, TornDownNarInfo[]>();
+		const byCache = new Map<CacheId, TornDownNarInfo[]>();
 
 		for (const entry of queued) {
 			const entries = byCache.get(entry.cacheId) ?? [];
@@ -1031,7 +1022,6 @@ export class DeletionQueueService {
 		const revoked = await this.context.d1
 			.update(d1Schema.cacheLifecycle)
 			.set({
-				cache: legacyCacheKey(scope, access),
 				access,
 				generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
 				readRevision: sql`${d1Schema.cacheLifecycle.readRevision} + 1`,
@@ -1047,7 +1037,6 @@ export class DeletionQueueService {
 
 		await this.context.d1.insert(d1Schema.cacheLifecycle).values({
 			tenant,
-			cache: legacyCacheKey(scope, access),
 			...cacheIdentityColumns(scope),
 			access,
 			generation: secondCacheGeneration,

@@ -1,13 +1,20 @@
 import {
+	contractionMigrations,
 	currentLocalStep,
+	expansionLocalStep,
+	type LocalStep,
+	type ParsedLocalStepWakeResponse,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
 
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
 	type LocalStepReadiness,
 	type PhaseApi,
+	readLocalStepReadiness,
+	recordDeploymentPhase,
 	recordPhaseWhenTenantsReady
 } from '../../packages/cli/src/deploy/phase.ts';
 import { LocalStepUnreachedError } from '../../packages/cli/src/errors.ts';
@@ -16,17 +23,44 @@ import {
 	sleepingFixtureTenants
 } from '../fixtures/cache-deployment-predecessor/constants.ts';
 import {
+	type DeploymentClient,
 	stagedDeploymentDatabaseId,
 	StagedDeploymentServer
 } from '../support/staged-deployment-server.ts';
 
-// Enough for every seeded tenant, so one call clears the whole fixture.
+// Enough for every seeded tenant in one pass.
 const wakeLimit = 20;
+const wakePassLimit = 100;
 
-// The fixture's active tenants: `upgrade-active` plus the sleeping ones. The
-// suspended, offboarding and offboarded tenants are not woken and do not count
-// towards a step.
-const activeFixtureTenants = 1 + sleepingFixtureTenants.length;
+const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
+
+async function wakeUntilStep(
+	server: StagedDeploymentServer,
+	client: DeploymentClient,
+	requiredStep: LocalStep
+): Promise<{
+	readonly didAdvance: boolean;
+	readonly final: ParsedLocalStepWakeResponse;
+}> {
+	let didAdvance = false;
+	for (let pass = 0; pass < wakePassLimit; pass++) {
+		const wake = await client.wakeLocalStep(wakeLimit);
+		didAdvance ||= wake.outcomes.some((outcome) => outcome.kind === 'advanced');
+		const readiness = await readLocalStepReadiness(
+			phaseApi(server),
+			stagedDeploymentDatabaseId,
+			requiredStep
+		);
+
+		if (readiness.pending === 0) {
+			return { didAdvance, final: wake };
+		}
+	}
+
+	throw new Error(
+		`Tenant migration did not reach local step ${String(requiredStep)}`
+	);
+}
 
 function phaseApi(server: StagedDeploymentServer): PhaseApi {
 	return {
@@ -46,7 +80,9 @@ async function deployOverPredecessor(
 	await applyD1Migrations(
 		phaseApi(server),
 		stagedDeploymentDatabaseId,
-		server.artifact.d1Migrations
+		server.artifact.d1Migrations.filter(
+			(migration) => !contractionMigrations.includes(migration.name)
+		)
 	);
 	await server.deployCurrent();
 }
@@ -57,9 +93,30 @@ function recordPhase(
 	return recordPhaseWhenTenantsReady(
 		phaseApi(server),
 		stagedDeploymentDatabaseId,
+		'native-reads',
+		expansionLocalStep,
+		new Date()
+	);
+}
+
+async function contractOverPredecessor(
+	server: StagedDeploymentServer,
+	now = new Date()
+): Promise<void> {
+	await recordPhase(server);
+	await applyD1Migrations(
+		phaseApi(server),
+		stagedDeploymentDatabaseId,
+		server.artifact.d1Migrations.filter((migration) =>
+			contractionMigrations.includes(migration.name)
+		)
+	);
+	await recordDeploymentPhase(
+		phaseApi(server),
+		stagedDeploymentDatabaseId,
 		settledDeploymentPhase,
 		currentLocalStep,
-		new Date()
+		now
 	);
 }
 
@@ -103,31 +160,70 @@ it('upgrades a populated predecessor deployment', async () => {
 		const refused = await refusedPhaseRecord(server);
 
 		const client = await server.deploymentClient();
-		const wake = await client.wakeLocalStep(wakeLimit);
+		const wake = await wakeUntilStep(server, client, expansionLocalStep);
 
-		await recordPhase(server);
+		await contractOverPredecessor(server);
+		const contractionWake = await wakeUntilStep(
+			server,
+			client,
+			currentLocalStep
+		);
 
 		const recorded = await client.phase();
 
 		expect({
 			refused,
 			wake,
+			contractionWake,
 			status: await client.localStepStatus(),
 			phase: recorded.phase?.name,
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
 			refused: {
-				pending: activeFixtureTenants,
-				stragglers: ['upgrade-active', ...sleepingFixtureTenants]
+				pending: resumableFixtureTenants,
+				stragglers: [
+					'upgrade-active',
+					...sleepingFixtureTenants,
+					'upgrade-suspended'
+				]
 			},
 			wake: {
-				current: currentLocalStep,
-				woken: activeFixtureTenants,
-				failed: 0
+				didAdvance: true,
+				final: {
+					current: currentLocalStep,
+					woken: resumableFixtureTenants,
+					failed: 0,
+					outcomes: [
+						'upgrade-active',
+						...sleepingFixtureTenants,
+						'upgrade-suspended'
+					].map((tenant) => ({
+						tenant,
+						kind: 'recorded',
+						step: expansionLocalStep
+					}))
+				}
+			},
+			contractionWake: {
+				didAdvance: false,
+				final: {
+					current: currentLocalStep,
+					woken: resumableFixtureTenants,
+					failed: 0,
+					outcomes: [
+						'upgrade-active',
+						...sleepingFixtureTenants,
+						'upgrade-suspended'
+					].map((tenant) => ({
+						tenant,
+						kind: 'recorded',
+						step: currentLocalStep
+					}))
+				}
 			},
 			status: {
 				current: currentLocalStep,
-				ready: activeFixtureTenants,
+				ready: resumableFixtureTenants,
 				pending: 0,
 				stragglers: []
 			},
@@ -135,7 +231,7 @@ it('upgrades a populated predecessor deployment', async () => {
 			terminal: {
 				lastD1Migration: server.finalD1Migration,
 				phase: settledDeploymentPhase,
-				activeTenantsBelowStep: 0,
+				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
 			}
 		});
@@ -153,14 +249,16 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 
 		const client = await server.deploymentClient();
 
-		// Before the wake, every active tenant is behind: nothing has woken one
-		// since the deploy, so none has recorded a step.
+		// Before the wake, every active or suspended tenant is behind: none has
+		// run since the deploy, so none has recorded a step.
 		const before = await client.localStepStatus();
 
-		await client.wakeLocalStep(wakeLimit);
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await contractOverPredecessor(server);
+		await wakeUntilStep(server, client, currentLocalStep);
 
 		// Each sleeping tenant stopped at a different migration under the
-		// predecessor. Waking one applies the rest of its journal, so it reaches
+		// predecessor. Repeated wakes advance its persisted pages until it reaches
 		// the same step as the tenant that was never behind.
 		expect({
 			before,
@@ -169,15 +267,58 @@ it('brings a tenant that never woke under the predecessor up to date', async () 
 			before: {
 				current: currentLocalStep,
 				ready: 0,
-				pending: activeFixtureTenants,
-				stragglers: ['upgrade-active', ...sleepingFixtureTenants]
+				pending: resumableFixtureTenants,
+				stragglers: [
+					'upgrade-active',
+					...sleepingFixtureTenants,
+					'upgrade-suspended'
+				]
 			},
 			after: {
 				current: currentLocalStep,
-				ready: activeFixtureTenants,
+				ready: resumableFixtureTenants,
 				pending: 0,
 				stragglers: []
 			}
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
+it('serves a suspended predecessor private cache immediately after resume', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await contractOverPredecessor(server);
+		await wakeUntilStep(server, client, currentLocalStep);
+
+		await server.resumeTenant('upgrade-suspended');
+		await server.configureTenantReadCredential('upgrade-suspended');
+		const immediate = await server.tenantNarInfo(
+			'upgrade-suspended',
+			'secrets'
+		);
+		await immediate.arrayBuffer();
+
+		await client.wakeLocalStep(wakeLimit);
+		const afterWake = await server.tenantNarInfo(
+			'upgrade-suspended',
+			'secrets'
+		);
+		await afterWake.arrayBuffer();
+
+		expect({
+			immediate: immediate.status,
+			afterWake: afterWake.status
+		}).toStrictEqual({
+			immediate: StatusCodes.OK,
+			afterWake: StatusCodes.OK
 		});
 	} finally {
 		await server.stop();
@@ -193,26 +334,38 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 
 		const first = await server.deploymentClient();
 
-		await first.wakeLocalStep(wakeLimit);
-		await recordPhase(server);
+		await wakeUntilStep(server, first, expansionLocalStep);
+		await contractOverPredecessor(server, new Date('2026-01-01T00:00:00.000Z'));
+		await wakeUntilStep(server, first, currentLocalStep);
+		const initial = await first.phase();
 
 		// A rerun repeats every step against the state the first run left.
 		await server.restart();
 		await deployOverPredecessor(server);
-		await recordPhase(server);
+		await contractOverPredecessor(server, new Date('2026-01-02T00:00:00.000Z'));
 
 		const client = await server.deploymentClient();
 		const recorded = await client.phase();
 
 		expect({
-			phase: recorded.phase?.name,
+			initial: initial.phase,
+			repeated: recorded.phase,
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			phase: settledDeploymentPhase,
+			initial: {
+				name: settledDeploymentPhase,
+				requiredLocalStep: currentLocalStep,
+				updatedAt: '2026-01-01T00:00:00.000Z'
+			},
+			repeated: {
+				name: settledDeploymentPhase,
+				requiredLocalStep: currentLocalStep,
+				updatedAt: '2026-01-01T00:00:00.000Z'
+			},
 			terminal: {
 				lastD1Migration: server.finalD1Migration,
 				phase: settledDeploymentPhase,
-				activeTenantsBelowStep: 0,
+				resumableTenantsBelowStep: 0,
 				legacyNarInfoPresent: true
 			}
 		});
@@ -230,7 +383,9 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 
 		const client = await server.deploymentClient();
 
-		await client.wakeLocalStep(wakeLimit);
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await contractOverPredecessor(server);
+		await wakeUntilStep(server, client, currentLocalStep);
 
 		// The predecessor seeded retention policies for the default cache and
 		// `builds`, a `pr/` root-prefix policy, and grace policies for the empty
@@ -289,6 +444,55 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					graceManaged: true
 				}
 			]
+		});
+	} finally {
+		await server.stop();
+	}
+});
+
+// An offboarding tenant takes no traffic of its own and nothing wakes it during
+// a deploy, so it can reach this release with its cache catalogue still
+// unconverted. Its object has to convert and contract when it next runs, or the
+// offboard drain would fail for good and the tenant could never be finalised.
+it('starts an offboarding tenant that never converted its catalogue', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+
+		// The wake excludes offboarding tenants, so it leaves this one behind.
+		await wakeUntilStep(server, client, expansionLocalStep);
+		await contractOverPredecessor(server);
+		await wakeUntilStep(server, client, currentLocalStep);
+
+		await server.announceTenant('upgrade-offboarding');
+
+		// Admission starts the object before refusing the read. Repeated requests
+		// advance its persisted migration pages even though it no longer serves reads.
+		let response: Response | undefined;
+		let didReturnPending = false;
+		for (let attempt = 0; attempt < wakePassLimit; attempt++) {
+			response = await server.dispatch('/t/upgrade-offboarding/nix-cache-info');
+			if (response.status !== 503) {
+				break;
+			}
+			didReturnPending = true;
+		}
+
+		// Recording the catalogue version is the last thing the object's start-up
+		// does, so reading it back proves every migration applied, the contraction
+		// among them.
+		expect({
+			didReturnPending,
+			read: response?.status,
+			catalogueVersion: await server.catalogueVersion('upgrade-offboarding')
+		}).toStrictEqual({
+			didReturnPending: true,
+			read: StatusCodes.NOT_FOUND,
+			catalogueVersion: 2
 		});
 	} finally {
 		await server.stop();

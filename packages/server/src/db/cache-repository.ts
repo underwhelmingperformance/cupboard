@@ -1,7 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
-	cacheAccessModeSchema,
 	type CacheGeneration,
 	type CachePriority,
 	cachePrioritySchema,
@@ -33,14 +32,11 @@ export interface CacheCreation {
 	readonly graceSeconds?: GraceSeconds;
 }
 
-// The columns that make up a resolved cache. `access` and the identity columns
-// are still nullable while the expansion runs, so a row is only usable once
-// both have been backfilled.
 interface CacheIdentityRow {
 	readonly id: ResolvedCache['id'];
-	readonly kind: 'default' | 'named' | null;
+	readonly kind: 'default' | 'named';
 	readonly name: string | null;
-	readonly access: string | null;
+	readonly access: CacheAccessMode;
 	readonly generation: CacheGeneration;
 }
 
@@ -55,27 +51,15 @@ const identityColumns = {
 /**
  * Reads and writes the `cache_identity` rows that hold each cache's scope,
  * access and surrogate key.
- *
- * The legacy `cache` table is keyed by the stored name, which ties a cache's
- * identity to its access. Rows elsewhere refer to a cache by `cache_id`
- * instead, and the two are written together until the contraction drops the
- * legacy key.
  */
 export class CacheRepository {
 	constructor(private readonly database: SchemaDatabase) {}
 
-	// A row whose access the reconciliation has not yet supplied cannot say who
-	// may read the cache. Refusing it keeps a half-written row from resolving as
-	// a public cache.
 	private resolved(row: CacheIdentityRow): ResolvedCache {
-		if (row.access === null) {
-			throw new CacheIdentityMissingError({ id: row.id });
-		}
-
 		return {
 			id: row.id,
 			scope: cacheScopeFromRow(row),
-			access: cacheAccessModeSchema.parse(row.access),
+			access: row.access,
 			generation: row.generation
 		};
 	}
@@ -206,24 +190,14 @@ export class CacheRepository {
 		return { ...cache, access };
 	}
 
-	scopeForId(id: ResolvedCache['id'] | null): CacheScope {
+	scopeForId(id: ResolvedCache['id']): CacheScope {
 		return this.resolvedForId(id).scope;
 	}
 
 	/**
-	 * The cache a row's `cache_id` refers to.
-	 *
-	 * The column is nullable because the expansion added it to populated tables,
-	 * and the contraction tightens it later. A null cannot occur once every
-	 * tenant has run the reconciliation. Refusing one reports that the row was
-	 * written before the identity existed, which nothing repairs, so a caller
-	 * must not attribute the row to the cache it expected.
-	 */
-	resolvedForId(id: ResolvedCache['id'] | null): ResolvedCache {
-		if (id === null) {
-			throw new CacheIdentityMissingError({});
-		}
-
+	The cache identified by a row's `cache_id`, including deleted caches.
+	*/
+	resolvedForId(id: ResolvedCache['id']): ResolvedCache {
 		const row = this.database
 			.select(identityColumns)
 			.from(schema.cacheIdentities)

@@ -19,7 +19,8 @@ import {
 	DurableObjectMigrationDigestError,
 	DurableObjectMigrationError,
 	DurableObjectMigrationJournalError,
-	type MigrationBundle
+	type MigrationBundle,
+	migrationsThrough
 } from './migrate.ts';
 
 type Storage = DurableObjectState['storage'];
@@ -115,7 +116,7 @@ describe('applyMigrations', () => {
 		expect(tags).toStrictEqual(everyTag);
 	});
 
-	it('records each migration as verified with the digest of its SQL when an object initialises', async () => {
+	it('records the contraction separately from compatible migrations when an object initialises', async () => {
 		// Configuring the tenant initialises the object.
 		await useTestServer('migrate-initialise');
 
@@ -128,7 +129,10 @@ describe('applyMigrations', () => {
 				everyEntry.map(async (entry) => ({
 					hash: entry.tag,
 					digest: await sha256Hex(migrationSource(migrations, entry.idx)),
-					verificationState: 'verified'
+					verificationState:
+						entry.tag === '0052_cache_identity_contract'
+							? 'verified-contraction'
+							: 'verified'
 				}))
 			)
 		);
@@ -228,7 +232,7 @@ describe('applyMigrations', () => {
 			async (_instance, state) => {
 				await migrateThrough(state, 22);
 
-				await applyMigrations(drizzle(state.storage), migrations);
+				await migrateThrough(state, latestMigrationIndex);
 
 				return {
 					tags: appliedTags(state.storage),
@@ -463,6 +467,76 @@ describe('admitMigrationSource', () => {
 		expect(outcome).toStrictEqual({ refused: false, error: undefined });
 	});
 
+	it('refuses a contracted store to the preceding migration bundle', async () => {
+		const contractedBundle = migrationsThrough(migrations, 52);
+		const outcome = await runInDurableObject(
+			testServerFor('admit-contracted-successor'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, contractedBundle);
+
+				return {
+					contracted: recordedRows(state.storage).at(-1),
+					predecessor: await admissionOf(
+						state.storage,
+						migrationsThrough(migrations, 51)
+					),
+					current: await admissionOf(state.storage, contractedBundle)
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			contracted: {
+				hash: '0052_cache_identity_contract',
+				digest: await sha256Hex(migrationSource(migrations, 52)),
+				verificationState: 'verified-contraction'
+			},
+			predecessor: {
+				refused: true,
+				error: 'DurableObjectMigrationJournalError'
+			},
+			current: { refused: false, error: undefined }
+		});
+	});
+
+	it('marks an existing verified contraction before serving it', async () => {
+		const contractedBundle = migrationsThrough(migrations, 52);
+		const outcome = await runInDurableObject(
+			testServerFor('admit-preview-contraction'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, contractedBundle);
+				database.run(sql`
+					UPDATE __drizzle_migrations SET verification_state = 'verified'
+					WHERE hash = '0052_cache_identity_contract'
+				`);
+
+				await applyMigrations(database, contractedBundle);
+
+				return {
+					contracted: recordedRows(state.storage).at(-1),
+					predecessor: await admissionOf(
+						state.storage,
+						migrationsThrough(migrations, 51)
+					)
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			contracted: {
+				hash: '0052_cache_identity_contract',
+				digest: await sha256Hex(migrationSource(migrations, 52)),
+				verificationState: 'verified-contraction'
+			},
+			predecessor: {
+				refused: true,
+				error: 'DurableObjectMigrationJournalError'
+			}
+		});
+	});
+
 	it('refuses an unverified migration beyond the ones this build carries', async () => {
 		const outcome = await runInDurableObject(
 			testServerFor('admit-unverified-successor'),
@@ -479,5 +553,67 @@ describe('admitMigrationSource', () => {
 			refused: true,
 			error: 'DurableObjectMigrationJournalError'
 		});
+	});
+});
+
+describe('migration stop boundaries', () => {
+	const bundle: MigrationBundle = {
+		journal: {
+			entries: [
+				{ idx: 0, when: 1, tag: '0000_first' },
+				{ idx: 1, when: 2, tag: '0001_second' }
+			]
+		},
+		migrations: {
+			m0000: 'CREATE TABLE first (id text PRIMARY KEY);',
+			m0001: 'CREATE TABLE second (id text PRIMARY KEY);'
+		}
+	};
+	it('stops before a named migration and accepts a store already beyond the boundary', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-stop-boundary'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, bundle, { stopBefore: '0001_second' });
+				const stopped = {
+					tags: appliedTags(state.storage),
+					tables: tableNames(state.storage)
+				};
+				await applyMigrations(database, bundle);
+				await applyMigrations(database, bundle, { stopBefore: '0001_second' });
+				return {
+					stopped,
+					completed: {
+						tags: appliedTags(state.storage),
+						tables: tableNames(state.storage)
+					}
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			stopped: { tags: ['0000_first'], tables: ['first'] },
+			completed: {
+				tags: ['0000_first', '0001_second'],
+				tables: ['first', 'second']
+			}
+		});
+	});
+	it('rejects an unknown boundary before creating a table or tracking row', async () => {
+		await runInDurableObject(
+			testServerFor('migration-unknown-boundary'),
+			async (_instance, state) => {
+				await expect(
+					applyMigrations(drizzle(state.storage), bundle, {
+						stopBefore: 'missing'
+					})
+				).rejects.toBeInstanceOf(DurableObjectMigrationJournalError);
+				expect(
+					column(
+						state.storage,
+						"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'"
+					)
+				).toStrictEqual([]);
+			}
+		);
 	});
 });

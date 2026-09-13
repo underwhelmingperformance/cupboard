@@ -1,6 +1,4 @@
 import {
-	cacheNameSchema,
-	privateStoredCache,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -8,6 +6,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { cacheIdSchema } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { BoundValueLengthError } from '../errors.ts';
 
@@ -18,7 +17,7 @@ const throwStub = (): never => {
 };
 
 const database = drizzle({ exec: throwStub } as never, { schema });
-const cache = privateStoredCache(cacheNameSchema.parse('builds'));
+const cache = cacheIdSchema.parse(1);
 const nixBase32 = '0123456789abcdfghijklmnpqrsvwxyz';
 
 function nixBase32Hash(index: number): string {
@@ -60,7 +59,7 @@ function selectByHashes(count: number) {
 		.from(schema.narInfos)
 		.where(
 			and(
-				eq(schema.narInfos.cache, cache),
+				eq(schema.narInfos.cacheId, cache),
 				inArray(schema.narInfos.storePathHash, list)
 			)
 		)

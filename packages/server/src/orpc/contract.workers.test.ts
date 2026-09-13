@@ -618,7 +618,7 @@ describe('tenant contract round trip', () => {
 			report: {
 				narInfosChecked: 1,
 				cursor: '',
-				cursorCache: '',
+				cursorCache: 0,
 				discrepancies: []
 			}
 		});

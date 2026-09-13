@@ -25,7 +25,7 @@ import {
 import { and, eq, inArray } from 'drizzle-orm';
 
 import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
-import { legacyCacheKey, type ResolvedCache } from '../db/cache.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { InvalidPushIdError } from '../errors.ts';
@@ -174,7 +174,6 @@ export class UploadsService {
 				id: uploadId,
 				// Commit accepts only the upload identifier, so the cache recorded
 				// here is what prevents cross-cache redirection.
-				cache: legacyCacheKey(cache.scope, cache.access),
 				cacheId: cache.id,
 				narHash: metadata.narHash,
 				r2Key,

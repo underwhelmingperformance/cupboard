@@ -2,12 +2,26 @@ import { type Logger } from '@cupboard/logger';
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	currentLocalStep,
+	type LocalStep,
 	type LocalStepStatus,
 	localStepStragglerSampleSize,
+	type LocalStepWakeOutcome,
 	type LocalStepWakeResponse
 } from '@cupboard/protocol/deployment';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, asc, count, eq, gt, gte, lte, type SQL } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	count,
+	eq,
+	gt,
+	gte,
+	isNull,
+	lt,
+	lte,
+	or,
+	type SQL
+} from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -20,33 +34,43 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 // the invocation's budget.
 const wakeConcurrency = 4;
 
-// Only active tenants count towards a step. A suspended or offboarding tenant's
-// object is not woken and does not count towards a step.
-const activeTenant = eq(d1Schema.tenant.status, 'active');
+const resumableTenant = or(
+	eq(d1Schema.tenant.status, 'active'),
+	eq(d1Schema.tenant.status, 'suspended')
+);
 
-// An active tenant whose object has not reported the step this build asks for.
-const straggler = and(activeTenant, belowCurrentLocalStep);
+const straggler = and(resumableTenant, belowCurrentLocalStep);
 
 /**
- * Reports how many active tenants have reached the step this build asks for,
- * and names some of those that have not.
+ * Reports how many active or suspended tenants have reached the required step,
+ * and lists some of those that have not.
  */
 export async function controlLocalStepStatus(
-	env: Env
+	env: Env,
+	requiredStep: LocalStep = currentLocalStep
 ): Promise<LocalStepStatus> {
 	const database = controlDatabase(env);
 	const ready = await countTenants(
 		database,
-		and(activeTenant, gte(d1Schema.tenant.localStep, currentLocalStep))
+		and(resumableTenant, gte(d1Schema.tenant.localStep, requiredStep))
 	);
-	const pending = await countTenants(database, straggler);
+	const pendingFilter = and(
+		resumableTenant,
+		or(
+			isNull(d1Schema.tenant.localStep),
+			lt(d1Schema.tenant.localStep, requiredStep)
+		)
+	);
+	const pending = await countTenants(database, pendingFilter);
 	const stragglers = await selectStragglers(
 		database,
-		localStepStragglerSampleSize
+		localStepStragglerSampleSize,
+		undefined,
+		pendingFilter
 	);
 
 	return {
-		current: currentLocalStep,
+		current: requiredStep,
 		ready,
 		pending,
 		stragglers: stragglers.map(({ id }) => id)
@@ -112,22 +136,23 @@ export async function controlLocalStepWake(
 		wakeConcurrency,
 		async ({ id }) => wakeTenant(logger, env, id)
 	);
-	const woken = outcomes.filter((outcome) => outcome === 'woken').length;
+	const woken = outcomes.filter(
+		(outcome) => outcome.kind === 'recorded' || outcome.kind === 'advanced'
+	).length;
 
 	return {
 		current: currentLocalStep,
 		woken,
-		failed: outcomes.length - woken
+		failed: outcomes.length - woken,
+		outcomes
 	};
 }
-
-type WakeOutcome = 'woken' | 'failed';
 
 async function wakeTenant(
 	logger: Logger,
 	env: Env,
 	tenant: TenantId
-): Promise<WakeOutcome> {
+): Promise<LocalStepWakeOutcome> {
 	try {
 		const outcome = await tenantServer(env, tenant).reportLocalStep();
 
@@ -136,7 +161,7 @@ async function wakeTenant(
 			// a create failed part way through. Retrying the create repairs it.
 			logger.warn('local step wake found an unconfigured tenant', { tenant });
 
-			return 'failed';
+			return { tenant, kind: 'unconfigured' };
 		}
 
 		if (outcome.kind === 'incomplete') {
@@ -147,13 +172,14 @@ async function wakeTenant(
 				tenant,
 				projected: outcome.projected
 			});
+			return { tenant, kind: 'advanced', projected: outcome.projected };
 		}
 
-		return 'woken';
+		return { tenant, kind: 'recorded', step: outcome.step };
 	} catch (error) {
 		logger.warn('local step wake failed', { tenant, error });
 
-		return 'failed';
+		return { tenant, kind: 'failed' };
 	}
 }
 
@@ -172,13 +198,14 @@ async function countTenants(
 function selectStragglers(
 	database: Database,
 	limit: number,
-	position?: SQL
+	position?: SQL,
+	filter: SQL | undefined = straggler
 ): Promise<{ id: TenantId }[]> {
 	// A stable order lets the persisted cursor resume after the last attempted tenant.
 	return database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
-		.where(and(straggler, position))
+		.where(and(filter, position))
 		.orderBy(asc(d1Schema.tenant.id))
 		.limit(limit)
 		.all();

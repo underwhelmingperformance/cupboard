@@ -1,16 +1,20 @@
 import {
 	currentLocalStep,
+	expansionLocalStep,
 	type LocalStep
 } from '@cupboard/protocol/deployment';
 import { and, eq, isNull, lt, or, type SQL } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	contractCacheGrants,
+	grantContractionBatchSize
+} from '../migration/cache-grants.ts';
+import {
 	advanceCacheRetentionMigration,
 	retentionMigrationBatchSize
 } from '../migration/cache-retention.ts';
 
-import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import {
 	projectLocalCacheLifecycles,
 	resetCacheLifecycleProjection
@@ -72,11 +76,6 @@ export async function recordLocalStep(
 		return { kind: 'unconfigured' };
 	}
 
-	const backfill = await reconcileCacheIdentities(context);
-	if (backfill.hasMore) {
-		return { kind: 'incomplete', projected: backfill.processed };
-	}
-
 	const projection = await projectLocalCacheLifecycles(context, tenant);
 
 	if (projection.hasMore) {
@@ -119,16 +118,27 @@ export async function recordLocalStep(
 		return { kind: 'incomplete', projected: retentionMigrationBatchSize };
 	}
 
+	await context.phases.refresh();
+	const isContracted = await context.phases.hasReached('contracted');
+	if (isContracted && contractCacheGrants(context).status === 'pending') {
+		return { kind: 'incomplete', projected: grantContractionBatchSize };
+	}
+	const reached = isContracted ? currentLocalStep : expansionLocalStep;
+
+	const needsAdvance = or(
+		isNull(d1Schema.tenant.localStep),
+		lt(d1Schema.tenant.localStep, reached)
+	);
+
 	await context.d1
 		.update(d1Schema.tenant)
-		.set({ localStep: currentLocalStep })
-		.where(and(eq(d1Schema.tenant.id, tenant), belowCurrentLocalStep))
+		.set({ localStep: reached })
+		.where(and(eq(d1Schema.tenant.id, tenant), needsAdvance))
 		.run();
 
 	await Promise.all([
 		resetCacheLifecycleProjection(context),
 		resetObjectMoves(context)
 	]);
-
-	return { kind: 'recorded', step: currentLocalStep };
+	return { kind: 'recorded', step: reached };
 }

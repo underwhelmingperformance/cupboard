@@ -8,7 +8,11 @@ import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { tenantServer } from '../routing/durable-object.ts';
-import { provisionNamedTenant, suspendTenant } from '../test-support.ts';
+import {
+	provisionNamedTenant,
+	recordDeploymentPhase,
+	suspendTenant
+} from '../test-support.ts';
 
 import { controlLocalStepStatus, controlLocalStepWake } from './local-step.ts';
 
@@ -62,13 +66,22 @@ describe('local step', () => {
 	});
 
 	it('brings every active tenant to the current step without traffic', async () => {
+		await recordDeploymentPhase('contracted');
 		await provisionNamedTenant('step-one');
 		await provisionNamedTenant('step-two');
 
 		await expect(wake(10)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			woken: 2,
-			failed: 0
+			failed: 0,
+			outcomes: [
+				{
+					tenant: tenant('step-one'),
+					kind: 'recorded',
+					step: currentLocalStep
+				},
+				{ tenant: tenant('step-two'), kind: 'recorded', step: currentLocalStep }
+			]
 		});
 		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
 			current: currentLocalStep,
@@ -84,53 +97,101 @@ describe('local step', () => {
 		await expect(wake(10)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			woken: 0,
-			failed: 1
+			failed: 1,
+			outcomes: [{ tenant: tenant('step-unconfigured'), kind: 'unconfigured' }]
 		});
 		await expect(storedStep('step-unconfigured')).resolves.toBeNull();
 	});
 
 	it('advances past a failed tenant on the next bounded wake', async () => {
+		await recordDeploymentPhase('contracted');
 		await provisionNamedTenant('step-a-failed', { configure: false });
 		await provisionNamedTenant('step-b-ready');
-
-		await expect(wake(1)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			woken: 0,
-			failed: 1
+		const first = await wake(1);
+		const second = await wake(1);
+		expect({
+			first,
+			second,
+			step: await storedStep('step-b-ready')
+		}).toStrictEqual({
+			first: {
+				current: currentLocalStep,
+				woken: 0,
+				failed: 1,
+				outcomes: [{ tenant: tenant('step-a-failed'), kind: 'unconfigured' }]
+			},
+			second: {
+				current: currentLocalStep,
+				woken: 1,
+				failed: 0,
+				outcomes: [
+					{
+						tenant: tenant('step-b-ready'),
+						kind: 'recorded',
+						step: currentLocalStep
+					}
+				]
+			},
+			step: currentLocalStep
 		});
-		await expect(wake(1)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			woken: 1,
-			failed: 0
-		});
-		await expect(storedStep('step-b-ready')).resolves.toBe(currentLocalStep);
 	});
 
-	it('ignores a suspended tenant', async () => {
+	it('wakes a suspended tenant before it resumes', async () => {
+		await recordDeploymentPhase('contracted');
 		await provisionNamedTenant('step-suspended');
 		await suspendTenant('step-suspended');
 
-		await expect(wake(10)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			woken: 0,
-			failed: 0
-		});
-		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
-			current: currentLocalStep,
-			ready: 0,
-			pending: 0,
-			stragglers: []
+		const before = await controlLocalStepStatus(env);
+		const result = await wake(10);
+
+		expect({
+			before,
+			result,
+			after: await controlLocalStepStatus(env)
+		}).toStrictEqual({
+			before: {
+				current: currentLocalStep,
+				ready: 0,
+				pending: 1,
+				stragglers: [tenant('step-suspended')]
+			},
+			result: {
+				current: currentLocalStep,
+				woken: 1,
+				failed: 0,
+				outcomes: [
+					{
+						tenant: tenant('step-suspended'),
+						kind: 'recorded',
+						step: currentLocalStep
+					}
+				]
+			},
+			after: {
+				current: currentLocalStep,
+				ready: 1,
+				pending: 0,
+				stragglers: []
+			}
 		});
 	});
 
 	it('wakes no more tenants than the limit allows', async () => {
+		await recordDeploymentPhase('contracted');
 		await provisionNamedTenant('step-batch-a');
 		await provisionNamedTenant('step-batch-b');
 
 		await expect(wake(1)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			woken: 1,
-			failed: 0
+			failed: 0,
+			outcomes: [
+				{
+					tenant: tenant('step-batch-a'),
+					kind: 'recorded',
+					step: currentLocalStep
+				}
+			]
 		});
 		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
 			current: currentLocalStep,
@@ -147,7 +208,8 @@ describe('local step', () => {
 		await expect(wake(10)).resolves.toStrictEqual({
 			current: currentLocalStep,
 			woken: 0,
-			failed: 0
+			failed: 0,
+			outcomes: []
 		});
 		await expect(controlLocalStepStatus(env)).resolves.toStrictEqual({
 			current: currentLocalStep,
@@ -160,6 +222,7 @@ describe('local step', () => {
 	// A newer build records a higher step. Rolling back to this one must not
 	// lower it, or a later phase would wait for work that is already done.
 	it('keeps a step a newer build recorded when the object reports', async () => {
+		await recordDeploymentPhase('contracted');
 		const id = tenant('step-rolled-back');
 		await provisionNamedTenant(id);
 		await setStoredStep(id, laterStep);
