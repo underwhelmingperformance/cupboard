@@ -100,19 +100,18 @@ const cacheReader: TenantReadCredential = tenantReadCredentialSchema.parse({
 	password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
 });
 
-function credentialHeaders(credential: {
+interface ReadCredential {
 	readonly user: string;
 	readonly password: string;
-}): Record<string, string> {
+}
+
+function credentialHeaders(credential: ReadCredential): Record<string, string> {
 	return {
 		authorization: `Basic ${btoa(`${credential.user}:${credential.password}`)}`
 	};
 }
 
-function basic(credential: {
-	readonly user: string;
-	readonly password: string;
-}): RequestInit {
+function basic(credential: ReadCredential): RequestInit {
 	return { headers: credentialHeaders(credential) };
 }
 
@@ -590,11 +589,12 @@ async function publishPrivatePath(
 	return { token, metadata, nar };
 }
 
-// Reads the narinfo, NAR, attestation-list and availability routes with the
-// cache's own credential.
+// Reads private-cache content through the Worker and the attestation list
+// directly from the object. Worker reads use the supplied credential.
 async function readPrivateSurfaces(
 	metadata: UploadPathMetadata,
-	nar: VerifiableNar
+	nar: VerifiableNar,
+	credential: ReadCredential
 ): Promise<{
 	narinfo: number;
 	nar: number;
@@ -603,11 +603,11 @@ async function readPrivateSurfaces(
 }> {
 	const narinfo = await readFetch(
 		`/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`,
-		basic(cacheReader)
+		basic(credential)
 	);
 	const narRead = await readFetch(
 		await pushedNarPath(nar, `/cache/${privateBuildsName}`),
-		basic(cacheReader)
+		basic(credential)
 	);
 	const attestationList = await fetchPath(
 		`/cache/${privateBuildsName}/attestations/${metadata.storePathHash}`
@@ -617,7 +617,7 @@ async function readPrivateSurfaces(
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(credential),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [metadata.storePathHash] })
@@ -636,21 +636,24 @@ async function readPrivateSurfaces(
 }
 
 // Reads one path's narinfo by GET and by HEAD, and asks availability about it,
-// all with the cache's own credential.
-async function readPrivateNarInfo(storePathHash: StorePathHash): Promise<{
+// all with the given credential.
+async function readPrivateNarInfo(
+	storePathHash: StorePathHash,
+	credential: ReadCredential
+): Promise<{
 	narinfo: number;
 	head: number;
 	missing: readonly string[];
 }> {
 	const path = `/cache/${privateBuildsName}/${storePathHash}.narinfo`;
-	const narinfo = await readFetch(path, basic(cacheReader));
-	const head = await readFetch(path, { method: 'HEAD', ...basic(cacheReader) });
+	const narinfo = await readFetch(path, basic(credential));
+	const head = await readFetch(path, { method: 'HEAD', ...basic(credential) });
 	const availability = await readFetch(
 		`/cache/${privateBuildsName}/api/v1/missing-paths`,
 		{
 			method: 'POST',
 			headers: {
-				...credentialHeaders(cacheReader),
+				...credentialHeaders(credential),
 				'content-type': 'application/json'
 			},
 			body: JSON.stringify({ storePathHashes: [storePathHash] })
@@ -673,15 +676,17 @@ describe('deleted private cache', () => {
 	it('refuses published reads and reports every path missing before teardown drains the objects', async () => {
 		const { metadata, nar } = await publishPrivatePath('gen-deleted-surfaces');
 
-		const beforeDeletion = await readPrivateSurfaces(metadata, nar);
+		const beforeDeletion = await readPrivateSurfaces(
+			metadata,
+			nar,
+			cacheReader
+		);
 
 		await deleteAndParkTeardown(privateBuilds);
 
 		expect({
 			beforeDeletion,
-			afterDeletion: await readPrivateSurfaces(metadata, nar),
-			// The credential a deletion deliberately keeps, and the objects the
-			// parked drain has not removed.
+			afterDeletion: await readPrivateSurfaces(metadata, nar, tenantReader),
 			credentials: await cacheCredentialCaches(),
 			narInfoObject:
 				(await env.BLOBS.head(
@@ -700,7 +705,7 @@ describe('deleted private cache', () => {
 				attestationList: StatusCodes.NOT_FOUND,
 				missing: [metadata.storePathHash]
 			},
-			credentials: [{ cache: privateBuilds }],
+			credentials: [],
 			narInfoObject: true
 		});
 	});
@@ -766,28 +771,27 @@ describe('deleted private cache', () => {
 
 		await deleteAndParkTeardown(privateBuilds);
 
-		// Registering the name again ends the deleted state while the parked drain
-		// still holds the previous cache's published narinfo object. Only the
-		// reference edge separates the two caches' paths from here on.
+		// Keep the previous cache's published object in R2 while recreating the
+		// name, so these reads exercise the generation fence before cleanup.
 		await putTestCache(token, privateBuilds, 'private');
 		await pushPath(token, fresh, privateBuilds, freshNar);
 
 		const previousPath = `/cache/${privateBuildsName}/${metadata.storePathHash}.narinfo`;
-		const previous = await readFetch(previousPath, basic(cacheReader));
+		const previous = await readFetch(previousPath, basic(tenantReader));
 		const previousHead = await readFetch(previousPath, {
 			method: 'HEAD',
-			...basic(cacheReader)
+			...basic(tenantReader)
 		});
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const availability = await readFetch(
 			`/cache/${privateBuildsName}/api/v1/missing-paths`,
 			{
 				method: 'POST',
 				headers: {
-					...credentialHeaders(cacheReader),
+					...credentialHeaders(tenantReader),
 					'content-type': 'application/json'
 				},
 				body: JSON.stringify({
@@ -853,7 +857,10 @@ describe('deleted private cache', () => {
 			recommittedNar
 		);
 
-		const afterRecommit = await readPrivateNarInfo(metadata.storePathHash);
+		const afterRecommit = await readPrivateNarInfo(
+			metadata.storePathHash,
+			tenantReader
+		);
 
 		// Put the previous object at the recommitted cache's own key, modelling the
 		// interval after the new reference edge is written but before the
@@ -875,7 +882,10 @@ describe('deleted private cache', () => {
 
 		expect({
 			afterRecommit,
-			withPreviousObject: await readPrivateNarInfo(metadata.storePathHash)
+			withPreviousObject: await readPrivateNarInfo(
+				metadata.storePathHash,
+				tenantReader
+			)
 		}).toStrictEqual({
 			afterRecommit: {
 				narinfo: StatusCodes.OK,
@@ -933,7 +943,7 @@ describe('deleted private cache', () => {
 
 		const whileDeleted = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		await putTestCache(token, privateBuilds, 'private');
@@ -941,11 +951,11 @@ describe('deleted private cache', () => {
 
 		const freshRead = await readFetch(
 			`/cache/${privateBuildsName}/${fresh.storePathHash}.narinfo`,
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 		const freshNarRead = await readFetch(
 			await pushedNarPath(freshNar, `/cache/${privateBuildsName}`),
-			basic(cacheReader)
+			basic(tenantReader)
 		);
 
 		expect({
@@ -1225,7 +1235,7 @@ describe('cache generation gate', () => {
 				return blobReferenceRows();
 			}
 		);
-		const afterDeletion = await readFetch(narUrl, basic(cacheReader));
+		const afterDeletion = await readFetch(narUrl, basic(tenantReader));
 
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
@@ -1249,7 +1259,7 @@ describe('cache generation gate', () => {
 				{ cache: defaultCache, generation: 1 },
 				{ cache: privateBuilds, generation: 2 }
 			],
-			credentials: [{ cache: privateBuilds }]
+			credentials: []
 		});
 	});
 
@@ -1585,15 +1595,15 @@ describe('cache generation gate', () => {
 		const small = await deletionStatements('gen-allowance-small', 1);
 		const large = await deletionStatements('gen-allowance-large', 120);
 
-		// The generation revocation and the two maintenance-eligibility statements.
-		// A deletion that retired a chunk of paths itself would add roughly six
-		// statements for every 45 paths and pass the invocation allowance on a cache
-		// of a few hundred.
+		// The generation revocation, the credential deletion and the two
+		// maintenance-eligibility statements. A deletion that retired a chunk of
+		// paths itself would add roughly six statements for every 45 paths and pass
+		// the invocation allowance on a cache of a few hundred.
 		expect({
 			small,
 			large,
 			allowance: d1StatementsPerInvocation
-		}).toStrictEqual({ small: 3, large: 3, allowance: 50 });
+		}).toStrictEqual({ small: 4, large: 4, allowance: 50 });
 	}, 240_000);
 
 	it('keeps a full teardown pass within the D1 statements one invocation may run', async () => {

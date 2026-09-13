@@ -15,6 +15,7 @@ import {
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { tenantReadCredentialSchema } from '@cupboard/protocol/tenants';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -22,6 +23,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -305,6 +307,87 @@ function cacheListRequest(token: string): Request {
 
 describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
+
+	it('checks the current cache after waiting to delete it', async () => {
+		await useTestServer('cache-admin-delete-incarnation');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			defaultCache()
+		);
+
+		const request = (method: string, body?: object): Request =>
+			new Request('https://cupboard.test/caches/builds', {
+				method,
+				headers: {
+					authorization: `Bearer ${init.token}`,
+					'content-type': 'application/json'
+				},
+				...(body !== undefined && { body: JSON.stringify(body) })
+			});
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const enter = instance.context.criticalSection.bind(instance.context);
+			const gate = vi.spyOn(instance.context, 'criticalSection');
+			gate.mockImplementationOnce(async (run) => {
+				gate.mockRestore();
+				const previous = instance.context.db
+					.select()
+					.from(schema.narInfos)
+					.get();
+				if (previous === undefined) {
+					throw new Error('missing source narinfo');
+				}
+				const removed = await instance.fetch(
+					new Request('https://cupboard.test/caches/builds?force=true', {
+						method: 'DELETE',
+						headers: { authorization: `Bearer ${init.token}` }
+					})
+				);
+				const created = await instance.fetch(
+					request('PUT', { access: 'private', priority: 30 })
+				);
+				const replacement =
+					instance.context.cacheRepository.require(buildsCache);
+				instance.context.db
+					.insert(schema.narInfos)
+					.values({ ...previous, cacheId: replacement.id })
+					.run();
+				expect({
+					removed: removed.status,
+					created: created.status
+				}).toStrictEqual({
+					removed: StatusCodes.OK,
+					created: StatusCodes.OK
+				});
+				return enter(run);
+			});
+			try {
+				const response = await instance.fetch(request('DELETE'));
+				const current = await instance.fetch(request('GET'));
+				expect({
+					status: response.status,
+					cache: cacheSummarySchema.parse(await current.json())
+				}).toStrictEqual({
+					status: StatusCodes.CONFLICT,
+					cache: {
+						scope: buildsCache,
+						access: 'private',
+						priority: 30,
+						storePaths: 1,
+						defaultRootRetention: { kind: 'permanent' },
+						grace: { kind: 'none' },
+						rootRetentionOverrides: [],
+						graceManaged: false
+					}
+				});
+			} finally {
+				gate.mockRestore();
+			}
+		});
+	});
 
 	it('checks the current incarnation after waiting to update cache access', async () => {
 		await useTestServer('cache-admin-access-incarnation');
@@ -706,6 +789,110 @@ describe('cache registry admin', () => {
 			afterRemoval: {
 				identities: [defaultIdentity, { ...builds, deleted: true }]
 			}
+		});
+	});
+
+	it('keeps lifecycle and local identity live when D1 revocation fails', async () => {
+		await useTestServer('cache-admin-atomic-revocation-failure');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30, 'private');
+		const before = await cacheVersions();
+		const batch = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockRejectedValueOnce(new Error('D1 unavailable'));
+
+		let failed: Response;
+		try {
+			failed = await authorisedFetch('/caches/builds', init.token, {
+				method: 'DELETE'
+			});
+		} finally {
+			batch.mockRestore();
+		}
+
+		expect({
+			status: failed.status,
+			before,
+			after: await cacheVersions()
+		}).toStrictEqual({
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			before,
+			after: before
+		});
+	});
+
+	it('finishes a committed revocation after its D1 response is lost without deleting a new credential', async () => {
+		await useTestServer('cache-admin-lost-revocation-response');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30, 'private');
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const credential = tenantReadCredentialSchema.parse({
+			user: 'reader',
+			password: 'wRt2Qm7kZ9x1Yb4Nc6Vd8Fg0Hj3Kl5Mn7Pq9Rs1Tu23'
+		});
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+		await setCacheReadCredential(
+			database,
+			fixtureTenant,
+			buildsCache,
+			credential,
+			now
+		);
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
+		batch.mockImplementationOnce(async (statements) => {
+			await originalBatch(statements);
+			throw new Error('D1 response lost');
+		});
+
+		let failed: Response;
+		try {
+			failed = await authorisedFetch('/caches/builds', init.token, {
+				method: 'DELETE'
+			});
+		} finally {
+			batch.mockRestore();
+		}
+
+		const afterLostResponse = await cacheVersions();
+		await setCacheReadCredential(
+			database,
+			fixtureTenant,
+			buildsCache,
+			credential,
+			now
+		);
+		const replacement = await database
+			.select()
+			.from(d1Schema.tenantCacheReadCredential)
+			.get();
+		const retried = await authorisedFetch('/caches/builds', init.token, {
+			method: 'DELETE'
+		});
+		const afterRetry = await cacheVersions();
+		const retained = await database
+			.select()
+			.from(d1Schema.tenantCacheReadCredential)
+			.get();
+
+		expect({
+			failed: failed.status,
+			afterLostResponse,
+			retried: retried.status,
+			afterRetry,
+			retained
+		}).toStrictEqual({
+			failed: StatusCodes.INTERNAL_SERVER_ERROR,
+			afterLostResponse: {
+				local: { generation: 1 },
+				published: { generation: 2, readRevision: 2 }
+			},
+			retried: StatusCodes.OK,
+			afterRetry: {
+				local: undefined,
+				published: { generation: 2, readRevision: 2 }
+			},
+			retained: replacement
 		});
 	});
 
