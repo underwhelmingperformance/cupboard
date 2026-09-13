@@ -72,23 +72,21 @@ credential of its own; see [Private caches][cache-access].
 
 ## Getting started
 
-Stand up a deployment, provision a tenant, then push to it:
+Deploy and create the first tenant with guided initialisation. Choose `acme` as
+the tenant name in this example. The wizard prints the cache URL, read
+credential and Nix configuration; save the credential before continuing.
 
 ```sh
-# Deploy, then create a tenant. The --owner-* values identify the OIDC
-# principal that may administer it and sign in with `cupboard login`.
 cupboard init --instance-name cupboard
-cupboard tenant create https://cupboard.example.workers.dev acme \
-  --owner-issuer <issuer> --owner-subject <subject> --owner-audience <audience>
 
-# Sign in as the tenant administrator, then push.
+# Sign in as the tenant administrator, then push to the URL printed by init.
 cupboard login https://cupboard.example.workers.dev/t/acme
 cupboard push https://cupboard.example.workers.dev/t/acme ./result
-
-# Print the nix.conf required to substitute from the tenant.
-cupboard config https://cupboard.example.workers.dev/t/acme \
-  "$(cupboard pubkey https://cupboard.example.workers.dev/t/acme)"
 ```
+
+Add the configuration printed by `init` to your `nix.conf`. For a private cache,
+also save the printed credential in the indicated netrc file outside the Nix
+store. Use `cupboard tenant create` only when you want an additional tenant.
 
 Most commands need a session first; `cupboard login <url>` caches an admin token
 for the tenant. Pushing from CI instead uses GitHub Actions OIDC with
