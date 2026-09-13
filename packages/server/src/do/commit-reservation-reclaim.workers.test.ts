@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	firstCacheGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
 	storePathHashSchema
@@ -10,10 +11,9 @@ import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
@@ -332,12 +332,13 @@ async function seedEdge(
 			schema: d1Schema
 		});
 
-		await database.insert(migrationSchema.blobReferences).values({
+		await database.insert(d1Schema.blobReference).values({
 			tenant: instance.context.requireTenant(),
-			...cacheMigrationColumns({ kind: 'default' }, 'public'),
+			...cacheIdentityColumns({ kind: 'default' }),
 			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
 			generation: narInfoGenerationSchema.parse(generation),
-			narHash
+			narHash,
+			cacheGeneration: firstCacheGeneration
 		});
 	});
 }

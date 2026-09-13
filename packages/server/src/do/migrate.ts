@@ -216,12 +216,21 @@ type MigrationDatabase<TSchema extends Record<string, unknown>> =
 	DrizzleSqliteDODatabase<TSchema>;
 
 /**
- * How much a recorded digest proves. `verified` rows were written with the
- * digest of the SQL the store ran. `unverified-baseline` rows were written
- * before digests were recorded; their digest was adopted from the bundle
- * afterwards.
+ * How much a recorded digest proves. `verified` and `verified-contraction`
+ * rows were written with the digest of the SQL the store ran. The contraction
+ * state makes older builds refuse a schema that removed their columns.
+ * `unverified-baseline` rows were written before digests were recorded; their
+ * digest was adopted from the bundle afterwards.
  */
-type VerificationState = 'verified' | 'unverified-baseline';
+type VerificationState =
+	'verified' | 'verified-contraction' | 'unverified-baseline';
+
+const contractionMigrationTag = '0052_cache_identity_contract';
+
+function appliedVerificationState(tag: string): VerificationState {
+	// Older builds reject this state before reading tables removed by 0052.
+	return tag === contractionMigrationTag ? 'verified-contraction' : 'verified';
+}
 
 interface TrackingRow {
 	// `id` is declared `SERIAL PRIMARY KEY`, which SQLite does not treat as a
@@ -275,6 +284,7 @@ function readTracking<TSchema extends Record<string, unknown>>(
 
 		if (
 			verificationState !== 'verified' &&
+			verificationState !== 'verified-contraction' &&
 			verificationState !== 'unverified-baseline'
 		) {
 			throw new DurableObjectMigrationVerificationStateError(
@@ -335,7 +345,10 @@ function assertRowMatchesEntry(
 		);
 	}
 
-	if (row.verificationState === 'verified' && row.hash !== entry.tag) {
+	if (
+		row.verificationState !== 'unverified-baseline' &&
+		row.hash !== entry.tag
+	) {
 		throw new DurableObjectMigrationJournalError(
 			entry.tag,
 			'a verified migration must use its stable tag'
@@ -399,13 +412,23 @@ function admit<TSchema extends Record<string, unknown>>(
 	const entries = bundle.journal.entries.toSorted((a, b) => a.idx - b.idx);
 
 	for (const [index, row] of rows.entries()) {
+		if (
+			row.verificationState === 'verified-contraction' &&
+			row.hash !== contractionMigrationTag
+		) {
+			throw new DurableObjectMigrationJournalError(
+				row.hash,
+				'the contraction verification state belongs only to 0052'
+			);
+		}
+
 		const entry = entries[index];
 
 		if (entry === undefined) {
 			if (row.verificationState !== 'verified') {
 				throw new DurableObjectMigrationJournalError(
 					row.hash === '' ? 'unknown-migration' : row.hash,
-					'an unverified migration follows the migrations this build carries'
+					'this build cannot admit a successor migration with this verification state'
 				);
 			}
 
@@ -439,7 +462,7 @@ function applyMigration<TSchema extends Record<string, unknown>>(
 	statements: readonly string[],
 	digest: string
 ): void {
-	const verificationState: VerificationState = 'verified';
+	const verificationState = appliedVerificationState(entry.tag);
 
 	database.transaction((tx) => {
 		for (const statement of statements) {
@@ -460,6 +483,21 @@ function applyMigration<TSchema extends Record<string, unknown>>(
 	});
 }
 
+// The journal index of the migration with this tag. A caller names a migration
+// rather than a position, because positions move as migrations are added.
+function migrationIndexOf(bundle: MigrationBundle, tag: string): number {
+	const entry = bundle.journal.entries.find((item) => item.tag === tag);
+
+	if (entry === undefined) {
+		throw new DurableObjectMigrationJournalError(
+			tag,
+			'this build carries no migration with that tag'
+		);
+	}
+
+	return entry.idx;
+}
+
 /**
  * Brings a Durable Object's SQLite schema up to the bundled migrations, after
  * {@link admitMigrationSource} has accepted the store's recorded history.
@@ -469,22 +507,50 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  * edit to that migration is refused. Each migration still to run executes in
  * its own transaction and records the digest it was applied from, so a later
  * build can tell what this store actually ran.
+ *
+ * `stopBefore` names a migration to leave unapplied, along with everything
+ * after it, for a caller with work to do before that migration can run.
+ * Admission still sees the whole bundle, so a store already past that migration
+ * is admitted rather than refused for holding rows this run would not reach.
  */
 export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,
 	bundle: MigrationBundle,
-	options: { readonly budget?: LocalMigrationBudget } = {}
+	options: {
+		readonly stopBefore?: string;
+		readonly budget?: LocalMigrationBudget;
+	} = {}
 ): Promise<LocalMigrationResult> {
+	const throughIndex =
+		options.stopBefore === undefined
+			? Number.MAX_SAFE_INTEGER
+			: migrationIndexOf(bundle, options.stopBefore) - 1;
 	const digests = await digestsOf(bundle);
 	const rows = admit(database, bundle, digests);
 	const entries = bundle.journal.entries.toSorted((a, b) => a.idx - b.idx);
 	const budget = options.budget ?? localMigrationBudget();
+	// The first pass stops before D1 reconciliation. The second must use the
+	// same choice of migration path.
+	budget.freshStore ??= rows.length === 0;
 
 	// Admission proved the recorded rows are a prefix of the journal, so each
 	// row pairs with the entry at its position and the migrations still to run
 	// are the entries past them.
 	for (const [index, row] of rows.entries()) {
 		const entry = entries[index];
+
+		if (
+			entry?.tag === contractionMigrationTag &&
+			row.verificationState === 'verified' &&
+			row.digest !== undefined
+		) {
+			database.run(sql`
+				UPDATE ${sql.identifier(trackingTable)}
+				SET verification_state = 'verified-contraction'
+				WHERE rowid = ${row.rowId}
+			`);
+			continue;
+		}
 
 		if (entry === undefined || row.digest !== undefined) {
 			continue;
@@ -494,8 +560,14 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 	}
 
 	for (const entry of entries.slice(rows.length)) {
+		if (entry.idx > throughIndex) {
+			return { kind: 'complete' };
+		}
+
 		const statements = statementsOf(bundle, entry);
-		const recipe = localMigrationRecipe(entry.tag, statements);
+		const recipe = budget.freshStore
+			? undefined
+			: localMigrationRecipe(entry.tag, statements);
 
 		if (recipe === undefined) {
 			applyMigration(database, entry, statements, digestOf(digests, entry));
@@ -518,7 +590,7 @@ export async function applyMigrations<TSchema extends Record<string, unknown>>(
 			return result;
 		}
 
-		const verificationState: VerificationState = 'verified';
+		const verificationState = appliedVerificationState(entry.tag);
 		const digest = digestOf(digests, entry);
 		database.transaction((tx) => {
 			clearBoundedLocalMigration(tx);

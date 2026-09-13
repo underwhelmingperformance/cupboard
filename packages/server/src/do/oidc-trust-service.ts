@@ -207,7 +207,8 @@ export class OidcTrustService {
 				issuer: body.issuer,
 				audience: body.audience,
 				claimsJson: JSON.stringify(body.claims),
-				permittedGrantsJson,
+				permittedGrantsJson:
+					this.grantSpelling.permittedGrantsForWrite(permittedGrantsJson),
 				displayJson:
 					body.display === undefined ? undefined : JSON.stringify(body.display),
 				createdAt

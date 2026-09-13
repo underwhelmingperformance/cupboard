@@ -22,10 +22,7 @@ import {
 	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import {
-	privateStoredReuseView,
-	reuseViewNameSchema
-} from '@cupboard/protocol/reuse-views';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { and, eq, sql } from 'drizzle-orm';
@@ -108,9 +105,7 @@ const testStorePath = storePathSchema.parse(
 const testRootName = rootNameSchema.parse('main');
 const testDigest = sha256HexDigestSchema.parse('0'.repeat(64));
 const testGeneration = narInfoGenerationSchema.parse(0);
-const testReuseView = privateStoredReuseView(
-	reuseViewNameSchema.parse('shared')
-);
+const testReuseView = reuseViewNameSchema.parse('shared');
 const testUploadId = uploadIdSchema.parse('01J0000000000000000000000A');
 
 function narHashes(count: number): NixSha256HashString[] {

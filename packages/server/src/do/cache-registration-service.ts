@@ -1,11 +1,9 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
-	type CachePriority,
 	cachePrioritySchema,
 	type CacheReadRevision,
 	type CacheScope,
 	firstCacheGeneration,
-	type StoredCache,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -14,7 +12,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import {
 	cacheIdentityColumns,
 	cacheIdentityCondition,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import {
@@ -23,15 +20,10 @@ import {
 } from '../db/cache-generation.ts';
 import { type CacheCreation } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import * as schema from '../db/schema.ts';
 import { CacheAlreadyExistsError, CacheNotFoundError } from '../errors.ts';
 
 import { type ServerContext } from './context.ts';
 
-// Matches the tenant's lifecycle row for one cache by its identity columns.
-// The legacy key in the primary key encodes the access, so a cache that
-// changes access would otherwise gain a second row rather than update its
-// existing one.
 export function cacheLifecycleFilter(tenant: TenantId, scope: CacheScope) {
 	return and(
 		eq(d1Schema.cacheLifecycle.tenant, tenant),
@@ -44,9 +36,8 @@ export function cacheLifecycleFilter(tenant: TenantId, scope: CacheScope) {
 }
 
 /**
- * Registers caches: the identity row, the D1 lifecycle row that admission
- * reads, and the legacy registration row that stays in step with the identity
- * until the contraction drops it.
+ * Registers a cache's local identity and the D1 lifecycle row that admission
+ * reads.
  *
  * The write paths create a named cache on its first write through this
  * service, so it depends on nothing but the context.
@@ -84,7 +75,6 @@ export class CacheRegistrationService {
 		const updated = await this.context.d1
 			.update(d1Schema.cacheLifecycle)
 			.set({
-				cache: legacyCacheKey(scope, access),
 				access,
 				readRevision: sql<CacheReadRevision>`case when ${d1Schema.cacheLifecycle.access} is ${access} then ${d1Schema.cacheLifecycle.readRevision} else ${d1Schema.cacheLifecycle.readRevision} + 1 end`,
 				deletedAt: sql`null`,
@@ -105,7 +95,6 @@ export class CacheRegistrationService {
 			.insert(d1Schema.cacheLifecycle)
 			.values({
 				tenant,
-				cache: legacyCacheKey(scope, access),
 				...cacheIdentityColumns(scope),
 				access,
 				generation: firstCacheGeneration,
@@ -131,32 +120,6 @@ export class CacheRegistrationService {
 					)
 				)
 			)
-			.run();
-	}
-
-	// The legacy registration table is still written so its rows stay in step
-	// with the identities. It is keyed by the cache's stored name, which encodes
-	// the access, so changing the access replaces the row rather than updating
-	// it.
-	registerLegacy(cache: ResolvedCache, priority: CachePriority): void {
-		this.context.db
-			.insert(schema.caches)
-			.values({
-				name: legacyCacheKey(cache.scope, cache.access),
-				priority,
-				createdAt: isoTimestamp(new Date())
-			})
-			.onConflictDoUpdate({
-				target: schema.caches.name,
-				set: { priority }
-			})
-			.run();
-	}
-
-	removeLegacy(cache: StoredCache): void {
-		this.context.db
-			.delete(schema.caches)
-			.where(eq(schema.caches.name, cache))
 			.run();
 	}
 
@@ -186,7 +149,6 @@ export class CacheRegistrationService {
 			created,
 			version.generation
 		);
-		this.registerLegacy(cache, configuration.priority);
 
 		return cache;
 	}

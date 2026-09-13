@@ -33,6 +33,7 @@ import { registerConfirmCommand } from './commands/confirm.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
+import { registerDeploymentCommands } from './commands/deployment.ts';
 import { registerGithubCommands } from './commands/github.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
@@ -158,6 +159,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		});
 
 	registerDeployCommand(program, options);
+	registerDeploymentCommands(program, options);
 	registerLoginCommand(program, options);
 	registerAttestCommands(program, options);
 	registerPushCommand(program, options);

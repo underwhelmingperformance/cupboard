@@ -13,6 +13,7 @@ import {
 } from '../control-keys.ts';
 import {
 	deploymentPhaseResponseSchema,
+	localStepStatusQuerySchema,
 	localStepStatusSchema,
 	localStepWakeBodySchema,
 	localStepWakeResponseSchema
@@ -247,6 +248,7 @@ export const controlContract = {
 		status: controlProcedure
 			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/local-step' })
+			.input(localStepStatusQuerySchema)
 			.output(localStepStatusSchema),
 
 		wake: controlProcedure

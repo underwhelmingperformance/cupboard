@@ -43,8 +43,6 @@ export interface CacheLifecycleVersion {
 	readonly readRevision: CacheReadRevision;
 }
 
-const edgeGeneration = sql`coalesce(${d1Schema.blobReference.cacheGeneration}, ${firstCacheGeneration})`;
-
 // A cache with no lifecycle row counts as the first generation. Migration
 // `0024_cache_access_backfill` gave a row to every cache with an edge.
 // Registration and projection cover caches that held nothing at the backfill.
@@ -95,7 +93,7 @@ export function referencedCacheLifecycle(): SQL | undefined {
  * {@link referencedCacheLifecycle}.
  */
 export function authorisedByCacheGeneration(): SQL {
-	return sql`${edgeGeneration} = ${currentGeneration}`;
+	return sql`${d1Schema.blobReference.cacheGeneration} = ${currentGeneration}`;
 }
 
 /**

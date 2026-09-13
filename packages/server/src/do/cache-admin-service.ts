@@ -1,10 +1,9 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheName,
+	cacheNameSchema,
 	cachePrioritySchema,
-	type CacheScope,
-	identityForCache,
-	storedCacheSchema
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -21,14 +20,12 @@ import {
 	type CacheId,
 	cacheIdSchema,
 	cacheScopeFromRow,
-	legacyCacheKey,
 	type ResolvedCache
 } from '../db/cache.ts';
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheAccessMigrationPendingError,
-	CacheIdentityMissingError,
 	CacheNotEmptyError,
 	CacheNotFoundError
 } from '../errors.ts';
@@ -165,19 +162,23 @@ export class CacheAdminService {
 		suffix: string,
 		origin: string
 	): Promise<ResolvedCache | undefined> {
-		const stored = storedCacheSchema.safeParse(suffix);
-		const cache = stored.success
-			? this.context.cacheRepository.lastDeleted(
-					identityForCache(stored.data).scope
-				)
-			: undefined;
-
+		const name = cacheNameSchema.safeParse(
+			suffix.startsWith('private/') ? suffix.slice('private/'.length) : suffix
+		);
+		const scope: CacheScope | undefined =
+			suffix === ''
+				? { kind: 'default' }
+				: name.success
+					? { kind: 'named', name: name.data }
+					: undefined;
+		const cache =
+			scope === undefined
+				? undefined
+				: this.context.cacheRepository.lastDeleted(scope);
 		await this.context.ctx.storage.delete(key);
-
 		if (cache !== undefined) {
 			await this.context.ctx.storage.put(this.teardownKey(cache), origin);
 		}
-
 		return cache;
 	}
 
@@ -252,13 +253,6 @@ export class CacheAdminService {
 
 		const caches = registered
 			.map((row): CacheSummary => {
-				// A row whose access the reconciliation has not supplied cannot say
-				// who may read the cache, so it is refused rather than listed as
-				// public.
-				if (row.access === null) {
-					throw new CacheIdentityMissingError({ id: row.id });
-				}
-
 				const earliestGraceDeadline = earliestDeadlines.get(row.id);
 
 				return {
@@ -346,7 +340,6 @@ export class CacheAdminService {
 				.set({ priority: update.priority })
 				.where(eq(schema.cacheIdentities.id, cache.id))
 				.run();
-			this.registration.registerLegacy(cache, update.priority);
 
 			return this.cacheSummary(cache);
 		}
@@ -419,7 +412,6 @@ export class CacheAdminService {
 				throw new CacheAccessMigrationPendingError();
 			}
 
-			const previous = legacyCacheKey(existing.scope, existing.access);
 			let updated: ResolvedCache;
 			let version: CacheLifecycleVersion;
 
@@ -445,21 +437,6 @@ export class CacheAdminService {
 				updated,
 				version.generation
 			);
-
-			const row = this.context.db
-				.select({ priority: schema.cacheIdentities.priority })
-				.from(schema.cacheIdentities)
-				.where(eq(schema.cacheIdentities.id, cache.id))
-				.get();
-
-			if (row === undefined) {
-				throw new CacheNotFoundError(scope);
-			}
-
-			const priority = cachePrioritySchema.parse(row.priority);
-
-			this.registration.removeLegacy(previous);
-			this.registration.registerLegacy(cache, priority);
 
 			return this.cacheSummary(cache);
 		});
@@ -637,10 +614,10 @@ export class CacheAdminService {
 			// deletion cannot remove.
 			this.context.db.transaction((tx) => {
 				tx.run(
-					sql`INSERT INTO narinfo_deletion (cache, cache_id, store_path_hash, nar_hash, generation, created_at)
-						SELECT cache, cache_id, store_path_hash, nar_hash, generation, ${now}
+					sql`INSERT INTO narinfo_deletion (cache_id, store_path_hash, nar_hash, generation, created_at)
+						SELECT cache_id, store_path_hash, nar_hash, generation, ${now}
 						FROM narinfo WHERE cache_id = ${cache.id}
-						ON CONFLICT (cache, store_path_hash, generation)
+						ON CONFLICT (cache_id, store_path_hash, generation)
 						DO UPDATE SET nar_hash = excluded.nar_hash, created_at = excluded.created_at`
 				);
 				tx.delete(schema.narInfos)
@@ -663,11 +640,6 @@ export class CacheAdminService {
 				tx.update(schema.cacheIdentities)
 					.set({ deletedAt: now })
 					.where(eq(schema.cacheIdentities.id, cache.id))
-					.run();
-				tx.delete(schema.caches)
-					.where(
-						eq(schema.caches.name, legacyCacheKey(cache.scope, cache.access))
-					)
 					.run();
 				// A policy scoped to the cache would match nothing once the cache is
 				// gone, and its `cache_id` would refer to a deleted identity.

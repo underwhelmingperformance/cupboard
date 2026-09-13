@@ -11,7 +11,12 @@ import {
 	type DatabaseId,
 	databaseIdSchema
 } from './identifiers.ts';
-import { type PhaseApi, readLocalStepReadiness } from './phase.ts';
+import {
+	type PhaseApi,
+	readDeploymentPhase,
+	readLocalStepReadiness,
+	recordDeploymentPhase
+} from './phase.ts';
 
 const databaseId = databaseIdSchema.parse('database');
 const requiredStep = localStep(1);
@@ -127,7 +132,7 @@ describe('local step readiness', () => {
 		expect(api.queries).toHaveLength(1);
 	});
 
-	it('counts the active tenants below the step and names them', async () => {
+	it('counts the active and suspended tenants below the step', async () => {
 		const api = sqliteBackedApi([
 			{ id: 'alpha', status: 'active', localStep: undefined },
 			{ id: 'beta', status: 'active', localStep: 0 },
@@ -137,6 +142,76 @@ describe('local step readiness', () => {
 
 		expect(
 			await readLocalStepReadiness(api, databaseId, requiredStep)
-		).toStrictEqual({ pending: 2, stragglers: ['alpha', 'beta'] });
+		).toStrictEqual({ pending: 3, stragglers: ['alpha', 'beta', 'delta'] });
+	});
+});
+
+describe('deployment phase records', () => {
+	it('preserves a completed phase and its timestamp across reruns', async () => {
+		const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
+		const database = new DatabaseSync(':memory:');
+		database.exec(
+			'CREATE TABLE deployment_phase (id TEXT PRIMARY KEY, phase TEXT NOT NULL, required_local_step INTEGER NOT NULL, updated_at TEXT NOT NULL)'
+		);
+		const api: PhaseApi = {
+			queryBatch: (_id, statements) => {
+				for (const statement of statements) {
+					database.exec(statement);
+				}
+				return Promise.resolve();
+			},
+			queryRows: (_id, statement) =>
+				Promise.resolve(
+					database
+						.prepare(statement)
+						.all()
+						.flatMap((row) =>
+							Object.values(row).filter(
+								(value): value is string => typeof value === 'string'
+							)
+						)
+				)
+		};
+		try {
+			const initial = new Date('2026-01-01T00:00:00.000Z');
+			const later = new Date('2026-01-02T00:00:00.000Z');
+			await recordDeploymentPhase(
+				api,
+				databaseId,
+				'contracted',
+				localStep(5),
+				initial
+			);
+			await recordDeploymentPhase(
+				api,
+				databaseId,
+				'contracted',
+				localStep(5),
+				later
+			);
+			const repeated = await readDeploymentPhase(api, databaseId);
+			await recordDeploymentPhase(
+				api,
+				databaseId,
+				'native-reads',
+				localStep(4),
+				later
+			);
+			const lowered = await readDeploymentPhase(api, databaseId);
+			expect({ repeated, lowered }).toStrictEqual({
+				repeated: {
+					name: 'contracted',
+					requiredLocalStep: 5,
+					updatedAt: initial.toISOString()
+				},
+				lowered: {
+					name: 'contracted',
+					requiredLocalStep: 5,
+					updatedAt: initial.toISOString()
+				}
+			});
+		} finally {
+			database.close();
+		}
 	});
 });

@@ -328,6 +328,7 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureStagingLifecycleRule');
 			return Promise.resolve();
 		},
+		findD1Database: () => Promise.resolve(undefined),
 		ensureD1Database: () => {
 			recordApiCall(apiCalls, 'ensureD1Database');
 			return Promise.resolve(databaseIdSchema.parse('database-id'));

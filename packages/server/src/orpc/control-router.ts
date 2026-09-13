@@ -152,8 +152,8 @@ export const controlRouter = os.router({
 		)
 	},
 	localStep: {
-		status: os.localStep.status.handler(({ context }) =>
-			controlLocalStepStatus(context.env)
+		status: os.localStep.status.handler(({ context, input }) =>
+			controlLocalStepStatus(context.env, input.requiredStep)
 		),
 		wake: os.localStep.wake.handler(({ input, context }) =>
 			controlLocalStepWake(context.logger, context.env, input.limit)

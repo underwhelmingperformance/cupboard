@@ -9,6 +9,8 @@ import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
+import { cachedOwnerProvider } from '../auth/auth.ts';
+import { controlRpc } from '../client/orpc.ts';
 import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
@@ -52,6 +54,7 @@ import {
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
+	deploymentUrl,
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
@@ -83,8 +86,24 @@ import {
 	generateWrapSecret,
 	settlePushIdSigningKey
 } from './secrets.ts';
+import { settleTenants } from './settlement.ts';
 import { planWorkerSource } from './source.ts';
+import {
+	type DeploymentPlan,
+	observeDeployment,
+	planDeployment,
+	transitionPlanRows
+} from './transition.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
+
+export class DeploymentSettlementUrlMissingError extends CliError {
+	constructor() {
+		super(
+			'Tenant work needs a reachable deployment URL. Configure a domain, then resume the deployment.'
+		);
+		this.name = 'DeploymentSettlementUrlMissingError';
+	}
+}
 
 export class DeployCancelledError extends CliError {
 	constructor() {
@@ -995,6 +1014,8 @@ async function deployFlow(
 	};
 
 	if (cliOptions.dryRun === true) {
+		const offlinePlan = planDeployment(artifact, { kind: 'offline' });
+		const offlineArtifact = offlinePlan.artifact;
 		const assembled = assembleSecrets({
 			env: process.env,
 			accountId: '',
@@ -1004,15 +1025,16 @@ async function deployFlow(
 
 		ui.note('Deployment plan', [
 			...derivedPlanRows(
-				artifact,
+				offlineArtifact,
 				assembled.secrets,
 				assembled.missing
 					.filter((name) => r2Names.has(name))
 					.map((name) => `${name} (pending)`)
 			),
+			...transitionPlanRows(offlinePlan),
 			{ label: '', value: '' },
 			...choicePlanRows(
-				artifact.config,
+				offlineArtifact.config,
 				initialDomain,
 				// Dry runs do not authenticate, so derive the plan without a deployer identity.
 				defaultOwnerChoice(artifact.config)
@@ -1251,6 +1273,8 @@ async function deployFlow(
 		);
 	}
 
+	let reviewedPlan: DeploymentPlan | undefined;
+
 	const agreed = await reviewPlan(
 		{
 			accountId,
@@ -1262,14 +1286,22 @@ async function deployFlow(
 			ui,
 			render: async (state) => {
 				const { options, missing, annotated } = await planFor(state);
+				const plannedArtifact = {
+					...artifact,
+					config: withSignupGate(
+						state.config,
+						state.owner.kind === 'owner' ? state.owner.owner : undefined
+					)
+				};
+				reviewedPlan = planDeployment(
+					plannedArtifact,
+					await observeDeployment(apiFor(state.accountId), plannedArtifact)
+				);
 
 				ui.note('Deployment plan', [
-					...derivedPlanRows(
-						{ ...artifact, config: state.config },
-						options.secrets,
-						annotated
-					),
+					...derivedPlanRows(reviewedPlan.artifact, options.secrets, annotated),
 					{ label: '', value: '' },
+					...transitionPlanRows(reviewedPlan),
 					{ label: 'Account', value: state.accountId },
 					...choicePlanRows(state.config, state.domain, state.owner)
 				]);
@@ -1283,7 +1315,7 @@ async function deployFlow(
 		}
 	);
 
-	if (agreed === undefined) {
+	if (agreed === undefined || reviewedPlan === undefined) {
 		ui.cancelled('Deploy aborted.');
 		return;
 	}
@@ -1362,16 +1394,56 @@ async function deployFlow(
 
 	const { options } = await planFor(agreed);
 
-	// The signup gate is applied once, to the agreed config. Applying it inside
-	// the plan review loop would apply it again to an already-gated config on
-	// every edit.
-	const deployedConfig = withSignupGate(
-		agreed.config,
-		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
-	);
+	const deployedConfig = reviewedPlan.artifact.config;
+
+	const refreshIdToken =
+		credentialSource === 'cached login' || credentialSource === 'browser login'
+			? () =>
+					freshIdToken({
+						readGrant: readCachedGrant,
+						writeGrant: writeCachedGrant,
+						withGrantLock: withCachedGrantLock,
+						refreshGrant: (previous) =>
+							refreshCloudflareGrant(
+								previous,
+								fetch,
+								Date.now,
+								runtimeOptions.signal
+							),
+						now: Date.now,
+						signal: runtimeOptions.signal
+					})
+			: undefined;
 
 	await runDeploy({
-		artifact: { ...artifact, config: deployedConfig },
+		plan: reviewedPlan,
+		settleTenants: async (requiredStep) => {
+			const url = await deploymentUrl(
+				apiFor(agreed.accountId),
+				deployedConfig.control.name,
+				agreed.domain
+			);
+			if (url === undefined) {
+				throw new DeploymentSettlementUrlMissingError();
+			}
+			const parsed = new URL(url);
+			const credential = cachedOwnerProvider(parsed, {
+				signal: runtimeOptions.signal
+			});
+			await settleTenants(
+				controlRpc(parsed, { credential, signal: runtimeOptions.signal })
+					.localStep,
+				ui.reporter(),
+				{
+					requiredStep,
+					limit: 20,
+					maxPasses: 100,
+					...(runtimeOptions.signal !== undefined && {
+						signal: runtimeOptions.signal
+					})
+				}
+			);
+		},
 		api: apiFor(agreed.accountId),
 		reporter: ui.reporter(),
 		options,
@@ -1419,24 +1491,7 @@ async function deployFlow(
 						bucketName: agreedBucket
 					}
 				: { kind: 'fresh' },
-		...((credentialSource === 'cached login' ||
-			credentialSource === 'browser login') && {
-			freshIdToken: () =>
-				freshIdToken({
-					readGrant: readCachedGrant,
-					writeGrant: writeCachedGrant,
-					withGrantLock: withCachedGrantLock,
-					refreshGrant: (previous) =>
-						refreshCloudflareGrant(
-							previous,
-							fetch,
-							Date.now,
-							runtimeOptions.signal
-						),
-					now: Date.now,
-					signal: runtimeOptions.signal
-				})
-		})
+		...(refreshIdToken !== undefined && { freshIdToken: refreshIdToken })
 	});
 
 	switch (outcome.kind) {

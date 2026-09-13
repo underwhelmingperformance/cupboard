@@ -34,12 +34,11 @@ import {
 	setCacheReadCredential,
 	setTenantStatus
 } from '../control/tenant-registry.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
 import { secondCacheGeneration } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import {
 	isReadPasswordMatching,
 	readPasswordHashSchema,
@@ -662,11 +661,11 @@ describe('cache admission', () => {
 			now
 		);
 		await refreshTenantMembership(env);
-		await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
-			.insert(migrationSchema.cacheLifecycles)
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.insert(d1Schema.cacheLifecycle)
 			.values({
 				tenant: tenantIdSchema.parse('acme'),
-				...cacheMigrationColumns(builds, 'private'),
+				...cacheIdentityColumns(builds),
 				access: 'private',
 				generation: secondCacheGeneration,
 				deletedAt: now,

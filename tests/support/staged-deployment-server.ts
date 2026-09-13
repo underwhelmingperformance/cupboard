@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { CacheListResponse } from '@cupboard/protocol/caches';
 import {
+	contractionMigrations,
 	currentLocalStep,
 	type ParsedDeploymentPhaseResponse,
 	type ParsedLocalStepStatus,
@@ -14,7 +15,10 @@ import {
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
-import type { TenantStatus } from '@cupboard/protocol/tenants';
+import {
+	tenantReadCredentialSchema,
+	type TenantStatus
+} from '@cupboard/protocol/tenants';
 import { Miniflare, type MiniflareOptions } from 'miniflare';
 import { z } from 'zod';
 
@@ -58,6 +62,10 @@ const fileHash = 'sha256:0wzw5pz9bciz84825admrb4b848maxa2fh1isbsw4547mvra9czv';
 const controlWrapSecret = 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=';
 const operatorSubject = 'upgrade-deployment-operator';
 const operatorAudience = 'upgrade-deployment-client';
+const fixtureReadCredential = tenantReadCredentialSchema.parse({
+	user: 'fixture-reader',
+	password: 'f'.repeat(43)
+});
 
 const singleColumnRowsSchema = z.array(z.record(z.string(), z.unknown()));
 
@@ -172,16 +180,19 @@ const predecessorSnapshotSchema = z.strictObject({
 	caches: z.array(z.string()),
 	roots: z.array(z.string())
 });
+const catalogueVersionSchema = z.strictObject({
+	version: z.number().int().nullable()
+});
 const terminalD1SnapshotSchema = z.strictObject({
 	lastD1Migration: z.string(),
 	phase: z.string(),
-	activeTenantsBelowStep: z.number().int().nonnegative()
+	resumableTenantsBelowStep: z.number().int().nonnegative()
 });
 
 export interface TerminalDeploymentSnapshot {
 	readonly lastD1Migration: string;
 	readonly phase: string;
-	readonly activeTenantsBelowStep: number;
+	readonly resumableTenantsBelowStep: number;
 	readonly legacyNarInfoPresent: boolean;
 }
 
@@ -483,7 +494,7 @@ export class StagedDeploymentServer {
 
 		return {
 			phase: () => rpc.deployment.phase(),
-			localStepStatus: () => rpc.localStep.status(),
+			localStepStatus: () => rpc.localStep.status({}),
 			wakeLocalStep: (limit) => rpc.localStep.wake({ limit })
 		};
 	}
@@ -510,14 +521,18 @@ export class StagedDeploymentServer {
 	private async seedD1(): Promise<void> {
 		const database = await this.database();
 		const createdAt = '2026-01-01T00:00:00.000Z';
-		const statuses: readonly (readonly [FixtureTenant, TenantStatus])[] = [
-			['upgrade-active', 'active'],
-			['upgrade-suspended', 'suspended'],
-			['upgrade-offboarding', 'offboarding'],
-			['upgrade-offboarded', 'offboarded'],
-			['upgrade-sleeping-0022', 'active'],
-			['upgrade-sleeping-0024', 'active'],
-			['upgrade-sleeping-0031', 'active']
+		const statuses: readonly (readonly [
+			FixtureTenant,
+			TenantStatus,
+			'public' | 'private'
+		])[] = [
+			['upgrade-active', 'active', 'public'],
+			['upgrade-suspended', 'suspended', 'private'],
+			['upgrade-offboarding', 'offboarding', 'public'],
+			['upgrade-offboarded', 'offboarded', 'public'],
+			['upgrade-sleeping-0022', 'active', 'public'],
+			['upgrade-sleeping-0024', 'active', 'public'],
+			['upgrade-sleeping-0031', 'active', 'public']
 		];
 
 		await database.batch([
@@ -552,13 +567,13 @@ export class StagedDeploymentServer {
 				.bind(narHash, fileHash, createdAt)
 		]);
 
-		for (const [tenant, status] of statuses) {
+		for (const [tenant, status, readMode] of statuses) {
 			await database
 				.prepare(
 					`INSERT INTO tenant (id, status, read_mode, owner_issuer, owner_subject, owner_audience, config_version, created_at)
-					 VALUES (?, ?, 'public', 'https://issuer.invalid', 'owner', 'owner-client', 1, ?)`
+					 VALUES (?, ?, ?, 'https://issuer.invalid', 'owner', 'owner-client', 1, ?)`
 				)
-				.bind(tenant, status, createdAt)
+				.bind(tenant, status, readMode, createdAt)
 				.run();
 		}
 
@@ -636,6 +651,30 @@ export class StagedDeploymentServer {
 		await bucket.put(key, body, {
 			httpMetadata: { contentType: 'text/x-nix-narinfo; charset=utf-8' }
 		});
+		await bucket.put(
+			`t/upgrade-suspended/narinfo/private/secrets/${pathHash}`,
+			body,
+			{
+				httpMetadata: { contentType: 'text/x-nix-narinfo; charset=utf-8' },
+				customMetadata: {
+					generation: '0',
+					narHash,
+					narUrl: `nar/${narHash}.nar.zst`,
+					signatureGeneration: '0'
+				}
+			}
+		);
+		const database = await this.database();
+		await database.batch([
+			database.prepare(
+				`INSERT INTO blob_ref (tenant, cache, store_path_hash, generation, nar_hash, cache_generation)
+				 SELECT tenant, 'private/secrets', store_path_hash, generation, nar_hash, cache_generation
+				 FROM blob_ref WHERE tenant = 'upgrade-suspended' AND cache = 'builds'`
+			),
+			database.prepare(
+				"UPDATE tenant_usage SET narinfos = 2 WHERE tenant = 'upgrade-suspended'"
+			)
+		]);
 		await bucket.put(`nar/${narHash}.nar.zst`, 'predecessor\n');
 	}
 
@@ -695,6 +734,22 @@ export class StagedDeploymentServer {
 		return migration.name;
 	}
 
+	/**
+	 * The last migration a deploy applies before both Workers serve this build.
+	 * The rest wait for the preceding release to drain.
+	 */
+	get finalPreCutoverD1Migration(): string {
+		const migration = this.artifact.d1Migrations.findLast(
+			(candidate) => !contractionMigrations.includes(candidate.name)
+		);
+
+		if (migration === undefined) {
+			throw new ArtifactD1MigrationMissingError();
+		}
+
+		return migration.name;
+	}
+
 	get api(): Pick<CloudflareApi, 'd1QueryBatch' | 'd1QueryRows'> {
 		return {
 			d1QueryBatch: async (id, statements) =>
@@ -728,6 +783,35 @@ export class StagedDeploymentServer {
 		await this.seedLegacyR2Object();
 	}
 
+	async resumeTenant(tenant: FixtureTenant): Promise<void> {
+		const rpc = controlRpc(new URL('https://cupboard.invalid'), {
+			credential: await this.operatorCredential(),
+			fetcher: (input, init) => this.workerFetch(input, init)
+		});
+		await rpc.tenants.resume({ id: tenantIdSchema.parse(tenant) });
+	}
+
+	async configureTenantReadCredential(tenant: FixtureTenant): Promise<void> {
+		const rpc = controlRpc(new URL('https://cupboard.invalid'), {
+			credential: await this.operatorCredential(),
+			fetcher: (input, init) => this.workerFetch(input, init)
+		});
+		await rpc.tenants.rotateReadCredential({
+			id: tenantIdSchema.parse(tenant),
+			read: fixtureReadCredential
+		});
+	}
+
+	async tenantNarInfo(tenant: FixtureTenant, cache: string): Promise<Response> {
+		await this.announceTenant(tenant);
+		const credential = Buffer.from(
+			`${fixtureReadCredential.user}:${fixtureReadCredential.password}`
+		).toString('base64');
+		return this.workerFetch(`/t/${tenant}/cache/${cache}/${pathHash}.narinfo`, {
+			headers: { authorization: `Basic ${credential}` }
+		});
+	}
+
 	async writeLateLegacyState(tenant: FixtureTenant): Promise<void> {
 		await this.expectOk(`/fixture/tenant/${tenant}/late-write`, {
 			method: 'POST'
@@ -756,8 +840,8 @@ export class StagedDeploymentServer {
 					(SELECT name FROM d1_migrations ORDER BY id DESC LIMIT 1) AS lastD1Migration,
 					(SELECT phase FROM deployment_phase WHERE id = 'current') AS phase,
 					(SELECT count(*) FROM tenant
-						WHERE status = 'active'
-						  AND (local_step IS NULL OR local_step < ?)) AS activeTenantsBelowStep`
+						WHERE status IN ('active', 'suspended')
+						  AND (local_step IS NULL OR local_step < ?)) AS resumableTenantsBelowStep`
 			)
 			.bind(currentLocalStep)
 			.first();
@@ -858,22 +942,26 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The caches one tenant reports through the admin API, read with the
-	 * operator's credential. The tenant Worker serves the listing from the
-	 * Durable Object, so it shows the retention each cache holds after the
-	 * upgrade.
-	 *
-	 * Admission rejects a slug with no membership marker before any tenant route
-	 * runs. The fixture seeds its tenants straight into D1, so this writes the
-	 * marker that tenant creation would have written.
+	 * Writes a tenant's membership marker, which admission requires before any
+	 * tenant route runs. The fixture seeds its tenants straight into D1, so this
+	 * writes the marker that tenant creation would have written.
 	 */
-	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+	async announceTenant(tenant: FixtureTenant): Promise<void> {
 		const members = await this.miniflare.getKVNamespace(
 			tenantCacheBinding,
 			controlScript
 		);
 
 		await members.put(tenantMemberKey(tenantIdSchema.parse(tenant)), '1');
+	}
+
+	/**
+	 * The caches one tenant reports through the admin API, read with the
+	 * operator's credential. The release serves this listing from the Durable
+	 * Object, so it shows the retention each cache holds after the upgrade.
+	 */
+	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+		await this.announceTenant(tenant);
 
 		const rpc = tenantRpc(new URL(`https://cupboard.invalid/t/${tenant}`), {
 			credential: await this.operatorCredential(`/t/${tenant}/token`),
@@ -881,6 +969,23 @@ export class StagedDeploymentServer {
 		});
 
 		return rpc.caches.list();
+	}
+
+	/**
+	 * The catalogue version D1 records for a tenant. Its Durable Object writes it
+	 * at the end of a successful start, so a version here means the object
+	 * applied every migration this build carries.
+	 */
+	async catalogueVersion(tenant: FixtureTenant): Promise<number | null> {
+		const database = await this.database();
+		const row = await database
+			.prepare(
+				'SELECT cache_catalogue_version AS version FROM tenant WHERE id = ?'
+			)
+			.bind(tenant)
+			.first();
+
+		return catalogueVersionSchema.parse(row).version;
 	}
 
 	async dispatch(pathname: string, init?: RequestInit): Promise<Response> {

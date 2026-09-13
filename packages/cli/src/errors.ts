@@ -54,6 +54,15 @@ export class SigningKeyNotFoundError extends CliError {
 	}
 }
 
+export class UnclassifiedD1MigrationError extends CliError {
+	constructor(public readonly migrations: readonly string[]) {
+		super(
+			`D1 migrations are not classified: ${migrations.join(', ')}. Each sorts after the first contraction. Add it to contractionMigrations if it must run after the Workers settle, or move it before the contractions if the new Workers need it when they start.`
+		);
+		this.name = 'UnclassifiedD1MigrationError';
+	}
+}
+
 /**
  * The recorded phase describes the code that is running, so a deploy records it
  * only when every script serves the build it just uploaded. A script fails this
@@ -96,7 +105,7 @@ export class LocalStepUnreachedError extends CliError {
 				: stragglers.join(', ');
 
 		super(
-			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. The control Worker's hourly sweep wakes the tenants that are behind; re-run the deploy once every tenant has reached the step.`
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
 		);
 		this.name = 'LocalStepUnreachedError';
 	}

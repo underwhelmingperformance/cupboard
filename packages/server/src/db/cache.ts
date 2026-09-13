@@ -3,10 +3,7 @@ import {
 	type CacheGeneration,
 	type CacheName,
 	cacheNameSchema,
-	type CacheScope,
-	DEFAULT_CACHE,
-	privateStoredCache,
-	type StoredCache
+	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { or, type SQL, sql } from 'drizzle-orm';
@@ -14,7 +11,6 @@ import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { z } from 'zod';
 
 import { jsonRowLists } from '../do/json-list.ts';
-import { CacheIdentityMissingError } from '../errors.ts';
 
 /**
  * The surrogate key of a `cache_identity` row, stored in the `cache_id` columns
@@ -59,9 +55,6 @@ type CacheIdentityColumns =
  * The `cache_kind` and `cache_name` values for a scope. A default cache
  * stores a SQL null for the name.
  *
- * Every insert into a table with these columns sets them. The mirroring
- * triggers fill them only while they exist, and a later migration drops the
- * triggers.
  */
 export function cacheIdentityColumns(scope: CacheScope): CacheIdentityColumns {
 	if (scope.kind === 'default') {
@@ -165,19 +158,12 @@ export function cacheSelectorsCondition(
  * The scope stored in a row's identity columns.
  *
  * A row refuses to parse unless its name matches its kind: a default cache has
- * no name and a named cache has one. A row with no kind at all belongs to no
- * cache, which happens only if the backfill has not reached it; reading such a
- * row as the default cache would attribute it to the wrong cache, so this
- * refuses it instead.
+ * no name and a named cache has one.
  */
 export function cacheScopeFromRow(row: {
-	readonly kind?: 'default' | 'named' | null;
+	readonly kind: 'default' | 'named';
 	readonly name?: string | null;
 }): CacheScope {
-	if (row.kind === null || row.kind === undefined) {
-		throw new CacheIdentityMissingError({});
-	}
-
 	const identity = cacheIdentityRowSchema.parse({
 		kind: row.kind,
 		...(row.name !== null && row.name !== undefined && { name: row.name })
@@ -188,21 +174,4 @@ export function cacheScopeFromRow(row: {
 	}
 
 	return { kind: 'named', name: identity.name };
-}
-
-/**
- * The legacy key for a scope and the access the key encodes (see
- * `identityForCache`): `private/<name>` when `access` is `private`. Rows
- * include both representations until a later migration drops the legacy
- * column.
- */
-export function legacyCacheKey(
-	scope: CacheScope,
-	access: CacheAccessMode
-): StoredCache {
-	if (scope.kind === 'default') {
-		return DEFAULT_CACHE;
-	}
-
-	return access === 'private' ? privateStoredCache(scope.name) : scope.name;
 }
