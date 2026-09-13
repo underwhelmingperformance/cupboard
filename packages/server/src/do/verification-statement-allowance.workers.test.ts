@@ -35,10 +35,12 @@ import {
 	uploadMetadata,
 	useTestServer,
 	verifiableNar,
+	withDeployedStatementAllowance,
 	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
+import { maxPathsReconciledPerRun } from './reconcile-queue-service.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import {
@@ -55,16 +57,17 @@ const storePathAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 // of that size.
 const pushConcurrency = 6;
 
-// More committed paths than one verification pass can probe within its
-// statement allowance, so the scan only reaches the end across several cron
-// invocations.
-const committedPaths = 100;
+// This allowance permits eight probes per verification pass.
+const scanAllowance = 20;
 
 // Each row needs one probe. After maintenance eligibility uses its statements,
 // the pass also reserves one statement for the committed-reference query and
-// one for a removal. This page size uses the remaining allowance. The D1 binding
-// still enforces the 50-statement limit.
-const scanPageSize = 38;
+// one for a removal. This page size uses the remaining allowance.
+const scanPageSize = maxPathsReconciledPerRun(scanAllowance);
+
+// Two full pages and a short third, so the scan reaches the end and wraps on
+// the third pass.
+const committedPaths = scanPageSize * 2 + 4;
 
 // More rows than one claim settles without decoding, so the claim's limit
 // applies and later claims have to settle the rest.
@@ -146,14 +149,21 @@ async function driveCronVerification(
 				.where(eq(verificationCursor.id, 'active'))
 				.get()?.hash ?? '';
 
-		const passes = await measureInvocations(state, counting, {
-			attempts: invocations,
-			run: async () => {
-				await instance.runVerification();
+		const measured = await withDeployedStatementAllowance(
+			instance.context,
+			scanAllowance,
+			async () => ({
+				passes: await measureInvocations(state, counting, {
+					attempts: invocations,
+					run: async () => {
+						await instance.runVerification();
 
-				return { cursor: scanCursor() };
-			}
-		});
+						return { cursor: scanCursor() };
+					}
+				}),
+				statementAllowance: instance.context.d1StatementsPerInvocation
+			})
+		);
 
 		Object.defineProperty(instance.context, 'd1', {
 			configurable: true,
@@ -161,12 +171,11 @@ async function driveCronVerification(
 		});
 
 		return {
-			passes,
+			...measured,
 			committedRows: local
 				.select({ storePathHash: narInfos.storePathHash })
 				.from(narInfos)
-				.all().length,
-			statementAllowance: instance.context.d1StatementsPerInvocation
+				.all().length
 		};
 	});
 }
@@ -297,10 +306,10 @@ describe('cron verification D1 statement allowance', () => {
 		// All rows are committed, so the pass can use the complete maintenance
 		// allowance for the scan: one statement to invalidate maintenance
 		// eligibility, one probe for each row of the page, and one to reconcile
-		// eligibility afterwards.
-		// Every row is healthy, so the pass runs neither the committed reference
-		// edge query nor a repair. The third pass scans the remaining 24 rows,
-		// reaches the end and wraps, which resets the cursor.
+		// eligibility afterwards. Every row is healthy, so the pass runs neither
+		// the committed reference edge query nor a repair. The third pass scans
+		// the rows the first two left, reaches the end and wraps, which resets the
+		// cursor.
 		expect({
 			pageSize: scanPageSize,
 			committedRows: driven.committedRows,
@@ -311,11 +320,15 @@ describe('cron verification D1 statement allowance', () => {
 			statementAllowance: driven.statementAllowance,
 			cursors: driven.passes.map((pass) => pass.cursor)
 		}).toStrictEqual({
-			pageSize: 38,
+			pageSize: scanPageSize,
 			committedRows: committedPaths,
-			passStatements: [40, 40, 26],
+			passStatements: [
+				scanPageSize + 2,
+				scanPageSize + 2,
+				committedPaths - 2 * scanPageSize + 2
+			],
 			overAllowancePasses: [],
-			statementAllowance: 50,
+			statementAllowance: scanAllowance,
 			cursors: [
 				indexedMetadata(scanPageSize - 1).storePathHash,
 				indexedMetadata(2 * scanPageSize - 1).storePathHash,
