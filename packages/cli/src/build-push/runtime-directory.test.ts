@@ -1,9 +1,16 @@
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { mkdir, mkdtemp, readdir, rm, stat, symlink } from 'node:fs/promises';
+import {
+	link,
+	mkdir,
+	mkdtemp,
+	readdir,
+	rm,
+	stat,
+	symlink
+} from 'node:fs/promises';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import process, { platform } from 'node:process';
+import { platform } from 'node:process';
 
 import { invocationIdSchema } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,6 +36,50 @@ function planFor(base: string) {
 	const directory = path.join(base, 'cupboard', invocationId);
 
 	return { directory, socketPath: path.join(directory, socketFileName) };
+}
+
+function listen(server: Server, socketPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(socketPath, () => {
+			server.removeListener('error', reject);
+			resolve();
+		});
+	});
+}
+
+function close(server: Server): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.close((error) => {
+			if (error === undefined) {
+				resolve();
+				return;
+			}
+
+			reject(error);
+		});
+	});
+}
+
+/**
+ * Creates a stale Unix socket that refuses connections. Node unlinks the
+ * listening path when the server closes, so keep a hard link to the socket
+ * inode first. A missing path would exercise a different cleanup case.
+ */
+async function deadOwnerSocket(
+	directory: string,
+	socketPath: string
+): Promise<void> {
+	const listening = path.join(directory, 'live-owner.sock');
+	const server = createServer();
+
+	await listen(server, listening);
+
+	try {
+		await link(listening, socketPath);
+	} finally {
+		await close(server);
+	}
 }
 
 describe('planInvocationRuntime', () => {
@@ -183,23 +234,13 @@ describe('invocation runtime directory', () => {
 			const activeRoots = await createRootLinkDirectory(active, activeOwner);
 			await mkdir(stale, { recursive: true });
 			const staleSocket = path.join(base, 'stale.sock');
-			const staleOwner = spawn(
-				process.execPath,
-				[
-					'-e',
-					String.raw`const { createServer } = require('node:net'); const server = createServer(); server.listen(process.argv[1], () => process.stdout.write('ready\n'));`,
-					staleSocket
-				],
-				{ stdio: ['ignore', 'pipe', 'inherit'] }
-			);
-			await once(staleOwner.stdout, 'data');
+
+			await deadOwnerSocket(base, staleSocket);
 			await symlink(path.join(base, 'orphan.sock'), orphanOwner);
 			await symlink(
 				staleSocket,
 				path.join(parent, '.stale-roots.cupboard-owner')
 			);
-			staleOwner.kill('SIGKILL');
-			await once(staleOwner, 'exit');
 
 			const currentRoots = await createRootLinkDirectory(current, currentOwner);
 
