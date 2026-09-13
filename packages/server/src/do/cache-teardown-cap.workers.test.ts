@@ -35,7 +35,8 @@ import {
 	tenantUsageRow,
 	uploadMetadata,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
@@ -222,7 +223,6 @@ describe('cache teardown', () => {
 
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
-		const { token } = await bootstrap();
 
 		// Enough paths that the presence delete spans several parameter sub-chunks.
 		// Each path must carry a distinct narHash so the IN list does not collapse
@@ -246,20 +246,15 @@ describe('cache teardown', () => {
 			});
 		});
 
-		const pathsWithNars = paths.map((p, index) => [p, nars[index]] as const);
+		const { token } = await withoutAlarmArming(async () => {
+			const initial = await bootstrap();
 
-		const pushConcurrency = 8;
-		for (
-			let start = 0;
-			start < pathsWithNars.length;
-			start += pushConcurrency
-		) {
-			await Promise.all(
-				pathsWithNars
-					.slice(start, start + pushConcurrency)
-					.map(([metadata, nar]) => pushPath(token, metadata, 'builds', nar))
-			);
-		}
+			for (const [index, metadata] of paths.entries()) {
+				await pushPath(initial.token, metadata, 'builds', nars[index]);
+			}
+
+			return initial;
+		});
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
 			method: 'DELETE'
@@ -295,7 +290,7 @@ describe('cache teardown', () => {
 			presence: [],
 			usage: { bytes: 0, narinfos: 0, blobs: 0 }
 		});
-	}, 120_000);
+	});
 
 	it('clears only the generations a chunk actually retired', async () => {
 		await useTestServer('teardown-generations');
