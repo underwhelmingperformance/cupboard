@@ -1,4 +1,8 @@
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
@@ -383,18 +387,36 @@ describe('cupboard acquisition', () => {
 		);
 	}
 
-	it('gives every flake publish job the coordinate configure resolved', async () => {
+	it('gives every publishing flake job the coordinate configure resolved', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const setupInputs = inputsOf(workflow, cupboardAction('setup')).map(
-			(inputs) => selectInputs(inputs, (name) => !provisionInputNames.has(name))
+		const publishingSetup = allSteps(workflow).filter(
+			(entry) =>
+				entry.job !== 'remove-cache' &&
+				entry.step.uses === cupboardAction('setup')
+		);
+		const setupInputs = publishingSetup.map(({ step }) =>
+			selectInputs(step.with, (name) => !provisionInputNames.has(name))
 		);
 
 		expect({
+			jobs: publishingSetup.map(({ job }) => job),
+			callerCheckouts: allSteps(workflow)
+				.filter(
+					({ step }) =>
+						step.uses?.startsWith('actions/checkout@') === true &&
+						step.with?.repository === undefined
+				)
+				.map(({ job, step }) => ({ job, condition: step.if })),
 			configureOutput: workflow.jobs.configure?.steps.find(
 				(step) => step.uses === cupboardAction('resolve-cupboard')
 			)?.id,
 			setupInputs
 		}).toStrictEqual({
+			jobs: ['plan', 'cohort'],
+			callerCheckouts: [
+				{ job: 'plan', condition: undefined },
+				{ job: 'cohort', condition: undefined }
+			],
 			configureOutput: 'resolve-cupboard',
 			setupInputs: setupInputs.map(() => ({
 				'cache-url': '${{ inputs.url }}',
@@ -406,6 +428,46 @@ describe('cupboard acquisition', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				'checkout-dir': sourceCheckoutDirectory
 			}))
+		});
+	});
+
+	it('installs cupboard without a cache substituter for the removal job', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const removalSetup = (workflow.jobs['remove-cache']?.steps ?? []).filter(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect(removalSetup.map((step) => step.with)).toStrictEqual([
+			{
+				cupboard: '${{ needs.configure.outputs.cupboard }}',
+				'checkout-dir': sourceCheckoutDirectory
+			}
+		]);
+	});
+
+	it('prepares Nix before acquiring cupboard from source for removal', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const steps = workflow.jobs['remove-cache']?.steps ?? [];
+		const prepareIndex = steps.findIndex(
+			(step) => step.uses === cupboardAction('prepare')
+		);
+		const setupIndex = steps.findIndex(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect({
+			preparation: steps.filter(
+				(step) => step.uses === cupboardAction('prepare')
+			),
+			beforeAcquisition: prepareIndex !== -1 && prepareIndex < setupIndex
+		}).toStrictEqual({
+			preparation: [
+				{
+					uses: cupboardAction('prepare'),
+					if: "${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}"
+				}
+			],
+			beforeAcquisition: true
 		});
 	});
 
@@ -638,7 +700,8 @@ describe('cohort planning and publication', () => {
 		expect(Object.keys(workflow.jobs)).toStrictEqual([
 			'configure',
 			'plan',
-			'cohort'
+			'cohort',
+			'remove-cache'
 		]);
 	});
 
@@ -665,7 +728,9 @@ describe('cohort planning and publication', () => {
 				cupboardAction('setup'),
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
-				cupboardAction('attest-attach')
+				cupboardAction('attest-attach'),
+				cupboardAction('prepare'),
+				cupboardAction('setup')
 			],
 			artifactSteps: []
 		});
@@ -1073,6 +1138,105 @@ describe('repository cache publishing', () => {
 				() =>
 					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main'
 			)
+		});
+	});
+});
+
+const execFileAsync = promisify(execFile);
+
+async function resolvePublicationEvent(event: {
+	readonly action: string;
+	readonly merged: boolean;
+}): Promise<Record<string, string>> {
+	const workflow = await loadWorkflow(flakeWorkflow);
+	const step = workflow.jobs.configure?.steps.find(
+		(candidate) => candidate.name === 'Resolve inputs'
+	);
+
+	if (step?.run === undefined) {
+		throw new Error('The publication workflow has no input-resolution script');
+	}
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-publication-event-')
+	);
+	const output = path.join(directory, 'output');
+
+	try {
+		await execFileAsync('bash', ['-c', step.run], {
+			env: {
+				...Object.fromEntries(
+					Object.keys(step.env ?? {}).map((key) => [key, ''])
+				),
+				PRESET: 'pull-request-and-branch',
+				PUSH: 'true',
+				PERMANENT: 'false',
+				EVENT_NAME: 'pull_request',
+				EVENT_ACTION: event.action,
+				MERGED: String(event.merged),
+				PR_NUMBER: '7',
+				REPOSITORY: 'acme/infra',
+				REPOSITORY_ID: '1234',
+				HEAD_REPOSITORY_ID: '1234',
+				REF: event.merged ? 'refs/heads/main' : 'refs/pull/7/merge',
+				BRANCH: 'main',
+				GITHUB_OUTPUT: output
+			}
+		});
+		const written = await readFile(output, 'utf8');
+
+		return Object.fromEntries(
+			written
+				.trimEnd()
+				.split('\n')
+				.map((line) => {
+					const separator = line.indexOf('=');
+
+					return [line.slice(0, separator), line.slice(separator + 1)];
+				})
+		);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('pull-request cache lifecycle', () => {
+	it.each([
+		{ action: 'opened', merged: false, removed: '' },
+		{ action: 'closed', merged: false, removed: 'gh-1234-pr-7' },
+		{ action: 'closed', merged: true, removed: '' }
+	])(
+		'resolves a $action pull request with merged=$merged',
+		async ({ action, merged, removed }) => {
+			expect(await resolvePublicationEvent({ action, merged })).toStrictEqual({
+				cache: 'gh-1234-pr-7',
+				'root-prefix': 'github:acme/infra/pr-7',
+				ttl: '14d',
+				permanent: 'false',
+				'reuse-view': '',
+				'provision-cache': 'gh-1234-pr-7',
+				'provision-cache-ttl': '14d',
+				'remove-cache': removed
+			});
+		}
+	);
+
+	it('keeps closed events out of planning and grants release verification to removal', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		expect({
+			merged: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Resolve inputs'
+			)?.env?.MERGED,
+			planCondition: workflow.jobs.plan?.if,
+			removalPermissions: workflow.jobs['remove-cache']?.permissions
+		}).toStrictEqual({
+			merged: '${{ github.event.pull_request.merged }}',
+			planCondition:
+				"github.event_name != 'pull_request' || github.event.action != 'closed'",
+			removalPermissions: {
+				contents: 'read',
+				attestations: 'read',
+				'id-token': 'write'
+			}
 		});
 	});
 });

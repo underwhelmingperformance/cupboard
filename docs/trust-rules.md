@@ -204,8 +204,11 @@ cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
 Create the cache explicitly to choose its access and default root TTL before
 publication. A first push can also create a missing cache, but it inherits the
 default cache's access and has no default root TTL. The flake publish workflow
-invokes creation from its plan job before publishing. It does not yet remove a
-cache when the pull request closes.
+invokes creation from its plan job before publishing. A closed event removes the
+cache only if the pull request was not merged. Merged caches remain available to
+the branch run through the reuse view, and their roots expire according to their
+TTL. All closed events skip planning and building. The caller must include
+`closed` in its `pull_request` trigger for the removal job to run.
 
 A default root TTL lets roots expire even if a later writer supplies no TTL.
 Collection can then reclaim paths that have no other retention. An abandoned
