@@ -1,3 +1,4 @@
+import { cacheNameSchema, type CacheScope } from '@cupboard/nix-store/scalars';
 import {
 	contractionMigrations,
 	currentLocalStep,
@@ -9,6 +10,10 @@ import {
 import { StatusCodes } from 'http-status-codes';
 import { expect, it } from 'vitest';
 
+import { cacheCreateAuthorizationDetails } from '../../packages/cli/src/auth/attenuate.ts';
+import { githubPullRequestClaims } from '../../packages/cli/src/commands/github/claims.ts';
+import { pullRequestCacheName } from '../../packages/cli/src/commands/github/convention.ts';
+import { githubPrAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
 import {
 	type LocalStepReadiness,
@@ -31,6 +36,12 @@ import {
 // Enough for every seeded tenant in one pass.
 const wakeLimit = 20;
 const wakePassLimit = 100;
+
+const repository = {
+	repositoryId: 4321,
+	repositoryOwnerId: 8765,
+	fullName: 'owner/repo'
+};
 
 const resumableFixtureTenants = 2 + sleepingFixtureTenants.length;
 
@@ -494,6 +505,77 @@ it('starts an offboarding tenant that never converted its catalogue', async () =
 			read: StatusCodes.NOT_FOUND,
 			catalogueVersion: 2
 		});
+	} finally {
+		await server.stop();
+	}
+});
+
+// Existing tenants are upgraded in place, and their runs use the same
+// workflow, so the grant that permits a pull-request run to create its cache
+// has to work against a tenant whose state came from the predecessor.
+it('lets a pull-request token create its cache on an upgraded tenant', async () => {
+	const server = await StagedDeploymentServer.start(process.cwd());
+
+	try {
+		await server.seedPredecessor();
+		await deployOverPredecessor(server);
+
+		const client = await server.deploymentClient();
+
+		await client.wakeLocalStep(wakeLimit);
+		await contractOverPredecessor(server);
+		await client.wakeLocalStep(wakeLimit);
+
+		const owner = await server.tenantOwnerRpc('upgrade-active');
+		const tenantUrl = server.tenantUrl('upgrade-active');
+
+		// The rule `cupboard github setup` writes, with the issuer replaced by
+		// the one the harness can sign for.
+		await owner.oidcTrust.add({
+			...githubPrAddBody(tenantUrl, repository, {
+				repo: repository.fullName
+			}),
+			issuer: server.issuerUrl
+		});
+
+		const cache: CacheScope = {
+			kind: 'named',
+			name: cacheNameSchema.parse(
+				pullRequestCacheName(repository.repositoryId, 1)
+			)
+		};
+		const credential = await server.tenantCiCredential(
+			'upgrade-active',
+			{
+				...githubPullRequestClaims(tenantUrl, repository, {
+					pullRequestNumber: 1
+				}),
+				iss: server.issuerUrl
+			},
+			cacheCreateAuthorizationDetails({ cache })
+		);
+		const cacheName = cache.name;
+		const ci = server.tenantRpcAs('upgrade-active', credential);
+
+		await ci.caches.put.inNamedCache({
+			cacheName: cache.name,
+			access: 'public',
+			priority: 30
+		});
+
+		const { caches } = await server.tenantCaches('upgrade-active');
+
+		expect(
+			caches
+				.map((summary) =>
+					summary.scope.kind === 'named' ? summary.scope.name : 'default'
+				)
+				.toSorted((left, right) => left.localeCompare(right))
+		).toStrictEqual(
+			['builds', 'default', 'secrets', cacheName].toSorted((left, right) =>
+				left.localeCompare(right)
+			)
+		);
 	} finally {
 		await server.stop();
 	}

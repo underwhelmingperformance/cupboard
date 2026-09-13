@@ -12,8 +12,43 @@ import {
 	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
 
-export const pullRequestViewName = 'pull-requests';
-export const pullRequestPrefix = 'pr-';
+// The workflow renders this prefix in shell. Keep both forms consistent
+// with the claim-bound template used by the trust rule.
+export function pullRequestCachePrefix(repositoryId: number | string): string {
+	return `gh-${String(repositoryId)}-pr-`;
+}
+
+export function pullRequestCacheName(
+	repositoryId: number | string,
+	pullRequestNumber: number | string
+): string {
+	return `${pullRequestCachePrefix(repositoryId)}${String(pullRequestNumber)}`;
+}
+
+// The workflow derives this name independently in its configure job.
+export function pullRequestViewName(repositoryId: number | string): string {
+	return `pull-requests-${String(repositoryId)}`;
+}
+
+// The template variables a pull-request rule substitutes from verified claims.
+const repositoryVariable = '{repository_id}';
+const pullRequestVariable = '{pr}';
+
+/**
+ * The cache a pull-request rule binds, as a template over verified claims.
+ */
+export function pullRequestCacheTemplate(): string {
+	return pullRequestCacheName(repositoryVariable, pullRequestVariable);
+}
+
+/**
+ * The retention root a pull-request rule binds. The root string already
+ * contains the repository, so the pull-request number alone distinguishes one
+ * root from another and the repository id is not repeated in it.
+ */
+export function pullRequestRootTemplate(repositoryFullName: string): string {
+	return `github:${repositoryFullName}/pr-${pullRequestVariable}/`;
+}
 
 // Branches, pull-request merge refs and abbreviated commit ids can resolve to
 // different workflow contents later. The GitHub commands therefore accept

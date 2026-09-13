@@ -10,6 +10,7 @@ import {
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import {
 	isDestinationPreferred,
+	reuseViewNameSchema,
 	reuseViewPrioritySchema,
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
@@ -49,13 +50,16 @@ import {
 import {
 	parseExactWorkflowReference,
 	parseWorkflowReference,
-	pullRequestPrefix,
+	pullRequestCachePrefix,
 	pullRequestViewName,
 	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
 import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
-import { lookupRepository } from './oidc-trust/github.ts';
+import {
+	lookupRepository,
+	type RepositoryIdentity
+} from './oidc-trust/github.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
@@ -552,22 +556,27 @@ interface PlannedSetupStep {
 
 async function planReuseView(
 	client: GithubSetupClient,
+	identity: RepositoryIdentity,
 	destinationPriority: CachePriority
 ): Promise<PlannedSetupStep> {
-	const selectors = [{ kind: 'prefix' as const, prefix: pullRequestPrefix }];
+	const prefix = pullRequestCachePrefix(identity.repositoryId);
+	const name = reuseViewNameSchema.parse(
+		pullRequestViewName(identity.repositoryId)
+	);
+	const selectors = [{ kind: 'prefix' as const, prefix }];
 	const { views } = await client.reuseViews.list();
-	const existing = views.find((view) => view.name === pullRequestViewName);
+	const existing = views.find((view) => view.name === name);
 
 	if (existing === undefined) {
 		return {
 			step: {
 				step: 'reuse view',
 				outcome: 'created',
-				detail: `${pullRequestPrefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
+				detail: `${prefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
 			},
 			apply: async () => {
 				await client.reuseViews.set({
-					name: pullRequestViewName,
+					name,
 					access: 'public',
 					selectors,
 					priority: reuseViewPrioritySchema.parse(
@@ -590,7 +599,7 @@ async function planReuseView(
 			step: 'reuse view',
 			outcome: 'drift',
 			detail: isDestinationPreferred(destinationPriority, existing.priority)
-				? 'stored selectors differ from the pr- prefix setup would write'
+				? `stored selectors differ from the ${prefix} prefix setup would write`
 				: `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
 		}
 	};
@@ -747,7 +756,7 @@ export async function runGithubSetup(
 	);
 	const configurationPlans = await reporter.phase(
 		'Reading tenant configuration',
-		async () => [await planReuseView(client, destination.priority)]
+		async () => [await planReuseView(client, identity, destination.priority)]
 	);
 	const drifted = configurationPlans.filter(
 		({ step }) => step.outcome === 'drift'
@@ -1047,6 +1056,7 @@ export function registerGithubCommands(
 				options,
 				reporter,
 				{
+					caches: rpc.caches,
 					reuseViews: rpc.reuseViews,
 					oidcTrust: rpc.oidcTrust
 				},

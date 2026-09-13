@@ -18,12 +18,13 @@ on:
       preset:
         description: >-
           Derive cache, root-prefix, and ttl from the triggering event.
-          'pull-request-and-branch' gives each pull_request run a pr-<number>
-          cache with a 14-day TTL. A run on the configured branch uses the
-          default cache. Both roots start with github:<repository>; other refs
-          are rejected before planning. Only branch runs use reuse-view. This
-          input is mutually exclusive with cache, root-prefix, ttl, and
-          permanent; leave it empty to use those explicit inputs.
+          'pull-request-and-branch' gives each pull_request run a
+          gh-<repository-id>-pr-<number> cache with a 14-day TTL. A run on the
+          configured branch uses the default cache. Both roots start with
+          github:<repository>; other refs are rejected before planning. Only
+          branch runs use reuse-view. This input is mutually exclusive with
+          cache, root-prefix, ttl, and permanent; leave it empty to use those
+          explicit inputs.
         required: false
         default: ''
         type: string
@@ -300,6 +301,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -391,17 +393,24 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                CACHE="pr-${PR_NUMBER}"
+                # Match pullRequestCacheTemplate and the prefix used by
+                # cupboard github setup's repository view.
+                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
                 TTL=14d
                 PERMANENT=false
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
                 REUSE_VIEW=''
-                ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
+                # Match pullRequestRootTemplate in packages/cli.
+                ROOT_PREFIX="github:${REPOSITORY}/pr-${PR_NUMBER}"
               elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
                 ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
                 PERMANENT=true
+                # Match pullRequestViewName in packages/cli.
+                if [ -z "${REUSE_VIEW}" ]; then
+                  REUSE_VIEW="pull-requests-${REPOSITORY_ID}"
+                fi
               else
                 echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
                 exit 1
