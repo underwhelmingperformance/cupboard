@@ -7,6 +7,49 @@ built and published.
 
 [releases]: ./releases.md
 
+## Workers plan and subrequest allowance
+
+Cupboard limits each invocation to its configured number of internal-service
+subrequests. The [Workers limits] list 1,000 calls on Free and a default of
+10,000 on Paid. D1 and R2 binding calls share that runtime allowance, and one
+`D1Database.batch()` counts as one call regardless of its statement count.
+Cupboard reserves 100 calls for work outside its tracked D1 and R2 bindings.
+
+The [D1 limits] page still lists 50 queries per invocation on Free and 1,000 on
+Paid. Those figures conflict with the newer Workers subrequest limits and with a
+Paid runtime check in which 10,000 D1 calls completed and the 10,001st failed.
+The Free internal-service allowance has not been checked against a hosted
+Worker. Cupboard uses the Workers limits for both plans.
+
+`cupboard deploy` reads the account's subscriptions and writes the selected
+allowance into both Workers. Plan detection is best effort. If the token cannot
+read subscriptions, the request fails, or the response contains an unrecognised
+Workers plan, deployment reports the reason and uses the Free allowance. An
+unknown rate-plan ID is included in the message. The automatic Paid match is
+`WORKERS_PAID`, as listed in Cloudflare's [subscription reference]. Other
+Workers identifiers use the Free allowance until their limit is verified.
+
+Use `--workers-plan free` or `--workers-plan paid` to skip detection and select
+the allowance explicitly. The flag must match the account's subscription; it
+does not change that subscription. For example, an operator who has confirmed a
+Paid subscription can deploy with a token that cannot read billing information:
+
+```sh
+cupboard deploy --workers-plan paid
+```
+
+The allowance is stored in `CUPBOARD_SUBREQUESTS_PER_INVOCATION`. An unset or
+invalid value uses 1,000 calls. The parser accepts the Paid figure only when it
+is exactly 10,000; all other values use the Free figure. Both checked-in
+Wrangler configurations leave `limits.subrequests` unset, so Cloudflare applies
+the account's plan limit. The configured allowance does not extend the tenant
+object's critical-section deadline.
+
+[Workers limits]: https://developers.cloudflare.com/workers/platform/limits/
+[D1 limits]: https://developers.cloudflare.com/d1/platform/limits/
+[subscription reference]:
+  https://developers.cloudflare.com/tenant/reference/subscriptions/
+
 ## Phases
 
 The `deployment_phase` row in D1 records the deployment's phase and the local

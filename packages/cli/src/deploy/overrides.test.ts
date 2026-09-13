@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
-import { renameResource, withCrons, withSignupGate } from './overrides.ts';
+import {
+	renameResource,
+	withCrons,
+	withSignupGate,
+	withWorkersInvocationAllowance
+} from './overrides.ts';
 
 const config = parseDeploymentConfig(
 	`{
@@ -122,5 +127,22 @@ describe('withSignupGate', () => {
 		const updated = withSignupGate(withSignupGate(config, admin));
 
 		expect(updated.control.vars.CUPBOARD_SIGNUP_SUBJECT).toBe('');
+	});
+});
+
+describe('withWorkersInvocationAllowance', () => {
+	it('sets the allowance on both workers, preserving other vars', () => {
+		const updated = withWorkersInvocationAllowance(config, {
+			subrequests: 1000
+		});
+		const expected = { CUPBOARD_SUBREQUESTS_PER_INVOCATION: '1000' };
+
+		expect({
+			control: updated.control.vars,
+			tenant: updated.tenant.vars
+		}).toStrictEqual({
+			control: { ...config.control.vars, ...expected },
+			tenant: { ...config.tenant.vars, ...expected }
+		});
 	});
 });

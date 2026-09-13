@@ -1,3 +1,5 @@
+import type { WorkersInvocationAllowance } from '@cupboard/protocol/platform';
+
 import type {
 	DeploymentConfig,
 	EditableResourceKind,
@@ -118,5 +120,25 @@ export function withSignupGate(
 			...config.control,
 			vars: { ...config.control.vars, ...variables }
 		}
+	};
+}
+
+/**
+ * Sets the shared D1 and R2 subrequest allowance for both Workers.
+ */
+export function withWorkersInvocationAllowance(
+	config: DeploymentConfig,
+	allowance: WorkersInvocationAllowance
+): DeploymentConfig {
+	const variables = {
+		CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(allowance.subrequests)
+	};
+
+	return {
+		control: {
+			...config.control,
+			vars: { ...config.control.vars, ...variables }
+		},
+		tenant: { ...config.tenant, vars: { ...config.tenant.vars, ...variables } }
 	};
 }

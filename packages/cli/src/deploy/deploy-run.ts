@@ -4,6 +4,7 @@ import {
 	type LocalStep,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
@@ -156,7 +157,12 @@ export function derivedPlanRows(
 
 	return [
 		{ label: 'Build', value: artifact.buildVersion },
-
+		{
+			label: 'Subrequests per invocation',
+			value:
+				artifact.config.tenant.vars.CUPBOARD_SUBREQUESTS_PER_INVOCATION ??
+				String(workersInvocationAllowances.free.subrequests)
+		},
 		{
 			label: 'Control worker',
 			value: `${(artifact.controlBundle.code.length / 1024).toFixed(0)} KiB`

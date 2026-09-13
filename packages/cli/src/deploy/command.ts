@@ -58,7 +58,12 @@ import {
 	onboardDeployment
 } from './onboard.ts';
 import { showReadyCache } from './onboard-ready.ts';
-import { renameResource, withCrons, withSignupGate } from './overrides.ts';
+import {
+	renameResource,
+	withCrons,
+	withSignupGate,
+	withWorkersInvocationAllowance
+} from './overrides.ts';
 import {
 	cloudflareDashIssuer,
 	defaultOwnerChoice,
@@ -92,9 +97,15 @@ import {
 	type DeploymentPlan,
 	observeDeployment,
 	planDeployment,
+	planOfflineDeployment,
 	transitionPlanRows
 } from './transition.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
+import {
+	establishWorkersPlan,
+	type WorkersAllowance,
+	type WorkersPlanOverride
+} from './workers-plan.ts';
 
 export class DeploymentSettlementUrlMissingError extends CliError {
 	constructor() {
@@ -167,6 +178,7 @@ export interface DeployCliOptions {
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
 	readonly wrangler?: boolean;
+	readonly workersPlan?: WorkersPlanOverride;
 }
 
 export interface DeployRuntimeOptions {
@@ -1015,7 +1027,7 @@ async function deployFlow(
 	};
 
 	if (cliOptions.dryRun === true) {
-		const offlinePlan = planDeployment(artifact, { kind: 'offline' });
+		const offlinePlan = planOfflineDeployment(artifact, cliOptions.workersPlan);
 		const offlineArtifact = offlinePlan.artifact;
 		const assembled = assembleSecrets({
 			env: process.env,
@@ -1275,6 +1287,27 @@ async function deployFlow(
 	}
 
 	let reviewedPlan: DeploymentPlan | undefined;
+	const accountAllowances = new Map<CloudflareAccountId, WorkersAllowance>();
+	const allowanceFor = async (
+		account: CloudflareAccountId
+	): Promise<WorkersAllowance> => {
+		const cached = accountAllowances.get(account);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const allowance = await establishWorkersPlan({
+			api: apiFor(account),
+			ui,
+			...(cliOptions.workersPlan !== undefined && {
+				override: cliOptions.workersPlan
+			}),
+			...(runtimeOptions.signal !== undefined && {
+				signal: runtimeOptions.signal
+			})
+		});
+		accountAllowances.set(account, allowance);
+		return allowance;
+	};
 
 	const agreed = await reviewPlan(
 		{
@@ -1287,16 +1320,21 @@ async function deployFlow(
 			ui,
 			render: async (state) => {
 				const { options, missing, annotated } = await planFor(state);
+				const allowance = await allowanceFor(state.accountId);
 				const plannedArtifact = {
 					...artifact,
-					config: withSignupGate(
-						state.config,
-						state.owner.kind === 'owner' ? state.owner.owner : undefined
+					config: withWorkersInvocationAllowance(
+						withSignupGate(
+							state.config,
+							state.owner.kind === 'owner' ? state.owner.owner : undefined
+						),
+						allowance
 					)
 				};
 				reviewedPlan = planDeployment(
 					plannedArtifact,
-					await observeDeployment(apiFor(state.accountId), plannedArtifact)
+					await observeDeployment(apiFor(state.accountId), plannedArtifact),
+					allowance.source
 				);
 
 				ui.note('Deployment plan', [
