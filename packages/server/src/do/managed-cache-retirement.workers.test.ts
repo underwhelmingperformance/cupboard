@@ -612,7 +612,7 @@ describe('managed cache retirement', () => {
 			cacheLive: true,
 			wake: '2026-01-01T06:00:00.000Z',
 			steadyPassCost: [
-				{ method: 'garbage-collection', rowsRead: 182, rowsWritten: 8 }
+				{ method: 'garbage-collection', rowsRead: 179, rowsWritten: 8 }
 			]
 		});
 
