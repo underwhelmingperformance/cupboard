@@ -1,3 +1,4 @@
+import { currentLocalStep } from '@cupboard/protocol/deployment';
 import type { Reporter } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
@@ -1028,7 +1029,7 @@ describe('runDeploy', () => {
 			recorded: calls.filter((call) => call.startsWith('d1q:INSERT INTO'))
 		}).toStrictEqual({
 			pending: 2,
-			requiredStep: 1,
+			requiredStep: currentLocalStep,
 			stragglers: ['alpha', 'beta'],
 			recorded: []
 		});

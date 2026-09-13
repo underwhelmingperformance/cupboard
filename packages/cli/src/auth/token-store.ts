@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 import { canonicalHref } from '@cupboard/nix-store/url';
-import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
+import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { z } from 'zod';
 
 import { decodeJwtPayload } from './jwt.ts';
@@ -30,7 +30,7 @@ const cachedSessionSchema = z.object({
 export type CachedSession = z.output<typeof cachedSessionSchema>;
 
 export function sessionFromTokenResponse(
-	response: Pick<ParsedTokenResponse, 'access_token' | 'refresh_token'>
+	response: Pick<TokenResponse, 'access_token' | 'refresh_token'>
 ): CachedSession {
 	return {
 		accessToken: response.access_token,

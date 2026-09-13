@@ -1,10 +1,4 @@
-import {
-	cacheSelectorSchema,
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	scopeFromSelector,
-	storedCacheSchema
-} from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type AuthorizationDetails,
@@ -12,11 +6,11 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	acceptCapabilitiesHeader,
-	type ParsedUploadPathMetadata,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
 	uploadGraceFactsCapability,
-	type UploadPreviewResponse,
+	type UploadPathMetadata,
+	type UploadPreviewResponseInput,
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -31,12 +25,14 @@ import {
 	blobStateArmTimes,
 	cacheScopedPath,
 	currentServer,
+	defaultCache,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
 	negotiateUploads,
 	pushPath,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	testPushId,
 	uploadMetadata,
@@ -53,38 +49,38 @@ async function fireReconcile(): Promise<void> {
 }
 
 function previewOnlyGrants(
-	cacheSelector: string = DEFAULT_CACHE_SELECTOR
+	cache: CacheScope = defaultCache()
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:preview'],
-			cache: scopeFromSelector(cacheSelectorSchema.parse(cacheSelector))
+			cache
 		}
 	]);
 }
 
 function negotiateOnlyGrants(
-	cacheSelector: string = DEFAULT_CACHE_SELECTOR
+	cache: CacheScope = defaultCache()
 ): AuthorizationDetails {
 	return authorizationDetailsSchema.parse([
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:negotiate'],
-			cache: scopeFromSelector(cacheSelectorSchema.parse(cacheSelector))
+			cache
 		}
 	]);
 }
 
 async function previewUploads(
 	token: string,
-	paths: readonly ParsedUploadPathMetadata[],
-	cache: string = DEFAULT_CACHE,
+	paths: readonly UploadPathMetadata[],
+	cache: CacheScope = defaultCache(),
 	shouldReportGrace = true
 ): Promise<{
 	readonly status: number;
 	readonly capabilities: string | undefined;
-	readonly body: UploadPreviewResponse;
+	readonly body: UploadPreviewResponseInput;
 }> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/uploads/preview'),
@@ -124,7 +120,7 @@ async function addGracePolicy(
 	expect(response.status).toBe(StatusCodes.OK);
 }
 
-async function sideEffectSnapshot(cache: string): Promise<{
+async function sideEffectSnapshot(cache: CacheScope): Promise<{
 	readonly pendingUploadCount: number;
 	readonly graceRows: readonly {
 		readonly storePathHash: string;
@@ -133,9 +129,8 @@ async function sideEffectSnapshot(cache: string): Promise<{
 	readonly graceManaged: boolean;
 	readonly reconcileKeys: readonly string[];
 }> {
-	const storedCache = storedCacheSchema.parse(cache);
-
 	return runInDurableObject(currentServer(), async (instance) => {
+		const resolved = resolvedCache(instance.context, cache);
 		const pendingUploadCount = instance.context.db
 			.select({ id: schema.pendingUploads.id })
 			.from(schema.pendingUploads)
@@ -146,14 +141,14 @@ async function sideEffectSnapshot(cache: string): Promise<{
 				retainUntil: schema.retentionGrace.retainUntil
 			})
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, storedCache))
+			.where(eq(schema.retentionGrace.cacheId, resolved.id))
 			.orderBy(schema.retentionGrace.storePathHash)
 			.all();
 		const isGraceManaged =
 			instance.context.db
-				.select({ graceManaged: schema.caches.graceManaged })
-				.from(schema.caches)
-				.where(eq(schema.caches.name, storedCache))
+				.select({ graceManaged: schema.cacheIdentities.graceManaged })
+				.from(schema.cacheIdentities)
+				.where(eq(schema.cacheIdentities.id, resolved.id))
 				.get()?.graceManaged ?? false;
 		const reconciling = await new ReconcileQueueService(
 			instance.context
@@ -185,7 +180,7 @@ describe('upload preview', () => {
 			const preview = await previewUploads(
 				token,
 				[],
-				DEFAULT_CACHE,
+				defaultCache(),
 				shouldReportGrace
 			);
 
@@ -206,7 +201,7 @@ describe('upload preview', () => {
 			storePathHash: repeated('0'),
 			name: 'legacy-preview'
 		});
-		const preview = await previewUploads(token, [path], DEFAULT_CACHE, false);
+		const preview = await previewUploads(token, [path], defaultCache(), false);
 
 		expect(preview.body.uploads).toStrictEqual([
 			{
@@ -233,9 +228,9 @@ describe('upload preview', () => {
 		await negotiateUploads(token, [path]);
 		await fireReconcile();
 
-		const before = await sideEffectSnapshot(DEFAULT_CACHE);
+		const before = await sideEffectSnapshot(defaultCache());
 		const preview = await previewUploads(token, [path]);
-		const after = await sideEffectSnapshot(DEFAULT_CACHE);
+		const after = await sideEffectSnapshot(defaultCache());
 
 		expect({
 			status: preview.status,
@@ -349,7 +344,7 @@ describe('upload preview', () => {
 		// preview reads it.
 		await negotiateUploads(token, [skipPath]);
 
-		const stored = await sideEffectSnapshot(DEFAULT_CACHE);
+		const stored = await sideEffectSnapshot(defaultCache());
 		const preview = await previewUploads(token, [
 			skipPath,
 			reusePath,

@@ -1,7 +1,7 @@
 import { type S3ClientConfig } from '@aws-sdk/client-s3';
 import { type Options } from '@aws-sdk/lib-storage';
 import {
-	type ParsedPushCredential,
+	type PushCredential,
 	pushCredentialSchema
 } from '@cupboard/protocol/upload';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -54,7 +54,7 @@ describe('r2BlobUploader', () => {
 	const partBytes = 8 * 1024 * 1024;
 
 	it('builds a path-style auto-region S3 client whose credentials resolver renews through the provider', async () => {
-		const provider = vi.fn<() => Promise<ParsedPushCredential>>(() =>
+		const provider = vi.fn<() => Promise<PushCredential>>(() =>
 			Promise.resolve(credential)
 		);
 
@@ -86,7 +86,7 @@ describe('r2BlobUploader', () => {
 	});
 
 	it('streams the body to the requested key and awaits the managed upload', async () => {
-		const provider = vi.fn<() => Promise<ParsedPushCredential>>(() =>
+		const provider = vi.fn<() => Promise<PushCredential>>(() =>
 			Promise.resolve(credential)
 		);
 		const body = new ReadableStream<Uint8Array>();

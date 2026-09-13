@@ -1,10 +1,9 @@
 import {
-	cacheNameSchema,
+	type CacheScope,
 	DEFAULT_CACHE,
 	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -16,7 +15,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { CacheRepository } from '../db/cache-repository.ts';
+import { legacyCacheKey } from '../db/cache.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
@@ -25,9 +24,12 @@ import {
 	asOneInvocation,
 	authorisedFetch,
 	currentServer,
+	defaultCache,
 	initialise,
+	namedCache,
 	narInfoDeletionRows,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	syntheticStorePathHash,
 	testBase,
@@ -38,6 +40,7 @@ import {
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { chunk } from './bulk.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	DeletionQueueService,
@@ -46,9 +49,9 @@ import {
 } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
-const selectDeletions = 'SELECT cache, store_path_hash FROM narinfo_deletion';
-const defaultCache: StoredCache = DEFAULT_CACHE;
-const buildsCache = cacheNameSchema.parse('builds');
+const selectDeletions =
+	'SELECT cache_id, store_path_hash FROM narinfo_deletion';
+const buildsCache = namedCache('builds');
 
 function syntheticEntries(count: number): TornDownNarInfo[] {
 	return Array.from({ length: count }, (_unused, index) => ({
@@ -63,6 +66,7 @@ function buildDeletionQueue(context: ServerContext): DeletionQueueService {
 	const attestationCas = new AttestationCasService(context);
 	const attestations = new AttestationsService(
 		context,
+		new CacheRegistrationService(context),
 		attestationCas,
 		narInfoObjects
 	);
@@ -80,17 +84,19 @@ async function seedQueuedDeletions(
 ): Promise<void> {
 	const createdAt = isoTimestamp(testBase);
 
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
+		const cache = resolvedCache(instance.context);
 
-		// Each row binds five parameters. Keep the insert below the driver's
+		// Each row binds six parameters. Keep the insert below the driver's
 		// bound-parameter limit.
-		for (const batch of chunk(entries, 18)) {
+		for (const batch of chunk(entries, 16)) {
 			database
 				.insert(narInfoDeletions)
 				.values(
 					batch.map((entry) => ({
-						cache: defaultCache,
+						cache: legacyCacheKey(cache.scope, cache.access),
+						cacheId: cache.id,
 						storePathHash: entry.storePathHash,
 						narHash: entry.narHash,
 						generation: entry.generation,
@@ -103,14 +109,14 @@ async function seedQueuedDeletions(
 }
 
 function expectedQueueRows(entries: readonly TornDownNarInfo[]): {
-	cache: string;
+	cache: CacheScope;
 	storePathHash: StorePathHash;
 	narHash: NixSha256HashString;
 	generation: number;
 }[] {
 	return entries
 		.map((entry) => ({
-			cache: DEFAULT_CACHE,
+			cache: defaultCache(),
 			storePathHash: entry.storePathHash,
 			narHash: entry.narHash,
 			generation: entry.generation
@@ -132,19 +138,43 @@ describe('narinfo deletion queue', () => {
 
 		await runInDurableObject(
 			testServerFor('narinfo-deletion-caches'),
-			(_instance, state) => {
+			(instance, state) => {
+				const defaultResolved = resolvedCache(instance.context);
+				const buildsResolved = instance.context.cacheRepository.resolveOrCreate(
+					buildsCache,
+					'public'
+				);
+
 				drizzle(state.storage, { schema: { narInfoDeletions } })
 					.insert(narInfoDeletions)
 					.values([
-						{ cache: defaultCache, storePathHash: hash, narHash, createdAt },
-						{ cache: buildsCache, storePathHash: hash, narHash, createdAt }
+						{
+							cache: legacyCacheKey(
+								defaultResolved.scope,
+								defaultResolved.access
+							),
+							cacheId: defaultResolved.id,
+							storePathHash: hash,
+							narHash,
+							createdAt
+						},
+						{
+							cache: legacyCacheKey(
+								buildsResolved.scope,
+								buildsResolved.access
+							),
+							cacheId: buildsResolved.id,
+							storePathHash: hash,
+							narHash,
+							createdAt
+						}
 					])
 					.run();
 			}
 		);
 
 		await env.BLOBS.put(
-			narInfoObjectKey(fixtureTenant, hash),
+			narInfoObjectKey(fixtureTenant, hash, defaultCache()),
 			'default narinfo'
 		);
 		await env.BLOBS.put(
@@ -161,7 +191,7 @@ describe('narinfo deletion queue', () => {
 		);
 
 		const defaultObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, hash)
+			narInfoObjectKey(fixtureTenant, hash, defaultCache())
 		);
 		const namedObject = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, hash, buildsCache)
@@ -190,14 +220,11 @@ describe('narinfo deletion queue', () => {
 
 		const rows = await runInDurableObject(currentServer(), (instance) => {
 			const queue = buildDeletionQueue(instance.context);
-			const cacheId = new CacheRepository(instance.context.db).find(
-				defaultCache
-			);
+			const cache = resolvedCache(instance.context);
 
 			queue.enqueueNarInfoDeletion(
 				instance.context.db,
-				defaultCache,
-				cacheId,
+				cache,
 				entry.storePathHash,
 				entry.narHash,
 				entry.generation,
@@ -205,8 +232,7 @@ describe('narinfo deletion queue', () => {
 			);
 			queue.enqueueNarInfoDeletion(
 				instance.context.db,
-				defaultCache,
-				cacheId,
+				cache,
 				entry.storePathHash,
 				replacement,
 				entry.generation,
@@ -218,7 +244,7 @@ describe('narinfo deletion queue', () => {
 
 		expect(rows).toStrictEqual([
 			{
-				cache: defaultCache,
+				cache: DEFAULT_CACHE,
 				cacheId: 1,
 				storePathHash: entry.storePathHash,
 				narHash: replacement,
@@ -299,7 +325,10 @@ describe('narinfo deletion queue', () => {
 				try {
 					await asOneInvocation(() =>
 						instance.context.criticalSection(() =>
-							queue.retireTornDownNarInfos(DEFAULT_CACHE, 'public', entries)
+							queue.retireTornDownNarInfos(
+								resolvedCache(instance.context),
+								entries
+							)
 						)
 					);
 

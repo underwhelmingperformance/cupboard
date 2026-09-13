@@ -2,7 +2,10 @@ import type { NixValidPathInfo } from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
-import type { BuildSubjectV3, NixStoreUri } from '@cupboard/protocol/build';
+import type {
+	BuildSubjectV3Input,
+	NixStoreUri
+} from '@cupboard/protocol/build';
 
 import type { ReferenceMetadata } from './reference.ts';
 
@@ -18,7 +21,7 @@ function unbuiltSubject(
 	pathInfo: NixValidPathInfo,
 	buildStore: string,
 	copiedFrom: readonly NixStoreUri[] | undefined
-): BuildSubjectV3 {
+): BuildSubjectV3Input {
 	const identity = {
 		storePath: pathInfo.storePath,
 		narHash: pathInfo.narHash.digestHex(),
@@ -49,7 +52,7 @@ function unbuiltSubject(
 export function republishedSubject(
 	metadata: ReferenceMetadata,
 	metadataSource: string
-): BuildSubjectV3 {
+): BuildSubjectV3Input {
 	const { upload } = metadata;
 
 	return {
@@ -66,7 +69,7 @@ export function republishedSubject(
 }
 
 export interface PublishedSubjectsOptions {
-	readonly described: ReadonlyMap<string, BuildSubjectV3>;
+	readonly described: ReadonlyMap<string, BuildSubjectV3Input>;
 	readonly infos: readonly NixValidPathInfo[];
 	readonly servable: ReadonlySet<string>;
 	readonly buildStore: string;
@@ -80,8 +83,8 @@ export interface PublishedSubjectsOptions {
  */
 export function publishedSubjects(
 	options: PublishedSubjectsOptions
-): readonly BuildSubjectV3[] {
-	const subjects = new Map<string, BuildSubjectV3>();
+): readonly BuildSubjectV3Input[] {
+	const subjects = new Map<string, BuildSubjectV3Input>();
 
 	for (const [storePath, subject] of options.described) {
 		if (options.servable.has(storePath)) {

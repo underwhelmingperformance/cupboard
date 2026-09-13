@@ -2,10 +2,10 @@ import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { storedCacheSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import {
-	type ParsedPushSummary,
 	type PushSummary,
+	type PushSummaryInput,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import { createGithubReporter } from '@cupboard/reporter';
@@ -68,7 +68,7 @@ describe('buildPushArguments', () => {
 				paths: ['/nix/store/a', '/nix/store/b'],
 				audience: '',
 				root: 'github:owner/repo/main',
-				cache: storedCacheSchema.parse('ci'),
+				cache: { kind: 'named', name: cacheNameSchema.parse('ci') },
 				ttl: '7d',
 				retain: true,
 				wait: true,
@@ -79,14 +79,12 @@ describe('buildPushArguments', () => {
 		).toStrictEqual([
 			'--no-colour',
 			'push',
-			'https://cache.example.test',
+			'https://cache.example.test/cache/ci',
 			'/nix/store/a',
 			'/nix/store/b',
 			'--github-oidc',
 			'--root',
 			'github:owner/repo/main',
-			'--cache',
-			'ci',
 			'--ttl',
 			'7d',
 			'--wait-timeout',
@@ -105,7 +103,7 @@ describe('buildPushArguments', () => {
 				paths: ['/nix/store/a'],
 				audience: '',
 				root: 'github:owner/repo/main',
-				cache: '',
+				cache: { kind: 'default' },
 				ttl: '',
 				retain: true,
 				wait: true,
@@ -134,7 +132,7 @@ describe('buildPushArguments', () => {
 				paths: ['/nix/store/a'],
 				audience: '',
 				root: 'github:owner/repo/main',
-				cache: '',
+				cache: { kind: 'default' },
 				store: '',
 				ttl: '',
 				retain: true,
@@ -196,7 +194,7 @@ describe('resolvePushInputs', () => {
 		installDirectory: '/runner/temp/cupboard-bin',
 		url: new URL(url),
 		paths: [storePath],
-		cache: '',
+		cache: { kind: 'default' },
 		store: '',
 		audience: '',
 		root: 'github:owner/repo/main',
@@ -425,7 +423,7 @@ describe('buildPushArguments unretained', () => {
 				paths: ['/nix/store/a'],
 				audience: '',
 				root: '',
-				cache: '',
+				cache: { kind: 'default' },
 				ttl: '',
 				retain: false,
 				wait: true,
@@ -631,7 +629,7 @@ describe('pushArgumentsForInvocations', () => {
 	> = {
 		url: new URL('https://cache.example.test'),
 		audience: '',
-		cache: '',
+		cache: { kind: 'default' },
 		store: '',
 		ttl: '',
 		retain: true,
@@ -776,7 +774,7 @@ describe('aggregatePushSummaries', () => {
 	});
 });
 
-function summaryWithPaths(paths: PushSummary['paths']): ParsedPushSummary {
+function summaryWithPaths(paths: PushSummaryInput['paths']): PushSummary {
 	return pushSummarySchema.parse({
 		uploadedPaths: 0,
 		reusedBlobs: 0,

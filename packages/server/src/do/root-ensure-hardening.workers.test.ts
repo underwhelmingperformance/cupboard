@@ -1,8 +1,6 @@
 import {
-	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	rootNameSchema,
-	type StoredCache,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -16,36 +14,38 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, sql } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import * as d1Schema from '../db/d1-schema.ts';
+import { type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
+import { cacheMigrationColumns } from '../migration/cache-access.ts';
+import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
 	currentNarObjectKey,
 	currentServer,
+	defaultCache,
 	flakyR2,
 	initialise,
+	namedCache,
 	narBytes,
 	resetTestServer,
+	resolvedCache,
 	syntheticNarHash,
 	uploadMetadata
 } from '../test-support.ts';
 
-import { AttestationCasService } from './attestation-cas-service.ts';
-import { AttestationsService } from './attestations-service.ts';
-import { CacheAdminService } from './cache-admin-service.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { ServerContext } from './context.ts';
-import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
 import { type CupboardServer } from './server.ts';
 
 const rootName = rootNameSchema.parse('main');
-const defaultCache: StoredCache = DEFAULT_CACHE;
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 function indexedStorePathHash(index: number) {
@@ -96,28 +96,23 @@ function rootsServiceWithHeadHook(
 	instance: CupboardServer,
 	state: DurableObjectState,
 	onHead: () => void
-): RootsService {
+): { readonly roots: RootsService; readonly cache: ResolvedCache } {
 	const context = new ServerContext(state, {
 		...instance.context.env,
 		BLOBS: flakyR2(instance.context.env.BLOBS, { failures: 0, onMatch: onHead })
 	});
-	const attestationCas = new AttestationCasService(context);
 	const narInfoObjects = new NarInfoObjectsService(context);
-	const attestations = new AttestationsService(
-		context,
-		attestationCas,
-		narInfoObjects
-	);
-	const deletionQueue = new DeletionQueueService(
-		context,
-		attestationCas,
-		attestations,
-		narInfoObjects
-	);
-	const cacheAdmin = new CacheAdminService(context, deletionQueue);
 	const retention = new RetentionService(context);
 
-	return new RootsService(context, cacheAdmin, retention, narInfoObjects);
+	return {
+		roots: new RootsService(
+			context,
+			new CacheRegistrationService(context),
+			retention,
+			narInfoObjects
+		),
+		cache: resolvedCache(context)
+	};
 }
 
 function ignoreHead(): void {
@@ -149,7 +144,7 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const roots = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithHeadHook(
 					instance,
 					state,
 					onceOnHead(() => {
@@ -162,8 +157,7 @@ describe('root ensure hardening', () => {
 				);
 
 				return roots.ensureRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -191,11 +185,14 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const roots = rootsServiceWithHeadHook(instance, state, ignoreHead);
+				const { roots, cache } = rootsServiceWithHeadHook(
+					instance,
+					state,
+					ignoreHead
+				);
 
 				return roots.ensureRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -227,11 +224,14 @@ describe('root ensure hardening', () => {
 					.where(eq(schema.narInfos.storePathHash, committed.storePathHash))
 					.run();
 
-				const roots = rootsServiceWithHeadHook(instance, state, ignoreHead);
+				const { roots, cache } = rootsServiceWithHeadHook(
+					instance,
+					state,
+					ignoreHead
+				);
 
 				return roots.ensureRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -252,7 +252,7 @@ describe('root ensure hardening', () => {
 		const key = narInfoObjectKey(
 			fixtureTenant,
 			committed.storePathHash,
-			DEFAULT_CACHE
+			defaultCache()
 		);
 		const current = await env.BLOBS.get(key);
 
@@ -273,11 +273,14 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const roots = rootsServiceWithHeadHook(instance, state, ignoreHead);
+				const { roots, cache } = rootsServiceWithHeadHook(
+					instance,
+					state,
+					ignoreHead
+				);
 
 				return roots.ensureRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -318,7 +321,7 @@ describe('root ensure hardening', () => {
 		});
 		await mapWithConcurrency(targets, 6, ({ storePathHash }) =>
 			env.BLOBS.put(
-				narInfoObjectKey(fixtureTenant, storePathHash, DEFAULT_CACHE),
+				narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
 				'legacy narinfo\n'
 			)
 		);
@@ -326,12 +329,13 @@ describe('root ensure hardening', () => {
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				const cache = resolvedCache(instance.context);
 				const source = instance.context.db
 					.select()
 					.from(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, DEFAULT_CACHE),
+							eq(schema.narInfos.cacheId, cache.id),
 							eq(schema.narInfos.storePathHash, committed.storePathHash)
 						)
 					)
@@ -340,6 +344,9 @@ describe('root ensure hardening', () => {
 				if (source === undefined) {
 					throw new Error('missing source narinfo row');
 				}
+				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
+					schema: { blobReferences: migrationSchema.blobReferences }
+				});
 
 				for (const rows of chunk(targets, 4)) {
 					instance.context.db
@@ -354,13 +361,13 @@ describe('root ensure hardening', () => {
 						.run();
 				}
 
-				for (const references of chunk(targets, 18)) {
-					await instance.context.d1
-						.insert(d1Schema.blobReference)
+				for (const references of chunk(targets, 16)) {
+					await database
+						.insert(migrationSchema.blobReferences)
 						.values(
 							references.map(({ storePathHash }) => ({
 								tenant: fixtureTenant,
-								cache: defaultCache,
+								...cacheMigrationColumns(cache.scope, cache.access),
 								storePathHash,
 								generation: source.generation,
 								narHash: source.narHash
@@ -376,7 +383,7 @@ describe('root ensure hardening', () => {
 				});
 				const service = new NarInfoObjectsService(context);
 				const servable = await service.servableStorePathHashes(
-					DEFAULT_CACHE,
+					resolvedCache(context),
 					targets.map((target) => target.storePathHash)
 				);
 
@@ -401,7 +408,7 @@ describe('root ensure hardening', () => {
 		const response = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const roots = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithHeadHook(
 					instance,
 					state,
 					onceOnHead(() => {
@@ -414,8 +421,7 @@ describe('root ensure hardening', () => {
 				);
 
 				return roots.ensureRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -445,7 +451,7 @@ describe('root ensure hardening', () => {
 		const summary = await runInDurableObject(
 			currentServer(),
 			(instance, state) => {
-				const roots = rootsServiceWithHeadHook(
+				const { roots, cache } = rootsServiceWithHeadHook(
 					instance,
 					state,
 					onceOnHead(() => {
@@ -458,8 +464,7 @@ describe('root ensure hardening', () => {
 				);
 
 				return roots.setRoot(
-					DEFAULT_CACHE,
-					'public',
+					cache.scope,
 					rootName,
 					rootSetBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -473,5 +478,42 @@ describe('root ensure hardening', () => {
 				present: false
 			}
 		]);
+	});
+
+	// A root write on a cache the tenant does not hold creates the cache, as a
+	// push does, so a workflow that ensures a root before its first push needs
+	// no registration step.
+	it('creates a missing named cache on ensure', async () => {
+		const token = await initialise();
+		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, committed);
+		const cache = namedCache('pr-7');
+
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const { roots } = rootsServiceWithHeadHook(instance, state, ignoreHead);
+				// The path was committed to the default cache, so the new cache cannot
+				// serve it; the cache exists all the same.
+				const response = await roots.ensureRoot(
+					cache,
+					rootName,
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
+				);
+
+				return {
+					response,
+					created: instance.context.cacheRepository.resolve(cache)
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			response: {
+				status: 'build-required',
+				unavailable: [committed.storePath]
+			},
+			created: { id: 2, scope: cache, access: 'public' }
+		});
 	});
 });

@@ -193,8 +193,9 @@ export const cacheLifecycle = sqliteTable(
 		cacheName: text('cache_name'),
 		access: text('access', { enum: ['public', 'private'] }),
 		generation: integer('generation').$type<CacheGeneration>().notNull(),
-		// The cache's read revision. Deletion advances it; registration leaves
-		// it unchanged. A public read's Workers Cache key includes it.
+		// The version of how the cache reads. A deletion advances it, and so
+		// does a registration whose access differs from the recorded one. The
+		// Workers Cache key for a public read carries it.
 		readRevision: integer('read_revision')
 			.$type<CacheReadRevision>()
 			.notNull()
@@ -203,19 +204,16 @@ export const cacheLifecycle = sqliteTable(
 		// it in the same statement that advances the generation, and registering
 		// the cache name again clears it.
 		//
-		// Private-cache reads consult this column. A deleted cache retains its
-		// published narinfo and attestation state until the teardown drain removes
-		// them, and it retains its read credential indefinitely.
+		// Content reads consult this column. A deleted cache retains its published
+		// narinfo and attestation state until the teardown drain removes them, and
+		// it retains its read credential indefinitely.
 		//
 		// The NAR reference query does not inspect this column. Deletion advances
 		// the lifecycle generation, which invalidates every existing reference
-		// edge. Before a recreated named cache can commit an edge,
-		// `loadOrCreateCache` registers the cache and clears this column. The new
-		// edge then records the advanced generation. A generation-authorised edge
-		// for a named cache therefore belongs to its live incarnation.
-		//
-		// The default cache is never registered. Its public reads use the lifecycle
-		// generation alone.
+		// edge. Registering the cache again clears this column before the new
+		// cache can commit an edge, and the new edge records the advanced
+		// generation. A generation-authorised edge therefore belongs to the
+		// cache's live incarnation.
 		deletedAt: text('deleted_at').$type<IsoTimestamp>(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},

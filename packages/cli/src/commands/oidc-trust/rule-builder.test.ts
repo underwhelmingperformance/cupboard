@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { InvalidCacheNameError } from '../../errors.ts';
-
 import {
 	buildCacheGrant,
 	collectSubstitutions,
@@ -119,7 +117,7 @@ describe('collectSubstitutions', () => {
 });
 
 describe('buildCacheGrant', () => {
-	it('builds a per-PR cache grant with a same-as-cache root', () => {
+	it('builds a per-PR cache grant with an explicit root template', () => {
 		const substitutions = collectSubstitutions({
 			templateSource: 'github-pr',
 			captures: []
@@ -129,7 +127,7 @@ describe('buildCacheGrant', () => {
 			buildCacheGrant({
 				cacheTemplate: 'pr-{pr}',
 				allow: ['push', 'root'],
-				root: 'same-as-cache',
+				rootTemplate: 'pr-{pr}',
 				substitutions
 			})
 		).toStrictEqual({
@@ -157,7 +155,19 @@ describe('buildCacheGrant', () => {
 					},
 					validate: 'cacheName'
 				},
-				root: { validate: 'rootName', equalsResource: 'cache' }
+				root: {
+					equalsTemplate: 'pr-{pr}',
+					substitutions: {
+						pr: {
+							claim: 'ref',
+							capture: {
+								pattern: '^refs/pull/(?<pr>[0-9]+)/merge$',
+								group: 'pr'
+							}
+						}
+					},
+					validate: 'rootName'
+				}
 			}
 		});
 	});
@@ -194,65 +204,10 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
-	it('uses the cache binding as the root for an attach-only allowance', () => {
-		expect(
-			buildCacheGrant({ cache: 'acme-ci', allow: ['attach'] })
-		).toStrictEqual({
-			type: 'cupboard_cache',
-			actions: ['root:attach'],
-			resources: {
-				cache: { kind: 'named', exact: 'acme-ci', validate: 'cacheName' },
-				root: { validate: 'rootName', equalsResource: 'cache' }
-			}
-		});
-	});
-
-	it('refuses a root bound to the default cache', () => {
+	it('requires an explicit root for operations that manage roots', () => {
 		expect(() => buildCacheGrant({ allow: ['attach'] })).toThrow(
 			RootBindingRequiredError
 		);
-	});
-
-	it.each([
-		['_private-ci', { kind: 'named', exact: 'ci', validate: 'cacheName' }],
-		['_default', { kind: 'default' }]
-	])('binds the cache selected by %s', (cache, expected) => {
-		const grant = buildCacheGrant({ cache, allow: ['push'] });
-
-		expect(
-			grant.type === 'cupboard_cache' && grant.resources.cache
-		).toStrictEqual(expected);
-	});
-
-	it('refuses a cache that is not a selector', () => {
-		expect(() =>
-			buildCacheGrant({ cache: 'Bad Name', allow: ['push'] })
-		).toThrow(InvalidCacheNameError);
-	});
-
-	it('stores a private-cache template without its prefix', () => {
-		const grant = buildCacheGrant({
-			cacheTemplate: '_private-pr-{pr}',
-			allow: ['push'],
-			substitutions: collectSubstitutions({
-				templateSource: 'github-pr',
-				captures: []
-			})
-		});
-
-		expect(
-			grant.type === 'cupboard_cache' && grant.resources.cache
-		).toStrictEqual({
-			kind: 'named',
-			equalsTemplate: 'pr-{pr}',
-			substitutions: {
-				pr: {
-					claim: 'ref',
-					capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }
-				}
-			},
-			validate: 'cacheName'
-		});
 	});
 
 	it('builds an exact cache grant', () => {

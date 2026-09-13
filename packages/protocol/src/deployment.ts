@@ -31,12 +31,14 @@ export function localStep(value: number): LocalStep {
  * next step number and raises this constant. Step 1 gives every registered
  * cache an identity and fills the `cache_id` of every row that still refers to
  * its cache by the stored name alone. A migration ran that fill once, when the
- * object first initialised; the step repeats it for rows written since.
+ * object first initialised; the step repeats it for rows written since. Step 2
+ * moves a private cache's stored objects off the keys its old `private/`
+ * name gave them, which a migration cannot do because those objects are in R2.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(1);
+export const currentLocalStep: LocalStep = localStep(2);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a

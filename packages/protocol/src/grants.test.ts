@@ -1,7 +1,7 @@
 import {
 	type CacheAccessMode,
-	cacheNameSchema,
 	type CacheScope,
+	cacheScopeSchema,
 	rootNameSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -27,18 +27,16 @@ import {
 } from './grants.ts';
 
 interface ResourceFields {
-	cache?: string;
+	cache?: CacheScope;
 	root?: string;
 	tenant?: string;
 }
 
-function namedCache(name: string): CacheScope {
-	return { kind: 'named', name: cacheNameSchema.parse(name) };
-}
-
 function resource(fields: ResourceFields): ResourceRequest {
 	return {
-		...(fields.cache !== undefined && { cache: namedCache(fields.cache) }),
+		...(fields.cache !== undefined && {
+			cache: fields.cache
+		}),
 		...(fields.root !== undefined && {
 			root: rootNameSchema.parse(fields.root)
 		}),
@@ -48,31 +46,35 @@ function resource(fields: ResourceFields): ResourceRequest {
 	};
 }
 
+function namedCacheScope(name: string): CacheScope {
+	return cacheScopeSchema.parse({ kind: 'named', name });
+}
+
 const cacheGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['upload:commit', 'root:set', 'gc:run'],
-	cache: namedCache('pr-123'),
+	cache: { kind: 'named', name: 'pr-123' },
 	root: 'pr-123'
 });
 
 const prefixRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:set'],
-	cache: namedCache('main'),
+	cache: { kind: 'named', name: 'main' },
 	root: 'github:owner/repo/'
 });
 
 const attachRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:attach'],
-	cache: namedCache('main'),
+	cache: { kind: 'named', name: 'main' },
 	root: 'ci'
 });
 
 const prefixAttachRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:attach'],
-	cache: namedCache('main'),
+	cache: { kind: 'named', name: 'main' },
 	root: 'github:owner/repo/'
 });
 
@@ -124,6 +126,18 @@ describe('isOperationPermittedAtIssuance', () => {
 			['upload:negotiate'],
 			'upload:negotiate',
 			true
+		],
+		[
+			'a cache operation permits a cache read',
+			['upload:commit'],
+			'cache:read',
+			true
+		],
+		[
+			'a domain operation does not permit a cache read',
+			['signing-key:list'],
+			'cache:read',
+			false
 		],
 		[
 			'an unrelated action set does not permit a requested preview',
@@ -193,6 +207,18 @@ describe('isOperationSatisfiedByPresentedActions', () => {
 			true
 		],
 		[
+			'a presented cache operation covers a cache read',
+			['root:set'],
+			'cache:read',
+			true
+		],
+		[
+			'a presented domain operation does not cover a cache read',
+			['cache:list'],
+			'cache:read',
+			false
+		],
+		[
 			'an unrelated action set does not cover a requested preview',
 			['upload:commit'],
 			'upload:preview',
@@ -260,84 +286,96 @@ describe('isCoveredByToken', () => {
 			'cache op on the named cache',
 			[cacheGrant],
 			'upload:commit',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			true
 		],
 		[
 			'cache op on a different cache',
 			[cacheGrant],
 			'upload:commit',
-			{ cache: 'pr-999' },
+			{ cache: namedCacheScope('pr-999') },
 			false
 		],
 		[
 			'cache op not in the grant actions',
 			[cacheGrant],
 			'cache:delete',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			false
 		],
 		[
 			'root:set with the exact root',
 			[cacheGrant],
 			'root:set',
-			{ cache: 'pr-123', root: 'pr-123' },
+			{ cache: namedCacheScope('pr-123'), root: 'pr-123' },
 			true
 		],
 		[
 			'root:set with a non-matching root',
 			[cacheGrant],
 			'root:set',
-			{ cache: 'pr-123', root: 'main' },
+			{ cache: namedCacheScope('pr-123'), root: 'main' },
 			false
 		],
 		[
 			'root:attach with the exact root',
 			[attachRootGrant],
 			'root:attach',
-			{ cache: 'main', root: 'ci' },
+			{ cache: namedCacheScope('main'), root: 'ci' },
 			true
 		],
 		[
 			'root:attach with a non-matching root',
 			[attachRootGrant],
 			'root:attach',
-			{ cache: 'main', root: 'other' },
+			{ cache: namedCacheScope('main'), root: 'other' },
 			false
 		],
 		[
 			'root:attach within a trailing-slash prefix',
 			[prefixAttachRootGrant],
 			'root:attach',
-			{ cache: 'main', root: 'github:owner/repo/pr-1' },
+			{
+				cache: namedCacheScope('main'),
+				root: 'github:owner/repo/pr-1'
+			},
 			true
 		],
 		[
 			'root:attach outside the prefix',
 			[prefixAttachRootGrant],
 			'root:attach',
-			{ cache: 'main', root: 'github:owner/other/pr-1' },
+			{
+				cache: namedCacheScope('main'),
+				root: 'github:owner/other/pr-1'
+			},
 			false
 		],
 		[
 			'a commit grant does not cover root:attach on its own root',
 			[cacheGrant],
 			'root:attach',
-			{ cache: 'pr-123', root: 'pr-123' },
+			{ cache: namedCacheScope('pr-123'), root: 'pr-123' },
 			false
 		],
 		[
 			'root:set within a trailing-slash prefix',
 			[prefixRootGrant],
 			'root:set',
-			{ cache: 'main', root: 'github:owner/repo/pr-1' },
+			{
+				cache: namedCacheScope('main'),
+				root: 'github:owner/repo/pr-1'
+			},
 			true
 		],
 		[
 			'root:set outside the prefix',
 			[prefixRootGrant],
 			'root:set',
-			{ cache: 'main', root: 'github:owner/other/pr-1' },
+			{
+				cache: namedCacheScope('main'),
+				root: 'github:owner/other/pr-1'
+			},
 			false
 		],
 		[
@@ -352,7 +390,7 @@ describe('isCoveredByToken', () => {
 			'domain grant does not cover a per-cache gc:run',
 			[domainGrant],
 			'gc:run',
-			{ cache: 'c' },
+			{ cache: namedCacheScope('c') },
 			false
 		],
 		[
@@ -366,7 +404,7 @@ describe('isCoveredByToken', () => {
 			'domain reuse-view:set does not cover a per-cache resource',
 			[reuseViewGrant],
 			'reuse-view:set',
-			{ cache: 'c' },
+			{ cache: namedCacheScope('c') },
 			false
 		],
 		[
@@ -380,7 +418,7 @@ describe('isCoveredByToken', () => {
 			'cache grant covers a per-cache gc:run',
 			[cacheGrant],
 			'gc:run',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			true
 		],
 		[
@@ -417,11 +455,11 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:negotiate'],
-					cache: namedCache('pr-123')
+					cache: { kind: 'named', name: 'pr-123' }
 				})
 			],
 			'upload:preview',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			true
 		],
 		[
@@ -430,18 +468,18 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:preview'],
-					cache: namedCache('pr-123')
+					cache: { kind: 'named', name: 'pr-123' }
 				})
 			],
 			'upload:negotiate',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			false
 		],
 		[
 			'a commit grant does not cover a requested confirm on the same cache',
 			[cacheGrant],
 			'upload:confirm',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			false
 		],
 		[
@@ -450,18 +488,18 @@ describe('isCoveredByToken', () => {
 				authorizationDetailSchema.parse({
 					type: 'cupboard_cache',
 					actions: ['upload:confirm'],
-					cache: namedCache('pr-123')
+					cache: { kind: 'named', name: 'pr-123' }
 				})
 			],
 			'upload:commit',
-			{ cache: 'pr-123' },
+			{ cache: namedCacheScope('pr-123') },
 			false
 		],
 		[
 			'wildcard covers a cache op',
 			[wildcard],
 			'upload:commit',
-			{ cache: 'x' },
+			{ cache: namedCacheScope('x') },
 			true
 		],
 		[
@@ -471,7 +509,13 @@ describe('isCoveredByToken', () => {
 			{ tenant: 'x' },
 			true
 		],
-		['no grants covers nothing', [], 'upload:commit', { cache: 'x' }, false]
+		[
+			'no grants covers nothing',
+			[],
+			'upload:commit',
+			{ cache: namedCacheScope('x') },
+			false
+		]
 	])('%s', (_name, grants, operation, resourceFields, expected) => {
 		expect(isCoveredByToken(grants, operation, resource(resourceFields))).toBe(
 			expected
@@ -490,7 +534,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: namedCache('pr-123'),
+				cache: { kind: 'named', name: 'pr-123' },
 				root: 'pr-123'
 			}),
 			true
@@ -501,7 +545,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['narinfo:delete'],
-				cache: namedCache('pr-123')
+				cache: { kind: 'named', name: 'pr-123' }
 			}),
 			false
 		],
@@ -511,7 +555,7 @@ describe('isAuthorizationDetailCovered', () => {
 			authorizationDetailSchema.parse({
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
-				cache: namedCache('pr-999')
+				cache: { kind: 'named', name: 'pr-999' }
 			}),
 			false
 		],
@@ -546,7 +590,7 @@ describe('authorizationDetailSchema', () => {
 			authorizationDetailSchema.safeParse({
 				type: 'cupboard_cache',
 				actions: [],
-				cache: namedCache('c')
+				cache: { kind: 'named', name: 'c' }
 			}).success
 		).toBe(false);
 	});
@@ -574,14 +618,18 @@ describe('permittedGrantSchema', () => {
 		validate: 'cacheName'
 	};
 
-	it('accepts a templated cache grant with a relational root', () => {
+	it('accepts a templated cache grant with an explicit root template', () => {
 		expect(
 			permittedGrantSchema.safeParse({
 				type: 'cupboard_cache',
 				actions: ['upload:commit', 'root:set'],
 				resources: {
 					cache: captureBinding,
-					root: { equalsResource: 'cache', validate: 'rootName' }
+					root: {
+						equalsTemplate: 'pr-{pull_request_number}',
+						substitutions: captureBinding.substitutions,
+						validate: 'rootName'
+					}
 				}
 			}).success
 		).toBe(true);
@@ -615,13 +663,12 @@ describe('permittedGrantSchema', () => {
 					root: {
 						equalsTemplate: 'root-{n}',
 						exact: 'root-1',
-						equalsResource: 'cache',
 						substitutions: { n: { claim: 'ref' } },
 						validate: 'rootName'
 					}
 				}
 			},
-			'Set exactly one of equalsTemplate, exact, and equalsResource'
+			'Set exactly one of equalsTemplate and exact'
 		],
 		[
 			'a tenant binding',
@@ -675,7 +722,7 @@ describe('permittedGrantSchema', () => {
 
 describe('storedPermittedGrantsSchema', () => {
 	const cacheResources = {
-		cache: { exact: 'owner-ci', validate: 'cacheName' }
+		cache: { exact: 'owner-ci', kind: 'named', validate: 'cacheName' }
 	};
 	const upgradedCacheResources = {
 		cache: { kind: 'named', exact: 'owner-ci', validate: 'cacheName' }
@@ -803,7 +850,7 @@ describe('selector spelling', () => {
 		docs: 'public'
 	};
 	const accessOf: CacheAccessLookup = (name) => tenantCaches[name];
-	const root = { equalsResource: 'cache', validate: 'rootName' };
+	const root = { exact: 'pr-1', validate: 'rootName' };
 	const substitutions = { n: { claim: 'ref' } };
 
 	it.each([
@@ -960,9 +1007,9 @@ describe('selector spelling', () => {
 
 	it.each([
 		['the default cache', { kind: 'default' }, '_default'],
-		['a public named cache', namedCache('docs'), 'docs'],
-		['a private named cache', namedCache('ci'), '_private-ci'],
-		['a cache the tenant does not hold', namedCache('absent'), 'absent']
+		['a public named cache', namedCacheScope('docs'), 'docs'],
+		['a private named cache', namedCacheScope('ci'), '_private-ci'],
+		['a cache the tenant does not hold', namedCacheScope('absent'), 'absent']
 	])(
 		'spells an issued grant for %s as a selector and reads it back',
 		(_name, cache, selector) => {
@@ -1055,4 +1102,74 @@ describe('root selectors apply to root operations', () => {
 			}).toStrictEqual({ route: expected, attenuation: expected });
 		}
 	);
+});
+
+// A cache grant and a request both use the same cache scope. These cases cover
+// both scopes against both requests, so a scope that matched the wrong cache
+// would appear as a crossed pair rather than a single missing case.
+describe('cache scopes in issued grants', () => {
+	const scopes = {
+		default: cacheScopeSchema.parse({ kind: 'default' }),
+		named: cacheScopeSchema.parse({ kind: 'named', name: 'builds' })
+	};
+
+	const cases: {
+		readonly name: string;
+		readonly scope: keyof typeof scopes;
+		readonly cache: CacheScope;
+		readonly covered: boolean;
+	}[] = [
+		{
+			name: 'the default scope covers the default cache',
+			scope: 'default',
+			cache: scopes.default,
+			covered: true
+		},
+		{
+			name: 'the default scope refuses a named cache',
+			scope: 'default',
+			cache: scopes.named,
+			covered: false
+		},
+		{
+			name: 'a named scope covers that cache',
+			scope: 'named',
+			cache: scopes.named,
+			covered: true
+		},
+		{
+			name: 'a named scope refuses the default cache',
+			scope: 'named',
+			cache: scopes.default,
+			covered: false
+		},
+		{
+			name: 'a named scope refuses another name',
+			scope: 'named',
+			cache: namedCacheScope('releases'),
+			covered: false
+		}
+	];
+
+	it.each(cases)('$name', ({ scope, cache, covered }) => {
+		const grant = authorizationDetailSchema.parse({
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			cache: scopes[scope]
+		});
+
+		expect(
+			isCoveredByToken([grant], 'upload:commit', resource({ cache }))
+		).toBe(covered);
+	});
+
+	it('refuses a grant whose cache is still a plain string', () => {
+		expect(
+			authorizationDetailSchema.safeParse({
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: 'builds'
+			}).success
+		).toBe(false);
+	});
 });

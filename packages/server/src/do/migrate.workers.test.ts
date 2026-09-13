@@ -6,9 +6,11 @@ import { describe, expect, it } from 'vitest';
 import migrations from '../../drizzle/migrations.js';
 import { sha256Hex } from '../crypto/crypto.ts';
 import {
+	currentServer,
 	latestMigrationIndex,
 	migrateThrough,
-	testServerFor
+	testServerFor,
+	useTestServer
 } from '../test-support.ts';
 
 import {
@@ -114,13 +116,11 @@ describe('applyMigrations', () => {
 	});
 
 	it('records each migration as verified with the digest of its SQL when an object initialises', async () => {
-		const rows = await runInDurableObject(
-			testServerFor('migrate-initialise'),
-			async (instance, state) => {
-				await instance.fetch(new Request('https://tenant.test/nix-cache-info'));
+		// Configuring the tenant initialises the object.
+		await useTestServer('migrate-initialise');
 
-				return recordedRows(state.storage);
-			}
+		const rows = await runInDurableObject(currentServer(), (_instance, state) =>
+			recordedRows(state.storage)
 		);
 
 		expect(rows).toStrictEqual(

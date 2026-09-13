@@ -1,59 +1,79 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { PRIVATE_SELECTOR_PREFIX } from '@cupboard/nix-store/scalars';
+import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import {
-	type ParsedReuseViewListResponse,
-	type ParsedReuseViewRemoveResponse,
-	type ParsedReuseViewSummary,
+	type ReuseViewListResponse,
 	type ReuseViewPriority,
 	reuseViewPrioritySchema,
+	type ReuseViewRemoveResponse,
 	type ReuseViewSelector,
+	reuseViewSelectorSchema,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
+import { parseCacheAccess } from '../cache-access.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	InvalidReuseViewPriorityError,
+	InvalidReuseViewSelectorError,
 	ReuseViewSelectorRequiredError
 } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 export interface ReuseViewSetOptions {
-	readonly exact: readonly string[];
-	readonly prefix: readonly string[];
+	readonly select: readonly ReuseViewSelector[];
+	readonly access?: CacheAccessMode;
 	readonly priority?: ReuseViewPriority;
-	readonly private?: boolean;
 }
 
 interface ConfirmableOptions {
 	readonly yes?: boolean;
-	readonly private?: boolean;
-}
-
-/**
- * Returns the view's contract name. Public views keep their local name;
- * private views use `_private-<name>`. The server validates the local name.
- */
-export function contractViewName(name: string, isPrivate = false): string {
-	return isPrivate ? `${PRIVATE_SELECTOR_PREFIX}${name}` : name;
 }
 
 export interface ReuseViewClient {
-	list(): Promise<ParsedReuseViewListResponse>;
+	list(): Promise<ReuseViewListResponse>;
 	set(input: {
 		name: string;
-		selectors: readonly ReuseViewSelector[];
+		access: CacheAccessMode;
+		selectors: ReuseViewSelector[];
 		priority?: number;
-	}): Promise<ParsedReuseViewSummary>;
-	remove(input: { name: string }): Promise<ParsedReuseViewRemoveResponse>;
+	}): Promise<ReuseViewSummary>;
+	remove(input: { name: string }): Promise<ReuseViewRemoveResponse>;
 }
 
-function collect(value: string, previous: readonly string[]): string[] {
-	return [...previous, value];
+function collectSelector(
+	value: string,
+	previous: readonly ReuseViewSelector[]
+): ReuseViewSelector[] {
+	const selector = parseSelector(value);
+
+	return [...previous, selector];
+}
+
+export function parseSelector(value: string): ReuseViewSelector {
+	const candidate: unknown =
+		value === 'default'
+			? { kind: 'default' }
+			: value === 'all'
+				? { kind: 'all' }
+				: value === 'all-named'
+					? { kind: 'all-named' }
+					: value.startsWith('cache:')
+						? { kind: 'named', name: value.slice('cache:'.length) }
+						: value.startsWith('prefix:')
+							? { kind: 'prefix', prefix: value.slice('prefix:'.length) }
+							: undefined;
+	const selector = reuseViewSelectorSchema.safeParse(candidate);
+
+	if (!selector.success) {
+		throw new InvalidReuseViewSelectorError(value);
+	}
+
+	return selector.data;
 }
 
 export function parsePriority(value: string): ReuseViewPriority {
@@ -78,14 +98,11 @@ export function parsePriority(value: string): ReuseViewPriority {
 export function selectorsFromOptions(
 	options: ReuseViewSetOptions
 ): ReuseViewSelector[] {
-	if (options.exact.length === 0 && options.prefix.length === 0) {
+	if (options.select.length === 0) {
 		throw new ReuseViewSelectorRequiredError();
 	}
 
-	return [
-		...options.exact.map((pattern) => ({ kind: 'exact' as const, pattern })),
-		...options.prefix.map((pattern) => ({ kind: 'prefix' as const, pattern }))
-	];
+	return [...options.select];
 }
 
 export function registerReuseViewCommands(
@@ -120,25 +137,20 @@ export function registerReuseViewCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'reuse-view name')
 		.option(
-			'--exact <cache>',
-			'an exact cache name to include (repeatable)',
-			collect,
+			'--select <selector>',
+			'default, all, all-named, cache:<name> or prefix:<prefix> (repeatable)',
+			collectSelector,
 			[]
 		)
 		.option(
-			'--prefix <prefix>',
-			"a cache-name prefix to include (repeatable); '' matches every cache",
-			collect,
-			[]
+			'--access <mode>',
+			'read access: public or private (default: public)',
+			parseCacheAccess
 		)
 		.option(
 			'--priority <n>',
 			'Nix substituter priority (lower is preferred); default 50',
 			parsePriority
-		)
-		.option(
-			'--private',
-			'define the view in the private namespace; its selectors match private caches and every read requires authentication'
 		)
 		.addHelpText(
 			'after',
@@ -147,11 +159,11 @@ export function registerReuseViewCommands(
 				'Examples:',
 				'  # A view covering every PR cache plus one named release cache',
 				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
-				'    --prefix pr- --exact release',
+				'    --select prefix:pr- --select cache:release',
 				'',
-				'  # A private view over private caches with names that start with pr-',
+				'  # A private view over private caches whose names start with pr-',
 				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
-				'    --private --prefix pr-'
+				'    --access private --select prefix:pr-'
 			].join('\n')
 		)
 		.action(async (url: URL, name: string, options: ReuseViewSetOptions) => {
@@ -164,7 +176,8 @@ export function registerReuseViewCommands(
 			});
 
 			await runReuseViewSet(
-				contractViewName(name, options.private),
+				name,
+				options.access ?? 'public',
 				selectorsFromOptions(options),
 				options.priority,
 				reporter,
@@ -178,7 +191,6 @@ export function registerReuseViewCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'reuse-view name')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.option('--private', 'remove a view from the private namespace')
 		.action(async (url: URL, name: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
@@ -186,11 +198,7 @@ export function registerReuseViewCommands(
 				signal: programOptions.signal
 			});
 
-			await runReuseViewRemove(
-				contractViewName(name, options.private),
-				ui,
-				rpc.reuseViews
-			);
+			await runReuseViewRemove(name, ui, rpc.reuseViews);
 		});
 }
 
@@ -212,13 +220,19 @@ export async function runReuseViewList(
 
 export async function runReuseViewSet(
 	name: string,
+	access: CacheAccessMode,
 	selectors: readonly ReuseViewSelector[],
 	priority: ReuseViewPriority | undefined,
 	reporter: Reporter,
 	client: Pick<ReuseViewClient, 'set'>
 ): Promise<void> {
 	const summary = await reporter.phase('Setting reuse view', () =>
-		client.set({ name, selectors, ...(priority !== undefined && { priority }) })
+		client.set({
+			name,
+			access,
+			selectors: [...selectors],
+			...(priority !== undefined && { priority })
+		})
 	);
 
 	reporter.result({
@@ -226,6 +240,7 @@ export async function runReuseViewSet(
 		data: summary,
 		rows: [
 			{ label: 'View', value: summary.name },
+			{ label: 'Access', value: summary.access },
 			{ label: 'Revision', value: String(summary.revision) },
 			{ label: 'Priority', value: String(summary.priority) },
 			{
@@ -276,14 +291,26 @@ function reuseViewRow(view: ReuseViewSummary): ResultRow {
 
 	return {
 		label: view.name,
-		value: `revision ${String(view.revision)}; priority ${String(view.priority)}; ${selectors}`
+		value: `${view.access}; revision ${String(view.revision)}; priority ${String(view.priority)}; ${selectors}`
 	};
 }
 
 function selectorLabel(selector: ReuseViewSelector): string {
-	if (selector.kind === 'exact') {
-		return `exact:${selector.pattern}`;
+	if (selector.kind === 'default') {
+		return 'default';
 	}
 
-	return `prefix:${selector.pattern === '' ? '(all caches)' : selector.pattern}`;
+	if (selector.kind === 'all') {
+		return 'all';
+	}
+
+	if (selector.kind === 'named') {
+		return `cache:${selector.name}`;
+	}
+
+	if (selector.kind === 'prefix') {
+		return `prefix:${selector.prefix}`;
+	}
+
+	return 'all-named';
 }

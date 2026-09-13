@@ -4,13 +4,9 @@ import {
 	cacheNameSchema,
 	type CacheScope,
 	cacheScopeSchema,
-	type CacheSelector,
-	DEFAULT_CACHE_SELECTOR,
 	isSameCacheScope,
-	PRIVATE_SELECTOR_PREFIX,
 	type RootName,
 	rootNameSchema,
-	selectorForScope,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -24,7 +20,7 @@ import { z } from 'zod';
 // Cache-scoped tenant operations. `gc:run` and `stats:read` also appear as
 // domain operations: the per-cache form carries a cache, the deployment-wide
 // form carries none, and the procedure's declared resource picks which.
-export const cacheOperations = [
+export const cacheOperationSchema = z.enum([
 	'upload:negotiate',
 	'upload:preview',
 	'upload:status',
@@ -36,16 +32,21 @@ export const cacheOperations = [
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read'
-] as const;
+]);
+export type CacheOperation = z.infer<typeof cacheOperationSchema>;
+export const cacheOperations: readonly CacheOperation[] =
+	cacheOperationSchema.options;
 
 // Tenant-domain operations use authority over the tenant established by the
 // issuer. They have no separate resource selector.
-export const domainOperations = [
+const domainOperationSchema = z.enum([
 	'cache:list',
 	'stats:read',
 	'check:run',
@@ -67,23 +68,24 @@ export const domainOperations = [
 	'reuse-view:list',
 	'reuse-view:set',
 	'reuse-view:remove'
-] as const;
+]);
+export const domainOperations = domainOperationSchema.options;
 
 // These control operations require an exact tenant slug as their resource.
-export const tenantOperations = [
+const tenantOperationSchema = z.enum([
 	'tenant:create',
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
 	'tenant:clear-cache-read-credential'
-] as const;
+]);
+export const tenantOperations = tenantOperationSchema.options;
 
 // These control operations do not select a resource.
-export const controlOperations = [
+const controlOperationSchema = z.enum([
 	'control:check',
 	'instance:read',
 	'instance:initialise',
@@ -99,7 +101,8 @@ export const controlOperations = [
 	'control-oidc-trust:read',
 	'control-oidc-trust:add',
 	'control-oidc-trust:remove'
-] as const;
+]);
+export const controlOperations = controlOperationSchema.options;
 
 // `gc:run` and `stats:read` occur in two grant types but appear once in this
 // combined schema.
@@ -115,7 +118,9 @@ export const operationSchema = z.enum([
 	'root:attach',
 	'root:list',
 	'root:remove',
+	'cache:read',
 	'cache:create',
+	'cache:update',
 	'cache:delete',
 	'cache:list',
 	'narinfo:delete',
@@ -150,7 +155,6 @@ export const operationSchema = z.enum([
 	'tenant:suspend',
 	'tenant:resume',
 	'tenant:remove',
-	'tenant:set-read-mode',
 	'tenant:rotate-read-credential',
 	'tenant:clear-read-credential',
 	'tenant:rotate-cache-read-credential',
@@ -187,18 +191,19 @@ export interface ResourceRequest {
 // A cache grant identifies the cache by scope, independent of its access. The
 // grant still applies if the cache changes between public and private reads.
 
-export const grantTypes = [
+const grantTypeSchema = z.enum([
 	'cupboard_cache',
 	'cupboard_domain',
 	'cupboard_tenant',
 	'cupboard_control',
 	'cupboard_wildcard'
-] as const;
+]);
+export const grantTypes = grantTypeSchema.options;
 
-const cacheActionsSchema = z.array(z.enum(cacheOperations)).min(1);
-const domainActionsSchema = z.array(z.enum(domainOperations)).min(1);
-const tenantActionsSchema = z.array(z.enum(tenantOperations)).min(1);
-const controlActionsSchema = z.array(z.enum(controlOperations)).min(1);
+const cacheActionsSchema = z.array(cacheOperationSchema).min(1);
+const domainActionsSchema = z.array(domainOperationSchema).min(1);
+const tenantActionsSchema = z.array(tenantOperationSchema).min(1);
+const controlActionsSchema = z.array(controlOperationSchema).min(1);
 
 export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
@@ -245,6 +250,7 @@ const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
+const cacheOperationSet: ReadonlySet<Operation> = new Set(cacheOperations);
 
 function isOperationImplied(
 	actions: readonly Operation[],
@@ -252,6 +258,13 @@ function isOperationImplied(
 	impliedBy: Partial<Record<Operation, Operation>>
 ): boolean {
 	if (actions.includes(operation)) {
+		return true;
+	}
+
+	if (
+		operation === 'cache:read' &&
+		actions.some((action) => cacheOperationSet.has(action))
+	) {
 		return true;
 	}
 
@@ -439,23 +452,18 @@ function refineBinding(
 		readonly equalsTemplate?: string;
 		readonly exact?: string;
 		readonly substitutions?: Record<string, Substitution>;
-		readonly equalsResource?: 'cache';
 	},
-	ctx: z.RefinementCtx,
-	canUseResource: boolean
+	ctx: z.RefinementCtx
 ): void {
 	const choices = [
 		value.equalsTemplate !== undefined,
-		value.exact !== undefined,
-		value.equalsResource !== undefined
+		value.exact !== undefined
 	].filter(Boolean).length;
 
 	if (choices !== 1) {
 		ctx.addIssue({
 			code: 'custom',
-			message: canUseResource
-				? 'Set exactly one of equalsTemplate, exact, and equalsResource'
-				: 'Set exactly one of equalsTemplate and exact'
+			message: 'Set exactly one of equalsTemplate and exact'
 		});
 	}
 
@@ -484,22 +492,21 @@ export const cacheBindingSchema = z.discriminatedUnion('kind', [
 			validate: z.literal('cacheName')
 		})
 		.superRefine((value, ctx) => {
-			refineBinding(value, ctx, false);
+			refineBinding(value, ctx);
 		})
 ]);
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
-		validate: z.literal('rootName'),
-		equalsResource: z.literal('cache').optional()
+		validate: z.literal('rootName')
 	})
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, true);
+		refineBinding(value, ctx);
 	});
 export const tenantBindingSchema = z
 	.strictObject({ ...bindingShape, validate: z.literal('tenant') })
 	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
+		refineBinding(value, ctx);
 	});
 
 export const oidcTrustDisplaySchema = z.strictObject({
@@ -575,6 +582,13 @@ function withoutRetiredActions(grants: unknown): unknown {
 		});
 }
 
+// The retired selector spelling. No request uses it any more, but a document
+// stored before the cutover still spells a cache this way, and this build
+// stores it until a deploy records `contracted`, so the upgrades below read
+// it and the spelling functions at the end of this file write it.
+const legacyDefaultCacheSelector = '_default';
+const legacyPrivateSelectorPrefix = '_private-';
+
 const legacyCacheBindingSchema = z.looseObject({
 	exact: z.string().optional(),
 	equalsTemplate: z.string().optional()
@@ -621,26 +635,28 @@ function upgradedCacheBinding(binding: {
 	readonly equalsTemplate?: string;
 }): unknown {
 	if (
-		binding.exact === DEFAULT_CACHE_SELECTOR ||
-		binding.equalsTemplate === DEFAULT_CACHE_SELECTOR
+		binding.exact === legacyDefaultCacheSelector ||
+		binding.equalsTemplate === legacyDefaultCacheSelector
 	) {
 		return { kind: 'default' };
 	}
 
-	if (binding.exact?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+	if (binding.exact?.startsWith(legacyPrivateSelectorPrefix) === true) {
 		return {
 			...binding,
 			kind: 'named',
-			exact: binding.exact.slice(PRIVATE_SELECTOR_PREFIX.length)
+			exact: binding.exact.slice(legacyPrivateSelectorPrefix.length)
 		};
 	}
 
-	if (binding.equalsTemplate?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+	if (
+		binding.equalsTemplate?.startsWith(legacyPrivateSelectorPrefix) === true
+	) {
 		return {
 			...binding,
 			kind: 'named',
 			equalsTemplate: binding.equalsTemplate.slice(
-				PRIVATE_SELECTOR_PREFIX.length
+				legacyPrivateSelectorPrefix.length
 			)
 		};
 	}
@@ -700,14 +716,14 @@ export const storedAuthorizationDetailsSchema = z.preprocess(
 );
 
 function scopeFromSelectorText(selector: string): unknown {
-	if (selector === DEFAULT_CACHE_SELECTOR) {
+	if (selector === legacyDefaultCacheSelector) {
 		return { kind: 'default' };
 	}
 
 	return {
 		kind: 'named',
-		name: selector.startsWith(PRIVATE_SELECTOR_PREFIX)
-			? selector.slice(PRIVATE_SELECTOR_PREFIX.length)
+		name: selector.startsWith(legacyPrivateSelectorPrefix)
+			? selector.slice(legacyPrivateSelectorPrefix.length)
 			: selector
 	};
 }
@@ -750,8 +766,24 @@ type CacheAuthorizationDetail = Extract<
 export type SelectorSpelledAuthorizationDetail =
 	| Exclude<AuthorizationDetail, { type: 'cupboard_cache' }>
 	| (Omit<CacheAuthorizationDetail, 'cache'> & {
-			readonly cache: CacheSelector;
+			readonly cache: string;
 	  });
+
+/**
+ * The selector that spells a scope together with the cache's access:
+ * `_default` for the default cache, `_private-<name>` for a private named
+ * cache and the name alone for a public one. `scopeFromSelectorText` reads
+ * it back.
+ */
+function selectorForScope(scope: CacheScope, access: CacheAccessMode): string {
+	if (scope.kind === 'default') {
+		return legacyDefaultCacheSelector;
+	}
+
+	return access === 'private'
+		? `${legacyPrivateSelectorPrefix}${scope.name}`
+		: scope.name;
+}
 
 // A bound name that is not a cache name matches no cache in either spelling,
 // so it is stored as it is.
@@ -776,7 +808,7 @@ function selectorSpelledCacheBinding(
 	accessOf: CacheAccessLookup
 ): SelectorSpelledCacheBinding {
 	if (binding.kind === 'default') {
-		return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
+		return { exact: legacyDefaultCacheSelector, validate: 'cacheName' };
 	}
 
 	const { kind: _kind, ...bound } = binding;
@@ -803,8 +835,9 @@ export class SelectorTemplateUnrepresentableError extends Error {
  * `storedPermittedGrantsSchema` reads the result back into `grants`.
  *
  * A named cache is spelled with its current access, so the previous build
- * matches the same cache. An unregistered cache uses both selector forms
- * because its future access mode is unknown.
+ * matches the same cache. If the caller cannot determine a named cache's
+ * access, store both selector forms. This covers unregistered caches and
+ * control-plane rules, which do not inspect tenant cache state.
  * A template is stored in both public and private selector forms so either
  * access mode retains its authority after rollback. The current reader
  * coalesces those equivalent grants.
@@ -831,7 +864,7 @@ export function permittedGrantsInSelectorSpelling(
 							...spelled.resources,
 							cache: {
 								...cache,
-								exact: `${PRIVATE_SELECTOR_PREFIX}${name.data}`
+								exact: `${legacyPrivateSelectorPrefix}${name.data}`
 							}
 						}
 					}
@@ -839,7 +872,7 @@ export function permittedGrantsInSelectorSpelling(
 			}
 			return [spelled];
 		}
-		const privateTemplate = `${PRIVATE_SELECTOR_PREFIX}${cache.equalsTemplate}`;
+		const privateTemplate = `${legacyPrivateSelectorPrefix}${cache.equalsTemplate}`;
 		if (privateTemplate.length > templateMaxLength) {
 			throw new SelectorTemplateUnrepresentableError();
 		}

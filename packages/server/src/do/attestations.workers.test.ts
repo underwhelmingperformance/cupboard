@@ -1,17 +1,16 @@
 import {
 	narInfoGenerationSchema,
 	type Sha256HexDigest,
-	sha256HexDigestSchema,
-	type StorePathHash
+	sha256HexDigestSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	attestationAttachResponseSchema,
+	type AttestationDecision,
 	attestationDecisionSchema,
 	attestationListSchema,
 	attestationNegotiateMaxBundles,
 	attestationNegotiateResponseSchema,
-	attestationUploadDecisionSchema,
-	type ParsedAttestationDecision
+	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
 import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
 import {
@@ -55,6 +54,7 @@ import {
 	putNarBytes,
 	readFetch,
 	resetTestServer,
+	resolvedCache,
 	sigstoreBundleBytes,
 	tenantCasBlobRows,
 	tenantUsageRow,
@@ -69,6 +69,7 @@ import {
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { maxBoundParameters } from './bulk.ts';
+import { CacheRegistrationService } from './cache-registration-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
@@ -287,7 +288,11 @@ describe('attestation attach and reads', () => {
 	it('does not materialise a missing descriptor list during a read', async () => {
 		const { token, metadata, bundle } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
-		const key = attestationListObjectKey(fixtureTenant, metadata.storePathHash);
+		const key = attestationListObjectKey(
+			fixtureTenant,
+			metadata.storePathHash,
+			{ kind: 'default' }
+		);
 		await env.BLOBS.delete(key);
 		const beforeRead = {
 			refs: await attestationReferenceRows(),
@@ -321,7 +326,7 @@ describe('attestation attach and reads', () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
 		await provisionFixtureTenant({
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
 		const authorised = {
@@ -475,6 +480,8 @@ describe('attestation attach and reads', () => {
 		const error = await runInDurableObject(
 			fixtureWorkerServer(),
 			async (instance) => {
+				const cache = resolvedCache(instance.context);
+
 				class RacingAttestationCasService extends AttestationCasService {
 					override async measureStagedBundle(
 						key: R2ObjectKey
@@ -486,7 +493,12 @@ describe('attestation attach and reads', () => {
 								narHash: replacement.narHash,
 								generation: narInfoGenerationSchema.parse(1)
 							})
-							.where(eqStorePath(metadata.storePathHash))
+							.where(
+								and(
+									eq(schema.narInfos.cacheId, cache.id),
+									eq(schema.narInfos.storePathHash, metadata.storePathHash)
+								)
+							)
 							.run();
 
 						return measured;
@@ -494,12 +506,13 @@ describe('attestation attach and reads', () => {
 				}
 				const attestations = new AttestationsService(
 					instance.context,
+					new CacheRegistrationService(instance.context),
 					new RacingAttestationCasService(instance.context),
 					new NarInfoObjectsService(instance.context)
 				);
 
 				try {
-					return await attestations.attach('', decision.uploadId);
+					return await attestations.attach(cache.scope, decision.uploadId);
 				} catch (error: unknown) {
 					return error;
 				}
@@ -785,7 +798,7 @@ async function negotiate(
 	token: string,
 	pathHash: string,
 	digest: Sha256HexDigest
-): Promise<ParsedAttestationDecision> {
+): Promise<AttestationDecision> {
 	const response = await authorisedWorkerFetch('/attestations', token, {
 		body: JSON.stringify({
 			pushId: testPushId,
@@ -806,7 +819,7 @@ async function negotiateTenant(
 	token: string,
 	pathHash: string,
 	digest: Sha256HexDigest
-): Promise<ParsedAttestationDecision> {
+): Promise<AttestationDecision> {
 	const pushId = await testPushIdFor(tenant);
 	const response = await tenantFetch(tenant, '/attestations', token, {
 		body: JSON.stringify({
@@ -881,11 +894,4 @@ function tenantFetch(
 	headers.set('authorization', `Bearer ${token}`);
 
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
-}
-
-function eqStorePath(storePathHash: StorePathHash) {
-	return and(
-		eq(schema.narInfos.cache, ''),
-		eq(schema.narInfos.storePathHash, storePathHash)
-	);
 }

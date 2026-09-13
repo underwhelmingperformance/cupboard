@@ -9,6 +9,8 @@ import {
 } from '@cupboard/protocol/oidc-trust-match';
 import { type OidcTrustSelection } from '@cupboard/protocol/oidc-trust-selection';
 
+import { cacheLabel } from '../../client/client.ts';
+
 import { type CheckFinding, FailedCheckFinding } from './finding.ts';
 
 function describeAuthorizationDetail(detail: AuthorizationDetail): string {
@@ -17,12 +19,9 @@ function describeAuthorizationDetail(detail: AuthorizationDetail): string {
 	}
 
 	const root = detail.root === undefined ? '' : ` with root ${detail.root}`;
-	const cache =
-		detail.cache.kind === 'default'
-			? 'the default cache'
-			: `cache ${detail.cache.name}`;
+	const cache = cacheLabel(detail.cache);
 
-	return `${detail.actions.join(', ')} on ${cache}${root}`;
+	return `${detail.actions.join(', ')} on cache ${cache}${root}`;
 }
 
 export class RepositoryTrustRuleMissingFinding extends FailedCheckFinding {

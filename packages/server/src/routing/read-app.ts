@@ -1,4 +1,3 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse
@@ -15,7 +14,6 @@ import {
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
 import {
-	cacheInfoResponse,
 	guardScopedRead,
 	narAuthorityForScope,
 	serveNar,
@@ -28,12 +26,7 @@ import {
 } from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
-import {
-	cachedTenantRead,
-	innerRequest,
-	tenantUncachedRead,
-	withoutStoring
-} from './tenant-forward.ts';
+import { cachedTenantRead, tenantUncachedRead } from './tenant-forward.ts';
 
 /**
  * The Nix binary-cache routes relative to a selected cache. The worker mounts
@@ -48,26 +41,13 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
 
 	app.get('/nix-cache-info', async (context) => {
-		const denied = await guardRead(context);
+		const denied = await guardContentRead(context);
 
 		if (denied !== undefined) {
 			return denied;
 		}
 
-		const { cache } = context.get('readScope');
-
-		// A named cache's priority comes from the tenant registry and changes
-		// without a purge key, so only the default cache's fixed metadata is
-		// cacheable.
-		return cache === DEFAULT_CACHE && isCacheableRead(context)
-			? cachedTenantRead(context)
-			: cacheInfoResponse(
-					innerRequest(context),
-					context.env,
-					context.get('tenant'),
-					cache,
-					true
-				);
+		return tenantUncachedRead(context, true);
 	});
 
 	app.get(String.raw`/:name{[0-9a-z]+\.narinfo}`, async (context) => {
@@ -89,7 +69,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 					context.req.raw,
 					context.env,
 					context.get('tenant'),
-					context.get('readScope').cache,
+					context.get('readScope'),
 					storePathHash,
 					true
 				);
@@ -122,8 +102,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 
 	// Serve signing keys uncached so rotation is visible immediately. One key set
 	// signs everything the tenant publishes, so every cache prefix returns it.
-	// The key remains public at the bare tenant prefix even for a private tenant.
-	// Under the private-cache prefix, require authentication and add `no-store`.
+	// Signing keys are tenant-wide public metadata.
 	app.get('/pubkey', async (context) => {
 		const pubkeyUrl = new URL(context.req.url);
 		pubkeyUrl.pathname = '/pubkey';
@@ -133,9 +112,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 			context.get('tenant')
 		).fetch(new Request(pubkeyUrl, context.req.raw));
 
-		return context.get('readScope').visibility === 'public'
-			? response
-			: withoutStoring(response);
+		return response;
 	});
 
 	// Path and cache deletion can change attestation lists and bundle references,
@@ -238,8 +215,5 @@ async function guardContentRead(
 // tenant Worker handles those reads; the control Worker serves all others with
 // `no-store`.
 function isCacheableRead(context: Context<WorkerHonoEnv>): boolean {
-	return (
-		context.get('readScope').visibility === 'public' &&
-		context.get('tenantEntry').readMode !== 'private'
-	);
+	return context.get('readScope').access === 'public';
 }

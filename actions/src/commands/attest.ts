@@ -5,23 +5,23 @@ import { env } from 'node:process';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	type StoredCache,
+	type CacheScope,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	type BuildReceipt,
 	buildReceiptSchema,
-	type BuildReceiptV2,
-	type BuildReceiptV3,
-	type BuildSubjectV3,
-	type ParsedBuildReceipt
+	type BuildReceiptV2Input,
+	type BuildReceiptV3Input,
+	type BuildSubjectV3Input
 } from '@cupboard/protocol/build';
 import {
+	type BuildOriginPredicate,
 	buildOriginPredicateSchema,
 	buildOriginPredicateType,
-	type BuildOriginSubject,
-	type ParsedBuildOriginPredicate
+	type BuildOriginSubjectInput
 } from '@cupboard/protocol/build-origin';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
@@ -35,9 +35,10 @@ import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
-import { cacheVisibility } from '../attestation-signing.ts';
+import type { DestinationVisibility } from '../attestation-signing.ts';
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
+	CacheAccessProbeError,
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
 	MissingInputError,
@@ -68,7 +69,6 @@ export interface AttestOptions {
 	readonly predicateFile?: string;
 	readonly url?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 }
@@ -79,7 +79,7 @@ export interface AttestInputs {
 	readonly builtChecksumsFile: string;
 	readonly predicateFile: string;
 	readonly url: URL;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 }
@@ -96,13 +96,39 @@ interface AttestationSubjects {
 	readonly skipped: readonly string[];
 }
 
+async function cacheVisibility(
+	fetcher: typeof fetch,
+	cacheUrl: URL
+): Promise<DestinationVisibility> {
+	const target = `${canonicalHref(cacheUrl)}/nix-cache-info`;
+
+	return fetchWithProbeDeadline(
+		fetcher,
+		target,
+		undefined,
+		async (response) => {
+			await discardResponseBody(response);
+
+			if (response.status === 200) {
+				return 'public';
+			}
+
+			if (response.status === 401) {
+				return 'private';
+			}
+
+			throw new CacheAccessProbeError(target, response.status);
+		}
+	);
+}
+
 /**
  * For a version 2 receipt, treats every accepted subject as built by this run.
  * Version 2 did not distinguish other origins.
  */
 export function attestationSubjects(
 	infos: readonly CommittedPathInfo[],
-	receipt: BuildReceiptV2
+	receipt: BuildReceiptV2Input
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
 	const receiptSubjects = new Map(
@@ -142,7 +168,7 @@ export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
  * than from the build store.
  */
 export function provenancedSubjects(
-	receipt: BuildReceiptV3,
+	receipt: BuildReceiptV3Input,
 	held: SelectedPathInfos
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
@@ -169,7 +195,7 @@ export function provenancedSubjects(
 }
 
 function requireBacked(
-	subject: BuildSubjectV3,
+	subject: BuildSubjectV3Input,
 	info: CommittedPathInfo | undefined
 ): void {
 	if (info === undefined) {
@@ -203,7 +229,7 @@ function requireUnmoved(
 
 // Attempt fields belong to run-local attribution. Rebuild a `built` subject
 // without them before writing the durable build-origin statement.
-function originSubject(subject: BuildSubjectV3): BuildOriginSubject {
+function originSubject(subject: BuildSubjectV3Input): BuildOriginSubjectInput {
 	if (subject.origin === 'built') {
 		return {
 			origin: 'built',
@@ -226,15 +252,15 @@ function originSubject(subject: BuildSubjectV3): BuildOriginSubject {
  * subject.
  */
 export function buildOriginPredicateFor(
-	receipt: ParsedBuildReceipt,
+	receipt: BuildReceipt,
 	subjects: readonly StorePathDigest[]
-): ParsedBuildOriginPredicate | undefined {
+): BuildOriginPredicate | undefined {
 	if (receipt.version !== 3) {
 		return undefined;
 	}
 
 	const accepted = new Set(subjects.map((subject) => subject.storePath));
-	const origins: BuildOriginSubject[] = receipt.subjects
+	const origins: BuildOriginSubjectInput[] = receipt.subjects
 		.filter((subject) => accepted.has(subject.storePath))
 		.map((subject) => originSubject(subject));
 
@@ -285,19 +311,15 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--cache <name>',
-			'Check the subjects against a named public destination cache.'
-		)
-		.option(
-			'--private-cache <name>',
-			'Check the subjects against a private destination cache.'
+			'Check the subjects against a named destination cache.'
 		)
 		.option(
 			'--read-user <user>',
-			'Username for reading a private destination cache. Requires --read-password.'
+			'Username for reading the destination cache. Requires --read-password.'
 		)
 		.option(
 			'--read-password <password>',
-			'Password for reading a private destination cache. Requires --read-user.'
+			'Password for reading the destination cache. Requires --read-user.'
 		)
 		.action((options: AttestOptions) => attestAction(options, environment));
 }
@@ -338,7 +360,7 @@ export function resolveAttestInputs(
 	return {
 		receiptFile,
 		url,
-		cache: providedCacheSelection(options.cache, options.privateCache),
+		cache: providedCacheSelection(options.cache),
 		readUser,
 		readPassword,
 		checksumsFile,
@@ -362,7 +384,7 @@ function readCredential(inputs: AttestInputs): BasicCredential | undefined {
 }
 
 async function resolveAttestation(
-	receipt: ParsedBuildReceipt,
+	receipt: BuildReceipt,
 	inputs: AttestInputs,
 	dependencies: AttestDependencies
 ): Promise<AttestationSubjects> {
@@ -461,10 +483,15 @@ export async function attestAction(
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
+	const fetcher = dependencies.fetch ?? fetch;
+	const destinationVisibility = await cacheVisibility(
+		retryingFetcher(fetcher, 'replay-safe'),
+		cacheUrlFor(inputs.url, inputs.cache)
+	);
 	const { subjects, built, skipped } = await resolveAttestation(
 		receipt,
 		inputs,
-		dependencies
+		{ ...dependencies, fetch: fetcher }
 	);
 
 	for (const storePath of skipped) {
@@ -499,9 +526,5 @@ export async function attestAction(
 	await setOutput(environment, 'built-subject-count', String(built.length));
 	await setOutput(environment, 'predicate-file', predicateFile);
 	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
-	await setOutput(
-		environment,
-		'destination-visibility',
-		cacheVisibility(inputs.cache)
-	);
+	await setOutput(environment, 'destination-visibility', destinationVisibility);
 }

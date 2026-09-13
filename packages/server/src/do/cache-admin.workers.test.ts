@@ -1,15 +1,14 @@
 import {
-	cacheNameSchema,
+	type CacheAccessMode,
 	cachePrioritySchema,
 	type CacheScope,
-	type StoredCache,
 	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import type {
-	CacheListResponse,
-	CacheSummary
+	CacheListResponseInput,
+	CacheSummaryInput
 } from '@cupboard/protocol/caches';
 import {
 	cacheListResponseSchema,
@@ -24,7 +23,11 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
+import {
+	type CacheId,
+	cacheScopeFromRow,
+	legacyCacheKey
+} from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
@@ -33,23 +36,22 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheWriteGrants,
-	CommitSocketError,
+	CommitUpgradeError,
 	commitUploadRejection,
 	currentServer,
+	defaultCache,
 	driveToCompletion,
 	expectSingleUploadDecision,
-	fetchPath,
 	issueServerSignedToken,
+	namedCache,
 	narBytes,
 	narHash,
 	negotiateUploads,
-	provisionFixtureTenant,
 	pushPath,
 	putNarBytes,
 	recordDeploymentPhase,
 	resetTestServer,
-	testBase,
-	testPushId,
+	resolvedCache,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -57,9 +59,7 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
 import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
-import { phaseCacheMs } from './deployment-phase-gate.ts';
 import { type LocalStepOutcome } from './local-step.ts';
-import { RetentionService } from './retention-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 
@@ -72,7 +72,6 @@ async function cacheIdentities(): Promise<
 		id: CacheId;
 		scope: CacheScope | undefined;
 		access: string | undefined;
-		priority: number;
 		deleted: boolean;
 	}[]
 > {
@@ -83,7 +82,6 @@ async function cacheIdentities(): Promise<
 				kind: schema.cacheIdentities.kind,
 				name: schema.cacheIdentities.name,
 				access: schema.cacheIdentities.access,
-				priority: schema.cacheIdentities.priority,
 				deletedAt: schema.cacheIdentities.deletedAt
 			})
 			.from(schema.cacheIdentities)
@@ -98,86 +96,22 @@ async function cacheIdentities(): Promise<
 			name: row.name ?? undefined
 		}),
 		access: row.access ?? undefined,
-		priority: row.priority,
 		deleted: row.deletedAt !== null
 	}));
 }
-
-function withId(row: { cache: string; cacheId: CacheId | null }): {
-	cache: string;
-	cacheId: CacheId | undefined;
-} {
-	return { cache: row.cache, cacheId: row.cacheId ?? undefined };
-}
-
-/**
- * The cache columns of every row a publish writes, in store-path order.
- */
-async function publishedRows(): Promise<{
-	narInfos: { cache: string; cacheId: CacheId | undefined }[];
-	generationSeq: {
-		cache: string;
-		cacheKind: string | undefined;
-		cacheName: string | undefined;
-	}[];
-	pendingUploads: { cache: string; cacheId: CacheId | undefined }[];
-	pendingAttestations: { cache: string; cacheId: CacheId | undefined }[];
-}> {
-	return runInDurableObject(currentServer(), (instance) => ({
-		narInfos: instance.context.db
-			.select({
-				cache: schema.narInfos.cache,
-				cacheId: schema.narInfos.cacheId
-			})
-			.from(schema.narInfos)
-			.orderBy(schema.narInfos.cache, schema.narInfos.storePathHash)
-			.all()
-			.map((row) => withId(row)),
-		generationSeq: instance.context.db
-			.select({
-				cache: schema.generationSeq.cache,
-				cacheKind: schema.generationSeq.cacheKind,
-				cacheName: schema.generationSeq.cacheName
-			})
-			.from(schema.generationSeq)
-			.orderBy(schema.generationSeq.cache, schema.generationSeq.storePathHash)
-			.all()
-			.map((row) => ({
-				cache: row.cache,
-				cacheKind: row.cacheKind ?? undefined,
-				cacheName: row.cacheName ?? undefined
-			})),
-		pendingUploads: instance.context.db
-			.select({
-				cache: schema.pendingUploads.cache,
-				cacheId: schema.pendingUploads.cacheId
-			})
-			.from(schema.pendingUploads)
-			.orderBy(schema.pendingUploads.cache, schema.pendingUploads.id)
-			.all()
-			.map((row) => withId(row)),
-		pendingAttestations: instance.context.db
-			.select({
-				cache: schema.pendingAttestations.cache,
-				cacheId: schema.pendingAttestations.cacheId
-			})
-			.from(schema.pendingAttestations)
-			.orderBy(
-				schema.pendingAttestations.cache,
-				schema.pendingAttestations.storePathHash
-			)
-			.all()
-			.map((row) => withId(row))
-	}));
-}
+const defaultIdentity = {
+	id: 1,
+	scope: { kind: 'default' },
+	access: 'public',
+	deleted: false
+};
 
 /**
- * Tears the cache down inside the object and returns the cache columns of
- * every queued narinfo deletion, read before the object takes another
- * event: the teardown's alarm passes would otherwise retire the rows first.
+ * Tears the cache down and reads the deletion queue in the same object visit.
+ * The teardown's alarm passes would otherwise retire the rows first.
  */
 async function tearDownAndReadQueue(
-	cache: StoredCache
+	cache: CacheScope
 ): Promise<{ cache: string; cacheId: CacheId | undefined }[]> {
 	const rows = await runInDurableObject(currentServer(), async (instance) => {
 		await instance.runCacheTeardown(cache, origin);
@@ -195,7 +129,10 @@ async function tearDownAndReadQueue(
 			.all();
 	});
 
-	return rows.map((row) => withId(row));
+	return rows.map((row) => ({
+		cache: row.cache,
+		cacheId: row.cacheId ?? undefined
+	}));
 }
 
 /**
@@ -212,14 +149,6 @@ async function legacyCacheNames(): Promise<string[]> {
 
 	return rows.map((row) => row.name);
 }
-
-const defaultIdentity = {
-	id: 1,
-	scope: { kind: 'default' },
-	access: 'public',
-	priority: 40,
-	deleted: false
-};
 
 async function policyIdentityRows(): Promise<
 	{
@@ -292,8 +221,12 @@ async function lifecycleIdentities(): Promise<
 	}));
 }
 
-const buildsCache = cacheNameSchema.parse('builds');
+const buildsCache = namedCache('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
+// The legacy `cache` column still keys the lifecycle row for this cache.
+const buildsLegacyCache = storedCacheSchema.parse(
+	legacyCacheKey(buildsCache, 'public')
+);
 
 interface CacheVersion {
 	readonly generation: number;
@@ -308,12 +241,12 @@ function publishedCacheVersion(): Promise<CacheVersion | undefined> {
 			readRevision: d1Schema.cacheLifecycle.readRevision
 		})
 		.from(d1Schema.cacheLifecycle)
-		.where(eq(d1Schema.cacheLifecycle.cache, buildsCache))
+		.where(eq(d1Schema.cacheLifecycle.cache, buildsLegacyCache))
 		.get();
 }
 
 // The version D1 publishes for `builds` and the generation its live local
-// identity records. Registration copies the second from the first, so the two
+// identity records. Registration stamps the second from the first, so the two
 // agree.
 async function cacheVersions(): Promise<{
 	local: Pick<CacheVersion, 'generation'> | undefined;
@@ -325,7 +258,7 @@ async function cacheVersions(): Promise<{
 			.from(schema.cacheIdentities)
 			.where(
 				and(
-					eq(schema.cacheIdentities.name, buildsCache),
+					eq(schema.cacheIdentities.name, buildsCache.name),
 					isNull(schema.cacheIdentities.deletedAt)
 				)
 			)
@@ -342,19 +275,20 @@ const earlierLiveDeadline = isoTimestampSchema.parse(
 const laterLiveDeadline = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
 const expiredDeadline = isoTimestampSchema.parse('2025-12-01T00:00:00.000Z');
 
-function expectCommitSocketError(
+function expectCommitUpgradeError(
 	error: unknown
-): asserts error is CommitSocketError {
-	expect(error).toBeInstanceOf(CommitSocketError);
+): asserts error is CommitUpgradeError {
+	expect(error).toBeInstanceOf(CommitUpgradeError);
 }
 
 async function putCache(
 	token: string,
 	name: string,
-	priority: number
-): Promise<CacheSummary> {
+	priority: number,
+	access: CacheAccessMode = 'public'
+): Promise<CacheSummaryInput> {
 	const response = await authorisedFetch(`/caches/${name}`, token, {
-		body: JSON.stringify({ priority }),
+		body: JSON.stringify({ access, priority }),
 		headers: { 'content-type': 'application/json' },
 		method: 'PUT'
 	});
@@ -364,7 +298,23 @@ async function putCache(
 	return cacheSummarySchema.parse(await response.json());
 }
 
-async function listCaches(token: string): Promise<CacheListResponse> {
+async function updateCacheAccess(
+	token: string,
+	name: string,
+	access: CacheAccessMode
+): Promise<CacheSummaryInput> {
+	const response = await authorisedFetch(`/caches/${name}`, token, {
+		body: JSON.stringify({ kind: 'access', access }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PATCH'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return cacheSummarySchema.parse(await response.json());
+}
+
+async function listCaches(token: string): Promise<CacheListResponseInput> {
 	const response = await authorisedFetch('/caches', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
@@ -381,6 +331,57 @@ function cacheListRequest(token: string): Request {
 describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
 
+	it('checks the current incarnation after waiting to update cache access', async () => {
+		await useTestServer('cache-admin-access-incarnation');
+		await recordDeploymentPhase('native-reads');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30);
+
+		const request = (method: string, body?: object): Request =>
+			new Request('https://cupboard.test/caches/builds', {
+				method,
+				headers: {
+					authorization: `Bearer ${init.token}`,
+					'content-type': 'application/json'
+				},
+				...(body !== undefined && { body: JSON.stringify(body) })
+			});
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const enter = instance.context.criticalSection.bind(instance.context);
+			let recreated: CacheSummaryInput | undefined;
+			const gate = vi.spyOn(instance.context, 'criticalSection');
+			gate.mockImplementationOnce(async (run) => {
+				gate.mockRestore();
+				const removed = await instance.fetch(request('DELETE'));
+				const created = await instance.fetch(
+					request('PUT', { access: 'private', priority: 30 })
+				);
+				expect({
+					removed: removed.status,
+					created: created.status
+				}).toStrictEqual({
+					removed: StatusCodes.OK,
+					created: StatusCodes.OK
+				});
+				recreated = cacheSummarySchema.parse(await created.json());
+				return enter(run);
+			});
+			try {
+				const response = await instance.fetch(
+					request('PATCH', { kind: 'access', access: 'public' })
+				);
+				const current = await instance.fetch(request('GET'));
+				expect({
+					status: response.status,
+					cache: cacheSummarySchema.parse(await current.json())
+				}).toStrictEqual({ status: StatusCodes.CONFLICT, cache: recreated });
+			} finally {
+				gate.mockRestore();
+			}
+		});
+	});
+
 	it('lists registered caches with their priority and store-path count', async () => {
 		await useTestServer('cache-admin-list');
 		const init = await bootstrap();
@@ -388,14 +389,26 @@ describe('cache registry admin', () => {
 		await pushPath(
 			init.token,
 			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
+			buildsCache
 		);
 
 		const { caches } = await listCaches(init.token);
 
 		expect(caches).toStrictEqual([
-			{ name: '', priority: 40, storePaths: 0, graceManaged: false },
-			{ name: 'builds', priority: 30, storePaths: 1, graceManaged: false }
+			{
+				scope: defaultCache(),
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				graceManaged: false
+			},
+			{
+				scope: buildsCache,
+				access: 'public',
+				priority: 30,
+				storePaths: 1,
+				graceManaged: false
+			}
 		]);
 	});
 
@@ -404,26 +417,28 @@ describe('cache registry admin', () => {
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30);
 		await runInDurableObject(currentServer(), (instance) => {
+			const cache = resolvedCache(instance.context, buildsCache);
+
 			instance.context.db
-				.update(schema.caches)
+				.update(schema.cacheIdentities)
 				.set({ graceManaged: true })
-				.where(eq(schema.caches.name, buildsCache))
+				.where(eq(schema.cacheIdentities.id, cache.id))
 				.run();
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values([
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('a')),
 						retainUntil: laterLiveDeadline
 					},
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('b')),
 						retainUntil: earlierLiveDeadline
 					},
 					{
-						cache: buildsCache,
+						cacheId: cache.id,
 						storePathHash: storePathHashSchema.parse(repeated('c')),
 						retainUntil: expiredDeadline
 					}
@@ -436,9 +451,16 @@ describe('cache registry admin', () => {
 		// The expired row does not count as the earliest deadline: only live
 		// deadlines are reported.
 		expect(caches).toStrictEqual([
-			{ name: '', priority: 40, storePaths: 0, graceManaged: false },
 			{
-				name: 'builds',
+				scope: defaultCache(),
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				graceManaged: false
+			},
+			{
+				scope: buildsCache,
+				access: 'public',
 				priority: 30,
 				storePaths: 0,
 				graceManaged: true,
@@ -474,11 +496,12 @@ describe('cache registry admin', () => {
 
 					for (let index = 0; index < 20; index += 1) {
 						instance.context.db
-							.insert(schema.caches)
+							.insert(schema.cacheIdentities)
 							.values({
-								name: cacheNameSchema.parse(
-									`cache-${String(index).padStart(2, '0')}`
-								),
+								kind: 'named',
+								name: namedCache(`cache-${String(index).padStart(2, '0')}`)
+									.name,
+								access: 'public',
 								priority: cachePrioritySchema.parse(40),
 								createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 							})
@@ -502,24 +525,20 @@ describe('cache registry admin', () => {
 		});
 	});
 
-	it('registers the default cache identity at initialise', async () => {
-		await useTestServer('cache-admin-identity-default');
-
-		await bootstrap();
-
-		expect(await cacheIdentities()).toStrictEqual([defaultIdentity]);
-	});
-
-	it('records the cache identity on the rows a publish writes', async () => {
+	it('binds a published path to the cache identity', async () => {
 		await useTestServer('cache-admin-identity-binding');
 
 		const init = await bootstrap();
-		const published = uploadMetadata({ fileSize: narBytes.byteLength });
-		const digest = 'ab'.repeat(32);
 
-		// Neither negotiation registers its cache, so both rows wait under the
-		// legacy name. A commit deletes its pending row, so the upload stays
-		// uncommitted to be read back.
+		await putCache(init.token, 'builds', 40);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			buildsCache
+		);
+
+		// A commit deletes the pending row, so negotiate a second path and leave
+		// it uncommitted so that a pending row survives to be read.
 		await negotiateUploads(
 			init.token,
 			[
@@ -528,80 +547,29 @@ describe('cache registry admin', () => {
 					storePathHash: repeated('c')
 				})
 			],
-			'docs'
+			buildsCache
 		);
-		await authorisedFetch('/cache/builds/attestations', init.token, {
-			body: JSON.stringify({
-				pushId: testPushId,
-				bundles: [{ storePathHash: published.storePathHash, digest }]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		});
 
-		const beforeRegistration = await publishedRows();
+		const identity = await runInDurableObject(currentServer(), (instance) =>
+			resolvedCache(instance.context, buildsCache)
+		);
+		const bound = await runInDurableObject(currentServer(), (instance) => ({
+			narInfos: instance.context.db
+				.select({ cacheId: schema.narInfos.cacheId })
+				.from(schema.narInfos)
+				.all(),
+			pendingUploads: instance.context.db
+				.select({ cacheId: schema.pendingUploads.cacheId })
+				.from(schema.pendingUploads)
+				.all()
+		}));
 
-		await pushPath(init.token, published, 'docs');
-		await putCache(init.token, 'builds', 30);
-
-		const identities = await cacheIdentities();
-
-		expect({
-			identities: identities.map((identity) => ({
-				id: identity.id,
-				scope: identity.scope
-			})),
-			beforeRegistration,
-			afterRegistration: await publishedRows()
-		}).toStrictEqual({
-			identities: [
-				{ id: 1, scope: { kind: 'default' } },
-				{ id: 2, scope: { kind: 'named', name: 'docs' } },
-				{ id: 3, scope: { kind: 'named', name: 'builds' } }
-			],
-			beforeRegistration: {
-				narInfos: [],
-				generationSeq: [],
-				pendingUploads: [{ cache: 'docs', cacheId: undefined }],
-				pendingAttestations: [{ cache: 'builds', cacheId: undefined }]
-			},
-			afterRegistration: {
-				narInfos: [{ cache: 'docs', cacheId: 2 }],
-				generationSeq: [
-					{ cache: 'docs', cacheKind: 'named', cacheName: 'docs' }
-				],
-				pendingUploads: [{ cache: 'docs', cacheId: 2 }],
-				pendingAttestations: [{ cache: 'builds', cacheId: 3 }]
+		expect({ identity: identity.id, bound }).toStrictEqual({
+			identity: 2,
+			bound: {
+				narInfos: [{ cacheId: 2 }],
+				pendingUploads: [{ cacheId: 2 }]
 			}
-		});
-	});
-
-	it('queues the deletions of a torn-down cache under its deleted identity', async () => {
-		await useTestServer('cache-admin-identity-teardown-queue');
-
-		const init = await bootstrap();
-
-		await pushPath(
-			init.token,
-			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
-		);
-
-		const narInfoDeletions = await tearDownAndReadQueue(buildsCache);
-		const identities = await cacheIdentities();
-
-		expect({ identities, narInfoDeletions }).toStrictEqual({
-			identities: [
-				defaultIdentity,
-				{
-					id: 2,
-					scope: { kind: 'named', name: 'builds' },
-					access: 'public',
-					priority: 40,
-					deleted: true
-				}
-			],
-			narInfoDeletions: [{ cache: 'builds', cacheId: 2 }]
 		});
 	});
 
@@ -611,7 +579,8 @@ describe('cache registry admin', () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		await pushPath(init.token, metadata, 'builds');
+		await putCache(init.token, 'builds', 40);
+		await pushPath(init.token, metadata, buildsCache);
 
 		const set = await authorisedFetch(
 			'/cache/builds/roots/channel',
@@ -624,17 +593,11 @@ describe('cache registry admin', () => {
 		);
 		const bound = await runInDurableObject(currentServer(), (instance) => ({
 			roots: instance.context.db
-				.select({
-					cache: schema.retentionRoots.cache,
-					cacheId: schema.retentionRoots.cacheId
-				})
+				.select({ cacheId: schema.retentionRoots.cacheId })
 				.from(schema.retentionRoots)
 				.all(),
 			targets: instance.context.db
-				.select({
-					cache: schema.retentionRootTargets.cache,
-					cacheId: schema.retentionRootTargets.cacheId
-				})
+				.select({ cacheId: schema.retentionRootTargets.cacheId })
 				.from(schema.retentionRootTargets)
 				.all()
 		}));
@@ -642,13 +605,13 @@ describe('cache registry admin', () => {
 		expect({ set: set.status, bound }).toStrictEqual({
 			set: StatusCodes.OK,
 			bound: {
-				roots: [{ cache: 'builds', cacheId: 2 }],
-				targets: [{ cache: 'builds', cacheId: 2 }]
+				roots: [{ cacheId: 2 }],
+				targets: [{ cacheId: 2 }]
 			}
 		});
 	});
 
-	it('links a cache-scoped policy when its cache is created', async () => {
+	it('records the identity of the cache a policy names', async () => {
 		await useTestServer('cache-admin-identity-policy');
 
 		const init = await bootstrap();
@@ -659,81 +622,116 @@ describe('cache registry admin', () => {
 				method: 'POST'
 			});
 
-		// The cache does not exist yet, so this policy has no identity to name.
-		await addPolicy({ scope: 'cache', pattern: 'builds', ttlSeconds: 3600 });
+		// A cache-scoped policy names a cache, so it can only be added once that
+		// cache exists.
+		const beforeCache = await addPolicy({
+			scope: 'cache',
+			cache: buildsCache,
+			ttlSeconds: 3600
+		});
+
+		await putCache(init.token, 'builds', 40);
+		await putCache(init.token, 'guides', 40, 'private');
+		await addPolicy({ scope: 'cache', cache: buildsCache, ttlSeconds: 3600 });
+		await addPolicy({
+			scope: 'cache',
+			cache: namedCache('guides'),
+			ttlSeconds: 3600
+		});
 		await addPolicy({
 			scope: 'root-name-prefix',
 			pattern: 'release/',
 			ttlSeconds: 7200
 		});
 
-		const beforeCache = await policyIdentityRows();
-
-		await pushPath(
-			init.token,
-			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
-		);
-
-		const afterCache = await policyIdentityRows();
-
-		// The other order: this cache exists before its policy is added, so the
-		// insert resolves the identity itself.
-		await pushPath(
-			init.token,
-			uploadMetadata({
-				fileSize: narBytes.byteLength,
-				storePathHash: repeated('d')
-			}),
-			'docs'
-		);
-		await addPolicy({ scope: 'cache', pattern: 'docs', ttlSeconds: 3600 });
-
-		const afterSecondCache = await policyIdentityRows();
-
-		// A deleted cache keeps its policy, so registering the name again binds
-		// the policy to the new identity.
-		await authorisedFetch('/caches/builds?force=true', init.token, {
-			method: 'DELETE'
+		expect({
+			beforeCache: beforeCache.status,
+			policies: await policyIdentityRows()
+		}).toStrictEqual({
+			beforeCache: StatusCodes.NOT_FOUND,
+			policies: [
+				{
+					pattern: 'builds',
+					kind: 'cache',
+					cacheId: 2,
+					rootNamePrefix: undefined
+				},
+				// The legacy pattern still spells out a private cache's access.
+				{
+					pattern: 'private/guides',
+					kind: 'cache',
+					cacheId: 3,
+					rootNamePrefix: undefined
+				},
+				{
+					pattern: 'release/',
+					kind: 'root-name-prefix',
+					cacheId: undefined,
+					rootNamePrefix: 'release/'
+				}
+			]
 		});
-		await pushPath(
-			init.token,
-			uploadMetadata({
-				fileSize: narBytes.byteLength,
-				storePathHash: repeated('f')
-			}),
-			'builds'
+	});
+
+	it('fills the identity of rows that carry only a legacy cache name', async () => {
+		await useTestServer('cache-admin-identity-reconcile');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 40);
+		// The state an earlier release left behind: collection rows keyed by the
+		// stored cache name alone, with no identity beside them.
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.garbageCollectionRevisions)
+				.values([
+					{ cache: storedCacheSchema.parse(''), revision: 0 },
+					{ cache: buildsLegacyCache, revision: 0 }
+				])
+				.run();
+		});
+
+		const collectionState = (): Promise<
+			{ cache: string; cacheId: CacheId | undefined }[]
+		> =>
+			runInDurableObject(currentServer(), (instance) =>
+				instance.context.db
+					.select({
+						cache: schema.garbageCollectionRevisions.cache,
+						cacheId: schema.garbageCollectionRevisions.cacheId
+					})
+					.from(schema.garbageCollectionRevisions)
+					.orderBy(schema.garbageCollectionRevisions.cache)
+					.all()
+					.map((row) => ({
+						cache: row.cache,
+						cacheId: row.cacheId ?? undefined
+					}))
+			);
+
+		const beforeStep = await collectionState();
+
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep()
 		);
 
-		const prefixPolicy = {
-			pattern: 'release/',
-			kind: 'root-name-prefix',
-			cacheId: undefined,
-			rootNamePrefix: 'release/'
-		};
-		const buildsPolicy = (cacheId: number | undefined) => ({
-			pattern: 'builds',
-			kind: 'cache',
-			cacheId,
-			rootNamePrefix: undefined
-		});
-		const secondCachePolicy = {
-			pattern: 'docs',
-			kind: 'cache',
-			cacheId: 3,
-			rootNamePrefix: undefined
-		};
+		const afterStep = await collectionState();
+		const identities = await cacheIdentities();
 
 		expect({
-			beforeCache,
-			afterCache,
-			afterSecondCache,
-			afterRegisteredAgain: await policyIdentityRows()
+			beforeStep,
+			afterStep,
+			identities: identities.map(({ scope }) => scope)
 		}).toStrictEqual({
-			beforeCache: [buildsPolicy(undefined), prefixPolicy],
-			afterCache: [buildsPolicy(2), prefixPolicy],
-			afterSecondCache: [buildsPolicy(2), secondCachePolicy, prefixPolicy],
-			afterRegisteredAgain: [buildsPolicy(4), secondCachePolicy, prefixPolicy]
+			beforeStep: [
+				{ cache: '', cacheId: undefined },
+				{ cache: 'builds', cacheId: undefined }
+			],
+			afterStep: [
+				{ cache: '', cacheId: 1 },
+				{ cache: 'builds', cacheId: 2 }
+			],
+			identities: [{ kind: 'default' }, { kind: 'named', name: 'builds' }]
 		});
 	});
 
@@ -809,15 +807,11 @@ describe('cache registry admin', () => {
 	});
 
 	it('creates the identity of a cache registered without one', async () => {
-		await useTestServer('cache-admin-identity-reconcile');
+		await useTestServer('cache-admin-retained-legacy-backfill');
 
 		const init = await bootstrap();
 
-		await pushPath(
-			init.token,
-			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
-		);
+		await putCache(init.token, 'builds', 40);
 
 		// A build that predates the identity table registers a cache and writes
 		// its rows with the stored name alone.
@@ -847,9 +841,7 @@ describe('cache registry admin', () => {
 				.run();
 		});
 
-		await runInDurableObject(currentServer(), (instance) =>
-			instance.reportLocalStep()
-		);
+		await wake();
 
 		const releasesRow = await runInDurableObject(currentServer(), (instance) =>
 			instance.context.db
@@ -864,7 +856,10 @@ describe('cache registry admin', () => {
 
 		expect({
 			identities: await cacheIdentities(),
-			releasesRow: releasesRow === undefined ? undefined : withId(releasesRow)
+			releasesRow:
+				releasesRow === undefined
+					? undefined
+					: { cache: releasesRow.cache, cacheId: releasesRow.cacheId }
 		}).toStrictEqual({
 			identities: [
 				defaultIdentity,
@@ -872,14 +867,12 @@ describe('cache registry admin', () => {
 					id: 2,
 					scope: { kind: 'named', name: 'builds' },
 					access: 'public',
-					priority: 40,
 					deleted: false
 				},
 				{
 					id: 3,
 					scope: { kind: 'named', name: 'releases' },
 					access: 'private',
-					priority: 40,
 					deleted: false
 				}
 			],
@@ -887,7 +880,267 @@ describe('cache registry admin', () => {
 		});
 	});
 
-	it('creates no identity for a cache row its deleted identity outlives', async () => {
+	// A request that names a cache reads this row to learn how the cache reads,
+	// so the row has to exist from the cache's first write rather than waiting
+	// for the projection.
+	it('records how a cache reads when the cache is registered', async () => {
+		await useTestServer('cache-admin-lifecycle-on-registration');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+		await putCache(init.token, 'guides', 40, 'private');
+
+		expect(await lifecycleIdentities()).toStrictEqual([
+			{ kind: 'default', name: undefined, access: 'public' },
+			{ kind: 'named', name: 'builds', access: 'public' },
+			{ kind: 'named', name: 'guides', access: 'private' }
+		]);
+	});
+
+	it('registers the default cache identity at initialise', async () => {
+		await useTestServer('cache-admin-identity-default');
+
+		await bootstrap();
+
+		expect(await cacheIdentities()).toStrictEqual([defaultIdentity]);
+	});
+
+	it('queues the deletions of a torn-down cache under its deleted identity', async () => {
+		await useTestServer('cache-admin-identity-teardown-queue');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 40);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			buildsCache
+		);
+
+		const narInfoDeletions = await tearDownAndReadQueue(buildsCache);
+		const identities = await cacheIdentities();
+
+		expect({ identities, narInfoDeletions }).toStrictEqual({
+			identities: [
+				defaultIdentity,
+				{
+					id: 2,
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					deleted: true
+				}
+			],
+			narInfoDeletions: [{ cache: 'builds', cacheId: 2 }]
+		});
+	});
+
+	it('keeps the identity live when a teardown fails before its transaction', async () => {
+		await useTestServer('cache-admin-identity-teardown-failure');
+
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await putCache(init.token, 'builds', 30);
+		// A fresh upload stages under its own key, so the teardown has an R2
+		// object to delete before its local transaction.
+		await negotiateUploads(init.token, [metadata], buildsCache);
+
+		const deleteSpy = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockRejectedValue(new Error('R2 unavailable'));
+
+		let failed: Response;
+
+		try {
+			failed = await authorisedFetch('/caches/builds', init.token, {
+				method: 'DELETE'
+			});
+		} finally {
+			deleteSpy.mockRestore();
+		}
+
+		const afterFailure = {
+			identities: await cacheIdentities(),
+			legacyNames: await legacyCacheNames()
+		};
+		const removed = await authorisedFetch('/caches/builds', init.token, {
+			method: 'DELETE'
+		});
+		const builds = {
+			id: 2,
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public'
+		};
+
+		expect({
+			failed: failed.status,
+			afterFailure,
+			removed: removed.status,
+			afterRemoval: {
+				identities: await cacheIdentities(),
+				legacyNames: await legacyCacheNames()
+			}
+		}).toStrictEqual({
+			failed: StatusCodes.INTERNAL_SERVER_ERROR,
+			afterFailure: {
+				identities: [defaultIdentity, { ...builds, deleted: false }],
+				legacyNames: ['builds']
+			},
+			removed: StatusCodes.OK,
+			afterRemoval: {
+				identities: [defaultIdentity, { ...builds, deleted: true }],
+				legacyNames: []
+			}
+		});
+	});
+
+	// A policy scoped to a cache that has been torn down would refer to a deleted
+	// identity; every policy read resolves each policy's cache, so one such
+	// policy would fail every root write of the tenant.
+	it('removes the policies scoped to a cache it tears down', async () => {
+		await useTestServer('cache-admin-teardown-policies');
+
+		const init = await bootstrap();
+		const addPolicy = (body: unknown): Promise<Response> =>
+			authorisedFetch('/policies', init.token, {
+				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await putCache(init.token, 'builds', 40);
+		await pushPath(init.token, metadata);
+		await addPolicy({ scope: 'cache', cache: buildsCache, ttlSeconds: 3600 });
+		await addPolicy({
+			scope: 'root-name-prefix',
+			pattern: 'release/',
+			ttlSeconds: 7200
+		});
+		await authorisedFetch('/caches/builds?force=true', init.token, {
+			method: 'DELETE'
+		});
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(),
+			async () => {
+				const markers = await runInDurableObject(
+					currentServer(),
+					(_instance, state) =>
+						state.storage.list({ prefix: teardownEntryPrefix, limit: 1 })
+				);
+
+				return markers.size === 0;
+			},
+			3
+		);
+		const remainingMarkers = await runInDurableObject(
+			currentServer(),
+			(_instance, state) =>
+				state.storage.list({ prefix: teardownEntryPrefix, limit: 1 })
+		);
+		expect(remainingMarkers.size).toBe(0);
+
+		const listed = await authorisedFetch('/policies', init.token);
+		const set = await authorisedFetch('/roots/channel', init.token, {
+			body: JSON.stringify({ targets: [metadata.storePath] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		expect({
+			listed: listed.status,
+			policies: await policyIdentityRows(),
+			set: set.status
+		}).toStrictEqual({
+			listed: StatusCodes.OK,
+			policies: [
+				{
+					pattern: 'release/',
+					kind: 'root-name-prefix',
+					cacheId: undefined,
+					rootNamePrefix: 'release/'
+				}
+			],
+			set: StatusCodes.OK
+		});
+	});
+
+	it('creates the identity of a cache registered without one', async () => {
+		await useTestServer('cache-admin-identity-reconcile-legacy');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 40);
+
+		// A build that predates the identity table registers a cache and writes
+		// its rows with the stored name alone.
+		const releases = storedCacheSchema.parse('private/releases');
+		const registeredAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.caches)
+				.values({
+					name: releases,
+					priority: cachePrioritySchema.parse(40),
+					createdAt: registeredAt
+				})
+				.run();
+			instance.context.db
+				.insert(schema.narInfos)
+				.values({
+					cache: releases,
+					storePathHash: storePathHashSchema.parse(repeated('b')),
+					storePath: storePathSchema.parse(`/nix/store/${repeated('b')}-old`),
+					narHash,
+					narSize: narBytes.byteLength,
+					referencesJson: '[]',
+					createdAt: registeredAt
+				})
+				.run();
+		});
+
+		await wake();
+
+		const releasesRow = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({
+					cache: schema.narInfos.cache,
+					cacheId: schema.narInfos.cacheId
+				})
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.cache, releases))
+				.get()
+		);
+
+		expect({
+			identities: await cacheIdentities(),
+			releasesRow:
+				releasesRow === undefined
+					? undefined
+					: { cache: releasesRow.cache, cacheId: releasesRow.cacheId }
+		}).toStrictEqual({
+			identities: [
+				defaultIdentity,
+				{
+					id: 2,
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					deleted: false
+				},
+				{
+					id: 3,
+					scope: { kind: 'named', name: 'releases' },
+					access: 'private',
+					deleted: false
+				}
+			],
+			releasesRow: { cache: 'private/releases', cacheId: 3 }
+		});
+	});
+
+	it('distinguishes a deleted cache row from a recreated cache row', async () => {
 		await useTestServer('cache-admin-identity-reconcile-deleted');
 
 		await bootstrap();
@@ -903,12 +1156,12 @@ describe('cache registry admin', () => {
 				.insert(schema.caches)
 				.values([
 					{
-						name: cacheNameSchema.parse('releases'),
+						name: storedCacheSchema.parse('releases'),
 						priority,
 						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 					},
 					{
-						name: cacheNameSchema.parse('guides'),
+						name: storedCacheSchema.parse('guides'),
 						priority,
 						createdAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z')
 					}
@@ -937,14 +1190,11 @@ describe('cache registry admin', () => {
 				.run();
 		});
 
-		await runInDurableObject(currentServer(), (instance) =>
-			instance.reportLocalStep()
-		);
+		await wake();
 
 		const guidesIdentity = {
 			scope: { kind: 'named', name: 'guides' },
-			access: 'public',
-			priority: 40
+			access: 'public'
 		};
 
 		expect(await cacheIdentities()).toStrictEqual([
@@ -953,7 +1203,6 @@ describe('cache registry admin', () => {
 				id: 2,
 				scope: { kind: 'named', name: 'releases' },
 				access: 'public',
-				priority: 40,
 				deleted: true
 			},
 			{ ...guidesIdentity, id: 3, deleted: true },
@@ -961,46 +1210,50 @@ describe('cache registry admin', () => {
 		]);
 	});
 
-	// Registration writes the lifecycle row, so the projection is no longer the
-	// only path that creates one. The default cache's row comes from the D1
-	// trigger that fires when the tenant row is inserted, and the insert trigger
-	// gives a public-namespace cache the tenant's read mode.
-	it.each([
-		{ readMode: 'public', named: 'public' },
-		{ readMode: 'private', named: 'private' }
-	] as const)(
-		'records how a cache reads when it is registered in a $readMode tenant',
-		async ({ readMode, named }) => {
-			await useTestServer(`cache-admin-lifecycle-on-registration-${readMode}`);
-			await provisionFixtureTenant({ readMode });
+	it("records a cache's access as its projected row's access", async () => {
+		await useTestServer('cache-admin-identity-projection-access');
 
-			const init = await bootstrap();
+		const init = await bootstrap();
 
-			await putCache(init.token, 'builds', 30);
-			await pushPath(
-				init.token,
-				uploadMetadata({ fileSize: narBytes.byteLength }),
-				'private/guides'
-			);
+		// Registering a cache writes its lifecycle row. Drop it so the projection
+		// is the writer of the row under test.
+		await putCache(init.token, 'builds', 40, 'private');
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.cacheLifecycle)
+			.run();
+		await wake();
 
-			expect(await lifecycleIdentities()).toStrictEqual([
-				{ kind: 'default', name: undefined, access: readMode },
-				{ kind: 'named', name: 'builds', access: named },
-				{ kind: 'named', name: 'guides', access: 'private' }
-			]);
-		}
-	);
+		const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({
+				cache: d1Schema.cacheLifecycle.cache,
+				access: d1Schema.cacheLifecycle.access
+			})
+			.from(d1Schema.cacheLifecycle)
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, fixtureTenant),
+					eq(d1Schema.cacheLifecycle.cacheName, buildsCache.name)
+				)
+			)
+			.get();
+
+		expect(row).toStrictEqual({ cache: 'private/builds', access: 'private' });
+	});
 
 	it('finishes identity backfill and projection over bounded wakes', async () => {
 		await useTestServer('cache-admin-identity-projection');
 
 		const init = await bootstrap();
+		// More caches than one invocation projects.
 		const cacheCount = maxCachesProjectedPerRun + 5;
 
 		for (let index = 0; index < cacheCount; index += 1) {
 			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
 
+		// Registering a cache writes its lifecycle row, so drop every row to leave
+		// the state this projection exists for: caches registered by a release
+		// that wrote no row.
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.delete(d1Schema.cacheLifecycle)
 			.run();
@@ -1029,242 +1282,76 @@ describe('cache registry admin', () => {
 		expect(await wake()).toStrictEqual({ kind: 'incomplete', projected: 0 });
 	});
 
-	it("records the tenant's read mode as a projected cache's access", async () => {
-		await useTestServer('cache-admin-identity-projection-access');
-		await provisionFixtureTenant({ readMode: 'private' });
-
-		const init = await bootstrap();
-
-		// Registering a cache writes its lifecycle row. Drop it so the projection
-		// is the writer of the row under test.
-		await putCache(init.token, 'builds', 40);
-		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-			.delete(d1Schema.cacheLifecycle)
-			.run();
-		await wake();
-
-		const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-			.select({
-				cache: d1Schema.cacheLifecycle.cache,
-				access: d1Schema.cacheLifecycle.access
-			})
-			.from(d1Schema.cacheLifecycle)
-			.where(
-				and(
-					eq(d1Schema.cacheLifecycle.tenant, fixtureTenant),
-					eq(d1Schema.cacheLifecycle.cache, buildsCache)
-				)
-			)
-			.get();
-
-		expect(row).toStrictEqual({ cache: 'builds', access: 'private' });
-	});
-
-	it('lists the same caches from the identity table as from the legacy one', async () => {
-		await useTestServer('cache-admin-native-list');
-
-		const init = await bootstrap();
-
-		await putCache(init.token, 'builds', 30);
-		await putCache(init.token, 'docs', 20);
-		await pushPath(
-			init.token,
-			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
-		);
-
-		// A grace flag set through the retention path reaches both tables, so
-		// the flag the reads compare is `true` for one cache.
-		await runInDurableObject(currentServer(), (instance) => {
-			const retention = new RetentionService(instance.context);
-
-			instance.context.db.transaction((tx) => {
-				retention.markCacheGraceManaged(buildsCache, tx);
-			});
-		});
-
-		const reads = async (): Promise<{
-			list: CacheListResponse;
-			cacheInfo: string;
-			summary: CacheSummary;
-		}> => {
-			const info = await fetchPath('/cache/builds/nix-cache-info');
-
-			return {
-				list: await listCaches(init.token),
-				cacheInfo: await info.text(),
-				summary: await putCache(init.token, 'builds', 30)
-			};
-		};
-
-		const legacy = await reads();
-
-		await recordDeploymentPhase('native-reads');
-		// The gate answers from its last reading for `phaseCacheMs`; the first
-		// listing read the phase, so the second reads it again only once the
-		// clock has passed that interval.
-		vi.setSystemTime(new Date(testBase.getTime() + phaseCacheMs));
-
-		expect(await reads()).toStrictEqual(legacy);
-	});
-
 	it('gives each incarnation of a cache name its own identity', async () => {
 		await useTestServer('cache-admin-identity');
 
 		const init = await bootstrap();
 
+		await putCache(init.token, 'builds', 40);
 		await pushPath(
 			init.token,
 			uploadMetadata({ fileSize: narBytes.byteLength }),
-			'builds'
+			buildsCache
 		);
 
 		const afterPush = await cacheIdentities();
+		const buildsId = await runInDurableObject(
+			currentServer(),
+			(instance) => resolvedCache(instance.context, buildsCache).id
+		);
 
 		await authorisedFetch('/caches/builds?force=true', init.token, {
 			method: 'DELETE'
 		});
-
-		// Retire the old cache's final reference before reusing its NAR hash.
-		// Otherwise teardown can revoke reuse between negotiation and commit.
+		// Teardown retires the identity it deleted, so drive it to completion
+		// rather than reading the registry while a pass is still queued.
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(),
 			async () =>
 				(await runInDurableObject(currentServer(), (_instance, state) =>
-					state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+					state.storage.get(`${teardownEntryPrefix}${String(buildsId)}`)
 				)) === undefined,
 			3
 		);
 		const teardownMarker = await runInDurableObject(
 			currentServer(),
 			(_instance, state) =>
-				state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+				state.storage.get(`${teardownEntryPrefix}${String(buildsId)}`)
 		);
 		expect(teardownMarker).toBeUndefined();
+
 		const afterDeletion = await cacheIdentities();
 
+		await putCache(init.token, 'builds', 40);
 		await pushPath(
 			init.token,
 			uploadMetadata({
 				fileSize: narBytes.byteLength,
 				storePathHash: repeated('b')
 			}),
-			'builds'
+			buildsCache
 		);
 
 		const afterReuse = await cacheIdentities();
 		const builds = {
 			scope: { kind: 'named', name: 'builds' },
+			access: 'public'
+		};
+		const initial = {
+			scope: defaultCache(),
 			access: 'public',
-			priority: 40
+			id: 1,
+			deleted: false
 		};
 
 		expect({ afterPush, afterDeletion, afterReuse }).toStrictEqual({
-			afterPush: [defaultIdentity, { ...builds, id: 2, deleted: false }],
-			afterDeletion: [defaultIdentity, { ...builds, id: 2, deleted: true }],
+			afterPush: [initial, { ...builds, id: 2, deleted: false }],
+			afterDeletion: [initial, { ...builds, id: 2, deleted: true }],
 			afterReuse: [
-				defaultIdentity,
+				initial,
 				{ ...builds, id: 2, deleted: true },
 				{ ...builds, id: 3, deleted: false }
 			]
-		});
-	});
-
-	it('refuses to register a name whose live identity has the other access', async () => {
-		await useTestServer('cache-admin-identity-access-conflict');
-
-		const init = await bootstrap();
-
-		await putCache(init.token, 'builds', 30);
-
-		const refused = await authorisedFetch(
-			'/caches/_private-builds',
-			init.token,
-			{
-				body: JSON.stringify({ priority: 10 }),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
-
-		expect({
-			refused: refused.status,
-			identities: await cacheIdentities(),
-			legacyNames: await legacyCacheNames()
-		}).toStrictEqual({
-			refused: StatusCodes.CONFLICT,
-			identities: [
-				defaultIdentity,
-				{
-					id: 2,
-					scope: { kind: 'named', name: 'builds' },
-					access: 'public',
-					priority: 30,
-					deleted: false
-				}
-			],
-			legacyNames: ['', 'builds']
-		});
-	});
-
-	it('keeps the identity live when a teardown fails before its transaction', async () => {
-		await useTestServer('cache-admin-identity-teardown-failure');
-
-		const init = await bootstrap();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-
-		await putCache(init.token, 'builds', 30);
-		// A fresh upload stages under its own key, so the teardown has an R2
-		// object to delete before its local transaction.
-		await negotiateUploads(init.token, [metadata], 'builds');
-
-		const deleteSpy = vi
-			.spyOn(env.BLOBS, 'delete')
-			.mockRejectedValue(new Error('R2 unavailable'));
-
-		let failed: Response;
-
-		try {
-			failed = await authorisedFetch('/caches/builds', init.token, {
-				method: 'DELETE'
-			});
-		} finally {
-			deleteSpy.mockRestore();
-		}
-
-		const afterFailure = {
-			identities: await cacheIdentities(),
-			legacyNames: await legacyCacheNames()
-		};
-		const removed = await authorisedFetch('/caches/builds', init.token, {
-			method: 'DELETE'
-		});
-		const builds = {
-			id: 2,
-			scope: { kind: 'named', name: 'builds' },
-			access: 'public',
-			priority: 30
-		};
-
-		expect({
-			failed: failed.status,
-			afterFailure,
-			removed: removed.status,
-			afterRemoval: {
-				identities: await cacheIdentities(),
-				legacyNames: await legacyCacheNames()
-			}
-		}).toStrictEqual({
-			failed: StatusCodes.INTERNAL_SERVER_ERROR,
-			afterFailure: {
-				identities: [defaultIdentity, { ...builds, deleted: false }],
-				legacyNames: ['', 'builds']
-			},
-			removed: StatusCodes.OK,
-			afterRemoval: {
-				identities: [defaultIdentity, { ...builds, deleted: true }],
-				legacyNames: ['']
-			}
 		});
 	});
 
@@ -1277,10 +1364,10 @@ describe('cache registry admin', () => {
 
 		const created = await cacheVersions();
 
-		// Register the same name again with the same access. The read revision must
-		// stay where it is, or every registration would evict the cache's public
-		// responses from Workers Cache.
-		await putCache(init.token, 'builds', 30);
+		// Set the access the cache already has. The read revision must stay where
+		// it is, or every such call would evict the cache's public responses from
+		// Workers Cache.
+		await updateCacheAccess(init.token, 'builds', 'public');
 
 		const reregistered = await cacheVersions();
 
@@ -1311,8 +1398,13 @@ describe('cache registry admin', () => {
 	it('refuses to delete a non-empty cache without force, then force-tears it down', async () => {
 		await useTestServer('cache-admin-delete');
 		const init = await bootstrap();
+		await putCache(init.token, 'builds', 40);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		await pushPath(init.token, metadata, 'builds');
+		await pushPath(init.token, metadata, buildsCache);
+		const buildsId = await runInDurableObject(
+			currentServer(),
+			(instance) => resolvedCache(instance.context, buildsCache).id
+		);
 
 		const refused = await authorisedFetch('/caches/builds', init.token, {
 			method: 'DELETE'
@@ -1332,7 +1424,7 @@ describe('cache registry admin', () => {
 			() => currentServer().resumeCacheTeardown(),
 			async () =>
 				(await runInDurableObject(currentServer(), (_instance, state) =>
-					state.storage.get(`${teardownEntryPrefix}${buildsCache}`)
+					state.storage.get(`${teardownEntryPrefix}${String(buildsId)}`)
 				)) === undefined,
 			3
 		);
@@ -1347,13 +1439,13 @@ describe('cache registry admin', () => {
 			forcedStatus: forced.status,
 			removed,
 			objectGone: object === null,
-			remainingNames: caches.map((cache) => cache.name)
+			remainingScopes: caches.map((cache) => cache.scope)
 		}).toStrictEqual({
 			refusedStatus: StatusCodes.CONFLICT,
 			forcedStatus: StatusCodes.OK,
-			removed: { name: 'builds', removed: true, storePathsRemoved: 1 },
+			removed: { scope: buildsCache, removed: true, storePathsRemoved: 1 },
 			objectGone: true,
-			remainingNames: ['']
+			remainingScopes: [defaultCache()]
 		});
 	});
 
@@ -1364,7 +1456,7 @@ describe('cache registry admin', () => {
 
 		const list = await authorisedFetch('/caches', writeToken);
 		const put = await authorisedFetch('/caches/builds', writeToken, {
-			body: JSON.stringify({ priority: 10 }),
+			body: JSON.stringify({ access: 'public', priority: 10 }),
 			headers: { 'content-type': 'application/json' },
 			method: 'PUT'
 		});
@@ -1383,12 +1475,54 @@ describe('cache registry admin', () => {
 		});
 	});
 
+	it('lets a cache operation grant inspect only its exact cache', async () => {
+		await useTestServer('cache-admin-exact-read');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30);
+		const buildsToken = await issueServerSignedToken(
+			cacheWriteGrants([], buildsCache)
+		);
+
+		const exact = await authorisedFetch('/caches/builds', buildsToken);
+		const other = await authorisedFetch('/cache', buildsToken);
+		const list = await authorisedFetch('/caches', buildsToken);
+		const missingToken = await issueServerSignedToken(
+			cacheWriteGrants([], namedCache('missing'))
+		);
+		const missing = await authorisedFetch('/caches/missing', missingToken);
+
+		expect({
+			exact: {
+				status: exact.status,
+				body: cacheSummarySchema.parse(await exact.json())
+			},
+			other: other.status,
+			list: list.status,
+			missing: missing.status
+		}).toStrictEqual({
+			exact: {
+				status: StatusCodes.OK,
+				body: {
+					scope: buildsCache,
+					access: 'public',
+					priority: 30,
+					storePaths: 0,
+					graceManaged: false
+				}
+			},
+			other: StatusCodes.FORBIDDEN,
+			list: StatusCodes.FORBIDDEN,
+			missing: StatusCodes.NOT_FOUND
+		});
+	});
+
 	it('clears in-flight uploads negotiated under a cache it tears down', async () => {
 		await useTestServer('cache-admin-teardown-pending');
 		const init = await bootstrap();
+		await putCache(init.token, 'builds', 40);
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const decision = expectSingleUploadDecision(
-			await negotiateUploads(init.token, [metadata], 'builds'),
+			await negotiateUploads(init.token, [metadata], buildsCache),
 			metadata
 		);
 
@@ -1405,10 +1539,10 @@ describe('cache registry admin', () => {
 		const commitError = await commitUploadRejection(
 			init.token,
 			decision.uploadId,
-			'builds'
+			buildsCache
 		);
 
-		expectCommitSocketError(commitError);
+		expectCommitUpgradeError(commitError);
 		expect({
 			stagedBefore: stagedBefore !== null,
 			removed: removed.status,

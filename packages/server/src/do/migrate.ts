@@ -23,6 +23,28 @@ export interface MigrationBundle {
 	readonly migrations: Record<string, string>;
 }
 
+/**
+ * The prefix of a bundle up to and including one journal index. Test support
+ * uses it to leave a store as an earlier build left it.
+ */
+export function migrationsThrough(
+	bundle: MigrationBundle,
+	throughIndex: number
+): MigrationBundle {
+	return {
+		journal: {
+			entries: bundle.journal.entries.filter(
+				(entry) => entry.idx <= throughIndex
+			)
+		},
+		migrations: Object.fromEntries(
+			Object.entries(bundle.migrations).filter(
+				([key]) => Math.trunc(Number(key.slice(1))) <= throughIndex
+			)
+		)
+	};
+}
+
 // Drizzle's migrator created this table and wrote an empty `hash`. This
 // migrator keeps using it and stores the journal tag in `hash`.
 const trackingTable = '__drizzle_migrations';

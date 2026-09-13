@@ -11,13 +11,12 @@ const generationParameter = 'cache-generation';
 const readRevisionParameter = 'cache-read-revision';
 
 /**
- * The version component in the Workers Cache key for every read the tenant
- * Worker serves.
+ * The version component in the Workers Cache key for public reads.
  *
  * Workers Cache keys a stored response by the request path and query. Deploying
  * new code does not remove responses written by an earlier version. Increment
- * this value when a change alters which readers may receive a response, so the
- * a new deployment uses a cache-key format that earlier versions did not
+ * this value when a change alters which readers may receive a response, so a
+ * new deployment uses a cache-key format that earlier versions did not
  * populate.
  */
 const cacheKeyVersion = '2';
@@ -62,9 +61,9 @@ export function canonicalCacheRequest(
  * The cache version {@link canonicalCacheRequest} wrote into a request's key,
  * or undefined when either parameter is absent or malformed.
  *
- * Only the control Worker sends requests to the tenant Worker, so a request
- * without both parameters came from a control Worker that does not add them,
- * and its response must not be stored: the key would contain only the path.
+ * An older control Worker can omit these parameters during a deployment. If
+ * either is absent or malformed, the tenant Worker must not cache the response:
+ * its key cannot distinguish a later deletion or access change.
  */
 export function cacheRequestVersion(
 	request: Request
