@@ -26,6 +26,7 @@ import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheAccessMigrationPendingError,
+	CacheAlreadyExistsError,
 	CacheNotEmptyError,
 	CacheNotFoundError
 } from '../errors.ts';
@@ -396,6 +397,11 @@ export class CacheAdminService {
 			) {
 				assertRetentionMigrationSettled(this.context.db);
 			}
+
+			if (this.context.cacheRepository.resolve(scope) !== undefined) {
+				throw new CacheAlreadyExistsError(scope);
+			}
+
 			const cache = await this.registration.createInSection(scope, {
 				access: configuration.access,
 				priority: configuration.priority,

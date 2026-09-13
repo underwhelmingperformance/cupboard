@@ -26,8 +26,10 @@ import * as schema from '../db/schema.ts';
 import { narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	authorisedWorkerFetch,
 	fixtureWorkerServer,
 	handlerFetch,
+	initialiseViaWorker,
 	namedCache,
 	provisionFixtureTenant,
 	readFetch,
@@ -375,10 +377,23 @@ describe('private reuse-view access', () => {
 		}
 	);
 
-	it('does not expose a private cache through a public view with an all selector', async () => {
-		const privateHash = await commitTo(privateBuilds, 'private');
+	it('creates a private cache outside a public all-named view', async () => {
+		await setView([{ kind: 'all-named' }]);
+		const token = await initialiseViaWorker();
+		const privateCache = namedCache('private-after-view');
+		const created = await authorisedWorkerFetch(
+			'/caches/private-after-view',
+			token,
+			{
+				body: JSON.stringify({ access: 'private', priority: 30 }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+		expect(created.status).toBe(StatusCodes.OK);
+
+		const privateHash = await commitTo(privateCache, 'private');
 		const publicHash = await commitTo(publicBuilds, 'public');
-		await setView([{ kind: 'all' }]);
 
 		const privateRead = await readFetch(`/reuse/reuse/${privateHash}.narinfo`);
 		const publicRead = await readFetch(`/reuse/reuse/${publicHash}.narinfo`);

@@ -65,7 +65,10 @@ export const cachesContract = {
 			})
 			.route({ method: 'PUT', path: '/cache' })
 			.input(cachePutBodySchema)
-			.errors({ ...cacheAlreadyExistsError, ...retentionMigrationPendingError })
+			.errors({
+				...cacheAlreadyExistsError,
+				...retentionMigrationPendingError
+			})
 			.output(cacheSummarySchema),
 
 		inNamedCache: baseProcedure
@@ -80,7 +83,10 @@ export const cachesContract = {
 					...cachePutBodySchema.shape
 				})
 			)
-			.errors({ ...cacheAlreadyExistsError, ...retentionMigrationPendingError })
+			.errors({
+				...cacheAlreadyExistsError,
+				...retentionMigrationPendingError
+			})
 			.output(cacheSummarySchema)
 	},
 

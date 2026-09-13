@@ -2,6 +2,7 @@ import {
 	type CacheAccessMode,
 	cachePrioritySchema,
 	type CacheScope,
+	cacheScopeSchema,
 	storePathHashSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
@@ -22,6 +23,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { setCacheReadCredential } from '../control/tenant-registry.ts';
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
@@ -275,6 +277,25 @@ async function putCache(
 	return cacheSummarySchema.parse(await response.json());
 }
 
+async function putReuseView(
+	token: string,
+	name: string,
+	access: CacheAccessMode,
+	prefix: string
+): Promise<void> {
+	const response = await authorisedFetch(`/reuse-views/${name}`, token, {
+		body: JSON.stringify({
+			access,
+			priority: 50,
+			selectors: [{ kind: 'prefix', prefix }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+}
+
 async function updateCacheAccess(
 	token: string,
 	name: string,
@@ -474,6 +495,48 @@ describe('cache registry admin', () => {
 				graceManaged: false
 			}
 		]);
+	});
+
+	it('reports an existing cache when creation specifies different access', async () => {
+		await useTestServer('cache-admin-existing-view-access');
+		const init = await bootstrap();
+		await putCache(init.token, 'existing-pr', 30, 'private');
+		await putReuseView(init.token, 'existing-view', 'private', 'existing-');
+
+		const response = await authorisedFetch('/caches/existing-pr', init.token, {
+			body: JSON.stringify({ access: 'public', priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		const body = await response.json();
+		expect({
+			status: response.status,
+			body: z
+				.object({
+					code: z.string(),
+					data: z.object({ cache: cacheScopeSchema })
+				})
+				.parse(body)
+		}).toStrictEqual({
+			status: StatusCodes.CONFLICT,
+			body: {
+				code: 'CACHE_ALREADY_EXISTS',
+				data: { cache: { kind: 'named', name: 'existing-pr' } }
+			}
+		});
+	});
+
+	it('creates a cache whose access matches the selecting view', async () => {
+		await useTestServer('cache-admin-view-access-agrees');
+		const init = await bootstrap();
+		await putReuseView(init.token, 'pull-requests-2', 'public', 'wpr-');
+
+		const created = await putCache(init.token, 'wpr-1', 30, 'public');
+
+		expect({ scope: created.scope, access: created.access }).toStrictEqual({
+			scope: { kind: 'named', name: 'wpr-1' },
+			access: 'public'
+		});
 	});
 
 	it('reports grace management and the earliest live deadline per cache', async () => {
