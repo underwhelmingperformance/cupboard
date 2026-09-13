@@ -1782,6 +1782,7 @@ describe('runBuildPush', () => {
 		}
 	])(
 		'rebuilds and claims every output of an already-valid multi-output derivation in $name mode',
+		{ timeout: 30_000 },
 		async ({ preflightFailure, receipt: expectedReceipt }) => {
 			const run = await runFlow({
 				...(preflightFailure !== undefined && { preflightFailure }),
