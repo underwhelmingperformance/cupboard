@@ -1214,8 +1214,9 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
  * Basic read credentials come as a pair; half a pair is a mistake.
  */
 export class ReadCredentialPairError extends CliUsageError {
-	constructor() {
-		super('--read-user and --read-password must be supplied together');
+	constructor(target: 'cache' | 'view' = 'cache') {
+		const prefix = target === 'view' ? '--view-read' : '--read';
+		super(`${prefix}-user and ${prefix}-password must be supplied together`);
 		this.name = 'ReadCredentialPairError';
 	}
 }

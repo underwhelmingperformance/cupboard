@@ -39,10 +39,7 @@ import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
-import {
-	InvalidCohortTargetsFileError,
-	ReadCredentialPairError
-} from '../errors.ts';
+import { InvalidCohortTargetsFileError } from '../errors.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
 import {
 	type AvailabilityCeiling,
@@ -82,6 +79,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { registerPlanMeasureCommand } from './plan-measure.ts';
 import { registerPlanReprobeCommand } from './plan-reprobe.ts';
+import { readCredentials } from './read-credentials.ts';
 import { rootRetentionChoice } from './retention-choice.ts';
 import type { RootClient } from './root.ts';
 
@@ -173,6 +171,8 @@ export interface PlanCohortOptions {
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
+	readonly viewReadUser?: ReadUser;
+	readonly viewReadPassword?: string;
 	readonly ttl?: TtlSeconds;
 	readonly permanent?: boolean;
 	readonly githubOidc?: boolean;
@@ -313,6 +313,15 @@ export function registerPlanCommands(
 		)
 		.option('--read-password <password>', 'password for private cache reads')
 		.option(
+			'--view-read-user <user>',
+			'username for private reuse-view reads',
+			parseReadUser
+		)
+		.option(
+			'--view-read-password <password>',
+			'password for private reuse-view reads'
+		)
+		.option(
 			'--ttl <duration>',
 			'retention TTL refreshed when a target is already retained',
 			parseTtl
@@ -382,6 +391,8 @@ export function registerPlanCommands(
 				cacheName: string | undefined,
 				options: PlanCohortOptions
 			) => {
+				const credentials = readCredentials(options);
+				const viewCredentials = readCredentials(options, 'view');
 				const reporter = commandUi(program, programOptions).reporter();
 				const input = await readCohortPlanInput(options.targetsFile);
 				const { targets } = input;
@@ -410,7 +421,6 @@ export function registerPlanCommands(
 					credential,
 					signal: programOptions.signal
 				});
-				const credentials = readCredentials(options);
 				// Pass the run's abort signal to every store. Aborting the plan then
 				// cancels any substituter query still in progress.
 				const storeSelection = {
@@ -426,7 +436,8 @@ export function registerPlanCommands(
 					baseUrl: target.tenantUrl,
 					cache,
 					...(options.reuseView !== undefined && { view: options.reuseView }),
-					...(credentials !== undefined && { credentials })
+					...(credentials !== undefined && { credentials }),
+					...(viewCredentials !== undefined && { viewCredentials })
 				});
 				const { substitution, signatures } = discoverNixStoreConfig();
 				const plannedSubstitutionPolicy =
@@ -847,30 +858,6 @@ export async function readCohortTargets(
 	const input = await readCohortPlanInput(targetsFile);
 
 	return input.targets;
-}
-
-export interface ReadCredentialOptions {
-	readonly readUser?: ReadUser;
-	readonly readPassword?: string;
-}
-
-// Reject an incomplete pair before a cache read makes an unauthenticated
-// request and receives a 401 response.
-export function readCredentials(
-	options: ReadCredentialOptions
-): { readonly user: ReadUser; readonly password: string } | undefined {
-	if (
-		(options.readUser === undefined) !==
-		(options.readPassword === undefined)
-	) {
-		throw new ReadCredentialPairError();
-	}
-
-	if (options.readUser === undefined || options.readPassword === undefined) {
-		return undefined;
-	}
-
-	return { user: options.readUser, password: options.readPassword };
 }
 
 async function defaultCapacityProbe(

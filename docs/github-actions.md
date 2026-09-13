@@ -209,17 +209,17 @@ jobs:
 The preset derives the cache, root prefix, and TTL from the triggering event. A
 `pull_request` run publishes to `gh-<repository-id>-pr-<number>` with a 14-day
 root TTL. Before building, the plan job creates the cache with that default root
-TTL and the run's OIDC token. It requests private access when `read_user` is
-set, public access otherwise. Repeated runs keep the existing cache's
-properties, but setup refuses an access mismatch before publication. If the
-workflow changes from public to private publication, an administrator must
-change the existing cache's access before rerunning it. The PR trust rule
-permits publication, creation and deletion of that cache and management of its
-retention roots. A closed event skips planning and building. If the pull request
-closed without merging, the removal job removes its cache. A merged pull request
-keeps its cache so the branch run can reuse those outputs through the
-repository's view. Its roots still expire according to their TTL; the empty
-cache row remains until it is removed.
+TTL and the run's OIDC token. It requests private access when
+`fallback_read_user` is set, public access otherwise. Repeated runs keep the
+existing cache's properties, but setup refuses an access mismatch before
+publication. If the workflow changes from public to private publication, an
+administrator must change the existing cache's access before rerunning it. The
+PR trust rule permits publication, creation and deletion of that cache and
+management of its retention roots. A closed event skips planning and building.
+If the pull request closed without merging, the removal job removes its cache. A
+merged pull request keeps its cache so the branch run can reuse those outputs
+through the repository's view. Its roots still expire according to their TTL;
+the empty cache row remains until it is removed.
 
 The preset accepts only pull requests from the caller repository. A caller that
 accepts fork contributions can skip publication for those runs with
@@ -931,22 +931,37 @@ known-hosts sources, accepts only those pins and offers only the input key;
 input credentials and pins never enter the builder or direct-store
 configuration.
 
-When the destination cache or the reuse view is private, also pass `read_user`
-and `read_password` as workflow secrets. `actions/setup`'s netrc file covers
-only Nix substituter reads. The plan job also probes the cache directly, outside
-Nix, so pass the same credentials separately: `actions/plan` accepts them as
-`read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
-header on every narinfo probe.
+When the destination cache or the reuse view is private, also pass read
+credentials as workflow secrets. There are two pairs, because a destination
+cache and a reuse view can accept different credentials:
+
+- `destination_read_user` and `destination_read_password` authenticate reads
+  from the cache this run publishes to. If a private destination has no
+  credential of its own, supply the tenant credential as this pair too.
+- `fallback_read_user` and `fallback_read_password` authenticate reads from a
+  private reuse view with the tenant credential.
+
+Supply both fields of each pair you use. Existing callers must replace the
+workflow's `read_user` and `read_password` secrets with the appropriate pairs.
+
+`actions/setup` configures Nix reads. Cache-specific credentials are attached to
+substituter URLs, and the tenant fallback uses a netrc file. The plan and
+attestation steps also read the destination directly, outside Nix, with the
+destination pair. Cohort planning and reprobes use the fallback pair for the
+reuse view. Direct `cupboard plan cohort` and `cupboard plan reprobe` callers
+can pass `--view-read-user` and `--view-read-password`; when neither is
+supplied, the view uses the existing `--read-user` and `--read-password` pair.
 
 To publish to a named cache, set `cache`; omitting it selects the default cache.
 The cache can be public or private. Combining `cache` with `preset` fails
 because a preset chooses the destination. The workflow passes the selection to
 `actions/setup`, `actions/plan`, `actions/build-cohort`, `actions/attest` and
 `actions/attest-attach`, so every job reads and writes the same destination. The
-workflow supplies one `read_user` and `read_password` pair for all authenticated
-reads, so supply the credential that the selected private cache accepts. If the
-cache has its own verifier, the tenant-wide fallback credential is rejected by
-setup's initial cache-info probe, before publication starts.
+workflow sends the destination pair wherever it reads that cache and the
+fallback pair wherever it reads the tenant's reuse view, so supply the
+credential the selected private cache accepts as the destination pair. Supplying
+the fallback where the cache has its own verifier is rejected by setup's initial
+cache-info probe, before publication starts.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter

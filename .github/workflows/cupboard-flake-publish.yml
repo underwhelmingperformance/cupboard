@@ -38,10 +38,11 @@ on:
       cache:
         description:
           Named cache to publish to, whether it is public or private. Leave
-          empty to publish to the default cache. The workflow supplies one
-          read_user and read_password pair for authenticated reads, so when the
-          cache is private, supply the credential it accepts. If the cache has
-          its own verifier, the tenant-wide fallback credential is rejected by
+          empty to publish to the default cache. When the cache is private,
+          supply the credential it accepts as destination_read_user and
+          destination_read_password. A reuse view is a tenant-level resource and
+          reads with fallback_read_user and fallback_read_password. Supplying
+          the fallback where the cache has its own verifier is rejected by
           setup's initial cache-info probe, before publication starts.
         required: false
         default: ''
@@ -242,11 +243,21 @@ on:
           SSH key used while evaluating private flake inputs. Requires
           input-known-hosts.
         required: false
-      read_user:
-        description: Basic-auth user for private cache or reuse-view reads.
+      destination_read_user:
+        description:
+          Basic-auth user accepted by the private destination cache this run
+          publishes to.
         required: false
-      read_password:
-        description: Basic-auth password for private cache or reuse-view reads.
+      destination_read_password:
+        description:
+          Basic-auth password accepted by the private destination cache this run
+          publishes to.
+        required: false
+      fallback_read_user:
+        description: Tenant Basic-auth user for private reuse-view reads.
+        required: false
+      fallback_read_password:
+        description: Tenant Basic-auth password for private reuse-view reads.
         required: false
 
 permissions: {}
@@ -525,12 +536,14 @@ jobs:
           cupboard: ${{ needs.configure.outputs.cupboard }}
           provision-cache: ${{ needs.configure.outputs.provision-cache }}
           provision-cache-access:
-            ${{ secrets.read_user != '' && 'private' || 'public' }}
+            ${{ secrets.fallback_read_user != '' && 'private' || 'public' }}
           provision-cache-ttl:
             ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
@@ -562,8 +575,8 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
@@ -658,8 +671,10 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
@@ -678,8 +693,10 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
+          fallback-read-user: ${{ secrets.fallback_read_user }}
+          fallback-read-password: ${{ secrets.fallback_read_password }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}
@@ -707,8 +724,8 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
       # the bundle only after publication and only when signing produced a
@@ -721,8 +738,8 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           # Each output contains one bundle path per line. The attach input
