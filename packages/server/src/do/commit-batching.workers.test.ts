@@ -9,7 +9,6 @@ import {
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,12 +16,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfos } from '../db/schema.ts';
-import { d1StatementsPerInvocation } from '../http/http.ts';
 import {
 	authorisedFetch,
 	commitPath,
 	commitUpload,
-	countingD1,
 	currentServer,
 	defaultCache,
 	drivenDirectly,
@@ -41,13 +38,16 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-import { boundedD1 } from './bounded-io.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
-import { withStatementAllowance } from './statement-scope.ts';
+import {
+	subrequestsAvailable,
+	subrequestSliceReserve,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
 function pipelineFor(context: ServerContext): CommitPipelineService {
@@ -454,22 +454,22 @@ describe('commit batching', () => {
 	});
 });
 
-// More reuse commits than one invocation's D1 allowance can charge. Each
-// materialisation charges five statements, so a burst this size needs more than
-// one invocation on the Free allowance of 50.
 const pagedBurst = 14;
 
 /**
  * Commits one path, then drives a burst of reuse commits for its NAR through
  * one `materialiseBatched` flush under a single invocation allowance.
  *
- * Reports each request outcome, the D1 statement count, and the tenant's final
+ * Reports each request outcome, the tracked call count, and the tenant's final
  * reference edges, presence rows, and usage.
  */
-async function drivePagedBurst(server: string): Promise<{
+async function drivePagedBurst(
+	server: string,
+	allowance: number
+): Promise<{
 	readonly kinds: readonly string[];
-	readonly statements: number;
-	readonly allowance: number;
+	readonly calls: number;
+	readonly usable: number;
 	readonly edges: number;
 	readonly presence: number;
 	readonly narinfoUsage: number | null | undefined;
@@ -504,16 +504,7 @@ async function drivePagedBurst(server: string): Promise<{
 		await commitUpload(token, decision.uploadId);
 	}
 
-	const counting = countingD1(env.CUPBOARD_DB);
-
 	return runInDurableObject(currentServer(), async (instance, state) => {
-		const real = instance.context.d1;
-
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
-		});
-
 		const local = drizzle(state.storage, { schema: { narInfos } });
 		const generations = new Map(
 			local
@@ -531,38 +522,39 @@ async function drivePagedBurst(server: string): Promise<{
 				)
 		);
 		const pipeline = pipelineFor(instance.context);
-		const before = counting.statementsSent();
-
 		// Use one allowance for the complete burst, as a dispatched method does.
-		const kinds = await withStatementAllowance(async () => {
-			const probe = await pipeline.probeMaterialisation(committed);
+		const measured = await withSubrequestSlice(
+			async () => {
+				const before = subrequestsAvailable();
+				const probe = await pipeline.probeMaterialisation(committed);
 
-			return Promise.all(
-				paths.map((metadata) => {
-					const generation = generations.get(metadata.storePathHash);
+				const outcomes = await Promise.all(
+					paths.map((metadata) => {
+						const generation = generations.get(metadata.storePathHash);
 
-					if (generation === undefined) {
-						throw new Error('the committed path has no narinfo row');
-					}
+						if (generation === undefined) {
+							throw new Error('the committed path has no narinfo row');
+						}
 
-					return pipeline.materialiseBatched(rootLogger(), {
-						cache: resolvedCache(instance.context),
-						metadata,
-						generation,
-						probe,
-						mustOwnBlob: true,
-						graceDecision: undefined,
-						attachRootName: undefined
-					});
-				})
-			);
-		});
-		const statements = counting.statementsSent() - before;
+						return pipeline.materialiseBatched(rootLogger(), {
+							cache: resolvedCache(instance.context),
+							metadata,
+							generation,
+							probe,
+							mustOwnBlob: true,
+							graceDecision: undefined,
+							attachRootName: undefined
+						});
+					})
+				);
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: real
-		});
+				return {
+					kinds: outcomes.map((outcome) => outcome.kind).toSorted(byCodeUnit),
+					calls: before - subrequestsAvailable()
+				};
+			},
+			{ subrequests: allowance }
+		);
 
 		const tenant = instance.context.requireTenant();
 		const edges = await instance.context.d1
@@ -582,9 +574,8 @@ async function drivePagedBurst(server: string): Promise<{
 			.get();
 
 		return {
-			kinds: kinds.map((outcome) => outcome.kind).toSorted(byCodeUnit),
-			statements,
-			allowance: d1StatementsPerInvocation,
+			...measured,
+			usable: allowance - subrequestSliceReserve,
 			edges: edges.length,
 			presence: presence.length,
 			narinfoUsage: usage?.narinfos
@@ -595,34 +586,55 @@ async function drivePagedBurst(server: string): Promise<{
 describe('materialise flush paging', () => {
 	beforeEach(resetTestServer);
 
-	it('charges requests within the allowance and defers the remaining requests', async () => {
-		const driven = await drivePagedBurst('flush-paging');
+	it.each([
+		{
+			usable: 4,
+			expected: {
+				deferred: 14,
+				materialised: 0,
+				otherKinds: [],
+				calls: 2,
+				usable: 4,
+				edges: 14,
+				presence: 1,
+				narinfoUsage: 14
+			}
+		},
+		{
+			usable: 900,
+			expected: {
+				deferred: 0,
+				materialised: 14,
+				otherKinds: [],
+				calls: 4,
+				usable: 900,
+				edges: 14,
+				presence: 1,
+				narinfoUsage: 14
+			}
+		}
+	])(
+		'processes a burst with $usable available calls',
+		async ({ usable, expected }) => {
+			const driven = await drivePagedBurst(
+				`flush-paging-${String(usable)}`,
+				usable + subrequestSliceReserve
+			);
 
-		// The burst replays paths this fixture already committed, so the charge
-		// statements are conditional no-ops and the tenant's edges and usage must
-		// come out unchanged: paging a flush must not charge a path twice. Nine of
-		// the fourteen fit the allowance once the probe and the account read have
-		// taken theirs. The flush returns `deferred` for the other five requests and
-		// leaves their uploads pending for verification.
-		expect({
-			deferred: driven.kinds.filter((kind) => kind === 'deferred').length,
-			materialised: driven.kinds.filter((kind) => kind === 'materialised')
-				.length,
-			otherKinds: driven.kinds.filter(
-				(kind) => kind !== 'deferred' && kind !== 'materialised'
-			),
-			withinAllowance: driven.statements <= driven.allowance,
-			edges: driven.edges,
-			presence: driven.presence,
-			narinfoUsage: driven.narinfoUsage
-		}).toStrictEqual({
-			deferred: 5,
-			materialised: 9,
-			otherKinds: [],
-			withinAllowance: true,
-			edges: pagedBurst,
-			presence: 1,
-			narinfoUsage: pagedBurst
-		});
-	}, 240_000);
+			expect({
+				deferred: driven.kinds.filter((kind) => kind === 'deferred').length,
+				materialised: driven.kinds.filter((kind) => kind === 'materialised')
+					.length,
+				otherKinds: driven.kinds.filter(
+					(kind) => kind !== 'deferred' && kind !== 'materialised'
+				),
+				calls: driven.calls,
+				usable: driven.usable,
+				edges: driven.edges,
+				presence: driven.presence,
+				narinfoUsage: driven.narinfoUsage
+			}).toStrictEqual(expected);
+		},
+		240_000
+	);
 });

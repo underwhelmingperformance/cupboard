@@ -37,7 +37,7 @@ describe('attestationNegotiateRequestSchema', () => {
 			value: { bundles: [{ ...bundle, digest: 'nope' }] }
 		},
 		{
-			name: '100,001 bundles',
+			name: 'one bundle over the negotiated limit',
 			value: {
 				bundles: Array.from(
 					{ length: attestationNegotiateMaxBundles + 1 },

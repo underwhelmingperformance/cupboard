@@ -83,6 +83,21 @@ describe('unboundable members', () => {
 });
 
 describe('bounded Worker environment', () => {
+	it('counts Worker D1 and R2 calls in the same slice', async () => {
+		const worker = boundedWorkerEnv(env);
+		const isRemaining = await withSubrequestSlice(
+			async () => {
+				await worker.CUPBOARD_DB.prepare('SELECT 1').first();
+				await worker.BLOBS.head('missing-key');
+
+				return hasSubrequestsFor(1);
+			},
+			{ subrequests: 2, reserve: 0 }
+		);
+
+		expect(isRemaining).toBe(false);
+	});
+
 	// The deadline is the test's own. The 15-second figure a Worker applies is
 	// not exercised here.
 	it('times out a hung R2 head and serves the other bindings as they are', async () => {

@@ -6,7 +6,12 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from '@cupboard/protocol/platform';
+import {
 	rootEnsureBodySchema,
+	rootEnsureResponseSchema,
 	rootSetBodySchema,
 	rootSetMaxTargets
 } from '@cupboard/protocol/retention';
@@ -16,12 +21,13 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { StatusCodes } from 'http-status-codes';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { cacheIdentityColumns, type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	commitPath,
@@ -35,6 +41,7 @@ import {
 	resetTestServer,
 	resolvedCache,
 	syntheticNarHash,
+	testBase,
 	uploadMetadata
 } from '../test-support.ts';
 
@@ -43,7 +50,11 @@ import { ServerContext } from './context.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
-import { type CupboardServer } from './server.ts';
+import { CupboardServer } from './server.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 
 const rootName = rootNameSchema.parse('main');
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
@@ -313,18 +324,20 @@ describe('root ensure hardening', () => {
 			const storePathHash = indexedStorePathHash(offset + 1);
 
 			return {
+				narHash: syntheticNarHash(offset + 10_000),
 				storePathHash,
 				storePath: storePathSchema.parse(
 					`/nix/store/${storePathHash}-legacy-${String(offset + 1)}`
 				)
 			};
 		});
-		await mapWithConcurrency(targets, 6, ({ storePathHash }) =>
-			env.BLOBS.put(
+		await mapWithConcurrency(targets, 6, async ({ narHash, storePathHash }) => {
+			await env.BLOBS.put(narObjectKey(narHash, 2), narBytes);
+			await env.BLOBS.put(
 				narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
 				'legacy narinfo\n'
-			)
-		);
+			);
+		});
 
 		const result = await runInDurableObject(
 			currentServer(),
@@ -345,15 +358,36 @@ describe('root ensure hardening', () => {
 					throw new Error('missing source narinfo row');
 				}
 				const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
-					schema: { blobReference: d1Schema.blobReference }
+					schema: {
+						blobReference: d1Schema.blobReference,
+						blobState: d1Schema.blobState
+					}
 				});
+
+				const sourceBlob = await database
+					.select()
+					.from(d1Schema.blobState)
+					.where(eq(d1Schema.blobState.narHash, committed.narHash))
+					.get();
+
+				if (sourceBlob === undefined) {
+					throw new Error('missing source blob row');
+				}
+
+				for (const rows of chunk(targets, 10)) {
+					await database
+						.insert(d1Schema.blobState)
+						.values(rows.map(({ narHash }) => ({ ...sourceBlob, narHash })))
+						.run();
+				}
 
 				for (const rows of chunk(targets, 4)) {
 					instance.context.db
 						.insert(schema.narInfos)
 						.values(
-							rows.map(({ storePathHash, storePath }) => ({
+							rows.map(({ narHash, storePathHash, storePath }) => ({
 								...source,
+								narHash,
 								storePathHash,
 								storePath
 							}))
@@ -365,38 +399,101 @@ describe('root ensure hardening', () => {
 					await database
 						.insert(d1Schema.blobReference)
 						.values(
-							references.map(({ storePathHash }) => ({
+							references.map(({ narHash, storePathHash }) => ({
 								tenant: fixtureTenant,
 								...cacheIdentityColumns(cache.scope),
 								storePathHash,
 								generation: source.generation,
-								narHash: source.narHash,
+								narHash,
 								cacheGeneration: firstCacheGeneration
 							}))
 						)
 						.run();
 				}
 
-				const tracked = trackR2Puts(instance.context.env.BLOBS);
-				const context = new ServerContext(state, {
+				const tracked = trackR2Puts(env.BLOBS);
+				const restarted = new CupboardServer(state, {
 					...instance.context.env,
-					BLOBS: tracked.bucket
+					BLOBS: tracked.bucket,
+					CUPBOARD_DB: env.CUPBOARD_DB,
+					CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(
+						workersInvocationAllowances.free.subrequests
+					)
 				});
-				const service = new NarInfoObjectsService(context);
-				const servable = await service.servableStorePathHashes(
-					resolvedCache(context),
-					targets.map((target) => target.storePathHash)
-				);
+				vi.useFakeTimers();
+				vi.setSystemTime(testBase);
 
-				return {
-					servable: [...servable],
-					maximumConcurrentPuts: tracked.maximum()
-				};
+				try {
+					const ensure = () =>
+						withSubrequestSlice(
+							async () => {
+								const availableBefore = subrequestsAvailable();
+								const request = new Request(
+									'https://cupboard.test/roots/main/ensure',
+									{
+										body: JSON.stringify({
+											targets: targets.map((target) => target.storePath),
+											retention: { kind: 'duration', seconds: 3600 }
+										}),
+										headers: {
+											authorization: `Bearer ${token}`,
+											'content-type': 'application/json'
+										},
+										method: 'POST'
+									}
+								);
+								const response = await restarted.fetch(request);
+
+								return {
+									calls: availableBefore - subrequestsAvailable(),
+									httpStatus: response.status,
+									body: rootEnsureResponseSchema.parse(await response.json())
+								};
+							},
+							{
+								subrequests: workersInvocationAllowances.free.subrequests,
+								reserve: subrequestSafetyReserve
+							}
+						);
+					const cold = await ensure();
+
+					await mapWithConcurrency(targets, 6, ({ storePathHash }) =>
+						env.BLOBS.put(
+							narInfoObjectKey(fixtureTenant, storePathHash, defaultCache()),
+							'legacy narinfo\n'
+						)
+					);
+
+					return {
+						cold,
+						warm: await ensure(),
+						maximumConcurrentPuts: tracked.maximum()
+					};
+				} finally {
+					vi.useRealTimers();
+				}
 			}
 		);
 
+		const expectedBody = {
+			status: 'retained' as const,
+			root: {
+				name: rootName,
+				expiresAt: new Date(testBase.getTime() + 3600 * 1000).toISOString(),
+				expired: false,
+				createdAt: testBase.toISOString(),
+				updatedAt: testBase.toISOString(),
+				targets: targets.map(({ storePathHash, storePath }) => ({
+					storePathHash,
+					storePath,
+					present: true
+				}))
+			}
+		};
+
 		expect(result).toStrictEqual({
-			servable: targets.map((target) => target.storePathHash),
+			cold: { calls: 898, httpStatus: StatusCodes.OK, body: expectedBody },
+			warm: { calls: 897, httpStatus: StatusCodes.OK, body: expectedBody },
 			maximumConcurrentPuts: 6
 		});
 	}, 120_000);

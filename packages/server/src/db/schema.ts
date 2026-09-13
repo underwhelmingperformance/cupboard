@@ -380,7 +380,7 @@ export const pendingUploads = sqliteTable(
 		// Null preserves the behaviour of pushes that did not request a root.
 		attachRootName: text('attach_root_name').$type<RootName>(),
 		// The verdict reported by the queue consumer. It remains here until a pass
-		// has enough D1 allowance to apply it. A recorded verdict prevents another
+		// has enough subrequest allowance to apply it. A recorded verdict prevents another
 		// consumer from claiming the row and repeating the decode. Rows created
 		// before this column was added contain null.
 		recordedVerdictJson: text('recorded_verdict_json')

@@ -81,7 +81,7 @@ import { jsonRowLists, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
-import { affordableOperations } from './statement-scope.ts';
+import { affordableSubrequestOperations } from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -186,14 +186,13 @@ interface PendingMaterialise {
 	readonly reject: (error: unknown) => void;
 }
 
-// Each materialisation adds five statements, and the charge batch adds one for
-// its leading tenant read. A flush also reads the tenant account before it takes
-// the gate.
-const statementsPerMaterialise = 5;
-const materialiseFlushOverheadStatements = 2;
+// A failed combined charge batch falls back to one D1 batch per item.
+// Reserve one call per item, the combined attempt, and the account read.
+const subrequestsPerMaterialise = 1;
+const materialiseFlushOverheadSubrequests = 2;
 
 // A flush handles at most this many requests to stay below D1's parameter
-// limit. The remaining statement allowance can reduce the batch further.
+// limit. The remaining subrequest slice can reduce the batch further.
 const materialiseFlushCap = 32;
 
 // Bound winner re-resolution so repeated recommits cannot pin one request.
@@ -361,7 +360,7 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'deferred') {
-			// This invocation's D1 allowance cannot charge the commit. Keep the
+			// This invocation's subrequest allowance cannot charge the commit. Keep the
 			// upload pending, request verification, and return the protocol's
 			// existing deferred outcome.
 			this.uploadState.markUploadPending(uploadId);
@@ -1115,17 +1114,14 @@ export class CommitPipelineService {
 		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
 
 		try {
-			// Page the flush from the invocation's remaining D1 allowance. A larger
-			// allowance settles more of a burst in one invocation; an allowance
-			// that covers the whole flush settles every request immediately.
-			// Under a small allowance, the flush returns `deferred` for requests
-			// that it cannot charge. The pending upload remains available for a
-			// verification pass.
+			// Page the flush within the invocation's remaining subrequest allowance.
+			// Requests beyond the affordable page return `deferred`; their pending
+			// uploads remain available for a verification pass.
 			const affordable = Math.min(
 				materialiseFlushCap,
-				affordableOperations(
-					statementsPerMaterialise,
-					materialiseFlushOverheadStatements
+				affordableSubrequestOperations(
+					subrequestsPerMaterialise,
+					materialiseFlushOverheadSubrequests
 				)
 			);
 

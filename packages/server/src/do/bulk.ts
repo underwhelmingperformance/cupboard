@@ -7,18 +7,13 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	BatchStatementLimitError,
 	EmptyStatementBatchError,
 	StatementParameterLimitError
 } from '../errors.ts';
-import {
-	d1StatementsPerInvocation,
-	narObjectKey,
-	type R2ObjectKey
-} from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import { jsonValueLists } from './json-list.ts';
-import { statementsRemaining } from './statement-scope.ts';
+import { hasSubrequestsFor } from './subrequest-slice.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
@@ -62,15 +57,8 @@ interface FittedBatch {
 }
 
 /**
- * Builds a batch for the widest prefix of `items` that satisfies both limits.
- * Each statement must bind at most `maxBoundParameters` parameters. The batch
- * must also contain no more statements than the invocation's remaining D1
- * allowance. The function measures every statement and counts all batch
- * members.
- *
- * Returns `undefined` when the batch for a single item exceeds the remaining
- * allowance but fits within a fresh invocation. The caller defers the item to
- * that invocation.
+ * Builds a batch for the widest prefix of `items` whose statements each bind at
+ * most `maxBoundParameters` parameters.
  *
  * The loop tries each width from all `items` down to one item. It builds and
  * measures one in-memory batch per width, then returns the first batch that
@@ -81,7 +69,7 @@ interface FittedBatch {
 function fittedBatch(
 	items: readonly unknown[],
 	batchFor: (width: number) => readonly InspectableBatchItem[]
-): FittedBatch | undefined {
+): FittedBatch {
 	let width = items.length;
 
 	for (;;) {
@@ -94,9 +82,7 @@ function fittedBatch(
 		const parameters = Math.max(
 			...statements.map((statement) => statement.toSQL().params.length)
 		);
-		const affordable = statementsRemaining();
-
-		if (parameters <= maxBoundParameters && statements.length <= affordable) {
+		if (parameters <= maxBoundParameters) {
 			return { width, statements };
 		}
 
@@ -105,14 +91,7 @@ function fittedBatch(
 				throw new StatementParameterLimitError(parameters, maxBoundParameters);
 			}
 
-			if (statements.length > d1StatementsPerInvocation) {
-				throw new BatchStatementLimitError(
-					statements.length,
-					d1StatementsPerInvocation
-				);
-			}
-
-			return undefined;
+			throw new StatementParameterLimitError(parameters, maxBoundParameters);
 		}
 
 		width -= 1;
@@ -123,9 +102,9 @@ function fittedBatch(
  * Runs the batch produced by `buildBatch` for each chunk of `items`. Returns the
  * processed prefix, allowing the caller to defer the remaining suffix.
  *
- * Each chunk is narrowed until its batch fits the platform's parameter limit
- * and the invocation's D1 allowance. The function dispatches only complete
- * batches.
+ * Each chunk is narrowed until its statements fit the parameter limit. The
+ * function dispatches only complete batches and defers when the current
+ * subrequest slice cannot fit another D1 call.
  */
 export async function drainStatementBatches<
 	Item,
@@ -138,14 +117,14 @@ export async function drainStatementBatches<
 	let processed = 0;
 
 	while (processed < items.length) {
+		if (!hasSubrequestsFor(1)) {
+			break;
+		}
+
 		const rest = items.slice(processed);
 		const fitted = fittedBatch(rest, (width) =>
 			buildBatch(rest.slice(0, width))
 		);
-
-		if (fitted === undefined) {
-			break;
-		}
 
 		await batchNonEmpty(database, fitted.statements);
 		processed += fitted.width;

@@ -1,13 +1,16 @@
-import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { describe, expect, it } from 'vitest';
 
 import { SubrequestSliceExceededError } from '../errors.ts';
 
 import {
+	enterSubrequestSliceOnDispatch,
 	hasSubrequestsFor,
 	requireSubrequestsFor,
 	spendSubrequests,
+	subrequestsAvailable,
 	subrequestSliceReserve,
+	withHeldSubrequests,
 	withSubrequestSlice
 } from './subrequest-slice.ts';
 
@@ -59,11 +62,73 @@ describe('a pass asking what it can afford', () => {
 		expect(
 			withSubrequestSlice(() => ({
 				lessTheReserve: hasSubrequestsFor(
-					subrequestsPerInvocation - subrequestSliceReserve
+					workersInvocationAllowances.free.subrequests - subrequestSliceReserve
 				),
-				whole: hasSubrequestsFor(subrequestsPerInvocation)
+				whole: hasSubrequestsFor(workersInvocationAllowances.free.subrequests)
 			}))
 		).toStrictEqual({ lessTheReserve: true, whole: false });
+	});
+
+	it('uses the receiver allowance and shares it through nested dispatch', () => {
+		class Receiver {
+			constructor(readonly subrequests: number) {}
+
+			remaining(): number | undefined {
+				return subrequestsAvailable();
+			}
+
+			spendAndRead(): number | undefined {
+				spendSubrequests(3);
+				return this.remaining();
+			}
+		}
+
+		enterSubrequestSliceOnDispatch(
+			Receiver.prototype,
+			(receiver) => receiver.subrequests
+		);
+		const free = new Receiver(workersInvocationAllowances.free.subrequests);
+		const paid = new Receiver(workersInvocationAllowances.paid.subrequests);
+
+		expect({
+			free: free.spendAndRead(),
+			paid: paid.spendAndRead(),
+			fresh: free.remaining()
+		}).toStrictEqual({ free: 897, paid: 9897, fresh: 900 });
+	});
+
+	it('reserves completion calls until the body returns', async () => {
+		const observed = await withSubrequestSlice(
+			async () => {
+				const during = await withHeldSubrequests(2, () => {
+					spendSubrequests(1);
+
+					return Promise.resolve(subrequestsAvailable());
+				});
+
+				return { during, after: subrequestsAvailable() };
+			},
+			{ subrequests: 4, reserve: 0 }
+		);
+
+		expect(observed).toStrictEqual({ during: 1, after: 3 });
+	});
+
+	it('refuses a tracked call beyond the absolute slice', () => {
+		const error = withSubrequestSlice(
+			() => {
+				spendSubrequests(1);
+
+				try {
+					spendSubrequests(1, 'd1.batch');
+				} catch (error_) {
+					return error_;
+				}
+			},
+			{ subrequests: 1, reserve: 0 }
+		);
+
+		expect(error).toBeInstanceOf(SubrequestSliceExceededError);
 	});
 
 	// A nested call shares the enclosing slice, so a dispatch that opens one

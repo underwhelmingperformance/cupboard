@@ -128,7 +128,7 @@ async function deferUpload(
 
 /**
  * Gives the verdict drain `attempts` turns. Each alarm applies as many held
- * verdicts as one invocation's D1 allowance covers, so a batch needs one turn
+ * verdicts as one invocation's subrequest allowance covers, so a batch needs one turn
  * per verdict the recording invocation could not afford.
  */
 async function drainRecordedVerdicts(attempts: number): Promise<void> {

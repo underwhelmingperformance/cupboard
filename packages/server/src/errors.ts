@@ -1334,37 +1334,6 @@ export function causedBy<T>(
 }
 
 /**
- * Work that requires the invocation's D1 allowance but runs outside an
- * allowance scope.
- *
- * Production page-sizing calls run beneath a wrapped dispatch method. This
- * error exposes a dispatch method that is missing the wrapper.
- */
-export class MissingStatementAllowanceError extends Error {
-	constructor() {
-		super('This work requires an invocation D1 allowance and none is in force');
-		this.name = 'MissingStatementAllowanceError';
-	}
-}
-
-/**
- * A D1 call that exceeds the invocation's remaining statement allowance. The
- * binding throws before dispatching the statement or batch.
- */
-export class StatementAllowanceExceededError extends Error {
-	constructor(
-		public readonly subject: string,
-		public readonly statements: number,
-		public readonly available: number
-	) {
-		super(
-			`${subject} needs ${String(statements)} D1 statements and this invocation has ${String(available)} left`
-		);
-		this.name = 'StatementAllowanceExceededError';
-	}
-}
-
-/**
  * Work that asks how much of the invocation's Durable Object row budget is
  * left but runs outside a budget scope.
  *
@@ -1379,10 +1348,6 @@ export class MissingRowBudgetError extends Error {
 	}
 }
 
-/**
- * A D1 call with a statement count that cannot be determined before dispatch.
- * The active allowance requires an exact count.
- */
 // A unit of work sized to fit one invocation's subrequest slice did not. The
 // sender derives the size from the same limits the slice applies, so this is a
 // defect in that derivation, not a condition a retry can clear.
@@ -1395,15 +1360,6 @@ export class SubrequestSliceExceededError extends Error {
 			`${subject} needs ${String(subrequests)} subrequests and this invocation's slice cannot afford them`
 		);
 		this.name = 'SubrequestSliceExceededError';
-	}
-}
-
-export class UncountableStatementError extends Error {
-	constructor(public readonly subject: string) {
-		super(
-			`${subject} runs an unknown number of statements and cannot be counted against an invocation's D1 allowance`
-		);
-		this.name = 'UncountableStatementError';
 	}
 }
 
@@ -1438,23 +1394,6 @@ export class BoundValueLengthError extends Error {
 			`A bound value of ${String(bytes)} bytes exceeds the limit of ${String(limit)}`
 		);
 		this.name = 'BoundValueLengthError';
-	}
-}
-
-/**
- * A batch for one item that exceeds the D1 statement limit for an invocation.
- * The item cannot be split into a narrower chunk, so a later invocation would
- * reach the same limit.
- */
-export class BatchStatementLimitError extends Error {
-	constructor(
-		public readonly statements: number,
-		public readonly limit: number
-	) {
-		super(
-			`A D1 batch for one item needs ${String(statements)} statements and an invocation may run ${String(limit)}`
-		);
-		this.name = 'BatchStatementLimitError';
 	}
 }
 

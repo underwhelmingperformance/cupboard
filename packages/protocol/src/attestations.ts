@@ -8,7 +8,7 @@ import { z } from 'zod';
 
 import {
 	subrequestSafetyReserve,
-	subrequestsPerInvocation
+	workersInvocationAllowances
 } from './platform.ts';
 import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
@@ -54,7 +54,7 @@ const attestationNegotiateOverhead = 50;
  * several requests.
  */
 export const attestationNegotiateMaxBundles =
-	subrequestsPerInvocation -
+	workersInvocationAllowances.free.subrequests -
 	subrequestSafetyReserve -
 	attestationNegotiateOverhead;
 

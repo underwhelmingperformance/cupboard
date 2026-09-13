@@ -28,7 +28,7 @@ import {
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { CacheNotFoundError } from '../errors.ts';
-import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
+import { type RequestOrigin } from '../http/http.ts';
 
 import {
 	type AttestationCasService,
@@ -45,11 +45,12 @@ import {
 	type JsonValueList,
 	jsonValueLists
 } from './json-list.ts';
+import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
-	affordableOperations,
-	statementsRemaining
-} from './statement-scope.ts';
+	affordableSubrequestOperations,
+	subrequestsAvailable
+} from './subrequest-slice.ts';
 
 export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
@@ -66,9 +67,9 @@ export interface RetiredNarInfo {
 	readonly wasNewerCommitted: boolean;
 }
 
-// The paths one retirement chunk covers. A chunk costs the same number of D1
-// statements whatever its size, so this is a step size: a larger chunk retires
-// more paths for those statements and holds the critical section for longer.
+// The paths one retirement chunk covers. A larger chunk amortises the D1 calls
+// but can make two R2 calls for each path whose list belongs to an older
+// generation, so the subrequest calculation uses that worst case.
 export const maxFencedRetireRows = 45;
 
 // Limit each flush to a few retirement batches. An alarm continues any backlog
@@ -78,7 +79,7 @@ export const maxNarInfoDeletionsFlushedPerRun =
 	teardownChunksPerFlush * maxFencedRetireRows;
 
 // One query finds the attestation references of every path in a chunk.
-const attestationQueryStatementsPerChunk = 1;
+const attestationQuerySubrequestsPerChunk = 1;
 
 // Retiring one attestation reference runs a three-statement batch: the edge
 // delete and the two reads that decide whether the tenant still holds the
@@ -86,30 +87,31 @@ const attestationQueryStatementsPerChunk = 1;
 // batch for the quota credit and the presence delete. The drain cannot tell the
 // two apart until the delete has run, so it reserves the larger cost before
 // each reference.
-const attestationRetirementStatements = 5;
+const attestationRetirementSubrequests = 2;
 
 // After retiring all attestation references, the chunk credits usage, deletes
 // edges, updates presence accounting and queues exact-cache purges. A chunk
 // contains at most `maxFencedRetireRows` paths, so all of its distinct NAR
 // hashes fit in one presence batch.
-const narInfoRetirementStatementsPerChunk = 5;
+const narInfoRetirementBaseSubrequests = 5;
+const supersededListSubrequests = 2;
 
-// The fixed D1 statement cost of retiring one teardown chunk.
-export const minimumStatementsPerTeardownChunk =
-	attestationQueryStatementsPerChunk + narInfoRetirementStatementsPerChunk;
-
-// The fixed D1 statement cost of retiring one path. This includes the edge
-// credit and delete, two presence reads, the presence credit and delete, the
-// attestation-reference query, the unreferenced-hash probe and the two
-// maintenance-eligibility statements around the request.
-const statementsPerSinglePathRetirement = 10;
+export function narInfoRetirementSubrequests(paths: number): number {
+	return narInfoRetirementBaseSubrequests + paths * supersededListSubrequests;
+}
 
 // The maximum number of attestation references that one invocation can retire
 // after paying the fixed cost for the path.
-const maxSinglePathAttestationRetirements = Math.floor(
-	(d1StatementsPerInvocation - statementsPerSinglePathRetirement) /
-		attestationRetirementStatements
-);
+function maxSinglePathAttestationRetirements(
+	subrequestAllowance: number
+): number {
+	return Math.floor(
+		(maintenancePassSubrequests(subrequestAllowance) -
+			attestationQuerySubrequestsPerChunk -
+			narInfoRetirementSubrequests(1)) /
+			attestationRetirementSubrequests
+	);
+}
 
 /**
  * Builds the query for the attestation references filed against the exact
@@ -456,13 +458,13 @@ export class DeletionQueueService {
 
 	/**
 	 * Retires as many of one narinfo generation's attestation references as the
-	 * available D1 statements permit, and reports whether it retired them all.
+	 * available subrequests permit, and reports whether it retired them all.
 	 *
 	 * A path may have any number of references, so one invocation might not
 	 * retire them all. When this returns false the caller keeps the queue entry,
 	 * and garbage collection retires the remainder.
 	 *
-	 * The remaining D1 allowance and `maxSinglePathAttestationRetirements`
+	 * The remaining subrequest slice and `maxSinglePathAttestationRetirements`
 	 * jointly limit the page.
 	 */
 	private async retireAttestationRefs(
@@ -471,8 +473,10 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const affordable = Math.min(
-			maxSinglePathAttestationRetirements,
-			affordableOperations(attestationRetirementStatements)
+			maxSinglePathAttestationRetirements(
+				this.context.subrequestsPerInvocation
+			),
+			affordableSubrequestOperations(attestationRetirementSubrequests)
 		);
 		const tenant = this.context.requireTenant();
 		const references = await this.context.d1
@@ -535,15 +539,20 @@ export class DeletionQueueService {
 	): Promise<number | undefined> {
 		// Start a chunk only when the remaining allowance covers its attestation
 		// query and fixed narinfo-retirement work.
-		if (statementsRemaining() < minimumStatementsPerTeardownChunk) {
+		const finishingSubrequests = narInfoRetirementSubrequests(batch.length);
+
+		if (
+			subrequestsAvailable() <
+			attestationQuerySubrequestsPerChunk + finishingSubrequests
+		) {
 			return undefined;
 		}
 
 		// Reserve the fixed narinfo-retirement cost before selecting attestation
 		// references. Read one additional reference to detect an unfinished chunk.
-		const affordable = affordableOperations(
-			attestationRetirementStatements,
-			attestationQueryStatementsPerChunk + narInfoRetirementStatementsPerChunk
+		const affordable = affordableSubrequestOperations(
+			attestationRetirementSubrequests,
+			attestationQuerySubrequestsPerChunk + finishingSubrequests
 		);
 		const references = await this.capturedAttestationReferences(
 			tenant,
@@ -561,7 +570,7 @@ export class DeletionQueueService {
 			return undefined;
 		}
 
-		if (statementsRemaining() < narInfoRetirementStatementsPerChunk) {
+		if (subrequestsAvailable() < finishingSubrequests) {
 			return undefined;
 		}
 
@@ -774,7 +783,7 @@ export class DeletionQueueService {
 	}
 
 	// The caller must hold the critical section. The row cap and the invocation's
-	// D1 allowance both bound one pass; an alarm resumes the remaining durable
+	// subrequest allowance both bound one pass; an alarm resumes the remaining durable
 	// queue entries.
 	async flushQueuedNarInfoDeletions(
 		origin?: RequestOrigin,

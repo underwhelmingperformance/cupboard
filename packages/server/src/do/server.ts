@@ -165,7 +165,7 @@ import { LegacyRetentionService } from './legacy-retention-service.ts';
 import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
-	maintenancePassStatements,
+	maintenancePassSubrequests,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
@@ -189,7 +189,6 @@ import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
 import { enterRowBudgetOnDispatch } from './row-budget.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
-import { enterStatementAllowanceOnDispatch } from './statement-scope.ts';
 import { StatsService } from './stats-service.ts';
 import { enterSubrequestSliceOnDispatch } from './subrequest-slice.ts';
 import {
@@ -201,10 +200,10 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
-	pendingSettlePrefetchStatements,
+	pendingSettlePrefetchSubrequests,
 	type PendingVerification,
 	type PendingVerificationBatch,
-	statementsPerPendingSettleRow,
+	subrequestsPerPendingSettleRow,
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
@@ -286,7 +285,7 @@ type MaintenancePassKey =
  * One bounded background task an alarm can run.
  *
  * `hasWork` reads durable storage or local SQLite. The alarm therefore leaves
- * the complete D1 allowance for the selected pass. A pass is due after its retry
+ * the complete subrequest allowance for the selected pass. A pass is due after its retry
  * deadline and while work remains.
  *
  * The result from `run` determines the next retry deadline.
@@ -371,14 +370,19 @@ function mergeGarbageCollectionContinuation(
  * How many deferred rows one backstop pass reads.
  *
  * The page reserves the same maximum cost for every row after subtracting the
- * page prefetch from the invocation's D1 allowance. This value is a page limit;
- * the D1 binding enforces the allowance during settlement. Unprocessed rows
+ * page prefetch from the invocation's subrequest allowance. This value is a page
+ * limit; the bounded bindings enforce the allowance during settlement. Unprocessed rows
  * remain pending, and the pass requests another verification run.
  */
-export const verifyBackstopReuseSettleLimit = Math.floor(
-	(maintenancePassStatements - pendingSettlePrefetchStatements) /
-		statementsPerPendingSettleRow
-);
+export function verifyBackstopReuseSettleLimit(
+	subrequestAllowance: number
+): number {
+	return Math.floor(
+		(maintenancePassSubrequests(subrequestAllowance) -
+			pendingSettlePrefetchSubrequests) /
+			subrequestsPerPendingSettleRow
+	);
+}
 
 type MaintenanceKind = 'gc' | 'verify' | 'local-step';
 
@@ -417,14 +421,16 @@ class CountingSemaphore {
 const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
-	// Put the invocation's D1 allowance, Durable Object row budget and subrequest
+	// Put the Durable Object row budget and subrequest
 	// slice on every method the runtime can dispatch to: a request, an alarm, an
 	// RPC, and any method added later. No dispatched method can run without them,
 	// and none has to remember to open them itself.
 	static {
-		enterStatementAllowanceOnDispatch(this.prototype);
 		enterRowBudgetOnDispatch(this.prototype);
-		enterSubrequestSliceOnDispatch(this.prototype);
+		enterSubrequestSliceOnDispatch(
+			this.prototype,
+			(server) => server.context.subrequestsPerInvocation
+		);
 	}
 
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -1760,7 +1766,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Share the cron verification chain and reset the queue-request guard before
 	// this pass claims rows. A later deferral then requests another pass.
 	//
-	// Settlement and scanning share the invocation's D1 allowance. The requested
+	// Settlement and scanning share the invocation's subrequest allowance. The requested
 	// limit caps the page, and the remaining allowance determines the work
 	// completed by this invocation.
 	private verifyInteractive(
@@ -1951,7 +1957,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.withMaintenanceEligibility(() =>
 				this.verification.processPendingWithoutDecode(
 					logger,
-					verifyBackstopReuseSettleLimit
+					verifyBackstopReuseSettleLimit(this.context.subrequestsPerInvocation)
 				)
 			)
 		);
@@ -1961,7 +1967,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Settle decode-free rows within the invocation's D1 allowance, then build the
+	// Settle decode-free rows within the invocation's subrequest allowance, then build the
 	// claim snapshot from the Durable Object's local SQLite database.
 	//
 	// Request another queue pass after settlement makes progress and claimable
@@ -2094,7 +2100,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 * turns.
 	 *
 	 * Every `hasWork` callback reads durable storage or the local SQLite database.
-	 * The selected pass receives the complete D1 allowance.
+	 * The selected pass receives the complete subrequest allowance.
 	 */
 	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
 		return [
@@ -2347,10 +2353,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 * deadlines and run queued cache purges. These operations use local or
 	 * durable storage.
 	 *
-	 * The maintenance passes do reach D1. Workers Free permits 50 D1 statements
-	 * per invocation, and a Durable Object alarm is one invocation, so the alarm
-	 * runs one maintenance pass under that allowance and arms the alarm again
-	 * for whichever pass is due next.
+	 * Maintenance passes issue D1 and R2 calls under one Free-plan subrequest
+	 * slice. The alarm runs one pass and arms another alarm for whichever pass
+	 * is due next.
 	 */
 	override async alarm(): Promise<void> {
 		try {
@@ -2414,7 +2419,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// One cron invocation settles pending rows and scans a page of committed
-	// narinfos under the same D1 allowance. The claim and scan cursors preserve
+	// narinfos under the same subrequest allowance. The claim and scan cursors preserve
 	// unfinished work for the next cron run.
 	async runVerification(): Promise<void> {
 		await this.initialise();

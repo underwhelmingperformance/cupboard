@@ -116,7 +116,7 @@ export function rowsRemaining(): number {
  * Whether the current invocation has spent its row budget.
  *
  * Ask this *after* completing a step, never before starting one. Unlike the
- * D1 statement allowance, a row budget cannot refuse work in advance, because
+ * subrequest slice, a row budget cannot refuse work in advance, because
  * a statement's row count is known only once it has run. So a pass runs a
  * step, asks this, and stops before starting another.
  *
@@ -133,5 +133,5 @@ export function isRowBudgetExhausted(): boolean {
  * row budget, and so each dispatch shares one budget.
  */
 export function enterRowBudgetOnDispatch(prototype: object): void {
-	wrapDispatchedMethods(prototype, withRowBudget);
+	wrapDispatchedMethods(prototype, (body) => withRowBudget(body));
 }

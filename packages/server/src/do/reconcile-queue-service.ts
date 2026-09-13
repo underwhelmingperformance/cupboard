@@ -5,7 +5,7 @@ import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
 
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
-import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
+import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 
 export interface ReconcileTarget {
 	readonly cacheId: CacheId;
@@ -27,41 +27,39 @@ const reconcileOriginKey = 'maintenance:reconcile-origin';
 // is split into successive writes.
 const maxStoragePutEntries = 128;
 
-// These constants determine the page size for a reconcile pass. The D1 binding
-// enforces the statement limit if one becomes inaccurate, which can reduce the
-// work completed by the pass.
-//
-// Probing one target reads the shared blob row for the NAR's current
-// incarnation. The subsequent R2 HEAD requests do not use D1.
-export const statementsPerReconcileProbe = 1;
+// Probing one target reads its current incarnation from D1, then heads the NAR
+// and narinfo objects in R2.
+export const subrequestsPerReconcileProbe = 3;
 
 // One query reads the committed reference edges for a whole page, however many
 // paths the page holds.
-export const statementsPerReconcileEdgeQuery = 1;
+export const subrequestsPerReconcileEdgeQuery = 1;
 
-// Restoring a missing narinfo object re-reads the NAR's incarnation under the
-// critical section, then reads the shared blob row used to render the narinfo.
-export const statementsPerReconcileRestore = 2;
+// Restoring a missing narinfo object re-reads and heads the NAR, reads the shared
+// blob row used to render the narinfo, and writes the object to R2.
+export const subrequestsPerReconcileRestore = 4;
 
-// Removing a path after its NAR disappears credits and deletes the reference
-// edge, reads the remaining edges and the presence row, then credits and deletes
-// that presence row. It also queries the path's attestation references and
-// checks for references from other tenants. Each attestation reference requires
-// five additional statements from the remaining allowance.
-export const statementsPerReconcileRemoval = 8;
+// Removing a path after its NAR disappears uses at most three D1 batches for the
+// reference and presence rows, one D1 query for attestations, one D1 query for
+// remaining NAR references, and two R2 calls for the narinfo and attestation
+// list. Attestation retirement uses additional calls and stops when the slice
+// cannot cover another reference.
+export const subrequestsPerReconcileRemoval = 7;
 
 /**
  * The maximum number of queued paths claimed by one alarm.
  *
- * The page reserves one statement per probe, the edge query and one removal.
+ * The page reserves three calls per probe, the edge query and one removal.
  * Every pass can therefore repair at least one probed target.
  */
-export const maxPathsReconciledPerRun = Math.floor(
-	(maintenancePassStatements -
-		statementsPerReconcileEdgeQuery -
-		statementsPerReconcileRemoval) /
-		statementsPerReconcileProbe
-);
+export function maxPathsReconciledPerRun(subrequestAllowance: number): number {
+	return Math.floor(
+		(maintenancePassSubrequests(subrequestAllowance) -
+			subrequestsPerReconcileEdgeQuery -
+			subrequestsPerReconcileRemoval) /
+			subrequestsPerReconcileProbe
+	);
+}
 
 export class ReconcileQueueService {
 	constructor(private readonly context: ServerContext) {}
@@ -95,7 +93,9 @@ export class ReconcileQueueService {
 	}
 
 	claimChunk(
-		limit: number = maxPathsReconciledPerRun
+		limit: number = maxPathsReconciledPerRun(
+			this.context.subrequestsPerInvocation
+		)
 	): Promise<Map<string, ReconcileTarget>> {
 		return this.context.ctx.storage.list<ReconcileTarget>({
 			prefix: reconcileEntryPrefix,

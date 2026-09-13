@@ -3,7 +3,7 @@ import {
 	type CacheAvailabilityResponse,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
-import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -26,29 +26,42 @@ import { type WorkerHonoEnv } from './hono-env.ts';
 // heads, divided by the heads one hash costs at worst. Derived, not chosen:
 // `subrequest-budget.test.ts` checks each chunk's worst case against the
 // ceiling.
-function chunkSizeFor(headsPerHash: number, d1CallsPerChunk: number): number {
+function chunkSizeFor(
+	allowance: number,
+	headsPerHash: number,
+	d1CallsPerChunk: number
+): number {
 	return Math.floor(
-		(subrequestsPerInvocation - subrequestSliceReserve - d1CallsPerChunk) /
-			headsPerHash
+		(allowance - subrequestSliceReserve - d1CallsPerChunk) / headsPerHash
 	);
 }
 
 /**
  * One narinfo head per hash.
  */
-export const cacheAvailabilityChunkSize = chunkSizeFor(
-	1,
-	cacheProbeD1CallsPerChunk
+export const cacheAvailabilityChunkSize = cacheAvailabilityChunkSizeFor(
+	workersInvocationAllowances.free.subrequests
 );
+
+export function cacheAvailabilityChunkSizeFor(allowance: number): number {
+	return chunkSizeFor(allowance, 1, cacheProbeD1CallsPerChunk);
+}
 
 /**
  * One NAR head per distinct NAR among a hash's copies, at most
  * `reuseDistinctNarLimit`.
  */
-export const reuseViewAvailabilityChunkSize = chunkSizeFor(
-	reuseDistinctNarLimit,
-	reuseViewProbeD1CallsPerChunk
+export const reuseViewAvailabilityChunkSize = reuseViewAvailabilityChunkSizeFor(
+	workersInvocationAllowances.free.subrequests
 );
+
+export function reuseViewAvailabilityChunkSizeFor(allowance: number): number {
+	return chunkSizeFor(
+		allowance,
+		reuseDistinctNarLimit,
+		reuseViewProbeD1CallsPerChunk
+	);
+}
 
 /**
  * Answers an availability page through the tenant Durable Object a chunk at a

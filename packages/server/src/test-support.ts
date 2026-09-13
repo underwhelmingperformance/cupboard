@@ -92,6 +92,7 @@ import {
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
 import { readUserInputSchema } from '@cupboard/shared/http';
+import { withDeadline } from '@cupboard/shared/timeout';
 import {
 	createExecutionContext,
 	runInDurableObject,
@@ -154,7 +155,7 @@ import { MaintenanceEligibilityService } from './do/maintenance-eligibility-serv
 import { applyMigrations, migrationsThrough } from './do/migrate.ts';
 import { withRowBudget } from './do/row-budget.ts';
 import type { CupboardServer } from './do/server.ts';
-import { withStatementAllowance } from './do/statement-scope.ts';
+import { withSubrequestSlice } from './do/subrequest-slice.ts';
 import {
 	attestationListObjectKey,
 	attestationStagingObjectKey,
@@ -250,6 +251,7 @@ const harness = {
 	origin: 'https://cupboard.test',
 	server: testServerFor('initial'),
 	serverName: 'initial',
+	serversUsed: new Set<DurableObjectStub<CupboardServer>>(),
 	nextTestServerId: 0,
 	nextProvisionConfigVersion: 1
 };
@@ -276,6 +278,7 @@ export async function resetTestServer(): Promise<void> {
 	harness.origin = `https://cupboard-${serverName}.test`;
 	harness.serverName = serverName;
 	harness.server = testServerFor(harness.serverName);
+	harness.serversUsed.add(harness.server);
 	harness.nextTestServerId += 1;
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -600,6 +603,7 @@ export async function useTestServer(name: string): Promise<void> {
 	harness.origin = `https://cupboard-${name}.test`;
 	harness.serverName = name;
 	harness.server = testServerFor(name);
+	harness.serversUsed.add(harness.server);
 
 	await provisionFixtureTenant();
 	await configureFixtureTenant(harness.server);
@@ -614,6 +618,46 @@ The Durable Object stub the harness is currently targeting.
 */
 export function currentServer(): DurableObjectStub<CupboardServer> {
 	return harness.server;
+}
+
+/**
+ * Returns the current test server's subrequest allowance. The pool defaults
+ * to Workers Free; `withDeployedSubrequestAllowance` can override that value.
+ */
+export function deployedSubrequestAllowance(): Promise<number> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) => instance.context.subrequestsPerInvocation
+	);
+}
+
+/**
+ * Runs `body` with the Durable Object's subrequest allowance replaced, and
+ * restores the deployed allowance afterwards.
+ *
+ * Maintenance page sizes and subsequent dispatches use the replacement. An
+ * already open subrequest slice keeps its existing allowance. Tests can use
+ * smaller pages to exercise continuation without production-sized fixtures.
+ */
+export async function withDeployedSubrequestAllowance<T>(
+	context: ServerContext,
+	subrequests: number,
+	body: () => Promise<T>
+): Promise<T> {
+	const deployed = context.subrequestsPerInvocation;
+	const set = (value: number): void => {
+		Object.defineProperty(context, 'subrequestsPerInvocation', {
+			configurable: true,
+			value
+		});
+	};
+	set(subrequests);
+
+	try {
+		return await body();
+	} finally {
+		set(deployed);
+	}
 }
 
 /**
@@ -655,12 +699,12 @@ export async function recordClaimedMissingObject(
  * and an armed alarm on an abandoned object fires into a test environment
  * that has moved on: its handler's console output then races the pool's log
  * forwarding and surfaces as teardown errors. The shared `afterEach` calls
- * this. It covers the server the harness currently points at and the fixture
- * tenant's object; a test that arms an alarm on any other object clears that
- * one itself.
+ * this. It covers every server selected by the harness during the test and the
+ * fixture tenant's object. A test that arms an alarm on another object clears
+ * that alarm itself.
  */
 export async function clearAbandonedAlarms(): Promise<void> {
-	for (const stub of [harness.server, fixtureWorkerServer()]) {
+	for (const stub of testServersUsed()) {
 		await runInDurableObject(stub, (_instance, state) =>
 			state.storage.deleteAlarm()
 		);
@@ -692,16 +736,29 @@ export class StalledMaintenancePassError extends Error {
  *
  * The shared `afterEach` calls this and fails the test on the first pass it
  * finds. A test that means to leave a pass stalled calls this function itself
- * and asserts on the result. It covers the object the harness points at and
- * the fixture tenant's object, like `clearAbandonedAlarms`.
+ * and asserts on the result. It covers every server selected by the harness
+ * during the test and the fixture tenant's object.
  */
 export async function takeStalledMaintenancePasses(): Promise<
 	{ readonly pass: string; readonly waitMs: number }[]
 > {
+	return stalledMaintenancePassesFor(testServersUsed());
+}
+
+function testServersUsed(): readonly DurableObjectStub<CupboardServer>[] {
+	harness.serversUsed.add(harness.server);
+	harness.serversUsed.add(fixtureWorkerServer());
+
+	return [...harness.serversUsed];
+}
+
+async function stalledMaintenancePassesFor(
+	servers: readonly DurableObjectStub<CupboardServer>[]
+): Promise<{ readonly pass: string; readonly waitMs: number }[]> {
 	const now = Date.now();
 	const stalled: { pass: string; waitMs: number }[] = [];
 
-	for (const stub of [harness.server, fixtureWorkerServer()]) {
+	for (const stub of servers) {
 		const parked = await runInDurableObject(stub, async (_instance, state) => {
 			const deadlines = await state.storage.list<number>({
 				prefix: maintenanceRetryPrefix
@@ -725,6 +782,28 @@ export async function takeStalledMaintenancePasses(): Promise<
 
 		stalled.push(...parked);
 	}
+
+	return stalled;
+}
+
+/**
+ * Clears alarms and audits stalled maintenance on one snapshot of every
+ * Durable Object used by the test. The shared `afterEach` calls this before
+ * the next test resets the registry.
+ */
+export async function finishTestServerLifecycle(): Promise<
+	{ readonly pass: string; readonly waitMs: number }[]
+> {
+	const servers = testServersUsed();
+
+	for (const stub of servers) {
+		await runInDurableObject(stub, (_instance, state) =>
+			state.storage.deleteAlarm()
+		);
+	}
+
+	const stalled = await stalledMaintenancePassesFor(servers);
+	harness.serversUsed.clear();
 
 	return stalled;
 }
@@ -1243,10 +1322,10 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 }
 
 /**
- * Wraps a service so direct test calls use one invocation's D1 statement
- * allowance.
+ * Wraps a service so direct test calls use one invocation's subrequest
+ * slice.
  *
- * Production dispatch adds the allowance before it calls a service. Tests that
+ * Production dispatch opens the slice before it calls a service. Tests that
  * call the service directly bypass that dispatch, so this wrapper adds the same
  * boundary to one instance without changing the shared prototype.
  */
@@ -1262,7 +1341,7 @@ export function drivenDirectly<Service extends object>(
 			}
 
 			return (...parameters: unknown[]): unknown =>
-				withStatementAllowance((): unknown =>
+				withSubrequestSlice((): unknown =>
 					withRowBudget((): unknown =>
 						Reflect.apply(value, receiver, parameters)
 					)
@@ -1272,14 +1351,14 @@ export function drivenDirectly<Service extends object>(
 }
 
 /**
- * Runs `body` under one invocation's D1 statement allowance and row budget.
+ * Runs `body` under one invocation's subrequest slice and row budget.
  *
  * Use this when a test calls code below the Durable Object dispatch boundary.
  * A dispatch opens both scopes, and code that consults either one refuses to
  * run without it.
  */
 export function asOneInvocation<T>(body: () => T): T {
-	return withStatementAllowance(() => withRowBudget(body));
+	return withSubrequestSlice(() => withRowBudget(body));
 }
 
 /**
@@ -1297,13 +1376,11 @@ export function underOneUnitOfWork<T>(body: () => T): T {
 }
 
 /**
- * Wraps a D1 binding and counts every prepared statement. Tests use the count to
- * enforce the Workers Free limit for one invocation.
+ * Wraps a D1 binding and counts prepared statements as a query diagnostic.
  *
  * Drizzle prepares each statement before execution, including every batch
- * member. Counting preparations therefore counts executed D1 statements.
- * `batch` does not add another statement because all of its members have
- * already passed through `prepare`.
+ * member. A batch is one subrequest even when this counter reports several
+ * statements.
  */
 export function countingD1(inner: D1Database): {
 	readonly binding: D1Database;
@@ -2700,6 +2777,12 @@ export interface CommitConversation {
 	readonly socket: WebSocket;
 	readonly send: (request: CommitSessionRequestInput) => void;
 	readonly nextFrame: () => Promise<CommitSessionFrame>;
+	readonly diagnostics: () => {
+		readonly socketState: number;
+		readonly queuedFrames: number;
+		readonly pendingReaders: number;
+		readonly closed: boolean;
+	};
 	// The capability header the 101 carried, which is where a credited session's
 	// opening grant is advertised.
 	readonly capabilities: string | null;
@@ -2722,6 +2805,7 @@ export function commitSessionFromResponse(
 		);
 	}
 
+	let closeError: CommitSocketProtocolError | undefined;
 	const frames: CommitSessionFrame[] = [];
 	const waiters: {
 		resolve: (frame: CommitSessionFrame) => void;
@@ -2741,12 +2825,13 @@ export function commitSessionFromResponse(
 		}
 	});
 	socket.addEventListener('close', () => {
+		closeError = new CommitSocketProtocolError(
+			'the socket closed before the frame'
+		);
 		const pending = [...waiters];
 		waiters.length = 0;
 		for (const waiter of pending) {
-			waiter.reject(
-				new CommitSocketProtocolError('the socket closed before the frame')
-			);
+			waiter.reject(closeError);
 		}
 	});
 	socket.accept();
@@ -2756,6 +2841,10 @@ export function commitSessionFromResponse(
 
 		if (queued !== undefined) {
 			return Promise.resolve(queued);
+		}
+
+		if (closeError !== undefined) {
+			return Promise.reject(closeError);
 		}
 
 		const waiter = Promise.withResolvers<CommitSessionFrame>();
@@ -2772,6 +2861,12 @@ export function commitSessionFromResponse(
 		socket,
 		send,
 		nextFrame,
+		diagnostics: () => ({
+			socketState: socket.readyState,
+			queuedFrames: frames.length,
+			pendingReaders: waiters.length,
+			closed: closeError !== undefined
+		}),
 		capabilities: response.headers.get(commitCapabilitiesHeader)
 	};
 }
@@ -2818,63 +2913,115 @@ function closeSessionAndWait(socket: WebSocket): Promise<void> {
 	});
 }
 
+type CommitFixturePhase = 'initial frame' | 'verdict';
+
+// Leave part of Vitest's default 30-second case timeout for socket cleanup and
+// the shared after-test audit after a phase reports that it stopped progressing.
+export const commitFixturePhaseDeadlineMs = 20_000;
+
+/**
+ * Identifies the commit fixture phase that stopped progressing.
+ */
+export class CommitFixturePhaseTimeoutError extends Error {
+	constructor(
+		public readonly phase: CommitFixturePhase,
+		public readonly uploadId: UploadId,
+		public readonly server: string,
+		public readonly conversation: ReturnType<CommitConversation['diagnostics']>
+	) {
+		super(
+			`The commit fixture timed out during ${phase} for upload ${uploadId} on ${server}. Conversation state: ${JSON.stringify(conversation)}`
+		);
+		this.name = 'CommitFixturePhaseTimeoutError';
+	}
+}
+
+function waitForCommitFixturePhase<T>(
+	conversation: CommitConversation,
+	uploadId: UploadId,
+	phase: CommitFixturePhase,
+	operation: () => Promise<T>
+): Promise<T> {
+	return withDeadline(
+		operation,
+		commitFixturePhaseDeadlineMs,
+		() =>
+			new CommitFixturePhaseTimeoutError(
+				phase,
+				uploadId,
+				harness.serverName,
+				conversation.diagnostics()
+			)
+	);
+}
+
 // Sends a commit operation and waits for its response. For a deferred upload,
 // the helper runs the verification pass that the queue runs in production and
 // waits for the verdict. With `wait: false`, it returns `pending` immediately.
-// The helper closes the session after receiving the final result.
-async function completeCommitSession(
+// The helper closes the session after every result or error.
+export async function completeCommitSession(
 	conversation: CommitConversation,
 	uploadId: UploadId,
 	runVerification: () => Promise<void>,
 	options: { readonly wait?: boolean }
 ): Promise<CommitResponseInput> {
 	const { socket, send, nextFrame } = conversation;
-	send({ op: 'commit', uploadId });
-	const first = await nextFrame();
 
-	if (first.ev === 'settled') {
-		await closeSessionAndWait(socket);
+	try {
+		send({ op: 'commit', uploadId });
+		const first = await waitForCommitFixturePhase(
+			conversation,
+			uploadId,
+			'initial frame',
+			nextFrame
+		);
 
-		return first.response;
-	}
+		if (first.ev === 'settled') {
+			return first.response;
+		}
 
-	if (first.ev === 'error') {
-		await closeSessionAndWait(socket);
-		throw new CommitSocketError(first.status, first.message);
-	}
+		if (first.ev === 'error') {
+			throw new CommitSocketError(first.status, first.message);
+		}
 
-	if (first.ev !== 'deferred') {
-		await closeSessionAndWait(socket);
-		throw new CommitSocketProtocolError(`unexpected first frame: ${first.ev}`);
-	}
+		if (first.ev !== 'deferred') {
+			throw new CommitSocketProtocolError(
+				`unexpected first frame: ${first.ev}`
+			);
+		}
 
-	if (options.wait === false) {
-		await closeSessionAndWait(socket);
+		if (options.wait === false) {
+			return {
+				storePathHash: first.storePathHash,
+				narHash: first.narHash,
+				status: 'pending'
+			};
+		}
+
+		await runVerification();
+		const verdict = await waitForCommitFixturePhase(
+			conversation,
+			uploadId,
+			'verdict',
+			nextFrame
+		);
+
+		if (verdict.ev !== 'verdict') {
+			throw new CommitSocketProtocolError(`unexpected frame: ${verdict.ev}`);
+		}
+
+		if (verdict.status !== 'servable') {
+			throw new CommitVerdictError(verdict.status);
+		}
 
 		return {
 			storePathHash: first.storePathHash,
 			narHash: first.narHash,
-			status: 'pending'
+			status: 'committed'
 		};
+	} finally {
+		await closeSessionAndWait(socket);
 	}
-
-	await runVerification();
-	const verdict = await nextFrame();
-	await closeSessionAndWait(socket);
-
-	if (verdict.ev !== 'verdict') {
-		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.ev}`);
-	}
-
-	if (verdict.status !== 'servable') {
-		throw new CommitVerdictError(verdict.status);
-	}
-
-	return {
-		storePathHash: first.storePathHash,
-		narHash: first.narHash,
-		status: 'committed'
-	};
 }
 
 /**

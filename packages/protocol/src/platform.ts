@@ -1,14 +1,22 @@
 /**
  * Platform figures the request caps in this package are sized against.
  *
- * Request caps use the Workers Free internal-service call allowance. Cloudflare
- * applies the ceiling for the account's plan when a Worker is deployed.
+ * Both request caps and the deployment plan decision use these figures.
+ * Cloudflare applies the runtime ceiling for the account's Workers plan.
  */
 
-/**
- * The internal-service calls one Workers Free invocation may make. The Paid
- * default is 10,000. The request caps use the Free figure for both plans.
- */
-export const subrequestsPerInvocation = 1000;
+export interface WorkersInvocationAllowance {
+	readonly subrequests: number;
+}
+
+export const workersInvocationAllowances = {
+	free: { subrequests: 1000 },
+	paid: { subrequests: 10_000 }
+} as const satisfies Record<string, WorkersInvocationAllowance>;
+
+export type WorkersPlanTier = keyof typeof workersInvocationAllowances;
 
 export const subrequestSafetyReserve = 100;
+
+export const freeTierD1StatementsPerInvocation = 50;
+export const paidTierD1StatementsPerInvocation = 1000;
