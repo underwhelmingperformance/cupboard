@@ -892,17 +892,90 @@ export class StagedDeploymentServer {
 	}
 
 	/**
-	 * The caches one tenant reports through the admin API, read with the
-	 * operator's credential. The release serves this listing from the Durable
-	 * Object, so it shows the retention each cache holds after the upgrade.
+	 * The stub issuer to put in the `issuer` field of any trust rule seeded
+	 * against this harness.
 	 */
-	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+	get issuerUrl(): string {
+		return this.issuer.issuer;
+	}
+
+	/**
+	 * The URL of a tenant's admin API inside the harness.
+	 */
+	tenantUrl(tenant: FixtureTenant): URL {
+		return new URL(`https://cupboard.invalid/t/${tenant}`);
+	}
+
+	/**
+	 * A tenant admin client with the operator's authority. Use tenantRpcAs
+	 * with an exchanged token to exercise CI permissions.
+	 */
+	async tenantOwnerRpc(
+		tenant: FixtureTenant
+	): Promise<ReturnType<typeof tenantRpc>> {
 		await this.announceTenant(tenant);
 
-		const rpc = tenantRpc(new URL(`https://cupboard.invalid/t/${tenant}`), {
-			credential: await this.operatorCredential(`/t/${tenant}/token`),
+		return this.tenantRpcAs(
+			tenant,
+			await this.operatorCredential(`/t/${tenant}/token`)
+		);
+	}
+
+	/**
+	 * A tenant admin client that presents `credential` on every call.
+	 */
+	tenantRpcAs(
+		tenant: FixtureTenant,
+		credential: string
+	): ReturnType<typeof tenantRpc> {
+		return tenantRpc(this.tenantUrl(tenant), {
+			credential,
 			fetcher: (input, init) => this.workerFetch(input, init)
 		});
+	}
+
+	/**
+	 * Exchanges a signed ID token for one tenant's access token, the way a CI
+	 * job does. The harness signs `claims` with its stub issuer, so a rule
+	 * seeded with {@link issuerUrl} matches it. A claim-bound exchange must
+	 * request the `authorizationDetails` it needs.
+	 */
+	async tenantCiCredential(
+		tenant: FixtureTenant,
+		claims: Readonly<Record<string, unknown>>,
+		authorizationDetails: unknown
+	): Promise<string> {
+		await this.announceTenant(tenant);
+
+		const response = await this.workerFetch(`/t/${tenant}/token`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: tokenExchangeGrantType,
+				subject_token: this.issuer.sign(claims),
+				subject_token_type: subjectTokenTypeIdToken,
+				authorization_details: JSON.stringify(authorizationDetails)
+			}).toString()
+		});
+
+		if (!response.ok) {
+			throw new DeploymentTokenExchangeError(
+				response.status,
+				await response.text()
+			);
+		}
+
+		const value: unknown = await response.json();
+
+		return tokenResponseSchema.parse(value).access_token;
+	}
+
+	/**
+	 * Lists a tenant's caches and retention properties from its Durable Object,
+	 * using the operator's credential.
+	 */
+	async tenantCaches(tenant: FixtureTenant): Promise<CacheListResponse> {
+		const rpc = await this.tenantOwnerRpc(tenant);
 
 		return rpc.caches.list();
 	}

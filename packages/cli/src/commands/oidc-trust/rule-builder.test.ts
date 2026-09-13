@@ -79,6 +79,10 @@ describe('collectSubstitutions', () => {
 		expect(
 			collectSubstitutions({ templateSource: 'github-pr', captures: [] })
 		).toStrictEqual({
+			// The pull-request cache is named for its repository as well as its
+			// number, so the source supplies the repository claim whole beside the
+			// captured number.
+			repository_id: { claim: 'repository_id' },
 			pr: {
 				claim: 'ref',
 				capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }

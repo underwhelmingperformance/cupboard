@@ -24,6 +24,10 @@ import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import { githubActionsIssuer } from './github/claims.ts';
 import {
+	pullRequestCacheTemplate,
+	pullRequestRootTemplate
+} from './github/convention.ts';
+import {
 	lookupRepository,
 	type RepositoryIdentity
 } from './oidc-trust/github.ts';
@@ -304,15 +308,14 @@ const controlPlane: OidcTrustPlane = {
 		}).oidcTrust
 };
 
-// Pin immutable repository IDs and the pull-request event. The captured PR
-// number selects both `pr-<n>` and its retention root, so one PR cannot write
-// another PR's cache.
+// Pin repository and owner IDs as well as the event. Template substitutions
+// choose a cache name; they do not restrict which repository can authenticate.
 export function githubPrAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubPrOptions
 ): OidcTrustAddBodyInput {
-	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
+	const cacheTemplate = options.cacheTemplate ?? pullRequestCacheTemplate();
 
 	// Pin the event so a verified token from the same repository cannot select
 	// this rule for a branch or tag build.
@@ -334,9 +337,11 @@ export function githubPrAddBody(
 			buildCacheGrant({
 				cacheTemplate,
 				rootTemplate:
-					options.rootTemplate ??
-					`github:${identity.fullName}/${cacheTemplate}/`,
-				allow: withAttest(['push', 'root', 'attach'], options.attest),
+					options.rootTemplate ?? pullRequestRootTemplate(identity.fullName),
+				allow: withAttest(
+					['push', 'root', 'attach', 'create', 'remove'],
+					options.attest
+				),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-pr',
 					captures: []
@@ -492,7 +497,7 @@ function buildOidcTrustCommands(
 		)
 		.option(
 			'--allow <action>',
-			'an action set the rule may exchange for: push, attest, root, or attach (repeatable)',
+			'an action set the rule may exchange for: push, attest, root, attach, create, or remove (repeatable)',
 			collect,
 			[]
 		)
@@ -517,7 +522,7 @@ function buildOidcTrustCommands(
 		)
 		.option(
 			'--template-source <name>',
-			'a built-in capture source: github-pr (binds {pr}) or github-tag (binds {tag}) from the ref claim'
+			'a built-in capture source: github-pr (binds {repository_id} and {pr}) or github-tag (binds {tag}) from token claims'
 		)
 		.option(
 			'--from-file <path>',
@@ -563,7 +568,7 @@ function buildOidcTrustCommands(
 			)
 			.option(
 				'--cache-template <template>',
-				'the per-PR cache template (default: pr-{pr})'
+				'the per-PR cache template (default: gh-{repository_id}-pr-{pr})'
 			)
 			.option(
 				'--root-template <template>',
@@ -583,7 +588,7 @@ function buildOidcTrustCommands(
 					'',
 					'Example:',
 					"  # Trust this repository's pull-request builds to push to their own",
-					'  # pr-<number> cache, which they cannot escape',
+					'  # gh-<repository-id>-pr-<number> cache',
 					'  cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \\',
 					'    --repo acme/infra'
 				].join('\n')

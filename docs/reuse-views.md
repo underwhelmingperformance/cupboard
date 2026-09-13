@@ -110,8 +110,9 @@ request. An administrator defines the view once so it selects the per-PR caches
 used by the `add-github-pr` rule (see [docs/trust-rules.md](./trust-rules.md)):
 
 ```bash
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --select prefix:pr-
+# repository_id is the repository's numeric GitHub ID.
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
+  "pull-requests-$repository_id" --select "prefix:gh-$repository_id-pr-"
 ```
 
 `main`'s post-merge workflow then opts into it:
@@ -127,7 +128,7 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
-      reuse-view: pull-requests
+      reuse-view: pull-requests-${{ github.repository_id }}
 ```
 
 The tag pin selects that immutable published release. Set `cupboard-version`
