@@ -219,8 +219,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 49,
-			largeBacklogCost: 48
+			smallBacklogCost: 171,
+			largeBacklogCost: 170
 		});
 	});
 
@@ -230,12 +230,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 46,
+				rowsRead: 168,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 46,
+				rowsRead: 168,
 				usesIndex: true,
 				sorts: false
 			}
@@ -272,8 +272,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 44,
-			largeBacklogCost: 44
+			smallBacklogCost: 166,
+			largeBacklogCost: 166
 		});
 	});
 
@@ -304,8 +304,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 676, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 676, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 798, rowsWritten: 133 },
+			largeBacklog: { rowsRead: 798, rowsWritten: 133 }
 		});
 	});
 
@@ -324,15 +324,12 @@ describe('maintenance pass cost', () => {
 			currentServer().runGarbageCollection()
 		);
 
-		// The seeded roots create the collection revision row through its
-		// triggers, without a cache identity. The first pass binds that row to
-		// the identity, which the second pass then finds bound.
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 57,
-			largeBacklogCost: 57
+			smallBacklogCost: 179,
+			largeBacklogCost: 179
 		});
 	});
 });

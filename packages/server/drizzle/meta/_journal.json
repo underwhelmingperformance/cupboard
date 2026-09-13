@@ -379,6 +379,13 @@
 			"when": 1788789588287,
 			"tag": "0053_cache_identity_triggers",
 			"breakpoints": true
+		},
+		{
+			"idx": 54,
+			"version": "6",
+			"when": 1788987565176,
+			"tag": "0054_gc_write_barrier",
+			"breakpoints": true
 		}
 	]
 }

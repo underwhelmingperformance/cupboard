@@ -884,6 +884,18 @@ export class StoredReuseViewSelectorInvalidError extends ServerHttpError {
 	}
 }
 
+/**
+ * A collection scan cannot run because a write-barrier trigger is missing.
+ */
+export class GarbageCollectionBarrierMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly missingTriggers: readonly string[]) {
+		super('The garbage-collection write barrier is incomplete');
+		this.name = 'GarbageCollectionBarrierMissingError';
+	}
+}
+
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
