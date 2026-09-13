@@ -27,7 +27,7 @@ import {
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { d1StatementsPerInvocation, type RequestOrigin } from '../http/http.ts';
+import { type RequestOrigin } from '../http/http.ts';
 
 import {
 	type AttestationCasService,
@@ -105,10 +105,14 @@ const statementsPerSinglePathRetirement = 10;
 
 // The maximum number of attestation references that one invocation can retire
 // after paying the fixed cost for the path.
-const maxSinglePathAttestationRetirements = Math.floor(
-	(d1StatementsPerInvocation - statementsPerSinglePathRetirement) /
-		attestationRetirementStatements
-);
+function maxSinglePathAttestationRetirements(
+	statementAllowance: number
+): number {
+	return Math.floor(
+		(statementAllowance - statementsPerSinglePathRetirement) /
+			attestationRetirementStatements
+	);
+}
 
 /**
  * Builds the query for the attestation references filed against the exact
@@ -470,7 +474,9 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const affordable = Math.min(
-			maxSinglePathAttestationRetirements,
+			maxSinglePathAttestationRetirements(
+				this.context.d1StatementsPerInvocation
+			),
 			affordableOperations(attestationRetirementStatements)
 		);
 		const tenant = this.context.requireTenant();
@@ -620,6 +626,7 @@ export class DeletionQueueService {
 		const retiredHashes = await drainStatementBatches(
 			this.context.d1,
 			[...new Set(batch.map((entry) => entry.narHash))],
+			this.context.d1StatementsPerInvocation,
 			(hashes) =>
 				jsonValueLists(hashes).flatMap((list) => {
 					const { update, presenceDelete } = teardownPresenceBatch(

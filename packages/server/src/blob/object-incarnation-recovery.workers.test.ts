@@ -16,11 +16,11 @@ import type { ObjectReaperPhase } from '../do/blob-reaper-service.ts';
 import {
 	blobReaperGraceMs,
 	casObjectKey,
-	d1StatementsPerInvocation,
 	narObjectKey,
 	objectDeletionBatchSize,
 	objectRecoveryBatchSize
 } from '../http/http.ts';
+import { d1StatementAllowance } from '../policy/d1-statements.ts';
 import { runBlobReaper as runBlobReaperPhase } from '../routing/scheduled.ts';
 import {
 	clearBlobStorage,
@@ -44,6 +44,10 @@ import {
 	drainObjectDeletions,
 	recoverAbandonedIncarnations
 } from './object-incarnation-recovery.ts';
+
+// The reaper runs in the control Worker, which reads the same deployment
+// variable as the tenant Durable Object.
+const statementAllowance = d1StatementAllowance(env);
 
 async function casFixture(seed: string): Promise<{
 	readonly bytes: Uint8Array;
@@ -752,6 +756,7 @@ describe('abandoned object version recovery', () => {
 					'nar',
 					now,
 					2,
+					statementAllowance,
 					rootLogger()
 				),
 				await recoverAbandonedIncarnations(
@@ -760,6 +765,7 @@ describe('abandoned object version recovery', () => {
 					'nar',
 					now,
 					2,
+					statementAllowance,
 					rootLogger()
 				)
 			];
@@ -811,122 +817,151 @@ describe('abandoned object version recovery', () => {
 		});
 	});
 
-	it('continues a recovery backlog in query-budgeted pages', async () => {
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const rowCount = objectRecoveryBatchSize + 1;
-		const rows = Array.from({ length: rowCount }, (_, index) => ({
-			kind: 'nar' as const,
-			objectId: syntheticNarHash(index + 10_000),
-			incarnation: firstVersionedObjectIncarnation,
-			state: 'pending' as const,
-			updatedAt: isoTimestamp(testBase)
-		}));
+	it.each([50, 1000])(
+		'continues a recovery backlog within a %i-statement allowance',
+		async (allowance) => {
+			const reaperEnv = {
+				...env,
+				CUPBOARD_D1_STATEMENTS_PER_INVOCATION: String(allowance)
+			};
+			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+			const rowCount = objectRecoveryBatchSize(allowance) + 1;
+			const rows = Array.from({ length: rowCount }, (_, index) => ({
+				kind: 'nar' as const,
+				objectId: syntheticNarHash(index + 10_000),
+				incarnation: firstVersionedObjectIncarnation,
+				state: 'pending' as const,
+				updatedAt: isoTimestamp(testBase)
+			}));
 
-		await env.CUPBOARD_DB.batch(
-			rows.map((row) =>
-				env.CUPBOARD_DB.prepare(
-					`INSERT INTO object_incarnation
+			await env.CUPBOARD_DB.batch(
+				rows.map((row) =>
+					env.CUPBOARD_DB.prepare(
+						`INSERT INTO object_incarnation
 					 (kind, object_id, incarnation, state, updated_at)
 					 VALUES (?, ?, ?, ?, ?)`
-				).bind(
-					row.kind,
-					row.objectId,
-					row.incarnation,
-					row.state,
-					row.updatedAt
+					).bind(
+						row.kind,
+						row.objectId,
+						row.incarnation,
+						row.state,
+						row.updatedAt
+					)
 				)
-			)
-		);
-		vi.setSystemTime(new Date(testBase.getTime() + blobReaperGraceMs + 1));
-		const continueReaper = vi.fn((_phase: ObjectReaperPhase) =>
-			Promise.resolve()
-		);
+			);
+			vi.setSystemTime(new Date(testBase.getTime() + blobReaperGraceMs + 1));
+			const continueReaper = vi.fn((_phase: ObjectReaperPhase) =>
+				Promise.resolve()
+			);
 
-		await runBlobReaperPhase(rootLogger(), env, 500, continueReaper, 'recover');
-		const afterFirst = await database
-			.select({ state: d1Schema.objectIncarnation.state })
-			.from(d1Schema.objectIncarnation)
-			.all();
-		await runBlobReaperPhase(rootLogger(), env, 500, continueReaper, 'recover');
-		const afterSecond = await database
-			.select({ state: d1Schema.objectIncarnation.state })
-			.from(d1Schema.objectIncarnation)
-			.all();
+			await runBlobReaperPhase(
+				rootLogger(),
+				reaperEnv,
+				1000,
+				continueReaper,
+				'recover'
+			);
+			const afterFirst = await database
+				.select({ state: d1Schema.objectIncarnation.state })
+				.from(d1Schema.objectIncarnation)
+				.all();
+			await runBlobReaperPhase(
+				rootLogger(),
+				reaperEnv,
+				1000,
+				continueReaper,
+				'recover'
+			);
+			const afterSecond = await database
+				.select({ state: d1Schema.objectIncarnation.state })
+				.from(d1Schema.objectIncarnation)
+				.all();
 
-		expect({
-			afterFirst: Object.fromEntries(
-				[...Map.groupBy(afterFirst, ({ state }) => state)].map(
-					([state, matching]) => [state, matching.length]
-				)
-			),
-			afterSecond: Object.fromEntries(
-				[...Map.groupBy(afterSecond, ({ state }) => state)].map(
-					([state, matching]) => [state, matching.length]
-				)
-			),
-			continuations: continueReaper.mock.calls.map(([phase]) => phase)
-		}).toStrictEqual({
-			afterFirst: { absent: objectRecoveryBatchSize, pending: 1 },
-			afterSecond: { absent: rowCount },
-			continuations: ['recover', 'arm']
-		});
-	});
+			expect({
+				afterFirst: Object.fromEntries(
+					[...Map.groupBy(afterFirst, ({ state }) => state)].map(
+						([state, matching]) => [state, matching.length]
+					)
+				),
+				afterSecond: Object.fromEntries(
+					[...Map.groupBy(afterSecond, ({ state }) => state)].map(
+						([state, matching]) => [state, matching.length]
+					)
+				),
+				continuations: continueReaper.mock.calls.map(([phase]) => phase)
+			}).toStrictEqual({
+				afterFirst: {
+					absent: objectRecoveryBatchSize(allowance),
+					pending: 1
+				},
+				afterSecond: { absent: rowCount },
+				continuations: ['recover', 'arm']
+			});
+		}
+	);
 
-	it('continues deletion markers within the Workers Free D1 allowance', async () => {
-		const rowCount = objectDeletionBatchSize + 1;
-		await env.CUPBOARD_DB.batch(
-			Array.from({ length: rowCount }, (_, index) =>
-				env.CUPBOARD_DB.prepare(
-					`INSERT INTO object_deletion
+	it.each([50, 1000])(
+		'continues deletion markers within a %i-statement allowance',
+		async (allowance) => {
+			const reaperEnv = {
+				...env,
+				CUPBOARD_D1_STATEMENTS_PER_INVOCATION: String(allowance)
+			};
+			const rowCount = objectDeletionBatchSize(allowance) + 1;
+			await env.CUPBOARD_DB.batch(
+				Array.from({ length: rowCount }, (_, index) =>
+					env.CUPBOARD_DB.prepare(
+						`INSERT INTO object_deletion
 					 (kind, object_id, incarnation, remove_after)
 					 VALUES ('nar', ?, 1, ?)`
-				).bind(syntheticNarHash(index + 20_000), isoTimestamp(testBase))
-			)
-		);
-		const continuations: ObjectReaperPhase[] = [];
-		const continueReaper = (phase: ObjectReaperPhase): Promise<void> => {
-			continuations.push(phase);
+					).bind(syntheticNarHash(index + 20_000), isoTimestamp(testBase))
+				)
+			);
+			const continuations: ObjectReaperPhase[] = [];
+			const continueReaper = (phase: ObjectReaperPhase): Promise<void> => {
+				continuations.push(phase);
 
-			return Promise.resolve();
-		};
-		const markerCount = async (): Promise<number> => {
-			const row = await env.CUPBOARD_DB.prepare(
-				"SELECT count(*) AS count FROM object_deletion WHERE kind = 'nar'"
-			).first<{ count: number }>();
+				return Promise.resolve();
+			};
+			const markerCount = async (): Promise<number> => {
+				const row = await env.CUPBOARD_DB.prepare(
+					"SELECT count(*) AS count FROM object_deletion WHERE kind = 'nar'"
+				).first<{ count: number }>();
 
-			return row?.count ?? 0;
-		};
+				return row?.count ?? 0;
+			};
 
-		await runBlobReaperPhase(
-			rootLogger(),
-			env,
-			500,
-			continueReaper,
-			'delete-existing'
-		);
-		const afterFirst = await markerCount();
-		await runBlobReaperPhase(
-			rootLogger(),
-			env,
-			500,
-			continueReaper,
-			'delete-existing'
-		);
+			await runBlobReaperPhase(
+				rootLogger(),
+				reaperEnv,
+				1000,
+				continueReaper,
+				'delete-existing'
+			);
+			const afterFirst = await markerCount();
+			await runBlobReaperPhase(
+				rootLogger(),
+				reaperEnv,
+				1000,
+				continueReaper,
+				'delete-existing'
+			);
 
-		expect({
-			statementLimit: d1StatementsPerInvocation,
-			pageSize: objectDeletionBatchSize,
-			afterFirst,
-			afterSecond: await markerCount(),
-			continuations
-		}).toStrictEqual({
-			statementLimit: 50,
-			pageSize: 49,
-			afterFirst: 1,
-			afterSecond: 0,
-			continuations: ['delete-existing', 'recover']
-		});
-	});
+			expect({
+				statementLimit: allowance,
+				pageSize: objectDeletionBatchSize(allowance),
+				afterFirst,
+				afterSecond: await markerCount(),
+				continuations
+			}).toStrictEqual({
+				statementLimit: allowance,
+				pageSize: allowance - 1,
+				afterFirst: 1,
+				afterSecond: 0,
+				continuations: ['delete-existing', 'recover']
+			});
+		}
+	);
 
 	it.each(['nar', 'cas'] as const)(
 		'retries an interrupted retirement of an incomplete %s object',

@@ -65,7 +65,10 @@
 		"CUPBOARD_COMMIT_SOCKET_CEILING": "",
 		// Empty means the built-in budget of commit-entry credit. A test binds a
 		// small value so that it can saturate the budget by arrangement.
-		"CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET": ""
+		"CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET": "",
+		// Per-invocation D1 statement allowance supplied by the deployment.
+		// Empty uses the Workers Free limit.
+		"CUPBOARD_D1_STATEMENTS_PER_INVOCATION": ""
 	},
 	"exports": {
 		"CupboardServer": { "type": "durable-object", "storage": "sqlite" },

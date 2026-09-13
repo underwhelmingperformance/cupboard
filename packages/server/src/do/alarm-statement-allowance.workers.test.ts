@@ -18,11 +18,7 @@ import {
 	signingKeyBackfills,
 	signingKeys
 } from '../db/schema.ts';
-import {
-	d1StatementsPerInvocation,
-	narInfoObjectKey,
-	requestOriginSchema
-} from '../http/http.ts';
+import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -127,6 +123,7 @@ async function driveAlarms(
 	readonly teardownPending: unknown;
 	readonly collectionPending: unknown;
 	readonly queuedDeletions: number;
+	readonly statementAllowance: number;
 }> {
 	await publishCommittedPaths(server);
 
@@ -179,7 +176,8 @@ async function driveAlarms(
 			alarms,
 			teardownPending: await state.storage.get(teardownKey),
 			collectionPending: await state.storage.get(gcContinuationKey),
-			queuedDeletions: queueDepth()
+			queuedDeletions: queueDepth(),
+			statementAllowance: instance.context.d1StatementsPerInvocation
 		};
 	});
 }
@@ -187,7 +185,7 @@ async function driveAlarms(
 describe('alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps teardown and garbage-collection alarms within the 50-statement D1 limit', async () => {
+	it('keeps teardown and garbage-collection alarms within their D1 statement allowance', async () => {
 		const driven = await driveAlarms('alarm-allowance-cap', 12);
 
 		// A teardown drain and a collection pass each size their page for a whole
@@ -203,9 +201,9 @@ describe('alarm D1 statement allowance', () => {
 			queuedDeletionsAtFirstAlarm: driven.alarms[0]?.queuedDeletions,
 			firstAlarmStatements: driven.alarms[0]?.statements,
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -345,6 +343,8 @@ async function driveReconcileAlarms(
 	readonly alarms: readonly ReconcileAlarmObservation[];
 	readonly queuedTargets: number;
 	readonly restoredObjects: number;
+	readonly statementAllowance: number;
+	readonly pageSize: number;
 }> {
 	const paths = await commitReconcilePaths(server);
 
@@ -388,7 +388,14 @@ async function driveReconcileAlarms(
 				value: real
 			});
 
-			return { alarms, queuedTargets: await queueDepth() };
+			const statementAllowance = instance.context.d1StatementsPerInvocation;
+
+			return {
+				alarms,
+				queuedTargets: await queueDepth(),
+				statementAllowance,
+				pageSize: maxPathsReconciledPerRun(statementAllowance)
+			};
 		}
 	);
 
@@ -468,6 +475,8 @@ async function driveBackstopAlarms(
 ): Promise<{
 	readonly alarms: readonly BackstopAlarmObservation[];
 	readonly pendingRows: number;
+	readonly statementAllowance: number;
+	readonly settleLimit: number;
 }> {
 	await queueBackstopReuseRows(server);
 	const counting = countingD1(env.CUPBOARD_DB);
@@ -514,14 +523,21 @@ async function driveBackstopAlarms(
 			value: real
 		});
 
-		return { alarms, pendingRows: pendingDepth() };
+		const statementAllowance = instance.context.d1StatementsPerInvocation;
+
+		return {
+			alarms,
+			pendingRows: pendingDepth(),
+			statementAllowance,
+			settleLimit: verifyBackstopReuseSettleLimit(statementAllowance)
+		};
 	});
 }
 
 describe('reconcile alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every reconcile alarm within the 50-statement D1 limit', async () => {
+	it('keeps every reconcile alarm within its D1 statement allowance', async () => {
 		const driven = await driveReconcileAlarms('alarm-allowance-reconcile', 12);
 
 		// The first alarm spends 49 of the 50 statements: one to invalidate
@@ -533,9 +549,9 @@ describe('reconcile alarm D1 statement allowance', () => {
 			queuedAtFirstAlarm: driven.alarms[0]?.queuedTargets,
 			firstAlarmStatements: driven.alarms[0]?.statements,
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -564,7 +580,7 @@ describe('reconcile alarm D1 statement allowance', () => {
 		// probes another full page, which the two re-queued targets rejoin at the
 		// front of the queue order, and has enough allowance for both restores.
 		expect({
-			pageSize: maxPathsReconciledPerRun,
+			pageSize: driven.pageSize,
 			queueDepths: driven.alarms.map((alarm) => alarm.queuedTargets),
 			queuedTargets: driven.queuedTargets
 		}).toStrictEqual({
@@ -748,7 +764,7 @@ describe('reconcile queue retention', () => {
 describe('verify backstop alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every backstop alarm within the 50-statement D1 limit', async () => {
+	it('keeps every backstop alarm within its D1 statement allowance', async () => {
 		const driven = await driveBackstopAlarms('alarm-allowance-backstop', 12);
 
 		// Each alarm settles two rows: two statements for maintenance eligibility,
@@ -757,12 +773,12 @@ describe('verify backstop alarm D1 statement allowance', () => {
 		// because every row settles.
 		expect({
 			pendingAtFirstAlarm: driven.alarms[0]?.pendingRows,
-			settleLimit: verifyBackstopReuseSettleLimit,
+			settleLimit: driven.settleLimit,
 			alarmStatements: driven.alarms.map((alarm) => alarm.statements),
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),
@@ -833,6 +849,8 @@ async function driveBackfillAlarms(
 	readonly alarms: readonly BackfillAlarmObservation[];
 	readonly resigned: number;
 	readonly pendingBackfills: number;
+	readonly statementAllowance: number;
+	readonly entriesPerPass: number;
 }> {
 	await queueSigningKeyBackfill(server);
 
@@ -912,10 +930,14 @@ async function driveBackfillAlarms(
 			value: real
 		});
 
+		const statementAllowance = instance.context.d1StatementsPerInvocation;
+
 		return {
 			alarms,
 			resigned: resignedCount(),
-			pendingBackfills: pendingBackfills()
+			pendingBackfills: pendingBackfills(),
+			statementAllowance,
+			entriesPerPass: backfillEntriesPerPass(statementAllowance)
 		};
 	});
 }
@@ -923,7 +945,7 @@ async function driveBackfillAlarms(
 describe('signing key backfill alarm D1 statement allowance', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps every backfill alarm within the 50-statement D1 limit', async () => {
+	it('keeps every backfill alarm within its D1 statement allowance', async () => {
 		const driven = await driveBackfillAlarms('alarm-allowance-backfill', 12);
 
 		// The first alarm stages the whole batch, which writes only to the Durable
@@ -931,12 +953,12 @@ describe('signing key backfill alarm D1 statement allowance', () => {
 		// statements each: one to render the narinfo and one to confirm the
 		// written object.
 		expect({
-			entriesPerPass: backfillEntriesPerPass,
+			entriesPerPass: driven.entriesPerPass,
 			alarmStatements: driven.alarms.map((alarm) => alarm.statements),
 			overAllowanceAlarms: driven.alarms.filter(
-				(alarm) => alarm.statements > d1StatementsPerInvocation
+				(alarm) => alarm.statements > driven.statementAllowance
 			),
-			statementAllowance: d1StatementsPerInvocation,
+			statementAllowance: driven.statementAllowance,
 			passes: [...new Set(driven.alarms.map((alarm) => alarm.pass))].toSorted(
 				byCodeUnit
 			),

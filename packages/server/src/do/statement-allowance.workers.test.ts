@@ -2,6 +2,7 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString
 } from '@cupboard/nix-store/scalars';
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq, inArray } from 'drizzle-orm';
@@ -16,7 +17,6 @@ import {
 	StatementAllowanceExceededError,
 	StatementParameterLimitError
 } from '../errors.ts';
-import { d1StatementsPerInvocation } from '../http/http.ts';
 import {
 	currentServer,
 	initialise,
@@ -36,6 +36,7 @@ import {
 import { CupboardServer } from './server.ts';
 import {
 	enterStatementAllowanceOnDispatch,
+	spendStatements,
 	statementsRemaining,
 	withStatementAllowance
 } from './statement-scope.ts';
@@ -79,13 +80,16 @@ function blobStateValues(narHash: NixSha256HashString): BlobStateValues {
  */
 async function withTenantD1<T>(
 	server: string,
-	body: (d1: DrizzleD1Database<typeof d1Schema>) => Promise<T>
+	body: (
+		d1: DrizzleD1Database<typeof d1Schema>,
+		statementAllowance: number
+	) => Promise<T>
 ): Promise<T> {
 	await useTestServer(server);
 	await initialise();
 
 	return runInDurableObject(currentServer(), (instance) =>
-		body(instance.context.d1)
+		body(instance.context.d1, instance.context.d1StatementsPerInvocation)
 	);
 }
 
@@ -110,10 +114,12 @@ async function driveDrain(
 	readonly processed: readonly NixSha256HashString[];
 	readonly written: readonly NixSha256HashString[];
 }> {
-	return withTenantD1(server, async (d1) => {
+	return withTenantD1(server, async (d1, statementAllowance) => {
 		const processed = await withStatementAllowance(
 			async () =>
-				drainStatementBatches(d1, hashes, (chunk) => buildBatch(d1, chunk)),
+				drainStatementBatches(d1, hashes, statementAllowance, (chunk) =>
+					buildBatch(d1, chunk)
+				),
 			allowance
 		);
 		const rows = await d1
@@ -326,12 +332,18 @@ describe('D1 statement allowance', () => {
 		const refused = await withTenantD1('drain-invocation-limit', async (d1) =>
 			withStatementAllowance(async () => {
 				try {
-					await drainStatementBatches(d1, [narHash], (chunk) =>
-						chunk.flatMap((hash) =>
-							Array.from({ length: d1StatementsPerInvocation + 1 }, () =>
-								d1.insert(d1Schema.blobState).values(blobStateValues(hash))
+					await drainStatementBatches(
+						d1,
+						[narHash],
+						freeTierD1StatementsPerInvocation,
+						(chunk) =>
+							chunk.flatMap((hash) =>
+								Array.from(
+									{ length: freeTierD1StatementsPerInvocation + 1 },
+									() =>
+										d1.insert(d1Schema.blobState).values(blobStateValues(hash))
+								)
 							)
-						)
 					);
 
 					return;
@@ -346,8 +358,8 @@ describe('D1 statement allowance', () => {
 		);
 
 		expect(refused).toStrictEqual({
-			statements: d1StatementsPerInvocation + 1,
-			limit: d1StatementsPerInvocation
+			statements: freeTierD1StatementsPerInvocation + 1,
+			limit: freeTierD1StatementsPerInvocation
 		});
 	});
 
@@ -356,7 +368,12 @@ describe('D1 statement allowance', () => {
 		const refused = await withTenantD1('drain-empty-batch', async (d1) =>
 			withStatementAllowance(async () => {
 				try {
-					await drainStatementBatches(d1, [narHash], () => []);
+					await drainStatementBatches(
+						d1,
+						[narHash],
+						freeTierD1StatementsPerInvocation,
+						() => []
+					);
 
 					return;
 				} catch (error) {
@@ -417,7 +434,7 @@ async function driveExhaustingMaintenanceBody(server: string): Promise<{
 						// full loop without a refusal.
 						for (
 							let attempt = 0;
-							attempt < d1StatementsPerInvocation;
+							attempt < freeTierD1StatementsPerInvocation;
 							attempt += 1
 						) {
 							try {
@@ -464,7 +481,7 @@ describe('maintenance eligibility reservation', () => {
 		// fails without running a statement here, so its fallback invalidation
 		// spends one of the two and one is left over.
 		expect(driven).toStrictEqual({
-			bodyStatements: d1StatementsPerInvocation - 3,
+			bodyStatements: freeTierD1StatementsPerInvocation - 3,
 			refusedAvailable: 0,
 			remainingAfterEligibility: 1
 		});
@@ -507,7 +524,10 @@ function wrappedMethodSource(): string {
 			// The body does not matter: only the wrapper's own source is compared.
 		}
 	};
-	enterStatementAllowanceOnDispatch(sample);
+	enterStatementAllowanceOnDispatch(
+		sample,
+		() => freeTierD1StatementsPerInvocation
+	);
 
 	return methodSource(sample, 'method');
 }
@@ -527,6 +547,34 @@ describe('dispatch coverage', () => {
 			unmetered,
 			counted: methods.length > 20
 		}).toStrictEqual({ unmetered: [], counted: true });
+	});
+
+	it('uses the receiver allowance and preserves it across nested dispatches', () => {
+		class SampleReceiver {
+			constructor(readonly allowance: number) {}
+
+			remaining(): number {
+				return statementsRemaining();
+			}
+
+			spendAndRead(): number {
+				spendStatements(3, 'sample dispatch');
+				return this.remaining();
+			}
+		}
+
+		enterStatementAllowanceOnDispatch(
+			SampleReceiver.prototype,
+			(receiver) => receiver.allowance
+		);
+		const free = new SampleReceiver(50);
+		const paid = new SampleReceiver(1000);
+
+		expect({
+			free: free.spendAndRead(),
+			paid: paid.spendAndRead(),
+			fresh: free.remaining()
+		}).toStrictEqual({ free: 47, paid: 997, fresh: 50 });
 	});
 
 	it('runs a dispatched method with the allowance in force', async () => {

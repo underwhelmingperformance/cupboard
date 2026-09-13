@@ -10,6 +10,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { d1StatementAllowance } from '../policy/d1-statements.ts';
 import {
 	blobStateNarHashes,
 	cacheWriteGrants,
@@ -64,7 +65,8 @@ function reaperWith(demoter: NarInfoDemoter): BlobReaperService {
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		env.BLOBS,
 		demoter,
-		rejectingCasDemoter
+		rejectingCasDemoter,
+		d1StatementAllowance(env)
 	);
 }
 

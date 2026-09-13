@@ -89,19 +89,23 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export const blobReaperBatchSize = 500;
 
-// Fifty D1 statements in one invocation, counting each statement of a batch.
-// The D1 binding holds every maintenance invocation to this allowance and
-// refuses the statement that would exceed it.
-//
-// Fifty is the Workers Free figure. A paid plan permits more, and raising this
-// needs that plan's figure; a lower allowance costs extra invocations and
-// never a refused statement.
-export const d1StatementsPerInvocation = 50;
+/**
+ * How many object deletions one invocation flushes. Each successful R2
+ * deletion removes one D1 marker. Reserve one statement to read the due
+ * markers before processing them.
+ */
+export function objectDeletionBatchSize(statementAllowance: number): number {
+	return statementAllowance - 1;
+}
 
-export const objectDeletionBatchSize = d1StatementsPerInvocation - 1;
-export const objectRecoveryBatchSize = Math.floor(
-	(d1StatementsPerInvocation - 1) / 3
-);
+/**
+ * How many abandoned promotion reservations one invocation recovers. The pass
+ * reads the stale reservations with one statement and spends three more on each
+ * reservation it repairs.
+ */
+export function objectRecoveryBatchSize(statementAllowance: number): number {
+	return Math.floor((statementAllowance - 1) / 3);
+}
 
 // Verification SQL reconstructs NAR object keys from `nar_hash`. Keep these
 // fragments in sync with that query.

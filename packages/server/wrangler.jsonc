@@ -99,7 +99,10 @@
 		"CUPBOARD_SIGNUP_ISSUER": "",
 		"CUPBOARD_SIGNUP_AUDIENCE": "",
 		"CUPBOARD_SIGNUP_SUBJECT": "",
-		"CUPBOARD_LOCAL_DEV": ""
+		"CUPBOARD_LOCAL_DEV": "",
+		// Per-invocation D1 statement allowance supplied by the deployment.
+		// Empty uses the Workers Free limit.
+		"CUPBOARD_D1_STATEMENTS_PER_INVOCATION": ""
 	},
 	"limits": {
 		"cpu_ms": 300000,
