@@ -13,6 +13,7 @@ import {
 	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 import {
 	guardScopedRead,
 	narAuthorityForScope,
@@ -22,7 +23,7 @@ import {
 
 import {
 	answerAvailabilityInChunks,
-	cacheAvailabilityChunkSize
+	cacheAvailabilityChunkSizeFor
 } from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
@@ -171,7 +172,7 @@ function buildReadApp(): Hono<WorkerHonoEnv> {
 		return answerAvailabilityInChunks(
 			context,
 			request.storePathHashes,
-			cacheAvailabilityChunkSize
+			cacheAvailabilityChunkSizeFor(subrequestsPerInvocation(context.env))
 		);
 	});
 

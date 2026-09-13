@@ -55,7 +55,7 @@ import {
 import { armAlarmNoLaterThan, noProgressRetryMs } from './alarm.ts';
 import { type ServerContext } from './context.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
-import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
+import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	bootstrapKeyId,
@@ -66,12 +66,12 @@ import {
 	signingKeyName,
 	storedSignaturesSchema
 } from './signing-keys.ts';
-import { affordableOperations } from './statement-scope.ts';
+import { affordableSubrequestOperations } from './subrequest-slice.ts';
 
 const sequenceId = 'singleton';
 
 // Staging re-signs rows and writes them to the Durable Object's local SQLite
-// database. Its size is independent of the D1 statement calculations below.
+// database. Its size is independent of the subrequest calculation below.
 const backfillBatchSize = 32;
 
 // Publishing one continuation entry reads the shared blob row from which its
@@ -79,7 +79,7 @@ const backfillBatchSize = 32;
 // while that read was in flight, reads the shared blob row again to confirm the
 // written object, probes the path's committed reference edge, and renders the
 // narinfo once more.
-const statementsPerBackfillEntry = 5;
+const subrequestsPerBackfillEntry = 5;
 
 /**
  * How many entries of a continuation one backfill pass publishes.
@@ -89,13 +89,14 @@ const statementsPerBackfillEntry = 5;
  * this many entries settles them, keeps the rest in the continuation, and wakes
  * the alarm for another pass.
  *
- * This value is a page limit. The D1 binding enforces the invocation allowance
- * if an entry requires more statements than the estimate, and the pass then
- * publishes fewer entries.
+ * This value is a page limit. Each entry uses the five D1 and R2 calls in the calculation above.
  */
-export const backfillEntriesPerPass = Math.floor(
-	maintenancePassStatements / statementsPerBackfillEntry
-);
+export function backfillEntriesPerPass(subrequestAllowance: number): number {
+	return Math.floor(
+		maintenancePassSubrequests(subrequestAllowance) /
+			subrequestsPerBackfillEntry
+	);
+}
 
 const purgeEntrySchema = z.strictObject({
 	cacheId: cacheIdSchema,
@@ -715,7 +716,7 @@ export class SigningKeysService {
 
 	/**
 	 * Publishes as many entries of the oldest backfill continuation as one
-	 * invocation's D1 allowance covers, purges their cache tags, and records them.
+	 * invocation's subrequest allowance covers, purges their cache tags, and records them.
 	 *
 	 * Reports `partial` when entries remain, so the caller wakes the alarm for
 	 * another pass rather than staging more work on top of them.
@@ -745,8 +746,8 @@ export class SigningKeysService {
 		// page must be one the invocation's allowance covers in full. Otherwise
 		// the entry the binding refused would fail the same page on every pass.
 		const affordable = Math.min(
-			backfillEntriesPerPass,
-			affordableOperations(statementsPerBackfillEntry)
+			backfillEntriesPerPass(this.context.subrequestsPerInvocation),
+			affordableSubrequestOperations(subrequestsPerBackfillEntry)
 		);
 		const entries = queued.slice(0, affordable);
 		const remaining = queued.slice(affordable);

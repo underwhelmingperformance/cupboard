@@ -73,16 +73,16 @@ import { type JsonValueList, jsonValueLists } from './json-list.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	type ReconcileTarget,
-	statementsPerReconcileEdgeQuery,
-	statementsPerReconcileProbe,
-	statementsPerReconcileRemoval,
-	statementsPerReconcileRestore
+	subrequestsPerReconcileEdgeQuery,
+	subrequestsPerReconcileProbe,
+	subrequestsPerReconcileRemoval,
+	subrequestsPerReconcileRestore
 } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import {
-	affordableOperations,
-	statementsRemaining
-} from './statement-scope.ts';
+	affordableSubrequestOperations,
+	subrequestsAvailable
+} from './subrequest-slice.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 import {
@@ -93,69 +93,66 @@ import {
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type PendingUploadRow = typeof schema.pendingUploads.$inferSelect;
 
-// These constants determine the page sizes for the settle and drain passes. The
-// D1 binding enforces the statement limit even if one of the constants becomes
-// inaccurate. An inaccurate constant can therefore reduce the work completed
-// by a pass, but cannot cause the pass to exceed the limit.
-//
 // Before settling any rows, a pass reads the shared blob rows and the tenant's
 // presence rows for the whole page. The page contains at most the number of
 // distinct NAR hashes allowed in one `IN (...)` list, so each read requires one
-// D1 statement.
-export const pendingSettlePrefetchStatements = 2;
+// D1 call.
+export const pendingSettlePrefetchSubrequests = 2;
 
 // Classifying one committed-recovery candidate reads the path's committed
 // reference edge. A reuse row skips this read.
-const settleClassifyStatements = 1;
+const settleClassifySubrequests = 1;
 
 // Preparing one row reads the NAR's current incarnation, the row's committed
 // reference edge, and the shared blob row from which the narinfo is rendered.
-const settlePrepareStatements = 3;
+const settlePrepareSubrequests = 3;
 
-// Charging one commit probes the tenant's quota, then runs a batch containing
-// the tenant status read and the five statements that credit usage and record
-// the reference edge and the presence row.
-const settleChargeStatements = 7;
+// Charging one commit probes the tenant's quota, then runs a D1 batch
+// containing the status, usage, reference-edge and presence changes.
+const settleChargeSubrequests = 2;
 
-// After charging a row, publication reads the shared blob row for the narinfo.
-const settlePublishStatements = 1;
+// Publication reads the shared blob row, writes the narinfo object, and
+// removes the private staging object.
+const settlePublishSubrequests = 3;
 
-// Re-reading one row's shared blob row and presence row is a two-statement
-// batch.
-const settleRowProbeStatements = 2;
+// Re-reading one row's shared blob row and presence row uses one D1 batch
+// and one R2 head.
+const settleRowProbeSubrequests = 2;
 
-// Reclaiming a reserved narinfo row reads the row's reference edge.
-const settleReclaimStatements = 1;
+// Reclaiming a reserved narinfo row reads its reference edge and can remove
+// its private staging object.
+const settleReclaimSubrequests = 2;
 
 // If charging reports that the tenant is over quota, the service reads the
 // blob and presence rows again, charges a second time, and reclaims the
 // reserved narinfo row. The row does not reach the publication read. The result
 // is unknown until the first charge completes, so every row reserves enough
-// statements for the more expensive result.
-const settleOverQuotaStatements =
-	settleRowProbeStatements + settleChargeStatements + settleReclaimStatements;
+// calls for the more expensive result.
+const settleOverQuotaSubrequests =
+	settleRowProbeSubrequests +
+	settleChargeSubrequests +
+	settleReclaimSubrequests;
 
 /**
- * The maximum number of D1 statements needed to settle one pending row without
+ * The maximum number of D1 and R2 calls needed to process one pending row without
  * decoding its NAR.
  *
  * Every row uses the same maximum because the result is unknown before the
  * first charge completes.
  */
-export const statementsPerPendingSettleRow =
-	settleClassifyStatements +
-	settlePrepareStatements +
-	settleChargeStatements +
-	Math.max(settlePublishStatements, settleOverQuotaStatements);
+export const subrequestsPerPendingSettleRow =
+	settleClassifySubrequests +
+	settlePrepareSubrequests +
+	settleChargeSubrequests +
+	Math.max(settlePublishSubrequests, settleOverQuotaSubrequests);
 
-// Promoting a freshly verified upload writes the shared blob row for the new
-// canonical object and reads the row back. Complete invocations show that this
-// requires six more statements than settling a row for an existing canonical
-// object.
-const settlePromoteStatements = 6;
+// Promotion reserves and activates an incarnation through D1, copies the
+// staging bytes through R2, writes the blob row, and confirms the incarnation.
+// A failure can also queue an object deletion.
+const settlePromoteSubrequests = 9;
 
 /**
- * The maximum number of D1 statements needed to apply one recorded verdict.
+ * The maximum number of D1 and R2 calls needed to apply one recorded verdict.
  *
  * Applying a verdict runs the same reservation, charge and publication as
  * settling a row without a decode, and promotes the upload's bytes as well. It
@@ -163,14 +160,13 @@ const settlePromoteStatements = 6;
  * classified the row. A page of verdicts also requires the same prefetch as a
  * page of pending rows.
  *
- * Complete invocations show that a successful settlement requires 17 of these
- * statements. The remaining statements cover the case in which charging
- * reports that the tenant is over quota.
+ * The maximum includes the case in which charging reports that the tenant
+ * is over quota.
  */
-export const statementsPerRecordedVerdict =
-	statementsPerPendingSettleRow -
-	settleClassifyStatements +
-	settlePromoteStatements;
+export const subrequestsPerRecordedVerdict =
+	subrequestsPerPendingSettleRow -
+	settleClassifySubrequests +
+	settlePromoteSubrequests;
 
 const pendingDecodeFreeCursorKey =
 	'maintenance:verification-decode-free-cursor';
@@ -238,16 +234,13 @@ function edgeKey(
 	return JSON.stringify([cache, storePathHash, generation, narHash]);
 }
 
-// Returns the number of D1 statements required to repair an observation.
-// Removing a row with a missing NAR requires one statement. Restoring a missing
-// narinfo object requires two. A healthy row requires no repair and returns
-// zero.
-function repairStatements(observation: RowObservation): number {
+// Returns the maximum D1 and R2 calls needed to repair an observation.
+function repairSubrequests(observation: RowObservation): number {
 	if (!observation.isNarPresent) {
-		return statementsPerReconcileRemoval;
+		return subrequestsPerReconcileRemoval;
 	}
 
-	return observation.objectPresent ? 0 : statementsPerReconcileRestore;
+	return observation.objectPresent ? 0 : subrequestsPerReconcileRestore;
 }
 
 function reconcileCandidates(
@@ -1619,7 +1612,7 @@ export class VerificationService {
 	 * unverified row. The read runs outside the gate; if a commit creates the
 	 * edge afterwards, this pass leaves the row for the next scan.
 	 *
-	 * The read stops before a query that would exceed the D1 allowance. `covered`
+	 * The read stops before a query that would exceed the subrequest allowance. `covered`
 	 * contains only the hashes from completed queries. Callers must defer every
 	 * other row because its reference edge is unknown.
 	 */
@@ -1636,7 +1629,7 @@ export class VerificationService {
 		const covered = new Set<StorePathHash>();
 
 		for (const list of jsonValueLists(hashes)) {
-			if (statementsRemaining() < 1) {
+			if (subrequestsAvailable() < 1) {
 				break;
 			}
 
@@ -2206,7 +2199,7 @@ export class VerificationService {
 	 * removes a path after its NAR disappears.
 	 *
 	 * Returns every target that still needs reconciliation. This includes targets
-	 * outside the current D1 allowance and targets for which a probe or repair
+	 * outside the current subrequest allowance and targets for which a probe or repair
 	 * failed. The caller keeps them in the queue for the next pass.
 	 */
 	async reconcileTargets(
@@ -2222,11 +2215,11 @@ export class VerificationService {
 			return [];
 		}
 
-		// Reserve enough D1 statements for the edge query and one removal. The pass
+		// Reserve enough subrequests for the edge query and one removal. The pass
 		// can therefore repair at least one probed row when every row needs removal.
-		const probeLimit = affordableOperations(
-			statementsPerReconcileProbe,
-			statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval
+		const probeLimit = affordableSubrequestOperations(
+			subrequestsPerReconcileProbe,
+			subrequestsPerReconcileEdgeQuery + subrequestsPerReconcileRemoval
 		);
 		const probed = rows.slice(0, probeLimit);
 		const deferred = rows
@@ -2253,11 +2246,11 @@ export class VerificationService {
 
 				// Keep a row queued if its repair would exceed the remaining allowance
 				// or if the edge query did not cover its store path hash.
-				const repair = repairStatements(observation);
+				const repair = repairSubrequests(observation);
 
 				if (
 					repair > 0 &&
-					(statementsRemaining() < repair ||
+					(subrequestsAvailable() < repair ||
 						!committedEdges.covered.has(row.storePathHash))
 				) {
 					deferred.push(this.reconcileTarget(row));
@@ -2284,8 +2277,8 @@ export class VerificationService {
 	 * Scans one page of committed narinfos from the durable cursor, restoring a
 	 * missing narinfo object and removing a path after its NAR disappears.
 	 *
-	 * The preceding settle pass and this scan share one D1 statement allowance.
-	 * The remaining allowance determines the page size. The scan advances its
+	 * The preceding settle pass and this scan share one subrequest slice.
+	 * The available calls determine the page size. The scan advances its
 	 * cursor through every row it examines, and the next pass starts at the first
 	 * unexamined row. After a failed probe, the scan revisits the row when the
 	 * cursor wraps.
@@ -2317,9 +2310,9 @@ export class VerificationService {
 		// This leaves enough statements to repair at least one row.
 		const pageLimit = Math.min(
 			limit,
-			affordableOperations(
-				statementsPerReconcileProbe,
-				statementsPerReconcileEdgeQuery + statementsPerReconcileRemoval
+			affordableSubrequestOperations(
+				subrequestsPerReconcileProbe,
+				subrequestsPerReconcileEdgeQuery + subrequestsPerReconcileRemoval
 			)
 		);
 
@@ -2424,11 +2417,11 @@ export class VerificationService {
 				// if the repair would exceed the remaining allowance or if the edge
 				// query did not cover the row. Leave the cursor before that row so the
 				// next scan examines it again.
-				const repair = repairStatements(observation);
+				const repair = repairSubrequests(observation);
 
 				if (
 					repair > 0 &&
-					(statementsRemaining() < repair ||
+					(subrequestsAvailable() < repair ||
 						!committedEdges.covered.has(row.storePathHash))
 				) {
 					break;
@@ -2557,7 +2550,7 @@ export class VerificationService {
 	 * can finish crash recovery from its durable reference, and a reuse row can
 	 * adopt its canonical object. Other fresh rows remain for the queue consumer.
 	 *
-	 * The remaining D1 allowance determines the page size. Claiming removes a row
+	 * The remaining subrequest allowance determines the page size. Claiming removes a row
 	 * from the pending set, so unclaimed rows remain available to a later pass.
 	 * The durable claim cursor records where that pass should resume.
 	 */
@@ -2569,9 +2562,9 @@ export class VerificationService {
 		signal?.throwIfAborted();
 		const affordable = Math.min(
 			limit,
-			affordableOperations(
-				statementsPerPendingSettleRow,
-				pendingSettlePrefetchStatements
+			affordableSubrequestOperations(
+				subrequestsPerPendingSettleRow,
+				pendingSettlePrefetchSubrequests
 			)
 		);
 
@@ -2692,13 +2685,13 @@ export class VerificationService {
 	/**
 	 * Accepts one queue batch. It first stores every verdict in the Durable
 	 * Object's SQLite database. The synchronous local writes preserve the
-	 * consumer's decode results if the remaining D1 allowance covers only part of
+	 * consumer's decode results if the remaining subrequest allowance covers only part of
 	 * the batch.
 	 *
 	 * A stored verdict prevents another consumer from claiming the row and
 	 * decoding the same NAR again. A later pass applies the verdict.
 	 *
-	 * The method applies as many verdicts as the D1 allowance permits and returns
+	 * The method applies as many verdicts as the subrequest allowance permits and returns
 	 * the number of settled rows. The consumer uses this count to decide whether
 	 * to continue a truncated batch.
 	 */
@@ -2735,14 +2728,14 @@ export class VerificationService {
 	}
 
 	/**
-	 * Applies recorded verdicts up to the invocation's D1 allowance. It prepares
+	 * Applies recorded verdicts within the invocation's subrequest slice. It prepares
 	 * the verdicts concurrently and flushes their materialisations together.
 	 *
 	 * A completed attempt clears the verdict. If the attempt does not settle the
 	 * row, clearing the verdict makes the row available for a new claim. An error
 	 * leaves the verdict in place, so the next pass retries application without
 	 * repeating the decode. The D1 binding can return such an error when the
-	 * statement allowance is exhausted.
+	 * subrequest slice is exhausted.
 	 */
 	async applyRecordedVerdicts(
 		logger: Logger,
@@ -2751,9 +2744,9 @@ export class VerificationService {
 		signal?.throwIfAborted();
 		const affordable = Math.min(
 			maxVerificationRpcRows,
-			affordableOperations(
-				statementsPerRecordedVerdict,
-				pendingSettlePrefetchStatements
+			affordableSubrequestOperations(
+				subrequestsPerRecordedVerdict,
+				pendingSettlePrefetchSubrequests
 			)
 		);
 

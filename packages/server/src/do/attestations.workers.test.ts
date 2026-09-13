@@ -12,24 +12,32 @@ import {
 	attestationNegotiateResponseSchema,
 	attestationUploadDecisionSchema
 } from '@cupboard/protocol/attestations';
-import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
+import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from '@cupboard/protocol/platform';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	uploadActionDecisionSchema,
+	uploadIdSchema,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { AttestationPathNotFoundError } from '../errors.ts';
 import {
 	attestationListObjectKey,
+	attestationStagingObjectKey,
 	casObjectKey,
 	type R2ObjectKey
 } from '../http/http.ts';
@@ -68,9 +76,14 @@ import {
 
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
-import { maxBoundParameters } from './bulk.ts';
+import { chunk, maxBoundParameters } from './bulk.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { CupboardServer } from './server.ts';
+import {
+	subrequestsAvailable,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
 
@@ -666,18 +679,151 @@ describe('attestation attach and reads', () => {
 				(casHeads / bundles.length) * attestationNegotiateMaxBundles;
 
 			expect({
-				maxBundles: attestationNegotiateMaxBundles,
 				headsPerBundle: casHeads / bundles.length,
-				pageFitsTheCeiling: pageHeads <= subrequestsPerInvocation
-			}).toStrictEqual({
-				maxBundles: 850,
-				headsPerBundle: 1,
-				pageFitsTheCeiling: true
-			});
+				pageFitsTheCeiling:
+					pageHeads <= workersInvocationAllowances.free.subrequests
+			}).toStrictEqual({ headsPerBundle: 1, pageFitsTheCeiling: true });
 		} finally {
 			heads.mockRestore();
 		}
 	});
+
+	it('fits a maximum distinct-digest page through cold and warm request dispatch', async () => {
+		const first = await committedPathBundle();
+		const digests = Array.from(
+			{ length: attestationNegotiateMaxBundles },
+			(_, index) =>
+				sha256HexDigestSchema.parse((index + 1).toString(16).padStart(64, '0'))
+		);
+		const database = drizzleD1(env.CUPBOARD_DB, {
+			schema: { casObject: d1Schema.casObject }
+		});
+
+		for (const page of chunk(digests, 25)) {
+			await database
+				.insert(d1Schema.casObject)
+				.values(
+					page.map((digest) => ({
+						digest,
+						size: 1,
+						storedAt: isoTimestamp(new Date())
+					}))
+				)
+				.run();
+		}
+
+		const bundles = digests.map((digest) => ({
+			storePathHash: first.metadata.storePathHash,
+			digest
+		}));
+		const uploadIds = Array.from({ length: digests.length * 2 }, () =>
+			uploadIdSchema.parse(crypto.randomUUID())
+		);
+		let nextUploadId = 0;
+		const randomUUID = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+			const uploadId = uploadIds[nextUploadId];
+			nextUploadId += 1;
+
+			if (uploadId === undefined) {
+				throw new Error('negotiation generated more upload IDs than bundles');
+			}
+
+			return uploadId;
+		});
+		const now = new Date();
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		const expiresAt = isoTimestamp(new Date(now.getTime() + 15 * 60 * 1000));
+
+		let result;
+
+		try {
+			result = await runInDurableObject(
+				fixtureWorkerServer(),
+				async (instance, state) => {
+					const restarted = new CupboardServer(state, {
+						...instance.context.env,
+						BLOBS: env.BLOBS,
+						CUPBOARD_DB: env.CUPBOARD_DB,
+						CUPBOARD_SUBREQUESTS_PER_INVOCATION: String(
+							workersInvocationAllowances.free.subrequests
+						)
+					});
+
+					const negotiate = () =>
+						withSubrequestSlice(
+							async () => {
+								const availableBefore = subrequestsAvailable();
+								const response = await restarted.fetch(
+									new Request('https://cupboard.test/attestations', {
+										body: JSON.stringify({ pushId: testPushId, bundles }),
+										headers: {
+											authorization: `Bearer ${first.token}`,
+											'content-type': 'application/json'
+										},
+										method: 'POST'
+									})
+								);
+
+								return {
+									calls: availableBefore - subrequestsAvailable(),
+									httpStatus: response.status,
+									body: attestationNegotiateResponseSchema.parse(
+										await response.json()
+									)
+								};
+							},
+							{
+								subrequests: workersInvocationAllowances.free.subrequests,
+								reserve: subrequestSafetyReserve
+							}
+						);
+
+					return {
+						cold: await negotiate(),
+						warm: await negotiate()
+					};
+				}
+			);
+		} finally {
+			randomUUID.mockRestore();
+			vi.useRealTimers();
+		}
+
+		const decisions = (offset: number) =>
+			bundles.map((bundle, index) => {
+				const uploadId = uploadIds[offset + index];
+
+				if (uploadId === undefined) {
+					throw new Error('missing expected upload ID');
+				}
+
+				return {
+					action: 'upload' as const,
+					...bundle,
+					uploadId,
+					r2Key: attestationStagingObjectKey(testPushId, uploadId),
+					expiresAt
+				};
+			});
+
+		expect(result).toStrictEqual({
+			cold: {
+				calls: 855,
+				httpStatus: StatusCodes.OK,
+				body: {
+					bundles: decisions(0)
+				}
+			},
+			warm: {
+				calls: 854,
+				httpStatus: StatusCodes.OK,
+				body: {
+					bundles: decisions(bundles.length)
+				}
+			}
+		});
+	}, 120_000);
 
 	it('decides correctly for more bundles than a statement could bind', async () => {
 		// 101 distinct storePathHashes and the cache would be 102 parameters if

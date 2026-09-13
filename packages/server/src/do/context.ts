@@ -57,6 +57,7 @@ import {
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
@@ -167,6 +168,7 @@ export class ServerContext {
 	readonly phases: DeploymentPhaseGate;
 	grantsContracted = false;
 	readonly cacheRepository: CacheRepository;
+	readonly subrequestsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
@@ -187,10 +189,8 @@ export class ServerContext {
 		// Durable Object after about 30 seconds.
 		//
 		// These wrappers reach only the bindings this object holds. Worker code
-		// reaches R2 through `boundedWorkerEnv`, which applies the per-call
-		// deadline and nothing else: no statement allowance, no row meter, and
-		// `env.CUPBOARD_DB` as the runtime supplies it. The limits described in
-		// this class bound Durable Object code only.
+		// reaches D1 and R2 through `boundedWorkerEnv`, which also counts their
+		// terminal calls. The row meter applies only to Durable Object storage.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.discovery = new OidcDiscoveryStore({
 			canUseLoopbackHttp: canUseLoopbackHttp(env)
@@ -201,6 +201,7 @@ export class ServerContext {
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 		this.phases = new DeploymentPhaseGate(this.d1);
+		this.subrequestsPerInvocation = subrequestsPerInvocation(env);
 		this.cacheRepository = new CacheRepository(this.db);
 	}
 

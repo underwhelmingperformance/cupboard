@@ -17,6 +17,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { boundedWorkerEnv } from '../do/bounded-io.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
+import { withSubrequestSlice } from '../do/subrequest-slice.ts';
 import {
 	TenantAdmissionUnavailableError,
 	TenantWritesStoppedError
@@ -30,11 +31,12 @@ import {
 } from '../http/http.ts';
 import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
 import {
 	answerAvailabilityInChunks,
-	reuseViewAvailabilityChunkSize
+	reuseViewAvailabilityChunkSizeFor
 } from './chunked-availability.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
@@ -327,16 +329,24 @@ const app = buildApp();
 
 export default {
 	fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
-		app.fetch(request, boundedWorkerEnv(env), ctx),
+		withSubrequestSlice(() => app.fetch(request, boundedWorkerEnv(env), ctx), {
+			subrequests: subrequestsPerInvocation(env)
+		}),
 
 	async scheduled(_controller, env) {
 		// Enqueue bounded jobs so execution failures retry per message rather than
 		// repeating the whole cron plan.
-		await enqueueMaintenanceJobs(boundedWorkerEnv(env));
+		await withSubrequestSlice(
+			() => enqueueMaintenanceJobs(boundedWorkerEnv(env)),
+			{ subrequests: subrequestsPerInvocation(env) }
+		);
 	},
 
 	async queue(batch, env) {
-		await handleMaintenanceQueue(batch, boundedWorkerEnv(env));
+		await withSubrequestSlice(
+			() => handleMaintenanceQueue(batch, boundedWorkerEnv(env)),
+			{ subrequests: subrequestsPerInvocation(env) }
+		);
 	}
 } satisfies ExportedHandler<Env>;
 
@@ -353,7 +363,7 @@ async function answerReuseViewAvailability(
 	return answerAvailabilityInChunks(
 		context,
 		request.storePathHashes,
-		reuseViewAvailabilityChunkSize
+		reuseViewAvailabilityChunkSizeFor(subrequestsPerInvocation(context.env))
 	);
 }
 

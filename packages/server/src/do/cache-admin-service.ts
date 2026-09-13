@@ -66,32 +66,34 @@ import { type ServerContext } from './context.ts';
 import {
 	type DeletionQueueService,
 	maxFencedRetireRows,
-	minimumStatementsPerTeardownChunk
+	maxNarInfoDeletionsFlushedPerRun,
+	narInfoRetirementSubrequests
 } from './deletion-queue-service.ts';
 import { jsonValueLists } from './json-list.ts';
-import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
+import { maintenancePassSubrequests } from './maintenance-eligibility-service.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
-// Bound each narinfo retirement pass so large caches release the input gate
-// between R2 deletions and D1 edge updates, and so one pass fits the D1
-// statements a single Worker invocation may run.
-
 // Once the chunk empties the queue, the pass sweeps for revoked edges.
-const revokedEdgeSweepStatementsPerPass = 1;
+const revokedEdgeSweepSubrequestsPerPass = 1;
 
 /**
  * The most paths one pass reads from the teardown queue.
  *
- * This caps the rows read, not the statements executed. The drain can retire
- * the entire page when its paths have no attestation references. Otherwise the
- * remaining D1 allowance can stop it earlier. The calculation reserves one
- * statement for the revoked-edge sweep.
+ * This caps the rows read. The drain can retire the entire page when its paths
+ * have no attestation references. Otherwise the remaining subrequests can
+ * stop it earlier. The calculation reserves one call for the revoked-edge
+ * sweep.
  */
-export const maxPathsTornDownPerRun =
-	Math.floor(
-		(maintenancePassStatements - revokedEdgeSweepStatementsPerPass) /
-			minimumStatementsPerTeardownChunk
-	) * maxFencedRetireRows;
+export function maxPathsTornDownPerRun(subrequestAllowance: number): number {
+	return Math.min(
+		maxNarInfoDeletionsFlushedPerRun,
+		Math.floor(
+			(maintenancePassSubrequests(subrequestAllowance) -
+				revokedEdgeSweepSubrequestsPerPass) /
+				(1 + narInfoRetirementSubrequests(maxFencedRetireRows))
+		) * maxFencedRetireRows
+	);
+}
 
 // Each cache being torn down has its own durable marker because several cache
 // deletion queues can be active at once. The complete suffix is the cache name,
@@ -242,9 +244,9 @@ export class CacheAdminService {
 	// The caller holds the input gate. The retirement service applies the
 	// generation fence that protects a recommitted path.
 	//
-	// The drain sizes its page from the current allowance and keeps one D1
-	// statement for the sweep below. The binding enforces the invocation limit if
-	// the page estimate drifts.
+	// The drain sizes its page from the current allowance and keeps one D1 call
+	// for the sweep below. The bounded binding enforces the slice if the page
+	// estimate drifts.
 	//
 	// After the queue becomes empty, sweep for reference edges left by an
 	// interrupted deletion and queue them for the next pass. Check the queue after
@@ -1140,7 +1142,9 @@ export class CacheAdminService {
 	async resumeTeardownPass(
 		cache: ResolvedCache,
 		origin: RequestOrigin | undefined,
-		limit: number = maxPathsTornDownPerRun
+		limit: number = maxPathsTornDownPerRun(
+			this.context.subrequestsPerInvocation
+		)
 	): Promise<void> {
 		await this.context.criticalSection(async () => {
 			await this.drainTeardownChunk(cache, origin, limit);

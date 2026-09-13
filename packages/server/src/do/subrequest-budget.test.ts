@@ -1,4 +1,7 @@
-import { subrequestsPerInvocation } from '@cupboard/protocol/platform';
+import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from '@cupboard/protocol/platform';
 import {
 	rootListPageSize,
 	rootSetMaxTargets
@@ -8,7 +11,9 @@ import { describe, expect, it } from 'vitest';
 import { cacheProbeD1CallsPerChunk } from '../read/read.ts';
 import {
 	cacheAvailabilityChunkSize,
-	reuseViewAvailabilityChunkSize
+	cacheAvailabilityChunkSizeFor,
+	reuseViewAvailabilityChunkSize,
+	reuseViewAvailabilityChunkSizeFor
 } from '../routing/chunked-availability.ts';
 
 import {
@@ -17,10 +22,8 @@ import {
 } from './reuse-view-lookup-service.ts';
 import { subrequestSliceReserve } from './subrequest-slice.ts';
 
-// Each cap below bounds how many items one request accepts, so the binding
-// calls the server makes for those items stay under the subrequest ceiling.
-// `scripts/subrequest-budget.test.ts` checks that both Worker configurations
-// use their plan's internal-service call allowance.
+// Each cap below bounds how many items one request accepts, so that its D1 and
+// R2 calls stay under the Free plan's usable subrequest allowance.
 //
 // The per-item costs are read from the code, so each is a claim a reader must
 // re-check rather than something the compiler knows.
@@ -28,9 +31,10 @@ interface CappedRequest {
 	readonly cap: string;
 	readonly items: number;
 	/**
-	Binding calls one item costs. Fixed request overhead is not counted.
+	D1 and R2 calls for one item.
 	*/
 	readonly requestsPerItem: number;
+	readonly fixedCalls: number;
 	/**
 	Where that count comes from.
 	*/
@@ -42,13 +46,15 @@ const cappedRequests: readonly CappedRequest[] = [
 		cap: 'rootSetMaxTargets',
 		items: rootSetMaxTargets,
 		requestsPerItem: 6,
+		fixedCalls: 4,
 		fanOut:
-			'`servableNarInfoVersions` heads the narinfo and NAR, repairs a missing narinfo object, and reads the associated D1 rows.'
+			'`servableNarInfoVersions` heads the narinfo object and the NAR, repairs a missing narinfo object, and heads the repaired objects again.'
 	},
 	{
 		cap: 'rootListPageSize',
 		items: rootListPageSize,
-		requestsPerItem: 6,
+		requestsPerItem: 4,
+		fixedCalls: 1,
 		fanOut: 'The same probe as `rootSetMaxTargets`, over one page.'
 	}
 ];
@@ -93,15 +99,26 @@ describe('the subrequest ceiling', () => {
 	it('covers the fan-out of every capped request', () => {
 		const overBudget = cappedRequests.filter(
 			(request) =>
-				request.items * request.requestsPerItem > subrequestsPerInvocation
+				request.items * request.requestsPerItem + request.fixedCalls >
+				workersInvocationAllowances.free.subrequests - subrequestSafetyReserve
 		);
 
 		expect(
 			overBudget.map(
 				(request) =>
-					`${request.cap}: ${String(request.items * request.requestsPerItem)} calls`
+					`${request.cap}: ${String(request.items * request.requestsPerItem)} requests`
 			)
 		).toStrictEqual([]);
+	});
+
+	it('sets the root boundary from the complete repair cost', () => {
+		expect({
+			cap: rootSetMaxTargets,
+			calls: rootSetMaxTargets * 6 + 4,
+			nextCalls: (rootSetMaxTargets + 1) * 6 + 4,
+			usable:
+				workersInvocationAllowances.free.subrequests - subrequestSafetyReserve
+		}).toStrictEqual({ cap: 149, calls: 898, nextCalls: 904, usable: 900 });
 	});
 
 	it('leaves the slice its reserve after the worst case of every chunk', () => {
@@ -111,7 +128,7 @@ describe('the subrequest ceiling', () => {
 				request.items * request.requestsPerItem +
 					request.d1Calls +
 					subrequestSliceReserve >
-					subrequestsPerInvocation
+					workersInvocationAllowances.free.subrequests
 		);
 
 		expect(
@@ -120,5 +137,29 @@ describe('the subrequest ceiling', () => {
 					`${request.chunk}: ${String(request.items)} hashes at ${String(request.requestsPerItem)} heads`
 			)
 		).toStrictEqual([]);
+	});
+
+	it('derives different chunks for Free and Paid invocations', () => {
+		expect({
+			free: {
+				cache: cacheAvailabilityChunkSizeFor(
+					workersInvocationAllowances.free.subrequests
+				),
+				reuse: reuseViewAvailabilityChunkSizeFor(
+					workersInvocationAllowances.free.subrequests
+				)
+			},
+			paid: {
+				cache: cacheAvailabilityChunkSizeFor(
+					workersInvocationAllowances.paid.subrequests
+				),
+				reuse: reuseViewAvailabilityChunkSizeFor(
+					workersInvocationAllowances.paid.subrequests
+				)
+			}
+		}).toStrictEqual({
+			free: { cache: 899, reuse: 56 },
+			paid: { cache: 9899, reuse: 618 }
+		});
 	});
 });

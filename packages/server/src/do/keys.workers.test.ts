@@ -29,6 +29,7 @@ import {
 	bootstrap,
 	cacheWriteGrants,
 	currentServer,
+	deployedSubrequestAllowance,
 	fetchNarInfo,
 	fetchPath,
 	isNarInfoSignatureValid,
@@ -673,7 +674,8 @@ describe('signing key rotation', () => {
 	// a pass can afford.
 	it('publishes a continuation longer than one pass can settle', async () => {
 		await bootstrap();
-		const queued = 150;
+		const queued =
+			backfillEntriesPerPass(await deployedSubrequestAllowance()) + 1;
 		const now = isoTimestamp(new Date());
 		const expiresAt = isoTimestamp(new Date(Date.now() + 3_600_000));
 		const remaining = await runInDurableObject(
@@ -717,7 +719,8 @@ describe('signing key rotation', () => {
 		);
 
 		expect({ remaining }).toStrictEqual({
-			remaining: queued - backfillEntriesPerPass
+			remaining:
+				queued - backfillEntriesPerPass(await deployedSubrequestAllowance())
 		});
 	});
 

@@ -63,7 +63,7 @@ export type LocalStepOutcome =
  *
  * The work runs on every call, without reading the recorded step first. A step
  * added here must reach the same state from any starting point, and must bound
- * its D1 statements per call, reporting `incomplete` when work remains, because
+ * its D1 and R2 calls, reporting `incomplete` when work remains, because
  * the control plane wakes the object again until it records the step.
  */
 export async function recordLocalStep(

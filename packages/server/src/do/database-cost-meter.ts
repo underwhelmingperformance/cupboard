@@ -85,8 +85,7 @@ function meteredSql(
 			...bindings: unknown[]
 		): SqlStorageCursor<T> {
 			// Only the parameter rule is shared with the D1 binding. Durable Object
-			// SQLite has no per-invocation statement cap, so this must not spend the
-			// D1 statement allowance: `applyMigrations` alone would exhaust it.
+			// SQLite operations do not consume internal-service subrequests.
 			admitBoundParameters(bindings.length);
 
 			const cursor = sql.exec<T>(query, ...bindings);

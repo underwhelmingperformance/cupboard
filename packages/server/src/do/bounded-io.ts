@@ -1,8 +1,7 @@
-import { UnboundableIoError, UncountableStatementError } from '../errors.ts';
+import { UnboundableIoError } from '../errors.ts';
 
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 import { admitBoundParameters } from './statement-admission.ts';
-import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
 import { spendSubrequests } from './subrequest-slice.ts';
 
 // Declare the call against the dispatch's subrequest slice before making it.
@@ -14,24 +13,9 @@ function bounded<A extends unknown[], R>(
 	capMs?: number
 ): (...arguments_: A) => Promise<R> {
 	return (...arguments_: A) => {
-		spendSubrequests(1);
+		spendSubrequests(1, subrequest);
 
 		return boundedSubrequest(() => method(...arguments_), subrequest, capMs);
-	};
-}
-
-// Decrement the invocation's statement allowance before calling D1. If the call
-// would exceed the allowance, throw before D1 receives the statement.
-function charged<A extends unknown[], R>(
-	method: (...arguments_: A) => Promise<R>,
-	subrequest: string
-): (...arguments_: A) => Promise<R> {
-	const run = bounded(method, subrequest);
-
-	return (...arguments_: A) => {
-		spendStatements(1, subrequest);
-
-		return run(...arguments_);
 	};
 }
 
@@ -58,21 +42,29 @@ function passThrough(target: object, property: PropertyKey): unknown {
 }
 
 /**
- * Wraps the environment a Worker entry point receives so its R2 metadata
- * calls carry the same per-call deadline as a Durable Object's. `get` and
- * `put` stay unbounded, because a NAR body takes as long as it takes. D1 and
- * every other binding are served as they are.
+ * Wraps a Worker's D1 and R2 bindings with the deadlines and subrequest
+ * accounting used by Durable Objects. R2 `get` and `put` can transfer NAR
+ * bytes, so they have no per-call deadline; an enclosing deadline still
+ * applies. Other bindings receive no deadline or accounting wrapper.
  */
-export function boundedWorkerEnv<T extends { readonly BLOBS: R2Bucket }>(
-	env: T
-): T {
+export function boundedWorkerEnv<
+	T extends { readonly BLOBS: R2Bucket; readonly CUPBOARD_DB: D1Database }
+>(env: T): T {
 	// A proxy, not a spread: tests supply a service binding through a `get`
 	// trap, which a spread would not copy.
 	return new Proxy(env, {
 		get(target, property) {
-			return property === 'BLOBS'
-				? boundedBlobs(target.BLOBS)
-				: passThrough(target, property);
+			switch (property) {
+				case 'BLOBS': {
+					return boundedBlobs(target.BLOBS);
+				}
+				case 'CUPBOARD_DB': {
+					return boundedD1(target.CUPBOARD_DB);
+				}
+				default: {
+					return passThrough(target, property);
+				}
+			}
 		}
 	});
 }
@@ -129,16 +121,16 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 					};
 				}
 				case 'run': {
-					return charged(target.run.bind(target), 'd1.run');
+					return bounded(target.run.bind(target), 'd1.run');
 				}
 				case 'all': {
-					return charged(target.all.bind(target), 'd1.all');
+					return bounded(target.all.bind(target), 'd1.all');
 				}
 				case 'first': {
-					return charged(target.first.bind(target), 'd1.first');
+					return bounded(target.first.bind(target), 'd1.first');
 				}
 				case 'raw': {
-					return charged(target.raw.bind(target), 'd1.raw');
+					return bounded(target.raw.bind(target), 'd1.raw');
 				}
 				default: {
 					return passThrough(target, property);
@@ -153,14 +145,9 @@ function boundedStatement(statement: D1PreparedStatement): D1PreparedStatement {
 }
 
 /**
- * Wraps a {@link D1Database} with deadlines and statement accounting. `prepare`
- * does not change the invocation's allowance. Each terminal `run`, `all`,
- * `first` or `raw` call decrements the allowance by one. `batch` decrements it
- * by the number of members and sends the corresponding native statements to
- * D1. A D1 batch is atomic, so this wrapper never decomposes one.
- *
- * `exec` can execute an unknown number of statements from one string. An active
- * statement allowance therefore rejects the call before dispatch.
+ * Wraps a {@link D1Database} with deadlines and subrequest accounting. Each
+ * terminal statement method, batch, or exec call consumes one subrequest. A D1
+ * batch remains atomic and consumes one call regardless of its member count.
  */
 export function boundedD1(database: D1Database): D1Database {
 	return new Proxy(database, {
@@ -172,8 +159,7 @@ export function boundedD1(database: D1Database): D1Database {
 				}
 				case 'batch': {
 					return (statements: D1PreparedStatement[]) => {
-						spendStatements(statements.length, 'd1.batch');
-						spendSubrequests(1);
+						spendSubrequests(1, 'd1.batch');
 
 						return boundedSubrequest(
 							() =>
@@ -187,13 +173,7 @@ export function boundedD1(database: D1Database): D1Database {
 					};
 				}
 				case 'exec': {
-					return (query: string): Promise<D1ExecResult> => {
-						if (hasStatementAllowance()) {
-							throw new UncountableStatementError('d1.exec');
-						}
-
-						return bounded(target.exec.bind(target), 'd1.exec')(query);
-					};
+					return bounded(target.exec.bind(target), 'd1.exec');
 				}
 				case 'withSession':
 				case 'dump': {

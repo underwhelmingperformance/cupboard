@@ -9,6 +9,10 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import {
+	subrequestSafetyReserve,
+	workersInvocationAllowances
+} from './platform.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
 // The largest target set one root-set or root-ensure request may carry.
@@ -24,9 +28,11 @@ import { isoTimestampSchema } from './scalars.ts';
 // This bounds one request, not a root. A run root grows one target at a time
 // through `attachRoot`, which is additive and unbounded.
 //
-// The probe for a full set is checked against `subrequestsPerInvocation` by
-// `subrequest-budget.test.ts`.
-export const rootSetMaxTargets = 149;
+// The full dispatch can make six calls per target and four fixed calls.
+export const rootSetMaxTargets = Math.floor(
+	(workersInvocationAllowances.free.subrequests - subrequestSafetyReserve - 4) /
+		6
+);
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
 
@@ -98,9 +104,11 @@ export const rootEnsureResponseSchema = z.discriminatedUnion('status', [
 ]);
 export type RootEnsureResponse = z.output<typeof rootEnsureResponseSchema>;
 
-// A target page runs the same probe for each distinct path as
-// `rootSetMaxTargets` describes. A caller follows the cursor to read every
-// target. Root listings use the same page size to bound response size.
+// A target page probes each distinct path for servability: its narinfo object
+// and NAR, a repair of a missing narinfo object, and the repaired objects again,
+// so a page at this limit fits the Free plan's usable slice. A caller reads every
+// target by following the cursor the page returns. Root listings use the same
+// page size to bound response size.
 export const rootListPageSize = rootSetMaxTargets;
 
 // Clients must return the cursor unchanged to resume a listing. Its contents

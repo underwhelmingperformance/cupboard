@@ -2,10 +2,12 @@ import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 
 import { boundedWorkerEnv } from './do/bounded-io.ts';
+import { withSubrequestSlice } from './do/subrequest-slice.ts';
 import {
 	WorkersCachePurgeError,
 	WorkersCacheUnavailableError
 } from './errors.ts';
+import { subrequestsPerInvocation } from './policy/subrequests.ts';
 import { tenantReadFetch } from './routing/tenant-read-handler.ts';
 
 export { CupboardServer } from './do/server.ts';
@@ -40,7 +42,10 @@ Serves cacheable reads admitted by the control Worker.
 */
 export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	override fetch(request: Request): Promise<Response> {
-		return tenantReadFetch(request, boundedWorkerEnv(this.env), this.ctx);
+		return withSubrequestSlice(
+			() => tenantReadFetch(request, boundedWorkerEnv(this.env), this.ctx),
+			{ subrequests: subrequestsPerInvocation(this.env) }
+		);
 	}
 
 	/**

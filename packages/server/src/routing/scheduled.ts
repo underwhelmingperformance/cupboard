@@ -45,6 +45,7 @@ import {
 	verifyClaimBatchSize,
 	verifyClaimMaxNarBytes
 } from '../http/http.ts';
+import { subrequestsPerInvocation } from '../policy/subrequests.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -536,7 +537,8 @@ function blobReaper(env: Env): BlobReaperService {
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		env.BLOBS,
 		new TenantNarInfoDemoter(env),
-		new TenantCasReferenceDemoter(env)
+		new TenantCasReferenceDemoter(env),
+		subrequestsPerInvocation(env)
 	);
 }
 

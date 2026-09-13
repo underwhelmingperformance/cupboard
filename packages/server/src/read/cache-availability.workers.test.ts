@@ -148,7 +148,7 @@ describe('cache availability query', () => {
 		});
 	});
 
-	it('answers a full page through bounded object requests', async () => {
+	it('answers a full page across Free-sized object requests', async () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata);

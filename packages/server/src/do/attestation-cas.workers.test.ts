@@ -15,10 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { reserveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import {
-	StatementAllowanceExceededError,
-	UploadedObjectNotFoundError
-} from '../errors.ts';
+import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
 import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -47,10 +44,6 @@ import {
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
-
-import { AttestationCasService } from './attestation-cas-service.ts';
-import { boundedD1 } from './bounded-io.ts';
-import { withStatementAllowance } from './statement-scope.ts';
 
 const textEncoder = new TextEncoder();
 const predicateType = predicateTypeSchema.parse(
@@ -136,79 +129,6 @@ describe('attestation CAS lifecycle', () => {
 			} finally {
 				spy.mockRestore();
 			}
-		}
-	);
-
-	it.each([7, 8])(
-		'admits a CAS charge atomically with %i statements available',
-		async (allowance) => {
-			const staging = await stageAttestationBundle(
-				'charge-budget',
-				textEncoder.encode('bundle')
-			);
-			const measured = await currentServer().measureAttestationBundle(staging);
-			await currentServer().promoteAttestationBundle(staging, measured);
-			const objects = await casObjectRows();
-			const reference = {
-				cache: defaultCache(),
-				storePathHash,
-				generation: narInfoGenerationSchema.parse(0),
-				predicateType,
-				digest: measured.digest
-			};
-			const outcome = await runInDurableObject(
-				currentServer(),
-				async (instance) => {
-					const original = instance.context.d1;
-					Object.defineProperty(instance.context, 'd1', {
-						configurable: true,
-						value: drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema })
-					});
-					try {
-						return await withStatementAllowance(async () => {
-							try {
-								return await new AttestationCasService(
-									instance.context
-								).reserveReferenceAndCharge(reference, measured.size);
-							} catch (error) {
-								if (error instanceof StatementAllowanceExceededError) {
-									return 'refused';
-								}
-								throw error;
-							}
-						}, allowance);
-					} finally {
-						Object.defineProperty(instance.context, 'd1', {
-							configurable: true,
-							value: original
-						});
-					}
-				}
-			);
-			if (allowance === 8) {
-				expect({
-					outcome,
-					refs: await attestationReferenceRows(),
-					presence: await tenantCasBlobRows()
-				}).toStrictEqual({
-					outcome: 'referenced',
-					refs: [{ tenant: fixtureTenant, ...reference }],
-					presence: [
-						{
-							tenant: fixtureTenant,
-							digest: measured.digest,
-							size: measured.size
-						}
-					]
-				});
-				return;
-			}
-			expect({
-				outcome,
-				refs: await attestationReferenceRows(),
-				presence: await tenantCasBlobRows(),
-				objects: await casObjectRows()
-			}).toStrictEqual({ outcome: 'refused', refs: [], presence: [], objects });
 		}
 	);
 

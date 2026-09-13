@@ -9,6 +9,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { cacheAvailabilityResponseSchema } from '@cupboard/protocol/cache-availability';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
+import { workersInvocationAllowances } from '@cupboard/protocol/platform';
 import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type TenantReadCredential,
@@ -30,7 +31,6 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import {
 	attestationListObjectKey,
-	d1StatementsPerInvocation,
 	narInfoObjectKey,
 	narObjectKey,
 	requestOriginSchema
@@ -65,6 +65,7 @@ import {
 	useTestServer,
 	type VerifiableNar,
 	verifiableNar,
+	withDeployedSubrequestAllowance,
 	withoutAlarmArming
 } from '../test-support.ts';
 
@@ -74,6 +75,11 @@ import {
 	teardownEntryPrefix
 } from './cache-admin-service.ts';
 import { maxFencedRetireRows } from './deletion-queue-service.ts';
+import {
+	subrequestsAvailable,
+	subrequestSliceReserve,
+	withSubrequestSlice
+} from './subrequest-slice.ts';
 
 const buildsName = cacheNameSchema.parse('builds');
 const privateBuildsName = cacheNameSchema.parse('private-builds');
@@ -407,9 +413,8 @@ async function deletionStatements(
 
 /**
  * Counts the D1 statements one alarm pass runs at the deployed chunk size,
- * after a deletion has filled the queue. `maxPathsTornDownPerRun` is derived
- * from a fixed cost per pass and a cost per retirement chunk, and this measures
- * both.
+ * after a deletion has filled the queue. The count separates fixed query work
+ * from the work for each retirement chunk.
  *
  * The deletion and the pass share one Durable Object invocation, so a delivered
  * alarm cannot drain the queue before the pass this counts.
@@ -494,16 +499,17 @@ async function publishAttestedPaths(
 }
 
 /**
- * Counts the D1 statements each teardown pass runs until the drain has emptied
- * the queue, at the deployed chunk size.
+ * Counts the tracked D1 and R2 calls each teardown pass makes until the drain
+ * has emptied the queue, at the selected invocation allowance.
  *
  * The deletion and every pass share one Durable Object invocation, so a
  * delivered alarm cannot drain the queue between the counts.
  */
-async function attestedTeardownPassStatements(
+async function attestedTeardownPassSubrequests(
 	server: string,
 	paths: number,
 	references: number,
+	allowance: number,
 	maxPasses = 6
 ): Promise<number[]> {
 	await useTestServer(server);
@@ -511,41 +517,42 @@ async function attestedTeardownPassStatements(
 	return withoutAlarmArming(async () => {
 		await publishAttestedPaths(paths, references);
 
-		const counting = countingD1(env.CUPBOARD_DB);
-
 		return runInDurableObject(currentServer(), async (instance, state) => {
-			const real = instance.context.d1;
 			const cache = instance.context.cacheRepository.require(buildsCache);
 
-			Object.defineProperty(instance.context, 'd1', {
-				configurable: true,
-				value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
-			});
+			return withDeployedSubrequestAllowance(
+				instance.context,
+				allowance,
+				async () => {
+					await instance.runCacheTeardown(buildsCache, origin);
 
-			await instance.runCacheTeardown(buildsCache, origin);
+					const perPass: number[] = [];
 
-			const perPass: number[] = [];
+					for (let taken = 0; taken < maxPasses; taken += 1) {
+						const marker = await state.storage.get(
+							`${teardownEntryPrefix}${String(cache.id)}`
+						);
 
-			for (let taken = 0; taken < maxPasses; taken += 1) {
-				const marker = await state.storage.get(
-					`${teardownEntryPrefix}${String(cache.id)}`
-				);
+						if (marker === undefined) {
+							break;
+						}
 
-				if (marker === undefined) {
-					break;
+						perPass.push(
+							await withSubrequestSlice(
+								async () => {
+									const before = subrequestsAvailable();
+									await instance.resumeCacheTeardown();
+
+									return before - subrequestsAvailable();
+								},
+								{ subrequests: allowance }
+							)
+						);
+					}
+
+					return perPass;
 				}
-
-				const before = counting.statementsSent();
-				await instance.resumeCacheTeardown();
-				perPass.push(counting.statementsSent() - before);
-			}
-
-			Object.defineProperty(instance.context, 'd1', {
-				configurable: true,
-				value: real
-			});
-
-			return perPass;
+			);
 		});
 	});
 }
@@ -1595,18 +1602,10 @@ describe('cache generation gate', () => {
 		const small = await deletionStatements('gen-allowance-small', 1);
 		const large = await deletionStatements('gen-allowance-large', 120);
 
-		// The generation revocation, the credential deletion and the two
-		// maintenance-eligibility statements. A deletion that retired a chunk of
-		// paths itself would add roughly six statements for every 45 paths and pass
-		// the invocation allowance on a cache of a few hundred.
-		expect({
-			small,
-			large,
-			allowance: d1StatementsPerInvocation
-		}).toStrictEqual({ small: 4, large: 4, allowance: 50 });
+		expect({ small, large }).toStrictEqual({ small: 4, large: 4 });
 	}, 240_000);
 
-	it('keeps a full teardown pass within the D1 statements one invocation may run', async () => {
+	it('measures fixed and per-chunk teardown D1 statements', async () => {
 		const oneChunk = await teardownPassStatements('gen-pass-small', 1);
 		const twoChunks = await teardownPassStatements(
 			'gen-pass-large',
@@ -1617,51 +1616,44 @@ describe('cache generation gate', () => {
 		const perChunk = twoChunks - oneChunk;
 		const perPass = oneChunk - perChunk;
 
-		// The deployed cap in the worst case: every chunk full and the sweep run.
-		// Measuring both costs rather than restating the constant means a wider cap
-		// or a costlier chunk fails here instead of on Workers Free.
 		expect({
 			oneChunk,
 			twoChunks,
 			perChunk,
 			perPass,
 			worstCase:
-				perPass + (maxPathsTornDownPerRun / maxFencedRetireRows) * perChunk,
-			allowance: d1StatementsPerInvocation
+				perPass +
+				(maxPathsTornDownPerRun(workersInvocationAllowances.free.subrequests) /
+					maxFencedRetireRows) *
+					perChunk
 		}).toStrictEqual({
 			oneChunk: 9,
 			twoChunks: 15,
 			perChunk: 6,
 			perPass: 3,
-			worstCase: 45,
-			allowance: 50
+			worstCase: 27
 		});
 	}, 240_000);
 
-	it('keeps every attested teardown pass within the D1 statement allowance', async () => {
-		// Twelve references in one chunk is more attestation work than a pass can
-		// afford, so the drain has to stop inside the chunk and resume. Measuring
-		// each pass means an attestation retirement that grows costlier fails here
-		// instead of on Workers Free.
-		const perPass = await attestedTeardownPassStatements(
+	it('defers attested teardown within a 200-call invocation allowance', async () => {
+		const allowance = 200;
+		const perPass = await attestedTeardownPassSubrequests(
 			'gen-pass-attested',
 			3,
-			4
+			20,
+			allowance
 		);
 
 		expect({
 			perPass,
 			worstPass: Math.max(...perPass),
-			allowance: d1StatementsPerInvocation,
+			usable: allowance - subrequestSliceReserve,
 			references: await attestationReferenceRows(),
 			edges: await blobReferenceRows()
 		}).toStrictEqual({
-			// The first pass retires the eight references the allowance covers beside
-			// the chunk's own retirement, and leaves the chunk unfinished. The second
-			// retires the last four, finishes the chunk, and sweeps.
-			perPass: [43, 29],
-			worstPass: 43,
-			allowance: 50,
+			perPass: [87, 45],
+			worstPass: 87,
+			usable: 100,
 			references: [],
 			edges: []
 		});
