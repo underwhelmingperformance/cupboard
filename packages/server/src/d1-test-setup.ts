@@ -26,9 +26,8 @@ import {
 	tenantUsage
 } from './db/d1-schema.ts';
 import {
-	clearAbandonedAlarms,
-	StalledMaintenancePassError,
-	takeStalledMaintenancePasses
+	finishTestServerLifecycle,
+	StalledMaintenancePassError
 } from './test-support.ts';
 
 // `TEST_MIGRATIONS` is typed in test-env.d.ts; vitest.config.ts supplies its
@@ -82,12 +81,9 @@ afterEach(async () => {
 	// The test's Durable Objects are abandoned when it ends; an alarm left
 	// armed on one would fire into an environment that has moved on, whose log
 	// forwarding then races the pool's teardown. Quieten them first.
-	await clearAbandonedAlarms();
-
-	// A pass parked behind a retry deadline does not run again while `Date`
-	// is pinned. Report it here, so a test that left one parked fails by name
-	// whether or not anything in it waited on the pass.
-	const stalled = await takeStalledMaintenancePasses();
+	// Use one registry snapshot for alarm cleanup and the stalled-pass audit. A
+	// server selected earlier in the test must remain visible to both phases.
+	const stalled = await finishTestServerLifecycle();
 	const first = stalled[0];
 
 	vi.useRealTimers();
