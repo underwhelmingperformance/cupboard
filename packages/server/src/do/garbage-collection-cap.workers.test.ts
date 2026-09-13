@@ -1,6 +1,7 @@
 import {
 	narInfoGenerationSchema,
-	rootNameSchema
+	rootNameSchema,
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
@@ -228,6 +229,18 @@ async function seedExpiredRoot(target: UploadPathMetadata): Promise<void> {
 				storePathHash: target.storePathHash,
 				storePath: target.storePath
 			})
+			.run();
+	});
+}
+
+// Queue a path without changing the revision, so the scan must process the
+// frontier itself instead of restarting.
+async function queueFrontier(storePathHash: StorePathHash): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.db
+			.insert(garbageCollectionFrontier)
+			.values({ cacheId: resolvedCache(instance.context).id, storePathHash })
+			.onConflictDoNothing()
 			.run();
 	});
 }
@@ -592,6 +605,85 @@ describe('garbage collection cap', () => {
 		expect(typeof generations.parent).toBe('number');
 		expect(typeof generations.child).toBe('number');
 		expect(generations.collectable).toBeUndefined();
+	});
+
+	it('returns to marking when a path is queued during the collect phase', async () => {
+		await useTestServer('gc-collect-requeue');
+		const { token } = await bootstrap();
+		const child = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'child',
+			references: []
+		});
+		const parent = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'parent',
+			references: [StorePath.basename(child.storePath)]
+		});
+		const rooted = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'rooted',
+			references: []
+		});
+
+		await pushPath(token, child);
+		await pushPath(token, parent);
+		await pushPath(token, rooted);
+		await setRoot(token, { name: 'channel', targets: [rooted.storePath] });
+
+		const generations = async (): Promise<
+			Record<string, number | undefined>
+		> => ({
+			rooted: await narInfoGeneration(rooted.storePathHash),
+			parent: await narInfoGeneration(parent.storePathHash),
+			child: await narInfoGeneration(child.storePathHash)
+		});
+		const pushed = await generations();
+
+		// Park the continuation with the scan about to collect, so the queued path
+		// arrives after the mark phase finished and before anything is deleted.
+		await driveScanTo((scan) => scan?.phase === 'collect');
+		const collecting = await currentScanProgress();
+		const revision = collecting?.revision;
+
+		expect(typeof revision).toBe('number');
+
+		await queueFrontier(parent.storePathHash);
+
+		await driven.collectOneUnitOfWork();
+		const requeued = await currentScanProgress();
+
+		await driven.restore();
+		await drainContinuation();
+
+		expect({
+			collecting,
+			requeued,
+			scan: await currentScanProgress(),
+			continuation: await continuation(),
+			stored: await generations()
+		}).toStrictEqual({
+			collecting: {
+				phase: 'collect',
+				revision,
+				cursor: '',
+				frontier: 0,
+				marks: 1
+			},
+			requeued: {
+				phase: 'mark',
+				revision,
+				cursor: '',
+				frontier: 1,
+				marks: 1
+			},
+			scan: undefined,
+			continuation: undefined,
+			stored: pushed
+		});
 	});
 
 	it('restarts an in-progress walk when retention changes between chunks', async () => {
