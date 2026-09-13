@@ -622,10 +622,10 @@ action does not record the bundles in the repository's attestation store, and it
 signs a separate statement for each subject. Each bundle therefore contains one
 subject.
 
-The action derives all three inputs from the destination cache's visibility
-whenever the workflow leaves them unset. A public destination gets
-`sigstore-default`, `true` and `run`. An unresolved destination uses the private
-defaults because publication cannot be undone.
+The action derives all three inputs from the destination cache's access whenever
+the workflow leaves them unset. A public destination gets `sigstore-default`,
+`true` and `run`. When no destination access reaches the signing step, it uses
+the private defaults, because publication cannot be undone.
 
 Those defaults prevent automatic publication and keep each bundle to one
 subject; they do not make the bundle non-disclosing. Every subject digest in
@@ -657,11 +657,12 @@ Setting these inputs explicitly overrides the derived defaults, and for a
 private destination the override is a disclosure decision. `upload-to-github`
 set to `true` records each bundle in the repository's attestation store. Anyone
 who can read the repository can then read the complete bundle and its subject
-digests. `rekor-and-tsa` puts the same digests in a public append-only log.
-Before signing begins, the action reports the instances it may use, the services
-it may contact and the destinations to which it may publish a complete bundle.
-Afterwards, it reports the trust domain and evidence found in the produced
-bundles.
+digests. `rekor-and-tsa` sends the statement to Rekor, which publishes a
+permanent signature record and indexes its subject digests. Its DSSE log entry
+does not contain the full statement. Before signing begins, the action reports
+the instances it may use, the services it may contact and the destinations to
+which it may publish signature records or bundles. Afterwards, it reports the
+trust domain and evidence found in the produced bundles.
 
 The upload is the only step that writes a bundle to the repository's attestation
 store, so `gh attestation verify` cannot find a bundle that the action did not
