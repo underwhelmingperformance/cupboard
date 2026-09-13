@@ -174,7 +174,9 @@ of rebuilt:
 name: cupboard
 
 on:
+  # Include closed so unmerged pull requests remove their caches.
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -213,9 +215,11 @@ properties, but setup refuses an access mismatch before publication. If the
 workflow changes from public to private publication, an administrator must
 change the existing cache's access before rerunning it. The PR trust rule
 permits publication, creation and deletion of that cache and management of its
-retention roots. The workflow does not yet remove closed pull requests' caches.
-Expired roots let collection reclaim unretained paths; the empty cache row
-remains until it is removed.
+retention roots. A closed event skips planning and building. If the pull request
+closed without merging, the removal job removes its cache. A merged pull request
+keeps its cache so the branch run can reuse those outputs through the
+repository's view. Its roots still expire according to their TTL; the empty
+cache row remains until it is removed.
 
 The preset accepts only pull requests from the caller repository. A caller that
 accepts fork contributions can skip publication for those runs with

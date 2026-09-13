@@ -270,6 +270,7 @@ jobs:
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
       provision-cache: ${{ steps.resolve.outputs.provision-cache }}
       provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
+      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -302,6 +303,8 @@ jobs:
           PERMANENT: ${{ inputs.permanent }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
@@ -404,6 +407,9 @@ jobs:
                 # Match pullRequestCacheTemplate and the prefix used by
                 # cupboard github setup's repository view.
                 CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
+                if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
+                  REMOVE_CACHE="${CACHE}"
+                fi
                 TTL=14d
                 PERMANENT=false
                 if [ "${PUSH}" = true ]; then
@@ -440,11 +446,13 @@ jobs:
             echo "reuse-view=${REUSE_VIEW}"
             echo "provision-cache=${PROVISION_CACHE:-}"
             echo "provision-cache-ttl=${TTL}"
+            echo "remove-cache=${REMOVE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
     name: Plan the publication
     needs: configure
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 30
     permissions:
@@ -757,3 +765,52 @@ jobs:
           if ! nix store gc; then
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
+
+  remove-cache:
+    name: Remove the pull request's cache
+    needs: configure
+    if: needs.configure.outputs.remove-cache != ''
+    runs-on: ${{ inputs.plan-runner }}
+    timeout-minutes: 10
+    permissions:
+      attestations: read # verify a selected cupboard release
+      contents: read # check out the workflow code that installs cupboard
+      id-token: write # OIDC token for the cache removal
+    steps:
+      - uses: $/actions/prepare
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+
+      - name: Reserve the cupboard workflow checkout
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      - uses: $/actions/setup
+        id: setup
+        with:
+          cupboard: ${{ needs.configure.outputs.cupboard }}
+          checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+
+      - name: Remove the cache
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.remove-cache }}
+        run: |
+          set -euo pipefail
+          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
+            --github-oidc --force --yes
