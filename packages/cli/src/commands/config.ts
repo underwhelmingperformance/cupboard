@@ -12,7 +12,11 @@ import type { Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
-import { cacheTargetFromUrl, cacheTargetWithName } from '../cache-target.ts';
+import {
+	type CacheTarget,
+	cacheTargetFromUrl,
+	cacheTargetWithName
+} from '../cache-target.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import {
@@ -43,7 +47,10 @@ interface ConfigOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly cacheCredentials?: string;
+	readonly includeDefaultCache?: boolean;
 }
+
+const defaultCacheScope: CacheScope = { kind: 'default' };
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -147,6 +154,31 @@ export function resolveConfigSubstituters(
 	});
 }
 
+/**
+ * Selects named caches from the positional arguments, or the URL's cache when
+ * no names are given. With `hasDefaultCache`, the default cache comes first
+ * and appears once, separately from any named cache called `default`.
+ */
+export function selectConfigCaches(
+	target: CacheTarget,
+	names: readonly string[],
+	hasDefaultCache: boolean
+): readonly CacheScope[] {
+	const selected =
+		names.length === 0
+			? [target.cache]
+			: names.map((name) => cacheTargetWithName(target, name).cache);
+
+	if (!hasDefaultCache) {
+		return selected;
+	}
+
+	return [
+		defaultCacheScope,
+		...selected.filter((cache) => cache.kind !== 'default')
+	];
+}
+
 export function registerConfigCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -159,6 +191,10 @@ export function registerConfigCommand(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<pubkey>', 'Nix trusted-public-keys entry')
 		.argument('[caches...]', 'named caches; omit them to use the URL target')
+		.option(
+			'--include-default-cache',
+			"also configure the tenant's default cache, alongside any named caches"
+		)
 		.option(
 			'--read-user <user>',
 			'read username (or CUPBOARD_READ_USER)',
@@ -185,10 +221,11 @@ export function registerConfigCommand(
 					options.cacheCredentials ?? env.CUPBOARD_CACHE_CREDENTIALS
 				);
 				const target = cacheTargetFromUrl(url);
-				const selected =
-					names.length === 0
-						? [target.cache]
-						: names.map((name) => cacheTargetWithName(target, name).cache);
+				const selected = selectConfigCaches(
+					target,
+					names,
+					options.includeDefaultCache === true
+				);
 
 				runConfig(
 					{
