@@ -10,6 +10,7 @@ import {
 	and,
 	asc,
 	eq,
+	getTableName,
 	gt,
 	inArray,
 	lt,
@@ -23,6 +24,7 @@ import {
 import { type CacheId, type ResolvedCache } from '../db/cache.ts';
 import * as schema from '../db/schema.ts';
 import {
+	GarbageCollectionBarrierMissingError,
 	StoredReferencesInvalidError,
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
@@ -69,6 +71,59 @@ export const phaseStepSize = 128;
 // The roots one expiry step inspects. A step size like `phaseStepSize`; the
 // row budget decides how many steps a pass runs.
 export const maxRootsExpiredPerRun = 32;
+
+/**
+ * Reachability comes from retention targets, grace entries and the references
+ * of reachable narinfo rows. Seed queries and expected barrier trigger names
+ * share this list, so adding a seed source also requires its write barrier.
+ */
+const reachabilitySources = [
+	{
+		role: 'seed',
+		phase: 'roots',
+		table: schema.retentionRootTargets,
+		cacheId: schema.retentionRootTargets.cacheId,
+		storePathHash: schema.retentionRootTargets.storePathHash
+	},
+	{
+		role: 'seed',
+		phase: 'grace',
+		table: schema.retentionGrace,
+		cacheId: schema.retentionGrace.cacheId,
+		storePathHash: schema.retentionGrace.storePathHash
+	},
+	{
+		role: 'edge',
+		table: schema.narInfos
+	}
+] as const;
+
+type SeedSource = Extract<
+	(typeof reachabilitySources)[number],
+	{ role: 'seed' }
+>;
+
+// The seed phases of the scan, in the order the scan runs them.
+const seedSources: readonly SeedSource[] = reachabilitySources.filter(
+	(source): source is SeedSource => source.role === 'seed'
+);
+
+const barrierTriggerPrefix = 'garbage_collection_barrier_';
+
+/**
+ * The expected write-barrier triggers and the tables they protect.
+ */
+export const barrierTriggers: readonly {
+	readonly name: string;
+	readonly table: string;
+}[] = reachabilitySources.flatMap((source) => {
+	const table = getTableName(source.table);
+
+	return (['insert', 'update'] as const).map((statement) => ({
+		name: `${barrierTriggerPrefix}${table}_${statement}`,
+		table
+	}));
+});
 
 /**
  * Builds one ordered page of targets for roots that have just expired. The
@@ -426,40 +481,26 @@ export class GarbageCollectionService {
 		}
 	}
 
+	// Several roots can retain the same path. Select distinct hashes so each
+	// path consumes only one place in the frontier page.
 	private advanceSeed(
 		cache: ResolvedCache,
-		phase: 'roots' | 'grace',
+		source: SeedSource,
 		cursor: string
 	): void {
 		const page = phaseStepSize;
-		const rows =
-			phase === 'roots'
-				? this.context.db
-						.selectDistinct({
-							storePathHash: schema.retentionRootTargets.storePathHash
-						})
-						.from(schema.retentionRootTargets)
-						.where(
-							and(
-								eq(schema.retentionRootTargets.cacheId, cache.id),
-								sql`${schema.retentionRootTargets.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionRootTargets.storePathHash))
-						.limit(page + 1)
-						.all()
-				: this.context.db
-						.select({ storePathHash: schema.retentionGrace.storePathHash })
-						.from(schema.retentionGrace)
-						.where(
-							and(
-								eq(schema.retentionGrace.cacheId, cache.id),
-								sql`${schema.retentionGrace.storePathHash} > ${cursor}`
-							)
-						)
-						.orderBy(asc(schema.retentionGrace.storePathHash))
-						.limit(page + 1)
-						.all();
+		const rows = this.context.db
+			.selectDistinct({ storePathHash: source.storePathHash })
+			.from(source.table)
+			.where(
+				and(
+					eq(source.cacheId, cache.id),
+					sql`${source.storePathHash} > ${cursor}`
+				)
+			)
+			.orderBy(asc(source.storePathHash))
+			.limit(page + 1)
+			.all();
 		const batch = rows.slice(0, page);
 
 		this.insertFrontier(
@@ -475,10 +516,9 @@ export class GarbageCollectionService {
 			return;
 		}
 
-		this.updateScan(cache, {
-			phase: phase === 'roots' ? 'grace' : 'mark',
-			cursor: ''
-		});
+		const next = seedSources[seedSources.indexOf(source) + 1];
+
+		this.updateScan(cache, { phase: next?.phase ?? 'mark', cursor: '' });
 	}
 
 	private existingMarks(
@@ -660,6 +700,8 @@ export class GarbageCollectionService {
 
 			const page = phaseStepSize;
 
+			// A new reference source also needs barrier triggers. Otherwise writes
+			// to it after marking could make paths reachable without re-queuing them.
 			const references = this.context.db.all<{
 				referenceIndex: number;
 				reference: unknown;
@@ -909,6 +951,29 @@ export class GarbageCollectionService {
 	}
 
 	/**
+	 * SQLite drops a table's triggers when a migration rebuilds it. Do not
+	 * collect against marks until every write-barrier trigger is restored.
+	 */
+	private assertBarrierPresent(): void {
+		const present = new Set(
+			this.context.db
+				.all<{ name: string }>(
+					sql`SELECT name FROM sqlite_master
+					    WHERE type = 'trigger'
+					      AND name GLOB ${`${barrierTriggerPrefix}*`}`
+				)
+				.map((row) => row.name)
+		);
+		const missing = barrierTriggers
+			.map((trigger) => trigger.name)
+			.filter((name) => !present.has(name));
+
+		if (missing.length > 0) {
+			throw new GarbageCollectionBarrierMissingError(missing);
+		}
+	}
+
+	/**
 	 * Advances one cache's collection scan until the invocation's row budget is
 	 * spent, leaving the phase it stopped in recorded for the next invocation.
 	 *
@@ -931,6 +996,8 @@ export class GarbageCollectionService {
 		hasMoreExpiredRoots: boolean;
 		hasMoreWork: boolean;
 	} {
+		this.assertBarrierPresent();
+
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
@@ -985,8 +1052,13 @@ export class GarbageCollectionService {
 				continue;
 			}
 
-			if (scan.phase === 'roots' || scan.phase === 'grace') {
-				this.advanceSeed(cache, scan.phase, scan.cursor);
+			const { phase } = scan;
+			const seedSource = seedSources.find(
+				(candidate) => candidate.phase === phase
+			);
+
+			if (seedSource !== undefined) {
+				this.advanceSeed(cache, seedSource, scan.cursor);
 
 				if (isRowBudgetExhausted()) {
 					break;
