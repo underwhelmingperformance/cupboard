@@ -53,6 +53,7 @@ import {
 	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
+	removeView,
 	setView
 } from './reuse-view-read.test-support.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -81,6 +82,9 @@ function generatedMissingHashes(count: number): string[] {
 
 describe('reuse-view narinfo lookup', () => {
 	beforeEach(resetTestServer);
+	// Every case uses the same fixture tenant. Remove any view left by the
+	// previous case so each test reads its own view definition.
+	beforeEach(() => removeView());
 
 	// A view page may cost `reuseDistinctNarLimit` heads per hash at worst, and
 	// the Worker sends it to the object in chunks that fit one invocation's
