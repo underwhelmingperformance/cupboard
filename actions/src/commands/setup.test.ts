@@ -1356,3 +1356,69 @@ describe('setupAction cache provisioning', () => {
 		);
 	});
 });
+
+describe('including the default cache', () => {
+	it.each([
+		{ cache: '', includeDefaultCache: 'true', expected: [defaultCache] },
+		{
+			cache: 'builds, release',
+			includeDefaultCache: 'true',
+			expected: [defaultCache, namedCache('builds'), namedCache('release')]
+		},
+		{
+			cache: 'default',
+			includeDefaultCache: 'true',
+			expected: [defaultCache, namedCache('default')]
+		},
+		{
+			cache: 'builds, release',
+			includeDefaultCache: 'false',
+			expected: [namedCache('builds'), namedCache('release')]
+		}
+	])(
+		'selects $cache with include-default-cache=$includeDefaultCache',
+		({ cache, includeDefaultCache, expected }) => {
+			const inputs = resolveSetupInputs(
+				{ cache, includeDefaultCache },
+				{ RUNNER_TEMP: '/runner/temp' }
+			);
+			expect(inputs.caches).toStrictEqual(expected.map((cache) => ({ cache })));
+		}
+	);
+
+	it('rejects a single destination credential when the default adds another cache', () => {
+		expect(() =>
+			resolveSetupInputs(
+				{
+					cache: 'builds',
+					includeDefaultCache: 'true',
+					destinationReadUser: 'ci',
+					destinationReadPassword: readPassword
+				},
+				{ RUNNER_TEMP: '/runner/temp' }
+			)
+		).toThrow(DestinationReadCredentialCacheCountError);
+	});
+
+	it('attaches separate credentials to default and named default caches', () => {
+		const credentials = [
+			{
+				cache: defaultCache,
+				credential: { user: 'tenant-default', password: readPassword }
+			},
+			{
+				cache: namedCache('default'),
+				credential: { user: 'named-default', password: 'B'.repeat(43) }
+			}
+		];
+		const inputs = resolveSetupInputs(
+			{
+				cache: 'default',
+				includeDefaultCache: 'true',
+				cacheCredentials: JSON.stringify(credentials)
+			},
+			{ RUNNER_TEMP: '/runner/temp' }
+		);
+		expect(inputs.caches).toStrictEqual(credentials);
+	});
+});
