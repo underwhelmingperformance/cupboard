@@ -7,6 +7,7 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { type SQLiteColumn, type SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { StatusCodes } from 'http-status-codes';
@@ -14,6 +15,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { cacheIdSchema } from '../db/cache.ts';
 import {
+	cacheIdentities,
 	garbageCollectionFrontier,
 	garbageCollectionMarks,
 	garbageCollectionScans,
@@ -36,6 +38,7 @@ import {
 	narBytes,
 	narInfoGeneration,
 	pushPath,
+	putTestCache,
 	resetTestServer,
 	resolvedCache,
 	runGcResult,
@@ -408,6 +411,78 @@ describe('garbage collection cap', () => {
 		}).toStrictEqual({ collectable: 0, continuation: undefined });
 
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
+	});
+
+	it('starts a tenant collection at the lowest cache identity', async () => {
+		await useTestServer('gc-cache-order');
+		const { token } = await bootstrap();
+
+		// Create the caches in reverse name order so their identity order differs.
+		await putTestCache(token, namedCache('zebra'));
+		await putTestCache(token, namedCache('alpha'));
+
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('d'),
+				name: 'zebra-path'
+			}),
+			namedCache('zebra')
+		);
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('f'),
+				name: 'alpha-path'
+			}),
+			namedCache('alpha')
+		);
+
+		// The default cache sorts first in both orders and would hide the mismatch.
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { cacheIdentities } })
+				.delete(cacheIdentities)
+				.where(eq(cacheIdentities.kind, 'default'))
+				.run();
+		});
+
+		await driven.collectOneUnitOfWork();
+
+		const observed = await runInDurableObject(
+			currentServer(),
+			(_instance, state) => {
+				const database = drizzle(state.storage, {
+					schema: { cacheIdentities, garbageCollectionTenantRuns }
+				});
+
+				return {
+					identities: database
+						.select({
+							id: cacheIdentities.id,
+							name: cacheIdentities.name
+						})
+						.from(cacheIdentities)
+						.orderBy(cacheIdentities.id)
+						.all(),
+					startedAt: database
+						.select({ cacheId: garbageCollectionTenantRuns.cacheId })
+						.from(garbageCollectionTenantRuns)
+						.get()?.cacheId
+				};
+			}
+		);
+
+		await driven.restore();
+
+		expect(observed).toStrictEqual({
+			identities: [
+				{ id: 2, name: 'zebra' },
+				{ id: 3, name: 'alpha' }
+			],
+			startedAt: 2
+		});
 	});
 
 	it('spends one budget across the refresh-family and collection phases', async () => {

@@ -1201,10 +1201,12 @@ export class GarbageCollectionService {
 			return this.context.cacheRepository.resolvedForId(current.cache);
 		}
 
+		// advanceTenantCollection visits only larger identities. Start in the
+		// same order so no cache is skipped.
 		const first = this.context.db
 			.select({ cache: schema.cacheIdentities.id })
 			.from(schema.cacheIdentities)
-			.orderBy(asc(schema.cacheIdentities.name))
+			.orderBy(asc(schema.cacheIdentities.id))
 			.limit(1)
 			.get();
 
