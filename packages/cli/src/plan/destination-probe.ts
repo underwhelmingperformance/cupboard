@@ -86,6 +86,10 @@ export interface TenantProbeOptions {
 	readonly cache: CacheScope;
 	readonly view?: string;
 	readonly credentials?: BasicCredential;
+	/**
+	Overrides credentials for view reads; other probes keep credentials.
+	*/
+	readonly viewCredentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
 }
 
@@ -112,7 +116,14 @@ export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 			// Do not make a request when no reuse view is configured.
 			view === undefined
 				? Promise.resolve(new Set())
-				: viewServedPaths({ ...shared, paths, view }),
+				: viewServedPaths({
+						...shared,
+						paths,
+						view,
+						...(options.viewCredentials !== undefined && {
+							credentials: options.viewCredentials
+						})
+					}),
 		attestedServed: (paths) =>
 			attestedServedPaths({ ...shared, paths, cache: options.cache })
 	};

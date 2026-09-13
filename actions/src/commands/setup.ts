@@ -20,7 +20,11 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { workflowCommands } from '@cupboard/shared/github-actions';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import {
+	basicAuthHeader,
+	type BasicCredential,
+	type ReadUser
+} from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
@@ -39,6 +43,10 @@ import {
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
 	ProvisionCacheAccessRequiredError,
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
@@ -88,6 +96,8 @@ export interface SetupOptions {
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
@@ -201,6 +211,14 @@ export function registerSetupCommand(
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
+			'--destination-read-user <user>',
+			'Username accepted by the single selected destination cache.'
+		)
+		.option(
+			'--destination-read-password <password>',
+			'Password accepted by the single selected destination cache.'
+		)
+		.option(
 			'--provision-cache <name>',
 			"Create a missing cache with the run's OIDC token before configuring Nix."
 		)
@@ -243,8 +261,23 @@ export function resolveSetupInputs(
 ): SetupInputs {
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readUser = providedReadUser(options.readUser ?? environment.READ_USER);
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
+	const destinationReadUser = providedReadUser(
+		options.destinationReadUser ?? environment.DESTINATION_READ_USER
+	);
+	const destinationReadPassword =
+		options.destinationReadPassword ??
+		environment.DESTINATION_READ_PASSWORD ??
+		'';
+
+	if (destinationReadUser !== '' && destinationReadPassword === '') {
+		throw new DestinationReadPasswordRequiredError();
+	}
+
+	if (destinationReadPassword !== '' && destinationReadUser === '') {
+		throw new DestinationReadUserRequiredError();
+	}
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -283,7 +316,7 @@ export function resolveSetupInputs(
 			options.includePrereleases,
 			true
 		),
-		githubToken: provided(options.githubToken) ?? '',
+		githubToken: provided(options.githubToken ?? environment.GH_TOKEN) ?? '',
 		releaseRepository:
 			provided(options.releaseRepository) ??
 			environment.GITHUB_ACTION_REPOSITORY ??
@@ -295,7 +328,19 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options),
+		caches: resolveCaches(
+			{
+				...options,
+				cacheCredentials:
+					options.cacheCredentials ?? environment.CACHE_CREDENTIALS
+			},
+			destinationReadUser === ''
+				? undefined
+				: {
+						user: destinationReadUser,
+						password: destinationReadPassword
+					}
+		),
 		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
@@ -344,10 +389,25 @@ function resolveProvisionCache(
  * Resolves the caches to configure and attaches cache-specific credentials.
  * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+function resolveCaches(
+	options: SetupOptions,
+	destinationCredential: BasicCredential | undefined
+): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+
+	if (
+		destinationCredential !== undefined &&
+		provided(options.cacheCredentials) !== undefined
+	) {
+		throw new DestinationReadCredentialConflictError();
+	}
+
 	const defaultCache: CacheScope = { kind: 'default' };
 	const selected = caches.length === 0 ? [defaultCache] : caches;
+
+	if (destinationCredential !== undefined && selected.length !== 1) {
+		throw new DestinationReadCredentialCacheCountError(selected.length);
+	}
 
 	const credentials = providedCacheCredentials(
 		options.cacheCredentials,
@@ -355,9 +415,10 @@ function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
 	);
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
-			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		const credential =
+			destinationCredential ??
+			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
+				?.credential;
 
 		return {
 			cache,
