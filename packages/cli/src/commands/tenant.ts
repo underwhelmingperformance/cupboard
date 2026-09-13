@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto';
-
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type CacheAccessMode,
@@ -12,7 +10,6 @@ import {
 import {
 	type CacheReadCredentialResponse,
 	defaultReadUser,
-	readPasswordByteLength,
 	type TenantCreateBody,
 	tenantCreateBodySchema,
 	type TenantListResponse,
@@ -30,7 +27,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { parseReadUser } from '../read-user.ts';
+import { generateReadPassword, parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 export interface TenantClient {
@@ -76,7 +73,7 @@ interface CreateOptions {
 	readonly ownerIssuer: string;
 	readonly ownerSubject: string;
 	readonly ownerAudience: string;
-	readonly defaultCacheAccess?: CacheAccessMode;
+	readonly access: CacheAccessMode;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: boolean;
 	readonly quotaBytes?: number;
@@ -114,15 +111,6 @@ interface ReadCredentialSelection {
 	readonly read:
 		undefined | { readonly user: ReadUser; readonly password: string };
 	readonly generatedPassword: string | undefined;
-}
-
-/**
- * Creates a read password. The control plane stores a salted digest of it, so
- * the strength of the credential is these 32 random bytes and no command
- * accepts a password from the caller.
- */
-export function generateReadPassword(): string {
-	return randomBytes(readPasswordByteLength).toString('base64url');
 }
 
 function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
@@ -168,9 +156,9 @@ export function registerTenantCommands(
 			'--owner-audience <audience>',
 			'the owner OIDC audience (client id)'
 		)
-		.option(
-			'--default-cache-access <mode>',
-			'the default cache read access: public or private (default: private)',
+		.requiredOption(
+			'--access <mode>',
+			"read access for the tenant's default cache: public or private",
 			parseCacheAccess
 		)
 		.option(
@@ -193,7 +181,7 @@ export function registerTenantCommands(
 			const readSelection = readCredentialFromOptions(options);
 			const body = tenantCreateBodySchema.parse({
 				id,
-				defaultCacheAccess: options.defaultCacheAccess ?? 'private',
+				defaultCacheAccess: options.access,
 				ownerIssuer: options.ownerIssuer,
 				ownerSubject: options.ownerSubject,
 				ownerAudience: options.ownerAudience,

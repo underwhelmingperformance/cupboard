@@ -1,8 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
-import { NixConfig } from '@cupboard/nix-store/nix-config';
-import { canonicalHref } from '@cupboard/nix-store/url';
+import type { CacheAccessMode } from '@cupboard/nix-store/scalars';
 import type { InstanceName } from '@cupboard/protocol/instance';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
@@ -58,6 +57,7 @@ import {
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
+import { showReadyCache } from './onboard-ready.ts';
 import { renameResource, withCrons, withSignupGate } from './overrides.ts';
 import {
 	cloudflareDashIssuer,
@@ -162,6 +162,7 @@ export interface DeployCliOptions {
 	readonly domain?: string;
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
+	readonly access?: CacheAccessMode;
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
@@ -1472,6 +1473,7 @@ async function deployFlow(
 		tenantScriptName: agreed.config.tenant.name,
 		domain: agreed.domain,
 		instanceName: cliOptions.instanceName,
+		cacheAccess: cliOptions.access,
 		admin: onboardAdminFor(
 			agreed.owner,
 			subject !== undefined && idToken !== undefined
@@ -1621,23 +1623,7 @@ async function deployFlow(
 		}
 
 		case 'ready': {
-			const cacheUrl = canonicalHref(outcome.cacheUrl);
-			const nixConfig = new NixConfig(outcome.cacheUrl, outcome.publicKey);
-			const nixConfigLines = nixConfig
-				.render()
-				.trimEnd()
-				.split('\n')
-				.map((line) => ({ label: '', value: line }));
-
-			ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
-				{ label: 'Cache URL', value: cacheUrl },
-				{ label: '', value: '' },
-				...nixConfigLines
-			]);
-
-			ui.outro(
-				`Deployed and initialised. Next: cupboard push ${cacheUrl} ./result`
-			);
+			showReadyCache(ui, outcome);
 			return;
 		}
 	}

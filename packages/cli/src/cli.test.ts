@@ -371,6 +371,12 @@ function expectCommandFound(
 	});
 }
 
+// Commander wraps option descriptions to the terminal width, so compare a
+// multi-word description against the help with its line breaks flattened.
+function unwrapped(text: string): string {
+	return text.replaceAll(/\s+/gu, ' ');
+}
+
 describe('command help', () => {
 	it('shows usage examples for push', () => {
 		const help = helpFor(['push']);
@@ -396,6 +402,41 @@ describe('command help', () => {
 
 	it('notes that most commands need a login', () => {
 		expect(helpFor([])).toContain('cupboard login');
+	});
+
+	it('requires --access when creating a tenant', async () => {
+		const help = helpFor(['tenant', 'create']);
+
+		expect(help).toContain('--access <mode>');
+		expect(unwrapped(help)).toContain(
+			"read access for the tenant's default cache: public or private"
+		);
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'tenant',
+				'create',
+				'https://cupboard.example',
+				'acme',
+				'--owner-issuer',
+				'https://issuer.example',
+				'--owner-subject',
+				'owner',
+				'--owner-audience',
+				'cupboard'
+			])
+		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
+	});
+
+	it('lists --access in init help', () => {
+		const help = helpFor(['init']);
+
+		expect(help).toContain('--access <mode>');
+		expect(unwrapped(help)).toContain(
+			'read access for the first cache: public or private (you are asked ' +
+				'when it is omitted)'
+		);
 	});
 
 	it('describes immediate read and write suspension', () => {
