@@ -747,37 +747,61 @@ export class GarbageCollectionService {
 		}
 	}
 
+	private hasRetainedPath(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.narInfos)
+				.innerJoin(
+					schema.garbageCollectionMarks,
+					and(
+						eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
+						eq(
+							schema.garbageCollectionMarks.storePathHash,
+							schema.narInfos.storePathHash
+						)
+					)
+				)
+				.where(eq(schema.narInfos.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	/**
+	 * An empty cursor means collection has not started. Preserve a non-empty
+	 * cursor when returning from marking so collection resumes after the last
+	 * scanned hash and does not repeat the empty-cache guard.
+	 */
 	private finishMark(
 		cache: ResolvedCache,
 		scan: typeof schema.garbageCollectionScans.$inferSelect
 	): boolean {
-		const retained = this.context.db
-			.select({ storePathHash: schema.narInfos.storePathHash })
-			.from(schema.narInfos)
-			.innerJoin(
-				schema.garbageCollectionMarks,
-				and(
-					eq(schema.garbageCollectionMarks.cacheId, schema.narInfos.cacheId),
-					eq(
-						schema.garbageCollectionMarks.storePathHash,
-						schema.narInfos.storePathHash
-					)
-				)
-			)
-			.where(eq(schema.narInfos.cacheId, cache.id))
-			.limit(1)
-			.get();
-
-		if (retained === undefined && !scan.allowEmptyCollection) {
+		if (
+			scan.cursor === '' &&
+			!scan.allowEmptyCollection &&
+			!this.hasRetainedPath(cache)
+		) {
 			this.clearScan(cache);
 			return true;
 		}
 
-		this.updateScan(cache, { phase: 'collect', cursor: '' });
+		this.updateScan(cache, { phase: 'collect' });
 		return false;
 	}
 
-	// A mark for the path the outer statement is looking at.
+	private hasQueuedPaths(cache: ResolvedCache): boolean {
+		return (
+			this.context.db
+				.select({ one: sql`1` })
+				.from(schema.garbageCollectionFrontier)
+				.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+				.limit(1)
+				.get() !== undefined
+		);
+	}
+
+	// A mark for the narinfo row considered by the outer query.
 	private markedPath(cache: ResolvedCache) {
 		return this.context.db
 			.select({ one: sql`1` })
@@ -861,6 +885,14 @@ export class GarbageCollectionService {
 		for (const paths of jsonRowLists(batch)) {
 			const unmarked = notExists(this.markedPath(cache));
 			const settled = notExists(this.inFlightUpload(cache));
+			// Unprocessed frontier rows can reference a candidate for deletion.
+			// Keep this condition even if the caller changes the phase order.
+			const markIsCurrent = notExists(
+				this.context.db
+					.select({ one: sql`1` })
+					.from(schema.garbageCollectionFrontier)
+					.where(eq(schema.garbageCollectionFrontier.cacheId, cache.id))
+			);
 
 			// Queue exactly the paths the delete removed, so a path kept by the mark
 			// or by an upload in flight is never queued for deletion.
@@ -875,7 +907,8 @@ export class GarbageCollectionService {
 								generation: schema.narInfos.generation
 							}),
 							unmarked,
-							settled
+							settled,
+							markIsCurrent
 						)
 					)
 					.returning({
@@ -1072,6 +1105,18 @@ export class GarbageCollectionService {
 				const marked = this.advanceMark(cache, scan);
 
 				if (marked.complete || isRowBudgetExhausted()) {
+					break;
+				}
+
+				scan = this.scanRow(cache);
+				continue;
+			}
+
+			// Preserve the collection cursor while following newly queued references.
+			if (this.hasQueuedPaths(cache)) {
+				this.updateScan(cache, { phase: 'mark' });
+
+				if (isRowBudgetExhausted()) {
 					break;
 				}
 
