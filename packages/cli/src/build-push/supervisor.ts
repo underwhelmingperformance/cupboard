@@ -44,13 +44,32 @@ const defaultChildTerminationScheduler: ChildTerminationScheduler = {
 	}
 };
 
+/**
+ * A running child that can receive signals and report its exit.
+ */
+export interface SupervisedChild {
+	kill(signal: NodeJS.Signals): void;
+	readonly exited: Promise<ChildExit>;
+}
+
+export type SpawnChild = (
+	command: ChildCommand,
+	environment: ChildEnvironment
+) => SupervisedChild;
+
 export interface RunChildOptions {
 	readonly command: ChildCommand;
 	readonly environment: ChildEnvironment;
 	readonly signal?: AbortSignal;
 	readonly signalSource?: SignalSource;
 	readonly terminationScheduler?: ChildTerminationScheduler;
+	/**
+	Starts the child. Defaults to a real process.
+	*/
+	readonly spawnChild?: SpawnChild;
 }
+
+export type RunChild = (options: RunChildOptions) => Promise<ChildExit>;
 
 export interface SuperviseOptions {
 	readonly command: ChildCommand;
@@ -64,6 +83,10 @@ export interface SuperviseOptions {
 	readonly onExit?: (exit: ChildExit) => Promise<void>;
 	readonly signalSource?: SignalSource;
 	readonly terminationScheduler?: ChildTerminationScheduler;
+	/**
+	Runs the child. Defaults to {@link runChild}.
+	*/
+	readonly runChild?: RunChild;
 	/**
 	Removes the invocation runtime directory after the child exits and `onExit`
 	completes.
@@ -81,8 +104,27 @@ function waitForExit(child: ChildProcess): Promise<ChildExit> {
 }
 
 /**
+Starts a child with inherited stdin, stdout and stderr.
+*/
+export const spawnChildProcess: SpawnChild = (command, environment) => {
+	const [executable, ...childArguments] = command;
+	// A shell wrapper would receive forwarded signals instead of the command.
+	const child = spawn(executable, childArguments, {
+		stdio: 'inherit',
+		env: { ...environment }
+	});
+
+	return {
+		kill(signal) {
+			child.kill(signal);
+		},
+		exited: waitForExit(child)
+	};
+};
+
+/**
  * Runs one child to completion with the given environment and inherited
- * stdio, so its output and semantics are untouched. SIGINT and SIGTERM
+ * stdio. SIGINT and SIGTERM
  * arriving at the supervisor are forwarded to the child while it runs, as is
  * an explicit AbortSignal cancellation. A child that does not exit within the
  * graceful shutdown window is killed. The first forwarded signal remains the
@@ -92,11 +134,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 	options.signal?.throwIfAborted();
 
 	const signalSource = options.signalSource ?? process;
-	const [executable, ...childArguments] = options.command;
-	const child = spawn(executable, childArguments, {
-		stdio: 'inherit',
-		env: { ...options.environment }
-	});
+	const child = (options.spawnChild ?? spawnChildProcess)(
+		options.command,
+		options.environment
+	);
 	const terminationScheduler =
 		options.terminationScheduler ?? defaultChildTerminationScheduler;
 	let interrupted: NodeJS.Signals | undefined;
@@ -135,7 +176,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 	}
 
 	return withCleanups(async () => {
-		const exit = await waitForExit(child);
+		const exit = await child.exited;
 		isChildExited = true;
 		const signal = interrupted ?? exit.signal;
 
@@ -179,8 +220,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 export async function superviseBuild(
 	options: SuperviseOptions
 ): Promise<ChildExit> {
+	const run = options.runChild ?? runChild;
+
 	return withCleanups(async () => {
-		const exit = await runChild({
+		const exit = await run({
 			command: options.command,
 			environment: options.environment,
 			...(options.signalSource !== undefined && {
@@ -221,6 +264,10 @@ export interface AttemptedBuildOptions {
 	readonly terminationScheduler?: ChildTerminationScheduler;
 	readonly nextAttemptId?: () => string;
 	readonly startDelay?: StartDelay;
+	/**
+	Runs each attempt's child. Defaults to {@link runChild}.
+	*/
+	readonly runChild?: RunChild;
 	/**
 	Removes the invocation runtime directory after every attempt finishes.
 	*/
@@ -288,6 +335,7 @@ export async function superviseAttemptedBuild(
 ): Promise<AttemptedBuildResult> {
 	const nextAttemptId = options.nextAttemptId ?? randomUUID;
 	const startDelay = options.startDelay ?? startTimerDelay;
+	const run = options.runChild ?? runChild;
 	const signalSource = options.signalSource ?? process;
 	const attempts: SupervisedAttempt[] = [];
 	let exit: ChildExit = { status: undefined, signal: undefined };
@@ -316,7 +364,7 @@ export async function superviseAttemptedBuild(
 				`nix-log-${attemptId}.jsonl`
 			);
 
-			exit = await runChild({
+			exit = await run({
 				command: options.command(logFile),
 				environment: options.environment,
 				...(options.signalSource !== undefined && {
