@@ -561,18 +561,18 @@ export class CacheAdminService {
 	}
 
 	/**
-	 * Deletes a cache by revoking its read authority and removing its local state
-	 * atomically. Bounded alarm passes run by {@link resumeTeardownPass} retire the
-	 * published state.
+	 * Revokes a cache's read authority, then removes its local state. Bounded
+	 * alarm passes run by {@link resumeTeardownPass} retire published state.
 	 *
-	 * Revocation advances the cache generation and records the deletion in one D1
-	 * statement, independently of the number of reference edges. The local
-	 * transaction starts after this statement succeeds. Read queries then exclude
-	 * earlier generations while cleanup continues.
+	 * Revocation advances the generation and records deletion together in D1.
+	 * Reads then exclude earlier generations while cleanup continues. Credential
+	 * removal follows, before the local transaction starts, so a later cache
+	 * with the same name does not inherit the deleted cache's credential.
 	 *
-	 * The request runs one D1 statement regardless of the number of committed
-	 * paths. It always writes the teardown marker because the first pass must also
-	 * sweep for edges left by an interrupted earlier deletion.
+	 * The normal path runs two D1 statements, independently of the number of
+	 * committed paths. A missing lifecycle row needs an additional insert. The
+	 * teardown marker is always written because the first pass must also sweep
+	 * for edges left by an interrupted earlier deletion.
 	 *
 	 * The deletion queue is durable, so garbage collection can resume it after a
 	 * crash before the alarm marker is written. The blob reaper later collects
@@ -581,6 +581,11 @@ export class CacheAdminService {
 	tearDownCache(cache: ResolvedCache, origin: RequestOrigin): Promise<void> {
 		return this.context.criticalSection(async () => {
 			await this.deletionQueue.revokeCacheGeneration(cache);
+			// Readers of a private cache with no credential row of its own
+			// authenticate with the tenant's credential. Delete the row only after
+			// the revocation, or the cache would be readable with the tenant's
+			// credential while it is still live.
+			await this.registration.clearReadCredential(cache.scope);
 
 			const now = isoTimestamp(new Date());
 

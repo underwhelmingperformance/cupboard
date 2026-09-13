@@ -98,7 +98,8 @@ export const settledDeploymentPhase: DeploymentPhaseName = 'contracted';
  */
 export const contractionMigrations: readonly string[] = [
 	'0028_cache_identity_contract.sql',
-	'0029_cache_grant_contract.sql'
+	'0029_cache_grant_contract.sql',
+	'0030_cache_credential_lifecycle.sql'
 ];
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
