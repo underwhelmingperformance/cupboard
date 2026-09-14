@@ -680,18 +680,49 @@ export class DeletionQueueService {
 		generation: NarInfoGeneration,
 		now: IsoTimestamp
 	): void {
-		handle
-			.insert(schema.narInfoDeletions)
-			.values({ cache, storePathHash, narHash, generation, createdAt: now })
-			.onConflictDoUpdate({
-				target: [
-					schema.narInfoDeletions.cache,
-					schema.narInfoDeletions.storePathHash,
-					schema.narInfoDeletions.generation
-				],
-				set: { narHash, createdAt: now }
-			})
-			.run();
+		this.enqueueNarInfoDeletions(
+			handle,
+			cache,
+			[{ storePathHash, narHash, generation }],
+			now
+		);
+	}
+
+	/**
+	 * Queues narinfo versions for deletion, one statement per bound list. A
+	 * version already queued keeps its `created_at` and takes the incoming NAR
+	 * hash.
+	 */
+	enqueueNarInfoDeletions(
+		handle: SchemaWriter,
+		cache: StoredCache,
+		entries: readonly TornDownNarInfo[],
+		now: IsoTimestamp
+	): void {
+		for (const rows of jsonRowLists(entries)) {
+			handle
+				.insert(schema.narInfoDeletions)
+				.select(
+					rows.insertSource([
+						sql`${cache}`,
+						rows.column('storePathHash'),
+						rows.column('narHash'),
+						rows.column('generation'),
+						sql`${now}`
+					])
+				)
+				.onConflictDoUpdate({
+					target: [
+						schema.narInfoDeletions.cache,
+						schema.narInfoDeletions.storePathHash,
+						schema.narInfoDeletions.generation
+					],
+					// A conflicting row is the same deletion queued again, so it keeps
+					// the time it was first queued.
+					set: { narHash: sql`excluded.nar_hash` }
+				})
+				.run();
+		}
 	}
 
 	// The caller must hold the critical section. The row cap and the invocation's
