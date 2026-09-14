@@ -2,7 +2,12 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	rootNameSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootListResponse,
@@ -20,6 +25,8 @@ import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cacheScopedDouble } from '../test-support.ts';
+
 import {
 	describeExpiry,
 	type RootClient,
@@ -32,9 +39,21 @@ import {
 } from './root.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+const buildsCache = cacheNameSchema.parse('builds');
 
-type SetRootInput = Parameters<RootClient['set']>[0];
-type EnsureRootInput = Parameters<RootClient['ensure']>[0];
+interface RootWriteInput {
+	readonly cacheName?: string;
+	readonly name: string;
+	readonly targets: string[];
+	readonly ttlSeconds?: number;
+}
+
+interface ListPageInput {
+	readonly cacheName?: string;
+	readonly name?: string;
+	readonly cursor?: string;
+	readonly limit?: number;
+}
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
@@ -95,8 +114,8 @@ describe('rootListingAuthorizationDetails', () => {
 });
 
 describe('runRootSet', () => {
-	it('addresses the cache, sends the fields, and reports', async () => {
-		const calls: SetRootInput[] = [];
+	it('addresses the default cache, sends the fields, and reports', async () => {
+		const calls: RootWriteInput[] = [];
 		const results: ResultRow[][] = [];
 		const response = summary({
 			name: 'github:owner/repo/main',
@@ -111,7 +130,7 @@ describe('runRootSet', () => {
 		});
 
 		await runRootSet(
-			'_default',
+			DEFAULT_CACHE,
 			rootName('github:owner/repo/main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
@@ -121,7 +140,6 @@ describe('runRootSet', () => {
 
 		expect(calls).toStrictEqual([
 			{
-				cacheName: '_default',
 				name: 'github:owner/repo/main',
 				targets: [target],
 				ttlSeconds: 604_800
@@ -138,22 +156,22 @@ describe('runRootSet', () => {
 
 	it('rejects a target the client refuses', async () => {
 		const rejection = new RootClientRefusal('/tmp/nope');
-		const calls: SetRootInput[] = [];
+		const calls: RootWriteInput[] = [];
 
 		let error: unknown;
 		try {
 			await runRootSet(
-				'_default',
+				buildsCache,
 				rootName('main'),
 				['/tmp/nope'],
 				undefined,
 				reporter([]),
 				{
-					set(input) {
+					set: cacheScopedDouble((input) => {
 						calls.push(input);
 
 						return Promise.reject(rejection);
-					}
+					})
 				}
 			);
 		} catch (error_: unknown) {
@@ -165,7 +183,7 @@ describe('runRootSet', () => {
 			error: { target: '/tmp/nope' },
 			calls: [
 				{
-					cacheName: '_default',
+					cacheName: 'builds',
 					name: 'main',
 					targets: ['/tmp/nope']
 				}
@@ -203,28 +221,27 @@ describe('runRootEnsure', () => {
 			]
 		}
 	])('reports $name', async ({ response, expectedRows }) => {
-		const calls: EnsureRootInput[] = [];
+		const calls: RootWriteInput[] = [];
 		const results: ResultRow[][] = [];
 
 		await runRootEnsure(
-			'_default',
+			DEFAULT_CACHE,
 			rootName('main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
 			reporter(results),
 			{
-				ensure(input) {
+				ensure: cacheScopedDouble((input) => {
 					calls.push(input);
 
 					return Promise.resolve(response);
-				}
+				})
 			}
 		);
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [
 				{
-					cacheName: '_default',
 					name: 'main',
 					targets: [target],
 					ttlSeconds: 604_800
@@ -237,7 +254,7 @@ describe('runRootEnsure', () => {
 
 describe('runRootList', () => {
 	it('follows the cursor to exhaustion and reports a row per root', async () => {
-		const calls: Parameters<RootClient['list']>[0][] = [];
+		const calls: ListPageInput[] = [];
 		const results: ResultRow[][] = [];
 		const pages = [
 			rootListResponseSchema.parse({
@@ -255,8 +272,8 @@ describe('runRootList', () => {
 			})
 		];
 
-		await runRootList('_default', reporter(results), {
-			list(input) {
+		await runRootList(buildsCache, reporter(results), {
+			list: cacheScopedDouble((input) => {
 				calls.push(input);
 
 				const page = pages.shift();
@@ -266,14 +283,11 @@ describe('runRootList', () => {
 				}
 
 				return Promise.resolve(page);
-			}
+			})
 		});
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [
-				{ params: { cacheName: '_default' } },
-				{ params: { cacheName: '_default' }, query: { cursor: 'main' } }
-			],
+			calls: [{ cacheName: 'builds' }, { cacheName: 'builds', cursor: 'main' }],
 			results: [
 				[
 					{ label: 'main', value: '1 target(s); permanent' },
@@ -291,7 +305,7 @@ describe('runRootList', () => {
 		const infos: string[] = [];
 
 		await runRootList(
-			'_default',
+			DEFAULT_CACHE,
 			reporter(results, infos),
 			listClient({ roots: [] })
 		);
@@ -305,7 +319,7 @@ describe('runRootList', () => {
 
 describe('runRootTargets', () => {
 	it('follows the cursor to exhaustion and reports each target', async () => {
-		const calls: Parameters<RootClient['targets']>[0][] = [];
+		const calls: ListPageInput[] = [];
 		const results: ResultRow[][] = [];
 		const missingTarget = `/nix/store/${'b'.repeat(32)}-tool`;
 		const pages = [
@@ -324,8 +338,8 @@ describe('runRootTargets', () => {
 			})
 		];
 
-		await runRootTargets('_default', rootName('main'), reporter(results), {
-			targets(input) {
+		await runRootTargets(DEFAULT_CACHE, rootName('main'), reporter(results), {
+			targets: cacheScopedDouble((input) => {
 				calls.push(input);
 
 				const page = pages.shift();
@@ -335,16 +349,13 @@ describe('runRootTargets', () => {
 				}
 
 				return Promise.resolve(page);
-			}
+			})
 		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [
-				{ params: { cacheName: '_default', name: 'main' } },
-				{
-					params: { cacheName: '_default', name: 'main' },
-					query: { cursor: presentTarget().storePathHash }
-				}
+				{ name: 'main' },
+				{ name: 'main', cursor: presentTarget().storePathHash }
 			],
 			results: [
 				[
@@ -358,7 +369,7 @@ describe('runRootTargets', () => {
 
 describe('runRootRemove', () => {
 	it('removes the root and reports the outcome once confirmed', async () => {
-		const calls: { cacheName: string; name: string }[] = [];
+		const calls: { cacheName?: string; name: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 		const response = rootRemoveResponseSchema.parse({
 			name: 'pr-123',
@@ -366,7 +377,7 @@ describe('runRootRemove', () => {
 		});
 
 		await runRootRemove(
-			'builds',
+			buildsCache,
 			rootName('pr-123'),
 			ui,
 			removeClient(response, calls)
@@ -391,7 +402,7 @@ describe('runRootRemove', () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
 		await runRootRemove(
-			'builds',
+			buildsCache,
 			rootName('pr-123'),
 			ui,
 			removeClient(
@@ -444,14 +455,14 @@ function entry(
 
 function setRootClient(
 	response: ParsedRootSetResponse,
-	calls: SetRootInput[]
+	calls: RootWriteInput[]
 ): Pick<RootClient, 'set'> {
 	return {
-		set(input) {
+		set: cacheScopedDouble((input) => {
 			calls.push(input);
 
 			return Promise.resolve(response);
-		}
+		})
 	};
 }
 
@@ -459,16 +470,16 @@ function listClient(
 	response: ParsedRootListResponse
 ): Pick<RootClient, 'list'> {
 	return {
-		list: () => Promise.resolve(response)
+		list: cacheScopedDouble(() => Promise.resolve(response))
 	};
 }
 
 function removeClient(
 	response: ParsedRootRemoveResponse,
-	calls: { cacheName: string; name: string }[]
+	calls: { cacheName?: string; name: string }[]
 ): RootClient {
 	return {
-		ensure: (input) =>
+		ensure: cacheScopedDouble((input) =>
 			Promise.resolve({
 				status: 'retained',
 				root: summary({
@@ -479,8 +490,9 @@ function removeClient(
 						storePath
 					}))
 				})
-			}),
-		set: (input) =>
+			})
+		),
+		set: cacheScopedDouble((input) =>
 			Promise.resolve(
 				summary({
 					name: input.name,
@@ -490,13 +502,14 @@ function removeClient(
 						storePath
 					}))
 				})
-			),
-		list: () => Promise.resolve({ roots: [] }),
-		targets: () => Promise.resolve({ targets: [] }),
-		remove(input) {
+			)
+		),
+		list: cacheScopedDouble(() => Promise.resolve({ roots: [] })),
+		targets: cacheScopedDouble(() => Promise.resolve({ targets: [] })),
+		remove: cacheScopedDouble((input) => {
 			calls.push(input);
 
 			return Promise.resolve(response);
-		}
+		})
 	};
 }

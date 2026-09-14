@@ -1,10 +1,10 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { privateCacheOption } from '../cache-option.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { callInCache } from '../client/cache-scoped.ts';
 import {
 	type CacheSelectionOptions,
 	resolveCacheSelection
@@ -33,9 +33,7 @@ export function registerStatsCommand(
 			});
 
 			const stats = await reporter.phase('Querying cupboard', () =>
-				rpc.stats.cache({
-					cacheName: selectorForCache(resolveCacheSelection(options))
-				})
+				callInCache(rpc.stats.cache, resolveCacheSelection(options), {})
 			);
 
 			reporter.result({

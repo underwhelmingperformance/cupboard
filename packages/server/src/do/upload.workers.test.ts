@@ -371,7 +371,7 @@ describe('upload flow', () => {
 
 	it('rejects unauthenticated management requests', async () => {
 		const stats = await fetchPath(defaultCacheStatsPath);
-		const negotiate = await fetchPath('/cache/_default/uploads', {
+		const negotiate = await fetchPath('/uploads', {
 			body: JSON.stringify({ pushId: testPushId, paths: [] }),
 			headers: {
 				'content-type': 'application/json'
@@ -2900,7 +2900,7 @@ describe('upload flow', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		const response = await authorisedFetch('/cache/_default/uploads', token, {
+		const response = await authorisedFetch('/uploads', token, {
 			body: JSON.stringify({
 				pushId: testPushId,
 				paths: [{ ...uploadPathNegotiation(metadata), ...fields }]
@@ -2939,7 +2939,7 @@ describe('upload flow', () => {
 
 	it('rejects malformed JSON upload requests', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch('/cache/_default/uploads', token, {
+		const response = await authorisedFetch('/uploads', token, {
 			body: '{',
 			headers: {
 				'content-type': 'application/json'
@@ -3359,7 +3359,7 @@ describe('upload flow', () => {
 
 	it('rejects an unauthenticated delete', async () => {
 		const response = await fetchPath(
-			'/cache/_default/paths/11111111111111111111111111111111',
+			'/paths/11111111111111111111111111111111',
 			{
 				method: 'DELETE'
 			}
@@ -3370,13 +3370,9 @@ describe('upload flow', () => {
 
 	it('rejects a malformed store path hash', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch(
-			'/cache/_default/paths/not-a-valid-hash',
-			token,
-			{
-				method: 'DELETE'
-			}
-		);
+		const response = await authorisedFetch('/paths/not-a-valid-hash', token, {
+			method: 'DELETE'
+		});
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
@@ -3522,15 +3518,11 @@ describe('upload flow', () => {
 
 			// Root replacement is atomic: an unservable target must leave the existing
 			// target set intact.
-			const response = await authorisedFetch(
-				'/cache/_default/roots/main',
-				token,
-				{
-					body: JSON.stringify({ targets: [committed.storePath, absentPath] }),
-					headers: { 'content-type': 'application/json' },
-					method: 'PUT'
-				}
-			);
+			const response = await authorisedFetch('/roots/main', token, {
+				body: JSON.stringify({ targets: [committed.storePath, absentPath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
 			const { roots } = await listRoots(token);
 
 			expect({ status: response.status, roots }).toStrictEqual({
@@ -3595,18 +3587,14 @@ describe('upload flow', () => {
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 			await commitPath(token, committed);
 
-			const response = await authorisedFetch(
-				'/cache/_default/roots/pr-1/ensure',
-				token,
-				{
-					body: JSON.stringify({
-						targets: [committed.storePath],
-						ttlSeconds: 604_800
-					}),
-					headers: { 'content-type': 'application/json' },
-					method: 'POST'
-				}
-			);
+			const response = await authorisedFetch('/roots/pr-1/ensure', token, {
+				body: JSON.stringify({
+					targets: [committed.storePath],
+					ttlSeconds: 604_800
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
 			const body = await response.json();
 			const expiresAt = new Date(testBase.getTime() + 604_800 * 1000);
 
@@ -3641,15 +3629,11 @@ describe('upload flow', () => {
 				targets: [committed.storePath]
 			});
 
-			const response = await authorisedFetch(
-				'/cache/_default/roots/main/ensure',
-				token,
-				{
-					body: JSON.stringify({ targets: [absentPath] }),
-					headers: { 'content-type': 'application/json' },
-					method: 'POST'
-				}
-			);
+			const response = await authorisedFetch('/roots/main/ensure', token, {
+				body: JSON.stringify({ targets: [absentPath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
 			const body = await response.json();
 			const { roots } = await listRoots(token);
 
@@ -3679,15 +3663,11 @@ describe('upload flow', () => {
 				'orphaned'
 			);
 
-			const response = await authorisedFetch(
-				'/cache/_default/roots/main/ensure',
-				token,
-				{
-					body: JSON.stringify({ targets: [orphaned.storePath] }),
-					headers: { 'content-type': 'application/json' },
-					method: 'POST'
-				}
-			);
+			const response = await authorisedFetch('/roots/main/ensure', token, {
+				body: JSON.stringify({ targets: [orphaned.storePath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
 			const body = await response.json();
 			const { roots } = await listRoots(token);
 
@@ -3780,18 +3760,18 @@ describe('upload flow', () => {
 
 		it('requires auth for the root routes', async () => {
 			const target = '/nix/store/11111111111111111111111111111111-a';
-			const set = await fetchPath('/cache/_default/roots/main', {
+			const set = await fetchPath('/roots/main', {
 				body: JSON.stringify({ targets: [target] }),
 				headers: { 'content-type': 'application/json' },
 				method: 'PUT'
 			});
-			const list = await fetchPath('/cache/_default/roots');
-			const ensure = await fetchPath('/cache/_default/roots/main/ensure', {
+			const list = await fetchPath('/roots');
+			const ensure = await fetchPath('/roots/main/ensure', {
 				body: JSON.stringify({ targets: [target] }),
 				headers: { 'content-type': 'application/json' },
 				method: 'POST'
 			});
-			const remove = await fetchPath('/cache/_default/roots/main', {
+			const remove = await fetchPath('/roots/main', {
 				method: 'DELETE'
 			});
 
@@ -3813,13 +3793,13 @@ describe('upload flow', () => {
 		it.each([
 			{
 				name: 'a target that is not a store path',
-				path: '/cache/_default/roots/main',
+				path: '/roots/main',
 				method: 'PUT',
 				body: { targets: ['not-a-store-path'] }
 			},
 			{
 				name: 'an ensure over no targets',
-				path: '/cache/_default/roots/main/ensure',
+				path: '/roots/main/ensure',
 				method: 'POST',
 				body: { targets: [] }
 			}
@@ -4194,17 +4174,13 @@ describe('upload flow', () => {
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
 			const stats = await authorisedFetch(defaultCacheStatsPath, token);
-			const rootResponse = await authorisedFetch(
-				'/cache/_default/roots/main',
-				token,
-				{
-					body: JSON.stringify({
-						targets: ['/nix/store/11111111111111111111111111111111-a']
-					}),
-					headers: { 'content-type': 'application/json' },
-					method: 'PUT'
-				}
-			);
+			const rootResponse = await authorisedFetch('/roots/main', token, {
+				body: JSON.stringify({
+					targets: ['/nix/store/11111111111111111111111111111111-a']
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
 
 			expect([stats.status, rootResponse.status]).toStrictEqual([
 				StatusCodes.OK,
@@ -4224,18 +4200,14 @@ describe('upload flow', () => {
 				'ci'
 			);
 
-			const rootResponse = await authorisedFetch(
-				'/cache/_default/roots/main',
-				writeToken,
-				{
-					body: JSON.stringify({ targets: [target] }),
-					headers: { 'content-type': 'application/json' },
-					method: 'PUT'
-				}
-			);
+			const rootResponse = await authorisedFetch('/roots/main', writeToken, {
+				body: JSON.stringify({ targets: [target] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
 			const stats = await authorisedFetch(defaultCacheStatsPath, writeToken);
 			const removed = await authorisedFetch(
-				'/cache/_default/paths/11111111111111111111111111111111',
+				'/paths/11111111111111111111111111111111',
 				writeToken,
 				{ method: 'DELETE' }
 			);

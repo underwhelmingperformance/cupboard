@@ -217,7 +217,7 @@ describe('attestation attach and reads', () => {
 		);
 
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
-		const path = `/cache/_default/attestations/${decision.uploadId}/attach`;
+		const path = `/attestations/${decision.uploadId}/attach`;
 		const first = await authorisedWorkerFetch(path, token, { method: 'POST' });
 		const repeated = await authorisedWorkerFetch(path, token, {
 			method: 'POST'
@@ -569,7 +569,7 @@ describe('attestation attach and reads', () => {
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const response = await authorisedWorkerFetch(
-			`/cache/_default/attestations/${decision.uploadId}/attach`,
+			`/attestations/${decision.uploadId}/attach`,
 			token,
 			{ method: 'POST' }
 		);
@@ -638,15 +638,11 @@ describe('attestation attach and reads', () => {
 		const heads = vi.spyOn(env.BLOBS, 'head');
 
 		try {
-			const response = await authorisedWorkerFetch(
-				'/cache/_default/attestations',
-				token,
-				{
-					body: JSON.stringify({ pushId: testPushId, bundles }),
-					headers: { 'content-type': 'application/json' },
-					method: 'POST'
-				}
-			);
+			const response = await authorisedWorkerFetch('/attestations', token, {
+				body: JSON.stringify({ pushId: testPushId, bundles }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
 
 			expect(response.status).toBe(StatusCodes.OK);
 
@@ -684,15 +680,11 @@ describe('attestation attach and reads', () => {
 			}))
 		];
 
-		const response = await authorisedWorkerFetch(
-			'/cache/_default/attestations',
-			token,
-			{
-				body: JSON.stringify({ pushId: testPushId, bundles }),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			}
-		);
+		const response = await authorisedWorkerFetch('/attestations', token, {
+			body: JSON.stringify({ pushId: testPushId, bundles }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
 		expect(response.status).toBe(StatusCodes.OK);
 		const body = attestationNegotiateResponseSchema.parse(
 			await response.json()
@@ -778,7 +770,7 @@ async function attachBundleResponse(
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	return authorisedWorkerFetch(
-		`/cache/_default/attestations/${decision.uploadId}/attach`,
+		`/attestations/${decision.uploadId}/attach`,
 		token,
 		{ method: 'POST' }
 	);
@@ -789,18 +781,14 @@ async function negotiate(
 	pathHash: string,
 	digest: Sha256HexDigest
 ): Promise<ParsedAttestationDecision> {
-	const response = await authorisedWorkerFetch(
-		'/cache/_default/attestations',
-		token,
-		{
-			body: JSON.stringify({
-				pushId: testPushId,
-				bundles: [{ storePathHash: pathHash, digest }]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const response = await authorisedWorkerFetch('/attestations', token, {
+		body: JSON.stringify({
+			pushId: testPushId,
+			bundles: [{ storePathHash: pathHash, digest }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = attestationNegotiateResponseSchema.parse(await response.json());
 	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
@@ -815,19 +803,14 @@ async function negotiateTenant(
 	digest: Sha256HexDigest
 ): Promise<ParsedAttestationDecision> {
 	const pushId = await testPushIdFor(tenant);
-	const response = await tenantFetch(
-		tenant,
-		'/cache/_default/attestations',
-		token,
-		{
-			body: JSON.stringify({
-				pushId,
-				bundles: [{ storePathHash: pathHash, digest }]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const response = await tenantFetch(tenant, '/attestations', token, {
+		body: JSON.stringify({
+			pushId,
+			bundles: [{ storePathHash: pathHash, digest }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = attestationNegotiateResponseSchema.parse(await response.json());
 	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
@@ -863,19 +846,14 @@ async function pushPathThroughTenant(
 	nar: Awaited<ReturnType<typeof verifiableNar>>
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
-	const negotiated = await tenantFetch(
-		tenant,
-		'/cache/_default/uploads',
-		token,
-		{
-			body: JSON.stringify({
-				pushId,
-				paths: [uploadPathNegotiation(metadata)]
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		}
-	);
+	const negotiated = await tenantFetch(tenant, '/uploads', token, {
+		body: JSON.stringify({
+			pushId,
+			paths: [uploadPathNegotiation(metadata)]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const body = uploadNegotiateResponseSchema.parse(await negotiated.json());
 	const [decision] = z.tuple([uploadActionDecisionSchema]).parse(body.uploads);

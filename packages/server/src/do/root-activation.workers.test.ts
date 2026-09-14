@@ -89,15 +89,11 @@ describe('root activation gating', () => {
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
-		const response = await authorisedFetch(
-			'/cache/_default/roots/main',
-			token,
-			{
-				body: JSON.stringify({ targets: [metadata.storePath] }),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
+		const response = await authorisedFetch('/roots/main', token, {
+			body: JSON.stringify({ targets: [metadata.storePath] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
 		const { roots } = await listRoots(token);
 
 		expect({ status: response.status, roots }).toStrictEqual({
