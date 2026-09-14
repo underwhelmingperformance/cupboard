@@ -1,4 +1,5 @@
 import {
+	DEFAULT_CACHE,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -24,6 +25,7 @@ import {
 	commitPath,
 	commitSharedPath,
 	CommitSocketError,
+	commitUpload,
 	commitUploadRejection,
 	CommitVerdictError,
 	currentServer,
@@ -62,6 +64,14 @@ async function divergentEncodings(
 	expect(large.narBytes.byteLength).toBeGreaterThan(small.narBytes.byteLength);
 
 	return { small, large };
+}
+
+// Models a tenant whose creation wrote the tenant row but not its usage row.
+async function dropFixtureTenantUsage(): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.delete(d1Schema.tenantUsage)
+		.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+		.run();
 }
 
 function expectCommitSocketError(
@@ -247,6 +257,105 @@ describe('per-tenant quota', () => {
 				quotaBytes: nar.narBytes.byteLength - 1
 			}
 		});
+	});
+
+	it('refuses a commit for a tenant whose usage row is missing', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('quota-usage-row-missing');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(decision.r2Key, nar);
+		await dropFixtureTenantUsage();
+		const commitError = await commitUploadRejection(token, decision.uploadId);
+
+		expectCommitSocketError(commitError);
+		expect({
+			error: { name: commitError.name, status: commitError.status },
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			error: {
+				name: 'CommitSocketError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR
+			},
+			edges: [],
+			presence: [],
+			usage: undefined
+		});
+	});
+
+	it('refuses a retry of a deferred commit once the usage row is gone', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('quota-usage-row-gone-retry');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(decision.r2Key, nar);
+		// The first commit reserves the narinfo row and defers to verification.
+		await commitUpload(token, decision.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
+		await dropFixtureTenantUsage();
+		const retryError = await commitUploadRejection(
+			token,
+			decision.uploadId,
+			DEFAULT_CACHE,
+			{ wait: false }
+		);
+
+		expectCommitSocketError(retryError);
+		expect({
+			error: { name: retryError.name, status: retryError.status },
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows()
+		}).toStrictEqual({
+			error: {
+				name: 'CommitSocketError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR
+			},
+			edges: [],
+			presence: []
+		});
+	});
+
+	it('stores nothing for a deferred upload whose tenant lost its usage row', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(
+			token,
+			'quota-usage-row-gone',
+			'a'.repeat(32)
+		);
+
+		await dropFixtureTenantUsage();
+		await verifyCurrentTenant();
+
+		expect({
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			verdict: await pendingUploadVerdict(upload.uploadId)
+		}).toStrictEqual({ edges: [], presence: [], verdict: 'pending' });
 	});
 
 	it('rejects a NAR commit when CAS usage has consumed the quota', async () => {

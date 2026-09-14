@@ -178,16 +178,19 @@ describe('batched verify fault isolation', () => {
 			instance.context.discovery = marker;
 		});
 
-		// Fail the D1 status re-check that runs inside the settle's critical
-		// section. The runtime breaks the whole object when the gated callback
-		// itself throws, so the fault must surface as an ordinary rejection the
-		// caller's per-verdict isolation absorbs.
-		const statusQuery = 'select "status" from "tenant"';
+		// Fail the charge batch's leading read, which runs inside the settle's
+		// critical section. The runtime breaks the whole object when the gated
+		// callback itself throws, so the fault must surface as an ordinary
+		// rejection the caller's per-verdict isolation absorbs. The prefix ends
+		// at `from`, so it does not match the advisory account read, which
+		// selects the usage counters after the same two columns.
+		const gateQuery =
+			'select "tenant"."status", "tenant_usage"."tenant" from "tenant"';
 		const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
 		const prepare = vi
 			.spyOn(env.CUPBOARD_DB, 'prepare')
 			.mockImplementation((query) => {
-				if (typeof query === 'string' && query.startsWith(statusQuery)) {
+				if (typeof query === 'string' && query.startsWith(gateQuery)) {
 					throw new Error('simulated D1 outage');
 				}
 

@@ -21,10 +21,15 @@ export const keysContract = {
 	// Nix verifies narinfo signatures with these keys.
 	signing: {
 		list: baseProcedure
-			.meta({ requires: 'signing-key:list' })
+			.meta({ requires: 'signing-key:list', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/keys' })
 			.output(keyListResponseSchema),
 
+		// Rotation keeps the default. It inserts a key with a new id, advances the
+		// generation sequence and starts a backfill, so a retry either meets the
+		// first attempt's unfinished backfill and returns the conflict below, or
+		// creates a second key once that backfill has completed. Auth-key rotation
+		// inserts a key with a fresh `kid` on every call.
 		rotate: baseProcedure
 			.meta({ requires: 'signing-key:rotate' })
 			.route({ method: 'POST', path: '/keys/rotate' })
@@ -64,7 +69,7 @@ export const keysContract = {
 	// Auth-token keys rotate independently of the narinfo keys.
 	auth: {
 		list: baseProcedure
-			.meta({ requires: 'auth-key:list' })
+			.meta({ requires: 'auth-key:list', replaySafety: 'replay-safe' })
 			.route({ method: 'GET', path: '/keys/auth' })
 			.output(authKeyListResponseSchema),
 

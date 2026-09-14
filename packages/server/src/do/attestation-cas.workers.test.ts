@@ -15,7 +15,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { reserveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
+import {
+	StatementAllowanceExceededError,
+	UploadedObjectNotFoundError
+} from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
 import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -44,6 +47,10 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { boundedD1 } from './bounded-io.ts';
+import { withStatementAllowance } from './statement-scope.ts';
+
 const textEncoder = new TextEncoder();
 const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
@@ -57,6 +64,152 @@ describe('attestation CAS lifecycle', () => {
 		await resetTestServer();
 		await clearBlobStorage();
 	});
+
+	it.each(['suspended', 'offboarding', 'missing-usage'])(
+		'refuses a CAS charge when %s wins after preflight',
+		async (change) => {
+			const staging = await stageAttestationBundle(
+				'charge-gate-race',
+				textEncoder.encode('bundle')
+			);
+			const measured = await currentServer().measureAttestationBundle(staging);
+			await currentServer().promoteAttestationBundle(staging, measured);
+			const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+			const objects = await casObjectRows();
+			let expectedUsage = await tenantUsageRow();
+			let didChange = false;
+			const spy = vi
+				.spyOn(env.CUPBOARD_DB, 'batch')
+				.mockImplementation(async (statements) => {
+					if (!didChange && statements.length > 2) {
+						didChange = true;
+						if (change === 'missing-usage') {
+							await env.CUPBOARD_DB.prepare(
+								'DELETE FROM tenant_usage WHERE tenant = ?'
+							)
+								.bind(fixtureTenant)
+								.run();
+						} else {
+							await env.CUPBOARD_DB.prepare(
+								'UPDATE tenant SET status = ? WHERE id = ?'
+							)
+								.bind(change, fixtureTenant)
+								.run();
+						}
+						expectedUsage = await tenantUsageRow();
+					}
+					return originalBatch(statements);
+				});
+			try {
+				await runInDurableObject(currentServer(), async (instance) => {
+					await expect(
+						instance.reserveAttestationReference(
+							{
+								cache: '' as const,
+								storePathHash,
+								generation: narInfoGenerationSchema.parse(0),
+								predicateType,
+								digest: measured.digest
+							},
+							measured.size
+						)
+					).rejects.toThrow(
+						change === 'missing-usage'
+							? 'has no usage row'
+							: 'Writes for this tenant are stopped'
+					);
+				});
+				expect({
+					didChange,
+					refs: await attestationReferenceRows(),
+					presence: await tenantCasBlobRows(),
+					objects: await casObjectRows(),
+					usage: await tenantUsageRow()
+				}).toStrictEqual({
+					didChange: true,
+					refs: [],
+					presence: [],
+					objects,
+					usage: expectedUsage
+				});
+			} finally {
+				spy.mockRestore();
+			}
+		}
+	);
+
+	it.each([7, 8])(
+		'admits a CAS charge atomically with %i statements available',
+		async (allowance) => {
+			const staging = await stageAttestationBundle(
+				'charge-budget',
+				textEncoder.encode('bundle')
+			);
+			const measured = await currentServer().measureAttestationBundle(staging);
+			await currentServer().promoteAttestationBundle(staging, measured);
+			const objects = await casObjectRows();
+			const reference = {
+				cache: '' as const,
+				storePathHash,
+				generation: narInfoGenerationSchema.parse(0),
+				predicateType,
+				digest: measured.digest
+			};
+			const outcome = await runInDurableObject(
+				currentServer(),
+				async (instance) => {
+					const original = instance.context.d1;
+					Object.defineProperty(instance.context, 'd1', {
+						configurable: true,
+						value: drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema })
+					});
+					try {
+						return await withStatementAllowance(async () => {
+							try {
+								return await new AttestationCasService(
+									instance.context
+								).reserveReferenceAndCharge(reference, measured.size);
+							} catch (error) {
+								if (error instanceof StatementAllowanceExceededError) {
+									return 'refused';
+								}
+								throw error;
+							}
+						}, allowance);
+					} finally {
+						Object.defineProperty(instance.context, 'd1', {
+							configurable: true,
+							value: original
+						});
+					}
+				}
+			);
+			if (allowance === 8) {
+				expect({
+					outcome,
+					refs: await attestationReferenceRows(),
+					presence: await tenantCasBlobRows()
+				}).toStrictEqual({
+					outcome: 'referenced',
+					refs: [{ tenant: fixtureTenant, ...reference }],
+					presence: [
+						{
+							tenant: fixtureTenant,
+							digest: measured.digest,
+							size: measured.size
+						}
+					]
+				});
+				return;
+			}
+			expect({
+				outcome,
+				refs: await attestationReferenceRows(),
+				presence: await tenantCasBlobRows(),
+				objects: await casObjectRows()
+			}).toStrictEqual({ outcome: 'refused', refs: [], presence: [], objects });
+		}
+	);
 
 	it('promotes a measured bundle into the shared CAS', async () => {
 		const stagingKey = await stageAttestationBundle(
