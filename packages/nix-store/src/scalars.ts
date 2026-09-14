@@ -488,6 +488,17 @@ export const cacheGenerationSchema = z
 	.brand('CacheGeneration');
 export type CacheGeneration = z.infer<typeof cacheGenerationSchema>;
 
+// The read revision of one cache: a counter that changes when the cache's read
+// behaviour changes. A deletion advances it. The Workers Cache key carries it,
+// so a response stored under an earlier revision is not served.
+export const cacheReadRevisionSchema = z
+	.number()
+	.int()
+	.min(1)
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('CacheReadRevision');
+export type CacheReadRevision = z.infer<typeof cacheReadRevisionSchema>;
+
 export const compressionSchema = z.literal('zstd');
 
 export const referencesSchema = z
