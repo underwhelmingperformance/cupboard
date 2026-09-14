@@ -409,13 +409,19 @@ describe('tenant contract round trip', () => {
 			chargedBlobs: usage.narBlobs,
 			report: {
 				narInfosChecked: report.narInfosChecked,
-				complete: report.complete,
+				cursor: report.cursor,
+				cursorCache: report.cursorCache,
 				discrepancies: report.discrepancies
 			}
 		}).toStrictEqual({
 			storePaths: 1,
 			chargedBlobs: 1,
-			report: { narInfosChecked: 1, complete: true, discrepancies: [] }
+			report: {
+				narInfosChecked: 1,
+				cursor: '',
+				cursorCache: '',
+				discrepancies: []
+			}
 		});
 	});
 

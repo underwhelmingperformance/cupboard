@@ -36,8 +36,10 @@ export const internalOrigin = requestOriginSchema.parse(
 	'https://cupboard.local'
 );
 
-// `GET /check` is a bounded one-shot scan. Its response reports when more
-// committed narinfos remain.
+// The narinfo rows one `GET /check` pass examines. A pass probes every row's
+// narinfo object and every distinct NAR, and a deep pass also reads each NAR
+// back, so a pass makes at most 3,000 R2 requests, which
+// `subrequest-budget.test.ts` checks against `subrequestsPerInvocation`.
 export const checkBatchSize = 1000;
 
 // Each `POST /verify` pass advances one cursor batch and wraps after the final
@@ -86,9 +88,13 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export const blobReaperBatchSize = 500;
 
-// Workers Free permits 50 D1 statements in one invocation, counting each
-// statement of a batch. The D1 binding holds every maintenance invocation to
-// this allowance and refuses the statement that would exceed it.
+// Fifty D1 statements in one invocation, counting each statement of a batch.
+// The D1 binding holds every maintenance invocation to this allowance and
+// refuses the statement that would exceed it.
+//
+// Fifty is the Workers Free figure. A paid plan permits more, and raising this
+// needs that plan's figure; a lower allowance costs extra invocations and
+// never a refused statement.
 export const d1StatementsPerInvocation = 50;
 
 export const objectDeletionBatchSize = d1StatementsPerInvocation - 1;
