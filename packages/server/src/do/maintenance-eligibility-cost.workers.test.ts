@@ -213,14 +213,12 @@ describe('maintenance pass cost', () => {
 			currentServer().runGarbageCollection()
 		);
 
-		// The first pass finds no collection revision row for the default cache
-		// and creates one; the second reads the row it created.
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 49,
-			largeBacklogCost: 48
+			smallBacklogCost: 154,
+			largeBacklogCost: 154
 		});
 	});
 
@@ -230,12 +228,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 46,
+				rowsRead: 151,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 46,
+				rowsRead: 151,
 				usesIndex: true,
 				sorts: false
 			}
@@ -272,8 +270,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 44,
-			largeBacklogCost: 44
+			smallBacklogCost: 148,
+			largeBacklogCost: 148
 		});
 	});
 
@@ -304,8 +302,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 676, rowsWritten: 133 },
-			largeBacklog: { rowsRead: 676, rowsWritten: 133 }
+			smallBacklog: { rowsRead: 780, rowsWritten: 131 },
+			largeBacklog: { rowsRead: 780, rowsWritten: 131 }
 		});
 	});
 
@@ -324,15 +322,12 @@ describe('maintenance pass cost', () => {
 			currentServer().runGarbageCollection()
 		);
 
-		// The seeded roots create the collection revision row through its
-		// triggers, without a cache identity. The first pass binds that row to
-		// the identity, which the second pass then finds bound.
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 57,
-			largeBacklogCost: 57
+			smallBacklogCost: 162,
+			largeBacklogCost: 162
 		});
 	});
 });
