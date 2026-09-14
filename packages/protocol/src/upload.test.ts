@@ -62,17 +62,29 @@ describe('uploadNegotiateRequestSchema', () => {
 
 	it.each([
 		{
-			name: 'a run root with no ttl',
+			name: 'a run root which inherits retention',
 			attachRoot: { name: 'github:owner/repo/pr-1' }
 		},
 		{
-			name: 'a run root with a ttl',
-			attachRoot: { name: 'ci', ttlSeconds: 86_400 }
+			name: 'a run root with a duration',
+			attachRoot: {
+				name: 'ci',
+				retention: { kind: 'duration', seconds: 86_400 }
+			}
 		}
 	])('accepts a request attaching $name', ({ attachRoot }) => {
 		const value = { pushId, paths: [negotiationPath], attachRoot };
 
-		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual({
+			...value,
+			attachRoot: {
+				...value.attachRoot,
+				retention:
+					'retention' in value.attachRoot
+						? value.attachRoot.retention
+						: { kind: 'inherit' }
+			}
+		});
 	});
 
 	it.each([
@@ -88,13 +100,23 @@ describe('uploadNegotiateRequestSchema', () => {
 		},
 		{
 			name: 'a ttl above the root bound',
-			attachRoot: { name: 'ci', ttlSeconds: rootTtlMaxSeconds + 1 },
-			issues: [{ code: 'too_big', path: ['attachRoot', 'ttlSeconds'] }]
+			attachRoot: {
+				name: 'ci',
+				retention: { kind: 'duration', seconds: rootTtlMaxSeconds + 1 }
+			},
+			issues: [
+				{ code: 'too_big', path: ['attachRoot', 'retention', 'seconds'] }
+			]
 		},
 		{
 			name: 'a ttl below the root bound',
-			attachRoot: { name: 'ci', ttlSeconds: 0 },
-			issues: [{ code: 'too_small', path: ['attachRoot', 'ttlSeconds'] }]
+			attachRoot: {
+				name: 'ci',
+				retention: { kind: 'duration', seconds: 0 }
+			},
+			issues: [
+				{ code: 'too_small', path: ['attachRoot', 'retention', 'seconds'] }
+			]
 		},
 		{
 			name: 'an unknown key',
@@ -275,7 +297,7 @@ describe('uploadDecisionSchema', () => {
 
 describe('uploadGraceFactSchema', () => {
 	it.each([
-		{ name: 'no policy fact', value: {} },
+		{ name: 'no configured grace fact', value: {} },
 		{
 			name: 'a stored deadline',
 			value: { retainUntil: '2026-01-02T00:00:00.000Z' }
@@ -323,7 +345,7 @@ describe('uploadPreviewResponseSchema', () => {
 			}
 		},
 		{
-			name: 'upload with no matching policy',
+			name: 'upload with no configured grace',
 			value: { action: 'upload', storePathHash, narHash, grace: {} }
 		},
 		{
@@ -406,7 +428,7 @@ describe('uploadConfirmResponseSchema', () => {
 			}
 		},
 		{
-			name: 'a confirmed path with no matching policy',
+			name: 'a confirmed path with no configured grace',
 			value: { storePathHash, confirmed: true, grace: {} }
 		},
 		{

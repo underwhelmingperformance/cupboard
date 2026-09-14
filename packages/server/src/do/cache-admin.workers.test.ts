@@ -4,7 +4,8 @@ import {
 	type CacheScope,
 	storedCacheSchema,
 	storePathHashSchema,
-	storePathSchema
+	storePathSchema,
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import type {
 	CacheListResponseInput,
@@ -161,13 +162,13 @@ async function policyIdentityRows(): Promise<
 	const rows = await runInDurableObject(currentServer(), (instance) =>
 		instance.context.db
 			.select({
-				pattern: schema.retentionPolicies.pattern,
-				kind: schema.retentionPolicies.kind,
-				cacheId: schema.retentionPolicies.cacheId,
-				rootNamePrefix: schema.retentionPolicies.rootNamePrefix
+				pattern: schema.legacyRetentionPolicies.pattern,
+				kind: schema.legacyRetentionPolicies.kind,
+				cacheId: schema.legacyRetentionPolicies.cacheId,
+				rootNamePrefix: schema.legacyRetentionPolicies.rootNamePrefix
 			})
-			.from(schema.retentionPolicies)
-			.orderBy(schema.retentionPolicies.pattern)
+			.from(schema.legacyRetentionPolicies)
+			.orderBy(schema.legacyRetentionPolicies.pattern)
 			.all()
 	);
 
@@ -400,6 +401,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -407,6 +411,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 1,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			}
 		]);
@@ -456,6 +463,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 40,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -463,6 +473,9 @@ describe('cache registry admin', () => {
 				access: 'public',
 				priority: 30,
 				storePaths: 0,
+				defaultRootRetention: { kind: 'permanent' },
+				grace: { kind: 'none' },
+				rootRetentionOverrides: [],
 				graceManaged: true,
 				earliestGraceDeadline: earlierLiveDeadline
 			}
@@ -608,68 +621,6 @@ describe('cache registry admin', () => {
 				roots: [{ cacheId: 2 }],
 				targets: [{ cacheId: 2 }]
 			}
-		});
-	});
-
-	it('records the identity of the cache a policy names', async () => {
-		await useTestServer('cache-admin-identity-policy');
-
-		const init = await bootstrap();
-		const addPolicy = (body: unknown): Promise<Response> =>
-			authorisedFetch('/policies', init.token, {
-				body: JSON.stringify(body),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			});
-
-		// A cache-scoped policy names a cache, so it can only be added once that
-		// cache exists.
-		const beforeCache = await addPolicy({
-			scope: 'cache',
-			cache: buildsCache,
-			ttlSeconds: 3600
-		});
-
-		await putCache(init.token, 'builds', 40);
-		await putCache(init.token, 'guides', 40, 'private');
-		await addPolicy({ scope: 'cache', cache: buildsCache, ttlSeconds: 3600 });
-		await addPolicy({
-			scope: 'cache',
-			cache: namedCache('guides'),
-			ttlSeconds: 3600
-		});
-		await addPolicy({
-			scope: 'root-name-prefix',
-			pattern: 'release/',
-			ttlSeconds: 7200
-		});
-
-		expect({
-			beforeCache: beforeCache.status,
-			policies: await policyIdentityRows()
-		}).toStrictEqual({
-			beforeCache: StatusCodes.NOT_FOUND,
-			policies: [
-				{
-					pattern: 'builds',
-					kind: 'cache',
-					cacheId: 2,
-					rootNamePrefix: undefined
-				},
-				// The legacy pattern still spells out a private cache's access.
-				{
-					pattern: 'private/guides',
-					kind: 'cache',
-					cacheId: 3,
-					rootNamePrefix: undefined
-				},
-				{
-					pattern: 'release/',
-					kind: 'root-name-prefix',
-					cacheId: undefined,
-					rootNamePrefix: 'release/'
-				}
-			]
 		});
 	});
 
@@ -995,28 +946,40 @@ describe('cache registry admin', () => {
 		});
 	});
 
-	// A policy scoped to a cache that has been torn down would refer to a deleted
-	// identity; every policy read resolves each policy's cache, so one such
-	// policy would fail every root write of the tenant.
 	it('removes the policies scoped to a cache it tears down', async () => {
 		await useTestServer('cache-admin-teardown-policies');
 
 		const init = await bootstrap();
-		const addPolicy = (body: unknown): Promise<Response> =>
-			authorisedFetch('/policies', init.token, {
-				body: JSON.stringify(body),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			});
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await putCache(init.token, 'builds', 40);
 		await pushPath(init.token, metadata);
-		await addPolicy({ scope: 'cache', cache: buildsCache, ttlSeconds: 3600 });
-		await addPolicy({
-			scope: 'root-name-prefix',
-			pattern: 'release/',
-			ttlSeconds: 7200
+		await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(buildsCache);
+			const createdAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+			instance.context.db
+				.insert(schema.legacyRetentionPolicies)
+				.values([
+					{
+						id: 'cache-policy',
+						scope: 'cache',
+						pattern: 'builds',
+						kind: 'cache',
+						cacheId: cache.id,
+						defaultTtlSeconds: ttlSecondsSchema.parse(3600),
+						createdAt
+					},
+					{
+						id: 'prefix-policy',
+						scope: 'root-name-prefix',
+						pattern: 'release/',
+						kind: 'root-name-prefix',
+						rootNamePrefix: 'release/',
+						defaultTtlSeconds: ttlSecondsSchema.parse(7200),
+						createdAt
+					}
+				])
+				.run();
 		});
 		await authorisedFetch('/caches/builds?force=true', init.token, {
 			method: 'DELETE'
@@ -1497,6 +1460,9 @@ describe('cache registry admin', () => {
 					access: 'public',
 					priority: 30,
 					storePaths: 0,
+					defaultRootRetention: { kind: 'permanent' },
+					grace: { kind: 'none' },
+					rootRetentionOverrides: [],
 					graceManaged: false
 				}
 			},

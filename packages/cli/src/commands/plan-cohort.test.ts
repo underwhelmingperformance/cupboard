@@ -30,7 +30,9 @@ const defaultCache: CacheScope = { kind: 'default' };
 interface RootEnsureBody {
 	readonly name: string;
 	readonly targets: string[];
-	readonly ttlSeconds?: number;
+	readonly retention:
+		| { readonly kind: 'inherit' | 'permanent' }
+		| { readonly kind: 'duration'; readonly seconds: number };
 }
 import {
 	type AvailabilityPartition,
@@ -162,6 +164,7 @@ function runOptions(
 	return {
 		targets: [],
 		cache: defaultCache,
+		retention: { kind: 'inherit' },
 		storeIdentity: { kind: 'daemon' },
 		plannedSubstitutionPolicy: {
 			kind: 'known',
@@ -226,6 +229,34 @@ function reporter(payloads: ResultPayload[]): Reporter {
 }
 
 describe('runPlanCohort', () => {
+	it('ensures the publication root with explicit permanent retention', async () => {
+		const rootClient = recordingRootClient(buildRequired([]));
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		try {
+			await runPlanCohort(
+				runOptions({
+					targets: [target()],
+					retention: { kind: 'permanent' },
+					planFile: path.join(directory, 'plan.json')
+				}),
+				reporter([]),
+				dependencies({ rootClient })
+			);
+			expect(rootClient.ensure.calls).toStrictEqual([
+				{
+					cache: defaultCache,
+					input: {
+						name: appRoot,
+						targets: [appPath],
+						retention: { kind: 'permanent' }
+					}
+				}
+			]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('computes the partition, checks capacity, writes the plan file and reports the result', async () => {
 		const payloads: ResultPayload[] = [];
 		const rootClient = recordingRootClient(buildRequired([]));
@@ -251,7 +282,11 @@ describe('runPlanCohort', () => {
 			expect(rootClient.ensure.calls).toStrictEqual([
 				{
 					cache: defaultCache,
-					input: { name: appRoot, targets: [appPath, otherPath] }
+					input: {
+						name: appRoot,
+						targets: [appPath, otherPath],
+						retention: { kind: 'inherit' }
+					}
 				}
 			]);
 

@@ -118,6 +118,20 @@ const fixedWidthSites: readonly (BoundListSite & {
 		reason: 'The legacy and native spellings of one view: two at most.'
 	},
 	{
+		kind: 'and',
+		file: 'src/migration/cache-retention.ts',
+		argument: "and( eq(schema.legacyRetentionPolicies.kind, 'root",
+		reason:
+			'The spread holds the keyset cursor: one condition once the migration has a cursor, none before that.'
+	},
+	{
+		kind: 'and',
+		file: 'src/migration/cache-retention.ts',
+		argument: 'and(...cursorConditions, isNull(schema.cacheIdenti',
+		reason:
+			'The spread holds the keyset cursor: one condition once the migration has a cursor, none before that.'
+	},
+	{
 		kind: 'values',
 		file: 'src/test-support.ts',
 		argument: 'batch.map((narHash) => ({ narHash, fileHash: narHa',

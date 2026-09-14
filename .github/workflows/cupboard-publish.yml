@@ -31,10 +31,18 @@ on:
         default: ''
       ttl:
         description:
-          Retention TTL such as 7d. Leave empty to retain permanently.
+          Retention TTL such as 7d. When empty, retain permanently if permanent
+          is true; otherwise inherit the cache's retention.
         required: false
         type: string
         default: ''
+      permanent:
+        description:
+          Retain the root permanently when ttl is empty. Set false to inherit
+          the cache's retention instead.
+        required: false
+        type: boolean
+        default: true
       attest:
         description:
           When true, sign and attach SLSA build provenance for the published
@@ -168,6 +176,7 @@ jobs:
           cache: ${{ inputs.cache }}
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}
+          permanent: ${{ inputs.ttl == '' && inputs.permanent }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
 
       # This workflow exposes no read credentials and therefore supports only

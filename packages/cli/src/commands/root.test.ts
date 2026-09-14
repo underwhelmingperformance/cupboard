@@ -50,7 +50,8 @@ const defaultCache: CacheScope = { kind: 'default' };
 interface RootBody {
 	name: string;
 	targets: string[];
-	ttlSeconds?: number;
+	retention:
+		{ kind: 'inherit' | 'permanent' } | { kind: 'duration'; seconds: number };
 }
 interface ListPage {
 	cursor?: string;
@@ -116,6 +117,30 @@ describe('rootListingAuthorizationDetails', () => {
 });
 
 describe('runRootSet', () => {
+	it('sends an explicit permanent retention choice', async () => {
+		const set = recordingCacheScopedClient((_input: RootBody) =>
+			Promise.resolve(summary({}))
+		);
+		await runRootSet(
+			defaultCache,
+			rootName('main'),
+			[target],
+			{ kind: 'permanent' },
+			reporter([]),
+			{ set }
+		);
+		expect(set.calls).toStrictEqual([
+			{
+				cache: defaultCache,
+				input: {
+					name: 'main',
+					targets: [target],
+					retention: { kind: 'permanent' }
+				}
+			}
+		]);
+	});
+
 	it('addresses the cache, sends the fields, and reports', async () => {
 		const results: ResultRow[][] = [];
 		const response = summary({
@@ -138,7 +163,7 @@ describe('runRootSet', () => {
 			defaultCache,
 			rootName('github:owner/repo/main'),
 			[target],
-			ttlSecondsSchema.parse(604_800),
+			{ kind: 'duration', seconds: ttlSecondsSchema.parse(604_800) },
 			reporter(results),
 			{ set }
 		);
@@ -149,7 +174,7 @@ describe('runRootSet', () => {
 				input: {
 					name: 'github:owner/repo/main',
 					targets: [target],
-					ttlSeconds: 604_800
+					retention: { kind: 'duration', seconds: 604_800 }
 				}
 			}
 		]);
@@ -174,7 +199,7 @@ describe('runRootSet', () => {
 				defaultCache,
 				rootName('main'),
 				['/tmp/nope'],
-				undefined,
+				{ kind: 'inherit' },
 				reporter([]),
 				{ set }
 			);
@@ -189,7 +214,11 @@ describe('runRootSet', () => {
 				calls: [
 					{
 						cache: defaultCache,
-						input: { name: 'main', targets: ['/tmp/nope'] }
+						input: {
+							name: 'main',
+							targets: ['/tmp/nope'],
+							retention: { kind: 'inherit' }
+						}
 					}
 				]
 			}
@@ -235,7 +264,7 @@ describe('runRootEnsure', () => {
 			defaultCache,
 			rootName('main'),
 			[target],
-			ttlSecondsSchema.parse(604_800),
+			{ kind: 'duration', seconds: ttlSecondsSchema.parse(604_800) },
 			reporter(results),
 			{ ensure }
 		);
@@ -244,7 +273,11 @@ describe('runRootEnsure', () => {
 			calls: [
 				{
 					cache: defaultCache,
-					input: { name: 'main', targets: [target], ttlSeconds: 604_800 }
+					input: {
+						name: 'main',
+						targets: [target],
+						retention: { kind: 'duration', seconds: 604_800 }
+					}
 				}
 			],
 			results: [expectedRows]

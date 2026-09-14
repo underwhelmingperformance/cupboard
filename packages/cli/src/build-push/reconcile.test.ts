@@ -499,8 +499,14 @@ describe('reconcileBuild', () => {
 					{ root: rootTwo, applied: true, targets: [pathB] }
 				],
 				rootReplacements: [
-					{ name: rootOne, body: { targets: [pathA] } },
-					{ name: rootTwo, body: { targets: [pathB] } }
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathA] }
+					},
+					{
+						name: rootTwo,
+						body: { retention: { kind: 'inherit' }, targets: [pathB] }
+					}
 				],
 				negotiatedPaths: [[pathA, pathB]],
 				failures: []
@@ -540,7 +546,12 @@ describe('reconcileBuild', () => {
 					{ root: rootOne, applied: true, targets: [pathA] },
 					{ root: rootTwo, applied: false, targets: [pathB] }
 				],
-				rootReplacements: [{ name: rootOne, body: { targets: [pathA] } }],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathA] }
+					}
+				],
 				negotiatedPaths: [[pathA, pathB]],
 				failures: [{ storePath: pathB, reason: 'upload' }]
 			}
@@ -567,7 +578,12 @@ describe('reconcileBuild', () => {
 					collected: []
 				},
 				roots: [{ root: rootOne, applied: true, targets: [pathC] }],
-				rootReplacements: [{ name: rootOne, body: { targets: [pathC] } }],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathC] }
+					}
+				],
 				negotiatedPaths: [[pathC]],
 				failures: []
 			}
@@ -604,7 +620,12 @@ describe('reconcileBuild', () => {
 					collected: []
 				},
 				roots: [{ root: rootTwo, applied: true, targets: [] }],
-				rootReplacements: [{ name: rootTwo, body: { targets: [] } }],
+				rootReplacements: [
+					{
+						name: rootTwo,
+						body: { retention: { kind: 'inherit' }, targets: [] }
+					}
+				],
 				negotiatedPaths: [],
 				failures: []
 			}
@@ -645,7 +666,12 @@ describe('reconcileBuild', () => {
 					collected: []
 				},
 				roots: [{ root: rootTwo, applied: true, targets: [pathA] }],
-				rootReplacements: [{ name: rootTwo, body: { targets: [pathA] } }],
+				rootReplacements: [
+					{
+						name: rootTwo,
+						body: { retention: { kind: 'inherit' }, targets: [pathA] }
+					}
+				],
 				negotiatedPaths: [[pathA]],
 				failures: []
 			}
@@ -718,7 +744,12 @@ describe('reconcileBuild', () => {
 					collected: []
 				},
 				roots: [{ root: rootOne, applied: true, targets: [pathB] }],
-				rootReplacements: [{ name: rootOne, body: { targets: [pathB] } }],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathB] }
+					}
+				],
 				negotiatedPaths: [[pathB]],
 				failures: []
 			}
@@ -776,7 +807,12 @@ describe('reconcileBuild', () => {
 					collected: []
 				},
 				roots: [{ root: rootOne, applied: true, targets: [pathA] }],
-				rootReplacements: [{ name: rootOne, body: { targets: [pathA] } }],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathA] }
+					}
+				],
 				negotiatedPaths: [[pathA, pathG]],
 				failures: []
 			}
@@ -802,7 +838,12 @@ describe('reconcileBuild', () => {
 					collected: [pathG]
 				},
 				roots: [{ root: rootOne, applied: true, targets: [pathA] }],
-				rootReplacements: [{ name: rootOne, body: { targets: [pathA] } }],
+				rootReplacements: [
+					{
+						name: rootOne,
+						body: { retention: { kind: 'inherit' }, targets: [pathA] }
+					}
+				],
 				negotiatedPaths: [[pathA]],
 				failures: []
 			}
@@ -905,7 +946,12 @@ describe('reconcileBuild', () => {
 					{ root: rootOne, applied: false, targets: failedPaths },
 					{ root: rootTwo, applied: true, targets: [last] }
 				],
-				rootReplacements: [{ name: rootTwo, body: { targets: [last] } }],
+				rootReplacements: [
+					{
+						name: rootTwo,
+						body: { retention: { kind: 'inherit' }, targets: [last] }
+					}
+				],
 				failureTypes: Array.from(
 					{ length: uploadNegotiateMaxPaths },
 					() => NegotiationTestError
@@ -920,11 +966,17 @@ describe('reconcileBuild', () => {
 
 		await reconcileWith(harnessed, {
 			targets: [target(pathA, rootOne)],
-			ttlSeconds
+			retention: { kind: 'duration', seconds: ttlSeconds }
 		});
 
 		expect(harnessed.rootReplacements).toStrictEqual([
-			{ name: rootOne, body: { targets: [pathA], ttlSeconds } }
+			{
+				name: rootOne,
+				body: {
+					targets: [pathA],
+					retention: { kind: 'duration', seconds: ttlSeconds }
+				}
+			}
 		]);
 	});
 
