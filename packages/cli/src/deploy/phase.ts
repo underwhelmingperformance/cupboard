@@ -3,11 +3,12 @@ import {
 	deploymentPhaseRowId,
 	deploymentPhaseSchema,
 	type LocalStep,
+	localStepStragglerSampleSize,
 	type ParsedDeploymentPhase
 } from '@cupboard/protocol/deployment';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 
-import { CliError } from '../errors.ts';
+import { CliError, LocalStepUnreachedError } from '../errors.ts';
 
 import type { DatabaseId } from './identifiers.ts';
 
@@ -30,6 +31,97 @@ const recordedPhaseQuery = `SELECT phase || '${fieldSeparator}' || required_loca
 // that migration has no table to query.
 const phaseTableQuery =
 	"SELECT tbl_name FROM sqlite_master WHERE type = 'table' AND tbl_name = 'deployment_phase';";
+
+export class InvalidTenantReadinessCountError extends CliError {
+	constructor() {
+		super(
+			'Invalid tenant readiness count returned by D1. Retry the deployment after checking the D1 response.'
+		);
+		this.name = 'InvalidTenantReadinessCountError';
+	}
+}
+
+export function parseTenantReadinessCount(count: string | undefined): number {
+	if (
+		count === undefined ||
+		!/^\d+$/.test(count) ||
+		!Number.isSafeInteger(Number(count))
+	) {
+		throw new InvalidTenantReadinessCountError();
+	}
+	return Number(count);
+}
+
+export interface LocalStepReadiness {
+	readonly pending: number;
+	readonly stragglers: readonly string[];
+}
+
+/**
+ * Counts the active tenants whose object has not recorded the step this build
+ * requires, and returns up to {@link localStepStragglerSampleSize} of their
+ * ids in slug order.
+ *
+ * This only reads. An object records its step when the control Worker wakes
+ * it, which the hourly sweep does for the tenants that are behind, so the
+ * count falls without the deploy doing anything.
+ */
+export async function readLocalStepReadiness(
+	api: PhaseApi,
+	databaseId: DatabaseId,
+	requiredStep: LocalStep
+): Promise<LocalStepReadiness> {
+	const behind = `status = 'active' AND (local_step IS NULL OR local_step < ${String(requiredStep)})`;
+	// `d1QueryRows` keeps only string columns, so the count is cast to text; a
+	// bare `count(*)` comes back as a number and is dropped.
+	const counted = await api.queryRows(
+		databaseId,
+		`SELECT CAST(count(*) AS TEXT) FROM tenant WHERE ${behind};`
+	);
+	const [count] = counted;
+
+	const pending = parseTenantReadinessCount(count);
+
+	if (pending === 0) {
+		return { pending: 0, stragglers: [] };
+	}
+
+	return {
+		pending,
+		stragglers: await api.queryRows(
+			databaseId,
+			`SELECT id FROM tenant WHERE ${behind} ORDER BY id LIMIT ${String(localStepStragglerSampleSize)};`
+		)
+	};
+}
+
+/**
+ * Records `phase` once every active tenant has reached `requiredStep`. A phase
+ * describes what every tenant's object has already done, so while any tenant
+ * is behind this throws `LocalStepUnreachedError` and leaves the row
+ * unchanged.
+ */
+export async function recordPhaseWhenTenantsReady(
+	api: PhaseApi,
+	databaseId: DatabaseId,
+	phase: DeploymentPhaseName,
+	requiredStep: LocalStep,
+	now: Date
+): Promise<LocalStepReadiness> {
+	const readiness = await readLocalStepReadiness(api, databaseId, requiredStep);
+
+	if (readiness.pending > 0) {
+		throw new LocalStepUnreachedError(
+			readiness.pending,
+			requiredStep,
+			readiness.stragglers
+		);
+	}
+
+	await recordDeploymentPhase(api, databaseId, phase, requiredStep, now);
+
+	return readiness;
+}
 
 /**
  * This build does not define the stored phase name. That happens after a

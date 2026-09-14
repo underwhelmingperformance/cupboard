@@ -77,6 +77,31 @@ export class DeploymentPhaseUnsettledError extends CliError {
 	}
 }
 
+/**
+ * Active tenants have not recorded the local step this build requires, so the
+ * deploy did not record its phase. The Workers are already uploaded when this
+ * is thrown; the control Worker's sweep records the step for the tenants that
+ * are behind, and running the deploy again then records the phase.
+ */
+export class LocalStepUnreachedError extends CliError {
+	constructor(
+		public readonly pending: number,
+		public readonly requiredStep: number,
+		public readonly stragglers: readonly string[]
+	) {
+		const unnamed = pending - stragglers.length;
+		const named =
+			unnamed > 0
+				? `${stragglers.join(', ')} and ${String(unnamed)} more`
+				: stragglers.join(', ');
+
+		super(
+			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. The control Worker's hourly sweep wakes the tenants that are behind; re-run the deploy once every tenant has reached the step.`
+		);
+		this.name = 'LocalStepUnreachedError';
+	}
+}
+
 export class InvalidCacheNameError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);

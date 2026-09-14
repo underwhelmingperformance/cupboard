@@ -3,7 +3,9 @@ import {
 	cachePrioritySchema,
 	type CacheScope,
 	type StoredCache,
-	storePathHashSchema
+	storedCacheSchema,
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import type {
 	CacheListResponse,
@@ -17,11 +19,13 @@ import {
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -36,7 +40,9 @@ import {
 	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
+	narHash,
 	negotiateUploads,
+	provisionFixtureTenant,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
@@ -46,6 +52,9 @@ import {
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
+import { reconcileCacheIdentities } from './cache-identity-reconcile.ts';
+import { maxCachesProjectedPerRun } from './cache-lifecycle-projection.ts';
+import { type LocalStepOutcome } from './local-step.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 
@@ -234,6 +243,21 @@ async function policyIdentityRows(): Promise<
 		cacheId: row.cacheId ?? undefined,
 		rootNamePrefix: row.rootNamePrefix ?? undefined
 	}));
+}
+
+function wake(): Promise<LocalStepOutcome> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.reportLocalStep()
+	);
+}
+
+async function projectedCaches(): Promise<number> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ cache: d1Schema.cacheLifecycle.cache })
+		.from(d1Schema.cacheLifecycle)
+		.all();
+
+	return rows.length;
 }
 
 const buildsCache = cacheNameSchema.parse('builds');
@@ -639,6 +663,297 @@ describe('cache registry admin', () => {
 			afterSecondCache: [buildsPolicy(2), secondCachePolicy, prefixPolicy],
 			afterRegisteredAgain: [buildsPolicy(4), secondCachePolicy, prefixPolicy]
 		});
+	});
+
+	it('bounds identity backfill pages and admits later predecessor writes', async () => {
+		await useTestServer('cache-admin-bounded-backfill');
+		await bootstrap();
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				"UPDATE cache SET migration_identity_id = (SELECT id FROM cache_identity WHERE kind = 'default' AND deleted_at IS NULL) WHERE name = ''"
+			);
+			for (let index = 0; index < 40; index++) {
+				const name = `legacy-${String(index).padStart(3, '0')}`;
+				const hash = String(index).padStart(32, '0');
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES (?, 40, '2026-01-01T00:00:00.000Z')",
+					name
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES (?, ?, ?, ?, 1, '[]', '2026-01-01T00:00:00.000Z')",
+					name,
+					hash,
+					`/nix/store/${hash}-old`,
+					narHash
+				);
+			}
+		});
+		const pages = [];
+		for (let index = 0; index < 4; index++) {
+			pages.push(
+				await runInDurableObject(currentServer(), async (instance, state) => ({
+					outcome: await reconcileCacheIdentities(instance.context),
+					unlinked: state.storage.sql
+						.exec<{ count: number }>(
+							'SELECT count(*) AS count FROM narinfo WHERE cache_id IS NULL'
+						)
+						.one().count
+				}))
+			);
+		}
+		expect(pages).toStrictEqual([
+			{ outcome: { processed: 36, hasMore: true }, unlinked: 40 },
+			{ outcome: { processed: 36, hasMore: true }, unlinked: 8 },
+			{ outcome: { processed: 36, hasMore: true }, unlinked: 0 },
+			{ outcome: { processed: 12, hasMore: false }, unlinked: 0 }
+		]);
+		const later = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES ('aaa-later', 40, '2026-02-01T00:00:00.000Z')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, created_at) VALUES ('aaa-later', ?, ?, ?, 1, '[]', '2026-02-01T00:00:00.000Z')",
+					repeated('z'),
+					`/nix/store/${repeated('z')}-later`,
+					narHash
+				);
+				const outcome = await reconcileCacheIdentities(instance.context);
+				return {
+					outcome,
+					unlinked: state.storage.sql
+						.exec<{ count: number }>(
+							'SELECT count(*) AS count FROM narinfo WHERE cache_id IS NULL'
+						)
+						.one().count
+				};
+			}
+		);
+		expect(later).toStrictEqual({
+			outcome: { processed: 3, hasMore: false },
+			unlinked: 0
+		});
+	});
+
+	it('creates the identity of a cache registered without one', async () => {
+		await useTestServer('cache-admin-identity-reconcile');
+
+		const init = await bootstrap();
+
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength }),
+			'builds'
+		);
+
+		// A build that predates the identity table registers a cache and writes
+		// its rows with the stored name alone.
+		const releases = storedCacheSchema.parse('private/releases');
+		const registeredAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.caches)
+				.values({
+					name: releases,
+					priority: cachePrioritySchema.parse(40),
+					createdAt: registeredAt
+				})
+				.run();
+			instance.context.db
+				.insert(schema.narInfos)
+				.values({
+					cache: releases,
+					storePathHash: storePathHashSchema.parse(repeated('b')),
+					storePath: storePathSchema.parse(`/nix/store/${repeated('b')}-old`),
+					narHash,
+					narSize: narBytes.byteLength,
+					referencesJson: '[]',
+					createdAt: registeredAt
+				})
+				.run();
+		});
+
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep()
+		);
+
+		const releasesRow = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({
+					cache: schema.narInfos.cache,
+					cacheId: schema.narInfos.cacheId
+				})
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.cache, releases))
+				.get()
+		);
+
+		expect({
+			identities: await cacheIdentities(),
+			releasesRow: releasesRow === undefined ? undefined : withId(releasesRow)
+		}).toStrictEqual({
+			identities: [
+				defaultIdentity,
+				{
+					id: 2,
+					scope: { kind: 'named', name: 'builds' },
+					access: 'public',
+					priority: 40,
+					deleted: false
+				},
+				{
+					id: 3,
+					scope: { kind: 'named', name: 'releases' },
+					access: 'private',
+					priority: 40,
+					deleted: false
+				}
+			],
+			releasesRow: { cache: 'private/releases', cacheId: 3 }
+		});
+	});
+
+	it('creates no identity for a cache row its deleted identity outlives', async () => {
+		await useTestServer('cache-admin-identity-reconcile-deleted');
+
+		await bootstrap();
+
+		// `releases` was deleted after its row was registered, so the row is the
+		// deleted cache's own. `guides` was registered again after its deletion, so
+		// its row is a new cache.
+		const deletedAt = isoTimestampSchema.parse('2026-01-02T00:00:00.000Z');
+		const priority = cachePrioritySchema.parse(40);
+
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.caches)
+				.values([
+					{
+						name: cacheNameSchema.parse('releases'),
+						priority,
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+					},
+					{
+						name: cacheNameSchema.parse('guides'),
+						priority,
+						createdAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z')
+					}
+				])
+				.run();
+			instance.context.db
+				.insert(schema.cacheIdentities)
+				.values([
+					{
+						kind: 'named',
+						name: 'releases',
+						access: 'public',
+						priority,
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+						deletedAt
+					},
+					{
+						kind: 'named',
+						name: 'guides',
+						access: 'public',
+						priority,
+						createdAt: isoTimestampSchema.parse('2025-12-01T00:00:00.000Z'),
+						deletedAt
+					}
+				])
+				.run();
+		});
+
+		await runInDurableObject(currentServer(), (instance) =>
+			instance.reportLocalStep()
+		);
+
+		const guidesIdentity = {
+			scope: { kind: 'named', name: 'guides' },
+			access: 'public',
+			priority: 40
+		};
+
+		expect(await cacheIdentities()).toStrictEqual([
+			defaultIdentity,
+			{
+				id: 2,
+				scope: { kind: 'named', name: 'releases' },
+				access: 'public',
+				priority: 40,
+				deleted: true
+			},
+			{ ...guidesIdentity, id: 3, deleted: true },
+			{ ...guidesIdentity, id: 4, deleted: false }
+		]);
+	});
+
+	it('finishes identity backfill and projection over bounded wakes', async () => {
+		await useTestServer('cache-admin-identity-projection');
+
+		const init = await bootstrap();
+		// More caches than one wake projects. Registering a cache writes no
+		// lifecycle row at this build, so each reaches D1 only through the
+		// projection.
+		const cacheCount = maxCachesProjectedPerRun + 5;
+
+		for (let index = 0; index < cacheCount; index += 1) {
+			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
+		}
+
+		// The tenant's default cache already has a row, written by the D1 trigger
+		// when the tenant row was inserted, so compare the growth.
+		const outcomes = [];
+		for (let index = 0; index < 3; index++) {
+			const outcome = await wake();
+			outcomes.push({ kind: outcome.kind, projected: await projectedCaches() });
+		}
+		expect(outcomes).toStrictEqual([
+			{ kind: 'incomplete', projected: 1 },
+			{ kind: 'incomplete', projected: maxCachesProjectedPerRun },
+			{ kind: 'recorded', projected: cacheCount + 1 }
+		]);
+	});
+
+	it('bounds a projection pass even when every lifecycle already exists', async () => {
+		await useTestServer('cache-admin-existing-projection');
+		const init = await bootstrap();
+		for (let index = 0; index < maxCachesProjectedPerRun + 5; index++) {
+			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
+		}
+		await wake();
+		await wake();
+		await wake();
+		expect(await wake()).toStrictEqual({ kind: 'incomplete', projected: 0 });
+	});
+
+	it("records the tenant's read mode as a projected cache's access", async () => {
+		await useTestServer('cache-admin-identity-projection-access');
+		await provisionFixtureTenant({ readMode: 'private' });
+
+		const init = await bootstrap();
+
+		// Registering a cache writes no lifecycle row, so the projection is the
+		// only writer of this one.
+		await putCache(init.token, 'builds', 40);
+		await wake();
+
+		const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.select({
+				cache: d1Schema.cacheLifecycle.cache,
+				access: d1Schema.cacheLifecycle.access
+			})
+			.from(d1Schema.cacheLifecycle)
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, fixtureTenant),
+					eq(d1Schema.cacheLifecycle.cache, buildsCache)
+				)
+			)
+			.get();
+
+		expect(row).toStrictEqual({ cache: 'builds', access: 'private' });
 	});
 
 	it('gives each incarnation of a cache name its own identity', async () => {

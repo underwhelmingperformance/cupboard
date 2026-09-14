@@ -28,13 +28,15 @@ export function localStep(value: number): LocalStep {
  * This build requires every tenant Durable Object to reach this step.
  *
  * A release that needs per-object work after its migrations gives that work the
- * next step number and raises this constant. This build defines no such work,
- * so an object is at step 0 once it has applied its migrations.
+ * next step number and raises this constant. Step 1 gives every registered
+ * cache an identity and fills the `cache_id` of every row that still refers to
+ * its cache by the stored name alone. A migration ran that fill once, when the
+ * object first initialised; the step repeats it for rows written since.
  *
  * `cupboard deploy` records this number with the phase, and the control plane
  * compares each tenant's recorded step against it.
  */
-export const currentLocalStep: LocalStep = localStep(0);
+export const currentLocalStep: LocalStep = localStep(1);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a
@@ -45,12 +47,18 @@ export const currentLocalStep: LocalStep = localStep(0);
  * needs and reads the recorded one to choose behaviour. A build that needs no
  * such coordination runs in `current`.
  */
-export const deploymentPhaseNameSchema = z.enum(['current']);
+export const deploymentPhaseNameSchema = z.enum(['current', 'expanded']);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
-export const settledDeploymentPhase: DeploymentPhaseName = 'current';
+//
+// `expanded` means that this build's Workers serve and that every active
+// tenant has recorded local step 1: every registered cache has an identity,
+// and every row present when the tenant was woken carries its `cache_id`
+// beside the stored cache name. A later release reads caches by identity
+// alone, which is safe only once a deploy has recorded this phase.
+export const settledDeploymentPhase: DeploymentPhaseName = 'expanded';
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row.
