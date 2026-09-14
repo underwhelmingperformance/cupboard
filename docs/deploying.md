@@ -34,9 +34,13 @@ interrupted run is rerun with no repair step.
 [Workers deployments API]:
   https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/
 
-This build defines one phase, `current`, for a build that needs no such
-coordination. A release that adds a phase adds it to that list and documents
-here how the build behaves while that phase is recorded.
+This build defines two phases, in the order a release records them: `current`
+for a build that needs no such coordination, and `expanded`. `expanded` means
+that every active tenant has recorded local step 1, described below, so every
+registered cache has an identity and every row present when the tenant was woken
+carries its `cache_id` beside the stored cache name. A release that adds a phase
+adds it to that list and documents here how the build behaves while that phase
+is recorded.
 
 ## Local steps
 
@@ -50,12 +54,18 @@ every step recorded after about N / 20 ticks, later if some wakes fail.
 of those below it.
 
 The stored step is a watermark: rolling back to a build that defines fewer steps
-does not lower what a newer build recorded. This build defines one step, 0,
-which an object reaches once its migrations have applied.
+does not lower what a newer build recorded. This build defines step 1. When
+woken, an object creates an identity for every registered cache that lacks one,
+fills the `cache_id` of every row that still refers to its cache by the stored
+name alone, and writes the tenant's missing `cache_lifecycle` rows to D1, at
+most 36 per wake; a tenant with more caches records the step on a later wake.
 
-A release whose next phase depends on per-object work numbers that work as the
-next step, so the deploy can wait until every active tenant has reached it
-before it records the phase.
+`cupboard deploy` records a phase only once every active tenant has recorded the
+step the build requires. It checks after both Workers serve the build and stops
+with `LocalStepUnreachedError`, naming up to twenty of the tenants that are
+behind, while any is. The first deploy of a build that raises the step therefore
+always stops there, since no tenant can record the new step before the build
+serves; run it again once `localStep.status` reports none pending.
 
 ## Rolling back
 
@@ -69,6 +79,12 @@ build does not define. That build serves reads and writes as usual, but its
 `deployment.phase` control procedure returns an error and `cupboard deploy` of
 that build stops before applying a migration or uploading a Worker. Deploying a
 build that defines the phase clears both.
+
+Each tenant's recorded step stays as it was. Deploying a build that requires
+that step again does not wake those tenants, so anything the older build wrote
+in between that the step would have repaired stays unrepaired. For this release
+that means a cache the older build registered keeps no identity, and the
+contraction that follows refuses such an object.
 
 A rollback past a release that added a Durable Object migration leaves each
 object that ran under the newer build with migrations the older build does not

@@ -2,7 +2,10 @@ import type { Reporter } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
-import { DeploymentPhaseUnsettledError } from '../errors.ts';
+import {
+	DeploymentPhaseUnsettledError,
+	LocalStepUnreachedError
+} from '../errors.ts';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
@@ -224,6 +227,11 @@ function recordingApi(
 			d1QueryRows(_databaseId, sql) {
 				calls.push(`d1qr:${sql.slice(0, 12)}`);
 
+				// No tenant is behind the required step.
+				if (sql.startsWith('SELECT CAST(')) {
+					return Promise.resolve(['0']);
+				}
+
 				if (recordedPhase === undefined) {
 					return Promise.resolve([]);
 				}
@@ -432,6 +440,7 @@ describe('runDeploy', () => {
 			'config:cupboard',
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
+			'd1qr:SELECT CAST(',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -738,6 +747,7 @@ describe('runDeploy', () => {
 				'config:cupboard',
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
+				'd1qr:SELECT CAST(',
 				'd1q:INSERT INTO '
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
@@ -824,6 +834,7 @@ describe('runDeploy', () => {
 			'config:cupboard',
 			'versions:cupboard-tenant',
 			'config:cupboard-tenant',
+			'd1qr:SELECT CAST(',
 			'd1q:INSERT INTO '
 		]);
 	});
@@ -912,6 +923,7 @@ describe('runDeploy', () => {
 				'config:cupboard',
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
+				'd1qr:SELECT CAST(',
 				'd1q:INSERT INTO '
 			],
 			warnings: [
@@ -967,6 +979,57 @@ describe('runDeploy', () => {
 		}).toStrictEqual({
 			scripts,
 			buildVersion: artifact.buildVersion,
+			recorded: []
+		});
+	});
+
+	it('does not record the phase while a tenant is behind', async () => {
+		const { api, calls } = recordingApi();
+		const behindApi: CloudflareApi = {
+			...api,
+			d1QueryRows(databaseId, sql) {
+				if (sql.startsWith('SELECT CAST(')) {
+					calls.push(`d1qr:${sql.slice(0, 12)}`);
+					return Promise.resolve(['2']);
+				}
+
+				if (sql.startsWith('SELECT id')) {
+					calls.push(`d1qr:${sql.slice(0, 12)}`);
+					return Promise.resolve(['alpha', 'beta']);
+				}
+
+				return api.d1QueryRows(databaseId, sql);
+			}
+		};
+
+		let failure: unknown;
+
+		try {
+			await runDeploy({
+				artifact,
+				api: behindApi,
+				reporter: silentReporter,
+				options: { domain: undefined, secrets: { control: [], tenant: [] } }
+			});
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(LocalStepUnreachedError);
+
+		if (!(failure instanceof LocalStepUnreachedError)) {
+			return;
+		}
+
+		expect({
+			pending: failure.pending,
+			requiredStep: failure.requiredStep,
+			stragglers: failure.stragglers,
+			recorded: calls.filter((call) => call.startsWith('d1q:INSERT INTO'))
+		}).toStrictEqual({
+			pending: 2,
+			requiredStep: 1,
+			stragglers: ['alpha', 'beta'],
 			recorded: []
 		});
 	});
@@ -1067,13 +1130,15 @@ describe('runDeploy', () => {
 				'config:cupboard',
 				'versions:cupboard-tenant',
 				'config:cupboard-tenant',
+				'd1qr:SELECT CAST(',
 				'd1q:INSERT INTO '
 			],
 			facts: [
 				['resources', 5],
 				['build', 'abc123def456'],
 				['from', 'current'],
-				['phase', 'current']
+				['tenants behind', '0'],
+				['phase', 'expanded']
 			]
 		});
 	});

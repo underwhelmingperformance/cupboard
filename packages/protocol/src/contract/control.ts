@@ -227,9 +227,10 @@ export const controlContract = {
 	},
 
 	// A release that changes each tenant's local state needs every active
-	// tenant's Durable Object to report the step it has reached. `status` reports
-	// how far the tenants have come and `wake` advances a bounded batch of those
-	// that have not; an object records its step only when woken here.
+	// tenant's Durable Object to report the step it has reached, and `cupboard
+	// deploy` records a phase only once every active tenant has. `status`
+	// reports how far the tenants have come and `wake` advances a bounded batch
+	// of those that have not; an object records its step only when woken here.
 	localStep: {
 		status: controlProcedure
 			.meta({ requires: 'local-step:read', replaySafety: 'replay-safe' })

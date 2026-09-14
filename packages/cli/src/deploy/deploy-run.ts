@@ -20,7 +20,7 @@ import { type OwnerChoice, ownerHint } from './owner.ts';
 import {
 	type PhaseApi,
 	readDeploymentPhase,
-	recordDeploymentPhase
+	recordPhaseWhenTenantsReady
 } from './phase.ts';
 import type { DeploySecrets } from './secrets.ts';
 import {
@@ -623,7 +623,9 @@ async function servingBuildVersion(
 
 /**
  * Records the phase the deployment now runs in, once both Workers serve this
- * build from a single version.
+ * build from a single version and every active tenant has recorded the step
+ * this build requires. `LocalStepUnreachedError` names the tenants that have
+ * not.
  *
  * The phase row describes the running code, so it must not be written while an
  * earlier version can still take a request. If a script is still split across
@@ -661,13 +663,15 @@ async function settlePhase(
 			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
 		}
 
-		await recordDeploymentPhase(
+		const readiness = await recordPhaseWhenTenantsReady(
 			phaseApi,
 			databaseId,
 			settledDeploymentPhase,
 			currentLocalStep,
 			new Date()
 		);
+
+		context.fact('tenants behind', String(readiness.pending));
 		context.fact('phase', settledDeploymentPhase);
 	});
 }

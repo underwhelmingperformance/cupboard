@@ -47,12 +47,18 @@ export const currentLocalStep: LocalStep = localStep(1);
  * needs and reads the recorded one to choose behaviour. A build that needs no
  * such coordination runs in `current`.
  */
-export const deploymentPhaseNameSchema = z.enum(['current']);
+export const deploymentPhaseNameSchema = z.enum(['current', 'expanded']);
 export type DeploymentPhaseName = z.infer<typeof deploymentPhaseNameSchema>;
 
 // A deploy of this build ends in this phase. A release that adds phases changes
 // this to the last phase it introduces.
-export const settledDeploymentPhase: DeploymentPhaseName = 'current';
+//
+// `expanded` means that this build's Workers serve and that every active
+// tenant has recorded local step 1: every registered cache has an identity,
+// and every row present when the tenant was woken carries its `cache_id`
+// beside the stored cache name. A later release reads caches by identity
+// alone, which is safe only once a deploy has recorded this phase.
+export const settledDeploymentPhase: DeploymentPhaseName = 'expanded';
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row.
