@@ -1,4 +1,5 @@
 import {
+	identityForCache,
 	type NarInfoGeneration,
 	type PredicateType,
 	type Sha256HexDigest,
@@ -19,6 +20,7 @@ import {
 	reserveObjectIncarnation
 } from '../blob/object-incarnation.ts';
 import { sha256HexBytes } from '../crypto/crypto.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	AttestationBundleTooLargeError,
@@ -286,6 +288,8 @@ export class AttestationCasService {
 		}
 
 		const now = isoTimestamp(new Date());
+		const { scope } = identityForCache(reference.cache);
+		const identity = cacheIdentityColumns(scope);
 		const presenceMissing = notExists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -347,6 +351,12 @@ export class AttestationCasService {
 						.select({
 							tenant: sql<TenantId>`${tenant}`.as('tenant'),
 							cache: sql<StoredCache>`${reference.cache}`.as('cache'),
+							cacheKind: sql<
+								typeof identity.cacheKind
+							>`${identity.cacheKind}`.as('cache_kind'),
+							cacheName: sql<
+								typeof identity.cacheName
+							>`${identity.cacheName}`.as('cache_name'),
 							storePathHash: sql<StorePathHash>`${reference.storePathHash}`.as(
 								'store_path_hash'
 							),

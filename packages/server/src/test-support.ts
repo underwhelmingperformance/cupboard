@@ -137,6 +137,7 @@ import {
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import { maintenanceRetryPrefix } from './do/alarm.ts';
 import { listGenerationMetadataKey } from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
@@ -463,6 +464,44 @@ export async function offboardTenant(id: string): Promise<void> {
 	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
 }
 
+const cacheMirrorTriggerCount = 6;
+
+/**
+ * Runs `write` with the six D1 mirroring triggers of migrations 0023 and
+ * 0024 dropped, then recreates them from the definitions `sqlite_master`
+ * recorded.
+ *
+ * The triggers fill `cache_kind`, `cache_name` and `access` on a row inserted
+ * with them null, with the same values the code writes, so a row read back
+ * after a write cannot show which of the two filled it. A test that checks
+ * what the code wrote runs the write inside this.
+ */
+export async function withoutCacheMirrorTriggers<T>(
+	write: () => Promise<T>
+): Promise<T> {
+	const { results: triggers } = await env.CUPBOARD_DB.prepare(
+		"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'cache_access_mirror_%'"
+	).all<{ readonly name: string; readonly sql: string }>();
+
+	if (triggers.length !== cacheMirrorTriggerCount) {
+		throw new Error(
+			`Expected ${String(cacheMirrorTriggerCount)} cache mirroring triggers, found ${String(triggers.length)}`
+		);
+	}
+
+	for (const trigger of triggers) {
+		await env.CUPBOARD_DB.prepare(`DROP TRIGGER \`${trigger.name}\``).run();
+	}
+
+	try {
+		return await write();
+	} finally {
+		for (const trigger of triggers) {
+			await env.CUPBOARD_DB.prepare(trigger.sql).run();
+		}
+	}
+}
+
 /**
 A tenant's registry row, for asserting the offboarding lifecycle.
 */
@@ -613,6 +652,68 @@ export async function clearAbandonedAlarms(): Promise<void> {
 			state.storage.deleteAlarm()
 		);
 	}
+}
+
+/**
+ * Thrown by the shared `afterEach` for a maintenance pass parked behind a
+ * retry deadline the pinned test clock never reaches. A pass that reports a
+ * stall is not run again before `now + noProgressRetryMs`; with `Date` pinned
+ * that time never comes, so the pass is parked for the rest of the test.
+ */
+export class StalledMaintenancePassError extends Error {
+	constructor(
+		public readonly pass: string,
+		public readonly waitMs: number
+	) {
+		super(
+			`The ${pass} maintenance pass reported a stall and is parked for ${String(waitMs)}ms. The test clock does not advance, so the pass will not run again in this test.`
+		);
+		this.name = 'StalledMaintenancePassError';
+	}
+}
+
+/**
+ * Returns every maintenance pass parked behind a retry deadline the pinned
+ * test clock cannot reach, and deletes those deadlines so they do not survive
+ * into the next test.
+ *
+ * The shared `afterEach` calls this and fails the test on the first pass it
+ * finds. A test that means to leave a pass stalled calls this function itself
+ * and asserts on the result. It covers the object the harness points at and
+ * the fixture tenant's object, like `clearAbandonedAlarms`.
+ */
+export async function takeStalledMaintenancePasses(): Promise<
+	{ readonly pass: string; readonly waitMs: number }[]
+> {
+	const now = Date.now();
+	const stalled: { pass: string; waitMs: number }[] = [];
+
+	for (const stub of [harness.server, fixtureWorkerServer()]) {
+		const parked = await runInDurableObject(stub, async (_instance, state) => {
+			const deadlines = await state.storage.list<number>({
+				prefix: maintenanceRetryPrefix
+			});
+			const found: { pass: string; waitMs: number }[] = [];
+
+			for (const [key, deadline] of deadlines) {
+				if (deadline <= now) {
+					continue;
+				}
+
+				found.push({
+					pass: key.slice(maintenanceRetryPrefix.length),
+					waitMs: deadline - now
+				});
+				await state.storage.delete(key);
+			}
+
+			return found;
+		});
+
+		stalled.push(...parked);
+	}
+
+	return stalled;
 }
 
 interface SuspendedAlarmArming {
@@ -1650,7 +1751,14 @@ export async function blobReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
-		.select()
+		.select({
+			tenant: blobReference.tenant,
+			cache: blobReference.cache,
+			storePathHash: blobReference.storePathHash,
+			generation: blobReference.generation,
+			narHash: blobReference.narHash,
+			cacheGeneration: blobReference.cacheGeneration
+		})
 		.from(blobReference)
 		.all();
 
@@ -1706,7 +1814,14 @@ export async function attestationReferenceRows(): Promise<
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.select()
+		.select({
+			tenant: d1Schema.attestationReference.tenant,
+			cache: d1Schema.attestationReference.cache,
+			storePathHash: d1Schema.attestationReference.storePathHash,
+			generation: d1Schema.attestationReference.generation,
+			predicateType: d1Schema.attestationReference.predicateType,
+			digest: d1Schema.attestationReference.digest
+		})
 		.from(d1Schema.attestationReference)
 		.all();
 

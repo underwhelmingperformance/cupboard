@@ -25,7 +25,11 @@ import {
 	tenantMaintenanceFailure,
 	tenantUsage
 } from './db/d1-schema.ts';
-import { clearAbandonedAlarms } from './test-support.ts';
+import {
+	clearAbandonedAlarms,
+	StalledMaintenancePassError,
+	takeStalledMaintenancePasses
+} from './test-support.ts';
 
 // `TEST_MIGRATIONS` is typed in test-env.d.ts; vitest.config.ts supplies its
 // value, and production applies the same files with `wrangler d1 migrations apply`.
@@ -80,5 +84,15 @@ afterEach(async () => {
 	// forwarding then races the pool's teardown. Quieten them first.
 	await clearAbandonedAlarms();
 
+	// A pass parked behind a retry deadline does not run again while `Date`
+	// is pinned. Report it here, so a test that left one parked fails by name
+	// whether or not anything in it waited on the pass.
+	const stalled = await takeStalledMaintenancePasses();
+	const first = stalled[0];
+
 	vi.useRealTimers();
+
+	if (first !== undefined) {
+		throw new StalledMaintenancePassError(first.pass, first.waitMs);
+	}
 });
