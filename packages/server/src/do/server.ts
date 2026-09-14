@@ -18,7 +18,6 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
-import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -156,7 +155,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
-import { recordLocalStep } from './local-step.ts';
+import { type LocalStepOutcome, recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -2484,15 +2483,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	/**
 	 * Applies any pending migrations and records the step this object has
 	 * reached in its tenant row. This is the only path that records the step;
-	 * serving traffic does not. Returns undefined when the control plane has not
-	 * configured this object, which then has no tenant state to advance.
+	 * serving traffic does not. Reports an unconfigured object or unfinished
+	 * work without advancing the recorded step.
 	 */
-	async reportLocalStep(): Promise<LocalStep | undefined> {
+	async reportLocalStep(): Promise<LocalStepOutcome> {
 		try {
 			await this.initialise();
 		} catch (error) {
 			if (error instanceof TenantNotConfiguredError) {
-				return undefined;
+				return { kind: 'unconfigured' };
 			}
 			throw error;
 		}
