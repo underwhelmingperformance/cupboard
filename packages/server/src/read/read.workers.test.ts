@@ -153,7 +153,8 @@ describe('NAR serve under shared-fact read faults', () => {
 				tenant,
 				DEFAULT_CACHE,
 				referencingPath,
-				true
+				true,
+				'public'
 			)
 		]);
 
@@ -558,7 +559,8 @@ describe('private narinfo reference gate', () => {
 				tenant,
 				privateCache,
 				referencingPath,
-				true
+				true,
+				'private'
 			);
 			const missing = await missingStorePathHashes(
 				env.BLOBS,
@@ -605,7 +607,8 @@ describe('private narinfo reference gate', () => {
 				tenant,
 				privateCache,
 				referencingPath,
-				true
+				true,
+				'private'
 			);
 			const missing = await missingStorePathHashes(
 				env.BLOBS,
@@ -639,7 +642,8 @@ describe('private narinfo reference gate', () => {
 			tenant,
 			privateCache,
 			referencingPath,
-			true
+			true,
+			'private'
 		);
 
 		expect({

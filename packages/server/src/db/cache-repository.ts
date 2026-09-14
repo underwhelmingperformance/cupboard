@@ -1,6 +1,7 @@
 import {
 	type CacheAccessMode,
 	type CachePriority,
+	cachePrioritySchema,
 	type CacheScope,
 	identityForCache,
 	type StoredCache
@@ -155,6 +156,32 @@ export class CacheRepository {
 			.run();
 
 		return created.id;
+	}
+
+	/**
+	 * The priority and grace flag recorded against this cache's live identity,
+	 * or undefined when the cache has none.
+	 */
+	readRegistration(
+		cache: StoredCache
+	): { priority: CachePriority; graceManaged: boolean } | undefined {
+		const row = this.database
+			.select({
+				priority: schema.cacheIdentities.priority,
+				graceManaged: schema.cacheIdentities.graceManaged
+			})
+			.from(schema.cacheIdentities)
+			.where(this.liveIdentity(cache))
+			.get();
+
+		if (row === undefined) {
+			return undefined;
+		}
+
+		return {
+			priority: cachePrioritySchema.parse(row.priority),
+			graceManaged: row.graceManaged
+		};
 	}
 
 	markGraceManaged(cache: StoredCache): void {

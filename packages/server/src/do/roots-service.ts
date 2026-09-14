@@ -1,4 +1,5 @@
 import {
+	type CacheAccessMode,
 	type NixSha256HashString,
 	type RootName,
 	type StoredCache,
@@ -63,6 +64,7 @@ export class RootsService {
 
 	private async writeRoot(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		request: RootSetCommand
 	): Promise<StoredRoot> {
 		const now = new Date();
@@ -146,7 +148,7 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets from the old
 			// root's retention with no deadline ever established.
-			this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			this.retention.applyGraceTransition(cache, access, released, nowIso, tx);
 
 			return created;
 		});
@@ -307,6 +309,7 @@ export class RootsService {
 	// Durable Object.
 	private async gatedRootWrite(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		requested: RootSetCommand,
 		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
 	): Promise<RootWrite> {
@@ -328,7 +331,7 @@ export class RootsService {
 
 			return {
 				kind: 'written',
-				stored: await this.writeRoot(cache, requested)
+				stored: await this.writeRoot(cache, access, requested)
 			};
 		});
 	}
@@ -414,12 +417,13 @@ export class RootsService {
 	// its resolved expiry remain, and released targets enter retention grace.
 	async setRoot(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		rootName: RootName,
 		body: ParsedRootSetBody
 	): Promise<RootSetResponse> {
 		const requested = this.buildRootSetCommand(rootName, body);
 		const servable = await this.servableTargets(cache, requested.targets);
-		const write = await this.gatedRootWrite(cache, requested);
+		const write = await this.gatedRootWrite(cache, access, requested);
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);
@@ -436,6 +440,7 @@ export class RootsService {
 
 	async ensureRoot(
 		cache: StoredCache,
+		access: CacheAccessMode,
 		rootName: RootName,
 		body: ParsedRootEnsureBody
 	): Promise<RootEnsureResponse> {
@@ -452,7 +457,12 @@ export class RootsService {
 			return { status: 'build-required', unavailable };
 		}
 
-		const write = await this.gatedRootWrite(cache, requested, identities);
+		const write = await this.gatedRootWrite(
+			cache,
+			access,
+			requested,
+			identities
+		);
 
 		if (write.kind === 'rejected') {
 			return {
@@ -558,7 +568,11 @@ export class RootsService {
 		};
 	}
 
-	removeRoot(cache: StoredCache, name: RootName): RootRemoveResponse {
+	removeRoot(
+		cache: StoredCache,
+		access: CacheAccessMode,
+		name: RootName
+	): RootRemoveResponse {
 		const released = this.rootTargetRows(cache, name).map(
 			(target) => target.storePathHash
 		);
@@ -596,7 +610,7 @@ export class RootsService {
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets with no
 			// deadline ever established.
-			this.retention.applyGraceTransition(cache, released, nowIso, tx);
+			this.retention.applyGraceTransition(cache, access, released, nowIso, tx);
 
 			return { name, removed: existing !== undefined };
 		});

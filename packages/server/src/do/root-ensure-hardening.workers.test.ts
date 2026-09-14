@@ -163,6 +163,7 @@ describe('root ensure hardening', () => {
 
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -194,6 +195,7 @@ describe('root ensure hardening', () => {
 
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -229,6 +231,7 @@ describe('root ensure hardening', () => {
 
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -274,6 +277,7 @@ describe('root ensure hardening', () => {
 
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -411,6 +415,7 @@ describe('root ensure hardening', () => {
 
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
@@ -454,6 +459,7 @@ describe('root ensure hardening', () => {
 
 				return roots.setRoot(
 					DEFAULT_CACHE,
+					'public',
 					rootName,
 					rootSetBodySchema.parse({ targets: [committed.storePath] })
 				);

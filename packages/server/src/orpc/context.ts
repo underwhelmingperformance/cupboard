@@ -1,5 +1,5 @@
 import type { Logger } from '@cupboard/logger';
-import type { StoredCache } from '@cupboard/nix-store/scalars';
+import type { CacheAccessMode, StoredCache } from '@cupboard/nix-store/scalars';
 import type { VerifyReport } from '@cupboard/protocol/reports';
 
 import type { AccessClaims } from '../auth/auth.ts';
@@ -72,6 +72,8 @@ export interface TenantOrpcContext {
 	// The cache the request path selected: the default cache for a bare path,
 	// and the named one for a path under `/cache/<selector>`.
 	readonly cache: StoredCache;
+	// The access of `cache`, as the routing middleware recorded it.
+	readonly cacheAccess: CacheAccessMode;
 	readonly logger: Logger;
 	readonly resHeaders?: Headers;
 }
