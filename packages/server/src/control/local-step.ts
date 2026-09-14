@@ -131,7 +131,7 @@ async function wakeTenant(
 	try {
 		const step = await tenantServer(env, tenant).reportLocalStep();
 
-		if (step === undefined) {
+		if (step.kind === 'unconfigured') {
 			// The registry holds a row whose Durable Object was never configured, so
 			// a create failed part way through. Retrying the create repairs it.
 			logger.warn('local step wake found an unconfigured tenant', { tenant });

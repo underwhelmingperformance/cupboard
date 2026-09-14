@@ -166,7 +166,7 @@ describe('local step', () => {
 
 		await expect(
 			tenantServer(env, id).reportLocalStep()
-		).resolves.toStrictEqual(currentLocalStep);
+		).resolves.toStrictEqual({ kind: 'recorded', step: currentLocalStep });
 		await expect(storedStep(id)).resolves.toStrictEqual(laterStep);
 	});
 });
