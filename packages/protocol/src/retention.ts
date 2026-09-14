@@ -12,14 +12,18 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// The largest target set one root can hold.
+// The largest target set one root-set or root-ensure request may carry.
 //
-// Setting a root replaces its target set as a whole under the write gate, and
-// a target with no committed row refuses the whole request. A root's meaning
-// is the complete set, so it cannot be assembled across several requests: a
-// partly written root would retain the wrong paths, and the retention sweep
-// would collect what the missing part was protecting. A caller with more
-// paths splits them across named roots, which `RootTargetLimitError` says.
+// Either request replaces the root's whole target set: a target with no
+// committed row refuses the whole request, the new set is swapped in under the
+// write gate, and the targets it releases enter retention grace. A caller cannot
+// split one set across two requests, because the second would replace the first
+// and the sweep would collect what the missing part protected. A caller with
+// more paths than this splits them across named roots, which
+// `RootTargetLimitError` says.
+//
+// This bounds one request, not a root. A run root grows one target at a time
+// through `attachRoot`, which is additive and unbounded.
 //
 // The probe for a full set is checked against `subrequestsPerInvocation` by
 // `subrequest-budget.test.ts`.

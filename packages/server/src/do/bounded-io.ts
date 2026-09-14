@@ -3,14 +3,21 @@ import { UnboundableIoError, UncountableStatementError } from '../errors.ts';
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 import { admitBoundParameters } from './statement-admission.ts';
 import { hasStatementAllowance, spendStatements } from './statement-scope.ts';
+import { spendSubrequests } from './subrequest-slice.ts';
 
+// Declare the call against the dispatch's subrequest slice before making it.
+// The slice refuses nothing; a pass asks `hasSubrequestsFor` before a unit of
+// work and defers when the answer is no.
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
 	subrequest: string,
 	capMs?: number
 ): (...arguments_: A) => Promise<R> {
-	return (...arguments_: A) =>
-		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	return (...arguments_: A) => {
+		spendSubrequests(1);
+
+		return boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+	};
 }
 
 // Decrement the invocation's statement allowance before calling D1. If the call
@@ -48,6 +55,26 @@ function passThrough(target: object, property: PropertyKey): unknown {
 	const bound: unknown = value.bind(target);
 
 	return bound;
+}
+
+/**
+ * Wraps the environment a Worker entry point receives so its R2 metadata
+ * calls carry the same per-call deadline as a Durable Object's. `get` and
+ * `put` stay unbounded, because a NAR body takes as long as it takes. D1 and
+ * every other binding are served as they are.
+ */
+export function boundedWorkerEnv<T extends { readonly BLOBS: R2Bucket }>(
+	env: T
+): T {
+	// A proxy, not a spread: tests supply a service binding through a `get`
+	// trap, which a spread would not copy.
+	return new Proxy(env, {
+		get(target, property) {
+			return property === 'BLOBS'
+				? boundedBlobs(target.BLOBS)
+				: passThrough(target, property);
+		}
+	});
 }
 
 /**
@@ -146,6 +173,7 @@ export function boundedD1(database: D1Database): D1Database {
 				case 'batch': {
 					return (statements: D1PreparedStatement[]) => {
 						spendStatements(statements.length, 'd1.batch');
+						spendSubrequests(1);
 
 						return boundedSubrequest(
 							() =>

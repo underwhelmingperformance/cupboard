@@ -6,7 +6,9 @@ import { SubrequestTimeoutError, UnboundableIoError } from '../errors.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
 
-import { boundedBlobs, boundedD1 } from './bounded-io.ts';
+import { boundedBlobs, boundedD1, boundedWorkerEnv } from './bounded-io.ts';
+import { withDeadlineBudget } from './deadline.ts';
+import { hasSubrequestsFor, withSubrequestSlice } from './subrequest-slice.ts';
 
 describe('bounded gated subrequest', () => {
 	beforeEach(resetTestServer);
@@ -77,5 +79,60 @@ describe('unboundable members', () => {
 		const database = boundedD1(env.CUPBOARD_DB);
 
 		expect(() => database.withSession()).toThrow(UnboundableIoError);
+	});
+});
+
+describe('bounded Worker environment', () => {
+	// The deadline is the test's own. The 15-second figure a Worker applies is
+	// not exercised here.
+	it('times out a hung R2 head and serves the other bindings as they are', async () => {
+		const hang = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation(() => Promise.race([]));
+		const worker = boundedWorkerEnv(env);
+
+		let rejection: unknown;
+		try {
+			await withDeadlineBudget(100, () => worker.BLOBS.head('hung-key'));
+		} catch (error) {
+			rejection = error;
+		} finally {
+			hang.mockRestore();
+		}
+
+		expect({
+			timedOut: rejection instanceof SubrequestTimeoutError,
+			isSameCronState: worker.CRON_STATE === env.CRON_STATE
+		}).toStrictEqual({ timedOut: true, isSameCronState: true });
+	});
+});
+
+describe('subrequest accounting', () => {
+	// One D1 batch is one call to the platform, however many statements it
+	// carries, and the slice refuses nothing: the batch runs although it spends
+	// the slice's only call.
+	it('spends one subrequest for a D1 batch', async () => {
+		const database = boundedD1(env.CUPBOARD_DB);
+		const select = database.prepare('SELECT 1');
+
+		const answers = await withSubrequestSlice(
+			async () => {
+				const isBefore = hasSubrequestsFor(1);
+				const results = await database.batch([select, select]);
+
+				return {
+					before: isBefore,
+					after: hasSubrequestsFor(1),
+					statementsRun: results.length
+				};
+			},
+			{ subrequests: 1, reserve: 0 }
+		);
+
+		expect(answers).toStrictEqual({
+			before: true,
+			after: false,
+			statementsRun: 2
+		});
 	});
 });
