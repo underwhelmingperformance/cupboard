@@ -5,7 +5,12 @@ import {
 import { expect, it } from 'vitest';
 
 import { applyD1Migrations } from '../../packages/cli/src/deploy/migrations.ts';
-import { recordDeploymentPhase } from '../../packages/cli/src/deploy/phase.ts';
+import {
+	type LocalStepReadiness,
+	type PhaseApi,
+	recordPhaseWhenTenantsReady
+} from '../../packages/cli/src/deploy/phase.ts';
+import { LocalStepUnreachedError } from '../../packages/cli/src/errors.ts';
 import {
 	predecessorDurableObjectMigration,
 	sleepingFixtureTenants
@@ -23,33 +28,59 @@ const wakeLimit = 20;
 // towards a step.
 const activeFixtureTenants = 1 + sleepingFixtureTenants.length;
 
+function phaseApi(server: StagedDeploymentServer): PhaseApi {
+	return {
+		queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
+		queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
+	};
+}
+
 /**
- * Applies the D1 migrations, swaps in the Workers built from the working tree,
- * and records the phase. These are the steps `cupboard deploy` performs against
- * Cloudflare, driven here against the harness's persisted storage.
+ * Applies the D1 migrations and swaps in the Workers built from the working
+ * tree, as `cupboard deploy` does before it records a phase. `recordPhase` is
+ * the step it takes after both Workers serve.
  */
 async function deployOverPredecessor(
 	server: StagedDeploymentServer
 ): Promise<void> {
 	await applyD1Migrations(
-		{
-			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
-			queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
-		},
+		phaseApi(server),
 		stagedDeploymentDatabaseId,
 		server.artifact.d1Migrations
 	);
 	await server.deployCurrent();
-	await recordDeploymentPhase(
-		{
-			queryBatch: (id, statements) => server.api.d1QueryBatch(id, statements),
-			queryRows: (id, sql) => server.api.d1QueryRows(id, sql)
-		},
+}
+
+function recordPhase(
+	server: StagedDeploymentServer
+): Promise<LocalStepReadiness> {
+	return recordPhaseWhenTenantsReady(
+		phaseApi(server),
 		stagedDeploymentDatabaseId,
 		settledDeploymentPhase,
 		currentLocalStep,
 		new Date()
 	);
+}
+
+/**
+ * The tenants a refused phase record names, or undefined when the record was
+ * not refused.
+ */
+async function refusedPhaseRecord(
+	server: StagedDeploymentServer
+): Promise<{ pending: number; stragglers: readonly string[] } | undefined> {
+	try {
+		await recordPhase(server);
+	} catch (error) {
+		if (error instanceof LocalStepUnreachedError) {
+			return { pending: error.pending, stragglers: error.stragglers };
+		}
+
+		throw error;
+	}
+
+	return undefined;
 }
 
 it('upgrades a populated predecessor deployment', async () => {
@@ -67,17 +98,28 @@ it('upgrades a populated predecessor deployment', async () => {
 
 		await deployOverPredecessor(server);
 
+		// No tenant has been woken since the swap, so none has recorded step 1 and
+		// the phase is refused.
+		const refused = await refusedPhaseRecord(server);
+
 		const client = await server.deploymentClient();
+		const wake = await client.wakeLocalStep(wakeLimit);
+
+		await recordPhase(server);
 
 		const recorded = await client.phase();
 
 		expect({
-			phase: recorded.phase?.name,
-			wake: await client.wakeLocalStep(wakeLimit),
+			refused,
+			wake,
 			status: await client.localStepStatus(),
+			phase: recorded.phase?.name,
 			terminal: await server.terminalSnapshot()
 		}).toStrictEqual({
-			phase: settledDeploymentPhase,
+			refused: {
+				pending: activeFixtureTenants,
+				stragglers: ['upgrade-active', ...sleepingFixtureTenants]
+			},
 			wake: {
 				current: currentLocalStep,
 				woken: activeFixtureTenants,
@@ -89,6 +131,7 @@ it('upgrades a populated predecessor deployment', async () => {
 				pending: 0,
 				stragglers: []
 			},
+			phase: settledDeploymentPhase,
 			terminal: {
 				lastD1Migration: server.finalD1Migration,
 				phase: settledDeploymentPhase,
@@ -148,14 +191,17 @@ it('records the same phase when an interrupted deploy is run again', async () =>
 		await server.seedPredecessor();
 		await deployOverPredecessor(server);
 
+		const first = await server.deploymentClient();
+
+		await first.wakeLocalStep(wakeLimit);
+		await recordPhase(server);
+
 		// A rerun repeats every step against the state the first run left.
 		await server.restart();
 		await deployOverPredecessor(server);
+		await recordPhase(server);
 
 		const client = await server.deploymentClient();
-
-		await client.wakeLocalStep(wakeLimit);
-
 		const recorded = await client.phase();
 
 		expect({
