@@ -93,6 +93,15 @@ export async function withDeadlineBudget<T>(
 /**
  * Returns the signal for the current deadline scope. Callers use this signal
  * as a control-flow boundary before state changes that follow awaited work.
+ *
+ * A deadline bounds a scope by aborting it, and an abort takes effect only
+ * where the code awaits. Work that runs to completion without awaiting is
+ * therefore bounded by no deadline, however long it takes, and a clock
+ * cannot be substituted for the signal to bound it. In production neither
+ * `Date.now()` nor `performance.now()` advances during synchronous work; in
+ * the local runtime both do. A bound built on either passes its local tests
+ * and never fires in production. Bound synchronous work by what it consumes
+ * instead.
  */
 export function currentDeadlineSignal(): AbortSignal | undefined {
 	return deadlineScope.getStore()?.signal;

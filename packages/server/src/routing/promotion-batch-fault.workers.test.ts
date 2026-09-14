@@ -93,14 +93,18 @@ function failBatchesFor(plan: BatchFaultPlan): BatchFault {
 	const limit = plan.limit ?? Infinity;
 	let rejected = 0;
 
+	// A statement binds a hash on its own or inside the JSON list that carries a
+	// whole set of them, so look for the hash within the bound value.
+	const hasSelectedHash = (value: unknown): boolean =>
+		typeof value === 'string' &&
+		[...plan.narHashes].some((narHash) => value.includes(narHash));
+
 	const spy = vi
 		.spyOn(env.CUPBOARD_DB, 'batch')
 		.mockImplementation((statements) => {
 			const details = statements.map((statement) => statementDetail(statement));
 			const isThisTest = details.some((detail) =>
-				detail.parameters.some(
-					(value) => typeof value === 'string' && plan.narHashes.has(value)
-				)
+				detail.parameters.some((value) => hasSelectedHash(value))
 			);
 			const sql = details.map((detail) => detail.sql).join(' ');
 

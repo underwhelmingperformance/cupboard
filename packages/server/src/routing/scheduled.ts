@@ -24,7 +24,8 @@ import {
 	type NarInfoDemotion,
 	type ObjectReaperPhase
 } from '../do/blob-reaper-service.ts';
-import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
+import { batchNonEmpty } from '../do/bulk.ts';
+import { type JsonValueList, jsonValueLists } from '../do/json-list.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
 import {
 	ActiveVerificationClaims,
@@ -1209,12 +1210,11 @@ function tenantMaintenanceDueCondition() {
 }
 
 /**
- * Builds one bounded update for the selected tenants. The caller chunks the
- * full batch to stay within D1's parameter limit.
+ * Builds one update for the selected tenants.
  */
 export function buildStampMaintainedStatement(
 	database: CronDatabase,
-	tenantIds: readonly TenantId[],
+	tenantIds: JsonValueList<TenantId>,
 	maintainedAt: IsoTimestamp
 ) {
 	return database
@@ -1236,9 +1236,8 @@ async function stampMaintained(
 	const maintainedAt = isoTimestamp(new Date());
 
 	const tenantIds = batch.map((entry) => entry.id);
-	const chunks = chunk(tenantIds, maxInClauseValues);
-	const queries = chunks.map((ids) =>
-		buildStampMaintainedStatement(database, ids, maintainedAt)
+	const queries = jsonValueLists(tenantIds).map((list) =>
+		buildStampMaintainedStatement(database, list, maintainedAt)
 	);
 
 	await batchNonEmpty(database, queries);
