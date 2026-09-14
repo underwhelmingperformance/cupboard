@@ -1,6 +1,7 @@
 import {
 	type CacheAccessMode,
 	type CacheScope,
+	firstCacheGeneration,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type TenantStatus } from '@cupboard/protocol/tenants';
@@ -12,7 +13,6 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { cacheIdentityCondition } from '../db/cache.ts';
 import {
 	type CacheLifecycleVersion,
-	firstCacheGeneration,
 	firstCacheReadRevision
 } from '../db/cache-generation.ts';
 import * as d1Schema from '../db/d1-schema.ts';

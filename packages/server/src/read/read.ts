@@ -1,6 +1,8 @@
 import {
 	type CacheAccessMode,
+	type CacheGeneration,
 	type CacheScope,
+	firstCacheGeneration,
 	type NixSha256HashString,
 	type StorePathHash,
 	type TenantId
@@ -49,6 +51,10 @@ import {
 	unauthorisedResponse
 } from './read-auth.ts';
 
+interface CacheNarInfoVersion extends NarInfoReferenceVersion {
+	readonly cacheGeneration: CacheGeneration;
+}
+
 export interface ReadEnv {
 	readonly BLOBS: R2Bucket;
 	readonly CUPBOARD_DB: D1Database;
@@ -56,11 +62,14 @@ export interface ReadEnv {
 }
 
 /**
- * The cache selected by a read request.
+ * The cache selected by a read request: which cache, which incarnation of its
+ * name, and who may read it. Admission resolves all three from the cache's
+ * lifecycle row.
  */
 export interface ReadScope {
 	readonly scope: CacheScope;
 	readonly access: CacheAccessMode;
+	readonly generation: CacheGeneration;
 }
 
 /**
@@ -192,8 +201,9 @@ export async function serveNar(
  *
  * Advancing the cache generation makes every edge from an earlier generation
  * stop authorising reads, so cache deletion does not need to retire those edges
- * synchronously to revoke read authority. Every live cache has a lifecycle row;
- * the inner join also rejects references whose catalogue entry is absent.
+ * synchronously to revoke read authority. Every cache reachable from `blob_ref`
+ * has a lifecycle row, so the inner join drops no live edge, and it rejects an
+ * edge whose cache has no lifecycle row at all.
  *
  * The index test builds this statement so that it inspects the query the read
  * path runs.
@@ -271,17 +281,17 @@ function referencingCaches(authority: NarAuthority): SQL | undefined {
  * A single narinfo GET or HEAD supplies one store-path hash and seeks
  * `blob_ref` through `blob_ref_native_identity_idx`, which leads with the
  * tenant and the cache's identity columns, joined to the cache lifecycle row.
- * The legacy primary key cannot serve this: it leads with the stored name,
- * which encodes the access, so a cache whose access changed would no longer
- * match the edges it committed earlier. Availability splits larger hash sets at
- * D1's parameter limit and sends all resulting lookups in one batch.
+ * The legacy primary key cannot serve this lookup: it leads with the stored
+ * name, which encodes the access, so a cache whose access changed would no
+ * longer match the edges it committed earlier. Availability binds the hashes
+ * of each chunk as one list parameter, so its lookup is one statement.
  *
- * A deleted cache keeps its path-keyed narinfo objects until the teardown drain
- * removes them. The same cache name can be registered again before that drain
- * finishes. Object presence therefore does not establish that the current
- * cache contains the path. The query requires an edge authorised by the current
- * cache generation. It also returns the narinfo generation and NAR hash so the
- * read can reject an object from another commit.
+ * A recommit publishes its object after its edge, so the object at a path's key
+ * can still record an earlier commit of the same cache. Object presence
+ * therefore does not establish which commit the cache holds. The query requires
+ * an edge authorised by the current cache generation, and returns that edge's
+ * narinfo generation and NAR hash so the read can reject an object from another
+ * commit.
  *
  * The index test builds this statement so that it inspects the query the read
  * path runs.
@@ -296,7 +306,8 @@ export function narInfoReferenceQuery(
 		.select({
 			storePathHash: d1Schema.blobReference.storePathHash,
 			generation: d1Schema.blobReference.generation,
-			narHash: d1Schema.blobReference.narHash
+			narHash: d1Schema.blobReference.narHash,
+			cacheGeneration: d1Schema.blobReference.cacheGeneration
 		})
 		.from(d1Schema.blobReference)
 		.leftJoin(d1Schema.cacheLifecycle, referencedCacheLifecycle())
@@ -323,7 +334,7 @@ export const cacheProbeD1CallsPerChunk = 1;
  *
  * A recommit can leave an earlier edge in place until the teardown drain
  * removes it, so D1 can contain several authorised edges for one path. Narinfo
- * generations increase and are never reused for a stored cache name and path.
+ * generations increase and are never reused for one cache and path.
  * The greatest generation therefore belongs to the current commit. A path with
  * no authorised edge is absent from the result.
  *
@@ -335,7 +346,7 @@ async function authorisedNarInfoVersions(
 	tenant: TenantId,
 	cache: CacheScope,
 	storePathHashes: readonly StorePathHash[]
-): Promise<ReadonlyMap<StorePathHash, NarInfoReferenceVersion>> {
+): Promise<ReadonlyMap<StorePathHash, CacheNarInfoVersion>> {
 	try {
 		const pages = await readWithOneRetry(() =>
 			batchNonEmpty(
@@ -345,7 +356,7 @@ async function authorisedNarInfoVersions(
 				)
 			)
 		);
-		const current = new Map<StorePathHash, NarInfoReferenceVersion>();
+		const current = new Map<StorePathHash, CacheNarInfoVersion>();
 
 		for (const edge of pages.flat()) {
 			const known = current.get(edge.storePathHash);
@@ -353,7 +364,8 @@ async function authorisedNarInfoVersions(
 			if (known === undefined || known.generation < edge.generation) {
 				current.set(edge.storePathHash, {
 					generation: edge.generation,
-					narHash: edge.narHash
+					narHash: edge.narHash,
+					cacheGeneration: edge.cacheGeneration ?? firstCacheGeneration
 				});
 			}
 		}
@@ -368,11 +380,20 @@ async function authorisedNarInfoVersions(
 // the same tenant, cache, and path identity in its cache tag so deletion and
 // re-signing purge only this narinfo.
 //
-// The read serves the object only when an authorised reference edge matches the
-// path and the object's recorded generation and NAR hash match that edge.
-// Narinfo objects are keyed by path within a cache, so without those checks a
-// reader of a recreated cache would receive the object published by the previous
-// cache with that name.
+// The object key carries the cache's generation, so an object published by an
+// earlier incarnation of the cache name is not at the key this read addresses.
+// Every site that retires a reference edge removes the object first, so an
+// object at this key cannot have outlived its edge. Deleted caches and inactive
+// tenants are refused at admission. A public read therefore
+// serves what R2 holds and spends no D1 statement beyond the admission read.
+//
+// An authenticated read keeps the edge lookup. That read answers `no-store`,
+// so it has no staleness allowance to trade for the saved statement, and the
+// lookup applies a test the key alone cannot: the object must record the
+// narinfo generation and NAR hash of the commit the edge names.
+//
+// A private read must pass true for `isAuthenticatedRead`; false bypasses the
+// reference lookup.
 export async function serveNarInfo(
 	request: Request,
 	env: ReadEnv,
@@ -381,9 +402,18 @@ export async function serveNarInfo(
 	storePathHash: StorePathHash,
 	isAuthenticatedRead: boolean
 ): Promise<Response> {
-	const key = narInfoObjectKey(tenant, storePathHash, cache.scope);
+	const key = narInfoObjectKey(
+		tenant,
+		storePathHash,
+		cache.scope,
+		cache.generation
+	);
 	const headersFor = (object: R2Object): Headers =>
 		narInfoHeaders(object, tenant, cache.scope, storePathHash);
+
+	if (!isAuthenticatedRead) {
+		return serveR2(request, env, key, headersFor, true);
+	}
 
 	const versions = await authorisedNarInfoVersions(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
@@ -397,13 +427,8 @@ export async function serveNarInfo(
 		return uncachedNotFoundResponse();
 	}
 
-	return serveR2(
-		request,
-		env,
-		key,
-		headersFor,
-		!isAuthenticatedRead,
-		(object) => isNarInfoObjectOfCommit(object, current)
+	return serveR2(request, env, key, headersFor, false, (object) =>
+		isNarInfoObjectOfCommit(object, current)
 	);
 }
 
@@ -423,8 +448,8 @@ export async function missingStorePathHashes(
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
 	// Resolve the current commit for each path before checking R2. Report the
-	// path as missing if the object belongs to another commit. A narinfo GET
-	// would refuse that object, so the push must not skip the path.
+	// path as missing if the object belongs to another commit, so the push does
+	// not skip a path whose current publication is unavailable.
 	const versions = await authorisedNarInfoVersions(
 		database,
 		tenant,
@@ -443,7 +468,7 @@ export async function missingStorePathHashes(
 			}
 
 			const object = await blobs.head(
-				narInfoObjectKey(tenant, storePathHash, cache)
+				narInfoObjectKey(tenant, storePathHash, cache, current.cacheGeneration)
 			);
 			const isServable =
 				object !== null && isNarInfoObjectOfCommit(object, current);
@@ -461,9 +486,9 @@ export async function missingStorePathHashes(
 // Public origin requests reach the cache-owning tenant Worker only after
 // control admission; private requests stay on the uncached control Worker.
 //
-// `isServable` validates an object after R2 returns it. A narinfo read uses the
-// predicate to refuse an object from a previous cache with the same name, or
-// from an earlier commit of the path.
+// `isServable` validates an object after R2 returns it. An authenticated
+// narinfo read uses the predicate to refuse an object whose recorded narinfo
+// generation or NAR hash belongs to a superseded commit.
 async function serveR2(
 	request: Request,
 	env: ReadEnv,

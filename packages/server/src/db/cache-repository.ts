@@ -8,7 +8,7 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt } from 'drizzle-orm';
 
 import type { SchemaDatabase } from '../do/context.ts';
 import {
@@ -32,13 +32,15 @@ interface CacheIdentityRow {
 	readonly kind: 'default' | 'named' | null;
 	readonly name: string | null;
 	readonly access: string | null;
+	readonly generation: CacheGeneration;
 }
 
 const identityColumns = {
 	id: schema.cacheIdentities.id,
 	kind: schema.cacheIdentities.kind,
 	name: schema.cacheIdentities.name,
-	access: schema.cacheIdentities.access
+	access: schema.cacheIdentities.access,
+	generation: schema.cacheIdentities.generation
 };
 
 /**
@@ -64,7 +66,8 @@ export class CacheRepository {
 		return {
 			id: row.id,
 			scope: cacheScopeFromRow(row),
-			access: cacheAccessModeSchema.parse(row.access)
+			access: cacheAccessModeSchema.parse(row.access),
+			generation: row.generation
 		};
 	}
 
@@ -231,12 +234,28 @@ export class CacheRepository {
 	 * Records on the identity the generation `cache_lifecycle` holds for the
 	 * cache. The row is created at the first generation, so a name registered
 	 * again after a deletion has to take the generation the deletion advanced.
+	 * Continue with the returned cache: the input still carries its earlier
+	 * generation and would address the previous cache's objects.
 	 */
-	stampGeneration(cache: ResolvedCache, generation: CacheGeneration): void {
+	stampGeneration(
+		cache: ResolvedCache,
+		generation: CacheGeneration
+	): ResolvedCache {
 		this.database
 			.update(schema.cacheIdentities)
 			.set({ generation })
-			.where(eq(schema.cacheIdentities.id, cache.id))
+			.where(
+				and(
+					eq(schema.cacheIdentities.id, cache.id),
+					isNull(schema.cacheIdentities.deletedAt),
+					lt(schema.cacheIdentities.generation, generation)
+				)
+			)
 			.run();
+
+		return {
+			...cache,
+			generation: cache.generation > generation ? cache.generation : generation
+		};
 	}
 }

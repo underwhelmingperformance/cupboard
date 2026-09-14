@@ -1,4 +1,5 @@
 import {
+	firstCacheGeneration,
 	nixSha256HashSchema,
 	rootNameSchema,
 	storePathHashSchema,
@@ -513,7 +514,12 @@ describe('root ensure hardening', () => {
 				status: 'build-required',
 				unavailable: [committed.storePath]
 			},
-			created: { id: 2, scope: cache, access: 'public' }
+			created: {
+				id: 2,
+				scope: cache,
+				access: 'public',
+				generation: firstCacheGeneration
+			}
 		});
 	});
 });

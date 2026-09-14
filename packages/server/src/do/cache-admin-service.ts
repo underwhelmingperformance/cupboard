@@ -323,7 +323,7 @@ export class CacheAdminService {
 			}
 
 			const previous = legacyCacheKey(existing.scope, existing.access);
-			let cache: ResolvedCache;
+			let updated: ResolvedCache;
 			let version: CacheLifecycleVersion;
 
 			if (update.access === 'private') {
@@ -331,14 +331,23 @@ export class CacheAdminService {
 					scope,
 					access: update.access
 				});
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
+				updated = this.context.cacheRepository.setAccess(
+					existing,
+					update.access
+				);
 			} else {
-				cache = this.context.cacheRepository.setAccess(existing, update.access);
-				version = await this.registration.recordLifecycle(cache);
-				await this.registration.clearReadCredential(cache.scope);
+				updated = this.context.cacheRepository.setAccess(
+					existing,
+					update.access
+				);
+				version = await this.registration.recordLifecycle(updated);
+				await this.registration.clearReadCredential(updated.scope);
 			}
 
-			this.context.cacheRepository.stampGeneration(cache, version.generation);
+			const cache = this.context.cacheRepository.stampGeneration(
+				updated,
+				version.generation
+			);
 
 			const row = this.context.db
 				.select({ priority: schema.cacheIdentities.priority })

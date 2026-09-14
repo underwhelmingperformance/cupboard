@@ -1,16 +1,25 @@
 import {
 	type CacheName,
 	cacheNameSchema,
+	firstCacheGeneration,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 
+import { cacheScopeFromRow } from '../db/cache.ts';
 import { type ResolvedCache } from '../db/cache.ts';
-import { LegacyObjectKeyInvalidError } from '../errors.ts';
-import { type R2ObjectKey, r2ObjectKeySchema } from '../http/http.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import { StoredObjectKeyInvalidError } from '../errors.ts';
+import {
+	cacheObjectPrefix,
+	type R2ObjectKey,
+	r2ObjectKeySchema
+} from '../http/http.ts';
+import { afterLifecycleKey } from '../migration/lifecycle-cursor.ts';
 
 import { maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -44,21 +53,23 @@ type CurrentObjects = (
 ) => ReadonlySet<StorePathHash>;
 
 /**
- * One family of path-keyed objects a private cache wrote under its old stored
- * name.
+ * One family of path-keyed objects: where the family keeps everything it
+ * writes, where within that one cache's object for a path belongs, and which
+ * of its stored objects a cache can still serve.
  */
-export interface LegacyObjectFamily {
-	/**
-	 * The key segment that names the family, such as `narinfo`.
-	 */
-	readonly segment: string;
+export interface ObjectFamily {
+	readonly prefix: (tenant: TenantId) => string;
+	readonly key: (
+		cache: ResolvedCache,
+		storePathHash: StorePathHash
+	) => R2ObjectKey;
 	readonly currentObjects: CurrentObjects;
 }
 
 /**
- * One stored object under a private cache's old directory.
+ * One stored object under a prefix a move is emptying.
  */
-interface LegacyObject {
+interface SourceObject {
 	readonly key: R2ObjectKey;
 	readonly storePathHash: StorePathHash;
 	readonly object: R2Object;
@@ -80,25 +91,8 @@ interface MovedObject {
  * under `<family>/private/`, one directory higher, so the prefix alone does not
  * say whose objects a key holds.
  */
-function legacyPrefix(tenant: TenantId, family: LegacyObjectFamily): string {
-	return `t/${tenant}/${family.segment}/${privateSegment}`;
-}
-
-/**
- * Where an object under one private cache's old directory belongs once its
- * access is no longer part of its name.
- *
- * The old directory is the family's own directory plus `private/`, so taking
- * that segment off the front of the key leaves the key the cache's scope alone
- * gives it. A cache named `private` keeps its name in the result, because only
- * the segment the access added comes off.
- */
-function movedKey(legacyFamilyPrefix: string, key: string): R2ObjectKey {
-	const family = legacyFamilyPrefix.slice(0, -privateSegment.length);
-
-	return r2ObjectKeySchema.parse(
-		`${family}${key.slice(legacyFamilyPrefix.length)}`
-	);
+function legacyPrefix(tenant: TenantId, family: ObjectFamily): string {
+	return `${family.prefix(tenant)}${privateSegment}`;
 }
 
 /**
@@ -113,7 +107,7 @@ function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
 	);
 
 	if (!parsed.success) {
-		throw new LegacyObjectKeyInvalidError(directory);
+		throw new StoredObjectKeyInvalidError(directory);
 	}
 
 	return parsed.data;
@@ -126,17 +120,17 @@ function cacheNameOf(legacyFamilyPrefix: string, directory: string): CacheName {
  * this build rather than an object another writer left, so it stops the pass
  * instead of reaching the branch that deletes an object no cache claims.
  */
-function legacyObjectsIn(
-	directory: string,
+function sourceObjectsIn(
+	prefix: string,
 	listed: readonly R2Object[]
-): LegacyObject[] {
+): SourceObject[] {
 	return listed.map((object) => {
 		const parsed = storePathHashSchema.safeParse(
-			object.key.slice(directory.length)
+			object.key.slice(prefix.length)
 		);
 
 		if (!parsed.success) {
-			throw new LegacyObjectKeyInvalidError(object.key);
+			throw new StoredObjectKeyInvalidError(object.key);
 		}
 
 		return {
@@ -155,13 +149,13 @@ async function deleteObject(
 }
 
 /**
- * Moves one object to the key its cache's scope alone gives it, and reports
- * whether it wrote the destination.
+ * Moves one object to the key its cache now reads, and reports whether it
+ * wrote the destination.
  *
- * The destination is authoritative once it exists: a commit since the cutover
- * wrote it under the current key, and copying the older object over it would
- * put back what that commit replaced. So an existing destination is left alone
- * and only the older object is removed.
+ * The destination is authoritative once it exists: a commit made after the key
+ * changed wrote it under the current key, and copying the older object over it
+ * would put back what that commit replaced. So an existing destination is left
+ * alone and only the older object is removed.
  *
  * The copy carries the object's metadata across, because the read checks a
  * narinfo's recorded generation and NAR hash against the reference edge and
@@ -210,7 +204,7 @@ async function moveObject(
  */
 async function discardSupersededCopies(
 	context: ServerContext,
-	family: LegacyObjectFamily,
+	family: ObjectFamily,
 	cache: ResolvedCache,
 	moved: ReadonlyMap<StorePathHash, MovedObject>
 ): Promise<void> {
@@ -236,33 +230,29 @@ async function discardSupersededCopies(
 }
 
 /**
- * Relocates the objects a cache can still serve and deletes the rest.
+ * Relocates the objects a cache can still serve from one prefix and deletes the
+ * rest.
  *
- * Nothing writes a legacy key after the cutover, because every key is built
- * from a cache's scope and a scope carries no access. So this decides about a
- * settled directory rather than racing a writer for it, and the local rows are
- * the current answer to what the cache holds.
+ * Nothing writes these keys once the family's keys have moved, so this pass
+ * reads a prefix no writer is still adding to, and the local rows say what the
+ * cache holds.
  *
  * An object whose path has no row, or whose recorded version a later commit
  * superseded, is one no read could serve. Relocating it would put an object at
  * a live key that the reference edge refuses and nothing collects, so it is
- * deleted here instead. Every object of a cache the registry no longer has
- * takes the same branch: a cache torn down and created again under the same
- * name is a different cache with a different identity, and these objects belong
- * to the one that went.
+ * deleted here instead. Every object takes that branch when no cache claims the
+ * prefix at all: a cache torn down and created again under the same name is a
+ * different cache with a different identity, and these objects belong to the
+ * deleted one.
  */
-async function disposeOfDirectory(
+async function disposeOfObjects(
 	context: ServerContext,
-	family: LegacyObjectFamily,
-	legacyFamilyPrefix: string,
-	directory: string,
+	family: ObjectFamily,
+	cache: ResolvedCache | undefined,
+	prefix: string,
 	listed: readonly R2Object[]
 ): Promise<void> {
-	const objects = legacyObjectsIn(directory, listed);
-	const cache = context.cacheRepository.resolve({
-		kind: 'named',
-		name: cacheNameOf(legacyFamilyPrefix, directory)
-	});
+	const objects = sourceObjectsIn(prefix, listed);
 
 	if (cache === undefined) {
 		await mapWithConcurrency(objects, maxOutgoingConnections, (entry) =>
@@ -286,7 +276,7 @@ async function disposeOfDirectory(
 				return;
 			}
 
-			const key = movedKey(legacyFamilyPrefix, entry.key);
+			const key = family.key(cache, entry.storePathHash);
 			const { hasCopied } = await moveObject(context, entry.key, key);
 
 			return hasCopied
@@ -320,7 +310,7 @@ const legacyProgressSchema = z.object({
 export async function moveLegacyPrivateObjects(
 	context: ServerContext,
 	tenant: TenantId,
-	families: readonly LegacyObjectFamily[]
+	families: readonly ObjectFamily[]
 ): Promise<ObjectMoveOutcome> {
 	const saved = await context.ctx.storage.get(legacyProgressKey);
 	let progress: z.infer<typeof legacyProgressSchema> =
@@ -362,10 +352,13 @@ export async function moveLegacyPrivateObjects(
 				limit: maxObjectsMovedPerRun - moved,
 				include: ['customMetadata']
 			});
-			await disposeOfDirectory(
+			await disposeOfObjects(
 				context,
 				family,
-				prefix,
+				context.cacheRepository.resolve({
+					kind: 'named',
+					name: cacheNameOf(prefix, directory)
+				}),
 				directory,
 				listed.objects
 			);
@@ -402,7 +395,118 @@ export async function moveLegacyPrivateObjects(
 }
 
 export const maxPrefixesInspectedPerRun = 36;
+const incarnationProgressKey = 'migration/incarnation-objects/v2';
+const incarnationProgressSchema = z.object({
+	family: z.number().int().nonnegative(),
+	afterKey: z.string(),
+	listingCursor: z.string().optional()
+});
+
+/**
+ * Moves first-generation objects to the current cache incarnation, or deletes
+ * them when no live cache claims them. Scope and listing cursors survive each
+ * wake, including pages which contain no objects to move.
+ *
+ * A first-generation cache still reads its original keys and must not be moved.
+ * Delimited listings exclude the generation directories beneath those keys.
+ */
+export async function moveObjectsToCacheIncarnation(
+	context: ServerContext,
+	tenant: TenantId,
+	families: readonly ObjectFamily[]
+): Promise<ObjectMoveOutcome> {
+	const saved = await context.ctx.storage.get(incarnationProgressKey);
+	let progress: z.infer<typeof incarnationProgressSchema> =
+		saved === undefined
+			? { family: 0, afterKey: '' }
+			: incarnationProgressSchema.parse(saved);
+	let moved = 0;
+	let inspected = 0;
+
+	for (const [familyIndex, family] of families.entries()) {
+		if (familyIndex < progress.family) {
+			continue;
+		}
+		const scopes = await context.d1
+			.select()
+			.from(d1Schema.cacheLifecycle)
+			.where(
+				and(
+					eq(d1Schema.cacheLifecycle.tenant, tenant),
+					afterLifecycleKey(progress.afterKey)
+				)
+			)
+			.orderBy(
+				d1Schema.cacheLifecycle.cacheKind,
+				d1Schema.cacheLifecycle.cacheName
+			)
+			.limit(maxPrefixesInspectedPerRun - inspected)
+			.all();
+		for (const row of scopes) {
+			if (
+				moved >= maxObjectsMovedPerRun ||
+				!hasSubrequestsFor(1 + 5 * (maxObjectsMovedPerRun - moved))
+			) {
+				return { moved, hasMore: true };
+			}
+			const scope = cacheScopeFromRow({
+				kind: row.cacheKind ?? undefined,
+				name: row.cacheName
+			});
+			let claimant = context.cacheRepository.resolve(scope);
+			if (
+				claimant !== undefined &&
+				row.deletedAt === null &&
+				claimant.generation < row.generation
+			) {
+				context.cacheRepository.stampGeneration(claimant, row.generation);
+				claimant = context.cacheRepository.resolve(scope);
+			}
+			if (
+				row.generation > firstCacheGeneration &&
+				claimant?.generation !== firstCacheGeneration
+			) {
+				const prefix = cacheObjectPrefix(family.prefix(tenant), scope);
+				const listed = await context.env.BLOBS.list({
+					prefix,
+					cursor: progress.listingCursor,
+					delimiter: '/',
+					limit: maxObjectsMovedPerRun - moved,
+					include: ['customMetadata']
+				});
+				await disposeOfObjects(
+					context,
+					family,
+					row.deletedAt === null ? claimant : undefined,
+					prefix,
+					listed.objects
+				);
+				moved += listed.objects.length;
+				if (listed.truncated) {
+					await context.ctx.storage.put(incarnationProgressKey, {
+						...progress,
+						family: familyIndex,
+						listingCursor: listed.cursor
+					});
+					return { moved, hasMore: true };
+				}
+			}
+			inspected += 1;
+			progress = {
+				family: familyIndex,
+				afterKey: scope.kind === 'default' ? 'default' : `named:${scope.name}`
+			};
+			await context.ctx.storage.put(incarnationProgressKey, progress);
+		}
+		if (inspected >= maxPrefixesInspectedPerRun) {
+			return { moved, hasMore: true };
+		}
+		progress = { family: familyIndex + 1, afterKey: '' };
+		await context.ctx.storage.put(incarnationProgressKey, progress);
+	}
+	return { moved, hasMore: false };
+}
 
 export async function resetObjectMoves(context: ServerContext): Promise<void> {
-	await context.ctx.storage.delete(legacyProgressKey);
+	await context.ctx.storage.delete([incarnationProgressKey, legacyProgressKey]);
 }
