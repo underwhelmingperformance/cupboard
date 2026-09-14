@@ -32,7 +32,8 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 type TenantClient = JsonifiedClient<
@@ -247,92 +248,96 @@ describe('tenant contract round trip', () => {
 
 	it('returns signing-key rotation conflicts as defined contract errors', async () => {
 		await useTestServer('contract-key-conflicts');
-		const init = await bootstrap();
-		await pushPath(
-			init.token,
-			uploadMetadata({
-				fileSize: narBytes.byteLength,
-				storePathHash: 'd'.repeat(32),
-				name: 'before-rotation'
-			})
-		);
-		const client = tenantClient(init.token);
-		const rotated = await client.keys.signing.rotate();
+		await withoutAlarmArming(async () => {
+			const init = await bootstrap();
+			await pushPath(
+				init.token,
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash: 'd'.repeat(32),
+					name: 'before-rotation'
+				})
+			);
+			const client = tenantClient(init.token);
+			const rotated = await client.keys.signing.rotate();
 
-		const [rotateError, rotateData, rotateDefined] = await safe(
-			client.keys.signing.rotate()
-		);
-		const [retireError, retireData, retireDefined] = await safe(
-			client.keys.signing.retire({ id: rotated.rotated.key.id })
-		);
-		const [abortError, abortData, abortDefined] = await safe(
-			client.keys.signing.abort({ id: 'active' })
-		);
-		if (
-			!(rotateError instanceof ORPCError) ||
-			!(retireError instanceof ORPCError) ||
-			!(abortError instanceof ORPCError)
-		) {
-			throw new Error('Expected each signing-key conflict to be an ORPCError');
-		}
-		const conflictSchema = z.object({
-			defined: z.literal(true),
-			code: z.enum([
-				'SIGNING_KEY_ROTATION_IN_PROGRESS',
-				'SIGNING_KEY_BACKFILL_INCOMPLETE',
-				'SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED'
-			]),
-			status: z.literal(StatusCodes.CONFLICT),
-			data: z.object({ id: signingKeyIdSchema })
-		});
+			const [rotateError, rotateData, rotateDefined] = await safe(
+				client.keys.signing.rotate()
+			);
+			const [retireError, retireData, retireDefined] = await safe(
+				client.keys.signing.retire({ id: rotated.rotated.key.id })
+			);
+			const [abortError, abortData, abortDefined] = await safe(
+				client.keys.signing.abort({ id: 'active' })
+			);
+			if (
+				!(rotateError instanceof ORPCError) ||
+				!(retireError instanceof ORPCError) ||
+				!(abortError instanceof ORPCError)
+			) {
+				throw new Error(
+					'Expected each signing-key conflict to be an ORPCError'
+				);
+			}
+			const conflictSchema = z.object({
+				defined: z.literal(true),
+				code: z.enum([
+					'SIGNING_KEY_ROTATION_IN_PROGRESS',
+					'SIGNING_KEY_BACKFILL_INCOMPLETE',
+					'SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED'
+				]),
+				status: z.literal(StatusCodes.CONFLICT),
+				data: z.object({ id: signingKeyIdSchema })
+			});
 
-		expect({
-			rotate: {
-				defined: rotateDefined,
-				data: rotateData,
-				error: conflictSchema.parse(rotateError)
-			},
-			retire: {
-				defined: retireDefined,
-				data: retireData,
-				error: conflictSchema.parse(retireError)
-			},
-			abort: {
-				defined: abortDefined,
-				data: abortData,
-				error: conflictSchema.parse(abortError)
-			}
-		}).toStrictEqual({
-			rotate: {
-				defined: true,
-				data: undefined,
-				error: {
-					defined: true,
-					code: 'SIGNING_KEY_ROTATION_IN_PROGRESS',
-					status: StatusCodes.CONFLICT,
-					data: { id: rotated.rotated.key.id }
+			expect({
+				rotate: {
+					defined: rotateDefined,
+					data: rotateData,
+					error: conflictSchema.parse(rotateError)
+				},
+				retire: {
+					defined: retireDefined,
+					data: retireData,
+					error: conflictSchema.parse(retireError)
+				},
+				abort: {
+					defined: abortDefined,
+					data: abortData,
+					error: conflictSchema.parse(abortError)
 				}
-			},
-			retire: {
-				defined: true,
-				data: undefined,
-				error: {
+			}).toStrictEqual({
+				rotate: {
 					defined: true,
-					code: 'SIGNING_KEY_BACKFILL_INCOMPLETE',
-					status: StatusCodes.CONFLICT,
-					data: { id: rotated.rotated.key.id }
-				}
-			},
-			abort: {
-				defined: true,
-				data: undefined,
-				error: {
+					data: undefined,
+					error: {
+						defined: true,
+						code: 'SIGNING_KEY_ROTATION_IN_PROGRESS',
+						status: StatusCodes.CONFLICT,
+						data: { id: rotated.rotated.key.id }
+					}
+				},
+				retire: {
 					defined: true,
-					code: 'SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED',
-					status: StatusCodes.CONFLICT,
-					data: { id: 'active' }
+					data: undefined,
+					error: {
+						defined: true,
+						code: 'SIGNING_KEY_BACKFILL_INCOMPLETE',
+						status: StatusCodes.CONFLICT,
+						data: { id: rotated.rotated.key.id }
+					}
+				},
+				abort: {
+					defined: true,
+					data: undefined,
+					error: {
+						defined: true,
+						code: 'SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED',
+						status: StatusCodes.CONFLICT,
+						data: { id: 'active' }
+					}
 				}
-			}
+			});
 		});
 	});
 
