@@ -3733,9 +3733,10 @@ export function migrateThrough(
 	state: DurableObjectState,
 	throughIndex: number
 ): Promise<void> {
-	applyMigrations(drizzle(state.storage), migrationsThrough(throughIndex));
-
-	return Promise.resolve();
+	return applyMigrations(
+		drizzle(state.storage),
+		migrationsThrough(throughIndex)
+	);
 }
 
 export interface SigningKeySeed {

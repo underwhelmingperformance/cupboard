@@ -16,6 +16,7 @@ import {
 	type CacheAvailabilityResponse,
 	reuseViewAvailabilityRequestSchema
 } from '@cupboard/protocol/cache-availability';
+import { type LocalStep } from '@cupboard/protocol/deployment';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -149,6 +150,7 @@ import {
 } from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { recordLocalStep } from './local-step.ts';
 import {
 	MaintenanceEligibilityService,
 	maintenancePassStatements,
@@ -354,7 +356,7 @@ export const verifyBackstopReuseSettleLimit = Math.floor(
 		statementsPerPendingSettleRow
 );
 
-type MaintenanceKind = 'gc' | 'verify';
+type MaintenanceKind = 'gc' | 'verify' | 'local-step';
 
 class CountingSemaphore {
 	private slots: number;
@@ -1447,12 +1449,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async migrateAndSeed(): Promise<void> {
 		// The meter is cumulative and a purged object can initialise again. Measure
-		// only this migration interval; its sole await does not access the database.
+		// only this migration interval; the awaited operations (hashing the bundled
+		// migrations, probing zstd) do not access the database.
 		this.context.dbCost.recordOutstanding();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		applyMigrations(this.context.db, migrations);
+		await applyMigrations(this.context.db, migrations);
 		await this.assertZstdAvailable();
 
 		// The default cache always exists in the registry so its priority is
@@ -1862,23 +1865,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Apply the verdicts the upload rows are still holding. A pass that left the
-	// queue no shorter failed on every verdict it tried, so it reports a stall
-	// and waits before the next attempt.
+	// A pass that resolved none of its page failed on every verdict it tried,
+	// so it reports a stall and waits. Do not judge this by the number of held
+	// verdicts: a commit can record a new one while the pass runs.
 	private async drainRecordedVerdicts(): Promise<MaintenanceProgress> {
-		const before = this.verification.recordedVerdictCount();
-		await this.metered('verdict-drain', (logger) =>
+		const page = await this.metered('verdict-drain', (logger) =>
 			this.withMaintenanceEligibility(() =>
 				this.verification.applyRecordedVerdicts(logger)
 			)
 		);
-		const remaining = this.verification.recordedVerdictCount();
 
-		if (remaining === 0) {
+		if (!this.verification.hasRecordedVerdicts()) {
 			return 'progressed';
 		}
 
-		if (remaining >= before) {
+		if (page.resolved === 0) {
 			return 'stalled';
 		}
 
@@ -2404,6 +2405,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requestVerificationPass();
 	}
 
+	/**
+	 * Applies any pending migrations and records the step this object has
+	 * reached in its tenant row. This is the only path that records the step;
+	 * serving traffic does not. Returns undefined when the control plane has not
+	 * configured this object, which then has no tenant state to advance.
+	 */
+	async reportLocalStep(): Promise<LocalStep | undefined> {
+		try {
+			await this.initialise();
+		} catch (error) {
+			if (error instanceof TenantNotConfiguredError) {
+				return undefined;
+			}
+			throw error;
+		}
+
+		return this.runExclusiveMaintenance('local-step', () =>
+			this.metered('local-step', () => recordLocalStep(this.context))
+		);
+	}
+
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
@@ -2887,6 +2909,7 @@ type MeteredMethod =
 	| 'demote-narinfo-objects'
 	| 'garbage-collection'
 	| 'initialise'
+	| 'local-step'
 	| 'offboard'
 	| 'reconcile'
 	| 'record-missing-object'

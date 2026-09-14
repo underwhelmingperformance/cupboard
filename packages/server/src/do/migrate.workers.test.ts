@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import migrations from '../../drizzle/migrations.js';
+import { sha256Hex } from '../crypto/crypto.ts';
 import {
 	latestMigrationIndex,
 	migrateThrough,
@@ -11,8 +12,11 @@ import {
 } from '../test-support.ts';
 
 import {
+	admitMigrationSource,
 	applyMigrations,
+	DurableObjectMigrationDigestError,
 	DurableObjectMigrationError,
+	DurableObjectMigrationJournalError,
 	type MigrationBundle
 } from './migrate.ts';
 
@@ -37,22 +41,160 @@ const columnNames = (storage: Storage, table: string): string[] =>
 		.values(sql.raw(`PRAGMA table_info(${table})`))
 		.map((row) => String(row[1]));
 
-const everyTag = migrations.journal.entries
-	.toSorted((a, b) => a.idx - b.idx)
-	.map((entry) => entry.tag);
+interface RecordedRow {
+	readonly hash: string;
+	readonly digest: string | undefined;
+	readonly verificationState: string | undefined;
+}
+
+const recordedRows = (storage: Storage): RecordedRow[] =>
+	drizzle(storage)
+		.values(
+			sql.raw(
+				'SELECT hash, digest, verification_state FROM __drizzle_migrations ORDER BY created_at, id'
+			)
+		)
+		.map((row) => ({
+			hash: String(row[0]),
+			digest: typeof row[1] === 'string' ? row[1] : undefined,
+			verificationState: typeof row[2] === 'string' ? row[2] : undefined
+		}));
+
+const everyEntry = migrations.journal.entries.toSorted((a, b) => a.idx - b.idx);
+
+const everyTag = everyEntry.map((entry) => entry.tag);
+
+const migrationSource = (bundle: MigrationBundle, index: number): string => {
+	const source = bundle.migrations[`m${index.toString().padStart(4, '0')}`];
+
+	if (source === undefined) {
+		throw new Error(`No migration source at index ${String(index)}`);
+	}
+
+	return source;
+};
+
+/**
+ * Writes a tracking row directly, so a test can put the store in a state no
+ * current build produces: a Drizzle-era empty hash, a tag this build does not
+ * carry, or a digest that no longer matches.
+ */
+function recordTrackingRow(
+	storage: Storage,
+	row: {
+		hash: string;
+		when: number;
+		digest?: string;
+		verificationState?: string;
+	}
+): void {
+	const database = drizzle(storage);
+	database.run(
+		sql.raw(
+			'CREATE TABLE IF NOT EXISTS __drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric, digest text, verification_state text)'
+		)
+	);
+	database.run(
+		sql`INSERT INTO __drizzle_migrations (hash, created_at, digest, verification_state) VALUES (${row.hash}, ${row.when}, ${row.digest ?? sql.raw('NULL')}, ${row.verificationState ?? sql.raw('NULL')})`
+	);
+}
 
 describe('applyMigrations', () => {
 	it('applies every migration and records each by tag on a fresh store', async () => {
 		const tags = await runInDurableObject(
 			testServerFor('migrate-fresh'),
-			(_instance, state) => {
-				applyMigrations(drizzle(state.storage), migrations);
+			async (_instance, state) => {
+				await applyMigrations(drizzle(state.storage), migrations);
 
 				return appliedTags(state.storage);
 			}
 		);
 
 		expect(tags).toStrictEqual(everyTag);
+	});
+
+	it('records each migration as verified with the digest of its SQL when an object initialises', async () => {
+		const rows = await runInDurableObject(
+			testServerFor('migrate-initialise'),
+			async (instance, state) => {
+				await instance.fetch(new Request('https://tenant.test/nix-cache-info'));
+
+				return recordedRows(state.storage);
+			}
+		);
+
+		expect(rows).toStrictEqual(
+			await Promise.all(
+				everyEntry.map(async (entry) => ({
+					hash: entry.tag,
+					digest: await sha256Hex(migrationSource(migrations, entry.idx)),
+					verificationState: 'verified'
+				}))
+			)
+		);
+	});
+
+	it('adopts the bundled digest for a row recorded before digests existed and refuses a later edit', async () => {
+		const bundle: MigrationBundle = {
+			journal: {
+				entries: [
+					{ idx: 0, when: 1, tag: '0000_widget' },
+					{ idx: 1, when: 2, tag: '0001_gadget' }
+				]
+			},
+			migrations: {
+				m0000: 'CREATE TABLE widget (id text PRIMARY KEY);',
+				m0001: 'CREATE TABLE gadget (id text PRIMARY KEY);'
+			}
+		};
+		const editedBundle: MigrationBundle = {
+			...bundle,
+			migrations: {
+				...bundle.migrations,
+				m0000: 'CREATE TABLE widget (id text PRIMARY KEY, name text);'
+			}
+		};
+
+		const outcome = await runInDurableObject(
+			testServerFor('migrate-adopt-baseline'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				database.run(sql.raw(migrationSource(bundle, 0)));
+				recordTrackingRow(state.storage, { hash: '', when: 1 });
+
+				await applyMigrations(database, bundle);
+
+				const rows = recordedRows(state.storage);
+
+				try {
+					await applyMigrations(database, editedBundle);
+					return { rows, refused: false as const };
+				} catch (error) {
+					return {
+						rows,
+						refused: true as const,
+						isDigestError: error instanceof DurableObjectMigrationDigestError
+					};
+				}
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			rows: [
+				{
+					hash: '',
+					digest: await sha256Hex(migrationSource(bundle, 0)),
+					verificationState: 'unverified-baseline'
+				},
+				{
+					hash: '0001_gadget',
+					digest: await sha256Hex(migrationSource(bundle, 1)),
+					verificationState: 'verified'
+				}
+			],
+			refused: true,
+			isDigestError: true
+		});
 	});
 
 	it('is a no-op when every migration is already applied', async () => {
@@ -63,7 +205,7 @@ describe('applyMigrations', () => {
 
 				const tablesBefore = tableNames(state.storage);
 
-				applyMigrations(drizzle(state.storage), migrations);
+				await applyMigrations(drizzle(state.storage), migrations);
 
 				return {
 					tags: appliedTags(state.storage),
@@ -80,24 +222,13 @@ describe('applyMigrations', () => {
 		});
 	});
 
-	it('converges a store whose schema already holds an unrecorded change', async () => {
-		// A Durable Object initialised by a divergent build can carry a later
-		// migration's objects without that migration recorded. Dropping the record
-		// of a migration whose objects remain reproduces that: re-running it must
-		// skip the change that is already present and converge cleanly.
+	it('brings a store that slept at an earlier migration up to date', async () => {
 		const result = await runInDurableObject(
-			testServerFor('migrate-diverged'),
+			testServerFor('migrate-sleeping'),
 			async (_instance, state) => {
 				await migrateThrough(state, 22);
 
-				const database = drizzle(state.storage);
-				database.run(
-					sql.raw(
-						"DELETE FROM __drizzle_migrations WHERE hash = '0022_maintenance_indexes'"
-					)
-				);
-
-				applyMigrations(database, migrations);
+				await applyMigrations(drizzle(state.storage), migrations);
 
 				return {
 					tags: appliedTags(state.storage),
@@ -108,6 +239,36 @@ describe('applyMigrations', () => {
 
 		expect(result.tags).toStrictEqual(everyTag);
 		expect(result.pendingUploadColumns).toContain('session_id');
+	});
+
+	it('refuses a store whose journal has a gap', async () => {
+		// A missing record means something changed the schema without recording
+		// it, so the remaining records no longer say which migrations ran.
+		const outcome = await runInDurableObject(
+			testServerFor('migrate-gap'),
+			async (_instance, state) => {
+				await migrateThrough(state, 24);
+
+				const database = drizzle(state.storage);
+				database.run(
+					sql.raw(
+						"DELETE FROM __drizzle_migrations WHERE hash = '0022_maintenance_indexes'"
+					)
+				);
+
+				try {
+					await applyMigrations(database, migrations);
+					return { threw: false as const };
+				} catch (error) {
+					return {
+						threw: true as const,
+						isJournalError: error instanceof DurableObjectMigrationJournalError
+					};
+				}
+			}
+		);
+
+		expect(outcome).toStrictEqual({ threw: true, isJournalError: true });
 	});
 
 	it('raises the underlying cause when a statement genuinely fails', async () => {
@@ -126,9 +287,9 @@ describe('applyMigrations', () => {
 
 		const outcome = await runInDurableObject(
 			testServerFor('migrate-genuine-failure'),
-			(_instance, state) => {
+			async (_instance, state) => {
 				try {
-					applyMigrations(drizzle(state.storage), bundle);
+					await applyMigrations(drizzle(state.storage), bundle);
 					return { threw: false as const };
 				} catch (error) {
 					return {
@@ -152,6 +313,171 @@ describe('applyMigrations', () => {
 			tag: '0001_bad_index',
 			applied: ['0000_widget'],
 			tables: ['widget']
+		});
+	});
+});
+
+describe('admitMigrationSource', () => {
+	const bundle: MigrationBundle = {
+		journal: {
+			entries: [
+				{ idx: 0, when: 1, tag: '0000_widget' },
+				{ idx: 1, when: 2, tag: '0001_gadget' }
+			]
+		},
+		migrations: {
+			m0000: 'CREATE TABLE widget (id text PRIMARY KEY);',
+			m0001: 'CREATE TABLE gadget (id text PRIMARY KEY);'
+		}
+	};
+	async function admissionOf(
+		storage: Storage,
+		source: MigrationBundle = bundle
+	): Promise<{ refused: boolean; error: string | undefined }> {
+		try {
+			await admitMigrationSource(drizzle(storage), source);
+			return { refused: false, error: undefined };
+		} catch (error) {
+			return {
+				refused: true,
+				error: error instanceof Error ? error.name : String(error)
+			};
+		}
+	}
+
+	it('admits a store with no journal and no application tables', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-empty'),
+			(_instance, state) => admissionOf(state.storage)
+		);
+
+		expect(outcome).toStrictEqual({ refused: false, error: undefined });
+	});
+
+	it('refuses an empty journal over application tables', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-unrecorded-schema'),
+			(_instance, state) => {
+				drizzle(state.storage).run(
+					sql.raw('CREATE TABLE widget (id text PRIMARY KEY)')
+				);
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			refused: true,
+			error: 'DurableObjectMigrationJournalError'
+		});
+	});
+
+	it('refuses a recorded tag this build does not carry at that position', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-unknown-tag'),
+			(_instance, state) => {
+				recordTrackingRow(state.storage, { hash: '0000_sprocket', when: 1 });
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			refused: true,
+			error: 'DurableObjectMigrationJournalError'
+		});
+	});
+
+	it('accepts the legacy empty hash below the Drizzle boundary', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-legacy-hash'),
+			(_instance, state) => {
+				recordTrackingRow(state.storage, { hash: '', when: 1 });
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({ refused: false, error: undefined });
+	});
+
+	it('refuses the legacy empty hash above the Drizzle boundary', async () => {
+		const lateBundle: MigrationBundle = {
+			journal: { entries: [{ idx: 25, when: 1, tag: '0025_late' }] },
+			migrations: { m0025: 'CREATE TABLE late (id text PRIMARY KEY);' }
+		};
+
+		const outcome = await runInDurableObject(
+			testServerFor('admit-late-legacy-hash'),
+			(_instance, state) => {
+				recordTrackingRow(state.storage, { hash: '', when: 1 });
+
+				return admissionOf(state.storage, lateBundle);
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			refused: true,
+			error: 'DurableObjectMigrationJournalError'
+		});
+	});
+
+	it('refuses a recorded digest that no longer matches the migration', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-digest-drift'),
+			(_instance, state) => {
+				recordTrackingRow(state.storage, {
+					hash: '0000_widget',
+					when: 1,
+					digest: 'digest-from-an-older-file',
+					verificationState: 'verified'
+				});
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			refused: true,
+			error: 'DurableObjectMigrationDigestError'
+		});
+	});
+
+	it('admits verified migrations a newer build applied before this one woke', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-verified-successor'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, bundle);
+				recordTrackingRow(state.storage, {
+					hash: '0002_from_a_newer_build',
+					when: 3,
+					digest: 'digest-0002',
+					verificationState: 'verified'
+				});
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({ refused: false, error: undefined });
+	});
+
+	it('refuses an unverified migration beyond the ones this build carries', async () => {
+		const outcome = await runInDurableObject(
+			testServerFor('admit-unverified-successor'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, bundle);
+				recordTrackingRow(state.storage, { hash: '0002_unrecorded', when: 3 });
+
+				return admissionOf(state.storage);
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			refused: true,
+			error: 'DurableObjectMigrationJournalError'
 		});
 	});
 });
