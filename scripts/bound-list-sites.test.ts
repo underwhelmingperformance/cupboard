@@ -83,6 +83,13 @@ const fixedWidthSites: readonly (BoundListSite & {
 			'The principal issuer, and the legacy issuer when there is one: two at most.'
 	},
 	{
+		kind: 'values',
+		file: 'src/do/cache-lifecycle-projection.ts',
+		argument: 'batch.map((cache) => ({ tenant, cache, ...cacheIde',
+		reason:
+			'The caller chunks the caches it projects by `projectedRowsPerStatement`.'
+	},
+	{
 		kind: 'or',
 		file: 'src/do/reuse-view-lookup-service.ts',
 		argument: 'or(...selectorConditions)',
