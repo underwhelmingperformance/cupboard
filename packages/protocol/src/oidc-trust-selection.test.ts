@@ -1,7 +1,4 @@
-import {
-	cacheSelectorSchema,
-	rootNameSchema
-} from '@cupboard/nix-store/scalars';
+import { cacheNameSchema, rootNameSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
@@ -59,7 +56,8 @@ function rule(options: {
 				actions: [...(options.actions ?? ['upload:commit'])],
 				resources: {
 					cache: {
-						exact: cacheSelectorSchema.parse(options.cache),
+						kind: 'named',
+						exact: cacheNameSchema.parse(options.cache),
 						validate: 'cacheName'
 					},
 					...(options.root !== undefined && {
@@ -83,7 +81,7 @@ function request(
 		{
 			type: 'cupboard_cache',
 			actions,
-			cache,
+			cache: { kind: 'named', name: cache },
 			...(root !== undefined && { root })
 		}
 	]);
@@ -156,19 +154,32 @@ describe('selectModelledOidcTrust', () => {
 	});
 
 	it('uses the requested root to distinguish equally specific rules', () => {
-		const main = rule({ id: 'main', cache: 'ci', root: 'github:acme/main/' });
+		const main = rule({
+			id: 'main',
+			cache: 'ci',
+			actions: ['upload:commit', 'root:set'],
+			root: 'github:acme/main/'
+		});
 		const release = rule({
 			id: 'release',
 			cache: 'ci',
+			actions: ['upload:commit', 'root:set'],
 			root: 'github:acme/release/'
 		});
 
-		const requested = request('ci', ['upload:commit'], 'github:acme/release/x');
+		const requested = request('ci', ['root:set'], 'github:acme/release/x');
 
 		expect(modelledResult([main, release], requested)).toStrictEqual({
 			outcome: 'selected',
 			rules: ['release']
 		});
+
+		expect(
+			modelledResult(
+				[main, release],
+				request('ci', ['upload:commit'], 'github:acme/release/x')
+			)
+		).toStrictEqual({ outcome: 'ambiguous', rules: ['main', 'release'] });
 	});
 
 	it('does not assemble one request from separate rules', () => {

@@ -16,11 +16,6 @@ import {
 	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
-import {
-	currentLocalStep,
-	type DeploymentPhaseName,
-	deploymentPhaseRowId
-} from '@cupboard/protocol/deployment';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -51,6 +46,7 @@ import {
 	provisionFixtureTenant,
 	pushPath,
 	putNarBytes,
+	recordDeploymentPhase,
 	resetTestServer,
 	testBase,
 	testPushId,
@@ -254,22 +250,6 @@ async function policyIdentityRows(): Promise<
 	}));
 }
 
-async function recordPhase(phase: DeploymentPhaseName): Promise<void> {
-	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(d1Schema.deploymentPhase)
-		.values({
-			id: deploymentPhaseRowId,
-			phase,
-			requiredLocalStep: currentLocalStep,
-			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
-		})
-		.onConflictDoUpdate({
-			target: d1Schema.deploymentPhase.id,
-			set: { phase }
-		})
-		.run();
-}
-
 function wake(): Promise<LocalStepOutcome> {
 	return runInDurableObject(currentServer(), (instance) =>
 		instance.reportLocalStep()
@@ -283,6 +263,33 @@ async function projectedCaches(): Promise<number> {
 		.all();
 
 	return rows.length;
+}
+
+/**
+ * The lifecycle rows a tenant has, by the identity they record.
+ */
+async function lifecycleIdentities(): Promise<
+	{
+		kind: string | undefined;
+		name: string | undefined;
+		access: string | undefined;
+	}[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			kind: d1Schema.cacheLifecycle.cacheKind,
+			name: d1Schema.cacheLifecycle.cacheName,
+			access: d1Schema.cacheLifecycle.access
+		})
+		.from(d1Schema.cacheLifecycle)
+		.orderBy(d1Schema.cacheLifecycle.cache)
+		.all();
+
+	return rows.map((row) => ({
+		kind: row.kind ?? undefined,
+		name: row.name ?? undefined,
+		access: row.access ?? undefined
+	}));
 }
 
 const buildsCache = cacheNameSchema.parse('builds');
@@ -914,28 +921,57 @@ describe('cache registry admin', () => {
 		]);
 	});
 
+	// Registration writes the lifecycle row, so the projection is no longer the
+	// only path that creates one. The default cache's row comes from the D1
+	// trigger that fires when the tenant row is inserted, and the insert trigger
+	// gives a public-namespace cache the tenant's read mode.
+	it.each([
+		{ readMode: 'public', named: 'public' },
+		{ readMode: 'private', named: 'private' }
+	] as const)(
+		'records how a cache reads when it is registered in a $readMode tenant',
+		async ({ readMode, named }) => {
+			await useTestServer(`cache-admin-lifecycle-on-registration-${readMode}`);
+			await provisionFixtureTenant({ readMode });
+
+			const init = await bootstrap();
+
+			await putCache(init.token, 'builds', 30);
+			await pushPath(
+				init.token,
+				uploadMetadata({ fileSize: narBytes.byteLength }),
+				'private/guides'
+			);
+
+			expect(await lifecycleIdentities()).toStrictEqual([
+				{ kind: 'default', name: undefined, access: readMode },
+				{ kind: 'named', name: 'builds', access: named },
+				{ kind: 'named', name: 'guides', access: 'private' }
+			]);
+		}
+	);
+
 	it('finishes identity backfill and projection over bounded wakes', async () => {
 		await useTestServer('cache-admin-identity-projection');
 
 		const init = await bootstrap();
-		// More caches than one wake projects. Registering a cache writes no
-		// lifecycle row at this build, so each reaches D1 only through the
-		// projection.
 		const cacheCount = maxCachesProjectedPerRun + 5;
 
 		for (let index = 0; index < cacheCount; index += 1) {
 			await putCache(init.token, `cache-${String(index).padStart(3, '0')}`, 40);
 		}
 
-		// The tenant's default cache already has a row, written by the D1 trigger
-		// when the tenant row was inserted, so compare the growth.
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.cacheLifecycle)
+			.run();
+
 		const outcomes = [];
 		for (let index = 0; index < 3; index++) {
 			const outcome = await wake();
 			outcomes.push({ kind: outcome.kind, projected: await projectedCaches() });
 		}
 		expect(outcomes).toStrictEqual([
-			{ kind: 'incomplete', projected: 1 },
+			{ kind: 'incomplete', projected: 0 },
 			{ kind: 'incomplete', projected: maxCachesProjectedPerRun },
 			{ kind: 'recorded', projected: cacheCount + 1 }
 		]);
@@ -959,9 +995,12 @@ describe('cache registry admin', () => {
 
 		const init = await bootstrap();
 
-		// Registering a cache writes no lifecycle row, so the projection is the
-		// only writer of this one.
+		// Registering a cache writes its lifecycle row. Drop it so the projection
+		// is the writer of the row under test.
 		await putCache(init.token, 'builds', 40);
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.delete(d1Schema.cacheLifecycle)
+			.run();
 		await wake();
 
 		const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
@@ -1020,7 +1059,7 @@ describe('cache registry admin', () => {
 
 		const legacy = await reads();
 
-		await recordPhase('native-reads');
+		await recordDeploymentPhase('native-reads');
 		// The gate answers from its last reading for `phaseCacheMs`; the first
 		// listing read the phase, so the second reads it again only once the
 		// clock has passed that interval.

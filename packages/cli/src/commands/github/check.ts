@@ -1,6 +1,11 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	type CacheScope,
+	DEFAULT_CACHE,
+	identityForCache
+} from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
@@ -393,40 +398,44 @@ export async function runGithubCheck(
 	);
 	const branchRoot = parseRootName(`${branchRootPrefix}/target`);
 	const branchRunRoot = parseRootName(`${branchRootPrefix}/_cupboard-run/1`);
-	const defaultSelector = selectorForCache(DEFAULT_CACHE);
+	const pullRequestCache: CacheScope = {
+		kind: 'named',
+		name: cacheNameSchema.parse('pr-1')
+	};
+	const defaultCache = identityForCache(DEFAULT_CACHE).scope;
 	const pullRequestRequests = [
 		pushAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCache,
 			attest: true,
 			root: pullRequestRoot,
 			runRoot: pullRequestRunRoot
 		}),
 		rootListAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCache,
 			root: pullRequestRoot
 		}),
 		rootEnsureAuthorizationDetails({
-			cacheSelector: 'pr-1',
+			cache: pullRequestCache,
 			root: pullRequestRoot
 		}),
-		confirmAuthorizationDetails({ cacheSelector: 'pr-1' })
+		confirmAuthorizationDetails({ cache: pullRequestCache })
 	];
 	const branchRequests = [
 		pushAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: defaultCache,
 			attest: true,
 			root: branchRoot,
 			runRoot: branchRunRoot
 		}),
 		rootListAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: defaultCache,
 			root: branchRoot
 		}),
 		rootEnsureAuthorizationDetails({
-			cacheSelector: defaultSelector,
+			cache: defaultCache,
 			root: branchRoot
 		}),
-		confirmAuthorizationDetails({ cacheSelector: defaultSelector })
+		confirmAuthorizationDetails({ cache: defaultCache })
 	];
 
 	const findings = await reporter.phase(

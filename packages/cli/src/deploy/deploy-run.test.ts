@@ -1138,7 +1138,7 @@ describe('runDeploy', () => {
 				['build', 'abc123def456'],
 				['from', 'current'],
 				['tenants behind', '0'],
-				['phase', 'expanded']
+				['phase', 'native-reads']
 			]
 		});
 	});

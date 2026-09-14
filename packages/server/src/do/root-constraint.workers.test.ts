@@ -1,3 +1,4 @@
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -59,6 +60,33 @@ function ensureRoot(token: string, name: string): Promise<Response> {
 describe('cb_roots enforcement at PUT /roots', () => {
 	beforeEach(resetTestServer);
 
+	it('refuses cache-wide root listing from a root-bound token', async () => {
+		await initialise();
+		const token = await issueServerSignedToken(
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					actions: ['root:list'],
+					cache: { kind: 'default' },
+					root: 'github:owner/main/'
+				}
+			]),
+			'ci'
+		);
+		const response = await authorisedFetch('/roots', token);
+		expect({
+			status: response.status,
+			body: orpcErrorBodyShape(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.FORBIDDEN,
+			body: {
+				defined: true,
+				code: 'FORBIDDEN',
+				status: StatusCodes.FORBIDDEN,
+				data: undefined
+			}
+		});
+	});
 	it.each([
 		{
 			name: 'a root beneath a permitted prefix',

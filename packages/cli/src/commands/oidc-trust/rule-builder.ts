@@ -1,4 +1,8 @@
-import { DEFAULT_CACHE_SELECTOR } from '@cupboard/nix-store/scalars';
+import {
+	cacheSelectorSchema,
+	PRIVATE_SELECTOR_PREFIX,
+	scopeFromSelector
+} from '@cupboard/nix-store/scalars';
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
@@ -11,7 +15,11 @@ import {
 	oidcTrustAddBodySchema
 } from '@cupboard/protocol/oidc';
 
-import { InvalidClaimError } from '../../errors.ts';
+import {
+	CliUsageError,
+	InvalidCacheNameError,
+	InvalidClaimError
+} from '../../errors.ts';
 import {
 	parseWorkflowReference,
 	workflowReferenceClaim
@@ -113,6 +121,15 @@ export class DuplicateCaptureVariableError extends Error {
 			`Template variable '${variable}' is defined by more than one capture.`
 		);
 		this.name = 'DuplicateCaptureVariableError';
+	}
+}
+
+export class RootBindingRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'The default cache has no name to use as the root. Specify the root with --root or --root-template.'
+		);
+		this.name = 'RootBindingRequiredError';
 	}
 }
 
@@ -226,15 +243,24 @@ export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	const { cacheActions, rootActions } = expandAllow(options.allow);
 	const substitutions = options.substitutions ?? {};
 	const hasRoot = rootActions.length > 0 || options.root !== undefined;
+	const cache = cacheBinding(options, substitutions);
+	const root = hasRoot ? rootBinding(options, substitutions) : undefined;
+
+	if (cache.kind === 'default' && root?.equalsResource === 'cache') {
+		throw new RootBindingRequiredError();
+	}
 
 	return permittedGrantSchema.parse({
 		type: 'cupboard_cache',
 		actions: [...cacheActions, ...rootActions],
-		resources: {
-			cache: cacheBinding(options, substitutions),
-			...(hasRoot && { root: rootBinding(options, substitutions) })
-		}
+		resources: { cache, ...(root !== undefined && { root }) }
 	});
+}
+
+function withoutPrivatePrefix(template: string): string {
+	return template.startsWith(PRIVATE_SELECTOR_PREFIX)
+		? template.slice(PRIVATE_SELECTOR_PREFIX.length)
+		: template;
 }
 
 function cacheBinding(
@@ -242,23 +268,35 @@ function cacheBinding(
 	substitutions: Record<string, Substitution>
 ): Record<string, unknown> {
 	if (options.cacheTemplate !== undefined) {
+		const template = withoutPrivatePrefix(options.cacheTemplate);
+
 		return {
-			equalsTemplate: options.cacheTemplate,
-			substitutions: referencedSubstitutions(
-				options.cacheTemplate,
-				substitutions
-			),
+			kind: 'named',
+			equalsTemplate: template,
+			substitutions: referencedSubstitutions(template, substitutions),
 			validate: 'cacheName'
 		};
 	}
 
+	// `--cache` takes the selector the other commands take. The binding stores
+	// the cache's name; the access is a property of the cache.
 	if (options.cache !== undefined) {
-		return { exact: options.cache, validate: 'cacheName' };
+		const selector = cacheSelectorSchema.safeParse(options.cache);
+
+		if (!selector.success) {
+			throw new InvalidCacheNameError(options.cache);
+		}
+
+		const scope = scopeFromSelector(selector.data);
+
+		return scope.kind === 'default'
+			? scope
+			: { kind: 'named', exact: scope.name, validate: 'cacheName' };
 	}
 
-	// An omitted cache means the tenant's default cache. `_default` is the
-	// selector for that cache, not a cache name the user must supply.
-	return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
+	// An omitted cache means the tenant's default cache, which has no name to
+	// bind.
+	return { kind: 'default' };
 }
 
 function rootBinding(

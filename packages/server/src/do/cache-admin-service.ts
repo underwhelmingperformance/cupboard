@@ -37,7 +37,6 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
-import { DeploymentPhaseGate } from './deployment-phase-gate.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -67,14 +66,12 @@ export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
 	private readonly identities: CacheRepository;
-	private readonly phases: DeploymentPhaseGate;
 
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
 	) {
 		this.identities = new CacheRepository(context.db);
-		this.phases = new DeploymentPhaseGate(context.d1);
 	}
 
 	private teardownKey(cache: StoredCache): string {
@@ -159,7 +156,7 @@ export class CacheAdminService {
 	private async registeredCache(
 		cache: StoredCache
 	): Promise<{ priority: CachePriority; graceManaged: boolean } | undefined> {
-		if (await this.phases.hasReached('native-reads')) {
+		if (await this.context.phases.hasReached('native-reads')) {
 			return this.identities.readRegistration(cache);
 		}
 
@@ -181,7 +178,7 @@ export class CacheAdminService {
 	private async registeredCaches(): Promise<
 		{ name: StoredCache; priority: CachePriority; graceManaged: boolean }[]
 	> {
-		if (!(await this.phases.hasReached('native-reads'))) {
+		if (!(await this.context.phases.hasReached('native-reads'))) {
 			return this.context.db.select().from(schema.caches).all();
 		}
 
@@ -291,7 +288,7 @@ export class CacheAdminService {
 				set: { priority }
 			})
 			.run();
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 
 		return this.cacheSummary(cache, priority);
 	}
@@ -352,15 +349,13 @@ export class CacheAdminService {
 
 	/**
 	 * Registers the cache in the local registry if it is not there already,
-	 * and returns its identity.
+	 * writes its D1 lifecycle row, and returns its identity. This handles the
+	 * first write to a new cache and recreation after deletion, at one D1
+	 * statement per newly registered cache.
 	 *
-	 * Creating a registry row also clears the D1 deletion timestamp. This handles
-	 * the first write to a new cache and recreation after deletion. The transition
-	 * uses one D1 statement per newly registered cache.
-	 *
-	 * The default cache is registered at initialise, is always public, and
-	 * uses only the lifecycle generation for read authorisation, so it has no
-	 * deletion to clear.
+	 * The default cache needs neither write: `migrateAndSeed` registers it
+	 * locally on every initialisation, and a D1 trigger writes its lifecycle
+	 * row when the tenant row is inserted.
 	 */
 	async loadOrCreateCache(cache: StoredCache): Promise<CacheId> {
 		const now = isoTimestamp(new Date());
@@ -388,7 +383,7 @@ export class CacheAdminService {
 			return cacheId;
 		}
 
-		await this.deletionQueue.clearCacheDeletion(cache);
+		await this.deletionQueue.recordCacheRegistration(cache);
 
 		return cacheId;
 	}

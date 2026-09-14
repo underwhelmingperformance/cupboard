@@ -113,13 +113,23 @@ default cache:
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --issuer https://token.actions.githubusercontent.com \
   --audience https://cupboard.example.workers.dev/t/acme \
+  --claim repository=acme/infra \
+  --claim ref=refs/heads/main \
   --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@0123456789abcdef0123456789abcdef01234567 \
   --allow push --allow attest --allow root \
   --root github:acme/infra/main/
 ```
 
+The repository and ref claims restrict this grant to runs on `acme/infra`'s main
+branch. The pinned `job_workflow_ref` identifies the reusable workflow, not the
+caller's repository or branch.
+
 The trailing slash on the root makes it a prefix, so one grant covers every
 per-system root beneath it.
+
+The root selector also limits `root:list` to the targets of matching roots.
+`cupboard root list` lists roots across the cache and therefore requires
+authority without a root selector.
 
 ## The run-root grant
 
@@ -134,6 +144,8 @@ the exact name or trailing-slash prefix the run roots will use:
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --issuer https://token.actions.githubusercontent.com \
   --audience https://cupboard.example.workers.dev/t/acme \
+  --claim repository=acme/infra \
+  --claim ref=refs/heads/main \
   --allow push --allow attest --allow root --allow attach \
   --root github:acme/infra/main/
 ```
@@ -223,28 +235,23 @@ pattern also filters tokens: a token whose claim does not match is refused.
 
 ## Pushing to a private cache
 
-A rule uses the selector `_private-<name>` to grant access to a private cache:
+A grant names a cache and says nothing about its access. A rule for the private
+cache `ci` binds the name `ci`:
 
 ```bash
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
   --issuer https://token.actions.githubusercontent.com \
   --audience https://cupboard.example.workers.dev/t/acme \
+  --claim repository=acme/infra \
   --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
-  --cache _private-ci \
+  --cache ci \
   --allow push
 ```
 
-`ci` and `_private-ci` are different caches. A grant for one does not apply to
-the other.
-
-A rendered `--cache-template` is matched against the same selector grammar, so a
-template reaches the private namespace only when its result starts with
-`_private-`. `add-github-pr` and `add-github-tag` capture values that start with
-a letter or a digit, so those values cannot supply the private prefix. Write
-`_private-` literally in `--cache-template` and let the named capture match only
-the local cache name. A custom `--capture` pattern can accept a leading
-underscore. If the capture includes the prefix, a token can select the public or
-private namespace.
+`--cache` also accepts the `_private-ci` selector, and `--cache-template` a
+template that begins with `_private-`; both bind the same cache as the plain
+name. A rendered template must be a valid cache name, so a capture whose value
+begins with an underscore matches no cache.
 
 A trust rule governs writes. Reads are separate: a reader of a private cache
 presents that cache's Basic credential. Trust rules do not grant read

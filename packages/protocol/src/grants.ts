@@ -1,8 +1,16 @@
 import {
+	type CacheAccessMode,
+	type CacheName,
+	cacheNameSchema,
+	type CacheScope,
+	cacheScopeSchema,
 	type CacheSelector,
-	cacheSelectorSchema,
+	DEFAULT_CACHE_SELECTOR,
+	isSameCacheScope,
+	PRIVATE_SELECTOR_PREFIX,
 	type RootName,
 	rootNameSchema,
+	selectorForScope,
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
@@ -11,7 +19,7 @@ import { z } from 'zod';
 // Tokens encode grants in the RFC 9396 `authorization_details` claim.
 // `isCoveredByToken` checks the route's required operation against the concrete
 // request resource. Stored trust rules use templates and captures that resolve
-// to concrete selectors when the server issues a token.
+// to concrete resources when the server issues a token.
 
 // Cache-scoped tenant operations. `gc:run` and `stats:read` also appear as
 // domain operations: the per-cache form carries a cache, the deployment-wide
@@ -158,15 +166,27 @@ export const operationSchema = z.enum([
 ]);
 export type Operation = z.infer<typeof operationSchema>;
 
+/**
+Whether the operation uses the grant's root selector.
+*/
+export function isRootOperation(operation: Operation): boolean {
+	return operation.startsWith('root:');
+}
+
 export interface ResourceRequest {
-	readonly cache?: CacheSelector;
+	readonly cache?: CacheScope;
 	readonly root?: RootName;
 	readonly tenant?: TenantId;
 }
 
-// Issued grants carry only concrete selectors. Cache and tenant selectors are
-// exact; a root selector is an exact name or a trailing-slash prefix. The
-// wildcard is the only non-concrete grant and covers its whole domain.
+// Issued grants carry only concrete resources. A cache scope names one cache
+// and a tenant selector one tenant; a root selector is an exact name or a
+// trailing-slash prefix. The wildcard is the only non-concrete grant and covers
+// its whole domain.
+//
+// A grant names the cache but not its access. Access is a property of the
+// cache, so the same grant covers that cache whether it reads publicly or
+// requires a credential.
 
 export const grantTypes = [
 	'cupboard_cache',
@@ -185,7 +205,7 @@ export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: cacheActionsSchema,
-		cache: cacheSelectorSchema,
+		cache: cacheScopeSchema,
 		root: rootNameSchema.optional()
 	}),
 	z.strictObject({
@@ -282,11 +302,23 @@ function isCoveredByGrant(
 
 	switch (grant.type) {
 		case 'cupboard_cache': {
+			if (
+				resource.cache === undefined ||
+				!isSameCacheScope(resource.cache, grant.cache)
+			) {
+				return false;
+			}
+
+			if (!isRootOperation(operation)) {
+				return true;
+			}
+
+			if (resource.root === undefined) {
+				return grant.root === undefined;
+			}
+
 			return (
-				resource.cache !== undefined &&
-				resource.cache === grant.cache &&
-				(resource.root === undefined ||
-					(grant.root !== undefined && isRootWithin(resource.root, grant.root)))
+				grant.root !== undefined && isRootWithin(resource.root, grant.root)
 			);
 		}
 		case 'cupboard_tenant': {
@@ -444,11 +476,20 @@ function refineBinding(
 	}
 }
 
-export const cacheBindingSchema = z
-	.strictObject({ ...bindingShape, validate: z.literal('cacheName') })
-	.superRefine((value, ctx) => {
-		refineBinding(value, ctx, false);
-	});
+// A rule binds either the default cache or a named one. The default cache has
+// no name to template, so it is a variant of its own.
+export const cacheBindingSchema = z.discriminatedUnion('kind', [
+	z.strictObject({ kind: z.literal('default') }),
+	z
+		.strictObject({
+			kind: z.literal('named'),
+			...bindingShape,
+			validate: z.literal('cacheName')
+		})
+		.superRefine((value, ctx) => {
+			refineBinding(value, ctx, false);
+		})
+]);
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
@@ -537,13 +578,311 @@ function withoutRetiredActions(grants: unknown): unknown {
 		});
 }
 
+const legacyCacheBindingSchema = z.looseObject({
+	exact: z.string().optional(),
+	equalsTemplate: z.string().optional()
+});
+const legacyCacheGrantSchema = z.looseObject({
+	type: z.literal('cupboard_cache'),
+	resources: z.looseObject({ cache: z.looseObject({}) })
+});
+
+// A rule in the selector spelling, which the previous build stored and this
+// build stores until a deploy records `contracted`, has no `kind` and spells
+// the default and private caches into the bound value: `_default` for the
+// default cache, and a `_private-` prefix on an exact value or at the start of
+// a template for a private one. Rewrite it into the current shape, in which
+// the binding names the cache and says nothing about access.
+function withUpgradedCacheBindings(grants: unknown): unknown {
+	if (!Array.isArray(grants)) {
+		return grants;
+	}
+
+	const items: readonly unknown[] = grants;
+
+	return items.map((grant) => {
+		const parsed = legacyCacheGrantSchema.safeParse(grant);
+
+		if (!parsed.success || 'kind' in parsed.data.resources.cache) {
+			return grant;
+		}
+
+		const binding = legacyCacheBindingSchema.parse(parsed.data.resources.cache);
+
+		return {
+			...parsed.data,
+			resources: {
+				...parsed.data.resources,
+				cache: upgradedCacheBinding(binding)
+			}
+		};
+	});
+}
+
+function upgradedCacheBinding(binding: {
+	readonly exact?: string;
+	readonly equalsTemplate?: string;
+}): unknown {
+	if (
+		binding.exact === DEFAULT_CACHE_SELECTOR ||
+		binding.equalsTemplate === DEFAULT_CACHE_SELECTOR
+	) {
+		return { kind: 'default' };
+	}
+
+	if (binding.exact?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+		return {
+			...binding,
+			kind: 'named',
+			exact: binding.exact.slice(PRIVATE_SELECTOR_PREFIX.length)
+		};
+	}
+
+	if (binding.equalsTemplate?.startsWith(PRIVATE_SELECTOR_PREFIX) === true) {
+		return {
+			...binding,
+			kind: 'named',
+			equalsTemplate: binding.equalsTemplate.slice(
+				PRIVATE_SELECTOR_PREFIX.length
+			)
+		};
+	}
+
+	return { ...binding, kind: 'named' };
+}
+
 /**
  * Validates stored trust-rule grants from both current and earlier releases.
- * Before strict validation, the preprocessor removes retired operations and any
+ * Before strict validation, the preprocessor upgrades a cache binding written
+ * in the selector spelling, then removes retired operations and any
  * non-wildcard grant with no recognised operation. An upgrade that narrows the
  * operation set therefore does not invalidate the stored rule.
  */
 export const storedPermittedGrantsSchema = z.preprocess(
-	withoutRetiredActions,
-	z.array(permittedGrantSchema)
+	(grants) => withoutRetiredActions(withUpgradedCacheBindings(grants)),
+	z
+		.array(permittedGrantSchema)
+		.transform((grants) =>
+			new Map(grants.map((grant) => [JSON.stringify(grant), grant]))
+				.values()
+				.toArray()
+		)
 );
+
+const legacyIssuedCacheGrantSchema = z.looseObject({
+	type: z.literal('cupboard_cache'),
+	cache: z.string()
+});
+
+/**
+ * Validates issued grants recorded by a refresh-token family, upgrading a cache
+ * named in the selector spelling. The previous build recorded that spelling,
+ * and this build records it until a deploy records `contracted`, so a refresh
+ * must read it back.
+ */
+export const storedAuthorizationDetailsSchema = z.preprocess(
+	(grants) => {
+		if (!Array.isArray(grants)) {
+			return grants;
+		}
+
+		const items: readonly unknown[] = grants;
+
+		return items.map((grant) => {
+			const parsed = legacyIssuedCacheGrantSchema.safeParse(grant);
+
+			return parsed.success
+				? { ...parsed.data, cache: scopeFromSelectorText(parsed.data.cache) }
+				: grant;
+		});
+	},
+	authorizationDetailsSchema.transform((grants) =>
+		new Map(grants.map((grant) => [JSON.stringify(grant), grant]))
+			.values()
+			.toArray()
+	)
+);
+
+function scopeFromSelectorText(selector: string): unknown {
+	if (selector === DEFAULT_CACHE_SELECTOR) {
+		return { kind: 'default' };
+	}
+
+	return {
+		kind: 'named',
+		name: selector.startsWith(PRIVATE_SELECTOR_PREFIX)
+			? selector.slice(PRIVATE_SELECTOR_PREFIX.length)
+			: selector
+	};
+}
+
+/**
+ * The access to spell a named cache with, or undefined when the tenant holds
+ * no cache of that name.
+ */
+export type CacheAccessLookup = (
+	name: CacheName
+) => CacheAccessMode | undefined;
+
+/**
+ * A cache binding as a build before the scope spelling stores it. The bound
+ * value is a selector: `_default` for the default cache, the name of a public
+ * cache or `_private-<name>` for a private one.
+ */
+export interface SelectorSpelledCacheBinding {
+	readonly equalsTemplate?: string;
+	readonly exact?: string;
+	readonly substitutions?: Record<string, Substitution>;
+	readonly validate: 'cacheName';
+}
+
+type CachePermittedGrant = Extract<PermittedGrant, { type: 'cupboard_cache' }>;
+
+export type SelectorSpelledPermittedGrant =
+	| Exclude<PermittedGrant, { type: 'cupboard_cache' }>
+	| (Omit<CachePermittedGrant, 'resources'> & {
+			readonly resources: Omit<CachePermittedGrant['resources'], 'cache'> & {
+				readonly cache: SelectorSpelledCacheBinding;
+			};
+	  });
+
+type CacheAuthorizationDetail = Extract<
+	AuthorizationDetail,
+	{ type: 'cupboard_cache' }
+>;
+
+export type SelectorSpelledAuthorizationDetail =
+	| Exclude<AuthorizationDetail, { type: 'cupboard_cache' }>
+	| (Omit<CacheAuthorizationDetail, 'cache'> & {
+			readonly cache: CacheSelector;
+	  });
+
+// A bound name that is not a cache name matches no cache in either spelling,
+// so it is stored as it is.
+function selectorForBoundName(
+	name: string,
+	accessOf: CacheAccessLookup
+): string {
+	const parsed = cacheNameSchema.safeParse(name);
+
+	if (!parsed.success) {
+		return name;
+	}
+
+	return selectorForScope(
+		{ kind: 'named', name: parsed.data },
+		accessOf(parsed.data) ?? 'public'
+	);
+}
+
+function selectorSpelledCacheBinding(
+	binding: CachePermittedGrant['resources']['cache'],
+	accessOf: CacheAccessLookup
+): SelectorSpelledCacheBinding {
+	if (binding.kind === 'default') {
+		return { exact: DEFAULT_CACHE_SELECTOR, validate: 'cacheName' };
+	}
+
+	const { kind: _kind, ...bound } = binding;
+
+	if (bound.exact === undefined) {
+		return bound;
+	}
+
+	return { ...bound, exact: selectorForBoundName(bound.exact, accessOf) };
+}
+
+export class SelectorTemplateUnrepresentableError extends Error {
+	constructor() {
+		super(
+			'This cache template is too long for the previous grant format. Complete the deployment before adding this rule.'
+		);
+		this.name = 'SelectorTemplateUnrepresentableError';
+	}
+}
+
+/**
+ * Spells trust-rule grants the way a build before the scope spelling stores
+ * them, so that such a build parses the row after a rollback.
+ * `storedPermittedGrantsSchema` reads the result back into `grants`.
+ *
+ * A named cache is spelled with the access it has now, so the previous build
+ * matches the same cache. A cache that does not exist yet uses both selector forms because its
+ * eventual access is not known.
+ * A template is stored in both public and private selector forms so either
+ * access mode retains its authority after rollback. The current reader
+ * coalesces those equivalent grants.
+ */
+
+export function permittedGrantsInSelectorSpelling(
+	grants: readonly PermittedGrant[],
+	accessOf: CacheAccessLookup
+): SelectorSpelledPermittedGrant[] {
+	return grants.flatMap((grant): SelectorSpelledPermittedGrant[] => {
+		if (grant.type !== 'cupboard_cache') {
+			return [grant];
+		}
+		const cache = selectorSpelledCacheBinding(grant.resources.cache, accessOf);
+		const spelled = { ...grant, resources: { ...grant.resources, cache } };
+		if (cache.equalsTemplate === undefined) {
+			const name = cacheNameSchema.safeParse(cache.exact);
+			if (name.success && accessOf(name.data) === undefined) {
+				return [
+					spelled,
+					{
+						...spelled,
+						resources: {
+							...spelled.resources,
+							cache: {
+								...cache,
+								exact: `${PRIVATE_SELECTOR_PREFIX}${name.data}`
+							}
+						}
+					}
+				];
+			}
+			return [spelled];
+		}
+		const privateTemplate = `${PRIVATE_SELECTOR_PREFIX}${cache.equalsTemplate}`;
+		if (privateTemplate.length > templateMaxLength) {
+			throw new SelectorTemplateUnrepresentableError();
+		}
+		return [
+			spelled,
+			{
+				...spelled,
+				resources: {
+					...spelled.resources,
+					cache: { ...cache, equalsTemplate: privateTemplate }
+				}
+			}
+		];
+	});
+}
+
+/**
+ * Spells the issued grants a refresh-token family records the way a build
+ * before the scope spelling stores them, with the same rules as
+ * `permittedGrantsInSelectorSpelling`. `storedAuthorizationDetailsSchema`
+ * reads the result back into `grants`.
+ */
+export function authorizationDetailsInSelectorSpelling(
+	grants: readonly AuthorizationDetail[],
+	accessOf: CacheAccessLookup
+): SelectorSpelledAuthorizationDetail[] {
+	return grants.flatMap((grant): SelectorSpelledAuthorizationDetail[] => {
+		if (grant.type !== 'cupboard_cache') {
+			return [grant];
+		}
+		const { cache } = grant;
+		const access = cache.kind === 'named' ? accessOf(cache.name) : 'public';
+		const spelled = {
+			...grant,
+			cache: selectorForScope(cache, access ?? 'public')
+		};
+		if (access === undefined && cache.kind === 'named') {
+			return [spelled, { ...grant, cache: selectorForScope(cache, 'private') }];
+		}
+		return [spelled];
+	});
+}

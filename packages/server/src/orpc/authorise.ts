@@ -1,9 +1,11 @@
 import {
+	type CacheScope,
 	type CacheSelector,
 	cacheSelectorSchema,
+	identityForCache,
 	type RootName,
 	rootNameSchema,
-	selectorForCache,
+	scopeFromSelector,
 	type StoredCache,
 	type TenantId,
 	tenantIdSchema
@@ -82,7 +84,7 @@ async function resolveResource(
 	}
 
 	const resource: {
-		cache?: CacheSelector;
+		cache?: CacheScope;
 		root?: RootName;
 		tenant?: TenantId;
 	} = {};
@@ -95,7 +97,7 @@ async function resolveResource(
 				throw new MissingPathCacheError();
 			}
 
-			resource.cache = pathCache;
+			resource.cache = scopeFromSelector(pathCache);
 		} else if ('pending' in spec.cache) {
 			const id = inputField(input, 'id');
 			const cache = id === undefined ? undefined : await pendingCache(id);
@@ -103,7 +105,7 @@ async function resolveResource(
 			if (cache === undefined) {
 				pendingMissing = { missingDenies: spec.cache.missingDenies !== false };
 			} else {
-				resource.cache = selectorForCache(cache);
+				resource.cache = identityForCache(cache).scope;
 			}
 		} else {
 			// A scoped grant cannot cover an invalid selector. A wildcard can,
@@ -117,7 +119,8 @@ async function resolveResource(
 			if (selector !== undefined && parsed === undefined) {
 				isUnresolved = true;
 			} else {
-				resource.cache = parsed;
+				resource.cache =
+					parsed === undefined ? undefined : scopeFromSelector(parsed);
 			}
 		}
 	}
@@ -223,11 +226,9 @@ export function authoriseAttachRoot(
 	cache: StoredCache,
 	root: RootName
 ): void {
-	const selector = selectorForCache(cache);
+	const scope = identityForCache(cache).scope;
 
-	if (
-		!isCoveredByToken(claims.grants, 'root:attach', { cache: selector, root })
-	) {
+	if (!isCoveredByToken(claims.grants, 'root:attach', { cache: scope, root })) {
 		throw new InsufficientScopeError();
 	}
 }
