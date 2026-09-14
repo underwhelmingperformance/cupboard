@@ -41,7 +41,7 @@
 		"esbuild": "^0.28.1",
 		"miniflare": "^4.20260730.0",
 		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"vitest": "^5.0.0"
 	},
 	"engines": {
 		"node": ">=24"
