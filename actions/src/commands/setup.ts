@@ -13,13 +13,18 @@ import {
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { cacheSummarySchema } from '@cupboard/protocol/caches';
 import {
 	isDestinationPreferred,
 	reuseViewPrioritySchema
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { workflowCommands } from '@cupboard/shared/github-actions';
-import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import {
+	basicAuthHeader,
+	type BasicCredential,
+	type ReadUser
+} from '@cupboard/shared/http';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
@@ -31,12 +36,20 @@ import {
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from '../cupboard-resolution.ts';
+import { runCupboard } from '../cupboard-run.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	CupboardReleaseSelectionConflictError,
+	DestinationReadCredentialCacheCountError,
+	DestinationReadCredentialConflictError,
+	DestinationReadPasswordRequiredError,
+	DestinationReadUserRequiredError,
+	ProvisionCacheAccessRequiredError,
+	ProvisionCacheResultError,
+	ProvisionCacheUrlRequiredError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	ReuseViewPriorityError
@@ -79,13 +92,29 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly includeDefaultCache?: string;
+	readonly provisionCache?: string;
+	readonly provisionCacheAccess?: string;
+	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
+	readonly destinationReadUser?: string;
+	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly nixConfigFile?: string;
 	readonly checkoutDir?: string;
+}
+
+/**
+ * Properties to use when setup creates a missing cache before configuring Nix.
+ * An existing cache keeps its properties, but its access must match.
+ */
+export interface ProvisionCache {
+	readonly name: string;
+	readonly access: string;
+	readonly rootTtl: string;
 }
 
 export interface SetupInputs {
@@ -99,6 +128,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
+	readonly provisionCache: ProvisionCache | undefined;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: ReadUser | '';
@@ -112,6 +142,7 @@ export interface SetupActionDependencies {
 	readonly fetch?: typeof fetch;
 	readonly installRelease?: typeof installCupboard;
 	readonly mask?: (value: string) => void;
+	readonly run?: typeof runCupboard;
 	readonly signal?: AbortSignal;
 }
 
@@ -181,6 +212,30 @@ export function registerSetupCommand(
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
+			'--include-default-cache <boolean>',
+			"Also configure the tenant's default cache, alongside any named caches."
+		)
+		.option(
+			'--destination-read-user <user>',
+			'Username accepted by the single selected destination cache.'
+		)
+		.option(
+			'--destination-read-password <password>',
+			'Password accepted by the single selected destination cache.'
+		)
+		.option(
+			'--provision-cache <name>',
+			"Create a missing cache with the run's OIDC token before configuring Nix."
+		)
+		.option(
+			'--provision-cache-access <mode>',
+			'Required read access for the cache: public or private.'
+		)
+		.option(
+			'--provision-cache-ttl <duration>',
+			'Default root TTL for the created cache, e.g. 14d.'
+		)
+		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to add as a second substituter'
 		)
@@ -211,8 +266,23 @@ export function resolveSetupInputs(
 ): SetupInputs {
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".
-	const readUser = providedReadUser(options.readUser);
-	const readPassword = options.readPassword ?? '';
+	const readUser = providedReadUser(options.readUser ?? environment.READ_USER);
+	const readPassword = options.readPassword ?? environment.READ_PASSWORD ?? '';
+	const destinationReadUser = providedReadUser(
+		options.destinationReadUser ?? environment.DESTINATION_READ_USER
+	);
+	const destinationReadPassword =
+		options.destinationReadPassword ??
+		environment.DESTINATION_READ_PASSWORD ??
+		'';
+
+	if (destinationReadUser !== '' && destinationReadPassword === '') {
+		throw new DestinationReadPasswordRequiredError();
+	}
+
+	if (destinationReadPassword !== '' && destinationReadUser === '') {
+		throw new DestinationReadUserRequiredError();
+	}
 
 	if (readUser !== '' && readPassword === '') {
 		throw new ReadPasswordRequiredError();
@@ -251,7 +321,7 @@ export function resolveSetupInputs(
 			options.includePrereleases,
 			true
 		),
-		githubToken: provided(options.githubToken) ?? '',
+		githubToken: provided(options.githubToken ?? environment.GH_TOKEN) ?? '',
 		releaseRepository:
 			provided(options.releaseRepository) ??
 			environment.GITHUB_ACTION_REPOSITORY ??
@@ -263,7 +333,20 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		caches: resolveCaches(options),
+		caches: resolveCaches(
+			{
+				...options,
+				cacheCredentials:
+					options.cacheCredentials ?? environment.CACHE_CREDENTIALS
+			},
+			destinationReadUser === ''
+				? undefined
+				: {
+						user: destinationReadUser,
+						password: destinationReadPassword
+					}
+		),
+		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -280,14 +363,64 @@ export function resolveSetupInputs(
 	};
 }
 
+function resolveProvisionCache(
+	options: SetupOptions,
+	cacheUrl: URL | undefined
+): ProvisionCache | undefined {
+	const name = provided(options.provisionCache);
+
+	if (name === undefined) {
+		return undefined;
+	}
+
+	if (cacheUrl === undefined) {
+		throw new ProvisionCacheUrlRequiredError();
+	}
+
+	const access = provided(options.provisionCacheAccess);
+
+	if (access === undefined) {
+		throw new ProvisionCacheAccessRequiredError();
+	}
+
+	return {
+		name,
+		access,
+		rootTtl: provided(options.provisionCacheTtl) ?? ''
+	};
+}
+
 /**
  * Resolves the caches to configure and attaches cache-specific credentials.
  * If the cache input is empty, the run configures the default cache.
  */
-function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
+function resolveCaches(
+	options: SetupOptions,
+	destinationCredential: BasicCredential | undefined
+): readonly CacheSelection[] {
 	const caches = providedCaches(options.cache);
+	const hasDefaultCache = isEnabled(
+		'include-default-cache',
+		options.includeDefaultCache,
+		false
+	);
+
+	if (
+		destinationCredential !== undefined &&
+		provided(options.cacheCredentials) !== undefined
+	) {
+		throw new DestinationReadCredentialConflictError();
+	}
+
 	const defaultCache: CacheScope = { kind: 'default' };
-	const selected = caches.length === 0 ? [defaultCache] : caches;
+	const requested = caches.length === 0 ? [defaultCache] : caches;
+	const selected = hasDefaultCache
+		? [defaultCache, ...requested.filter((cache) => cache.kind !== 'default')]
+		: requested;
+
+	if (destinationCredential !== undefined && selected.length !== 1) {
+		throw new DestinationReadCredentialCacheCountError(selected.length);
+	}
 
 	const credentials = providedCacheCredentials(
 		options.cacheCredentials,
@@ -295,9 +428,10 @@ function resolveCaches(options: SetupOptions): readonly CacheSelection[] {
 	);
 
 	return selected.map((cache) => {
-		const credential = credentials.find((entry) =>
-			isSameCacheScope(entry.cache, cache)
-		)?.credential;
+		const credential =
+			destinationCredential ??
+			credentials.find((entry) => isSameCacheScope(entry.cache, cache))
+				?.credential;
 
 		return {
 			cache,
@@ -403,6 +537,35 @@ export async function setupAction(
 		return;
 	}
 
+	if (inputs.provisionCache !== undefined) {
+		const results = await (dependencies.run ?? runCupboard)(
+			acquired.binaryPath,
+			provisionCacheArguments(inputs.cacheUrl, inputs.provisionCache),
+			environment,
+			{
+				...(dependencies.signal !== undefined && {
+					signal: dependencies.signal
+				})
+			}
+		);
+		const result = results.findLast((event) => event.kind === 'cache');
+		const parsed = cacheSummarySchema.safeParse(result?.data);
+		if (
+			!parsed.success ||
+			parsed.data.scope.kind !== 'named' ||
+			parsed.data.scope.name !== inputs.provisionCache.name
+		) {
+			throw new ProvisionCacheResultError(
+				'The cache creation command did not report the requested cache. Upgrade cupboard and retry.'
+			);
+		}
+		if (parsed.data.access !== inputs.provisionCache.access) {
+			throw new ProvisionCacheResultError(
+				`Cache "${inputs.provisionCache.name}" has ${parsed.data.access} access; ${inputs.provisionCache.access} access is required. Ask the cache administrator to change its access before rerunning this workflow.`
+			);
+		}
+	}
+
 	await configureNix(
 		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
 		reporter,
@@ -411,6 +574,23 @@ export async function setupAction(
 			...(dependencies.signal !== undefined && { signal: dependencies.signal })
 		}
 	);
+}
+
+function provisionCacheArguments(
+	cacheUrl: URL,
+	provision: ProvisionCache
+): readonly string[] {
+	return [
+		'cache',
+		'create',
+		canonicalHref(cacheUrl),
+		provision.name,
+		'--github-oidc',
+		'--if-absent',
+		'--access',
+		provision.access,
+		...(provision.rootTtl === '' ? [] : ['--root-ttl', provision.rootTtl])
+	];
 }
 
 export function cupboardPathEntry(binaryPath: string): string {

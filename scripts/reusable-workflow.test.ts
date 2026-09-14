@@ -1,4 +1,8 @@
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
@@ -366,28 +370,126 @@ describe('cupboard acquisition', () => {
 		}
 	);
 
-	it('gives every flake publish job the coordinate configure resolved', async () => {
+	const provisionInputNames = new Set([
+		'provision-cache',
+		'provision-cache-access',
+		'provision-cache-ttl'
+	]);
+
+	type StepInputs = Record<string, string | number | boolean> | undefined;
+
+	function selectInputs(
+		inputs: StepInputs,
+		isKept: (name: string) => boolean
+	): Record<string, string | number | boolean> {
+		return Object.fromEntries(
+			Object.entries(inputs ?? {}).filter(([name]) => isKept(name))
+		);
+	}
+
+	it('gives every publishing flake job the coordinate configure resolved', async () => {
 		const workflow = await loadWorkflow(flakeWorkflow);
-		const setupInputs = inputsOf(workflow, cupboardAction('setup'));
+		const publishingSetup = allSteps(workflow).filter(
+			(entry) =>
+				entry.job !== 'remove-cache' &&
+				entry.step.uses === cupboardAction('setup')
+		);
+		const setupInputs = publishingSetup.map(({ step }) =>
+			selectInputs(step.with, (name) => !provisionInputNames.has(name))
+		);
 
 		expect({
+			jobs: publishingSetup.map(({ job }) => job),
+			callerCheckouts: allSteps(workflow)
+				.filter(
+					({ step }) =>
+						step.uses?.startsWith('actions/checkout@') === true &&
+						step.with?.repository === undefined
+				)
+				.map(({ job, step }) => ({ job, condition: step.if })),
 			configureOutput: workflow.jobs.configure?.steps.find(
 				(step) => step.uses === cupboardAction('resolve-cupboard')
 			)?.id,
 			setupInputs
 		}).toStrictEqual({
+			jobs: ['plan', 'cohort'],
+			callerCheckouts: [
+				{ job: 'plan', condition: undefined },
+				{ job: 'cohort', condition: undefined }
+			],
 			configureOutput: 'resolve-cupboard',
 			setupInputs: setupInputs.map(() => ({
 				'cache-url': '${{ inputs.url }}',
 				cache: '${{ needs.configure.outputs.cache }}',
 				cupboard: '${{ needs.configure.outputs.cupboard }}',
 				'trusted-public-key': '${{ inputs.trusted-public-key }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'destination-read-user': '${{ secrets.destination_read_user }}',
+				'destination-read-password': '${{ secrets.destination_read_password }}',
+				'read-user': '${{ secrets.fallback_read_user }}',
+				'read-password': '${{ secrets.fallback_read_password }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				'checkout-dir': sourceCheckoutDirectory
 			}))
 		});
+	});
+
+	it('installs cupboard without a cache substituter for the removal job', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const removalSetup = (workflow.jobs['remove-cache']?.steps ?? []).filter(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect(removalSetup.map((step) => step.with)).toStrictEqual([
+			{
+				cupboard: '${{ needs.configure.outputs.cupboard }}',
+				'checkout-dir': sourceCheckoutDirectory
+			}
+		]);
+	});
+
+	it('prepares Nix before acquiring cupboard from source for removal', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const steps = workflow.jobs['remove-cache']?.steps ?? [];
+		const prepareIndex = steps.findIndex(
+			(step) => step.uses === cupboardAction('prepare')
+		);
+		const setupIndex = steps.findIndex(
+			(step) => step.uses === cupboardAction('setup')
+		);
+
+		expect({
+			preparation: steps.filter(
+				(step) => step.uses === cupboardAction('prepare')
+			),
+			beforeAcquisition: prepareIndex !== -1 && prepareIndex < setupIndex
+		}).toStrictEqual({
+			preparation: [
+				{
+					uses: cupboardAction('prepare'),
+					if: "${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}"
+				}
+			],
+			beforeAcquisition: true
+		});
+	});
+
+	it('creates the pull-request cache from the plan job alone', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const provisioning = inputsOf(workflow, cupboardAction('setup'))
+			.map((inputs) =>
+				selectInputs(inputs, (name) => provisionInputNames.has(name))
+			)
+			.filter((inputs) => Object.keys(inputs).length > 0);
+
+		expect(provisioning).toStrictEqual([
+			{
+				'provision-cache': '${{ needs.configure.outputs.provision-cache }}',
+				'provision-cache-access':
+					"${{ secrets.fallback_read_user != '' && 'private' || 'public' }}",
+				'provision-cache-ttl':
+					'${{ needs.configure.outputs.provision-cache-ttl }}'
+			}
+		]);
 	});
 
 	it('rebuilds a cached output when the publish workflow attests', async () => {
@@ -526,8 +628,10 @@ describe('SSH credential isolation', () => {
 				'store_ssh_key',
 				'store_ssh_config',
 				'input_ssh_key',
-				'read_user',
-				'read_password'
+				'destination_read_user',
+				'destination_read_password',
+				'fallback_read_user',
+				'fallback_read_password'
 			]
 		);
 	});
@@ -584,8 +688,8 @@ describe('cohort planning and publication', () => {
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
 				optimise: '${{ inputs.push }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
 				'enable-packing': '${{ inputs.enable-packing }}',
 				'pack-capacity': '${{ inputs.pack-capacity }}',
 				store: '${{ inputs.store }}',
@@ -600,7 +704,8 @@ describe('cohort planning and publication', () => {
 		expect(Object.keys(workflow.jobs)).toStrictEqual([
 			'configure',
 			'plan',
-			'cohort'
+			'cohort',
+			'remove-cache'
 		]);
 	});
 
@@ -627,7 +732,9 @@ describe('cohort planning and publication', () => {
 				cupboardAction('setup'),
 				cupboardAction('build-cohort'),
 				cupboardAction('attest'),
-				cupboardAction('attest-attach')
+				cupboardAction('attest-attach'),
+				cupboardAction('prepare'),
+				cupboardAction('setup')
 			],
 			artifactSteps: []
 		});
@@ -646,8 +753,10 @@ describe('cohort planning and publication', () => {
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				ttl: '${{ needs.configure.outputs.ttl }}',
 				permanent: '${{ needs.configure.outputs.permanent }}',
-				'read-user': '${{ secrets.read_user }}',
-				'read-password': '${{ secrets.read_password }}',
+				'read-user': '${{ secrets.destination_read_user }}',
+				'read-password': '${{ secrets.destination_read_password }}',
+				'fallback-read-user': '${{ secrets.fallback_read_user }}',
+				'fallback-read-password': '${{ secrets.fallback_read_password }}',
 				// No `max-jobs`. Passing 0 would send every derivation to the builders,
 				// including one that sets `preferLocalBuild`; a caller that wants that
 				// policy sets `max-jobs` through `nix-config`.
@@ -725,8 +834,8 @@ describe('attestation', () => {
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					url: '${{ inputs.url }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}'
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}'
 				}
 			],
 			publish: [
@@ -768,8 +877,8 @@ describe('attestation', () => {
 					url: '${{ inputs.url }}',
 					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
 					cache: '${{ needs.configure.outputs.cache }}',
-					'read-user': '${{ secrets.read_user }}',
-					'read-password': '${{ secrets.read_password }}',
+					'read-user': '${{ secrets.destination_read_user }}',
+					'read-password': '${{ secrets.destination_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
 					bundle:
@@ -863,6 +972,27 @@ describe('resolved publication inputs', () => {
 			defaultCache: '',
 			output: '${{ steps.resolve.outputs.cache }}',
 			written: true
+		});
+	});
+
+	it('refuses a pull request from a fork before deriving anything', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		const resolve = shellOf(workflow, 'configure', 'Resolve inputs');
+		const refusal =
+			'if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then';
+
+		expect({
+			headRepositoryId: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Resolve inputs'
+			)?.env?.HEAD_REPOSITORY_ID,
+			refuses: resolve.includes(refusal),
+			beforeTheCacheName:
+				resolve.indexOf(refusal) <
+				resolve.indexOf('CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"')
+		}).toStrictEqual({
+			headRepositoryId: '${{ github.event.pull_request.head.repo.id }}',
+			refuses: true,
+			beforeTheCacheName: true
 		});
 	});
 
@@ -1014,6 +1144,105 @@ describe('repository cache publishing', () => {
 				() =>
 					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main'
 			)
+		});
+	});
+});
+
+const execFileAsync = promisify(execFile);
+
+async function resolvePublicationEvent(event: {
+	readonly action: string;
+	readonly merged: boolean;
+}): Promise<Record<string, string>> {
+	const workflow = await loadWorkflow(flakeWorkflow);
+	const step = workflow.jobs.configure?.steps.find(
+		(candidate) => candidate.name === 'Resolve inputs'
+	);
+
+	if (step?.run === undefined) {
+		throw new Error('The publication workflow has no input-resolution script');
+	}
+	const directory = await mkdtemp(
+		path.join(tmpdir(), 'cupboard-publication-event-')
+	);
+	const output = path.join(directory, 'output');
+
+	try {
+		await execFileAsync('bash', ['-c', step.run], {
+			env: {
+				...Object.fromEntries(
+					Object.keys(step.env ?? {}).map((key) => [key, ''])
+				),
+				PRESET: 'pull-request-and-branch',
+				PUSH: 'true',
+				PERMANENT: 'false',
+				EVENT_NAME: 'pull_request',
+				EVENT_ACTION: event.action,
+				MERGED: String(event.merged),
+				PR_NUMBER: '7',
+				REPOSITORY: 'acme/infra',
+				REPOSITORY_ID: '1234',
+				HEAD_REPOSITORY_ID: '1234',
+				REF: event.merged ? 'refs/heads/main' : 'refs/pull/7/merge',
+				BRANCH: 'main',
+				GITHUB_OUTPUT: output
+			}
+		});
+		const written = await readFile(output, 'utf8');
+
+		return Object.fromEntries(
+			written
+				.trimEnd()
+				.split('\n')
+				.map((line) => {
+					const separator = line.indexOf('=');
+
+					return [line.slice(0, separator), line.slice(separator + 1)];
+				})
+		);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('pull-request cache lifecycle', () => {
+	it.each([
+		{ action: 'opened', merged: false, removed: '' },
+		{ action: 'closed', merged: false, removed: 'gh-1234-pr-7' },
+		{ action: 'closed', merged: true, removed: '' }
+	])(
+		'resolves a $action pull request with merged=$merged',
+		async ({ action, merged, removed }) => {
+			expect(await resolvePublicationEvent({ action, merged })).toStrictEqual({
+				cache: 'gh-1234-pr-7',
+				'root-prefix': 'github:acme/infra/pr-7',
+				ttl: '14d',
+				permanent: 'false',
+				'reuse-view': '',
+				'provision-cache': 'gh-1234-pr-7',
+				'provision-cache-ttl': '14d',
+				'remove-cache': removed
+			});
+		}
+	);
+
+	it('keeps closed events out of planning and grants release verification to removal', async () => {
+		const workflow = await loadWorkflow(flakeWorkflow);
+		expect({
+			merged: workflow.jobs.configure?.steps.find(
+				(step) => step.name === 'Resolve inputs'
+			)?.env?.MERGED,
+			planCondition: workflow.jobs.plan?.if,
+			removalPermissions: workflow.jobs['remove-cache']?.permissions
+		}).toStrictEqual({
+			merged: '${{ github.event.pull_request.merged }}',
+			planCondition:
+				"github.event_name != 'pull_request' || github.event.action != 'closed'",
+			removalPermissions: {
+				contents: 'read',
+				attestations: 'read',
+				'id-token': 'write'
+			}
 		});
 	});
 });

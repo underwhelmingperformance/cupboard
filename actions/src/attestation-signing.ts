@@ -181,8 +181,8 @@ export type SigningProfile = (typeof signingProfiles)[number];
 export const subjectGroupings = ['run', 'individual'] as const;
 export type SubjectGrouping = (typeof subjectGroupings)[number];
 
-export const destinationVisibilities = ['public', 'private'] as const;
-export type DestinationVisibility = (typeof destinationVisibilities)[number];
+export const destinationAccessModes = ['public', 'private'] as const;
+export type DestinationAccess = (typeof destinationAccessModes)[number];
 
 export type SigstoreInstance = 'public-good' | 'github';
 
@@ -206,19 +206,17 @@ export function subjectsPerStatement(
 }
 
 /**
- * The default signing policy for each destination visibility. The in-toto
- * subject digest of every statement is the NAR hash, and
- * Rekor and the repository's attestation store are append-only, so a
- * published bundle permanently reveals that each subject path exists and
- * identifies its contents to anyone holding a matching copy. The private
- * defaults omit Rekor and the GitHub attestation upload. They also sign one
- * statement per subject, which prevents a reader of one bundle from
- * enumerating the other subjects in the run.
+ * Default signing policy for the destination cache's read access.
+ * Private defaults avoid sending the statement to Rekor or uploading the
+ * bundle to GitHub. An uploaded GitHub bundle reveals its subjects to
+ * repository readers, who can retain copies even if the upload is deleted.
+ * Rekor's public signature record cannot be deleted.
+ *
+ * Each private statement covers one subject, so reading one bundle does not
+ * reveal other subjects in the run.
  */
-export function defaultSigningPolicy(
-	visibility: DestinationVisibility
-): SigningPolicy {
-	if (visibility === 'private') {
+export function defaultSigningPolicy(access: DestinationAccess): SigningPolicy {
+	if (access === 'private') {
 		return {
 			profile: 'tsa-only',
 			uploadToGithub: false,
@@ -297,7 +295,7 @@ const profileServices = {
 
 /**
  * The external services a policy may contact and the destinations to which it
- * may publish a complete bundle. The action displays this information before
+ * may publish signature records or bundles. The action displays this before
  * signing begins.
  */
 export function signingDisclosure(
@@ -337,7 +335,8 @@ const serviceDisclosure = {
 		'Certificate transparency receives the signing certificate and the identity it certifies.',
 	'rfc-3161-tsa':
 		'An RFC 3161 timestamp authority receives the signature imprint and returns a signed timestamp.',
-	rekor: 'Rekor receives the signature metadata and the certified identity.'
+	rekor:
+		'Rekor receives the signed statement, its signature and the signing certificate.'
 } as const satisfies Record<DisclosedService, string>;
 
 const publicationDisclosure = {
@@ -350,9 +349,7 @@ const publicationDisclosure = {
 } as const satisfies Record<PublicationDestination, string>;
 
 /**
- * Renders a disclosure for the run log. Each subject digest in a statement is
- * a NAR hash, so a reader of a published bundle can fetch the NARs it names
- * from any cache that serves them.
+ * Describes the signing services and publication destinations in the run log.
  */
 export function disclosureLines(
 	disclosure: SigningDisclosure

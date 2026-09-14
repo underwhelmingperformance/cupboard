@@ -1,7 +1,10 @@
 import {
 	type CacheAccessMode,
+	cacheGenerationSchema,
 	cachePrioritySchema,
+	cacheReadRevisionSchema,
 	type CacheScope,
+	cacheScopeSchema,
 	storePathHashSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
@@ -21,11 +24,13 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { type CacheId, cacheScopeFromRow } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey, requestOriginSchema } from '../http/http.ts';
+import { canonicalCacheRequest } from '../routing/cache-request.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -273,6 +278,25 @@ async function putCache(
 	return cacheSummarySchema.parse(await response.json());
 }
 
+async function putReuseView(
+	token: string,
+	name: string,
+	access: CacheAccessMode,
+	prefix: string
+): Promise<void> {
+	const response = await authorisedFetch(`/reuse-views/${name}`, token, {
+		body: JSON.stringify({
+			access,
+			priority: 50,
+			selectors: [{ kind: 'prefix', prefix }]
+		}),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+}
+
 async function updateCacheAccess(
 	token: string,
 	name: string,
@@ -302,6 +326,12 @@ function cacheListRequest(token: string): Request {
 		headers: { authorization: `Bearer ${token}` }
 	});
 }
+
+const viewMismatchDataSchema = z.object({ views: z.array(z.string()) });
+const viewMismatchSchema = z.object({
+	code: z.string(),
+	data: viewMismatchDataSchema
+});
 
 describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
@@ -391,6 +421,104 @@ describe('cache registry admin', () => {
 				graceManaged: false
 			}
 		]);
+	});
+
+	it('refuses a private cache that a public reuse view selects', async () => {
+		await useTestServer('cache-admin-view-access');
+		const init = await bootstrap();
+		await putReuseView(init.token, 'pull-requests-1', 'public', 'vpr-');
+
+		const refused = await authorisedFetch('/caches/vpr-1', init.token, {
+			body: JSON.stringify({ access: 'private', priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		const refusal = viewMismatchSchema.safeParse(await refused.json());
+
+		const { caches } = await listCaches(init.token);
+
+		expect({
+			status: refused.status,
+			code: refusal.data?.code,
+			views: refusal.data?.data.views,
+			caches: caches.map((summary) => summary.scope)
+		}).toStrictEqual({
+			status: StatusCodes.CONFLICT,
+			code: 'CACHE_VIEW_ACCESS_MISMATCH',
+			views: ['pull-requests-1'],
+			caches: [defaultCache()]
+		});
+	});
+
+	it('reports an existing cache before checking proposed access against views', async () => {
+		await useTestServer('cache-admin-existing-view-access');
+		const init = await bootstrap();
+		await putCache(init.token, 'existing-pr', 30, 'private');
+		await putReuseView(init.token, 'existing-view', 'private', 'existing-');
+
+		const response = await authorisedFetch('/caches/existing-pr', init.token, {
+			body: JSON.stringify({ access: 'public', priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		const body = await response.json();
+		expect({
+			status: response.status,
+			body: z
+				.object({
+					code: z.string(),
+					data: z.object({ cache: cacheScopeSchema })
+				})
+				.parse(body)
+		}).toStrictEqual({
+			status: StatusCodes.CONFLICT,
+			body: {
+				code: 'CACHE_ALREADY_EXISTS',
+				data: { cache: { kind: 'named', name: 'existing-pr' } }
+			}
+		});
+	});
+
+	it.each(['public', 'private'] as const)(
+		'rejects an invalid stored selector when the requested access is %s',
+		async (access) => {
+			await useTestServer(`cache-admin-invalid-view-selector-${access}`);
+			const init = await bootstrap();
+			await putReuseView(init.token, 'invalid-view', 'public', 'invalid-');
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.update(schema.nativeReuseViewSelectors)
+					.set({ prefix: 'invalid prefix' })
+					.run();
+			});
+
+			const response = await authorisedFetch('/caches/invalid-1', init.token, {
+				body: JSON.stringify({ access, priority: 30 }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
+			const { caches } = await listCaches(init.token);
+			expect({
+				status: response.status,
+				caches: caches.map((cache) => cache.scope)
+			}).toStrictEqual({
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				caches: [defaultCache()]
+			});
+		}
+	);
+
+	it('creates a cache whose access matches the selecting view', async () => {
+		await useTestServer('cache-admin-view-access-agrees');
+		const init = await bootstrap();
+		await putReuseView(init.token, 'pull-requests-2', 'public', 'wpr-');
+
+		const created = await putCache(init.token, 'wpr-1', 30, 'public');
+
+		expect({ scope: created.scope, access: created.access }).toStrictEqual({
+			scope: { kind: 'named', name: 'wpr-1' },
+			access: 'public'
+		});
 	});
 
 	it('reports grace management and the earliest live deadline per cache', async () => {
@@ -1031,6 +1159,46 @@ describe('cache registry admin', () => {
 			reregistered: { local: { generation: 1 }, published: first },
 			deleted: second,
 			recreated: { local: { generation: 2 }, published: second }
+		});
+	});
+
+	it('bumps the read revision when a cache changes access', async () => {
+		await useTestServer('cache-admin-access-revision');
+		await recordDeploymentPhase('contracted');
+
+		const init = await bootstrap();
+
+		await putCache(init.token, 'builds', 30);
+
+		const before = await cacheVersions();
+
+		await updateCacheAccess(init.token, 'builds', 'private');
+
+		const after = await cacheVersions();
+		const narInfo = new Request('https://cache.example/t/acme/abc.narinfo');
+		const cacheKey = (version: CacheVersion): string =>
+			canonicalCacheRequest(narInfo, {
+				generation: cacheGenerationSchema.parse(version.generation),
+				readRevision: cacheReadRevisionSchema.parse(version.readRevision)
+			}).url;
+
+		expect({
+			before,
+			after,
+			keyMoved:
+				before.published === undefined || after.published === undefined
+					? 'a version was missing'
+					: cacheKey(before.published) !== cacheKey(after.published)
+		}).toStrictEqual({
+			before: {
+				local: { generation: 1 },
+				published: { generation: 1, readRevision: 1 }
+			},
+			after: {
+				local: { generation: 1 },
+				published: { generation: 1, readRevision: 2 }
+			},
+			keyMoved: true
 		});
 	});
 

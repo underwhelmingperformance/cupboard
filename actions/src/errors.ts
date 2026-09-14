@@ -382,6 +382,76 @@ export class ReadUserRequiredError extends UsageError {
 	}
 }
 
+export class DestinationReadUserRequiredError extends UsageError {
+	constructor() {
+		super(
+			'destination-read-user is required when destination-read-password is supplied'
+		);
+		this.name = 'DestinationReadUserRequiredError';
+	}
+}
+
+export class DestinationReadPasswordRequiredError extends UsageError {
+	constructor() {
+		super(
+			'destination-read-password is required when destination-read-user is supplied'
+		);
+		this.name = 'DestinationReadPasswordRequiredError';
+	}
+}
+
+export class DestinationReadCredentialConflictError extends UsageError {
+	constructor() {
+		super(
+			'destination-read-user and cache-credentials both supply a destination credential; use one'
+		);
+		this.name = 'DestinationReadCredentialConflictError';
+	}
+}
+
+export class DestinationReadCredentialCacheCountError extends UsageError {
+	constructor(public readonly count: number) {
+		super(
+			'destination-read-user applies to a single destination cache; use cache-credentials for several'
+		);
+		this.name = 'DestinationReadCredentialCacheCountError';
+	}
+}
+
+export class FallbackReadUserRequiredError extends UsageError {
+	constructor() {
+		super(
+			'fallback-read-user is required when fallback-read-password is supplied'
+		);
+		this.name = 'FallbackReadUserRequiredError';
+	}
+}
+
+export class FallbackReadPasswordRequiredError extends UsageError {
+	constructor() {
+		super(
+			'fallback-read-password is required when fallback-read-user is supplied'
+		);
+		this.name = 'FallbackReadPasswordRequiredError';
+	}
+}
+
+export class ProvisionCacheAccessRequiredError extends UsageError {
+	constructor() {
+		super(
+			'provision-cache-access is required when provision-cache names a cache'
+		);
+		this.name = 'ProvisionCacheAccessRequiredError';
+	}
+}
+
+export class ProvisionCacheUrlRequiredError extends UsageError {
+	constructor() {
+		super('cache-url is required when provision-cache names a cache');
+		this.name = 'ProvisionCacheUrlRequiredError';
+	}
+}
+
 export class InvalidMaxJobsError extends UsageError {
 	constructor(public readonly value: string) {
 		super('max-jobs must be a non-negative 32-bit integer');
@@ -1682,5 +1752,15 @@ export class CacheGraceMissingError extends CodedError {
 			`${cache.kind === 'default' ? 'The default cache' : `Cache ${cache.name}`} has no configured grace: set it with \`cupboard cache set-grace\` or publish without require-grace`
 		);
 		this.name = 'CacheGraceMissingError';
+	}
+}
+
+/**
+The provisioned cache must satisfy the workflow's required read access.
+*/
+export class ProvisionCacheResultError extends CodedError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'ProvisionCacheResultError';
 	}
 }

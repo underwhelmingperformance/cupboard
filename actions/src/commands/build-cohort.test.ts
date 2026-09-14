@@ -3124,10 +3124,21 @@ describe('buildCohortAction', () => {
 			})
 		);
 
-		await buildCohortAction(baseOptions(), environment, {
-			runCupboard: runCupboardMock,
-			runNixBuild
-		});
+		await buildCohortAction(
+			{
+				...baseOptions(),
+				reuseView: 'pr-view',
+				readUser: 'reader',
+				readPassword: 'secret',
+				fallbackReadUser: 'fallback',
+				fallbackReadPassword: 'fallback-secret'
+			},
+			environment,
+			{
+				runCupboard: runCupboardMock,
+				runNixBuild
+			}
+		);
 
 		expect(runCupboardMock).toHaveBeenCalledTimes(1);
 
@@ -3159,7 +3170,17 @@ describe('buildCohortAction', () => {
 				canonicalHref(new URL('https://cache.example.test/t/acme')),
 				'--targets-file',
 				'--plan-file',
-				'--github-oidc'
+				'--github-oidc',
+				'--reuse-view',
+				'pr-view',
+				'--view-read-user',
+				'fallback',
+				'--view-read-password',
+				'fallback-secret',
+				'--read-user',
+				'reader',
+				'--read-password',
+				'secret'
 			],
 			targetsFile: {
 				targets: [
@@ -4312,31 +4333,44 @@ describe('planReprobeArguments', () => {
 		readonly name: string;
 		readonly inputs: Pick<
 			BuildCohortInputs,
-			'cache' | 'reuseView' | 'readUser' | 'readPassword'
+			| 'cache'
+			| 'reuseView'
+			| 'readUser'
+			| 'readPassword'
+			| 'fallbackReadUser'
+			| 'fallbackReadPassword'
 		>;
 		readonly extra: readonly string[];
 	}>([
 		{
-			name: 'the default cache on this runner asks for nothing more',
+			name: 'omits view credentials when no view is configured',
 			inputs: {
 				cache: defaultCache,
 				reuseView: '',
 				readUser: '',
-				readPassword: ''
+				readPassword: '',
+				fallbackReadUser: 'fallback',
+				fallbackReadPassword: 'fallback-secret'
 			},
 			extra: []
 		},
 		{
-			name: 'a named cache, view and credential all travel',
+			name: 'passes distinct destination and view credentials',
 			inputs: {
 				cache: buildsCache,
 				reuseView: 'pr-view',
 				readUser: 'reader',
-				readPassword: 'secret'
+				readPassword: 'secret',
+				fallbackReadUser: 'fallback',
+				fallbackReadPassword: 'fallback-secret'
 			},
 			extra: [
 				'--reuse-view',
 				'pr-view',
+				'--view-read-user',
+				'fallback',
+				'--view-read-password',
+				'fallback-secret',
 				'--read-user',
 				'reader',
 				'--read-password',
@@ -4922,6 +4956,75 @@ describe('rootGroups', () => {
 			'secret'
 		]);
 	});
+
+	it.each([
+		{
+			name: 'the reuse view',
+			referenceSource: 'https://cache.example.test/t/acme/reuse/pr-view',
+			expected: [
+				'--read-user',
+				'fallback',
+				'--read-password',
+				'fallback-secret'
+			]
+		},
+		{
+			name: 'a named cache',
+			referenceSource: 'https://cache.example.test/t/acme/cache/release',
+			expected: [
+				'--read-user',
+				'destination',
+				'--read-password',
+				'destination-secret'
+			]
+		}
+	])(
+		'reads a reference from $name with its own credential',
+		({ referenceSource, expected }) => {
+			const inputs = resolveBuildCohortInputs(
+				{
+					...baseOptions(),
+					push: 'true',
+					reuseView: 'pr-view',
+					readUser: 'destination',
+					readPassword: 'destination-secret',
+					fallbackReadUser: 'fallback',
+					fallbackReadPassword: 'fallback-secret'
+				},
+				{ RUNNER_TEMP: '/tmp' }
+			);
+
+			const arguments_ = cohortPushArguments(
+				inputs,
+				{
+					root: 'github:owner/repo/main/app',
+					paths: [appPath],
+					referencePaths: [appPath],
+					complete: true
+				},
+				{
+					intermediatePathsFile: '',
+					referencePathsFile: '/tmp/reference-paths',
+					referenceSource
+				}
+			);
+
+			expect(arguments_).toStrictEqual([
+				'--no-colour',
+				'push',
+				'https://cache.example.test/t/acme',
+				appPath,
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main/app',
+				'--reference-paths-file',
+				'/tmp/reference-paths',
+				'--reference-source',
+				referenceSource,
+				...expected
+			]);
+		}
+	);
 
 	it('keeps floating and multi-output remote paths with their keyed target root', () => {
 		const ownedMembers = members.map((member) =>

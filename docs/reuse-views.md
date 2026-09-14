@@ -76,9 +76,12 @@ private cache selected by the current view definition references its hash. The
 server rechecks the view revision after reading shared state, so a concurrent
 selector change produces a miss.
 
-`actions/setup` constructs `/reuse/<view>/` from its `reuse-view` input. Put the
-tenant-wide fallback credential in the URL's userinfo when the selected view is
-private.
+`actions/setup` takes a view name in its `reuse-view` input and constructs the
+view URL from the tenant URL. Supply the tenant-wide fallback credential through
+`read-user` and `read-password` when the selected view is private. Setup writes
+these credentials to a host-scoped netrc entry. The same entry authenticates
+reads from destination caches without separate credentials; a destination
+cache's own credentials take precedence for that cache.
 
 `cupboard reuse-view remove` removes a view. `cupboard reuse-view list` reports
 each view's access property.
@@ -110,8 +113,9 @@ request. An administrator defines the view once so it selects the per-PR caches
 used by the `add-github-pr` rule (see [docs/trust-rules.md](./trust-rules.md)):
 
 ```bash
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \
-  --select prefix:pr-
+# repository_id is the repository's numeric GitHub ID.
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme \
+  "pull-requests-$repository_id" --select "prefix:gh-$repository_id-pr-"
 ```
 
 `main`'s post-merge workflow then opts into it:
@@ -127,7 +131,7 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
-      reuse-view: pull-requests
+      reuse-view: pull-requests-${{ github.repository_id }}
 ```
 
 The tag pin selects that immutable published release. Set `cupboard-version`

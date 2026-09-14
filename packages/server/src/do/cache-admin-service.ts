@@ -1,5 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CacheAccessMode,
 	type CacheName,
 	cacheNameSchema,
 	cachePrioritySchema,
@@ -13,6 +14,7 @@ import {
 	type CacheSummary,
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
+import { isCacheSelectedBySelector } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
 
@@ -26,8 +28,11 @@ import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheAccessMigrationPendingError,
+	CacheAlreadyExistsError,
 	CacheNotEmptyError,
-	CacheNotFoundError
+	CacheNotFoundError,
+	CacheViewAccessMismatchError,
+	StoredReuseViewSelectorInvalidError
 } from '../errors.ts';
 import {
 	narObjectKey,
@@ -46,6 +51,7 @@ import {
 } from './deletion-queue-service.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
+import { reuseViewSelectorFromRow } from './reuse-view-selectors.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
 // statements a single Worker invocation may run.
@@ -81,6 +87,47 @@ export class CacheAdminService {
 		private readonly deletionQueue: DeletionQueueService
 	) {
 		this.retentionRules = new RetentionRuleService(context);
+	}
+
+	private mismatchedReuseViews(
+		scope: CacheScope,
+		access: CacheAccessMode
+	): { readonly names: string[]; readonly accesses: CacheAccessMode[] } {
+		const rows = this.context.db
+			.select({
+				name: schema.reuseViews.name,
+				access: schema.reuseViews.access,
+				kind: schema.nativeReuseViewSelectors.kind,
+				cacheName: schema.nativeReuseViewSelectors.cacheName,
+				prefix: schema.nativeReuseViewSelectors.prefix
+			})
+			.from(schema.reuseViews)
+			.innerJoin(
+				schema.nativeReuseViewSelectors,
+				eq(schema.nativeReuseViewSelectors.view, schema.reuseViews.name)
+			)
+			.all();
+		const names: string[] = [];
+		const accesses: CacheAccessMode[] = [];
+
+		for (const row of rows) {
+			const selector = reuseViewSelectorFromRow(row);
+
+			if (selector === undefined) {
+				throw new StoredReuseViewSelectorInvalidError(row.name);
+			}
+
+			if (row.access === access || names.includes(row.name)) {
+				continue;
+			}
+
+			if (isCacheSelectedBySelector(selector, scope)) {
+				names.push(row.name);
+				accesses.push(row.access);
+			}
+		}
+
+		return { names, accesses };
 	}
 
 	private teardownKey(cache: ResolvedCache): string {
@@ -309,6 +356,21 @@ export class CacheAdminService {
 			) {
 				assertRetentionMigrationSettled(this.context.db);
 			}
+
+			if (this.context.cacheRepository.resolve(scope) !== undefined) {
+				throw new CacheAlreadyExistsError(scope);
+			}
+
+			const mismatched = this.mismatchedReuseViews(scope, configuration.access);
+
+			if (mismatched.names.length > 0) {
+				throw new CacheViewAccessMismatchError(
+					scope,
+					mismatched.names,
+					mismatched.accesses
+				);
+			}
+
 			const cache = await this.registration.createInSection(scope, {
 				access: configuration.access,
 				priority: configuration.priority,

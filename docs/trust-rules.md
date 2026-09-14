@@ -31,9 +31,16 @@ The `add-github-pr` and `add-github-branch` commands assemble these rules for
 the common cases.
 
 `add-github-pr` trusts pull-request builds. It routes each build to its own
-short-lived cache, `pr-<number>`, and to the matching retention root,
-`github:<owner>/<repo>/pr-<number>/`. Both are keyed on the pull-request number,
-so one pull request cannot reach another's paths.
+short-lived cache, `gh-<repository-id>-pr-<number>`, and to the matching
+retention root, `github:<owner>/<repo>/pr-<number>/`. Both are keyed on the
+pull-request number, so one pull request cannot reach another's paths. The cache
+name also includes the repository, because a tenant can serve several
+repositories and their pull-request numbers repeat. The repository component
+comes from `repository_id`, a claim the issuer signs, so the rule renders
+exactly one cache name and a token cannot name another repository's.
+
+The default root template is `github:<owner>/<repo>/pr-{pr}/`, independently of
+`--cache-template`. To customise both names, pass `--root-template` as well.
 
 `add-github-branch` trusts pushes to one branch and publishes to the tenant's
 default cache, under `github:<owner>/<repo>/<branch>/`, which is the retention
@@ -46,7 +53,7 @@ retention operation a run performs on its roots, and attestation. Pass
 root.
 
 ```bash
-# Per-PR rule: build the pull request, push to its own pr-<n> cache.
+# Per-PR rule: build the pull request, push to its own cache.
 cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
   --repo acme/infra
 
@@ -166,6 +173,54 @@ grant a request that the highest-precedence rules refuse.
 The exchange is all-or-nothing, so a rule that cannot grant both refuses the
 whole exchange. That is the safer failure: the push fails at token exchange
 rather than publishing successfully with no retention.
+
+## Creating and removing a cache from CI
+
+The `create` and `remove` shorthands grant `cache:create` and `cache:delete` on
+the cache a rule binds. The `add-github-pr` preset includes both, together with
+the upload, root and attestation permissions used by the publication workflow.
+It pins the repository and owner IDs and the pull-request event:
+
+```bash
+cupboard oidc-trust add-github-pr "$tenant" --repo acme/infra \
+  --job-workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'
+```
+
+The workflow restriction has the release-publisher trust implications described
+above. The rule renders the cache name from the verified token's `repository_id`
+and `ref` claims. A token for pull request 7 of the authorised repository 1234
+can create or remove `gh-1234-pr-7`. A missing or unmatched `ref` cannot render
+a cache name, so token exchange returns 400.
+
+A run can authenticate these commands with its own OIDC token:
+
+```bash
+cupboard cache create "$tenant" "gh-$repository_id-pr-$number" \
+  --github-oidc --if-absent --access public --root-ttl 14d
+cupboard cache remove "$tenant" "gh-$repository_id-pr-$number" \
+  --github-oidc --force --yes
+```
+
+Create the cache explicitly to choose its access and default root TTL before
+publication. A first push can also create a missing cache, but it inherits the
+default cache's access and has no default root TTL. The flake publish workflow
+invokes creation from its plan job before publishing. A closed event removes the
+cache only if the pull request was not merged. Merged caches remain available to
+the branch run through the reuse view, and their roots expire according to their
+TTL. All closed events skip planning and building. The caller must include
+`closed` in its `pull_request` trigger for the removal job to run.
+
+The workflow requests private access when `fallback_read_user` is set and public
+access otherwise. `cupboard github setup` makes the same choice for a new reuse
+view from its `--read-user` input. Supply consistent credentials to both. Setup
+reports an existing view with different access as drift and leaves it unchanged;
+`--if-absent` also leaves an existing cache's access and retention unchanged.
+
+A default root TTL lets roots expire even if a later writer supplies no TTL.
+Collection can then reclaim paths that have no other retention. An abandoned
+pull request does not have to run a deletion job for those paths to expire. The
+empty cache row remains until it is removed. Choose a TTL that covers the
+required reuse period; a later push refreshes the roots it updates.
 
 ## The flake publish workflow's grants
 

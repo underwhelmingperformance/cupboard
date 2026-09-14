@@ -18,12 +18,13 @@ on:
       preset:
         description: >-
           Derive cache, root-prefix, and ttl from the triggering event.
-          'pull-request-and-branch' gives each pull_request run a pr-<number>
-          cache with a 14-day TTL. A run on the configured branch uses the
-          default cache. Both roots start with github:<repository>; other refs
-          are rejected before planning. Only branch runs use reuse-view. This
-          input is mutually exclusive with cache, root-prefix, ttl, and
-          permanent; leave it empty to use those explicit inputs.
+          'pull-request-and-branch' gives each pull_request run a
+          gh-<repository-id>-pr-<number> cache with a 14-day TTL. A run on the
+          configured branch uses the default cache. Both roots start with
+          github:<repository>; other refs are rejected before planning. Only
+          branch runs use reuse-view. This input is mutually exclusive with
+          cache, root-prefix, ttl, and permanent; leave it empty to use those
+          explicit inputs.
         required: false
         default: ''
         type: string
@@ -37,10 +38,11 @@ on:
       cache:
         description:
           Named cache to publish to, whether it is public or private. Leave
-          empty to publish to the default cache. The workflow supplies one
-          read_user and read_password pair for authenticated reads, so when the
-          cache is private, supply the credential it accepts. If the cache has
-          its own verifier, the tenant-wide fallback credential is rejected by
+          empty to publish to the default cache. When the cache is private,
+          supply the credential it accepts as destination_read_user and
+          destination_read_password. A reuse view is a tenant-level resource and
+          reads with fallback_read_user and fallback_read_password. Supplying
+          the fallback where the cache has its own verifier is rejected by
           setup's initial cache-info probe, before publication starts.
         required: false
         default: ''
@@ -241,11 +243,21 @@ on:
           SSH key used while evaluating private flake inputs. Requires
           input-known-hosts.
         required: false
-      read_user:
-        description: Basic-auth user for private cache or reuse-view reads.
+      destination_read_user:
+        description:
+          Basic-auth user accepted by the private destination cache this run
+          publishes to.
         required: false
-      read_password:
-        description: Basic-auth password for private cache or reuse-view reads.
+      destination_read_password:
+        description:
+          Basic-auth password accepted by the private destination cache this run
+          publishes to.
+        required: false
+      fallback_read_user:
+        description: Tenant Basic-auth user for private reuse-view reads.
+        required: false
+      fallback_read_password:
+        description: Tenant Basic-auth password for private reuse-view reads.
         required: false
 
 permissions: {}
@@ -267,6 +279,9 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       permanent: ${{ steps.resolve.outputs.permanent }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+      provision-cache: ${{ steps.resolve.outputs.provision-cache }}
+      provision-cache-ttl: ${{ steps.resolve.outputs.provision-cache-ttl }}
+      remove-cache: ${{ steps.resolve.outputs.remove-cache }}
     steps:
       - name: Require GitHub Cloud workflow identity
         env:
@@ -292,14 +307,19 @@ jobs:
         id: resolve
         env:
           PRESET: ${{ inputs.preset }}
+          PUSH: ${{ inputs.push }}
           CACHE: ${{ inputs.cache }}
           ROOT_PREFIX: ${{ inputs.root-prefix }}
           TTL: ${{ inputs.ttl }}
           PERMANENT: ${{ inputs.permanent }}
           REUSE_VIEW: ${{ inputs.reuse-view }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
           STORE: ${{ inputs.store }}
@@ -391,17 +411,34 @@ jobs:
                 exit 1
               fi
               if [ "${EVENT_NAME}" = pull_request ]; then
-                CACHE="pr-${PR_NUMBER}"
+                if [ -z "${HEAD_REPOSITORY_ID}" ] || [ "${HEAD_REPOSITORY_ID}" != "${REPOSITORY_ID}" ]; then
+                  echo "::error::pull-request publication accepts only pull requests from this repository; guard the job with github.event.pull_request.head.repo.id == github.repository_id"
+                  exit 1
+                fi
+                # Match pullRequestCacheTemplate and the prefix used by
+                # cupboard github setup's repository view.
+                CACHE="gh-${REPOSITORY_ID}-pr-${PR_NUMBER}"
+                if [ "${EVENT_ACTION}" = closed ] && [ "${MERGED}" != true ]; then
+                  REMOVE_CACHE="${CACHE}"
+                fi
                 TTL=14d
                 PERMANENT=false
+                if [ "${PUSH}" = true ]; then
+                  PROVISION_CACHE="${CACHE}"
+                fi
                 if [ -n "${REUSE_VIEW}" ]; then
                   echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
                 fi
                 REUSE_VIEW=''
-                ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
+                # Match pullRequestRootTemplate in packages/cli.
+                ROOT_PREFIX="github:${REPOSITORY}/pr-${PR_NUMBER}"
               elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
                 ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
                 PERMANENT=true
+                # Match pullRequestViewName in packages/cli.
+                if [ -z "${REUSE_VIEW}" ]; then
+                  REUSE_VIEW="pull-requests-${REPOSITORY_ID}"
+                fi
               else
                 echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
                 exit 1
@@ -418,11 +455,15 @@ jobs:
             echo "ttl=${TTL}"
             echo "permanent=${PERMANENT}"
             echo "reuse-view=${REUSE_VIEW}"
+            echo "provision-cache=${PROVISION_CACHE:-}"
+            echo "provision-cache-ttl=${TTL}"
+            echo "remove-cache=${REMOVE_CACHE:-}"
           } >> "${GITHUB_OUTPUT}"
 
   plan:
     name: Plan the publication
     needs: configure
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ${{ inputs.plan-runner }}
     timeout-minutes: 30
     permissions:
@@ -493,9 +534,16 @@ jobs:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
+          provision-cache: ${{ needs.configure.outputs.provision-cache }}
+          provision-cache-access:
+            ${{ secrets.fallback_read_user != '' && 'private' || 'public' }}
+          provision-cache-ttl:
+            ${{ needs.configure.outputs.provision-cache-ttl }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
@@ -527,8 +575,8 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
           optimise: ${{ inputs.push }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
@@ -623,8 +671,10 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           cupboard: ${{ needs.configure.outputs.cupboard }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          destination-read-user: ${{ secrets.destination_read_user }}
+          destination-read-password: ${{ secrets.destination_read_password }}
+          read-user: ${{ secrets.fallback_read_user }}
+          read-password: ${{ secrets.fallback_read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
@@ -643,8 +693,10 @@ jobs:
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           ttl: ${{ needs.configure.outputs.ttl }}
           permanent: ${{ needs.configure.outputs.permanent }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
+          fallback-read-user: ${{ secrets.fallback_read_user }}
+          fallback-read-password: ${{ secrets.fallback_read_password }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           require-provenance: ${{ inputs.push }}
@@ -672,8 +724,8 @@ jobs:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
       # the bundle only after publication and only when signing produced a
@@ -686,8 +738,8 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
-          read-user: ${{ secrets.read_user }}
-          read-password: ${{ secrets.read_password }}
+          read-user: ${{ secrets.destination_read_user }}
+          read-password: ${{ secrets.destination_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           # Each output contains one bundle path per line. The attach input
@@ -730,3 +782,52 @@ jobs:
           if ! nix store gc; then
             echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
           fi
+
+  remove-cache:
+    name: Remove the pull request's cache
+    needs: configure
+    if: needs.configure.outputs.remove-cache != ''
+    runs-on: ${{ inputs.plan-runner }}
+    timeout-minutes: 10
+    permissions:
+      attestations: read # verify a selected cupboard release
+      contents: read # check out the workflow code that installs cupboard
+      id-token: write # OIDC token for the cache removal
+    steps:
+      - uses: $/actions/prepare
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+
+      - name: Reserve the cupboard workflow checkout
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ fromJSON(needs.configure.outputs.cupboard).kind == 'source' }}
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard-workflow
+          persist-credentials: false
+
+      - uses: $/actions/setup
+        id: setup
+        with:
+          cupboard: ${{ needs.configure.outputs.cupboard }}
+          checkout-dir: ${{ github.workspace }}/.cupboard-workflow
+
+      - name: Remove the cache
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+          URL: ${{ inputs.url }}
+          CACHE: ${{ needs.configure.outputs.remove-cache }}
+        run: |
+          set -euo pipefail
+          "${CUPBOARD_PATH}" cache remove "${URL}" "${CACHE}" \
+            --github-oidc --force --yes

@@ -1,7 +1,11 @@
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	cachePrioritySchema,
+	cacheScopeSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
+	isCacheSelectedBySelector,
 	isDestinationPreferred,
 	reuseViewDefaultPriority,
 	reuseViewListResponseSchema,
@@ -243,5 +247,33 @@ describe('private reuse views', () => {
 			summary: view,
 			remove: { name: 'reuse', removed: true }
 		});
+	});
+});
+
+describe('cache selection before registration', () => {
+	const caches = [
+		{ kind: 'default' },
+		{ kind: 'named', name: 'default' },
+		{ kind: 'named', name: 'pr-1' },
+		{ kind: 'named', name: 'builds' }
+	].map((cache) => cacheScopeSchema.parse(cache));
+
+	it.each([
+		{ selector: { kind: 'all' }, expected: [true, true, true, true] },
+		{ selector: { kind: 'all-named' }, expected: [false, true, true, true] },
+		{ selector: { kind: 'default' }, expected: [true, false, false, false] },
+		{
+			selector: { kind: 'named', name: 'default' },
+			expected: [false, true, false, false]
+		},
+		{
+			selector: { kind: 'prefix', prefix: 'pr-' },
+			expected: [false, false, true, false]
+		}
+	])('matches $selector', ({ selector, expected }) => {
+		const parsed = reuseViewSelectorSchema.parse(selector);
+		expect(
+			caches.map((cache) => isCacheSelectedBySelector(parsed, cache))
+		).toStrictEqual(expected);
 	});
 });

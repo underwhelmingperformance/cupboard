@@ -8,7 +8,10 @@ import {
 	CacheInfo,
 	servedStoreDirectory
 } from '@cupboard/nix-store/cache-info';
-import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type OidcTrustAddBodyInput,
 	oidcTrustListResponseSchema,
@@ -110,6 +113,7 @@ interface Recorded {
 interface Stored {
 	readonly gracePolicies?: { cachePrefix: string; graceSeconds: number }[];
 	readonly views?: {
+		readonly access?: CacheAccessMode;
 		name: string;
 		priority: number;
 		selectors: readonly ReuseViewSelectorInput[];
@@ -210,6 +214,71 @@ function expectRemovalError(
 }
 
 describe('runGithubSetup', () => {
+	describe('stored reuse-view access', () => {
+		it.each([
+			{
+				access: 'public' as const,
+				credential: {
+					readUser: readUserInputSchema.parse('reader'),
+					readPassword: 'secret'
+				},
+				detail:
+					'stored view is public; setup was given a read credential, so it would write a private view'
+			},
+			{
+				access: 'private' as const,
+				credential: {},
+				detail:
+					'stored view is private; setup was given no read credential, so it would write a public view'
+			}
+		])(
+			'reports incompatible $access access without writes',
+			async ({ access, credential, detail }) => {
+				const results: ResultRow[][] = [];
+				const { client, recorded } = setupClient({
+					views: [
+						{
+							access,
+							name: 'pull-requests-1234',
+							priority: 50,
+							selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
+						}
+					],
+					rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+				});
+				let failure: unknown;
+
+				try {
+					await runGithubSetup(
+						url,
+						{ ...options, ...credential },
+						reporter(results),
+						client,
+						dependencies
+					);
+				} catch (error) {
+					failure = error;
+				}
+
+				expectDriftError(failure);
+				expect({
+					recorded,
+					steps: failure.steps,
+					outcomes: results
+				}).toStrictEqual({
+					recorded: {
+						graceAdds: [],
+						viewSets: [],
+						ruleAdds: [],
+						ruleRemoves: []
+					},
+					steps: ['reuse view'],
+					outcomes: [[{ label: 'reuse view', value: `drift: ${detail}` }]]
+				});
+			}
+		);
+	});
+
 	it('cancels stalled workflow verification with the command signal', async () => {
 		const controller = new AbortController();
 		const reason = new CliAbortError();
@@ -264,8 +333,8 @@ describe('runGithubSetup', () => {
 				viewSets: [
 					{
 						access: 'public',
-						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
+						name: 'pull-requests-1234',
+						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
 						priority: 50
 					}
 				],
@@ -274,12 +343,40 @@ describe('runGithubSetup', () => {
 			},
 			results: [
 				[
-					{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+					{
+						label: 'reuse view',
+						value: 'created: public gh-1234-pr- caches at priority 50'
+					},
 					{ label: 'pull-request trust rule', value: ruleCreated },
 					{ label: 'main trust rule', value: ruleCreated }
 				]
 			]
 		});
+	});
+
+	it('creates a private view when setup receives read credentials', async () => {
+		const { client, recorded } = setupClient({});
+
+		await runGithubSetup(
+			url,
+			{
+				...options,
+				readUser: readUserInputSchema.parse('reader'),
+				readPassword: 'secret'
+			},
+			reporter([]),
+			client,
+			dependencies
+		);
+
+		expect(recorded.viewSets).toStrictEqual([
+			{
+				access: 'private',
+				name: 'pull-requests-1234',
+				selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
+				priority: 50
+			}
+		]);
 	});
 
 	it('derives the audience from the tenant URL without its trailing slash', async () => {
@@ -288,9 +385,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -364,9 +461,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -405,9 +502,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -491,9 +588,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -642,9 +739,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [dispatch]
@@ -695,9 +792,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [dispatch]
@@ -783,8 +880,8 @@ describe('runGithubSetup', () => {
 				viewSets: [
 					{
 						access: 'public',
-						name: 'pull-requests',
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }],
+						name: 'pull-requests-1234',
+						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
 						priority: 50
 					}
 				],
@@ -792,7 +889,10 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+				{
+					label: 'reuse view',
+					value: 'created: public gh-1234-pr- caches at priority 50'
+				},
 				{ label: 'pull-request trust rule', value: ruleCreated },
 				{ label: 'main trust rule', value: ruleCreated }
 			]
@@ -813,9 +913,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -848,9 +948,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [conflict, storedRule('branch', branchBody)]
@@ -909,8 +1009,8 @@ describe('runGithubSetup', () => {
 			viewSets: [
 				{
 					access: 'public',
-					name: 'pull-requests',
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }],
+					name: 'pull-requests-1234',
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }],
 					priority: 50
 				}
 			],
@@ -934,9 +1034,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -1004,9 +1104,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [legacy]
@@ -1084,9 +1184,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [legacy]
@@ -1137,9 +1237,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -1205,9 +1305,9 @@ describe('runGithubSetup', () => {
 		const { client, recorded } = setupClient({
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
@@ -1263,9 +1363,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 3600 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 40,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [
@@ -1340,9 +1440,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [exactRule]
@@ -1413,9 +1513,9 @@ describe('runGithubSetup', () => {
 				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 				views: [
 					{
-						name: 'pull-requests',
+						name: 'pull-requests-1234',
 						priority: 50,
-						selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+						selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 					}
 				],
 				rules: [previousRule]
@@ -1460,9 +1560,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			]
 		});
@@ -1514,9 +1614,9 @@ describe('runGithubSetup', () => {
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
 				{
-					name: 'pull-requests',
+					name: 'pull-requests-1234',
 					priority: 50,
-					selectors: [{ kind: 'prefix', prefix: 'pr-' }]
+					selectors: [{ kind: 'prefix', prefix: 'gh-1234-pr-' }]
 				}
 			],
 			rules: [

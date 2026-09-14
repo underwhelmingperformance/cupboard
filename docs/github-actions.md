@@ -73,7 +73,7 @@ inputs.
 ## Cache-aware flake publishing quickstart
 
 This is the shortest complete setup for publishing pull-request builds to
-short-lived `pr-<number>` caches, then reusing those builds when `main` is
+short-lived per-pull-request caches, then reusing those builds when `main` is
 published.
 
 The example assumes that cupboard is deployed, the tenant exists, its reads are
@@ -107,7 +107,7 @@ Choose an immutable cupboard release from the [releases page][] and replace
 ### 2. Configure the tenant
 
 One idempotent command writes all tenant configuration required by these runs:
-the `pull-requests` reuse view over the per-PR caches, and trust rules for this
+this repository's reuse view over its per-PR caches, and trust rules for this
 repository's PR and `main` runs:
 
 ```bash
@@ -133,6 +133,13 @@ first publication accepted under that grace marks the cache as grace-managed,
 and `cache clear-grace` does not remove the marker. When the last deadline on a
 grace-managed cache lapses, collection may empty it; a cache without the marker
 is never emptied that way.
+
+When upgrading from the shared `pull-requests` view and `pr-<number>` cache
+names, rerun setup. It replaces the conflicting PR rule after confirmation, or
+without prompting under `--yes`, and creates the repository's view. It leaves
+the old view and caches in place. Remove an explicit `reuse-view: pull-requests`
+input to use the preset's new view. Existing roots retain their own expiry
+settings; changing the rule does not migrate them.
 
 ### 3. Declare the targets
 
@@ -167,7 +174,9 @@ of rebuilt:
 name: cupboard
 
 on:
+  # Include closed so unmerged pull requests remove their caches.
   pull_request:
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -183,6 +192,9 @@ concurrency:
 
 jobs:
   publish:
+    if:
+      ${{ github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.id == github.repository_id }}
     permissions:
       attestations: write
       contents: read
@@ -192,14 +204,35 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
       preset: pull-request-and-branch
-      reuse-view: pull-requests
 ```
 
 The preset derives the cache, root prefix, and TTL from the triggering event. A
-`pull_request` run uses a `pr-<number>` cache with a 14-day TTL. The PR trust
-rule grants access to that cache and its retention root. A run whose ref matches
-the configured `branch` uses the default cache, permanent retention under
-`github:<repository>/<branch>`, and the reuse view.
+`pull_request` run publishes to `gh-<repository-id>-pr-<number>` with a 14-day
+root TTL. Before building, the plan job creates the cache with that default root
+TTL and the run's OIDC token. It requests private access when
+`fallback_read_user` is set, public access otherwise. Repeated runs keep the
+existing cache's properties, but setup refuses an access mismatch before
+publication. If the workflow changes from public to private publication, an
+administrator must change the existing cache's access before rerunning it. The
+PR trust rule permits publication, creation and deletion of that cache and
+management of its retention roots. A closed event skips planning and building.
+If the pull request closed without merging, the removal job removes its cache. A
+merged pull request keeps its cache so the branch run can reuse those outputs
+through the repository's view. Its roots still expire according to their TTL;
+the empty cache row remains until it is removed.
+
+The preset accepts only pull requests from the caller repository. A caller that
+accepts fork contributions can skip publication for those runs with
+`github.event.pull_request.head.repo.id == github.repository_id` on its job.
+
+[Creating and removing a cache from CI][ci-cache-lifecycle] describes the
+lifecycle commands and their grants.
+
+A run whose ref matches the configured `branch` uses the default cache,
+permanent retention under `github:<repository>/<branch>`, and the repository's
+reuse view.
+
+[ci-cache-lifecycle]: ./trust-rules.md#creating-and-removing-a-cache-from-ci
 
 `branch` defaults to `main` and must match the value passed to
 `cupboard github setup --branch`. The configure job rejects another ref before
@@ -242,12 +275,12 @@ Listing the configuration by hand remains available (`cupboard cache list`,
 `cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
 only that rows exist, not that they will match a real run.
 
-Open a pull request and confirm that the workflow publishes to `pr-<number>`.
-After merging it, the `main` run should plan already-published targets from the
-reuse view and retain them beneath `github:<owner>/<repo>/main` in the default
-cache. If a push is refused anyway, the refusal names the first failing claim
-when the token really is from this repository; compare it against
-[docs/trust-rules.md](./trust-rules.md).
+Open a pull request and confirm that the workflow publishes to its own
+`gh-<repository-id>-pr-<number>` cache. After merging it, the `main` run should
+plan already-published targets from the reuse view and retain them beneath
+`github:<owner>/<repo>/main` in the default cache. If a push is refused anyway,
+the refusal names the first failing claim when the token really is from this
+repository; compare it against [docs/trust-rules.md](./trust-rules.md).
 
 ### Manual configuration
 
@@ -268,8 +301,10 @@ On the tenant, define a view over the PR caches and trust this repository's PR
 and `main` runs when they use cupboard's reusable workflow:
 
 ```bash
-cupboard reuse-view set "$tenant" pull-requests \
-  --select prefix:pr- --priority 50
+# One view per repository, selecting that repository's pull-request caches.
+# `repository_id` is the repository's numeric GitHub id.
+cupboard reuse-view set "$tenant" "pull-requests-$repository_id" \
+  --select "prefix:gh-$repository_id-pr-" --priority 50
 
 cupboard oidc-trust add-github-pr "$tenant" \
   --repo "$repo" \
@@ -586,10 +621,10 @@ action does not record the bundles in the repository's attestation store, and it
 signs a separate statement for each subject. Each bundle therefore contains one
 subject.
 
-The action derives all three inputs from the destination cache's visibility
-whenever the workflow leaves them unset. A public destination gets
-`sigstore-default`, `true` and `run`. An unresolved destination uses the private
-defaults because publication cannot be undone.
+The action derives all three inputs from the destination cache's access whenever
+the workflow leaves them unset. A public destination gets `sigstore-default`,
+`true` and `run`. When no destination access reaches the signing step, it uses
+the private defaults, because publication cannot be undone.
 
 Those defaults prevent automatic publication and keep each bundle to one
 subject; they do not make the bundle non-disclosing. Every subject digest in
@@ -621,11 +656,12 @@ Setting these inputs explicitly overrides the derived defaults, and for a
 private destination the override is a disclosure decision. `upload-to-github`
 set to `true` records each bundle in the repository's attestation store. Anyone
 who can read the repository can then read the complete bundle and its subject
-digests. `rekor-and-tsa` puts the same digests in a public append-only log.
-Before signing begins, the action reports the instances it may use, the services
-it may contact and the destinations to which it may publish a complete bundle.
-Afterwards, it reports the trust domain and evidence found in the produced
-bundles.
+digests. `rekor-and-tsa` sends the statement to Rekor, which publishes a
+permanent signature record and indexes its subject digests. Its DSSE log entry
+does not contain the full statement. Before signing begins, the action reports
+the instances it may use, the services it may contact and the destinations to
+which it may publish signature records or bundles. Afterwards, it reports the
+trust domain and evidence found in the produced bundles.
 
 The upload is the only step that writes a bundle to the repository's attestation
 store, so `gh attestation verify` cannot find a bundle that the action did not
@@ -710,16 +746,19 @@ jobs:
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
     with:
       url: https://cupboard.example.workers.dev/t/acme
-      cache: pr-${{ github.event.pull_request.number }}
+      cache:
+        gh-${{ github.repository_id }}-pr-${{ github.event.pull_request.number
+        }}
       root: github:acme/app/pr-${{ github.event.pull_request.number }}
       ttl: 14d
 ```
 
 `cache`, `root`, and `ttl` specify the destination cache, retention root and
 retention duration. In this example every pull request publishes to its own
-`pr-<number>` cache, and the pushed paths expire two weeks after the last push.
-A cache is created the first time something is pushed to it, so per-PR and
-per-release caches need no setup step.
+`gh-<repository-id>-pr-<number>` cache, and the pushed paths expire two weeks
+after the last push. A first push creates a missing cache with the default
+cache's access and no default root TTL. Create it with `cupboard cache create`
+before publishing if it needs different access or a default root TTL.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
 under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
@@ -842,7 +881,9 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
-      cache: pr-${{ github.event.pull_request.number }}
+      cache:
+        gh-${{ github.repository_id }}-pr-${{ github.event.pull_request.number
+        }}
       root-prefix: github:acme/app/pr-${{ github.event.pull_request.number }}
       ttl: 14d
       nix-config: .#nix.substituterConfig
@@ -891,22 +932,37 @@ known-hosts sources, accepts only those pins and offers only the input key;
 input credentials and pins never enter the builder or direct-store
 configuration.
 
-When the destination cache or the reuse view is private, also pass `read_user`
-and `read_password` as workflow secrets. `actions/setup`'s netrc file covers
-only Nix substituter reads. The plan job also probes the cache directly, outside
-Nix, so pass the same credentials separately: `actions/plan` accepts them as
-`read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
-header on every narinfo probe.
+When the destination cache or the reuse view is private, also pass read
+credentials as workflow secrets. There are two pairs, because a destination
+cache and a reuse view can accept different credentials:
+
+- `destination_read_user` and `destination_read_password` authenticate reads
+  from the cache this run publishes to. If a private destination has no
+  credential of its own, supply the tenant credential as this pair too.
+- `fallback_read_user` and `fallback_read_password` authenticate reads from a
+  private reuse view with the tenant credential.
+
+Supply both fields of each pair you use. Existing callers must replace the
+workflow's `read_user` and `read_password` secrets with the appropriate pairs.
+
+`actions/setup` configures Nix reads. Cache-specific credentials are attached to
+substituter URLs, and the tenant fallback uses a netrc file. The plan and
+attestation steps also read the destination directly, outside Nix, with the
+destination pair. Cohort planning and reprobes use the fallback pair for the
+reuse view. Direct `cupboard plan cohort` and `cupboard plan reprobe` callers
+can pass `--view-read-user` and `--view-read-password`; when neither is
+supplied, the view uses the existing `--read-user` and `--read-password` pair.
 
 To publish to a named cache, set `cache`; omitting it selects the default cache.
 The cache can be public or private. Combining `cache` with `preset` fails
 because a preset chooses the destination. The workflow passes the selection to
 `actions/setup`, `actions/plan`, `actions/build-cohort`, `actions/attest` and
 `actions/attest-attach`, so every job reads and writes the same destination. The
-workflow supplies one `read_user` and `read_password` pair for all authenticated
-reads, so supply the credential that the selected private cache accepts. If the
-cache has its own verifier, the tenant-wide fallback credential is rejected by
-setup's initial cache-info probe, before publication starts.
+workflow sends the destination pair wherever it reads that cache and the
+fallback pair wherever it reads the tenant's reuse view, so supply the
+credential the selected private cache accepts as the destination pair. Supplying
+the fallback where the cache has its own verifier is rejected by setup's initial
+cache-info probe, before publication starts.
 
 The plan first retains targets whose output paths are already available from
 cupboard. It then applies an advisory destination pre-filter. When that filter
@@ -1141,10 +1197,17 @@ push, and the existing root-prefix grant covers the new target's root.
 
 ### Add another repository to the same tenant
 
-The `pull-requests` view already covers any number of repositories. Run
-quickstart step 2's `cupboard github setup` for the new repository: it adds that
-repository's trust rules and reports the shared tenant state as unchanged. The
-equivalent individual commands are in
+Run quickstart step 2's `cupboard github setup` for the new repository. It adds
+that repository's trust rules and its own reuse view, and reports the shared
+tenant state as unchanged. Each repository gets its own view, selecting only its
+own pull-request caches, so one repository's `main` build never substitutes
+paths that another repository's pull request produced.
+
+To reuse across repositories deliberately, define a view of your own that
+selects more than one repository's caches, either with a wider prefix or with
+one `prefix:` selector per repository, and name it in the caller's `reuse-view`
+input. That overrides the per-repository view the preset would otherwise derive.
+The equivalent individual commands are in
 [Manual configuration](#manual-configuration).
 
 ### Tighten or audit a trust rule
@@ -1158,9 +1221,10 @@ restricts a rule and how to narrow it further.
 
 Check these conditions in order:
 
-- The run passed `reuse-view`. The quickstart caller sets it for `push` events
-  only.
-- The PR cache still exists and matches the view's `pr-` prefix.
+- The run is a branch run. The preset derives its repository's reuse view; an
+  explicit `reuse-view` input overrides that choice.
+- The PR cache still exists and matches the view's `gh-<repository-id>-pr-`
+  prefix.
 - The PR run published the path.
 - The grace or TTL window has not lapsed.
 
