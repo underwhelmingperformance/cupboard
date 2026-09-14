@@ -3,8 +3,7 @@ import {
 	cacheNamePattern,
 	cacheNamePrefixPattern,
 	cacheNameSchema,
-	type CachePriority,
-	PRIVATE_STORED_PREFIX
+	type CachePriority
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
@@ -18,51 +17,6 @@ export const reuseViewNameSchema = z
 	.regex(cacheNamePattern)
 	.brand('ReuseViewName');
 export type ReuseViewName = z.output<typeof reuseViewNameSchema>;
-
-/**
- * A private reuse view's stored name: `private/` followed by its local name.
- *
- * The stored name carries the namespace, so a private view and a public view of
- * the same local name are separate stored identities. Requests spell only the
- * local name and give the access alongside it.
- */
-export const privateStoredReuseViewSchema = z
-	.string()
-	.refine(
-		(value) =>
-			value.startsWith(PRIVATE_STORED_PREFIX) &&
-			reuseViewNameSchema.safeParse(value.slice(PRIVATE_STORED_PREFIX.length))
-				.success
-	)
-	.brand('PrivateStoredReuseView');
-export type PrivateStoredReuseView = z.output<
-	typeof privateStoredReuseViewSchema
->;
-
-/**
- * A stored reuse-view name: the local name for a public view or the `private/`
- * name for a private view.
- */
-export const storedReuseViewSchema = z.union([
-	reuseViewNameSchema,
-	privateStoredReuseViewSchema
-]);
-export type StoredReuseView = z.output<typeof storedReuseViewSchema>;
-
-export function isPrivateReuseView(
-	view: StoredReuseView
-): view is PrivateStoredReuseView {
-	return privateStoredReuseViewSchema.safeParse(view).success;
-}
-
-/**
- * The stored name of the private view with this local name.
- */
-export function privateStoredReuseView(
-	name: ReuseViewName
-): PrivateStoredReuseView {
-	return privateStoredReuseViewSchema.parse(`${PRIVATE_STORED_PREFIX}${name}`);
-}
 
 const reuseViewPrefixMaxLength = 63;
 

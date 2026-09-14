@@ -1,5 +1,7 @@
 import {
 	currentLocalStep,
+	expansionLocalStep,
+	type LocalStep,
 	settledDeploymentPhase
 } from '@cupboard/protocol/deployment';
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
@@ -20,9 +22,12 @@ import { type OwnerChoice, ownerHint } from './owner.ts';
 import {
 	type PhaseApi,
 	readDeploymentPhase,
+	readLocalStepReadiness,
+	recordDeploymentPhase,
 	recordPhaseWhenTenantsReady
 } from './phase.ts';
 import type { DeploySecrets } from './secrets.ts';
+import type { DeploymentPlan } from './transition.ts';
 import {
 	buildScriptMetadata,
 	type ResolvedResources,
@@ -74,11 +79,13 @@ export interface DeployOptions {
 }
 
 export interface DeployDependencies {
-	readonly artifact: DeploymentArtifact;
+	readonly plan: DeploymentPlan;
 	readonly api: CloudflareApi;
 	readonly reporter: Reporter;
 	readonly options: DeployOptions;
 	readonly signal?: AbortSignal;
+	readonly settleTenants?: (requiredStep: LocalStep) => Promise<void>;
+	readonly now?: () => Date;
 }
 
 interface ResourcePlan {
@@ -149,6 +156,7 @@ export function derivedPlanRows(
 
 	return [
 		{ label: 'Build', value: artifact.buildVersion },
+
 		{
 			label: 'Control worker',
 			value: `${(artifact.controlBundle.code.length / 1024).toFixed(0)} KiB`
@@ -229,7 +237,8 @@ async function reconcileResources(
 async function configureTriggers(
 	dependencies: DeployDependencies
 ): Promise<void> {
-	const { api, reporter, options, artifact } = dependencies;
+	const { api, reporter, options, plan } = dependencies;
+	const { artifact } = plan;
 	const control = artifact.config.control;
 
 	await reporter.phase('Configuring triggers', async (context) => {
@@ -370,7 +379,8 @@ export async function runDeploy(
 async function performDeploy(
 	dependencies: DeployDependencies
 ): Promise<ResultRow[]> {
-	const { artifact, api, reporter, options } = dependencies;
+	const { api, reporter, options, plan } = dependencies;
+	const { artifact } = plan;
 
 	const resources = await reconcileResources(
 		dependencies,
@@ -390,7 +400,7 @@ async function performDeploy(
 		const applied = await applyD1Migrations(
 			d1QueryApiOf(api),
 			databaseId,
-			artifact.d1Migrations
+			plan.preparation
 		);
 
 		if (applied.length > 0) {
@@ -545,6 +555,17 @@ async function performDeploy(
 
 	if (databaseId !== undefined) {
 		await settlePhase(dependencies, databaseId);
+		await contractSchema(dependencies, databaseId);
+		if (dependencies.settleTenants !== undefined) {
+			const readiness = await readLocalStepReadiness(
+				d1QueryApiOf(api),
+				databaseId,
+				currentLocalStep
+			);
+			if (readiness.pending > 0) {
+				await dependencies.settleTenants(currentLocalStep);
+			}
+		}
 	}
 
 	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
@@ -604,6 +625,11 @@ function isMissingWorkerScriptError(error: unknown): boolean {
  * Returns the build a script is serving, or undefined when its deployment does
  * not send every request to one version. A gradual deployment splits traffic
  * between two versions, and there is then no single build to report.
+ *
+ * This reads the deployment's intended allocation. Cloudflare has accepted a
+ * deployment that sends every request to this build; whether every colo is
+ * already serving it is not reported, and nothing here measures that
+ * propagation or the completion of requests already in flight.
  */
 async function servingBuildVersion(
 	api: CloudflareApi,
@@ -627,8 +653,8 @@ async function servingBuildVersion(
  * this build requires. `LocalStepUnreachedError` names the tenants that have
  * not.
  *
- * The phase row describes the running code, so it must not be written while an
- * earlier version can still take a request. If a script is still split across
+ * The deployments API reports the configured allocation, not whether old
+ * requests have finished. Contracted schemas must reject incompatible writes. If a script is still split across
  * versions, or still serves an earlier build, this throws
  * {@link DeploymentPhaseUnsettledError} and leaves the row unchanged.
  */
@@ -636,10 +662,12 @@ async function settlePhase(
 	dependencies: DeployDependencies,
 	databaseId: DatabaseId
 ): Promise<void> {
-	const { api, artifact, reporter } = dependencies;
+	const { api, reporter, plan } = dependencies;
+	const { artifact } = plan;
 	const phaseApi = d1QueryApiOf(api);
+	const now = dependencies.now ?? (() => new Date());
 
-	await reporter.phase('Recording the deployment phase', async (context) => {
+	return reporter.phase('Recording the deployment phase', async (context) => {
 		const recorded = await readDeploymentPhase(phaseApi, databaseId);
 
 		if (recorded !== undefined) {
@@ -663,15 +691,56 @@ async function settlePhase(
 			throw new DeploymentPhaseUnsettledError(unsettled, artifact.buildVersion);
 		}
 
+		if (dependencies.settleTenants !== undefined) {
+			const pending = await readLocalStepReadiness(
+				phaseApi,
+				databaseId,
+				expansionLocalStep
+			);
+			if (pending.pending > 0) {
+				await dependencies.settleTenants(expansionLocalStep);
+			}
+		}
+
 		const readiness = await recordPhaseWhenTenantsReady(
+			phaseApi,
+			databaseId,
+			'native-reads',
+			expansionLocalStep,
+			now()
+		);
+
+		context.fact('tenants behind', String(readiness.pending));
+		context.fact(
+			'phase',
+			recorded?.name === 'contracted' ? 'contracted' : 'native-reads'
+		);
+	});
+}
+
+/**
+Applies D1 contractions once the deployment has settled.
+*/
+async function contractSchema(
+	dependencies: DeployDependencies,
+	databaseId: DatabaseId
+): Promise<void> {
+	const { api, reporter, plan } = dependencies;
+	const phaseApi = d1QueryApiOf(api);
+	await reporter.phase('Contracting the schema', async (context) => {
+		const contractions = plan.contraction;
+		const applied =
+			contractions.length === 0
+				? []
+				: await applyD1Migrations(phaseApi, databaseId, contractions);
+		await recordDeploymentPhase(
 			phaseApi,
 			databaseId,
 			settledDeploymentPhase,
 			currentLocalStep,
-			new Date()
+			dependencies.now?.() ?? new Date()
 		);
-
-		context.fact('tenants behind', String(readiness.pending));
+		context.fact('migrations', String(applied.length));
 		context.fact('phase', settledDeploymentPhase);
 	});
 }

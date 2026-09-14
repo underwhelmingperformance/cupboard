@@ -135,6 +135,7 @@ export interface CloudflareApi {
 	 * after a day. The bucket must already exist.
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
+	findD1Database(name: string): Promise<DatabaseId | undefined>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	ensureQueue(name: string): Promise<QueueId>;
@@ -455,6 +456,17 @@ export function createCloudflareApi(
 				...account,
 				rules: [...others, desired]
 			});
+		},
+
+		async findD1Database(name) {
+			const existing = await findCloudflareItem(
+				client.d1.database.list({ ...account, name }),
+				(database) => database.name === name,
+				'Cloudflare D1 database list'
+			);
+			return existing?.uuid === undefined
+				? undefined
+				: databaseIdSchema.parse(existing.uuid);
 		},
 
 		async ensureD1Database(name) {

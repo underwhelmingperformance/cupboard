@@ -481,3 +481,65 @@ describe('admitMigrationSource', () => {
 		});
 	});
 });
+
+describe('migration stop boundaries', () => {
+	const bundle: MigrationBundle = {
+		journal: {
+			entries: [
+				{ idx: 0, when: 1, tag: '0000_first' },
+				{ idx: 1, when: 2, tag: '0001_second' }
+			]
+		},
+		migrations: {
+			m0000: 'CREATE TABLE first (id text PRIMARY KEY);',
+			m0001: 'CREATE TABLE second (id text PRIMARY KEY);'
+		}
+	};
+	it('stops before a named migration and accepts a store already beyond the boundary', async () => {
+		const result = await runInDurableObject(
+			testServerFor('migration-stop-boundary'),
+			async (_instance, state) => {
+				const database = drizzle(state.storage);
+				await applyMigrations(database, bundle, { stopBefore: '0001_second' });
+				const stopped = {
+					tags: appliedTags(state.storage),
+					tables: tableNames(state.storage)
+				};
+				await applyMigrations(database, bundle);
+				await applyMigrations(database, bundle, { stopBefore: '0001_second' });
+				return {
+					stopped,
+					completed: {
+						tags: appliedTags(state.storage),
+						tables: tableNames(state.storage)
+					}
+				};
+			}
+		);
+		expect(result).toStrictEqual({
+			stopped: { tags: ['0000_first'], tables: ['first'] },
+			completed: {
+				tags: ['0000_first', '0001_second'],
+				tables: ['first', 'second']
+			}
+		});
+	});
+	it('rejects an unknown boundary before creating a table or tracking row', async () => {
+		await runInDurableObject(
+			testServerFor('migration-unknown-boundary'),
+			async (_instance, state) => {
+				await expect(
+					applyMigrations(drizzle(state.storage), bundle, {
+						stopBefore: 'missing'
+					})
+				).rejects.toBeInstanceOf(DurableObjectMigrationJournalError);
+				expect(
+					column(
+						state.storage,
+						"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'"
+					)
+				).toStrictEqual([]);
+			}
+		);
+	});
+});

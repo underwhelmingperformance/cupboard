@@ -478,12 +478,9 @@ export class SigningKeysService {
 						isNull(schema.narInfos.pendingSignatureGeneration)
 					)
 				)
-				// The covering index for this scan is keyed by the legacy cache
-				// column, so ordering by the identity instead would sort the batch in
-				// a temporary B-tree.
 				.orderBy(
 					schema.narInfos.signatureGeneration,
-					schema.narInfos.cache,
+					schema.narInfos.cacheId,
 					schema.narInfos.storePathHash
 				)
 				.limit(backfillBatchSize)

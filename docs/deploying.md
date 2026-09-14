@@ -1,144 +1,208 @@
 # Deploying a release
 
-This document describes how `cupboard deploy` moves a live deployment from one
-build to the next. See [docs/releases.md](./releases.md) for how the CLI
-binaries themselves are built and published.
+`cupboard deploy` updates a control Worker, a tenant Worker and their shared D1
+database. Each tenant also has a Durable Object with its own SQLite database; R2
+holds the NAR and attestation bytes. See [releases] for how CLI binaries are
+built and published.
 
-A deployment is a control Worker, a tenant Worker, one D1 database shared by
-both, one Durable Object per tenant with its own SQLite store, and R2 for the
-NAR bytes. A deploy applies the pending D1 migrations, uploads both Workers, and
-leaves each tenant's object to apply its own migrations the next time a request
-reaches it.
+[releases]: ./releases.md
 
 ## Phases
 
-A release that changes what a tenant's Durable Object stores cannot switch every
-object over at once. Objects run at different times, and an object that has not
-run since the previous release still stores the old shape. Such a release runs
-its Workers in more than one configuration. `cupboard deploy` records the
-configuration the deployed build runs in, called the phase, in D1, and a release
-that defines more than one phase reads it from the Workers to choose their
-behaviour.
+The `deployment_phase` row in D1 records the deployment's phase and the local
+step its tenants must reach. The recognised phases are `current`, `expanded`,
+`native-reads` and `contracted`, in that order. A build that needs no
+coordinated transition uses `current`.
 
-One row of the `deployment_phase` table holds the phase. `cupboard deploy` reads
-it before it applies a migration or uploads a Worker, and stops if the recorded
-phase is one the build does not define. It writes the row once both Workers
-serve the build it has just uploaded, which it establishes by reading the
-traffic split of the current deployment from the [Workers deployments API]. A
-gradual deployment can still be splitting a script's traffic between two
-versions, and there is then no single build to record a phase for; the deploy
-stops and names the script to wait for, and running it again once the rollout
-has finished records the phase. Every step the deploy takes is idempotent, so an
-interrupted run is rerun with no repair step.
+This release finishes a deploy in `contracted`. One run performs these steps:
+
+1. Read the recorded phase before applying a migration or uploading a Worker.
+   Refuse a phase this build does not recognise.
+2. Apply the D1 preparation migrations.
+3. Upload both Workers and configure their triggers and secrets.
+4. Check that each Worker's deployment assigns all traffic to one version and
+   that both Workers report this build. Check that every active tenant has
+   reached local step 4, waking pending tenants in batches of 20.
+5. Record `native-reads`, apply the D1 contraction migrations and record
+   `contracted`. Wake tenants again until they finish local step 5.
+
+A failed readiness check leaves the contraction unapplied. The error names the
+Workers or a sample of the tenants that are behind. Each settlement stage runs
+at most 100 batches. Inspect incomplete work with
+`cupboard deployment status <url>` and retry batches with
+`cupboard deployment resume <url>`. Repair any reported tenant configuration or
+migration error, then rerun `cupboard deploy`. Applied migrations are skipped
+after checking their recorded digests. Repeating a phase preserves its
+timestamp, and a rerun cannot lower `contracted` to `native-reads`.
+
+`contractionMigrations` classifies the D1 files that run after readiness has
+been checked. Every contraction must follow every preparation migration in
+journal order. The deploy refuses an unlisted file that sorts after the first
+contraction, so a new migration must be assigned deliberately.
+
+There is no elapsed-time delay and no second deploy required solely to apply a
+contraction. The [Workers deployments API] reports the configured traffic
+allocation, not whether every old invocation has finished. A [Durable Object
+code deployment] restarts its objects; an old in-flight request is stopped when
+it next touches object storage, and WebSockets are closed. Old Worker HTTP
+requests can continue. The final D1 schema rejects their references to removed
+columns, and the grant migration installs triggers that reject writes in the old
+grant format. Those requests can fail during the transition and must retry
+against the new build.
 
 [Workers deployments API]:
   https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/
+[Durable Object code deployment]:
+  https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
 
-This build settles in `native-reads`: reads use cache identities, and every
-active tenant must have completed the required local data work. It also
-recognises `current`, for builds without phase coordination, and `expanded`,
-which earlier builds recorded after populating the cache identity columns.
-`contracted` is recognised so stored grants can preserve their old spelling
-until the schema contracts; this build does not record that phase.
+The phase is not a general rollback guarantee. Tenant SQLite contracts during
+initialisation under this build, before the global phase advances. The D1
+preparation retains both cache representations and mirrors inserts from either
+writer. Final D1 contraction removes that compatibility. The reviewed deployment
+plan identifies the tenant Worker upload as the local rollback boundary: after
+an object contracts its SQLite schema, complete this deployment to recover.
 
 ## Local steps
 
-`tenant.local_step` records how far each tenant's Durable Object has advanced
-its own store. An object applies its pending migrations whenever it runs, but it
-records its step only when the control Worker asks it to: the `localStep.wake`
-procedure wakes a bounded batch of the tenants that are behind, and the hourly
-cron sweep wakes twenty per tick, so a deployment with N active tenants has
-every step recorded after about N / 20 ticks, later if some wakes fail.
-`localStep.status` counts the tenants at the current step and names up to twenty
-of those below it.
+`tenant.local_step` is a watermark for each object's completed data work. The
+object never lowers it. The `localStep.wake` control procedure wakes a bounded
+batch of active tenants that are behind; the hourly sweep also wakes up to
+twenty per tick. `localStep.status` counts ready and pending tenants and names
+up to twenty pending tenants. Large tenants can need several wakes.
 
-The stored step is a watermark: rolling back to a build that defines fewer steps
-does not lower what a newer build recorded. This build requires step 3. It
-repeats the identity reconciliation and projects missing `cache_lifecycle` rows
-to D1, at most 36 per wake. It then copies live cache generations from D1 to the
-local identities, moves private-cache objects off their old `private/` keys, and
-moves objects of caches above generation 1 to their generation keys. Each object
-move processes at most 100 objects per wake; a tenant with more work records its
-step on a later wake.
+This build defines five steps:
 
-A path whose object has not reached its new key returns 404. The move or a new
-push makes it available there. After deploying, run `localStep.wake` until
-`localStep.status` reports every tenant ready, or wait for the hourly sweep.
+- Step 1 projects missing lifecycle rows into D1, at most 36 caches per wake.
+  The local schema migrations now reconcile registrations and fill identity
+  columns before contraction.
+- Step 2 moves private-cache objects off their old `private/` keys.
+- Step 3 moves objects from later cache generations onto keys that include the
+  generation. Steps 2 and 3 each move at most 100 objects per wake.
+- Step 4 imports legacy retention and grace policies in bounded batches. Cache
+  retention edits are refused while that import is pending. The policy list and
+  removal procedures remain available to recover from an import that exceeds its
+  supported rule bound.
+- Step 5 rewrites stored trust rules and refresh-token grants after D1 records
+  `contracted`. A wake rewrites at most 100 rules and 100 families. Completion
+  enables local database triggers that reject the old format.
 
-`cupboard deploy` records a phase only once every active tenant has recorded the
-step the build requires. It checks after both Workers serve the build and stops
-with `LocalStepUnreachedError`, naming up to twenty of the tenants that are
-behind, while any is. A deploy may stop there while tenants finish the new work.
-Run it again once `localStep.status` reports none pending.
+Before contraction, an object reports at most step 4. After contraction, the
+control plane still finds those tenants below step 5 and wakes them again. A
+successful CLI deploy completes both stages. If a run is interrupted,
+`cupboard deployment resume <url>` continues the pending stage; rerun
+`cupboard deploy` to complete any remaining global transition. The hourly sweep
+also continues tenant work. A persisted cursor rotates through pending tenants,
+so a failed tenant does not prevent later tenants from being attempted.
+
+A path whose object has not reached its generation key returns 404. The move or
+a new push makes it available at that key.
+
+## Stored cache grants
+
+This build reads both selector grants and scope grants. A selector grant names
+the default cache as `_default`, a public cache by name and a private cache as
+`_private-<name>`. A scope grant identifies the default cache or a named cache
+independently of its access. A trust-rule binding can also contain a template; a
+refresh-token family contains the concrete scopes already granted.
+
+Below `contracted`, new grants use the selector format so the grant readers in
+the preceding build can parse them. A known named cache uses the selector for
+its access. Templates and names whose access is not yet known use both public
+and private selectors; current readers combine these into one grant. Access
+changes are refused until contraction, so an existing selector retains its
+meaning throughout the compatibility period.
+
+The control plane cannot resolve a tenant cache's access, so it stores named
+cache grants in both selector forms. If a template is too long to include the
+private selector prefix in the preceding format, adding the rule returns
+`CACHE_GRANT_MIGRATION_PENDING` (409). Complete the deployment before adding
+that rule.
+
+The D1 contraction rewrites `control_trust`. Local step 5 rewrites each tenant's
+`oidc_trust` and `refresh_token_family`. A phase reading can be cached for one
+minute, so the local step refreshes it before starting the rewrite. Prepared
+grants are checked again immediately before their synchronous database write; a
+value prepared before local contraction is converted if contraction finished
+while its caller awaited another operation. Database triggers enforce the
+resulting format. Tolerant readers remain throughout the transition.
+
+## Cache read credentials
+
+Deleting a cache revokes its generation before removing its read credential. The
+ordering matters: a private cache with no credential of its own accepts the
+tenant credential, so removing the credential while the cache was still live
+would widen access. These are separate D1 statements. If deletion fails between
+them, retry it to complete the credential removal.
+
+The contraction migration `0030_cache_credential_lifecycle` removes credentials
+whose cache lifecycle row is still marked deleted. It keeps credentials set
+before a cache was registered. It also keeps credentials on live caches whose
+names have been reused: registration clears the deletion timestamp, and the
+stored data cannot establish whether a credential belongs to the current cache
+or an earlier cache with that name.
+
+After migration, this query lists credentials on recreated named caches for an
+operator to review:
+
+```sql
+SELECT c.tenant, c.cache_name, c.access, c.generation, r.created_at
+FROM cache_lifecycle AS c
+JOIN tenant_cache_read_credential AS r
+    ON r.tenant = c.tenant
+    AND r.cache_kind = c.cache_kind
+    AND r.cache_name IS c.cache_name
+WHERE c.cache_kind = 'named'
+    AND c.deleted_at IS NULL
+    AND c.generation > 1
+ORDER BY c.tenant, c.cache_name;
+```
+
+A generation above one means the cache name has been deleted at least once. The
+credential's `created_at` records when it was set, but does not prove which
+incarnation it belongs to. Confirm with the tenant whether its readers should
+still use that password.
+
+For a private cache that should keep its own credential, replace the password
+with `cupboard tenant rotate-cache-credential <url> <tenant> <cache>` and update
+its readers with the returned credential. Rotation replaces the existing
+verifier without first switching the cache to the tenant credential.
+
+Use `cupboard tenant clear-cache-credential <url> <tenant> <cache>` only when
+readers should use the tenant credential instead, or when removing an unused
+credential from a public cache. Clearing a credential does not lock a private
+cache: everyone with the tenant credential can then read it. Both commands check
+the tenant's lifecycle; use them rather than deleting rows directly in D1.
 
 ## Rolling back
 
-Objects moved to generation keys are not moved back by a rollback. The previous
-build cannot read those keys or remove them during teardown. If it publishes
-objects at the old keys, redeploying this build does not automatically move
-them: a tenant already at step 3 is not revisited. Those objects need explicit
-recovery before they can be read at the generation keys.
+Rolling back the Workers does not roll back D1, tenant SQLite, R2, the recorded
+phase or tenant progress. In particular, this release drops the legacy cache and
+reuse-view tables and removes columns that the preceding build reads and writes.
+A tenant that has initialised under this build has already crossed that local
+schema boundary, even if D1 has not yet recorded `contracted`.
 
-Rolling back means serving an older build of both Workers, whether by running
-`cupboard deploy` of that build or by the Workers rollback feature. D1, R2 and
-the Durable Objects are not rolled back: the recorded phase and every tenant's
-step stay as they were.
+After contraction, an older build cannot serve the resulting schema. Deploy this
+release again to resume an interrupted transition. Restoring an earlier release
+requires compatible storage from before the transition as well as the older
+Workers. D1 has [Time Travel]; this repository provides no automated restore
+procedure for every tenant's Durable Object storage. A Worker rollback alone is
+not that recovery procedure.
 
-A rollback past a release that added a phase leaves a phase name the earlier
-build does not define. That build serves reads and writes as usual, but its
-`deployment.phase` control procedure returns an error and `cupboard deploy` of
-that build stops before applying a migration or uploading a Worker. Deploying a
-build that defines the phase clears both.
+[Time Travel]: https://developers.cloudflare.com/d1/reference/time-travel/
 
-Each tenant's recorded step stays as it was. Deploying a build that requires
-that step again does not wake those tenants, so anything the older build wrote
-in between that the step would have repaired stays unrepaired. For this release
-that means a cache the older build registered keeps no identity, and the
-contraction that follows refuses such an object.
+Generation-key object moves are not reversed either. An older build can neither
+read those keys nor retire them during teardown. If it writes at an old key,
+redeploying a build whose local step the tenant already recorded does not
+necessarily revisit that object. Recover such objects explicitly before relying
+on the new keys.
 
-A rollback past a release that added a Durable Object migration leaves each
-object that ran under the newer build with migrations the older build does not
-carry. The older build admits such an object when the newer build recorded each
-of those migrations with the digest it applied, which every build from this one
-on does. An object whose extra rows carry no digest is refused, and that
-tenant's requests fail until a build that carries the migrations is deployed
-again.
+Migration-history admission checks are separate from schema compatibility. A
+build can admit a longer history whose extra migrations carry verified digests
+and still be unable to use the schema those migrations produced. An older build
+that does not recognise the recorded phase also refuses `cupboard deploy` and
+its deployment-phase response, which requires deploying a build that recognises
+that phase.
 
-A migration that drops a column or a table cannot be undone by redeploying, so a
-release that contracts the schema documents its own recovery here alongside the
-phase that performs it.
-
-### Rolling back with stored cache grants
-
-This release names the cache in a stored grant by its scope,
-`{"kind":"default"}` or `{"kind":"named","name":...}`. The preceding build
-stored a selector string (`_default`, a public cache's name, `_private-<name>`)
-and parses a stored grant strictly, so it cannot read a row in the scope
-spelling. The rows are the trust rules in each tenant's `oidc_trust`, the grants
-each refresh-token family recorded in `refresh_token_family`, and the control
-plane's trust rules in D1 (`control_trust`). This build reads both spellings.
-
-Nothing is rewritten while this build is deployed. Until a deploy records
-`contracted`, a tenant's object stores a new rule or refresh-token family in the
-selector spelling. An existing named cache uses its current access: a private
-cache `ci` is stored as `_private-ci`. A cache that does not yet exist uses both
-`ci` and `_private-ci`, because its eventual access is unknown. Named templates
-also use both selector forms, so the preceding build can match either access
-mode. This build converts both variants back to scopes and deduplicates them.
-
-The control plane uses the same conversion for new control rules. It cannot
-resolve a tenant cache's access, so every named cache uses both selector forms.
-If a template is too long to include the private selector prefix in the
-preceding format, adding the rule returns `CACHE_GRANT_MIGRATION_PENDING` (409).
-Complete the deployment before adding that rule. Rules that can be stored in the
-preceding format remain readable after rollback, with both public and private
-template matches preserved.
-
-The rewrite of the stored rows to the scope spelling is a contraction. It runs
-in the `contracted` phase of this release's deploy, after both Workers serve the
-new build and every active tenant has reached the required step: the D1
-migration that rewrites `control_trust` and the per-object step that rewrites
-`oidc_trust` and `refresh_token_family`. From then on rows are stored in the
-scope spelling only. A rollback after that phase lands on a build that cannot
-read the rows, so recovery is deploying this release again or restoring the
-storage from before it.
+The `check` API now uses a numeric cache identity in `cursorCache`. An older CLI
+cannot validate this response or resume an old scan against it. Use the CLI from
+this release and start the scan again.

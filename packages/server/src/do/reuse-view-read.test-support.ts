@@ -16,10 +16,9 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { expect } from 'vitest';
 
-import { legacyCacheKey } from '../db/cache.ts';
+import { cacheIdentityColumns } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedWorkerFetch,
@@ -107,7 +106,6 @@ export async function insertUnbackedRow(
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
-				cache: legacyCacheKey(resolved.scope, resolved.access),
 				cacheId: resolved.id,
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				storePath: storePathSchema.parse(`/nix/store/${storePathHash}-first`),
@@ -155,19 +153,15 @@ export async function insertAgreeingCopy(
 
 		instance.context.db
 			.insert(schema.narInfos)
-			.values({
-				...source,
-				cache: legacyCacheKey(targetCache.scope, targetCache.access),
-				cacheId: targetCache.id
-			})
+			.values({ ...source, cacheId: targetCache.id })
 			.run();
 	});
 
-	await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
-		.insert(migrationSchema.blobReferences)
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash: hash,
 			generation: source.generation,
 			narHash: source.narHash,
@@ -218,7 +212,6 @@ export async function insertBackedRow(
 			.insert(schema.narInfos)
 			.values({
 				...source,
-				cache: legacyCacheKey(targetCache.scope, targetCache.access),
 				cacheId: targetCache.id,
 				storePathHash: targetHash,
 				storePath: storePathSchema.parse(
@@ -229,11 +222,11 @@ export async function insertBackedRow(
 			.run();
 	});
 
-	await drizzleD1(env.CUPBOARD_DB, { schema: migrationSchema })
-		.insert(migrationSchema.blobReferences)
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant: fixtureTenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash: targetHash,
 			generation,
 			narHash: source.narHash,

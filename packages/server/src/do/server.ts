@@ -408,6 +408,9 @@ class CountingSemaphore {
 	}
 }
 
+// The migration whose assertions require every cache to record its access.
+const cacheAccessContractMigration = '0051_cache_identity_contract_assertions';
+
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Put the invocation's D1 allowance, Durable Object row budget and subrequest
 	// slice on every method the runtime can dispatch to: a request, an alarm, an
@@ -1530,12 +1533,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		// Every migration this build carries runs before anything reads the store.
-		// Handing this call a prefix of the bundle would refuse the object on its
-		// next start: the rows it already holds would run past the entries the
-		// prefix carries, and the migrator admits a longer history only when a
-		// newer build verified it.
-		await applyMigrations(this.context.db, migrations);
+		// Cache access comes from this tenant's D1 catalogue, which a SQLite
+		// migration cannot read. Reconcile it before the contraction assertions.
+		// Both calls need the whole bundle so admission can verify an object
+		// that already applied migrations beyond the stopping point.
+		await applyMigrations(this.context.db, migrations, {
+			stopBefore: cacheAccessContractMigration
+		});
 		await this.assertZstdAvailable();
 
 		const tenant = explicitTenant ?? this.tenantIdentity.current()?.tenant;
@@ -1556,6 +1560,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				throw new CacheCatalogueMigrationPendingError();
 			}
 		}
+
+		await applyMigrations(this.context.db, migrations);
+		this.context.grantsContracted =
+			this.context.db
+				.select({ complete: schema.grantContraction.complete })
+				.from(schema.grantContraction)
+				.get()?.complete ?? false;
 
 		if (!isCatalogueComplete) {
 			await markCacheCatalogueComplete(this.context, tenant);
@@ -2199,6 +2210,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			if (error instanceof CacheCatalogueMigrationPendingError) {
 				return serverHttpErrorResponse(error);
 			}
+
 			throw error;
 		}
 
@@ -2533,10 +2545,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	/**
-	 * Applies any pending migrations and records the step this object has
-	 * reached in its tenant row. This is the only path that records the step;
-	 * serving traffic does not. Reports an unconfigured object or unfinished
-	 * work without advancing the recorded step.
+	 * Runs the work this build's steps require, applying any pending migrations
+	 * first, and records the step this object has reached in its tenant row.
+	 * This is the only path that records the step; serving traffic does not.
+	 * Reports `unconfigured` when the control plane has not configured this
+	 * object, which then has no tenant row to update, and `incomplete` when the
+	 * step's work did not fit one invocation.
 	 */
 	async reportLocalStep(): Promise<LocalStepOutcome> {
 		try {

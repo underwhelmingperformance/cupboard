@@ -12,11 +12,13 @@ import {
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
+import { sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { cacheIdentityColumns } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { jsonValueLists } from '../do/json-list.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
@@ -26,8 +28,6 @@ import {
 	narObjectKey,
 	type NarObjectName
 } from '../http/http.ts';
-import { cacheMigrationColumns } from '../migration/cache-access.ts';
-import * as migrationSchema from '../migration/cache-access-schema.ts';
 import { defaultCache, flakyD1, namedCache } from '../test-support.ts';
 
 import {
@@ -96,21 +96,21 @@ async function seedOwnedNarReference(
 		})
 		.onConflictDoNothing();
 	const insertReference = database
-		.insert(migrationSchema.blobReferences)
+		.insert(d1Schema.blobReference)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			storePathHash: referencingPath,
 			generation: referencedGeneration,
 			narHash,
-			...(edgeGeneration !== undefined && { cacheGeneration: edgeGeneration })
+			cacheGeneration: edgeGeneration ?? firstCacheGeneration
 		})
 		.onConflictDoNothing();
 	const insertLifecycle = database
-		.insert(migrationSchema.cacheLifecycles)
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			access,
 			generation: edgeGeneration ?? firstCacheGeneration,
 			updatedAt: isoTimestamp(new Date())
@@ -125,22 +125,33 @@ function seedCacheGeneration(
 	generation: CacheGeneration,
 	access: CacheAccessMode = 'public'
 ): Promise<unknown> {
-	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
-		.insert(migrationSchema.cacheLifecycles)
+	const insert = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.cacheLifecycle)
 		.values({
 			tenant,
-			...cacheMigrationColumns(cache, access),
+			...cacheIdentityColumns(cache),
 			access,
 			generation,
 			updatedAt: isoTimestamp(new Date())
-		})
-		.onConflictDoUpdate({
-			target: [
-				migrationSchema.cacheLifecycles.tenant,
-				migrationSchema.cacheLifecycles.legacyCache
-			],
-			set: { access, generation }
 		});
+	const set = { access, generation };
+
+	// Each cache kind has its own partial unique index, so name the matching
+	// conflict target.
+	return cache.kind === 'default'
+		? insert.onConflictDoUpdate({
+				target: d1Schema.cacheLifecycle.tenant,
+				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'default'`,
+				set
+			})
+		: insert.onConflictDoUpdate({
+				target: [
+					d1Schema.cacheLifecycle.tenant,
+					d1Schema.cacheLifecycle.cacheName
+				],
+				targetWhere: sql`${d1Schema.cacheLifecycle.cacheKind} = 'named'`,
+				set
+			});
 }
 
 async function serveWithFaults(failures: number): Promise<Response> {

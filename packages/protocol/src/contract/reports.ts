@@ -8,9 +8,9 @@ export const checkContract = {
 	// One read-only call checks a page of this tenant's narinfo rows in
 	// (cache, store path hash) order, comparing committed metadata with the
 	// corresponding narinfo and NAR objects. Deep mode also re-derives compressed
-	// and uncompressed hashes. The report names the last row it checked, and the
-	// next call starts after it, so a caller checks every path by passing
-	// `cursor` and `cursorCache` back until the report returns them empty.
+	// and uncompressed hashes. The report identifies the last row it checked;
+	// the next call starts after it. Pass `cursor` and `cursorCache` back until
+	// `cursor` is empty.
 	run: baseProcedure
 		.meta({ requires: 'check:run', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/check' })
@@ -18,7 +18,7 @@ export const checkContract = {
 			z.strictObject({
 				deep: z.boolean().default(false),
 				cursor: z.string().default(''),
-				cursorCache: z.string().default('')
+				cursorCache: z.coerce.number().int().nonnegative().default(0)
 			})
 		)
 		.output(checkReportSchema)

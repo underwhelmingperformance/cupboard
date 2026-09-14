@@ -33,14 +33,14 @@ export const checkDiscrepancySchema = z.strictObject({
 });
 export type CheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
 
-// One pass of the integrity check. `cursorCache` and `cursor` name the last row
-// the pass checked when rows remain, and are empty once the scan has reached
-// the end; a caller checks every path by passing them back until they are.
+// One bounded pass of the integrity check. `cursorCache` and `cursor` identify
+// the last row checked when rows remain. Pass them back to continue after that
+// row. At the end of the scan, `cursorCache` is zero and `cursor` is empty.
 export const checkReportSchema = z.strictObject({
 	narInfosChecked: countSchema,
 	narBlobsChecked: countSchema,
 	cursor: z.string(),
-	cursorCache: z.string(),
+	cursorCache: countSchema,
 	discrepancies: z.array(checkDiscrepancySchema)
 });
 export type CheckReport = z.output<typeof checkReportSchema>;

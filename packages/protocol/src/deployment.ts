@@ -25,24 +25,22 @@ export function localStep(value: number): LocalStep {
 }
 
 /**
- * This build requires every tenant Durable Object to reach this step.
+ * The final local step this build asks each tenant to reach.
  *
- * A release that needs per-object work after its migrations gives that work the
- * next step number and raises this constant. Step 1 gives every registered
- * cache an identity and fills the `cache_id` of every row that still refers to
- * its cache by the stored name alone. A migration ran that fill once, when the
- * object first initialised; the step repeats it for rows written since. Step 2
- * moves a private cache's stored objects off the keys its old `private/`
- * name gave them, which a migration cannot do because those objects are in R2.
- * Step 3 moves the objects of a cache above its first generation onto keys
- * that carry that generation.
- * Step 4 imports the tenant's retention and grace policies onto its caches
- * in bounded batches, resuming from a stored cursor between wakes.
+ * Step 1 projects missing cache lifecycle rows into D1. Steps 2 and 3 move
+ * private-cache objects and later cache generations to their current R2 keys.
+ * Step 4 imports legacy retention and grace policies in bounded batches.
+ * Step 5 rewrites stored grants after D1 records `contracted`.
  *
- * `cupboard deploy` records this number with the phase, and the control plane
- * compares each tenant's recorded step against it.
+ * Objects report at most step 4 before contraction. They remain below this
+ * watermark afterwards, so the control plane wakes them for the grant rewrite.
  */
-export const currentLocalStep: LocalStep = localStep(4);
+export const currentLocalStep: LocalStep = localStep(5);
+
+/**
+The local data work that must finish before the deploy contracts D1.
+*/
+export const expansionLocalStep: LocalStep = localStep(4);
 
 /**
  * A deploy records one of these phase names. They are listed in the order a
@@ -55,11 +53,10 @@ export const currentLocalStep: LocalStep = localStep(4);
  *
  * `contracted` is the phase in which a deploy rewrites or removes what the
  * previous build still reads. A deploy records it only once the new build
- * serves every request and the contraction has run. From then on a rollback
+ * is assigned all traffic and the D1 contraction has run. From then on a rollback
  * cannot land on the previous build by redeploying it, so a write that build
- * cannot parse is safe. This build never records `contracted`; it reads the
- * phase so that a stored grant keeps the spelling the previous build parses
- * until a later deploy contracts.
+ * cannot parse is safe. Tenants then finish their local grant contraction
+ * and report step 5.
  */
 export const deploymentPhaseNameSchema = z.enum([
 	'current',
@@ -91,15 +88,19 @@ export function hasReachedPhase(
 	return phaseOrder.indexOf(recorded) >= phaseOrder.indexOf(wanted);
 }
 
-// A deploy of this build ends in this phase. A release that adds phases
-// changes this to the last phase it introduces.
-//
-// `native-reads` says the reads take a cache from its identity columns
-// instead of the legacy name. The deploy records it only after every active
-// tenant has recorded the current local step, whose reconciliation fills the
-// `cache_id` of the rows an earlier build wrote by name alone, so a build
-// that reads this phase finds an identity on every row.
-export const settledDeploymentPhase: DeploymentPhaseName = 'native-reads';
+// The final D1 phase. Tenant grant conversion continues as local step 5.
+export const settledDeploymentPhase: DeploymentPhaseName = 'contracted';
+
+/**
+ * D1 migrations applied after both Workers run this build and active tenants
+ * finish the expansion work. Every contraction must follow every expansion in
+ * journal order; an unlisted migration after this boundary is refused.
+ */
+export const contractionMigrations: readonly string[] = [
+	'0028_cache_identity_contract.sql',
+	'0029_cache_grant_contract.sql',
+	'0030_cache_credential_lifecycle.sql'
+];
 
 // The `deployment_phase` table has one row, and this is its `id`. `cupboard
 // deploy` writes that row.
@@ -131,6 +132,10 @@ export type DeploymentPhaseResponse = z.input<
 // tenants an operator would chase by hand, while bounding the response.
 export const localStepStragglerSampleSize = 20;
 
+export const localStepStatusQuerySchema = z.strictObject({
+	requiredStep: localStepSchema.optional()
+});
+
 export const localStepStatusSchema = z.strictObject({
 	// The step this build asks of every active tenant.
 	current: localStepSchema,
@@ -155,10 +160,27 @@ export type LocalStepWakeBody = z.input<typeof localStepWakeBodySchema>;
 
 // Waking a tenant is a request to its object, so a batch can partly fail. A
 // failed tenant stays in the straggler list and the next batch retries it.
+export const localStepWakeOutcomeSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('recorded'),
+		step: localStepSchema
+	}),
+	z.strictObject({
+		tenant: tenantIdSchema,
+		kind: z.literal('advanced'),
+		projected: z.number().int().nonnegative()
+	}),
+	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('unconfigured') }),
+	z.strictObject({ tenant: tenantIdSchema, kind: z.literal('failed') })
+]);
+export type LocalStepWakeOutcome = z.infer<typeof localStepWakeOutcomeSchema>;
+
 export const localStepWakeResponseSchema = z.strictObject({
 	current: localStepSchema,
 	woken: z.number().int().nonnegative(),
-	failed: z.number().int().nonnegative()
+	failed: z.number().int().nonnegative(),
+	outcomes: z.array(localStepWakeOutcomeSchema).max(localStepWakeMaxTenants)
 });
 export type ParsedLocalStepWakeResponse = z.output<
 	typeof localStepWakeResponseSchema

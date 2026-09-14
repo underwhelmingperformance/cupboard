@@ -13,15 +13,14 @@ import { z } from 'zod';
 import {
 	cacheIdentityColumns,
 	cacheIdentityCondition,
-	cacheScopeFromRow,
-	legacyCacheKey
+	cacheScopeFromRow
 } from '../db/cache.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import type { ServerContext } from '../do/context.ts';
 import { jsonValueLists } from '../do/json-list.ts';
 import { CacheCatalogueMigrationError } from '../errors.ts';
 
-import * as migrationSchema from './cache-access-schema.ts';
 import {
 	afterLifecycleKey,
 	lifecycleKey as scopeKey
@@ -36,16 +35,6 @@ interface CatalogueEntry {
 	readonly deletedAt: IsoTimestamp | undefined;
 }
 
-export function cacheMigrationColumns(
-	scope: CacheScope,
-	access: CacheAccessMode
-) {
-	return {
-		legacyCache: legacyCacheKey(scope, access),
-		...cacheIdentityColumns(scope)
-	};
-}
-
 export async function revokeCacheLifecycle(
 	context: ServerContext,
 	tenant: TenantId,
@@ -53,18 +42,16 @@ export async function revokeCacheLifecycle(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const identity = cacheMigrationColumns(scope, access);
 	const updated = await context.d1
-		.update(migrationSchema.cacheLifecycles)
+		.update(d1Schema.cacheLifecycle)
 		.set({
-			legacyCache: identity.legacyCache,
 			access,
-			generation: sql`${migrationSchema.cacheLifecycles.generation} + 1`,
+			generation: sql`${d1Schema.cacheLifecycle.generation} + 1`,
 			deletedAt: now,
 			updatedAt: now
 		})
 		.where(
-			sql`${migrationSchema.cacheLifecycles.tenant} = ${tenant} and ${cacheIdentityCondition(migrationSchema.cacheLifecycles.cacheKind, migrationSchema.cacheLifecycles.cacheName, scope)}`
+			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
 		)
 		.run();
 
@@ -72,9 +59,9 @@ export async function revokeCacheLifecycle(
 		return;
 	}
 
-	await context.d1.insert(migrationSchema.cacheLifecycles).values({
+	await context.d1.insert(d1Schema.cacheLifecycle).values({
 		tenant,
-		...identity,
+		...cacheIdentityColumns(scope),
 		access,
 		generation: cacheGenerationSchema.parse(2),
 		deletedAt: now,
@@ -89,17 +76,15 @@ export async function clearCacheLifecycleDeletion(
 	access: CacheAccessMode,
 	now: IsoTimestamp
 ): Promise<void> {
-	const identity = cacheMigrationColumns(scope, access);
 	const updated = await context.d1
-		.update(migrationSchema.cacheLifecycles)
+		.update(d1Schema.cacheLifecycle)
 		.set({
-			legacyCache: identity.legacyCache,
 			access,
 			deletedAt: sql`null`,
 			updatedAt: now
 		})
 		.where(
-			sql`${migrationSchema.cacheLifecycles.tenant} = ${tenant} and ${cacheIdentityCondition(migrationSchema.cacheLifecycles.cacheKind, migrationSchema.cacheLifecycles.cacheName, scope)}`
+			sql`${d1Schema.cacheLifecycle.tenant} = ${tenant} and ${cacheIdentityCondition(d1Schema.cacheLifecycle.cacheKind, d1Schema.cacheLifecycle.cacheName, scope)}`
 		)
 		.run();
 
@@ -107,9 +92,9 @@ export async function clearCacheLifecycleDeletion(
 		return;
 	}
 
-	await context.d1.insert(migrationSchema.cacheLifecycles).values({
+	await context.d1.insert(d1Schema.cacheLifecycle).values({
 		tenant,
-		...identity,
+		...cacheIdentityColumns(scope),
 		access,
 		generation: cacheGenerationSchema.parse(1),
 		deletedAt: sql`null`,
@@ -117,24 +102,38 @@ export async function clearCacheLifecycleDeletion(
 	});
 }
 
-async function legacyTenantAccess(
+/**
+ * The access a cache takes when the local catalogue records none for it: the
+ * access of the tenant's default cache, which every tenant has.
+ *
+ * A cache that records no access was created when one setting on the tenant row
+ * decided how all of a tenant's caches read, and the default cache's lifecycle
+ * row holds that setting's value.
+ */
+async function defaultCacheAccess(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<CacheAccessMode> {
 	const row = await context.d1
-		.select({ readMode: migrationSchema.tenants.readMode })
-		.from(migrationSchema.tenants)
-		.where(eq(migrationSchema.tenants.id, tenant))
+		.select({ access: d1Schema.cacheLifecycle.access })
+		.from(d1Schema.cacheLifecycle)
+		.where(
+			and(
+				eq(d1Schema.cacheLifecycle.tenant, tenant),
+				eq(d1Schema.cacheLifecycle.cacheKind, 'default'),
+				isNull(d1Schema.cacheLifecycle.cacheName)
+			)
+		)
 		.get();
 
 	if (row === undefined) {
 		throw new CacheCatalogueMigrationError(tenant, 'tenant-missing');
 	}
 
-	return row.readMode;
+	return row.access;
 }
 
-const cacheCatalogueBatchSize = 36;
+export const cacheCatalogueBatchSize = 36;
 
 export type CacheCatalogueOutcome =
 	{ readonly status: 'pending' } | { readonly status: 'complete' };
@@ -240,13 +239,12 @@ async function reconcileLocalPage(
 			kind: entry.scope.kind,
 			name: entry.scope.kind === 'named' ? entry.scope.name : undefined,
 			access: entry.access,
-			legacyCache: legacyCacheKey(entry.scope, entry.access),
 			deletedAt: entry.deletedAt
 		}))
 	);
 	await context.d1.run(sql`
-		insert into cache_lifecycle (tenant, cache, cache_kind, cache_name, access, generation, deleted_at, updated_at)
-		select ${tenant}, json_extract(value, '$.legacyCache'), json_extract(value, '$.kind'), json_extract(value, '$.name'),
+		insert into cache_lifecycle (tenant, cache_kind, cache_name, access, generation, deleted_at, updated_at)
+		select ${tenant}, json_extract(value, '$.kind'), json_extract(value, '$.name'),
 			json_extract(value, '$.access'), 1, json_extract(value, '$.deletedAt'), ${now}
 		from json_each(${document}) where true on conflict do nothing
 	`);
@@ -269,16 +267,16 @@ async function reconcileRemotePage(
 ): Promise<CacheCatalogueOutcome> {
 	const rows = await context.d1
 		.select()
-		.from(migrationSchema.cacheLifecycles)
+		.from(d1Schema.cacheLifecycle)
 		.where(
 			and(
-				eq(migrationSchema.cacheLifecycles.tenant, tenant),
+				eq(d1Schema.cacheLifecycle.tenant, tenant),
 				afterLifecycleKey(afterKey)
 			)
 		)
 		.orderBy(
-			migrationSchema.cacheLifecycles.cacheKind,
-			migrationSchema.cacheLifecycles.cacheName
+			d1Schema.cacheLifecycle.cacheKind,
+			d1Schema.cacheLifecycle.cacheName
 		)
 		.limit(cacheCatalogueBatchSize)
 		.all();
@@ -291,10 +289,7 @@ async function reconcileRemotePage(
 					cacheIdentityCondition(
 						schema.cacheIdentities.kind,
 						schema.cacheIdentities.name,
-						cacheScopeFromRow({
-							kind: row.cacheKind ?? undefined,
-							name: row.cacheName
-						})
+						cacheScopeFromRow({ kind: row.cacheKind, name: row.cacheName })
 					)
 				)
 				.limit(1)
@@ -340,7 +335,7 @@ export async function reconcileCacheCatalogue(
 	context: ServerContext,
 	tenant: TenantId
 ): Promise<CacheCatalogueOutcome> {
-	const legacyAccess = await legacyTenantAccess(context, tenant);
+	const legacyAccess = await defaultCacheAccess(context, tenant);
 	const saved = await context.ctx.storage.get(progressKey);
 	const progress =
 		saved === undefined
@@ -475,9 +470,9 @@ export async function isCacheCatalogueComplete(
 	tenant: TenantId
 ): Promise<boolean> {
 	const row = await context.d1
-		.select({ version: migrationSchema.tenants.cacheCatalogueVersion })
-		.from(migrationSchema.tenants)
-		.where(eq(migrationSchema.tenants.id, tenant))
+		.select({ version: d1Schema.tenant.cacheCatalogueVersion })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenant))
 		.get();
 
 	return row?.version === cacheCatalogueVersion;
@@ -488,7 +483,7 @@ export async function markCacheCatalogueComplete(
 	tenant: TenantId
 ): Promise<void> {
 	await context.d1
-		.update(migrationSchema.tenants)
+		.update(d1Schema.tenant)
 		.set({ cacheCatalogueVersion })
-		.where(eq(migrationSchema.tenants.id, tenant));
+		.where(eq(d1Schema.tenant.id, tenant));
 }

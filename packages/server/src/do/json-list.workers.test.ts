@@ -3,10 +3,8 @@
 // runtimes refuse a statement that binds one parameter per value
 // (`statement-admission.workers.test.ts` checks that they do).
 import {
-	cacheNameSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	privateStoredCache,
 	type StorePathHash,
 	storePathHashSchema,
 	tenantIdSchema
@@ -17,6 +15,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { cacheIdSchema } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
@@ -25,7 +24,7 @@ import { maxBoundParameters } from './bulk.ts';
 import { jsonRowLists, jsonValueLists } from './json-list.ts';
 
 const listLength = maxBoundParameters + 50;
-const cache = privateStoredCache(cacheNameSchema.parse('builds'));
+const cache = cacheIdSchema.parse(1);
 const tenant = tenantIdSchema.parse('fixture-tenant');
 const nixBase32 = '0123456789abcdfghijklmnpqrsvwxyz';
 
@@ -81,9 +80,7 @@ describe('a list bound as one JSON parameter', () => {
 
 			instance.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(
-					inserted.insertSource([sql`${cache}`, sql`null`, inserted.element()])
-				)
+				.select(inserted.insertSource([sql`${cache}`, inserted.element()]))
 				.run();
 
 			const selected = onlyList(jsonValueLists(storePathHashes));
@@ -95,7 +92,7 @@ describe('a list bound as one JSON parameter', () => {
 				.from(schema.garbageCollectionFrontier)
 				.where(
 					and(
-						eq(schema.garbageCollectionFrontier.cache, cache),
+						eq(schema.garbageCollectionFrontier.cacheId, cache),
 						inArray(schema.garbageCollectionFrontier.storePathHash, selected)
 					)
 				)
@@ -116,14 +113,15 @@ describe('a list bound as one JSON parameter', () => {
 
 			instance.context.db
 				.insert(schema.garbageCollectionFrontier)
-				.select(
-					inserted.insertSource([sql`${cache}`, sql`null`, inserted.element()])
-				)
+				.select(inserted.insertSource([sql`${cache}`, inserted.element()]))
 				.run();
 
 			const pairs = onlyList(
 				jsonRowLists(
-					storePathHashes.map((storePathHash) => ({ cache, storePathHash }))
+					storePathHashes.map((storePathHash) => ({
+						cacheId: cache,
+						storePathHash
+					}))
 				)
 			);
 
@@ -134,7 +132,7 @@ describe('a list bound as one JSON parameter', () => {
 				.from(schema.garbageCollectionFrontier)
 				.where(
 					pairs.matches({
-						cache: schema.garbageCollectionFrontier.cache,
+						cacheId: schema.garbageCollectionFrontier.cacheId,
 						storePathHash: schema.garbageCollectionFrontier.storePathHash
 					})
 				)

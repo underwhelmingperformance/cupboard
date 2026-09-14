@@ -90,34 +90,6 @@ const fixedWidthSites: readonly (BoundListSite & {
 			'One disjunct per bound list, not per selector. A view with more selectors produces longer lists, not more disjuncts.'
 	},
 	{
-		kind: 'inArray',
-		file: 'src/routing/scheduled.ts',
-		argument: "['active', 'suspended']",
-		reason: 'The two tenant statuses a sweep visits, written as literals.'
-	},
-	// The three entries below hold only while both spellings of a reuse view
-	// are stored. Each list is the legacy and the native name of one view, so
-	// it has two entries at most. The contraction drops the legacy spelling and
-	// these entries go with it.
-	{
-		kind: 'inArray',
-		file: 'src/do/reuse-view-admin-service.ts',
-		argument: 'keys',
-		reason: 'The legacy and native spellings of one view: two at most.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/do/reuse-view-lookup-service.ts',
-		argument: 'keys',
-		reason: 'The legacy and native spellings of one view: two at most.'
-	},
-	{
-		kind: 'inArray',
-		file: 'src/do/reuse-view-lookup-service.ts',
-		argument: 'legacyReuseViewKeys(view)',
-		reason: 'The legacy and native spellings of one view: two at most.'
-	},
-	{
 		kind: 'and',
 		file: 'src/migration/cache-retention.ts',
 		argument: "and( eq(schema.legacyRetentionPolicies.kind, 'root",
