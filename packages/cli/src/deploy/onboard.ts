@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import { tenantUrl } from '@cupboard/nix-store/cache-url';
-import { cacheNamePattern } from '@cupboard/nix-store/scalars';
+import {
+	type CacheAccessMode,
+	cacheNamePattern
+} from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	ConfiguredInstanceSummary,
@@ -9,16 +12,21 @@ import type {
 	InstanceSummary
 } from '@cupboard/protocol/instance';
 import { instanceNameSchema } from '@cupboard/protocol/instance';
-import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
+import {
+	subjectTokenProblems,
+	subjectTokenTypeIdToken
+} from '@cupboard/protocol/oidc';
 import type {
 	ControlCheckReport,
 	R2CredentialCheck
 } from '@cupboard/protocol/reports';
-import type {
-	MembershipRebuildResponse,
-	TenantCreateBodyInput,
-	TenantListResponse,
-	TenantSummary
+import {
+	defaultReadUser,
+	type MembershipRebuildResponse,
+	type TenantCreateBodyInput,
+	type TenantListResponse,
+	type TenantReadCredential,
+	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
@@ -30,13 +38,15 @@ import {
 	writeCachedSession
 } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
-import { controlRpc } from '../client/orpc.ts';
+import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
+import { generateReadPassword } from '../read-user.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
 import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
+import { showCacheCredential } from './onboard-ready.ts';
 import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
 import {
 	checkR2Credentials,
@@ -105,6 +115,11 @@ export function onboardAdminFor(
 		: { kind: 'other', owner: choice.owner };
 }
 
+interface CreatedCache {
+	readonly access: CacheAccessMode;
+	readonly read: TenantReadCredential;
+}
+
 export type OnboardOutcome =
 	| {
 			readonly kind: 'ready';
@@ -112,6 +127,11 @@ export type OnboardOutcome =
 			readonly slug: string;
 			readonly cacheUrl: URL;
 			readonly publicKey: string;
+			/**
+			Access of an existing cache, when the deployer can inspect it.
+			*/
+			readonly access?: CacheAccessMode;
+			readonly created?: CreatedCache;
 	  }
 	| { readonly kind: 'no-admin'; readonly url: string }
 	| {
@@ -165,6 +185,7 @@ export interface OnboardClient extends Pick<
 	CupboardClient,
 	'version' | 'signup' | 'tokenExchange' | 'publicKey'
 > {
+	cacheAccess(subjectToken: string): Promise<CacheAccessMode | undefined>;
 	getInstance(token: string): Promise<InstanceSummary>;
 	initialiseInstance(
 		token: string,
@@ -220,6 +241,10 @@ export interface OnboardOptions {
 	readonly domain: string | undefined;
 	readonly instanceName?: InstanceName;
 	readonly admin: OnboardAdmin;
+	/**
+	 * Read access for the first cache. Prompt for access when this is absent.
+	 */
+	readonly cacheAccess: CacheAccessMode | undefined;
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
@@ -236,6 +261,7 @@ export interface OnboardOptions {
 		target: URL
 	) => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
+	readonly readPassword?: () => string;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
 }
@@ -428,22 +454,34 @@ export async function onboardDeployment(
 	}
 
 	let slug: string;
+	let first: FirstTenant | undefined;
 	const sole = existing[0];
 
 	if (sole === undefined) {
-		const tenant = await createFirstTenant(
+		first = await createFirstTenant(
 			ui,
 			client,
 			url,
 			claim.token,
-			admin.owner
+			admin.owner,
+			options.cacheAccess,
+			{
+				user: defaultReadUser,
+				password: (options.readPassword ?? generateReadPassword)()
+			}
 		);
 
-		if (tenant === undefined) {
+		if (first === undefined) {
 			return { kind: 'cancelled', url };
 		}
 
-		slug = tenant.id;
+		slug = first.tenant.id;
+		showCacheCredential(
+			ui,
+			tenantUrl(parseWorkerUrl(url), slug),
+			first,
+			'confirmed'
+		);
 	} else {
 		ui.info(`The cache "${sole.id}" already exists; nothing to create.`);
 		slug = sole.id;
@@ -490,12 +528,22 @@ export async function onboardDeployment(
 		};
 	}
 
+	const access =
+		first?.access ??
+		(await cacheClient.cacheAccess(
+			(await options.freshIdToken?.()) ?? subjectToken
+		));
+
 	return {
 		kind: 'ready',
 		url,
 		slug,
+		...(first === undefined && access !== undefined && { access }),
 		cacheUrl,
-		publicKey: key.value
+		publicKey: key.value,
+		...(first !== undefined && {
+			created: { access: first.access, read: first.read }
+		})
 	};
 }
 
@@ -554,6 +602,37 @@ function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 		controlRpc(parsed, { credential: token, signal });
 
 	return {
+		cacheAccess: async (subjectToken) => {
+			try {
+				const token = await raw.tokenExchange(
+					subjectToken,
+					subjectTokenTypeIdToken
+				);
+				const cache = await tenantRpc(parsed, {
+					credential: token.access_token,
+					signal
+				}).caches.get.inDefaultCache({});
+				return cache.access;
+			} catch (error) {
+				if (
+					error instanceof CupboardHttpError &&
+					error.oauthError?.problem === subjectTokenProblems.untrusted
+				) {
+					return;
+				}
+				const refusedStatuses: readonly number[] = [
+					StatusCodes.UNAUTHORIZED,
+					StatusCodes.FORBIDDEN
+				];
+				if (
+					(error instanceof CupboardHttpError || error instanceof ORPCError) &&
+					refusedStatuses.includes(error.status)
+				) {
+					return;
+				}
+				throw error;
+			}
+		},
 		version: () => raw.version(),
 		publicKey: () => raw.publicKey(),
 		signup: (request) => raw.signup(request),
@@ -845,19 +924,26 @@ async function claimAdmin(
 	return { kind: 'claimed', token: claim.token };
 }
 
+interface FirstTenant extends CreatedCache {
+	readonly tenant: TenantSummary;
+}
+
 /**
- * Prompts for a slug and creates the tenant. The server decides ownership
- * because another caller can claim the slug before this request arrives. If the
- * server reports a conflict, it prompts again. Recreating an identical tenant
- * is idempotent, so a rerun with the same slug returns the existing tenant.
+ * Ask for a slug and for access if none was supplied. If another caller claims
+ * the slug first, ask for another slug and reuse the chosen access and read
+ * credential.
  */
 async function createFirstTenant(
 	ui: DeployUi,
 	client: OnboardClient,
 	url: string,
 	token: string,
-	owner: OwnerBinding
-): Promise<TenantSummary | undefined> {
+	owner: OwnerBinding,
+	requested: CacheAccessMode | undefined,
+	read: TenantReadCredential
+): Promise<FirstTenant | undefined> {
+	let chosen = requested;
+
 	for (;;) {
 		const slug = await ui.prefixedText({
 			message: 'Choose a slug for the first cache',
@@ -869,25 +955,64 @@ async function createFirstTenant(
 			return undefined;
 		}
 
+		const access = chosen ?? (await chooseCacheAccess(ui));
+
+		if (access === undefined) {
+			return undefined;
+		}
+
+		chosen = access;
+
 		try {
-			return await ui.reporter().phase(`Creating ${slug}`, () =>
+			const tenant = await ui.reporter().phase(`Creating ${slug}`, () =>
 				client.createTenant(token, {
 					id: slug,
-					defaultCacheAccess: 'public',
+					defaultCacheAccess: access,
 					ownerIssuer: owner.issuer,
 					ownerSubject: owner.subject,
-					ownerAudience: owner.audience
+					ownerAudience: owner.audience,
+					read
 				})
 			);
+
+			return { tenant, access, read };
 		} catch (error) {
 			if (error instanceof ORPCError && error.status === conflictStatusCode) {
 				ui.warn(`"${slug}" is already taken; choose another.`);
 				continue;
 			}
 
+			const status =
+				error instanceof ORPCError || error instanceof CupboardHttpError
+					? error.status
+					: undefined;
+			if (status === undefined || status === 408 || status >= 500) {
+				showCacheCredential(
+					ui,
+					tenantUrl(parseWorkerUrl(url), slug),
+					{ access, read },
+					'unconfirmed'
+				);
+			}
+
 			throw error;
 		}
 	}
+}
+
+function chooseCacheAccess(ui: DeployUi): Promise<CacheAccessMode | undefined> {
+	return ui.menu<CacheAccessMode>('Who may read from this cache?', [
+		{
+			value: 'private',
+			label: 'Only clients with a read credential',
+			hint: 'private'
+		},
+		{
+			value: 'public',
+			label: 'Anyone who learns the URL',
+			hint: 'public'
+		}
+	]);
 }
 
 async function pollProbe<T>(

@@ -4,6 +4,7 @@ import {
 } from '@cupboard/protocol/instance';
 import { type Command, InvalidArgumentError } from 'commander';
 
+import { parseCacheAccess } from '../cache-access.ts';
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
 
@@ -38,6 +39,12 @@ export function registerDeployCommand(
 			parseInstanceName
 		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
+		.option(
+			'--access <mode>',
+			'read access for the first cache: public or private (you are asked ' +
+				'when it is omitted)',
+			parseCacheAccess
+		)
 		.option(
 			'--no-wrangler',
 			"do not use a logged-in wrangler's stored token; log in directly"
