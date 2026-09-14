@@ -6,6 +6,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it, type TestContext } from 'vitest';
 
 import { Nix } from '../../packages/nix/src/nix.ts';
@@ -15,9 +16,11 @@ import {
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
 import { runCommand } from '../support/process.ts';
+import { FakeSubstituter, servedNarSize } from '../support/substituter.ts';
 
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
+const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const absentPath = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-cupboard-missing'
 );
@@ -59,6 +62,18 @@ async function withDaemon<T>(
 	return skippingPermissionDenied(context, () =>
 		run(new NixDaemonStoreClient({ socketPath, overrides }))
 	);
+}
+
+// An untrusted client cannot enable a substituter outside the daemon's
+// permitted lists. The fixture URL would be removed from the override,
+// leaving this connection with no substituter.
+async function requireTrustedDaemon(
+	context: Pick<TestContext, 'skip'>,
+	daemon: NixDaemonStoreClient
+): Promise<void> {
+	if ((await daemon.daemonTrust()) !== 'trusted') {
+		context.skip();
+	}
 }
 
 // The test process itself has to run from the store for its own store path to
@@ -154,48 +169,67 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 		});
 	});
 
+	// The partition asks every permitted substituter whether it serves the path,
+	// so the connection permits none and the answer comes from the daemon alone.
 	it('classifies an absent path in exactly one partition set', async (context) => {
-		const partition = await withDaemon(context, (daemon) =>
-			daemon.queryMissing([absentPath])
+		const partition = await withDaemon(
+			context,
+			(daemon) => daemon.queryMissing([absentPath]),
+			{ substituters: '' }
 		);
-		const membership = [
-			partition.willBuild,
-			partition.willSubstitute,
-			partition.unknown
-		].filter((paths) => paths.includes(absentPath)).length;
-
-		expect({
-			membership,
-			downloadSizeAtLeastZero: partition.downloadSize >= 0,
-			narSizeAtLeastZero: partition.narSize >= 0
-		}).toStrictEqual({
-			membership: 1,
-			downloadSizeAtLeastZero: true,
-			narSizeAtLeastZero: true
+		expect(partition).toStrictEqual({
+			willBuild: [],
+			willSubstitute: [],
+			unknown: [absentPath],
+			downloadSize: 0,
+			narSize: 0
 		});
 	});
 
 	it('offers substitutable info only for paths a substituter serves', async (context) => {
-		const executable = requireExecutableStorePath(context);
-		const infos = await withDaemon(context, (daemon) =>
-			daemon.querySubstitutablePathInfos([executable, absentPath])
-		);
+		const substituter = await FakeSubstituter.start(storeDirectory);
 
-		expect({
-			offeredPathsWereAsked: infos.every(
-				(info) => info.storePath === executable
-			),
-			offeredTheAbsentPath: infos.some((info) => info.storePath === absentPath),
-			sizesAtLeastZero: infos.every(
-				(info) => info.downloadSize >= 0 && info.narSize >= 0
-			),
-			referencesListed: infos.every((info) => Array.isArray(info.references))
-		}).toStrictEqual({
-			offeredPathsWereAsked: true,
-			offeredTheAbsentPath: false,
-			sizesAtLeastZero: true,
-			referencesListed: true
-		});
+		try {
+			// An ephemeral port can be reused between runs. Fresh paths prevent the
+			// daemon's narinfo cache from answering without contacting this fixture.
+			const offered = substituter.serve('offered');
+			const withheld = substituter.serve('withheld');
+			substituter.withdraw(withheld);
+
+			const infos = await withDaemon(
+				context,
+				async (daemon) => {
+					await requireTrustedDaemon(context, daemon);
+
+					return daemon.querySubstitutablePathInfos([offered, withheld]);
+				},
+				{ substituters: substituter.url }
+			);
+
+			expect({
+				offers: infos.map((info) => ({
+					storePath: info.storePath,
+					downloadSize: info.downloadSize,
+					narSize: info.narSize,
+					references: info.references
+				})),
+				asked: [...new Set(substituter.narInfoRequests)].toSorted(byCodeUnit)
+			}).toStrictEqual({
+				offers: [
+					{
+						storePath: offered,
+						downloadSize: servedNarSize,
+						narSize: servedNarSize,
+						references: []
+					}
+				],
+				asked: [StorePath.hash(withheld), StorePath.hash(offered)].toSorted(
+					byCodeUnit
+				)
+			});
+		} finally {
+			await substituter.stop();
+		}
 	});
 
 	// The walk that proves a closure is held upstream depends on this: the

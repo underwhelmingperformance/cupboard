@@ -670,20 +670,32 @@ export function runNix(
  * after the build returns, so without a link a collection can remove the result
  * first.
  */
-export const conformanceOutLinkDirectory = path.join(
+const conformanceOutLinkDirectory = path.join(
 	tmpdir(),
 	'cupboard-conformance-out-links'
 );
 
 /**
- * The out-link for the oracle's Nix. Every case in the suite runs that binary,
- * so this link keeps a fixed path and outlives each build. A later build
- * replaces the link, so at most one root exists.
+ * Creates a separate out-link for each run. Nix replaces an existing out-link,
+ * so sharing the path would let concurrent builds replace each other's root.
  */
-export const conformanceNixOutLink = path.join(
-	conformanceOutLinkDirectory,
-	'conformance-nix'
-);
+function createConformanceNixOutLink(): {
+	outLink: string;
+	release: () => void;
+} {
+	mkdirSync(conformanceOutLinkDirectory, { recursive: true });
+
+	const runDirectory = mkdtempSync(
+		path.join(conformanceOutLinkDirectory, 'run-')
+	);
+
+	return {
+		outLink: path.join(runDirectory, 'conformance-nix'),
+		release: () => {
+			rmSync(runDirectory, { force: true, recursive: true });
+		}
+	};
+}
 
 /**
  * Builds the pinned flake output with the ambient environment so Nix can use
@@ -691,9 +703,10 @@ export const conformanceNixOutLink = path.join(
  *
  * A missing `nix` binary and a failed build both make the oracle unavailable.
  */
-async function buildConformanceNix(root: string): Promise<NixResult> {
-	mkdirSync(conformanceOutLinkDirectory, { recursive: true });
-
+async function buildConformanceNix(
+	root: string,
+	outLink: string
+): Promise<NixResult> {
 	try {
 		return await runNix(
 			'nix',
@@ -701,7 +714,7 @@ async function buildConformanceNix(root: string): Promise<NixResult> {
 				'build',
 				conformanceNixOutput,
 				'--out-link',
-				conformanceNixOutLink,
+				outLink,
 				'--print-out-paths'
 			],
 			{ cwd: root }
@@ -791,29 +804,54 @@ async function readBuiltOracleProbe(
 }
 
 /**
+ * A built oracle and its garbage-collection root. Call `releaseOutLink` when
+ * the binary is no longer needed.
+ */
+export interface ResolvedConformanceNix {
+	readonly binary: string;
+	readonly outLink: string;
+	readonly releaseOutLink: () => void;
+}
+
+/**
  * Builds the pinned flake output and returns its `nix` binary. The build must
  * print exactly one output store path.
+ *
+ * The caller owns the returned out-link and must release it after use. Build
+ * or output-validation failures remove the link before propagating.
  */
 export async function resolveConformanceNixBinary(
 	root: string
-): Promise<string> {
-	const build = await buildConformanceNix(root);
+): Promise<ResolvedConformanceNix> {
+	const { outLink, release } = createConformanceNixOutLink();
 
-	if (build.status !== 0) {
-		throw new ConformanceNixUnavailableError(build.stderr.trim());
+	try {
+		const build = await buildConformanceNix(root, outLink);
+
+		if (build.status !== 0) {
+			throw new ConformanceNixUnavailableError(build.stderr.trim());
+		}
+
+		const printed = build.stdout.split('\n').filter(Boolean);
+		const [output] = printed;
+
+		if (output === undefined || printed.length > 1) {
+			throw new ConformanceNixUnavailableError(
+				`the build printed ${String(printed.length)} store paths; the suite ` +
+					'requires exactly one'
+			);
+		}
+
+		return {
+			binary: path.join(output, 'bin', 'nix'),
+			outLink,
+			releaseOutLink: release
+		};
+	} catch (error) {
+		release();
+
+		throw error;
 	}
-
-	const printed = build.stdout.split('\n').filter(Boolean);
-	const [output] = printed;
-
-	if (output === undefined || printed.length > 1) {
-		throw new ConformanceNixUnavailableError(
-			`the build printed ${String(printed.length)} store paths; the suite ` +
-				'requires exactly one'
-		);
-	}
-
-	return path.join(output, 'bin', 'nix');
 }
 
 export async function readNixVersion(

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { describe, it } from 'vitest';
+import { afterAll, describe, it } from 'vitest';
 
 import {
 	type NixOptions,
@@ -50,6 +50,10 @@ export class OracleVersionDriftError extends Error {
 export class Oracle {
 	constructor(
 		private readonly binary: string,
+		/**
+		 * The root owned by this test run.
+		 */
+		public readonly outLink: string,
 		public readonly system: OracleSystem,
 		public readonly version: string
 	) {}
@@ -86,38 +90,52 @@ export class Oracle {
 	}
 }
 
-type OracleResolution =
+type OracleResolution = {
+	readonly releaseOutLink: () => void;
+} & (
 	| { readonly kind: 'available'; readonly oracle: Oracle }
-	| { readonly kind: 'drifted'; readonly error: OracleVersionDriftError };
+	| { readonly kind: 'drifted'; readonly error: OracleVersionDriftError }
+);
 
 async function resolveOracle(): Promise<OracleResolution> {
-	const binary = await resolveConformanceNixBinary(repositoryRoot);
+	const { binary, outLink, releaseOutLink } =
+		await resolveConformanceNixBinary(repositoryRoot);
 
-	const { system, version } = await withTemporaryDirectory(
-		'cupboard-conformance-version-',
-		async (home) => {
-			const environment = await isolatedEnvironment(home);
-			const [system, version] = await Promise.all([
-				readNixSystem(binary, environment),
-				readNixVersion(binary, environment)
-			]);
+	try {
+		const { system, version } = await withTemporaryDirectory(
+			'cupboard-conformance-version-',
+			async (home) => {
+				const environment = await isolatedEnvironment(home);
+				const [system, version] = await Promise.all([
+					readNixSystem(binary, environment),
+					readNixVersion(binary, environment)
+				]);
 
-			return { system, version };
+				return { system, version };
+			}
+		);
+
+		if (version !== recordedOracle.versions[system]) {
+			return {
+				kind: 'drifted',
+				releaseOutLink,
+				error: new OracleVersionDriftError(
+					system,
+					recordedOracle.versions[system],
+					version
+				)
+			};
 		}
-	);
 
-	if (version !== recordedOracle.versions[system]) {
 		return {
-			kind: 'drifted',
-			error: new OracleVersionDriftError(
-				system,
-				recordedOracle.versions[system],
-				version
-			)
+			kind: 'available',
+			releaseOutLink,
+			oracle: new Oracle(binary, outLink, system, version)
 		};
+	} catch (error) {
+		releaseOutLink();
+		throw error;
 	}
-
-	return { kind: 'available', oracle: new Oracle(binary, system, version) };
 }
 
 // Resolving costs a flake build, so each test file does it once and every case
@@ -125,7 +143,11 @@ async function resolveOracle(): Promise<OracleResolution> {
 const resolution = await resolveOracle();
 
 /**
- * Declares a suite of cases that run against the pinned oracle.
+ * Declares a suite that uses the pinned oracle and releases its root when the
+ * suite ends. Each test file must declare exactly one such suite.
+ *
+ * Use the test hook for cleanup. Vitest can terminate its forked workers with
+ * SIGTERM, which does not run a process exit handler.
  *
  * A machine that cannot build the oracle fails the suite, so a missing oracle
  * cannot produce a false pass. A machine that builds a version not in the record
@@ -140,6 +162,8 @@ export function describeConformance(
 		const { error } = resolution;
 
 		describe(name, () => {
+			afterAll(resolution.releaseOutLink);
+
 			it('uses the Nix version recorded by the oracle', () => {
 				throw error;
 			});
@@ -151,6 +175,8 @@ export function describeConformance(
 	const { oracle } = resolution;
 
 	describe(name, () => {
+		afterAll(resolution.releaseOutLink);
+
 		body(oracle);
 	});
 }

@@ -5,6 +5,7 @@ import {
 	cloudflareTest,
 	readD1Migrations
 } from '@cloudflare/vitest-pool-workers';
+import { freeTierD1StatementsPerInvocation } from '@cupboard/protocol/platform';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig(async () => {
@@ -49,6 +50,11 @@ export default defineConfig(async () => {
 									// must stay above the concurrency any other suite pushes
 									// with, or that suite's seeding would be refused.
 									CUPBOARD_COMMIT_SOCKET_CEILING: '10',
+									// Pool bindings override Wrangler's `.dev.vars`. Keep the
+									// test allowance independent of local deployment settings.
+									CUPBOARD_D1_STATEMENTS_PER_INVOCATION: String(
+										freeTierD1StatementsPerInvocation
+									),
 									TEST_MIGRATIONS: migrations
 								},
 								// The admission manifest KV the control handler reads and writes;
