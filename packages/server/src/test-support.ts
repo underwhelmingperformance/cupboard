@@ -617,6 +617,48 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
+ * The D1 statements one invocation of the current test server may run.
+ *
+ * Returns the allowance currently configured on the object, including an
+ * override made with `withDeployedStatementAllowance`.
+ */
+export function deployedStatementAllowance(): Promise<number> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) => instance.context.d1StatementsPerInvocation
+	);
+}
+
+/**
+ * Runs `body` with the Durable Object's D1 statement allowance replaced, and
+ * restores the deployed allowance afterwards.
+ *
+ * Maintenance page sizes and subsequent dispatches use the replacement. An
+ * already open statement scope keeps its existing allowance. Tests can use
+ * smaller pages to exercise continuation without production-sized fixtures.
+ */
+export async function withDeployedStatementAllowance<T>(
+	context: ServerContext,
+	statements: number,
+	body: () => Promise<T>
+): Promise<T> {
+	const deployed = context.d1StatementsPerInvocation;
+	const set = (value: number): void => {
+		Object.defineProperty(context, 'd1StatementsPerInvocation', {
+			configurable: true,
+			value
+		});
+	};
+	set(statements);
+
+	try {
+		return await body();
+	} finally {
+		set(deployed);
+	}
+}
+
+/**
  * Claims an upload and records one owner-fenced verification verdict.
  */
 export async function recordClaimedVerification(

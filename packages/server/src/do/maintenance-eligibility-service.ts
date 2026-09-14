@@ -13,7 +13,6 @@ import {
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { d1StatementsPerInvocation } from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
 import { withHeldStatements } from './statement-scope.ts';
@@ -200,10 +199,13 @@ const leadingEligibilityStatements = 1;
  * refuses the next D1 call before it is sent, and the caller retains the
  * unprocessed work for a later invocation.
  */
-export const maintenancePassStatements =
-	d1StatementsPerInvocation -
-	leadingEligibilityStatements -
-	trailingEligibilityStatements;
+export function maintenancePassStatements(statementAllowance: number): number {
+	return (
+		statementAllowance -
+		leadingEligibilityStatements -
+		trailingEligibilityStatements
+	);
+}
 
 /**
  * Invalidates the tenant's eligibility projection, runs `body`, and reconciles

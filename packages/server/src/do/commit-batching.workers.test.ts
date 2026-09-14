@@ -17,7 +17,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfos } from '../db/schema.ts';
-import { d1StatementsPerInvocation } from '../http/http.ts';
 import {
 	authorisedFetch,
 	commitPath,
@@ -556,7 +555,7 @@ async function drivePagedBurst(server: string): Promise<{
 					});
 				})
 			);
-		});
+		}, instance.context.d1StatementsPerInvocation);
 		const statements = counting.statementsSent() - before;
 
 		Object.defineProperty(instance.context, 'd1', {
@@ -584,7 +583,7 @@ async function drivePagedBurst(server: string): Promise<{
 		return {
 			kinds: kinds.map((outcome) => outcome.kind).toSorted(byCodeUnit),
 			statements,
-			allowance: d1StatementsPerInvocation,
+			allowance: instance.context.d1StatementsPerInvocation,
 			edges: edges.length,
 			presence: presence.length,
 			narinfoUsage: usage?.narinfos

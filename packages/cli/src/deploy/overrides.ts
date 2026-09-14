@@ -120,3 +120,25 @@ export function withSignupGate(
 		}
 	};
 }
+
+/**
+ * Sets the D1 statements one invocation of either Worker may run. Both Workers
+ * run D1 work sized against this figure: the tenant Durable Object in its
+ * maintenance passes, and the control Worker in its scheduled reaper.
+ */
+export function withD1StatementAllowance(
+	config: DeploymentConfig,
+	statements: number
+): DeploymentConfig {
+	const variables = {
+		CUPBOARD_D1_STATEMENTS_PER_INVOCATION: String(statements)
+	};
+
+	return {
+		control: {
+			...config.control,
+			vars: { ...config.control.vars, ...variables }
+		},
+		tenant: { ...config.tenant, vars: { ...config.tenant.vars, ...variables } }
+	};
+}

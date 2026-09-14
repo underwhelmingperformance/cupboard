@@ -11,11 +11,7 @@ import {
 	EmptyStatementBatchError,
 	StatementParameterLimitError
 } from '../errors.ts';
-import {
-	d1StatementsPerInvocation,
-	narObjectKey,
-	type R2ObjectKey
-} from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import { jsonValueLists } from './json-list.ts';
 import { statementsRemaining } from './statement-scope.ts';
@@ -69,8 +65,8 @@ interface FittedBatch {
  * members.
  *
  * Returns `undefined` when the batch for a single item exceeds the remaining
- * allowance but fits within a fresh invocation. The caller defers the item to
- * that invocation.
+ * allowance but fits within a fresh invocation of `statementAllowance`
+ * statements. The caller defers the item to that invocation.
  *
  * The loop tries each width from all `items` down to one item. It builds and
  * measures one in-memory batch per width, then returns the first batch that
@@ -80,6 +76,7 @@ interface FittedBatch {
  */
 function fittedBatch(
 	items: readonly unknown[],
+	statementAllowance: number,
 	batchFor: (width: number) => readonly InspectableBatchItem[]
 ): FittedBatch | undefined {
 	let width = items.length;
@@ -105,10 +102,10 @@ function fittedBatch(
 				throw new StatementParameterLimitError(parameters, maxBoundParameters);
 			}
 
-			if (statements.length > d1StatementsPerInvocation) {
+			if (statements.length > statementAllowance) {
 				throw new BatchStatementLimitError(
 					statements.length,
-					d1StatementsPerInvocation
+					statementAllowance
 				);
 			}
 
@@ -126,6 +123,10 @@ function fittedBatch(
  * Each chunk is narrowed until its batch fits the platform's parameter limit
  * and the invocation's D1 allowance. The function dispatches only complete
  * batches.
+ *
+ * `statementAllowance` is what a fresh invocation of this deployment may run.
+ * An item whose narrowest batch exceeds it could never be dispatched, so the
+ * function refuses that item instead of deferring it for ever.
  */
 export async function drainStatementBatches<
 	Item,
@@ -133,13 +134,14 @@ export async function drainStatementBatches<
 >(
 	database: DrizzleD1Database<TSchema>,
 	items: readonly Item[],
+	statementAllowance: number,
 	buildBatch: (chunk: readonly Item[]) => readonly InspectableBatchItem[]
 ): Promise<readonly Item[]> {
 	let processed = 0;
 
 	while (processed < items.length) {
 		const rest = items.slice(processed);
-		const fitted = fittedBatch(rest, (width) =>
+		const fitted = fittedBatch(rest, statementAllowance, (width) =>
 			buildBatch(rest.slice(0, width))
 		);
 

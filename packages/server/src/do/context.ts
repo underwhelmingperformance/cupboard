@@ -57,6 +57,7 @@ import {
 	isAllowedIssuerTransport
 } from '../oidc/issuer-policy.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
+import { d1StatementAllowance } from '../policy/d1-statements.ts';
 
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
@@ -160,6 +161,11 @@ export class ServerContext {
 	readonly phases: DeploymentPhaseGate;
 	grantsContracted = false;
 	readonly cacheRepository: CacheRepository;
+	/**
+	 * The configured D1 statement allowance for each invocation. Maintenance
+	 * page sizes and the dispatch wrapper use this value.
+	 */
+	readonly d1StatementsPerInvocation: number;
 	gateBudgetMs = criticalSectionBudgetMs;
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
@@ -194,6 +200,7 @@ export class ServerContext {
 		);
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 		this.phases = new DeploymentPhaseGate(this.d1);
+		this.d1StatementsPerInvocation = d1StatementAllowance(env);
 		this.cacheRepository = new CacheRepository(this.db);
 	}
 

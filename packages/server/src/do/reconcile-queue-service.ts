@@ -56,12 +56,14 @@ export const statementsPerReconcileRemoval = 8;
  * The page reserves one statement per probe, the edge query and one removal.
  * Every pass can therefore repair at least one probed target.
  */
-export const maxPathsReconciledPerRun = Math.floor(
-	(maintenancePassStatements -
-		statementsPerReconcileEdgeQuery -
-		statementsPerReconcileRemoval) /
-		statementsPerReconcileProbe
-);
+export function maxPathsReconciledPerRun(statementAllowance: number): number {
+	return Math.floor(
+		(maintenancePassStatements(statementAllowance) -
+			statementsPerReconcileEdgeQuery -
+			statementsPerReconcileRemoval) /
+			statementsPerReconcileProbe
+	);
+}
 
 export class ReconcileQueueService {
 	constructor(private readonly context: ServerContext) {}
@@ -95,7 +97,9 @@ export class ReconcileQueueService {
 	}
 
 	claimChunk(
-		limit: number = maxPathsReconciledPerRun
+		limit: number = maxPathsReconciledPerRun(
+			this.context.d1StatementsPerInvocation
+		)
 	): Promise<Map<string, ReconcileTarget>> {
 		return this.context.ctx.storage.list<ReconcileTarget>({
 			prefix: reconcileEntryPrefix,

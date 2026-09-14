@@ -29,13 +29,10 @@ const attestationBundleRequestSchema = z.strictObject({
 	digest: sha256HexDigestSchema
 });
 
-// The subrequests a negotiate spends besides its per-bundle heads: three D1
-// calls, one for each list it reads (committed reference edges, filed
-// reference keys, recorded CAS objects). A list is bound as one parameter and
-// a page's digests fit one list. Fifty is the whole statement allowance of a
-// Durable Object invocation (`d1StatementsPerInvocation`), which the D1
-// binding refuses to exceed, so the margin cannot be overspent however those
-// reads are rearranged. This package cannot import that constant.
+// Negotiation makes three D1 calls besides the per-bundle R2 heads: it reads
+// committed reference edges, filed reference keys and recorded CAS objects.
+// Each page fits in one bound list per read. Keep a margin for changes to
+// these reads when calculating the maximum page size.
 const attestationNegotiateOverhead = 50;
 
 /**
