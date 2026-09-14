@@ -10,12 +10,12 @@ export const controlKeySummarySchema = z.strictObject({
 	retired: z.boolean(),
 	scheduledRetireAt: isoTimestampSchema.optional()
 });
-export type ParsedControlKeySummary = z.output<typeof controlKeySummarySchema>;
+export type ControlKeySummary = z.output<typeof controlKeySummarySchema>;
 
 export const controlKeyListResponseSchema = z.strictObject({
 	keys: z.array(controlKeySummarySchema)
 });
-export type ParsedControlKeyListResponse = z.output<
+export type ControlKeyListResponse = z.output<
 	typeof controlKeyListResponseSchema
 >;
 
@@ -28,7 +28,7 @@ export const controlKeyRotateResponseSchema = z.strictObject({
 		})
 		.optional()
 });
-export type ParsedControlKeyRotateResponse = z.output<
+export type ControlKeyRotateResponse = z.output<
 	typeof controlKeyRotateResponseSchema
 >;
 
@@ -36,17 +36,17 @@ export const controlKeyRetireResponseSchema = z.strictObject({
 	kid: authKeyIdSchema,
 	retired: z.boolean()
 });
-export type ParsedControlKeyRetireResponse = z.output<
+export type ControlKeyRetireResponse = z.output<
 	typeof controlKeyRetireResponseSchema
 >;
 
-export type ControlKeySummary = z.input<typeof controlKeySummarySchema>;
-export type ControlKeyListResponse = z.input<
+export type ControlKeySummaryInput = z.input<typeof controlKeySummarySchema>;
+export type ControlKeyListResponseInput = z.input<
 	typeof controlKeyListResponseSchema
 >;
-export type ControlKeyRotateResponse = z.input<
+export type ControlKeyRotateResponseInput = z.input<
 	typeof controlKeyRotateResponseSchema
 >;
-export type ControlKeyRetireResponse = z.input<
+export type ControlKeyRetireResponseInput = z.input<
 	typeof controlKeyRetireResponseSchema
 >;

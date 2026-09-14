@@ -1,13 +1,16 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import type { CacheScope } from '@cupboard/nix-store/scalars';
 import {
-	type DeletePathResponse,
+	type DeletePathResponseInput,
 	pathDeletionResponseSchema
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import { cacheScopedDouble } from '../test-support.ts';
+import {
+	type RecordedCall,
+	recordingCacheScopedClient
+} from '../client/cache-scoped.test-support.ts';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
 
@@ -27,11 +30,11 @@ describe('describeNarOutcome', () => {
 	])(
 		'describes "$expected"',
 		({ deleted, narScheduledForDeletion, expected }) => {
-			const result: DeletePathResponse = {
+			const result = pathDeletionResponseSchema.parse({
 				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
 				deleted,
 				narScheduledForDeletion
-			};
+			}) satisfies DeletePathResponseInput;
 
 			expect(describeNarOutcome(result)).toBe(expected);
 		}
@@ -40,43 +43,37 @@ describe('describeNarOutcome', () => {
 
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const storePath = `/nix/store/${storePathHash}-app`;
+const defaultCache: CacheScope = { kind: 'default' };
 
 /**
 A delete client that records its calls and reports the path as present.
 */
 function recordingClient(): {
 	client: DeleteClient;
-	calls: { cacheName?: string; hash: string }[];
+	calls: readonly RecordedCall<{ hash: string }>[];
 } {
-	const calls: { cacheName?: string; hash: string }[] = [];
-
-	return {
-		calls,
-		client: {
-			remove: cacheScopedDouble((input) => {
-				calls.push(input);
-
-				return Promise.resolve(
-					pathDeletionResponseSchema.parse({
-						storePathHash: input.hash,
-						deleted: true,
-						narScheduledForDeletion: false
-					})
-				);
+	const remove = recordingCacheScopedClient((input: { hash: string }) =>
+		Promise.resolve(
+			pathDeletionResponseSchema.parse({
+				storePathHash: input.hash,
+				deleted: true,
+				narScheduledForDeletion: false
 			})
-		}
-	};
+		)
+	);
+
+	return { calls: remove.calls, client: { remove } };
 }
 
 describe('runDelete', () => {
-	it('derives the hash, addresses a named cache, and reports once confirmed', async () => {
+	it('derives the hash, addresses the cache, and reports once confirmed', async () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		await runDelete(cacheNameSchema.parse('builds'), storePath, ui, client);
+		await runDelete(defaultCache, storePath, ui, client);
 
 		expect({ calls, results: captured.results }).toStrictEqual({
-			calls: [{ cacheName: 'builds', hash: storePathHash }],
+			calls: [{ cache: defaultCache, input: { hash: storePathHash } }],
 			results: [
 				{
 					kind: 'deleted-path',
@@ -99,7 +96,7 @@ describe('runDelete', () => {
 		const { client, calls } = recordingClient();
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runDelete(DEFAULT_CACHE, storePath, ui, client);
+		await runDelete(defaultCache, storePath, ui, client);
 
 		expect({ calls, cancellations: captured.cancellations }).toStrictEqual({
 			calls: [],
@@ -108,26 +105,23 @@ describe('runDelete', () => {
 	});
 
 	it('rejects an argument that is not a store path', async () => {
-		const calls: { hash: string }[] = [];
+		const remove = recordingCacheScopedClient((input: { hash: string }) =>
+			Promise.resolve(
+				pathDeletionResponseSchema.parse({
+					storePathHash: input.hash,
+					deleted: false,
+					narScheduledForDeletion: false
+				})
+			)
+		);
+		const calls = remove.calls;
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
 		let outcome:
 			| { value: Awaited<ReturnType<typeof runDelete>> }
 			| { error: { name: string; storePath: string } };
 		try {
-			await runDelete(DEFAULT_CACHE, '/tmp/not-a-store-path', ui, {
-				remove: cacheScopedDouble((input) => {
-					calls.push(input);
-
-					return Promise.resolve(
-						pathDeletionResponseSchema.parse({
-							storePathHash: input.hash,
-							deleted: false,
-							narScheduledForDeletion: false
-						})
-					);
-				})
-			});
+			await runDelete(defaultCache, '/tmp/not-a-store-path', ui, { remove });
 			outcome = { value: undefined };
 		} catch (error_: unknown) {
 			expect(error_).toBeInstanceOf(InvalidStorePathError);

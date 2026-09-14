@@ -9,8 +9,8 @@ export const signupRequestSchema = z.object({
 	subject_token: z.string().min(1),
 	claim_secret: z.string().optional()
 });
-export type ParsedSignupRequest = z.output<typeof signupRequestSchema>;
-export type SignupRequest = z.input<typeof signupRequestSchema>;
+export type SignupRequest = z.output<typeof signupRequestSchema>;
+export type SignupRequestInput = z.input<typeof signupRequestSchema>;
 
 // `claimed` is true only when this request establishes the global administrator.
 // A repeat by the same verified principal succeeds with `false`.
@@ -19,5 +19,5 @@ export const signupResponseSchema = z.strictObject({
 	subject: oidcSubjectSchema,
 	claimed: z.boolean()
 });
-export type ParsedSignupResponse = z.output<typeof signupResponseSchema>;
-export type SignupResponse = z.input<typeof signupResponseSchema>;
+export type SignupResponse = z.output<typeof signupResponseSchema>;
+export type SignupResponseInput = z.input<typeof signupResponseSchema>;

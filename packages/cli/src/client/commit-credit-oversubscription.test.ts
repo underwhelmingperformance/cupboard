@@ -19,7 +19,7 @@ const storePathHash = storePathHashSchema.parse(
 	'0123456789abcdfghijklmnpqrsvwxyz'
 );
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
-const path = '/cache/_default/commit';
+const path = '/commit';
 
 class ServerDrivenSocket extends FakeCommitSocket {
 	constructor(private readonly deliver: (text: string) => void) {

@@ -1,9 +1,35 @@
 import { describe, expect, it } from 'vitest';
+import { type ZodType } from 'zod';
 
 import {
 	tenantCreateBodySchema,
 	tenantReadCredentialSchema
 } from './tenants.ts';
+
+/**
+ * The fields a rejection is about. Asserting only that a parse failed lets a
+ * fixture that is wrong in some other way satisfy the case, so each rejection
+ * names the path it expects to fail on. An unrecognised key reports an empty
+ * path, which is how a fixture that has drifted from the schema shows up here
+ * rather than passing.
+ */
+function rejectedPaths(schema: ZodType, value: unknown): string[] {
+	const result = schema.safeParse(value);
+
+	return (result.error?.issues ?? []).map((issue) => issue.path.join('.'));
+}
+
+// A create body that differs from the schema only in its owner issuer, so a
+// rejection can be attributed to that field alone.
+function bodyWith(ownerIssuer: string): unknown {
+	return {
+		id: 'acme',
+		defaultCacheAccess: 'public',
+		ownerIssuer,
+		ownerSubject: 'owner',
+		ownerAudience: 'cupboard'
+	};
+}
 
 describe('tenantCreateBodySchema', () => {
 	it.each([
@@ -17,15 +43,21 @@ describe('tenantCreateBodySchema', () => {
 		'https://@idp.example.test',
 		'https://:@idp.example.test'
 	])('rejects an invalid owner issuer: %s', (ownerIssuer) => {
-		const body = {
-			id: 'acme',
-			readMode: 'public',
-			ownerIssuer,
-			ownerSubject: 'owner',
-			ownerAudience: 'cupboard'
-		};
+		expect(
+			rejectedPaths(tenantCreateBodySchema, bodyWith(ownerIssuer))
+		).toStrictEqual(['ownerIssuer']);
+	});
 
-		expect(tenantCreateBodySchema.safeParse(body).success).toBe(false);
+	// Every case above rejects on `ownerIssuer` alone, so the fixture has to be
+	// otherwise valid. Without this, a fixture that drifts from the schema makes
+	// all of them pass on the drift instead of on the issuer.
+	it('accepts the fixture the rejections vary', () => {
+		expect(
+			rejectedPaths(
+				tenantCreateBodySchema,
+				bodyWith('https://idp.example.test')
+			)
+		).toStrictEqual([]);
 	});
 });
 
@@ -63,8 +95,11 @@ describe('tenantReadCredentialSchema', () => {
 		}
 	])('rejects $name', ({ password }) => {
 		expect(
-			tenantReadCredentialSchema.safeParse({ user: 'alice', password }).success
-		).toBe(false);
+			rejectedPaths(tenantReadCredentialSchema, {
+				user: 'alice',
+				password
+			})
+		).toStrictEqual(['password']);
 	});
 
 	it.each([
@@ -73,10 +108,10 @@ describe('tenantReadCredentialSchema', () => {
 		{ name: 'nothing', user: '' }
 	])('rejects a user with $name', ({ user }) => {
 		expect(
-			tenantReadCredentialSchema.safeParse({
+			rejectedPaths(tenantReadCredentialSchema, {
 				user,
 				password: generatedPassword
-			}).success
-		).toBe(false);
+			})
+		).toStrictEqual(['user']);
 	});
 });

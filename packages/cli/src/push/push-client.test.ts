@@ -24,6 +24,7 @@ describe('pushClientFor', () => {
 				new URL('https://cupboard.test/t/acme'),
 				'token',
 				{
+					cache: { kind: 'default' },
 					fetcher: async (input, init) => {
 						const request = new Request(input, init);
 						requests.push({

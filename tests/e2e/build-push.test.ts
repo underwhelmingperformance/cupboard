@@ -14,7 +14,6 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 
 import {
-	selectorForCache,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -32,7 +31,6 @@ import { renderHookScript } from '../../packages/cli/src/build-push/hook-script.
 import { BuildEventListener } from '../../packages/cli/src/build-push/listener.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
 import type { ChildCommand } from '../../packages/cli/src/build-push/supervisor.ts';
-import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
 import {
 	BuildCommandFailedError,
 	BuildEventHandlingError,
@@ -357,7 +355,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 								daemonTrust: () => Promise.resolve('trusted'),
 								invocationId,
 								grants: [],
-								cache: selectorForCache(storedCacheFor(undefined)),
+								cache: { kind: 'default' },
 								helper: {
 									executablePath: path.join(workspace, 'cupboard')
 								},

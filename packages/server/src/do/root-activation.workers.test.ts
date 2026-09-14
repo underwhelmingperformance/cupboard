@@ -1,4 +1,3 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -15,6 +14,7 @@ import {
 	clearBlobStorage,
 	commitUpload,
 	currentServer,
+	defaultCache,
 	deferFreshUpload,
 	deleteBlobState,
 	expectSingleUploadDecision,
@@ -112,7 +112,7 @@ describe('root activation gating', () => {
 		await putNarBytes(upload.r2Key);
 		// The deferred commit has reserved the narinfo row, but verification has
 		// not made the target servable yet.
-		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
 
 		const reserved = await setRoot(token, {
 			name: 'main',
@@ -143,7 +143,7 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
 		// The root protects the reserved row while verification is still using its
@@ -152,7 +152,9 @@ describe('root activation gating', () => {
 		await verifyCurrentTenant();
 
 		const served = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		const { targets } = await listRootTargets(token, 'main');
 
@@ -179,7 +181,7 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key, wrong);
-		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
 		await verifyCurrentTenant();
@@ -203,7 +205,9 @@ describe('root activation gating', () => {
 		// already-committed short circuit. The current reference edge still proves
 		// that the path was committed, so a stale mismatch must not remove its root.
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		await replantStuckPending(staged);
 
@@ -234,7 +238,7 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await commitUpload(token, upload.uploadId, defaultCache(), { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
 		await suspendTenant(fixtureTenant);
@@ -258,7 +262,9 @@ describe('root activation gating', () => {
 		// Keep the row and shared blob so ensureRoot can restore the missing narinfo
 		// object.
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		const summary = await setRoot(token, {
@@ -266,7 +272,9 @@ describe('root activation gating', () => {
 			targets: [metadata.storePath]
 		});
 		const repaired = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect({
@@ -296,7 +304,9 @@ describe('root activation gating', () => {
 		// Keep the narinfo row while removing its shared blob and published object.
 		await deleteBlobState(metadata.narHash);
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		const { roots } = await listRoots(token);
 		const afterDemote = await listRootTargets(token, 'main');

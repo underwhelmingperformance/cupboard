@@ -1,7 +1,7 @@
 import {
 	buildOriginPredicateType,
-	buildOriginSubjectSchema,
-	type ParsedBuildOriginSubject
+	type BuildOriginSubject,
+	buildOriginSubjectSchema
 } from '@cupboard/protocol/build-origin';
 import type { VerifyResult } from '@cupboard/shared/sigstore';
 import { describe, expect, it } from 'vitest';
@@ -17,7 +17,7 @@ const otherPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 const derivation = '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const buildStore = 'ssh-ng://build@example.test';
 
-function localSubject(): ParsedBuildOriginSubject {
+function localSubject(): BuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'built',
 		storePath,
@@ -28,7 +28,7 @@ function localSubject(): ParsedBuildOriginSubject {
 	});
 }
 
-function delegatedSubject(): ParsedBuildOriginSubject {
+function delegatedSubject(): BuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'built',
 		storePath: otherPath,
@@ -40,7 +40,7 @@ function delegatedSubject(): ParsedBuildOriginSubject {
 	});
 }
 
-function reportedSubject(): ParsedBuildOriginSubject {
+function reportedSubject(): BuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'built',
 		storePath: otherPath,
@@ -51,7 +51,7 @@ function reportedSubject(): ParsedBuildOriginSubject {
 	});
 }
 
-function storeHeldSubject(): ParsedBuildOriginSubject {
+function storeHeldSubject(): BuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'store-held',
 		storePath: otherPath,
@@ -66,7 +66,7 @@ function copiedSubject(
 		readonly signatures?: readonly string[];
 		readonly copiedFrom?: readonly string[];
 	} = {}
-): ParsedBuildOriginSubject {
+): BuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'copied',
 		storePath: otherPath,

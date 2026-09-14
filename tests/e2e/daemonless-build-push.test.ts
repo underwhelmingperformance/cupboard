@@ -6,7 +6,6 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import {
-	selectorForCache,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -21,7 +20,6 @@ import {
 	runBuildPush
 } from '../../packages/cli/src/build-push/build-push.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
-import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
 import {
 	BuildCommandFailedError,
 	UntrustedDaemonError
@@ -393,7 +391,7 @@ function daemonlessDependencies(options: {
 				daemonTrust: () => Promise.resolve('unknown'),
 				invocationId: options.invocationId,
 				grants: [],
-				cache: selectorForCache(storedCacheFor(undefined)),
+				cache: { kind: 'default' },
 				helper: { executablePath },
 				runtime: {
 					environment: {},

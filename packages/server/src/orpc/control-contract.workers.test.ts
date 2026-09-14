@@ -274,7 +274,7 @@ describe('control contract round trip', () => {
 
 		const created = await client.tenants.create({
 			id: 'acme',
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
@@ -286,15 +286,14 @@ describe('control contract round trip', () => {
 		expect({
 			created: {
 				id: created.id,
-				status: created.status,
-				readMode: created.readMode
+				status: created.status
 			},
 			// The harness provisions the fixture `v1` tenant alongside.
 			listedIds: listed.tenants.map((entry) => entry.id),
 			suspended,
 			removed
 		}).toStrictEqual({
-			created: { id: 'acme', status: 'active', readMode: 'private' },
+			created: { id: 'acme', status: 'active' },
 			listedIds: ['acme', 'v1'],
 			suspended: { id: 'acme', status: 'suspended' },
 			removed: { id: 'acme', status: 'offboarding' }
@@ -319,7 +318,7 @@ describe('control contract round trip', () => {
 					},
 					body: JSON.stringify({
 						id: 'acme',
-						readMode: 'private',
+						defaultCacheAccess: 'private',
 						ownerIssuer,
 						ownerSubject: 'owner',
 						ownerAudience: 'aud'
@@ -328,7 +327,7 @@ describe('control contract round trip', () => {
 			);
 			const created = await controlClient(token).tenants.create({
 				id: 'acme',
-				readMode: 'private',
+				defaultCacheAccess: 'private',
 				ownerIssuer: 'https://idp.test',
 				ownerSubject: 'owner',
 				ownerAudience: 'aud'
@@ -352,7 +351,7 @@ describe('control contract round trip', () => {
 				},
 				body: JSON.stringify({
 					id: 'acme',
-					readMode: 'private',
+					defaultCacheAccess: 'private',
 					ownerIssuer: 'http://127.0.0.1:8788',
 					ownerSubject: 'owner',
 					ownerAudience: 'aud'
@@ -361,7 +360,7 @@ describe('control contract round trip', () => {
 		);
 		const created = await controlClient(token).tenants.create({
 			id: 'acme',
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
@@ -378,7 +377,7 @@ describe('control contract round trip', () => {
 
 		await client.tenants.create({
 			id: 'acme',
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
@@ -388,22 +387,18 @@ describe('control contract round trip', () => {
 		expect(await client.membership.rebuild()).toStrictEqual({ tenants: 2 });
 	});
 
-	it('updates tenant status, read mode, and read credentials through the derived client', async () => {
+	it('updates tenant status and fallback read credentials through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		await client.tenants.create({
 			id: 'acme',
-			readMode: 'private',
+			defaultCacheAccess: 'private',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
 		const suspended = await client.tenants.suspend({ id: 'acme' });
 		const resumed = await client.tenants.resume({ id: 'acme' });
-		const readMode = await client.tenants.setReadMode({
-			id: 'acme',
-			readMode: 'public'
-		});
 		const rotated = await client.tenants.rotateReadCredential({
 			id: 'acme',
 			read: {
@@ -413,38 +408,45 @@ describe('control contract round trip', () => {
 		});
 		const cleared = await client.tenants.clearReadCredential({ id: 'acme' });
 
-		expect({ suspended, resumed, readMode, rotated, cleared }).toStrictEqual({
+		expect({ suspended, resumed, rotated, cleared }).toStrictEqual({
 			suspended: { id: 'acme', status: 'suspended' },
 			resumed: { id: 'acme', status: 'active' },
-			readMode: { id: 'acme', readMode: 'public' },
-			rotated: { id: 'acme', readMode: 'public' },
-			cleared: { id: 'acme', readMode: 'public' }
+			rotated: { id: 'acme', hasCredential: true },
+			cleared: { id: 'acme', hasCredential: false }
 		});
 	});
 
-	it('sets and clears a private cache read credential through the derived client', async () => {
+	it('sets and clears a named cache read credential through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 
 		await client.tenants.create({
 			id: 'acme',
-			readMode: 'public',
+			defaultCacheAccess: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
 		});
-		const rotated = await client.tenants.rotateCacheReadCredential({
+		const rotated = await client.tenants.rotateNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds',
 			read: { user: 'reader', password: readPassword }
 		});
-		const cleared = await client.tenants.clearCacheReadCredential({
+		const cleared = await client.tenants.clearNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds'
 		});
 
 		expect({ rotated, cleared }).toStrictEqual({
-			rotated: { id: 'acme', cacheName: 'builds', hasCredential: true },
-			cleared: { id: 'acme', cacheName: 'builds', hasCredential: false }
+			rotated: {
+				id: 'acme',
+				cache: { kind: 'named', name: 'builds' },
+				hasCredential: true
+			},
+			cleared: {
+				id: 'acme',
+				cache: { kind: 'named', name: 'builds' },
+				hasCredential: false
+			}
 		});
 	});
 
@@ -466,7 +468,7 @@ describe('control contract round trip', () => {
 		const admin = controlClient(await issueControlAdminToken());
 		await admin.tenants.create({
 			id: 'acme',
-			readMode: 'public',
+			defaultCacheAccess: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
@@ -476,7 +478,7 @@ describe('control contract round trip', () => {
 		);
 
 		const [error] = await safe(
-			client.tenants.rotateCacheReadCredential({
+			client.tenants.rotateNamedCacheReadCredential({
 				id: 'acme',
 				cacheName: 'builds',
 				read: { user: 'reader', password: readPassword }
@@ -495,7 +497,7 @@ describe('control contract round trip', () => {
 		const admin = controlClient(await issueControlAdminToken());
 		await admin.tenants.create({
 			id: 'acme',
-			readMode: 'public',
+			defaultCacheAccess: 'public',
 			ownerIssuer: 'https://idp.test',
 			ownerSubject: 'owner',
 			ownerAudience: 'aud'
@@ -510,19 +512,27 @@ describe('control contract round trip', () => {
 			)
 		);
 
-		const rotated = await client.tenants.rotateCacheReadCredential({
+		const rotated = await client.tenants.rotateNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds',
 			read: { user: 'reader', password: readPassword }
 		});
-		const cleared = await client.tenants.clearCacheReadCredential({
+		const cleared = await client.tenants.clearNamedCacheReadCredential({
 			id: 'acme',
 			cacheName: 'builds'
 		});
 
 		expect({ rotated, cleared }).toStrictEqual({
-			rotated: { id: 'acme', cacheName: 'builds', hasCredential: true },
-			cleared: { id: 'acme', cacheName: 'builds', hasCredential: false }
+			rotated: {
+				id: 'acme',
+				cache: { kind: 'named', name: 'builds' },
+				hasCredential: true
+			},
+			cleared: {
+				id: 'acme',
+				cache: { kind: 'named', name: 'builds' },
+				hasCredential: false
+			}
 		});
 	});
 

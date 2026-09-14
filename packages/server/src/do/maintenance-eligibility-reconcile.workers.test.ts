@@ -28,6 +28,7 @@ import {
 	negotiateViaInstance,
 	putNarBytes,
 	resetTestServer,
+	resolvedCache,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -309,11 +310,13 @@ async function insertPendingUpload(
 	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
+		const cacheId = resolvedCache(instance.context).id;
+
 		instance.context.db
 			.insert(schema.pendingUploads)
 			.values({
 				id: uploadIdSchema.parse('seed-upload'),
-				cache: '',
+				cacheId,
 				narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 				r2Key: r2ObjectKeySchema.parse('staging/seed-upload'),
 				metadataJson: '{}',

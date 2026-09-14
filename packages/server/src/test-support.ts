@@ -5,23 +5,20 @@ import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
-	cacheFromSelector,
+	type CacheAccessMode,
 	type CacheGeneration,
-	cacheSelectorSchema,
-	DEFAULT_CACHE,
-	DEFAULT_CACHE_SELECTOR,
-	namedSelectorForCache,
+	cacheGenerationSchema,
+	cacheNameSchema,
+	cachePrioritySchema,
+	type CacheScope,
 	narInfoGenerationSchema,
 	nixKeyNameSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
-	scopeFromSelector,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type SigningKeyId,
-	type StoredCache,
-	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId,
@@ -51,10 +48,10 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type {
-	RootListResponse,
-	RootRemoveResponse,
-	RootSetBody,
-	RootSetResponse
+	RootListResponseInput,
+	RootRemoveResponseInput,
+	RootSetBodyInput,
+	RootSetResponseInput
 } from '@cupboard/protocol/retention';
 import {
 	gcResponseSchema,
@@ -70,29 +67,28 @@ import {
 	commitBatchCapability,
 	commitCapabilitiesHeader,
 	commitCreditCapability,
-	type CommitResponse,
+	type CommitResponseInput,
+	type CommitSessionFrame,
 	commitSessionFrameSchema,
-	type CommitSessionRequest,
-	type DeletePathResponse,
-	type ParsedCommitSessionFrame,
-	type ParsedUploadActionDecision,
-	type ParsedUploadCommitDecision,
-	type ParsedUploadDecision,
-	type ParsedUploadPathMetadata,
+	type CommitSessionRequestInput,
+	type DeletePathResponseInput,
 	pathDeletionResponseSchema,
 	type PushId,
-	type StatsResponse,
+	type StatsResponseInput,
+	type UploadActionDecision,
 	uploadActionDecisionSchema,
+	type UploadCommitDecision,
 	uploadCommitDecisionSchema,
 	uploadDecisionSchema,
 	uploadGraceFactsCapability,
 	type UploadId,
 	uploadIdSchema,
-	type UploadNegotiateResponse,
+	type UploadNegotiateResponseInput,
 	uploadNegotiateResponseSchema,
+	type UploadPathMetadata,
 	type UploadPathMetadataFields,
 	uploadPathMetadataSchema,
-	type UploadStatusResponse,
+	type UploadStatusResponseInput,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
 import { readUserInputSchema } from '@cupboard/shared/http';
@@ -102,8 +98,8 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { and, count, eq, isNull, sql } from 'drizzle-orm';
-import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { and, count, eq, isNull, type SQL, sql } from 'drizzle-orm';
+import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { expect, vi } from 'vitest';
@@ -127,6 +123,13 @@ import {
 	refreshTenantMembership
 } from './control/tenant-membership.ts';
 import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
+import {
+	cacheIdentityColumns,
+	cacheIdSchema,
+	cacheScopeFromRow,
+	legacyCacheKey,
+	type ResolvedCache
+} from './db/cache.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import {
 	blobReference,
@@ -147,8 +150,9 @@ import { maintenanceRetryPrefix } from './do/alarm.ts';
 import { listGenerationMetadataKey } from './do/attestations-service.ts';
 import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
+import type { ServerContext } from './do/context.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
-import { applyMigrations } from './do/migrate.ts';
+import { applyMigrations, migrationsThrough } from './do/migrate.ts';
 import { withRowBudget } from './do/row-budget.ts';
 import type { CupboardServer } from './do/server.ts';
 import { withStatementAllowance } from './do/statement-scope.ts';
@@ -165,6 +169,8 @@ import {
 	type R2ObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
+import { cacheMigrationColumns } from './migration/cache-access.ts';
+import * as migrationSchema from './migration/cache-access-schema.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
@@ -251,7 +257,7 @@ const harness = {
 	nextProvisionConfigVersion: 1
 };
 
-export type UploadDecision = UploadNegotiateResponse['uploads'][number];
+export type UploadDecision = z.output<typeof uploadDecisionSchema>;
 
 export interface GcResult {
 	readonly ok: true;
@@ -275,8 +281,6 @@ export async function resetTestServer(): Promise<void> {
 	harness.server = testServerFor(harness.serverName);
 	harness.nextTestServerId += 1;
 
-	await configureFixtureTenant(harness.server);
-	await configureFixtureTenant(fixtureWorkerServer());
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	await database.delete(d1Schema.instanceConfig).run();
 	await database
@@ -288,29 +292,31 @@ export async function resetTestServer(): Promise<void> {
 		})
 		.run();
 	await provisionFixtureTenant();
+	await configureFixtureTenant(harness.server);
+	await configureFixtureTenant(fixtureWorkerServer());
 }
 
 /**
- * Writes the fixture tenant's authoritative D1 row and refreshes the negative
- * membership hints. `readMode` selects public or private reads; `read` supplies
- * the verifier for a private tenant. Repeated calls can change the mode without
- * resetting usage counters.
+ * Writes the fixture tenant's authoritative D1 row and default cache, then
+ * refreshes the negative membership hints. `read` supplies the tenant fallback
+ * verifier. Repeated calls can change the default cache without resetting usage
+ * counters.
  */
 export async function provisionFixtureTenant(
 	options: {
-		readonly readMode?: 'public' | 'private';
+		readonly defaultCacheAccess?: 'public' | 'private';
 		readonly read?: { readonly user: string; readonly password: string };
 		readonly quotaBytes?: number;
 	} = {}
 ): Promise<void> {
-	const readMode = options.readMode ?? 'public';
+	const defaultCacheAccess = options.defaultCacheAccess ?? 'public';
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const readUser =
 		options.read === undefined
-			? undefined
+			? sql<null>`null`
 			: readUserInputSchema.parse(options.read.user);
-	let readPasswordHash: ReadPasswordHash | undefined;
-	let readPasswordSalt: ReadPasswordSalt | undefined;
+	let readPasswordHash: ReadPasswordHash | SQL<null> = sql<null>`null`;
+	let readPasswordSalt: ReadPasswordSalt | SQL<null> = sql<null>`null`;
 
 	if (options.read !== undefined) {
 		readPasswordSalt = generateReadPasswordSalt();
@@ -322,11 +328,11 @@ export async function provisionFixtureTenant(
 	const now = isoTimestamp(testBase);
 
 	await database
-		.insert(d1Schema.tenant)
+		.insert(migrationSchema.tenants)
 		.values({
 			id: fixtureTenant,
 			status: 'active',
-			readMode,
+			readMode: defaultCacheAccess,
 			ownerIssuer: fixtureOwner.issuer,
 			ownerSubject: fixtureOwner.subject,
 			ownerAudience: fixtureOwner.audience,
@@ -337,10 +343,17 @@ export async function provisionFixtureTenant(
 			readPasswordSalt
 		})
 		.onConflictDoUpdate({
-			target: d1Schema.tenant.id,
-			set: { readMode, readUser, readPasswordHash, readPasswordSalt }
+			target: migrationSchema.tenants.id,
+			set: {
+				readMode: defaultCacheAccess,
+				readUser,
+				readPasswordHash,
+				readPasswordSalt
+			}
 		})
 		.run();
+
+	await provisionD1Cache(database, fixtureTenant, defaultCacheAccess, now);
 
 	// The usage row is created with the tenant; a later call (e.g. switching read
 	// mode) updates only the quota, leaving the accumulated counters intact.
@@ -374,12 +387,12 @@ export async function provisionFixtureTenant(
 export async function provisionNamedTenant(
 	name: string,
 	options: {
-		readonly readMode?: 'public' | 'private';
+		readonly defaultCacheAccess?: 'public' | 'private';
 		configure?: boolean;
 	} = {}
 ): Promise<OidcIssuer> {
 	const id = tenantIdSchema.parse(name);
-	const readMode = options.readMode ?? 'public';
+	const defaultCacheAccess = options.defaultCacheAccess ?? 'public';
 	const issuer = oidcIssuerSchema.parse(`${harness.origin}/t/${id}`);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
@@ -391,11 +404,11 @@ export async function provisionNamedTenant(
 	await stub.purgeStorage();
 
 	await database
-		.insert(d1Schema.tenant)
+		.insert(migrationSchema.tenants)
 		.values({
 			id,
 			status: 'active',
-			readMode,
+			readMode: defaultCacheAccess,
 			ownerIssuer: '',
 			ownerSubject: '',
 			ownerAudience: '',
@@ -403,10 +416,22 @@ export async function provisionNamedTenant(
 			createdAt: isoTimestamp(testBase)
 		})
 		.onConflictDoUpdate({
-			target: d1Schema.tenant.id,
-			set: { status: 'active', readMode, configVersion }
+			target: migrationSchema.tenants.id,
+			set: {
+				status: 'active',
+				readMode: defaultCacheAccess,
+				configVersion,
+				cacheCatalogueVersion: sql`null`
+			}
 		})
 		.run();
+
+	await provisionD1Cache(
+		database,
+		id,
+		defaultCacheAccess,
+		isoTimestamp(testBase)
+	);
 
 	await database
 		.insert(d1Schema.tenantUsage)
@@ -434,6 +459,36 @@ export async function provisionNamedTenant(
 	await invalidateTenantRow(tenantIdSchema.parse(id));
 
 	return issuer;
+}
+
+async function provisionD1Cache(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	access: 'public' | 'private',
+	updatedAt: IsoTimestamp
+): Promise<void> {
+	await database
+		.insert(migrationSchema.cacheLifecycles)
+		.values({
+			tenant,
+			...cacheMigrationColumns({ kind: 'default' }, access),
+			access,
+			generation: cacheGenerationSchema.parse(1),
+			updatedAt
+		})
+		.onConflictDoUpdate({
+			target: [
+				migrationSchema.cacheLifecycles.tenant,
+				migrationSchema.cacheLifecycles.legacyCache
+			],
+			set: {
+				...cacheMigrationColumns({ kind: 'default' }, access),
+				access,
+				deletedAt: sql`null`,
+				updatedAt
+			}
+		})
+		.run();
 }
 
 /**
@@ -594,8 +649,8 @@ export async function useTestServer(name: string): Promise<void> {
 	harness.serverName = name;
 	harness.server = testServerFor(name);
 
-	await configureFixtureTenant(harness.server);
 	await provisionFixtureTenant();
+	await configureFixtureTenant(harness.server);
 }
 
 export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
@@ -848,17 +903,122 @@ export interface InitialisedServer {
 	readonly token: string;
 }
 
+interface BootstrapCache {
+	readonly scope: CacheScope;
+	readonly access?: CacheAccessMode;
+	readonly priority?: number;
+}
+
+interface BootstrapOptions {
+	readonly caches?: readonly BootstrapCache[];
+}
+
 /**
  * Brings a server up the way a deployment is: it issues an owner-equivalent admin
  * token from the active auth key and reads the published signing key, standing
  * in for what the old bootstrap exchange returned.
  */
-export async function bootstrap(): Promise<InitialisedServer> {
+export async function bootstrap(
+	options: BootstrapOptions = {}
+): Promise<InitialisedServer> {
 	const token = await issueServerSignedToken(adminGrants());
+	const caches = options.caches ?? [];
+
+	for (const cache of caches) {
+		await putTestCache(token, cache.scope, cache.access, cache.priority);
+	}
+
 	const response = await fetchPath('/pubkey');
 	const body = await response.text();
 
 	return { url: harness.origin, publicKey: body.trim(), token };
+}
+
+/**
+ * Provisions a cache through the same admin routes a client uses.
+ */
+export async function putTestCache(
+	token: string,
+	scope: CacheScope,
+	access: CacheAccessMode = 'public',
+	priority = 40
+): Promise<void> {
+	const path =
+		scope.kind === 'default'
+			? '/cache'
+			: `/caches/${encodeURIComponent(scope.name)}`;
+	const parsedPriority = cachePrioritySchema.parse(priority);
+
+	if (scope.kind === 'named') {
+		const response = await authorisedFetch(path, token, {
+			body: JSON.stringify({ access, priority: parsedPriority }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+		return;
+	}
+
+	const accessResponse = await authorisedFetch(path, token, {
+		body: JSON.stringify({ kind: 'access', access }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PATCH'
+	});
+	const priorityResponse = await authorisedFetch(path, token, {
+		body: JSON.stringify({ kind: 'priority', priority: parsedPriority }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PATCH'
+	});
+
+	expect({
+		access: accessResponse.status,
+		priority: priorityResponse.status
+	}).toStrictEqual({ access: StatusCodes.OK, priority: StatusCodes.OK });
+}
+
+/**
+ * Provisions a cache through the fixture Worker's admin API. A cache retained
+ * by another test receives the requested properties through the update API.
+ */
+export async function putWorkerTestCache(
+	token: string,
+	scope: CacheScope,
+	access: CacheAccessMode = 'public',
+	priority = 40
+): Promise<void> {
+	const path =
+		scope.kind === 'default'
+			? '/cache'
+			: `/caches/${encodeURIComponent(scope.name)}`;
+	const parsedPriority = cachePrioritySchema.parse(priority);
+	const created = await authorisedWorkerFetch(path, token, {
+		body: JSON.stringify({ access, priority: parsedPriority }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PUT'
+	});
+
+	if (created.ok) {
+		return;
+	}
+
+	expect(created.status).toBe(StatusCodes.CONFLICT);
+
+	const accessUpdated = await authorisedWorkerFetch(path, token, {
+		body: JSON.stringify({ kind: 'access', access }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PATCH'
+	});
+	const priorityUpdated = await authorisedWorkerFetch(path, token, {
+		body: JSON.stringify({ kind: 'priority', priority: parsedPriority }),
+		headers: { 'content-type': 'application/json' },
+		method: 'PATCH'
+	});
+
+	expect({
+		access: accessUpdated.status,
+		priority: priorityUpdated.status
+	}).toStrictEqual({ access: StatusCodes.OK, priority: StatusCodes.OK });
 }
 
 /**
@@ -893,6 +1053,23 @@ export function adminGrants(): AuthorizationDetails {
 	return [{ type: 'cupboard_wildcard' }];
 }
 
+export function defaultCache(): CacheScope {
+	return { kind: 'default' };
+}
+
+export function namedCache(
+	name: string
+): Extract<CacheScope, { kind: 'named' }> {
+	return { kind: 'named', name: cacheNameSchema.parse(name) };
+}
+
+export function resolvedCache(
+	context: ServerContext,
+	scope: CacheScope = defaultCache()
+): ResolvedCache {
+	return context.cacheRepository.require(scope);
+}
+
 /**
  * A CI-style write grant set: upload and attestation on one cache, plus
  * `root:set` on each named root selector. It authorises exactly the push path,
@@ -900,16 +1077,10 @@ export function adminGrants(): AuthorizationDetails {
  */
 export function cacheWriteGrants(
 	roots: readonly string[] = [],
-	cacheSelector: string = DEFAULT_CACHE_SELECTOR
+	cache: CacheScope = defaultCache()
 ): AuthorizationDetails {
-	const cache = scopeFromSelector(cacheSelectorSchema.parse(cacheSelector));
-
 	return authorizationDetailsSchema.parse([
-		{
-			type: 'cupboard_cache',
-			actions: cacheWriteActions,
-			cache
-		},
+		{ type: 'cupboard_cache', actions: cacheWriteActions, cache },
 		...roots.map((root) => ({
 			type: 'cupboard_cache',
 			actions: ['root:set'],
@@ -1751,7 +1922,7 @@ The D1 reference edges, sorted for deterministic assertions.
 export async function blobReferenceRows(): Promise<
 	{
 		tenant: TenantId;
-		cache: string;
+		cache: CacheScope;
 		storePathHash: StorePathHash;
 		generation: number;
 		narHash: NixSha256HashString;
@@ -1761,7 +1932,8 @@ export async function blobReferenceRows(): Promise<
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
 		.select({
 			tenant: blobReference.tenant,
-			cache: blobReference.cache,
+			cacheKind: blobReference.cacheKind,
+			cacheName: blobReference.cacheName,
 			storePathHash: blobReference.storePathHash,
 			generation: blobReference.generation,
 			narHash: blobReference.narHash,
@@ -1770,12 +1942,24 @@ export async function blobReferenceRows(): Promise<
 		.from(blobReference)
 		.all();
 
-	return rows.toSorted((left, right) =>
-		`${left.storePathHash}:${String(left.generation)}` >
-		`${right.storePathHash}:${String(right.generation)}`
-			? 1
-			: -1
-	);
+	return rows
+		.map((row) => ({
+			tenant: row.tenant,
+			cache: cacheScopeFromRow({
+				kind: row.cacheKind,
+				name: row.cacheName
+			}),
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			narHash: row.narHash,
+			cacheGeneration: row.cacheGeneration
+		}))
+		.toSorted((left, right) =>
+			`${left.storePathHash}:${String(left.generation)}` >
+			`${right.storePathHash}:${String(right.generation)}`
+				? 1
+				: -1
+		);
 }
 
 /**
@@ -1814,7 +1998,7 @@ export async function casObjectRows(): Promise<
 export async function attestationReferenceRows(): Promise<
 	{
 		tenant: TenantId;
-		cache: string;
+		cache: CacheScope;
 		storePathHash: StorePathHash;
 		generation: number;
 		predicateType: string;
@@ -1824,7 +2008,8 @@ export async function attestationReferenceRows(): Promise<
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({
 			tenant: d1Schema.attestationReference.tenant,
-			cache: d1Schema.attestationReference.cache,
+			cacheKind: d1Schema.attestationReference.cacheKind,
+			cacheName: d1Schema.attestationReference.cacheName,
 			storePathHash: d1Schema.attestationReference.storePathHash,
 			generation: d1Schema.attestationReference.generation,
 			predicateType: d1Schema.attestationReference.predicateType,
@@ -1833,12 +2018,24 @@ export async function attestationReferenceRows(): Promise<
 		.from(d1Schema.attestationReference)
 		.all();
 
-	return rows.toSorted((left, right) =>
-		byCodeUnit(
-			`${left.storePathHash}:${String(left.generation)}:${left.predicateType}`,
-			`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
-		)
-	);
+	return rows
+		.map((row) => ({
+			tenant: row.tenant,
+			cache: cacheScopeFromRow({
+				kind: row.cacheKind,
+				name: row.cacheName
+			}),
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			predicateType: row.predicateType,
+			digest: row.digest
+		}))
+		.toSorted((left, right) =>
+			byCodeUnit(
+				`${left.storePathHash}:${String(left.generation)}:${left.predicateType}`,
+				`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
+			)
+		);
 }
 
 export async function tenantCasBlobRows(): Promise<
@@ -1881,13 +2078,17 @@ export async function pendingAttestationRows(): Promise<
  * list object without generation metadata.
  */
 export async function publishAttestationList(fields: {
-	readonly cache?: StoredCache;
+	readonly cache?: CacheScope;
 	readonly storePathHash: StorePathHash;
 	readonly generation?: number;
 	readonly attestations?: readonly unknown[];
 }): Promise<void> {
 	await env.BLOBS.put(
-		attestationListObjectKey(fixtureTenant, fields.storePathHash, fields.cache),
+		attestationListObjectKey(
+			fixtureTenant,
+			fields.storePathHash,
+			fields.cache ?? defaultCache()
+		),
 		JSON.stringify({ attestations: fields.attestations ?? [] }),
 		fields.generation === undefined
 			? undefined
@@ -1915,7 +2116,7 @@ export async function stageAttestationBundle(
 export async function fileAttestationReference(options: {
 	readonly uploadId: string;
 	readonly bytes: Uint8Array;
-	readonly cache?: string;
+	readonly cache?: CacheScope;
 	readonly storePathHash: StorePathHash;
 	readonly generation: number;
 	readonly predicateType?: string;
@@ -1941,7 +2142,7 @@ export async function fileAttestationReference(options: {
 		options.tenant ?? fixtureTenant
 	).reserveAttestationReference(
 		{
-			cache: storedCacheSchema.parse(options.cache ?? DEFAULT_CACHE),
+			cache: options.cache ?? defaultCache(),
 			storePathHash: options.storePathHash,
 			generation: narInfoGenerationSchema.parse(options.generation),
 			predicateType: predicateTypeSchema.parse(
@@ -2009,19 +2210,20 @@ export async function isTenantUsagePresent(id: string): Promise<boolean> {
  */
 export async function queueUnflushedNarInfoDeletion(fields: {
 	readonly storePathHash: StorePathHash;
-	readonly cache?: string;
+	readonly cache?: CacheScope;
 }): Promise<void> {
-	const cache = storedCacheSchema.parse(fields.cache ?? DEFAULT_CACHE);
+	const scope = fields.cache ?? defaultCache();
 
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
 		const database = drizzle(state.storage, {
 			schema: { narInfoDeletions, narInfos }
 		});
+		const cache = resolvedCache(instance.context, scope);
 
 		database.transaction((tx) => {
 			const row = tx
 				.select({
-					cache: narInfos.cache,
+					cacheId: narInfos.cacheId,
 					storePathHash: narInfos.storePathHash,
 					narHash: narInfos.narHash,
 					generation: narInfos.generation
@@ -2029,7 +2231,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 				.from(narInfos)
 				.where(
 					and(
-						eq(narInfos.cache, cache),
+						eq(narInfos.cacheId, cache.id),
 						eq(narInfos.storePathHash, fields.storePathHash)
 					)
 				)
@@ -2037,24 +2239,24 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 
 			const deletion = z
 				.object({
-					cache: storedCacheSchema,
+					cacheId: cacheIdSchema,
 					storePathHash: storePathHashSchema,
 					narHash: nixSha256HashSchema,
 					generation: z.number()
 				})
 				.parse(row);
 			expect({
-				cache: deletion.cache,
+				cache: instance.context.cacheRepository.scopeForId(cache.id),
 				storePathHash: deletion.storePathHash
 			}).toStrictEqual({
-				cache,
+				cache: scope,
 				storePathHash: fields.storePathHash
 			});
 
 			tx.delete(narInfos)
 				.where(
 					and(
-						eq(narInfos.cache, deletion.cache),
+						eq(narInfos.cacheId, deletion.cacheId),
 						eq(narInfos.storePathHash, deletion.storePathHash)
 					)
 				)
@@ -2062,7 +2264,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 			const createdAt = new Date();
 			tx.insert(narInfoDeletions)
 				.values({
-					cache: deletion.cache,
+					cacheId: cache.id,
 					storePathHash: deletion.storePathHash,
 					narHash: deletion.narHash,
 					generation: narInfoGenerationSchema.parse(deletion.generation),
@@ -2080,11 +2282,13 @@ export async function seedNarInfoDeletion(fields: {
 	readonly generation: number;
 }): Promise<void> {
 	const createdAt = new Date();
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
+		const cache = resolvedCache(instance.context);
+
 		drizzle(state.storage, { schema: { narInfoDeletions } })
 			.insert(narInfoDeletions)
 			.values({
-				cache: DEFAULT_CACHE,
+				cacheId: cache.id,
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
 				generation: narInfoGenerationSchema.parse(fields.generation),
@@ -2099,22 +2303,28 @@ export async function seedNarInfoDeletion(fields: {
 // marker is the durable record of an in-flight delete the repair pass re-drives.
 export async function narInfoDeletionRows(): Promise<
 	{
-		cache: string;
+		cache: CacheScope;
 		storePathHash: StorePathHash;
 		narHash: NixSha256HashString;
 		generation: number;
 	}[]
 > {
-	return runInDurableObject(currentServer(), (_instance, state) =>
+	return runInDurableObject(currentServer(), (instance, state) =>
 		drizzle(state.storage, { schema: { narInfoDeletions } })
 			.select({
-				cache: narInfoDeletions.cache,
+				cacheId: narInfoDeletions.cacheId,
 				storePathHash: narInfoDeletions.storePathHash,
 				narHash: narInfoDeletions.narHash,
 				generation: narInfoDeletions.generation
 			})
 			.from(narInfoDeletions)
 			.all()
+			.map((row) => ({
+				cache: instance.context.cacheRepository.scopeForId(row.cacheId),
+				storePathHash: row.storePathHash,
+				narHash: row.narHash,
+				generation: row.generation
+			}))
 			.toSorted((left, right) =>
 				byCodeUnit(left.storePathHash, right.storePathHash)
 			)
@@ -2206,16 +2416,14 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 
 /**
 The path for a cache-scoped route: the bare suffix for the default cache, and
-the suffix under `/cache/<selector>` for a named one.
+the suffix under `/cache/<name>` for a named one.
 */
-export function cacheScopedPath(cache: string, suffix: string): string {
-	const stored = storedCacheSchema.parse(cache);
-
-	if (stored === DEFAULT_CACHE) {
+export function cacheScopedPath(cache: CacheScope, suffix: string): string {
+	if (cache.kind === 'default') {
 		return suffix;
 	}
 
-	return `/cache/${namedSelectorForCache(stored)}${suffix}`;
+	return `/cache/${cache.name}${suffix}`;
 }
 
 // A push id signed with the test signing key (the PUSH_ID_SIGNING_KEY the worker
@@ -2238,10 +2446,10 @@ export const testPushId = await testPushIdFor('v1');
 
 export async function negotiateUploads(
 	token: string,
-	paths: readonly ParsedUploadPathMetadata[],
-	cache: string = DEFAULT_CACHE,
+	paths: readonly UploadPathMetadata[],
+	cache: CacheScope = defaultCache(),
 	shouldReportGrace = false
-): Promise<UploadNegotiateResponse> {
+): Promise<UploadNegotiateResponseInput> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/uploads'),
 		token,
@@ -2260,7 +2468,7 @@ export async function negotiateUploads(
 		}
 	);
 
-	expect(response.status).toBe(StatusCodes.OK);
+	expect(response.status, await response.clone().text()).toBe(StatusCodes.OK);
 
 	return uploadNegotiateResponseSchema.parse(await response.json());
 }
@@ -2271,7 +2479,7 @@ export function negotiateViaInstance(
 	instance: { fetch(request: Request): Promise<Response> },
 	token: string,
 	storePathHash: string,
-	cache: string = DEFAULT_CACHE
+	cache: CacheScope = defaultCache()
 ): Promise<Response> {
 	const metadata = uploadMetadata({ storePathHash, fileSize: 1 });
 	const url = new URL(cacheScopedPath(cache, '/uploads'), currentOrigin());
@@ -2292,8 +2500,8 @@ export function negotiateViaInstance(
 
 export async function negotiateViaWorker(
 	token: string,
-	paths: readonly ParsedUploadPathMetadata[]
-): Promise<UploadNegotiateResponse> {
+	paths: readonly UploadPathMetadata[]
+): Promise<UploadNegotiateResponseInput> {
 	const response = await authorisedWorkerFetch('/uploads', token, {
 		body: JSON.stringify({
 			pushId: testPushId,
@@ -2315,8 +2523,8 @@ Pushes one path without making assertions against the upload expiry clock.
 */
 export async function pushPath(
 	token: string,
-	metadata: ParsedUploadPathMetadata,
-	cache: string = DEFAULT_CACHE,
+	metadata: UploadPathMetadata,
+	cache: CacheScope = defaultCache(),
 	nar?: VerifiableNar
 ): Promise<void> {
 	const decision = singleDecision(
@@ -2337,23 +2545,24 @@ export async function pushPath(
 export async function pushPathToTenant(
 	tenant: TenantId,
 	token: string,
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	nar?: VerifiableNar,
-	cache: string = DEFAULT_CACHE_SELECTOR
+	cache: CacheScope = defaultCache()
 ): Promise<void> {
 	const pushId = await testPushIdFor(tenant);
-	const uploadsPath = cacheScopedPath(
-		cacheFromSelector(cacheSelectorSchema.parse(cache)),
-		'/uploads'
+	const negotiated = await tenantWorkerFetch(
+		tenant,
+		cacheScopedPath(cache, '/uploads'),
+		token,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				pushId,
+				paths: [uploadPathNegotiation(metadata)]
+			})
+		}
 	);
-	const negotiated = await tenantWorkerFetch(tenant, uploadsPath, token, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({
-			pushId,
-			paths: [uploadPathNegotiation(metadata)]
-		})
-	});
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = singleDecision(
@@ -2385,7 +2594,7 @@ export async function pushPathToTenant(
 export async function attemptPushToTenant(
 	tenant: TenantId,
 	token: string,
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<number> {
 	const pushId = await testPushIdFor(tenant);
@@ -2440,7 +2649,7 @@ export async function attemptPushToTenant(
 export async function stageDeferredForTenant(
 	tenant: TenantId,
 	token: string,
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<UploadId> {
 	const pushId = await testPushIdFor(tenant);
@@ -2492,6 +2701,16 @@ export class CommitSocketError extends Error {
 }
 
 /**
+The HTTP response that refused a commit WebSocket upgrade.
+*/
+export class CommitUpgradeError extends Error {
+	constructor(public readonly status: number) {
+		super(`Commit WebSocket upgrade failed with HTTP ${String(status)}`);
+		this.name = 'CommitUpgradeError';
+	}
+}
+
+/**
 A deferred upload's verification settled on a non-servable verdict.
 */
 export class CommitVerdictError extends Error {
@@ -2518,8 +2737,8 @@ export class CommitSocketProtocolError extends Error {
  */
 export interface CommitConversation {
 	readonly socket: WebSocket;
-	readonly send: (request: CommitSessionRequest) => void;
-	readonly nextFrame: () => Promise<ParsedCommitSessionFrame>;
+	readonly send: (request: CommitSessionRequestInput) => void;
+	readonly nextFrame: () => Promise<CommitSessionFrame>;
 	// The capability header the 101 carried, which is where a credited session's
 	// opening grant is advertised.
 	readonly capabilities: string | null;
@@ -2528,7 +2747,12 @@ export interface CommitConversation {
 export function commitSessionFromResponse(
 	response: Response
 ): CommitConversation {
-	expect(response.status).toBe(StatusCodes.SWITCHING_PROTOCOLS);
+	const switchingProtocolsStatus: number = StatusCodes.SWITCHING_PROTOCOLS;
+
+	if (response.status !== switchingProtocolsStatus) {
+		throw new CommitUpgradeError(response.status);
+	}
+
 	const socket = response.webSocket;
 
 	if (socket === null) {
@@ -2537,9 +2761,9 @@ export function commitSessionFromResponse(
 		);
 	}
 
-	const frames: ParsedCommitSessionFrame[] = [];
+	const frames: CommitSessionFrame[] = [];
 	const waiters: {
-		resolve: (frame: ParsedCommitSessionFrame) => void;
+		resolve: (frame: CommitSessionFrame) => void;
 		reject: (reason: Error) => void;
 	}[] = [];
 
@@ -2566,20 +2790,20 @@ export function commitSessionFromResponse(
 	});
 	socket.accept();
 
-	const nextFrame = (): Promise<ParsedCommitSessionFrame> => {
+	const nextFrame = (): Promise<CommitSessionFrame> => {
 		const queued = frames.shift();
 
 		if (queued !== undefined) {
 			return Promise.resolve(queued);
 		}
 
-		const waiter = Promise.withResolvers<ParsedCommitSessionFrame>();
+		const waiter = Promise.withResolvers<CommitSessionFrame>();
 		waiters.push(waiter);
 
 		return waiter.promise;
 	};
 
-	const send = (request: CommitSessionRequest): void => {
+	const send = (request: CommitSessionRequestInput): void => {
 		socket.send(JSON.stringify(request));
 	};
 
@@ -2601,7 +2825,7 @@ Opens a push's commit session WebSocket against the Durable Object stub.
 */
 export async function openCommitSession(
 	token: string,
-	cache: string = DEFAULT_CACHE,
+	cache: CacheScope = defaultCache(),
 	accepted?: string
 ): Promise<CommitConversation> {
 	const response = await fetchPath(cacheScopedPath(cache, '/commit'), {
@@ -2642,7 +2866,7 @@ async function completeCommitSession(
 	uploadId: UploadId,
 	runVerification: () => Promise<void>,
 	options: { readonly wait?: boolean }
-): Promise<CommitResponse> {
+): Promise<CommitResponseInput> {
 	const { socket, send, nextFrame } = conversation;
 	send({ op: 'commit', uploadId });
 	const first = await nextFrame();
@@ -2704,9 +2928,9 @@ async function completeCommitSession(
 export async function commitUpload(
 	token: string,
 	uploadId: UploadId,
-	cache: string = DEFAULT_CACHE,
+	cache: CacheScope = defaultCache(),
 	options: { readonly wait?: boolean } = {}
-): Promise<CommitResponse> {
+): Promise<CommitResponseInput> {
 	const conversation = await openCommitSession(token, cache);
 
 	return completeCommitSession(
@@ -2726,7 +2950,7 @@ export async function commitUpload(
 export async function commitUploadRejection(
 	token: string,
 	uploadId: UploadId,
-	cache: string = DEFAULT_CACHE,
+	cache: CacheScope = defaultCache(),
 	options: { readonly wait?: boolean } = {}
 ): Promise<unknown> {
 	let result:
@@ -2765,12 +2989,14 @@ export async function commitUploadViaWorker(
 	options: {
 		readonly wait?: boolean;
 		readonly tenant?: string;
-		readonly cache?: string;
+		readonly cache?: CacheScope;
 	} = {}
-): Promise<CommitResponse> {
+): Promise<CommitResponseInput> {
 	const tenant = tenantIdSchema.parse(options.tenant ?? fixtureTenant);
-	const socketPath =
-		options.cache === undefined ? '/commit' : `/cache/${options.cache}/commit`;
+	const socketPath = cacheScopedPath(
+		options.cache ?? defaultCache(),
+		'/commit'
+	);
 	const response = await tenantWorkerFetch(tenant, socketPath, token, {
 		headers: { upgrade: 'websocket' }
 	});
@@ -2785,7 +3011,7 @@ export async function commitUploadViaWorker(
 
 export async function commitPath(
 	token: string,
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<void> {
 	const upload = expectSingleUploadDecision(
@@ -2798,7 +3024,7 @@ export async function commitPath(
 
 export async function commitSharedPath(
 	token: string,
-	metadata: ParsedUploadPathMetadata
+	metadata: UploadPathMetadata
 ): Promise<void> {
 	const decision = expectSingleCommitDecision(
 		await negotiateUploads(token, [metadata]),
@@ -2810,7 +3036,7 @@ export async function commitSharedPath(
 export async function deletePath(
 	token: string,
 	storePathHash: StorePathHash
-): Promise<DeletePathResponse> {
+): Promise<DeletePathResponseInput> {
 	const response = await authorisedFetch(`/paths/${storePathHash}`, token, {
 		method: 'DELETE'
 	});
@@ -2822,8 +3048,8 @@ export async function deletePath(
 
 export async function setRoot(
 	token: string,
-	fields: RootSetBody & { readonly name: string }
-): Promise<RootSetResponse> {
+	fields: RootSetBodyInput & { readonly name: string }
+): Promise<RootSetResponseInput> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
 		`/roots/${encodeURIComponent(name)}`,
@@ -2843,7 +3069,7 @@ export async function setRoot(
 export async function listRoots(
 	token: string,
 	options: { readonly cursor?: string; readonly limit?: number } = {}
-): Promise<RootListResponse> {
+): Promise<RootListResponseInput> {
 	const response = await authorisedFetch(
 		`/roots${listPageQuery(options)}`,
 		token
@@ -2887,7 +3113,7 @@ function listPageQuery(options: {
 export async function removeRoot(
 	token: string,
 	name: string
-): Promise<RootRemoveResponse> {
+): Promise<RootRemoveResponseInput> {
 	const response = await authorisedFetch(
 		`/roots/${encodeURIComponent(name)}`,
 		token,
@@ -3179,17 +3405,19 @@ export async function expectStatsForTenant(
 }
 
 type StatsExpectation = Omit<
-	StatsResponse,
+	StatsResponseInput,
 	'casFileSize' | 'casObjects' | 'narFileSize' | 'totalFileSize'
 > &
 	Partial<
 		Pick<
-			StatsResponse,
+			StatsResponseInput,
 			'casFileSize' | 'casObjects' | 'narFileSize' | 'totalFileSize'
 		>
 	>;
 
-export function statsExpectation(expected: StatsExpectation): StatsResponse {
+export function statsExpectation(
+	expected: StatsExpectation
+): StatsResponseInput {
 	const narFileSize = expected.narFileSize ?? expected.totalFileSize ?? 0;
 	const casFileSize = expected.casFileSize ?? 0;
 
@@ -3447,7 +3675,7 @@ Polls a deferred upload's status the way `push --wait` does, by its uploadId.
 */
 export async function uploadStatus(
 	uploadId: UploadId
-): Promise<UploadStatusResponse['status']> {
+): Promise<UploadStatusResponseInput['status']> {
 	const token = await initialise();
 	const response = await authorisedFetch(`/uploads/${uploadId}/status`, token, {
 		method: 'GET'
@@ -3466,7 +3694,7 @@ export async function tenantUploadStatus(
 	tenant: TenantId,
 	token: string,
 	uploadId: UploadId
-): Promise<UploadStatusResponse['status']> {
+): Promise<UploadStatusResponseInput['status']> {
 	const response = await tenantWorkerFetch(
 		tenant,
 		`/uploads/${uploadId}/status`,
@@ -3488,7 +3716,7 @@ export async function verifiablePath(
 		readonly storePathHash?: string;
 		readonly references?: string[];
 	}
-): Promise<{ metadata: ParsedUploadPathMetadata; nar: VerifiableNar }> {
+): Promise<{ metadata: UploadPathMetadata; nar: VerifiableNar }> {
 	const nar = await verifiableNar(seed);
 	const metadata = uploadMetadata({
 		name: fields.name,
@@ -3516,7 +3744,7 @@ export async function commitVerifiablePath(
 		readonly storePathHash?: string;
 		readonly references?: string[];
 	}
-): Promise<ParsedUploadPathMetadata> {
+): Promise<UploadPathMetadata> {
 	const { metadata, nar } = await verifiablePath(seed, fields);
 	await commitPath(token, metadata, nar);
 
@@ -3563,7 +3791,7 @@ export async function deferFreshUpload(
 ): Promise<{
 	uploadId: UploadId;
 	r2Key: string;
-	metadata: ParsedUploadPathMetadata;
+	metadata: UploadPathMetadata;
 	nar: VerifiableNar;
 }> {
 	const { metadata, nar } = await verifiablePath(seed, {
@@ -3617,20 +3845,23 @@ export async function markUploadCommitting(uploadId: UploadId): Promise<void> {
 // its generation with no D1 edge, no shared fact, and no R2 object. Signatures are
 // a placeholder, since this row only ever exists mid-saga.
 export async function seedReservedNarInfo(
-	metadata: ParsedUploadPathMetadata,
+	metadata: UploadPathMetadata,
 	generation = 0
 ): Promise<void> {
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(currentServer(), (instance, state) => {
 		const database = drizzle(state.storage, {
 			schema: { generationSeq, narInfos }
 		});
 		const reserved = narInfoGenerationSchema.parse(generation);
 		const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
+		const cache = resolvedCache(instance.context);
+		const legacyCache = legacyCacheKey(cache.scope, cache.access);
 
 		database
 			.insert(narInfos)
 			.values({
-				cache: '',
+				cache: legacyCache,
+				cacheId: cache.id,
 				storePathHash: metadata.storePathHash,
 				storePath: metadata.storePath,
 				narHash: metadata.narHash,
@@ -3646,7 +3877,8 @@ export async function seedReservedNarInfo(
 		database
 			.insert(generationSeq)
 			.values({
-				cache: '',
+				cache: legacyCache,
+				...cacheIdentityColumns(cache.scope),
 				storePathHash: metadata.storePathHash,
 				nextGeneration
 			})
@@ -3722,9 +3954,11 @@ export async function readStoredNarInfo(storePathHash: StorePathHash): Promise<{
 	readonly contentType: string | undefined;
 	readonly cacheControl: string | undefined;
 }> {
+	const key = narInfoObjectKey(fixtureTenant, storePathHash, defaultCache());
+	const stored = await env.BLOBS.get(key);
 	const object = z
 		.custom<R2ObjectBody>((value) => value !== null)
-		.parse(await env.BLOBS.get(narInfoObjectKey(fixtureTenant, storePathHash)));
+		.parse(stored);
 
 	return {
 		body: await object.text(),
@@ -3734,7 +3968,7 @@ export async function readStoredNarInfo(storePathHash: StorePathHash): Promise<{
 	};
 }
 
-export function uploadPathNegotiation(metadata: ParsedUploadPathMetadata) {
+export function uploadPathNegotiation(metadata: UploadPathMetadata) {
 	return {
 		storePathHash: metadata.storePathHash,
 		storePath: metadata.storePath,
@@ -3752,7 +3986,7 @@ export function uploadMetadata(
 		readonly name?: string;
 		readonly storePathHash?: string;
 	}
-): ParsedUploadPathMetadata {
+): UploadPathMetadata {
 	const storePathHash =
 		fields.storePathHash ?? '11111111111111111111111111111111';
 	const name = fields.name ?? 'first';
@@ -3783,10 +4017,10 @@ export function tenantId(name: string): TenantId {
 }
 
 export function expectSingleUploadDecision(
-	response: UploadNegotiateResponse,
-	metadata: ParsedUploadPathMetadata,
+	response: UploadNegotiateResponseInput,
+	metadata: UploadPathMetadata,
 	pushId: PushId = testPushId
-): ParsedUploadActionDecision {
+): UploadActionDecision {
 	const decision = uploadActionDecisionSchema.parse(singleDecision(response));
 	const expectedExpiresAt = uploadExpiryFromNow();
 
@@ -3805,9 +4039,9 @@ export function expectSingleUploadDecision(
 }
 
 export function expectSingleCommitDecision(
-	response: UploadNegotiateResponse,
-	metadata: ParsedUploadPathMetadata
-): ParsedUploadCommitDecision {
+	response: UploadNegotiateResponseInput,
+	metadata: UploadPathMetadata
+): UploadCommitDecision {
 	const decision = uploadCommitDecisionSchema.parse(singleDecision(response));
 
 	expect(response.uploads).toStrictEqual([
@@ -3823,8 +4057,8 @@ export function expectSingleCommitDecision(
 }
 
 export function singleDecision(
-	response: UploadNegotiateResponse
-): ParsedUploadDecision {
+	response: UploadNegotiateResponseInput
+): UploadDecision {
 	const [decision] = z.tuple([uploadDecisionSchema]).parse(response.uploads);
 	return uploadDecisionSchema.parse(decision);
 }
@@ -3862,22 +4096,6 @@ export const latestMigrationIndex = Math.max(
 	...migrations.journal.entries.map((entry) => entry.idx)
 );
 
-function migrationsThrough(throughIndex: number) {
-	return {
-		journal: {
-			...migrations.journal,
-			entries: migrations.journal.entries.filter(
-				(entry) => entry.idx <= throughIndex
-			)
-		},
-		migrations: Object.fromEntries(
-			Object.entries(migrations.migrations).filter(
-				([key]) => Math.trunc(Number(key.slice(1))) <= throughIndex
-			)
-		)
-	};
-}
-
 /**
  * Applies the registered migrations up to and including `throughIndex` against
  * a Durable Object's raw storage. Calling it twice with seeding in between lets
@@ -3890,7 +4108,7 @@ export function migrateThrough(
 ): Promise<void> {
 	return applyMigrations(
 		drizzle(state.storage),
-		migrationsThrough(throughIndex)
+		migrationsThrough(migrations, throughIndex)
 	);
 }
 

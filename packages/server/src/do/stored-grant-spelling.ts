@@ -5,8 +5,6 @@ import {
 	permittedGrantsInSelectorSpelling
 } from '@cupboard/protocol/grants';
 
-import { CacheRepository } from '../db/cache-repository.ts';
-
 import { type ServerContext } from './context.ts';
 
 /**
@@ -26,11 +24,7 @@ import { type ServerContext } from './context.ts';
  * spelling can still be written for that long after `contracted` is recorded.
  */
 export class StoredGrantSpelling {
-	private readonly identities: CacheRepository;
-
-	constructor(private readonly context: ServerContext) {
-		this.identities = new CacheRepository(context.db);
-	}
+	constructor(private readonly context: ServerContext) {}
 
 	async permittedGrantsJson(
 		grants: readonly PermittedGrant[]
@@ -40,8 +34,10 @@ export class StoredGrantSpelling {
 		}
 
 		return JSON.stringify(
-			permittedGrantsInSelectorSpelling(grants, (name) =>
-				this.identities.liveAccess({ kind: 'named', name })
+			permittedGrantsInSelectorSpelling(
+				grants,
+				(name) =>
+					this.context.cacheRepository.resolve({ kind: 'named', name })?.access
 			)
 		);
 	}
@@ -54,8 +50,10 @@ export class StoredGrantSpelling {
 		}
 
 		return JSON.stringify(
-			authorizationDetailsInSelectorSpelling(grants, (name) =>
-				this.identities.liveAccess({ kind: 'named', name })
+			authorizationDetailsInSelectorSpelling(
+				grants,
+				(name) =>
+					this.context.cacheRepository.resolve({ kind: 'named', name })?.access
 			)
 		);
 	}

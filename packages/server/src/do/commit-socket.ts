@@ -1,8 +1,8 @@
-import type { CommitSessionFrame } from '@cupboard/protocol/upload';
+import type { CommitSessionFrameInput } from '@cupboard/protocol/upload';
 
 export function sendCommitSessionFrame(
 	socket: WebSocket,
-	frame: CommitSessionFrame
+	frame: CommitSessionFrameInput
 ): void {
 	try {
 		socket.send(JSON.stringify(frame));

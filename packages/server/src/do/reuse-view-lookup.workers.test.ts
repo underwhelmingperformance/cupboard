@@ -1,8 +1,8 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	cacheNameSchema,
-	DEFAULT_CACHE_SELECTOR,
+	type CacheAccessMode,
+	type CacheScope,
 	nixSha256HashSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -11,7 +11,10 @@ import {
 	cacheAvailabilityResponseSchema,
 	reuseViewAvailabilityMaxPaths
 } from '@cupboard/protocol/cache-availability';
-import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import {
+	reuseViewNameSchema,
+	type ReuseViewSelectorInput
+} from '@cupboard/protocol/reuse-views';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -29,10 +32,14 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	asOneInvocation,
 	currentNarObjectKey,
+	defaultCache,
 	fixtureWorkerServer,
+	namedCache,
 	provisionFixtureTenant,
 	readFetch,
-	resetTestServer
+	recordDeploymentPhase,
+	resetTestServer,
+	resolvedCache
 } from '../test-support.ts';
 
 import {
@@ -46,7 +53,6 @@ import {
 	insertBackedRow,
 	insertUnbackedRow,
 	lookupPath,
-	type ReuseSelector,
 	setView
 } from './reuse-view-read.test-support.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -81,9 +87,9 @@ describe('reuse-view narinfo lookup', () => {
 	// slice at that cost. A page one hash over a chunk takes two object
 	// requests and is answered completely, in request order.
 	it('returns present and missing hashes through the bulk availability route', async () => {
-		const present = await committedPath('reuse-bulk', 'pr-1');
+		const present = await committedPath('reuse-bulk', namedCache('pr-1'));
 		const missing = generatedMissingHashes(reuseViewAvailabilityMaxPaths - 1);
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const capture = startCapture();
 		let status: number;
@@ -126,14 +132,14 @@ describe('reuse-view narinfo lookup', () => {
 	// the probe's D1 reads; a chunk that does not fit is a sizing defect, and
 	// the object refuses it instead of running into the platform's ceiling.
 	it('refuses a chunk whose worst-case heads exceed the subrequest slice', async () => {
-		const path = await committedPath('reuse-slice', 'pr-1', {
+		const path = await committedPath('reuse-slice', namedCache('pr-1'), {
 			storePathHash: 'a'.repeat(32)
 		});
-		await committedPath('reuse-slice-other', 'pr-2', {
+		await committedPath('reuse-slice-other', namedCache('pr-2'), {
 			storePathHash: path.storePathHash,
 			name: 'divergent'
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		let refusal: unknown;
 
@@ -147,6 +153,7 @@ describe('reuse-view narinfo lookup', () => {
 							).missingStorePathHashes(
 								rootLogger(),
 								reuseViewNameSchema.parse('reuse'),
+								'public',
 								[storePathHashSchema.parse(path.storePathHash)]
 							)
 						),
@@ -166,29 +173,34 @@ describe('reuse-view narinfo lookup', () => {
 		}).toStrictEqual({ isRefused: true, subrequests: 2 });
 	});
 
-	it.each([
+	const selectorCases: {
+		readonly label: string;
+		readonly selectors: ReuseViewSelectorInput[];
+		readonly cache?: CacheScope;
+	}[] = [
 		{
-			label: 'an exact selector',
-			selectors: [{ kind: 'exact', pattern: 'pr-1' }]
+			label: 'a named selector',
+			selectors: [{ kind: 'named', name: 'pr-1' }]
 		},
 		{
-			label: 'the default-cache exact selector',
-			selectors: [{ kind: 'exact', pattern: '_default' }],
-			cache: DEFAULT_CACHE_SELECTOR
+			label: 'the default-cache selector',
+			selectors: [{ kind: 'default' }],
+			cache: defaultCache()
 		},
 		{
 			label: 'a prefix selector',
-			selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+			selectors: [{ kind: 'prefix', prefix: 'pr-' }]
 		},
-		{ label: 'the empty prefix', selectors: [{ kind: 'prefix', pattern: '' }] }
-	] as const satisfies readonly {
-		label: string;
-		selectors: readonly ReuseSelector[];
-		cache?: string;
-	}[])(
+		{ label: 'the all-caches selector', selectors: [{ kind: 'all' }] }
+	];
+
+	it.each(selectorCases)(
 		'serves a committed candidate through $label',
 		async ({ selectors, cache }) => {
-			const path = await committedPath('reuse-hit', cache ?? 'pr-1');
+			const path = await committedPath(
+				'reuse-hit',
+				cache ?? namedCache('pr-1')
+			);
 			await setView(selectors);
 
 			const response = await readFetch(lookupPath(path.storePathHash));
@@ -207,75 +219,103 @@ describe('reuse-view narinfo lookup', () => {
 				contentType: 'text/x-nix-narinfo; charset=utf-8',
 				cacheControl: 'no-store',
 				storePath: path.storePath,
-				url: `../../${await currentNarObjectKey(
-					nixSha256HashSchema.parse(path.narHash)
-				)}`,
+				url: await currentNarObjectKey(nixSha256HashSchema.parse(path.narHash)),
 				narHash: path.narHash,
 				hasSignature: true
 			});
 		}
 	);
 
-	it.each([
+	const accessCases: {
+		readonly label: string;
+		readonly cache: CacheScope;
+		readonly access: CacheAccessMode;
+		readonly storePathHash: string;
+		readonly prefix?: string;
+		readonly isServed: boolean;
+	}[] = [
 		{
-			label: 'the empty prefix does not select a private cache',
-			cache: 'private/builds',
+			label: 'an all selector does not select a private cache',
+			cache: namedCache('builds'),
+			access: 'private',
 			storePathHash: '6'.repeat(32),
 			isServed: false
 		},
 		{
 			label: 'a matching prefix does not select a private cache',
-			cache: 'private/builds',
+			cache: namedCache('packages'),
+			access: 'private',
 			storePathHash: '7'.repeat(32),
 			prefix: 'p',
 			isServed: false
 		},
 		{
-			label: 'the empty prefix selects a public cache called private',
-			cache: 'private',
+			label: 'an all selector selects a tenant-access cache',
+			cache: namedCache('private'),
+			access: 'public',
 			storePathHash: '8'.repeat(32),
 			isServed: true
 		},
 		{
-			label: 'a matching prefix selects a public cache',
-			cache: 'pr-9',
+			label: 'a matching prefix selects a tenant-access cache',
+			cache: namedCache('pr-9'),
+			access: 'public',
 			storePathHash: '9'.repeat(32),
 			prefix: 'p',
 			isServed: true
 		}
-	])('$label', async ({ cache, storePathHash, prefix = '', isServed }) => {
-		const committed = await committedPath('reuse-private-source', 'source', {
-			storePathHash: '5'.repeat(32)
-		});
-		await insertBackedRow(cache, storePathHash, committed.storePathHash);
-		await setView([{ kind: 'prefix', pattern: prefix }]);
+	];
 
-		const narInfo = await readFetch(lookupPath(storePathHash));
-		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
-			body: JSON.stringify({ storePathHashes: [storePathHash] }),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		});
-		const body = cacheAvailabilityResponseSchema.parse(
-			await availability.json()
-		);
+	it.each(accessCases)(
+		'$label',
+		async ({ cache, access, storePathHash, prefix, isServed }) => {
+			const committed = await committedPath(
+				'reuse-private-source',
+				namedCache('source'),
+				{
+					storePathHash: '5'.repeat(32)
+				}
+			);
+			await insertBackedRow(
+				cache,
+				storePathHash,
+				committed.storePathHash,
+				access
+			);
+			await setView(
+				prefix === undefined ? [{ kind: 'all' }] : [{ kind: 'prefix', prefix }]
+			);
 
-		expect({
-			narInfoStatus: narInfo.status,
-			availabilityStatus: availability.status,
-			body
-		}).toStrictEqual({
-			narInfoStatus: isServed ? StatusCodes.OK : StatusCodes.NOT_FOUND,
-			availabilityStatus: StatusCodes.OK,
-			body: { missingStorePathHashes: isServed ? [] : [storePathHash] }
-		});
-	});
+			const narInfo = await readFetch(lookupPath(storePathHash));
+			const availability = await readFetch(
+				'/reuse/reuse/api/v1/missing-paths',
+				{
+					body: JSON.stringify({ storePathHashes: [storePathHash] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST'
+				}
+			);
+			const body = cacheAvailabilityResponseSchema.parse(
+				await availability.json()
+			);
+
+			expect({
+				narInfoStatus: narInfo.status,
+				availabilityStatus: availability.status,
+				body
+			}).toStrictEqual({
+				narInfoStatus: isServed ? StatusCodes.OK : StatusCodes.NOT_FOUND,
+				availabilityStatus: StatusCodes.OK,
+				body: { missingStorePathHashes: isServed ? [] : [storePathHash] }
+			});
+		}
+	);
 
 	it('answers a miss no-store when no selected cache holds the hash', async () => {
-		const path = await committedPath('reuse-unselected', 'other', {
+		const path = await committedPath('reuse-unselected', namedCache('other'), {
 			storePathHash: '2'.repeat(32)
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 
 		const response = await readFetch(lookupPath(path.storePathHash));
 
@@ -289,7 +329,7 @@ describe('reuse-view narinfo lookup', () => {
 	});
 
 	it('404s an unknown view and an invalid view name, no-store', async () => {
-		const path = await committedPath('reuse-no-view', 'pr-1', {
+		const path = await committedPath('reuse-no-view', namedCache('pr-1'), {
 			storePathHash: '3'.repeat(32)
 		});
 
@@ -313,15 +353,18 @@ describe('reuse-view narinfo lookup', () => {
 	// number of caches holding a path does not affect whether it is served.
 	it('serves a path that many caches of the view hold', async () => {
 		const copies = 40;
-		const path = await committedPath('reuse-wide', 'pr-0', {
+		const path = await committedPath('reuse-wide', namedCache('pr-0'), {
 			storePathHash: '4'.repeat(32)
 		});
 
 		for (let index = 1; index <= copies; index += 1) {
-			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
+			await insertAgreeingCopy(
+				namedCache(`pr-${String(index)}`),
+				path.storePathHash
+			);
 		}
 
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const response = await readFetch(lookupPath(path.storePathHash));
 		const narInfo = NarInfo.parse(await response.text());
@@ -351,19 +394,25 @@ describe('reuse-view narinfo lookup', () => {
 	// every copy. One cache out of many that disagrees still refuses the path.
 	it('answers a wide view with one disagreeing copy as a miss', async () => {
 		const agreeing = 40;
-		const path = await committedPath('reuse-wide-conflict', 'pr-0', {
-			storePathHash: '7'.repeat(32)
-		});
+		const path = await committedPath(
+			'reuse-wide-conflict',
+			namedCache('pr-0'),
+			{ storePathHash: '7'.repeat(32) }
+		);
 
 		for (let index = 1; index <= agreeing; index += 1) {
-			await insertAgreeingCopy(`pr-${String(index)}`, path.storePathHash);
+			await insertAgreeingCopy(
+				namedCache(`pr-${String(index)}`),
+				path.storePathHash
+			);
 		}
 
-		await committedPath('reuse-wide-other', `pr-${String(agreeing + 1)}`, {
-			storePathHash: path.storePathHash,
-			name: 'divergent'
-		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await committedPath(
+			'reuse-wide-other',
+			namedCache(`pr-${String(agreeing + 1)}`),
+			{ storePathHash: path.storePathHash, name: 'divergent' }
+		);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const response = await readFetch(lookupPath(path.storePathHash));
 
@@ -380,7 +429,7 @@ describe('reuse-view narinfo lookup', () => {
 		for (let index = 1; index <= copies; index += 1) {
 			await committedPath(
 				`reuse-distinct-${String(index)}`,
-				`pr-${String(index)}`,
+				namedCache(`pr-${String(index)}`),
 				{
 					storePathHash,
 					name: `copy-${String(index)}`
@@ -388,7 +437,7 @@ describe('reuse-view narinfo lookup', () => {
 			);
 		}
 
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const heads = await runInDurableObject(fixtureWorkerServer(), (instance) =>
 			vi.spyOn(instance.context.env.BLOBS, 'head')
@@ -430,15 +479,15 @@ describe('reuse-view narinfo lookup', () => {
 	});
 
 	it('answers conflicting candidates as a miss', async () => {
-		const first = await committedPath('reuse-conflict-a', 'pr-1', {
+		const first = await committedPath('reuse-conflict-a', namedCache('pr-1'), {
 			storePathHash: 'c'.repeat(32),
 			name: 'first'
 		});
-		await committedPath('reuse-conflict-b', 'pr-2', {
+		await committedPath('reuse-conflict-b', namedCache('pr-2'), {
 			storePathHash: 'c'.repeat(32),
 			name: 'first'
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const response = await readFetch(lookupPath(first.storePathHash));
 
@@ -447,20 +496,21 @@ describe('reuse-view narinfo lookup', () => {
 
 	it('merges the signature sets of identical candidates deterministically', async () => {
 		const extraSignature = `other-1:${btoa('another signature')}`;
-		const path = await committedPath('reuse-merge', 'pr-1', {
+		const path = await committedPath('reuse-merge', namedCache('pr-1'), {
 			storePathHash: '5'.repeat(32)
 		});
-		await committedPath('reuse-merge', 'pr-2', {
+		await committedPath('reuse-merge', namedCache('pr-2'), {
 			storePathHash: '5'.repeat(32)
 		});
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 
 		const baselineResponse = await readFetch(lookupPath(path.storePathHash));
 		const baseline = NarInfo.parse(await baselineResponse.text());
 		const storePathHash = storePathHashSchema.parse(path.storePathHash);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
+			const cache = resolvedCache(instance.context, namedCache('pr-2'));
 			const target = and(
-				eq(schema.narInfos.cache, cacheNameSchema.parse('pr-2')),
+				eq(schema.narInfos.cacheId, cache.id),
 				eq(schema.narInfos.storePathHash, storePathHash)
 			);
 			const row = instance.context.db
@@ -486,9 +536,13 @@ describe('reuse-view narinfo lookup', () => {
 	});
 
 	it('rejects a local row with no committed edge behind it', async () => {
-		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+		await setView([{ kind: 'prefix', prefix: 'pr-' }]);
 		const storePathHash = 'd'.repeat(32);
-		await insertUnbackedRow('pr-1', storePathHash, `sha256:${'g'.repeat(52)}`);
+		await insertUnbackedRow(
+			namedCache('pr-1'),
+			storePathHash,
+			`sha256:${'g'.repeat(52)}`
+		);
 
 		const response = await readFetch(lookupPath(storePathHash));
 
@@ -537,8 +591,10 @@ describe('reuse-view narinfo lookup', () => {
 			}
 		}
 	])('misses when $label', async ({ seed, storePathHash, remove }) => {
-		const path = await committedPath(seed, 'pr-1', { storePathHash });
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		const path = await committedPath(seed, namedCache('pr-1'), {
+			storePathHash
+		});
+		await setView([{ kind: 'named', name: 'pr-1' }]);
 		await remove(path.narHash);
 
 		const response = await readFetch(lookupPath(path.storePathHash));
@@ -546,13 +602,14 @@ describe('reuse-view narinfo lookup', () => {
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
-	it('gates a private tenant lookup behind the read credential', async () => {
-		const path = await committedPath('reuse-private', 'pr-1', {
-			storePathHash: '9'.repeat(32)
+	it('gates a private view lookup behind the tenant read credential', async () => {
+		await recordDeploymentPhase('contracted');
+		const path = await committedPath('reuse-private', namedCache('pr-1'), {
+			storePathHash: '9'.repeat(32),
+			access: 'private'
 		});
-		await setView([{ kind: 'exact', pattern: 'pr-1' }]);
+		await setView([{ kind: 'named', name: 'pr-1' }], 'reuse', 'private');
 		await provisionFixtureTenant({
-			readMode: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});
 

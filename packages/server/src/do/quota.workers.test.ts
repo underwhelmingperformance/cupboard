@@ -1,5 +1,4 @@
 import {
-	DEFAULT_CACHE,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -30,6 +29,7 @@ import {
 	commitUploadRejection,
 	CommitVerdictError,
 	currentServer,
+	defaultCache,
 	deferFreshUpload,
 	deletePath,
 	expectSingleUploadDecision,
@@ -319,14 +319,14 @@ describe('per-tenant quota', () => {
 		);
 		await putNarBytes(decision.r2Key, nar);
 		// The first commit reserves the narinfo row and defers to verification.
-		await commitUpload(token, decision.uploadId, DEFAULT_CACHE, {
+		await commitUpload(token, decision.uploadId, defaultCache(), {
 			wait: false
 		});
 		await dropFixtureTenantUsage();
 		const retryError = await commitUploadRejection(
 			token,
 			decision.uploadId,
-			DEFAULT_CACHE,
+			defaultCache(),
 			{ wait: false }
 		);
 
@@ -529,7 +529,9 @@ describe('per-tenant quota', () => {
 
 		const usage = await tenantUsageRow();
 		const object = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect({
@@ -575,10 +577,14 @@ describe('per-tenant quota', () => {
 		await verifyCurrentTenant();
 
 		const firstServable = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, first.metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, first.metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 		const secondServable = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, second.metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, second.metadata.storePathHash, {
+				kind: 'default'
+			})
 		);
 
 		expect({
@@ -613,8 +619,9 @@ async function probeWindowState(storePathHash: StorePathHash): Promise<{
 		presence: await tenantBlobRows(),
 		bytes: usage?.bytes,
 		servable:
-			(await env.BLOBS.head(narInfoObjectKey(fixtureTenant, storePathHash))) !==
-			null
+			(await env.BLOBS.head(
+				narInfoObjectKey(fixtureTenant, storePathHash, { kind: 'default' })
+			)) !== null
 	};
 }
 

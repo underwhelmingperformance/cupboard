@@ -4,10 +4,10 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
-import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
-	type ParsedPushSummary,
+	type PushSummary,
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
@@ -54,7 +54,6 @@ import {
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
-	cacheArguments,
 	collectLines,
 	isEnabled,
 	provided,
@@ -66,6 +65,7 @@ import {
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
+import { cacheUrlFor } from '../substituters.ts';
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
@@ -91,7 +91,6 @@ export interface PushOptions {
 	readonly expectedSourceCommit?: string;
 	readonly installDir?: string;
 	readonly cache?: string;
-	readonly privateCache?: string;
 	readonly store?: string;
 	readonly audience?: string;
 	readonly root?: string;
@@ -119,7 +118,7 @@ export interface PushInputs {
 	readonly installDirectory: string;
 	readonly url: URL;
 	readonly paths: readonly string[];
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly store: string;
 	readonly audience: string;
 	readonly root: string;
@@ -165,7 +164,7 @@ interface PushArgumentsOptions {
 	readonly paths: readonly string[];
 	readonly audience: string;
 	readonly root: string;
-	readonly cache: StoredCache;
+	readonly cache: CacheScope;
 	readonly store: string;
 	readonly ttl: string;
 	readonly retain: boolean;
@@ -219,8 +218,7 @@ export function registerPushCommand(
 			'--install-dir <directory>',
 			'directory for the downloaded cupboard binary'
 		)
-		.option('--cache <name>', 'Push to a named public cache.')
-		.option('--private-cache <name>', 'Push to a private cache.')
+		.option('--cache <name>', 'Push to a named cache.')
 		.option(
 			'--store <uri>',
 			'read path metadata and NAR bytes from this remote ssh-ng store'
@@ -380,7 +378,7 @@ export function resolvePushInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		url,
 		paths: options.paths,
-		cache: providedCacheSelection(options.cache, options.privateCache),
+		cache: providedCacheSelection(options.cache),
 		store: provided(options.store) ?? '',
 		audience: provided(options.audience) ?? '',
 		root: isRetained
@@ -461,7 +459,7 @@ export async function pushAction(
 	await publishPushAcquisitionOutputs(environment, installedCupboard);
 
 	const argumentsPerPush = pushArgumentsForInvocations(inputs, pushes);
-	const summaries: ParsedPushSummary[] = [];
+	const summaries: PushSummary[] = [];
 
 	for (const arguments_ of argumentsPerPush) {
 		const run = await runPushCupboard({
@@ -614,14 +612,14 @@ export async function inspectCupboardVersion(
  * outputs and checking grace deadlines.
  */
 export function aggregatePushSummaries(
-	summaries: readonly ParsedPushSummary[]
-): ParsedPushSummary {
+	summaries: readonly PushSummary[]
+): PushSummary {
 	let uploadedPaths = 0;
 	let reusedBlobs = 0;
 	let skipped = 0;
 	let uploadedBytes = 0;
-	const failures: ParsedPushSummary['failures'][number][] = [];
-	const paths: ParsedPushSummary['paths'][number][] = [];
+	const failures: PushSummary['failures'][number][] = [];
+	const paths: PushSummary['paths'][number][] = [];
 
 	for (const summary of summaries) {
 		uploadedPaths += summary.uploadedPaths;
@@ -677,7 +675,7 @@ export function requireGraceResultProtocol(
  * A path with neither `retainUntil` nor `graceSeconds` matched no cache grace
  * policy. {@link GracePolicyMissingError} reports this cache-level condition.
  */
-export function hasUngracedPath(summary: ParsedPushSummary): boolean {
+export function hasUngracedPath(summary: PushSummary): boolean {
 	return summary.paths.some(
 		(path) =>
 			path.grace?.retainUntil === undefined &&
@@ -692,7 +690,7 @@ export function hasUngracedPath(summary: ParsedPushSummary): boolean {
  * without `retainUntil` means that verification is still pending.
  */
 export function pathsMissingGraceDeadline(
-	summary: ParsedPushSummary
+	summary: PushSummary
 ): readonly MissingGracePath[] {
 	return summary.paths
 		.filter(
@@ -709,7 +707,7 @@ export function pathsMissingGraceDeadline(
 
 async function publishPushOutputs(
 	environment: Environment,
-	summary: ParsedPushSummary
+	summary: PushSummary
 ): Promise<void> {
 	await setOutput(environment, 'uploaded-paths', String(summary.uploadedPaths));
 	await setOutput(environment, 'reused-blobs', String(summary.reusedBlobs));
@@ -723,7 +721,7 @@ async function publishPushOutputs(
 export function requirePushSummary(
 	results: readonly ReporterResultEvent[],
 	protocol: CupboardResultProtocol = 'result-file'
-): ParsedPushSummary {
+): PushSummary {
 	for (const event of results) {
 		if (event.kind !== pushSummaryResultKind) {
 			continue;
@@ -761,7 +759,7 @@ export function buildPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'push',
-		canonicalHref(options.url),
+		canonicalHref(cacheUrlFor(options.url, options.cache)),
 		...options.paths,
 		'--github-oidc'
 	];
@@ -774,8 +772,6 @@ export function buildPushArguments(
 	if (options.root !== '') {
 		arguments_.push('--root', options.root);
 	}
-
-	arguments_.push(...cacheArguments(options.cache));
 
 	if (options.store !== '') {
 		arguments_.push('--store', options.store);
