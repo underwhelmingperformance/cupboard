@@ -16,6 +16,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CacheRepository } from '../db/cache-repository.ts';
 import { narInfoDeletions } from '../db/schema.ts';
 import { SubrequestTimeoutError } from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
@@ -189,10 +190,14 @@ describe('narinfo deletion queue', () => {
 
 		const rows = await runInDurableObject(currentServer(), (instance) => {
 			const queue = buildDeletionQueue(instance.context);
+			const cacheId = new CacheRepository(instance.context.db).find(
+				defaultCache
+			);
 
 			queue.enqueueNarInfoDeletion(
 				instance.context.db,
 				defaultCache,
+				cacheId,
 				entry.storePathHash,
 				entry.narHash,
 				entry.generation,
@@ -201,23 +206,20 @@ describe('narinfo deletion queue', () => {
 			queue.enqueueNarInfoDeletion(
 				instance.context.db,
 				defaultCache,
+				cacheId,
 				entry.storePathHash,
 				replacement,
 				entry.generation,
 				second
 			);
 
-			return instance.context.db
-				.select()
-				.from(narInfoDeletions)
-				.all()
-				.map((row) => ({ ...row, cacheId: row.cacheId ?? undefined }));
+			return instance.context.db.select().from(narInfoDeletions).all();
 		});
 
 		expect(rows).toStrictEqual([
 			{
 				cache: defaultCache,
-				cacheId: undefined,
+				cacheId: 1,
 				storePathHash: entry.storePathHash,
 				narHash: replacement,
 				generation: entry.generation,

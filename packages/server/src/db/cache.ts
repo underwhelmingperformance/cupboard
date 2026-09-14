@@ -5,6 +5,7 @@ import {
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
 import { type SQL, sql } from 'drizzle-orm';
+import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { z } from 'zod';
 
 /**
@@ -45,6 +46,22 @@ export function cacheIdentityColumns(scope: CacheScope): CacheIdentityColumns {
 	}
 
 	return { cacheKind: 'named', cacheName: scope.name };
+}
+
+/**
+ * Matches the rows for one scope: the default cache by its kind and its null
+ * name, a named cache by its kind and its name.
+ */
+export function cacheIdentityCondition(
+	kind: AnySQLiteColumn,
+	name: AnySQLiteColumn,
+	scope: CacheScope
+): SQL {
+	if (scope.kind === 'default') {
+		return sql`${kind} = 'default' and ${name} is null`;
+	}
+
+	return sql`${kind} = 'named' and ${name} = ${scope.name}`;
 }
 
 /**

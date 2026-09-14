@@ -77,8 +77,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 17,
-			largeBacklogCost: 17
+			emptyBacklogCost: 18,
+			largeBacklogCost: 18
 		});
 	});
 
@@ -214,8 +214,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 43,
-			largeBacklogCost: 43
+			smallBacklogCost: 46,
+			largeBacklogCost: 46
 		});
 	});
 
@@ -225,12 +225,12 @@ describe('maintenance pass cost', () => {
 
 		expect({ smallBacklog, largeBacklog }).toStrictEqual({
 			smallBacklog: {
-				rowsRead: 40,
+				rowsRead: 43,
 				usesIndex: true,
 				sorts: false
 			},
 			largeBacklog: {
-				rowsRead: 40,
+				rowsRead: 43,
 				usesIndex: true,
 				sorts: false
 			}
@@ -267,8 +267,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 39,
-			largeBacklogCost: 39
+			smallBacklogCost: 41,
+			largeBacklogCost: 41
 		});
 	});
 
@@ -299,8 +299,8 @@ describe('maintenance pass cost', () => {
 				rowsWritten: largeBacklog.rowsWritten
 			}
 		}).toStrictEqual({
-			smallBacklog: { rowsRead: 671, rowsWritten: 138 },
-			largeBacklog: { rowsRead: 671, rowsWritten: 138 }
+			smallBacklog: { rowsRead: 673, rowsWritten: 135 },
+			largeBacklog: { rowsRead: 673, rowsWritten: 135 }
 		});
 	});
 
@@ -319,12 +319,15 @@ describe('maintenance pass cost', () => {
 			currentServer().runGarbageCollection()
 		);
 
+		// The seeded roots create the collection revision row through its
+		// triggers, without a cache identity. The first pass binds that row to
+		// the identity, which the second pass then finds bound.
 		expect({
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 52,
-			largeBacklogCost: 52
+			smallBacklogCost: 58,
+			largeBacklogCost: 56
 		});
 	});
 });

@@ -490,6 +490,29 @@ async function hasGraceManagedMarker(cache: string): Promise<boolean> {
 	);
 }
 
+/**
+ * The `grace_managed` flag of every cache identity, keyed by legacy name.
+ */
+async function identityGraceManagedFlags(): Promise<Record<string, boolean>> {
+	const rows = await runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				kind: schema.cacheIdentities.kind,
+				name: schema.cacheIdentities.name,
+				graceManaged: schema.cacheIdentities.graceManaged
+			})
+			.from(schema.cacheIdentities)
+			.all()
+	);
+
+	return Object.fromEntries(
+		rows.map((row) => [
+			row.kind === 'default' ? DEFAULT_CACHE : (row.name ?? ''),
+			row.graceManaged
+		])
+	);
+}
+
 describe('retention grace transitions', () => {
 	beforeEach(resetTestServer);
 
@@ -986,6 +1009,36 @@ describe('retention grace transitions', () => {
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
 			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({ deadlines: [], graceManaged: true });
+	});
+
+	it('sets the grace-managed flag on the cache identity as well as the legacy row', async () => {
+		await useTestServer('transition-identity-flag');
+		const { token } = await bootstrap();
+		await addGracePolicy('', 0);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('6'),
+			name: 'identity-flag'
+		});
+
+		await pushPath(token, path);
+		await setRoot(token, { name: 'channel', targets: [path.storePath] });
+		await removeRoot(token, 'channel');
+		// A cache with no grace decision keeps its flag clear.
+		await authorisedFetch('/caches/builds', token, {
+			body: JSON.stringify({ priority: 30 }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		expect({
+			legacy: await hasGraceManagedMarker(DEFAULT_CACHE),
+			identities: await identityGraceManagedFlags()
+		}).toStrictEqual({
+			legacy: true,
+			identities: { [DEFAULT_CACHE]: true, builds: false }
+		});
 	});
 
 	it('leaves a cache with no matching policy untouched', async () => {

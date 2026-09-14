@@ -2385,17 +2385,31 @@ export class VerificationService {
 			const nextHash = hasWrapped ? '' : (last?.storePathHash ?? fromHash);
 			const now = isoTimestamp(new Date());
 
+			// The cursor's cache is a position in the scan order, not a reference to
+			// a cache. The id comes from the row the pass stopped at; a wrapped
+			// cursor has none, as its legacy name is the empty string. An update
+			// skips an undefined value, so the absent id is an explicit SQL null.
+			const cacheId = hasWrapped
+				? sql`null`
+				: (last?.cacheId ?? cursor?.cacheId ?? sql`null`);
+
 			this.context.db
 				.insert(schema.verificationCursor)
 				.values({
 					id: 'active',
 					cache: nextCache,
+					cacheId,
 					lastStorePathHash: nextHash,
 					updatedAt: now
 				})
 				.onConflictDoUpdate({
 					target: schema.verificationCursor.id,
-					set: { cache: nextCache, lastStorePathHash: nextHash, updatedAt: now }
+					set: {
+						cache: nextCache,
+						cacheId,
+						lastStorePathHash: nextHash,
+						updatedAt: now
+					}
 				})
 				.run();
 
