@@ -174,7 +174,7 @@ export async function authoriseRequest(
 	input: unknown,
 	pathCache: CacheScope | undefined,
 	pendingCache: PendingCacheResolver
-): Promise<void> {
+): Promise<CacheScope | undefined> {
 	if (meta.requires === undefined) {
 		throw new InsufficientScopeError();
 	}
@@ -194,7 +194,7 @@ export async function authoriseRequest(
 			throw new InsufficientScopeError();
 		}
 
-		return;
+		return undefined;
 	}
 
 	if (unresolved) {
@@ -202,12 +202,14 @@ export async function authoriseRequest(
 			throw new InsufficientScopeError();
 		}
 
-		return;
+		return undefined;
 	}
 
 	if (!isCoveredByToken(claims.grants, meta.requires, resource)) {
 		throw new InsufficientScopeError();
 	}
+
+	return resource.cache;
 }
 
 /**

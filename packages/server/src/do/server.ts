@@ -1073,7 +1073,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.uploadState.attachSession(uploadId, sessionId);
 
 			const outcome = await this.metered('commit', (logger) =>
-				this.afterHotMutation(() =>
+				this.afterHotMutation(cache.scope, () =>
 					this.commitPipeline.commit(logger, cache, uploadId, advisory)
 				)
 			);
@@ -1318,7 +1318,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return {
 			authenticate: (request) => this.authKeys.authenticate(request),
 			pendingCache: (id) => this.pendingCache(id),
-			afterMutation: (body) => this.afterMutation(body),
+			afterMutation: (scope, body) => this.afterMutation(scope, body),
 			takeNegotiateHints: (request) => {
 				const token = request.headers.get(negotiateHintsHeader);
 
@@ -1410,20 +1410,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// published. A hard isolate eviction can still interrupt this window. Deferred
 	// verification has its queue request; deletion and time-based maintenance rely
 	// on the projection's staleness backstop until the next scheduler tick.
-	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
+	private async afterMutation<T>(
+		scope: CacheScope | undefined,
+		body: () => Promise<T>
+	): Promise<T> {
 		try {
 			return await body();
 		} finally {
+			this.maintenanceEligibility.invalidateRetirementRecheck(scope);
 			await this.reconcileMaintenanceEligibility();
 		}
 	}
 
 	// Do not delay a commit reply for eligibility publication. Concurrent hot-path
 	// mutations share the same scheduled publication.
-	private async afterHotMutation<T>(body: () => Promise<T>): Promise<T> {
+	private async afterHotMutation<T>(
+		scope: CacheScope,
+		body: () => Promise<T>
+	): Promise<T> {
 		try {
 			return await body();
 		} finally {
+			this.maintenanceEligibility.invalidateRetirementRecheck(scope);
 			this.scheduleMaintenanceReconcile();
 		}
 	}
@@ -1676,9 +1684,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.runGarbagePass(
 			() =>
 				this.metered('garbage-collection', (logger) =>
-					this.withMaintenanceEligibility(() =>
-						this.garbageCollection.collectGarbage(logger, target)
-					)
+					this.withMaintenanceEligibility(async () => {
+						const outcome = await this.garbageCollection.collectGarbage(
+							logger,
+							target
+						);
+
+						const recheck = outcome.retirementRecheck;
+						if (
+							target.scope === 'tenant' &&
+							recheck?.cacheGraphComplete === true &&
+							!recheck.pendingExpiryBacklog &&
+							!this.deletionQueue.hasQueuedNarInfoDeletions()
+						) {
+							this.maintenanceEligibility.completeRetirementRecheck(
+								recheck.cacheId,
+								recheck
+							);
+						}
+
+						return outcome;
+					})
 				),
 			continuation
 		);
@@ -1849,24 +1875,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const origin = await this.reconcileQueue.origin();
 
-		const deferred = await this.metered('reconcile', (logger) =>
-			this.withMaintenanceEligibility(() =>
-				this.verification.reconcileTargets(
+		const clearedCount = await this.metered('reconcile', (logger) =>
+			this.withMaintenanceEligibility(async () => {
+				const deferred = await this.verification.reconcileTargets(
 					logger,
 					queued.values().toArray(),
 					origin
-				)
-			)
-		);
-		const deferredKeys = new Set(
-			deferred.map((target) => this.reconcileQueue.entryKey(target))
-		);
-		const cleared = queued
-			.keys()
-			.filter((key) => !deferredKeys.has(key))
-			.toArray();
+				);
+				const deferredKeys = new Set(
+					deferred.map((target) => this.reconcileQueue.entryKey(target))
+				);
+				const clearedTargets = queued
+					.entries()
+					.filter(([key]) => !deferredKeys.has(key))
+					.toArray();
 
-		await this.reconcileQueue.clearKeys(cleared);
+				try {
+					await this.reconcileQueue.clearKeys(
+						clearedTargets.map(([key]) => key)
+					);
+				} finally {
+					const clearedCacheIds = new Set(
+						clearedTargets.map(([, target]) => target.cacheId)
+					);
+					for (const cacheId of clearedCacheIds) {
+						this.maintenanceEligibility.invalidateRetirementRecheck(cacheId);
+					}
+				}
+
+				return clearedTargets.length;
+			})
+		);
 
 		if (!(await this.reconcileQueue.hasPending())) {
 			await this.reconcileQueue.clearOrigin();
@@ -1874,7 +1913,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return 'progressed';
 		}
 
-		if (cleared.length === 0) {
+		if (clearedCount === 0) {
 			return 'stalled';
 		}
 

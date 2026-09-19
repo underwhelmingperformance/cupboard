@@ -783,10 +783,19 @@ export class CacheAdminService {
 				);
 				this.context.db
 					.insert(schema.managedCacheRetirements)
-					.values({ cacheId: cache.id, eligibleAfter })
+					.values({
+						cacheId: cache.id,
+						eligibleAfter,
+						incarnation: crypto.randomUUID(),
+						nextCheckAt: eligibleAfter
+					})
 					.onConflictDoUpdate({
 						target: schema.managedCacheRetirements.cacheId,
-						set: { eligibleAfter }
+						set: {
+							eligibleAfter,
+							nextCheckAt: eligibleAfter,
+							revision: sql`${schema.managedCacheRetirements.revision} + 1`
+						}
 					})
 					.run();
 			} else {
@@ -820,7 +829,7 @@ export class CacheAdminService {
 			.where(
 				and(
 					eq(schema.managedCacheRetirements.cacheId, cache.id),
-					lte(schema.managedCacheRetirements.eligibleAfter, now)
+					lte(schema.managedCacheRetirements.nextCheckAt, now)
 				)
 			)
 			.get();

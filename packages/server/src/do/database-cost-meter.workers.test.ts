@@ -149,8 +149,9 @@ describe('db cost meter', () => {
 		// compare a store path against a bound list, and SQLite counts each element
 		// it reads from that list as a row, so a one-path negotiation reads two
 		// rows more than its table rows. One further row is the cache identity the
-		// request resolves before it negotiates anything. The request checks that
-		// the cache is still live before it inserts the pending upload.
+		// request resolves before it negotiates anything. The request also probes
+		// for a managed retirement before eligibility reconciliation, then checks
+		// that the cache is still live before it inserts the pending upload.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -162,9 +163,41 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 19,
+			rowsRead: 22,
 			rowsWritten: 7
 		});
+	});
+
+	it('updates the retirement revision for an opted-in cache', async () => {
+		const token = await initialise();
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.managedCacheRetirements)
+				.values({
+					cacheId: resolvedCache(instance.context).id,
+					eligibleAfter: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
+				})
+				.run();
+		});
+
+		const capture = startCapture();
+
+		try {
+			await negotiateUploads(token, [uploadMetadata({ fileSize: 1 })]);
+		} finally {
+			capture.stop();
+		}
+
+		const negotiate = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => costLineSchema.parse(entry.properties))
+			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
+
+		expect({
+			status: negotiate?.status,
+			rowsRead: negotiate?.rowsRead,
+			rowsWritten: negotiate?.rowsWritten
+		}).toStrictEqual({ status: StatusCodes.OK, rowsRead: 22, rowsWritten: 9 });
 	});
 
 	it('logs the cost line with a 500 status when the request fails', async () => {
@@ -203,7 +236,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 19,
+			rowsRead: 22,
 			rowsWritten: 0
 		});
 	});
