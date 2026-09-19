@@ -163,6 +163,68 @@ describe('isRetirementEnabled', () => {
 });
 
 describe('runCacheList', () => {
+	it('directs readers to inspect compact cache entries for retention overrides', async () => {
+		const results: ResultRow[][] = [];
+		const { rootRetentionOverrides: _overrides, ...compact } = cacheSummary({
+			scope: { kind: 'named', name: 'builds' },
+			access: 'public',
+			priority: 30,
+			storePaths: 0
+		});
+
+		await runCacheList(reporter(results), {
+			list: () => Promise.resolve({ caches: [compact] })
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{
+					label: 'builds',
+					value:
+						'public; priority 30; 0 path(s); default root retention permanent; grace none; root retention overrides: use cache inspect'
+				}
+			]
+		]);
+	});
+
+	it('reads every page before reporting caches', async () => {
+		const calls: unknown[] = [];
+		const results: ResultRow[][] = [];
+		const first = cacheSummary({
+			scope: { kind: 'named', name: 'first' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0,
+			graceManaged: false
+		});
+		const second = cacheSummary({
+			scope: { kind: 'named', name: 'second' },
+			access: 'public',
+			priority: 40,
+			storePaths: 0,
+			graceManaged: false
+		});
+
+		await runCacheList(reporter(results), {
+			list: (input) => {
+				calls.push(input);
+				return Promise.resolve(
+					input === undefined
+						? { caches: [first], cursor: '1' }
+						: { caches: [second] }
+				);
+			}
+		});
+
+		expect({
+			calls,
+			labels: results[0]?.map((row) => row.label)
+		}).toStrictEqual({
+			calls: [undefined, { cursor: '1' }],
+			labels: ['first', 'second']
+		});
+	});
+
 	it('reports a row per cache, labelling the default and its grace state', async () => {
 		const results: ResultRow[][] = [];
 		const response = {

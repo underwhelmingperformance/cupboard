@@ -108,7 +108,6 @@ describe('tenant contract round trip', () => {
 						storePaths: 0,
 						defaultRootRetention: { kind: 'permanent' },
 						grace: { kind: 'none' },
-						rootRetentionOverrides: [],
 						graceManaged: false
 					},
 					{
@@ -118,7 +117,6 @@ describe('tenant contract round trip', () => {
 						storePaths: 0,
 						defaultRootRetention: { kind: 'duration', seconds: 3600 },
 						grace: { kind: 'duration', graceSeconds: 60 },
-						rootRetentionOverrides: [],
 						graceManaged: false
 					}
 				]

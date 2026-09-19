@@ -540,7 +540,6 @@ describe('upload flow', () => {
 					storePaths: 1,
 					defaultRootRetention: { kind: 'permanent' },
 					grace: { kind: 'none' },
-					rootRetentionOverrides: [],
 					graceManaged: false
 				}
 			]);

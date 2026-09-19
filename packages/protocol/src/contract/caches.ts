@@ -2,6 +2,7 @@ import { cacheNameSchema, cacheScopeSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
+	cacheListInputSchema,
 	cacheListResponseSchema,
 	cachePutBodySchema,
 	cacheRemoveResponseSchema,
@@ -36,6 +37,8 @@ export const cachesContract = {
 	list: baseProcedure
 		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/caches' })
+		.input(cacheListInputSchema)
+		.errors({ CACHE_LISTING_PROJECTION_PENDING: { status: 503 } })
 		.output(cacheListResponseSchema),
 	get: {
 		inDefaultCache: baseProcedure

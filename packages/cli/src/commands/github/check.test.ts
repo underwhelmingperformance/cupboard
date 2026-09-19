@@ -138,12 +138,17 @@ function checkClient(overrides: {
 	rules?: OidcTrustSummaryInput[];
 	views?: ReuseViewSummaryInput[];
 	caches?: CacheSummaryInput[];
+	cachePages?: { caches: CacheSummaryInput[]; cursor?: string }[];
 }): GithubCheckClient {
 	return {
 		caches: {
-			list: () =>
+			list: (input) =>
 				Promise.resolve(
-					cacheListResponseSchema.parse({ caches: overrides.caches ?? [] })
+					cacheListResponseSchema.parse(
+						overrides.cachePages?.[input?.cursor === undefined ? 0 : 1] ?? {
+							caches: overrides.caches ?? []
+						}
+					)
 				)
 		},
 		reuseViews: {
@@ -361,6 +366,48 @@ describe('runGithubCheck', () => {
 					label: 'pull-request cache access',
 					value:
 						'failed: gh-1234-pr-1 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
+				},
+				{ label: 'root prefix', value: 'ok' }
+			]
+		});
+	});
+
+	it('checks pull-request cache access on later listing pages', async () => {
+		const results: ResultRow[][] = [];
+		let failure: unknown;
+
+		try {
+			await runGithubCheck(
+				url,
+				options,
+				reporter(results),
+				checkClient({
+					rules: [prRule, branchRule],
+					cachePages: [
+						{
+							caches: [pullRequestCache('gh-1234-pr-1', 'public')],
+							cursor: 'gh-1234-pr-1'
+						},
+						{ caches: [pullRequestCache('gh-1234-pr-2', 'private')] }
+					]
+				}),
+				checkDependencies({})
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectFailed(failure);
+		expect({ checks: failure.checks, rows: findings(results) }).toStrictEqual({
+			checks: ['pull-request cache access'],
+			rows: [
+				{ label: 'pull-request trust rule', value: 'ok' },
+				{ label: 'main trust rule', value: 'ok' },
+				{ label: 'reuse view', value: 'ok' },
+				{
+					label: 'pull-request cache access',
+					value:
+						'failed: gh-1234-pr-2 is private; the pull-requests-1234 view aggregates only public caches, so the view never serves it'
 				},
 				{ label: 'root prefix', value: 'ok' }
 			]

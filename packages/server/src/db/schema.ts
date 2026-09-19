@@ -115,6 +115,63 @@ export const managedCacheRetirements = sqliteTable('managed_cache_retirement', {
 	eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull()
 });
 
+export const cacheListingProjectionMigration = sqliteTable(
+	'cache_listing_projection_migration',
+	{
+		id: integer('id').primaryKey(),
+		narinfoInitialRowidHighWater: integer(
+			'narinfo_initial_rowid_high_water'
+		).notNull(),
+		narinfoCursor: integer('narinfo_cursor').notNull(),
+		narinfoComplete: integer('narinfo_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false),
+		graceInitialRowidHighWater: integer(
+			'grace_initial_rowid_high_water'
+		).notNull(),
+		graceCursor: integer('grace_cursor').notNull(),
+		graceComplete: integer('grace_complete', { mode: 'boolean' })
+			.notNull()
+			.default(false)
+	},
+	(table) => [
+		check('cache_listing_projection_migration_id_check', sql`${table.id} = 1`),
+		check(
+			'cache_listing_projection_narinfo_cursor_check',
+			sql`${table.narinfoCursor} BETWEEN 0 AND ${table.narinfoInitialRowidHighWater}`
+		),
+		check(
+			'cache_listing_projection_grace_cursor_check',
+			sql`${table.graceCursor} BETWEEN 0 AND ${table.graceInitialRowidHighWater}`
+		)
+	]
+);
+
+export const cacheNarInfoCounts = sqliteTable(
+	'cache_narinfo_count',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		count: integer('count').notNull()
+	},
+	(table) => [
+		check('cache_narinfo_count_nonnegative_check', sql`${table.count} >= 0`)
+	]
+);
+
+export const retentionGraceByDeadline = sqliteTable(
+	'retention_grace_by_deadline',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().notNull(),
+		retainUntil: text('retain_until').$type<IsoTimestamp>().notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [table.cacheId, table.retainUntil, table.storePathHash]
+		})
+	]
+);
+
 export const rootRetentionRuleSets = sqliteTable(
 	'root_retention_rule_set',
 	{
@@ -345,6 +402,7 @@ export const pendingAttestations = sqliteTable(
 	// checks listed staging keys for their owners. The indexes spare scans of
 	// every staged bundle.
 	(table) => [
+		index('pending_attestation_cache_id_idx').on(table.cacheId),
 		index('pending_attestation_expires_at_idx').on(table.expiresAt),
 		index('pending_attestation_r2_key_idx').on(table.r2Key)
 	]

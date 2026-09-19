@@ -400,7 +400,7 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 
 		// The predecessor seeded retention policies for the default cache and
 		// `builds`, a `pr/` root-prefix policy, and grace policies for the empty
-		// and `builds` cache-name prefixes. Each cache now holds the retention
+		// and `builds` cache-name prefixes. Each cache now has the retention
 		// those policies gave it and refers to the shared prefix rule set.
 		expect(await server.tenantCaches('upgrade-active')).toStrictEqual({
 			caches: [
@@ -411,12 +411,6 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					storePaths: 0,
 					defaultRootRetention: { kind: 'duration', seconds: 1_209_600 },
 					grace: { kind: 'duration', graceSeconds: 3600 },
-					rootRetentionOverrides: [
-						{
-							rootPrefix: 'pr/',
-							retention: { kind: 'duration', seconds: 86_400 }
-						}
-					],
 					graceManaged: true
 				},
 				{
@@ -429,12 +423,6 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					// The grace deadline the predecessor recorded for this cache's one
 					// path, which the retention move leaves alone.
 					earliestGraceDeadline: '2099-01-01T00:00:00.000Z',
-					rootRetentionOverrides: [
-						{
-							rootPrefix: 'pr/',
-							retention: { kind: 'duration', seconds: 86_400 }
-						}
-					],
 					graceManaged: true
 				},
 				{
@@ -446,16 +434,42 @@ it('gives each cache the retention its legacy policies granted it', async () => 
 					// A private cache took no grace from a cache-prefix policy, so it
 					// keeps none here.
 					grace: { kind: 'none' },
-					rootRetentionOverrides: [
-						{
-							rootPrefix: 'pr/',
-							retention: { kind: 'duration', seconds: 86_400 }
-						}
-					],
 					graceManaged: true
 				}
 			]
 		});
+
+		const rpc = await server.tenantOwnerRpc('upgrade-active');
+		const details = await Promise.all([
+			rpc.caches.get.inDefaultCache({}),
+			rpc.caches.get.inNamedCache({
+				cacheName: cacheNameSchema.parse('builds')
+			}),
+			rpc.caches.get.inNamedCache({
+				cacheName: cacheNameSchema.parse('secrets')
+			})
+		]);
+
+		expect(
+			details.map(({ scope, rootRetentionOverrides }) => ({
+				scope,
+				rootRetentionOverrides
+			}))
+		).toStrictEqual(
+			[
+				{ kind: 'default' },
+				{ kind: 'named', name: 'builds' },
+				{ kind: 'named', name: 'secrets' }
+			].map((scope) => ({
+				scope,
+				rootRetentionOverrides: [
+					{
+						rootPrefix: 'pr/',
+						retention: { kind: 'duration', seconds: 86_400 }
+					}
+				]
+			}))
+		);
 	} finally {
 		await server.stop();
 	}
@@ -522,9 +536,9 @@ it('lets a pull-request token create its cache on an upgraded tenant', async () 
 
 		const client = await server.deploymentClient();
 
-		await client.wakeLocalStep(wakeLimit);
+		await wakeUntilStep(server, client, expansionLocalStep);
 		await contractOverPredecessor(server);
-		await client.wakeLocalStep(wakeLimit);
+		await wakeUntilStep(server, client, currentLocalStep);
 
 		const owner = await server.tenantOwnerRpc('upgrade-active');
 		const tenantUrl = server.tenantUrl('upgrade-active');

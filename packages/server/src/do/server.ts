@@ -125,6 +125,7 @@ import {
 import { localMigrationBudget } from './bounded-migration.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
+import { CacheListingProjection } from './cache-listing-projection.ts';
 import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { CacheRegistrationService } from './cache-registration-service.ts';
 import {
@@ -272,6 +273,7 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
+	| 'cache-listing-projection'
 	| 'garbage-collection'
 	| 'managed-retirement'
 	| 'reconcile'
@@ -465,6 +467,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly reuseLookup: ReuseViewLookupService;
 	private readonly integrityCheck: IntegrityCheckService;
 	private readonly cacheAdmin: CacheAdminService;
+	private readonly cacheListingProjection: CacheListingProjection;
 	private readonly cacheRegistration: CacheRegistrationService;
 	private readonly garbageCollection: GarbageCollectionService;
 	private readonly tokenExchange: TokenExchangeService;
@@ -481,6 +484,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		super(ctx, env);
 		this.context = new ServerContext(ctx, env);
 		this.maintenanceRetry = new MaintenanceRetrySchedule(ctx.storage);
+		this.cacheListingProjection = new CacheListingProjection(this.context);
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
@@ -1585,6 +1589,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				contraction.stage
 			);
 		}
+
+		if (this.cacheListingProjection.hasPending()) {
+			await this.ctx.storage.setAlarm(Date.now());
+		}
+
 		this.context.grantsContracted =
 			this.context.db
 				.select({ complete: schema.grantContraction.complete })
@@ -2050,6 +2059,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	 */
 	private maintenancePasses(logger: Logger): readonly MaintenancePass[] {
 		return [
+			{
+				key: 'cache-listing-projection',
+				hasWork: () =>
+					Promise.resolve(this.cacheListingProjection.hasPending()),
+				run: () => {
+					this.cacheListingProjection.advance();
+					return Promise.resolve('progressed');
+				}
+			},
 			{
 				key: 'reconcile',
 				hasWork: () => this.reconcileQueue.hasPending(),

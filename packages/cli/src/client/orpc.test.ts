@@ -805,8 +805,7 @@ describe('tenantRpc', () => {
 					['caches', 0, 'priority'],
 					['caches', 0, 'storePaths'],
 					['caches', 0, 'defaultRootRetention'],
-					['caches', 0, 'grace'],
-					['caches', 0, 'rootRetentionOverrides']
+					['caches', 0, 'grace']
 				]
 			});
 		}

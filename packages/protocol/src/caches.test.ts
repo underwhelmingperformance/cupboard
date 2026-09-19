@@ -147,6 +147,14 @@ describe('cache schemas', () => {
 		});
 	});
 
+	it('accepts compact list entries and legacy entries with retention overrides', () => {
+		const { rootRetentionOverrides: _overrides, ...compact } = summary;
+
+		expect(
+			cacheListResponseSchema.parse({ caches: [compact, summary] })
+		).toStrictEqual({ caches: [compact, summary] });
+	});
+
 	it('rejects a put body without a priority', () => {
 		expect(cachePutBodySchema.safeParse({}).success).toBe(false);
 	});
