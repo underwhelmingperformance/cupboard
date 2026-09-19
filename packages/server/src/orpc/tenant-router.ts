@@ -37,7 +37,7 @@ const os = implement(tenantContract)
 	.use(async ({ context, procedure, next }, input) => {
 		const claims = await context.services.authenticate(context.request);
 
-		await authoriseRequest(
+		const maintenanceCache = await authoriseRequest(
 			claims,
 			procedure['~orpc'].meta,
 			input,
@@ -45,11 +45,13 @@ const os = implement(tenantContract)
 			context.services.pendingCache
 		);
 
-		return next({ context: { claims } });
+		return next({ context: { claims, maintenanceCache } });
 	})
 	.use(({ context, procedure, next }) =>
 		procedure['~orpc'].meta.maintenance === true
-			? context.services.afterMutation(async () => next())
+			? context.services.afterMutation(context.maintenanceCache, async () =>
+					next()
+				)
 			: next()
 	);
 

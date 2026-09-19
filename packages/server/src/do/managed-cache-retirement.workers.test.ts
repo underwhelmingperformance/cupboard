@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	cacheGenerationSchema,
 	type CacheScope,
@@ -167,7 +168,10 @@ async function makeRetirementDue(
 
 		instance.context.db
 			.update(schema.managedCacheRetirements)
-			.set({ eligibleAfter: isoTimestamp(new Date(expiredDeadline)) })
+			.set({
+				eligibleAfter: isoTimestamp(new Date(expiredDeadline)),
+				nextCheckAt: isoTimestamp(new Date(expiredDeadline))
+			})
 			.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
 			.run();
 	});
@@ -551,7 +555,7 @@ describe('managed cache retirement', () => {
 		const plan = await runInDurableObject(currentServer(), (_instance, state) =>
 			Array.from(
 				state.storage.sql.exec<{ detail: string }>(
-					'EXPLAIN QUERY PLAN SELECT eligible_after FROM managed_cache_retirement ORDER BY eligible_after LIMIT 1'
+					'EXPLAIN QUERY PLAN SELECT next_check_at FROM managed_cache_retirement ORDER BY next_check_at LIMIT 1'
 				),
 				(row) => row.detail
 			)
@@ -570,8 +574,311 @@ describe('managed cache retirement', () => {
 			scheduledWakeAt: summary.retirementEligibleAfter,
 			dueWakeAt: summary.retirementEligibleAfter,
 			plan: [
-				'SCAN managed_cache_retirement USING COVERING INDEX managed_cache_retirement_eligible_after_idx'
+				'SCAN managed_cache_retirement USING COVERING INDEX managed_cache_retirement_next_check_at_idx'
 			]
+		});
+	});
+
+	it('bounds rechecks of an overdue cache blocked by a permanent root', async () => {
+		const token = await createManagedCache('managed-retirement-permanent-root');
+		await makeRetirementDue();
+		await seedEligibilityBlocker(`INSERT INTO retention_root
+			(cache_id, name, expires_at, created_at, updated_at)
+			VALUES (?, 'permanent', NULL, '2026-01-01T00:00:00.000Z',
+				'2026-01-01T00:00:00.000Z')`);
+
+		await scheduleRetirement();
+		expect(await maintenanceWakeAt()).toBe(expiredDeadline);
+		await driveRetirementPasses();
+		const capture = startCapture();
+		try {
+			await scheduleRetirement();
+		} finally {
+			capture.stop();
+		}
+		const steadyPassCost = capture.logs
+			.filter(
+				(entry) =>
+					entry.message === 'method finished' &&
+					entry.properties.method === 'garbage-collection'
+			)
+			.map((entry) => entry.properties);
+
+		expect({
+			cacheLive: await isCacheLive(),
+			wake: await maintenanceWakeAt(),
+			steadyPassCost
+		}).toStrictEqual({
+			cacheLive: true,
+			wake: '2026-01-01T06:00:00.000Z',
+			steadyPassCost: [
+				{ method: 'garbage-collection', rowsRead: 182, rowsWritten: 8 }
+			]
+		});
+
+		const removed = await authorisedFetch(
+			'/cache/pr-1/roots/permanent',
+			token,
+			{
+				method: 'DELETE'
+			}
+		);
+
+		expect({
+			status: removed.status,
+			body: await removed.json(),
+			wake: await maintenanceWakeAt()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			body: { name: 'permanent', removed: true },
+			wake: expiredDeadline
+		});
+	});
+
+	it('does not stage a blocked retirement again before its next check', async () => {
+		const token = await createManagedCache('managed-retirement-deferred-claim');
+		await makeRetirementDue();
+		await seedEligibilityBlocker(`INSERT INTO retention_root
+			(cache_id, name, expires_at, created_at, updated_at)
+			VALUES (?, 'permanent', NULL, '2026-01-01T00:00:00.000Z',
+				'2026-01-01T00:00:00.000Z')`);
+
+		await scheduleRetirement();
+		await driveRetirementPasses();
+		await scheduleRetirement();
+		await withoutAlarmArming(runAlarm);
+		await scheduleRetirement();
+
+		expect({
+			wake: await maintenanceWakeAt(),
+			claims: await retirementClaims()
+		}).toStrictEqual({
+			wake: '2026-01-01T06:00:00.000Z',
+			claims: []
+		});
+
+		const removed = await authorisedFetch(
+			'/cache/pr-1/roots/permanent',
+			token,
+			{ method: 'DELETE' }
+		);
+		await scheduleRetirement();
+
+		expect({
+			removed: removed.status,
+			wake: await maintenanceWakeAt(),
+			claims: await retirementClaims()
+		}).toStrictEqual({
+			removed: StatusCodes.OK,
+			wake: '2026-01-01T06:00:00.000Z',
+			claims: [{ cacheId: 2, scope: managedCache, generation: 1 }]
+		});
+	});
+
+	it('wakes for a later cache before retrying a blocked retirement', async () => {
+		const token = await createManagedCache('managed-retirement-later-wake');
+		await makeRetirementDue();
+		await addManagedCache(token, secondManagedCache);
+		const nextDeadline = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const cache =
+					instance.context.cacheRepository.require(secondManagedCache);
+
+				return instance.context.db
+					.select({
+						eligibleAfter: schema.managedCacheRetirements.eligibleAfter
+					})
+					.from(schema.managedCacheRetirements)
+					.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+					.get()?.eligibleAfter;
+			}
+		);
+		await seedEligibilityBlocker(`INSERT INTO retention_root
+			(cache_id, name, expires_at, created_at, updated_at)
+			VALUES (?, 'permanent', NULL, '2026-01-01T00:00:00.000Z',
+				'2026-01-01T00:00:00.000Z')`);
+
+		await scheduleRetirement();
+		await driveRetirementPasses();
+		await scheduleRetirement();
+		await scheduleRetirement();
+		const wakeBeforeMutation = await maintenanceWakeAt();
+		const before = await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(managedCache);
+
+			return instance.context.db
+				.select({
+					revision: schema.managedCacheRetirements.revision,
+					nextCheckAt: schema.managedCacheRetirements.nextCheckAt
+				})
+				.from(schema.managedCacheRetirements)
+				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+				.get();
+		});
+		const updated = await authorisedFetch('/caches/pr-2/retirement', token, {
+			body: JSON.stringify({ retireWhenEmpty: true }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		const updatedSummary = await updated.json<{
+			retirementEligibleAfter: string;
+		}>();
+		const after = await runInDurableObject(currentServer(), (instance) => {
+			const cache = instance.context.cacheRepository.require(managedCache);
+
+			return instance.context.db
+				.select({
+					revision: schema.managedCacheRetirements.revision,
+					nextCheckAt: schema.managedCacheRetirements.nextCheckAt
+				})
+				.from(schema.managedCacheRetirements)
+				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+				.get();
+		});
+
+		expect({
+			updated: updated.status,
+			before,
+			after,
+			wakeBeforeMutation,
+			wakeAfterMutation: await maintenanceWakeAt()
+		}).toStrictEqual({
+			updated: StatusCodes.OK,
+			before: {
+				revision: 1,
+				nextCheckAt: '2026-01-01T06:00:00.000Z'
+			},
+			after: before,
+			wakeBeforeMutation: nextDeadline,
+			wakeAfterMutation: updatedSummary.retirementEligibleAfter
+		});
+	});
+
+	it('revisits a due cache after a bounded upload expiry spans caches', async () => {
+		const token = await createManagedCache('managed-retirement-expiry-backlog');
+		await addManagedCache(token, secondManagedCache);
+		await makeRetirementDue();
+		await runInDurableObject(currentServer(), (instance, state) => {
+			const cache = instance.context.cacheRepository.require(managedCache);
+			state.storage.sql.exec(
+				`INSERT INTO garbage_collection_tenant_run (id, cache_id) VALUES (1, ?)
+				ON CONFLICT (id) DO UPDATE SET cache_id = excluded.cache_id`,
+				cache.id
+			);
+			state.storage.sql.exec(
+				`WITH RECURSIVE seq(n) AS (
+					SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 1001
+				)
+				INSERT INTO pending_upload
+					(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at)
+				SELECT 'expired-' || n, ?, 'sha256:hash',
+					'nar/sha256:hash.nar.zst', '{}',
+					'2025-01-01T00:00:00.000Z', '2025-01-02T00:00:00.000Z'
+				FROM seq`,
+				cache.id
+			);
+		});
+
+		await scheduleRetirement();
+		const afterFirst = await pendingWorkState();
+		await scheduleRetirement();
+		const afterSecond = await pendingWorkState();
+		const dueWake = await maintenanceWakeAt();
+		await scheduleRetirement();
+		await scheduleRetirement();
+		await driveRetirementPasses();
+
+		expect({
+			afterFirst: afterFirst.uploads,
+			afterSecond: afterSecond.uploads,
+			dueWake,
+			cacheLive: await isCacheLive()
+		}).toStrictEqual({
+			afterFirst: 1,
+			afterSecond: 0,
+			dueWake: expiredDeadline,
+			cacheLive: false
+		});
+	});
+
+	it('keeps a due wake when a mutation overlaps completion of a scan', async () => {
+		await createManagedCache('managed-retirement-concurrent-mutation');
+		await makeRetirementDue();
+		await runInDurableObject(currentServer(), async (instance) => {
+			const eligibility = new MaintenanceEligibilityService(instance.context);
+			const cache = instance.context.cacheRepository.require(
+				namedCache('pr-1')
+			);
+			const observedRevision = eligibility.retirementRevision(cache.id);
+			if (observedRevision === undefined) {
+				throw new Error('Expected a due managed retirement.');
+			}
+
+			eligibility.invalidateRetirementRecheck(cache.id);
+			eligibility.completeRetirementRecheck(cache.id, observedRevision);
+			await eligibility.reconcile();
+		});
+
+		expect(await maintenanceWakeAt()).toBe(expiredDeadline);
+	});
+
+	it('does not defer a new opt-in after an old scan completes', async () => {
+		await createManagedCache('managed-retirement-reopt-in');
+		await makeRetirementDue();
+		const state = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const cache = instance.context.cacheRepository.require(managedCache);
+				const eligibility = new MaintenanceEligibilityService(instance.context);
+				const observed = eligibility.retirementRevision(cache.id);
+				if (observed === undefined) {
+					throw new Error('Expected a due managed retirement.');
+				}
+
+				const incarnation = crypto.randomUUID();
+				instance.context.db
+					.delete(schema.managedCacheRetirements)
+					.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+					.run();
+				instance.context.db
+					.insert(schema.managedCacheRetirements)
+					.values({
+						cacheId: cache.id,
+						eligibleAfter: isoTimestamp(new Date(expiredDeadline)),
+						nextCheckAt: isoTimestamp(new Date(expiredDeadline)),
+						incarnation,
+						revision: observed.revision
+					})
+					.run();
+				eligibility.completeRetirementRecheck(cache.id, observed);
+				await eligibility.reconcile();
+
+				return {
+					retirement: instance.context.db
+						.select({
+							incarnation: schema.managedCacheRetirements.incarnation,
+							revision: schema.managedCacheRetirements.revision,
+							nextCheckAt: schema.managedCacheRetirements.nextCheckAt
+						})
+						.from(schema.managedCacheRetirements)
+						.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+						.get(),
+					expected: {
+						incarnation,
+						revision: observed.revision,
+						nextCheckAt: expiredDeadline
+					}
+				};
+			}
+		);
+
+		expect({
+			retirement: state.retirement,
+			wake: await maintenanceWakeAt()
+		}).toStrictEqual({
+			retirement: state.expected,
+			wake: expiredDeadline
 		});
 	});
 
@@ -739,6 +1046,62 @@ describe('managed cache retirement', () => {
 			isCacheLive: true,
 			claims: [],
 			reconcilePending: true
+		});
+	});
+
+	it('re-arms a deferred cache when reconciliation clears its last target', async () => {
+		await createManagedCache('managed-retirement-reconcile-wake');
+		await makeRetirementDue();
+		await withoutAlarmArming(() =>
+			runInDurableObject(currentServer(), async (instance, state) => {
+				const cache = instance.context.cacheRepository.require(managedCache);
+				const queue = new ReconcileQueueService(instance.context);
+				await queue.enqueue(origin, [
+					{
+						cacheId: cache.id,
+						storePathHash: storePathHashSchema.parse('1'.repeat(32))
+					}
+				]);
+				state.storage.sql.exec(
+					`INSERT INTO garbage_collection_tenant_run (id, cache_id) VALUES (1, ?)
+					ON CONFLICT (id) DO UPDATE SET cache_id = excluded.cache_id`,
+					cache.id
+				);
+			})
+		);
+		await scheduleRetirement();
+		const deferredWake = await maintenanceWakeAt();
+		await stageRetirementClaim();
+		await runInDurableObject(currentServer(), async (_instance, state) => {
+			await state.storage.put(maintenancePassCursorKey, 'teardown');
+		});
+		await withoutAlarmArming(runAlarm);
+		const afterClaim = {
+			cacheLive: await isCacheLive(),
+			claims: await retirementClaims()
+		};
+		await withoutAlarmArming(runAlarm);
+		const hasPendingReconciliation = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				const cache = instance.context.cacheRepository.require(managedCache);
+
+				return new ReconcileQueueService(instance.context).hasPendingForCache(
+					cache.id
+				);
+			}
+		);
+
+		expect({
+			deferredWake,
+			afterClaim,
+			hasPendingReconciliation,
+			wakeAfterReconciliation: await maintenanceWakeAt()
+		}).toStrictEqual({
+			deferredWake: '2026-01-01T06:00:00.000Z',
+			afterClaim: { cacheLive: true, claims: [] },
+			hasPendingReconciliation: false,
+			wakeAfterReconciliation: expiredDeadline
 		});
 	});
 

@@ -1452,6 +1452,22 @@ export class GarbageCollectionService {
 						hasMoreWork: false
 					}
 				: this.collectUnreachable(collectionCache, now);
+		const retirementRecheck =
+			collectionCache === undefined
+				? undefined
+				: this.context.db
+						.select({
+							incarnation: schema.managedCacheRetirements.incarnation,
+							revision: schema.managedCacheRetirements.revision
+						})
+						.from(schema.managedCacheRetirements)
+						.where(
+							and(
+								eq(schema.managedCacheRetirements.cacheId, collectionCache.id),
+								lte(schema.managedCacheRetirements.eligibleAfter, now)
+							)
+						)
+						.get();
 		const hasMoreCollectionWork =
 			collectionCache !== undefined &&
 			!collected.hasMoreWork &&
@@ -1502,6 +1518,15 @@ export class GarbageCollectionService {
 		);
 
 		return {
+			...(retirementRecheck !== undefined &&
+				collectionCache !== undefined && {
+					retirementRecheck: {
+						cacheId: collectionCache.id,
+						...retirementRecheck,
+						cacheGraphComplete: !collected.hasMoreWork,
+						pendingExpiryBacklog: hasMorePendingRows
+					}
+				}),
 			pendingUploadsDeleted: expiredUploads.length,
 			pendingAttestationsDeleted: expiredAttestations.length,
 			rootsExpired: collected.rootsExpired,

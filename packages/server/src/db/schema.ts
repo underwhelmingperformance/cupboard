@@ -24,7 +24,7 @@ import type {
 	ReuseViewPriority,
 	ReuseViewRevision
 } from '@cupboard/protocol/reuse-views';
-import type { IsoTimestamp } from '@cupboard/protocol/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import { type SQL, sql, type SQLWrapper } from 'drizzle-orm';
 import {
@@ -110,14 +110,25 @@ export const cacheIdentities = sqliteTable(
 	]
 );
 
+const initialManagedRetirementCheckAt = isoTimestamp(new Date(0));
+
 export const managedCacheRetirements = sqliteTable(
 	'managed_cache_retirement',
 	{
 		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
-		eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull()
+		eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull(),
+		incarnation: text('incarnation').notNull().default(''),
+		revision: integer('revision').notNull().default(0),
+		nextCheckAt: text('next_check_at')
+			.$type<IsoTimestamp>()
+			.notNull()
+			.default(initialManagedRetirementCheckAt)
 	},
 	(table) => [
-		index('managed_cache_retirement_eligible_after_idx').on(table.eligibleAfter)
+		index('managed_cache_retirement_eligible_after_idx').on(
+			table.eligibleAfter
+		),
+		index('managed_cache_retirement_next_check_at_idx').on(table.nextCheckAt)
 	]
 );
 

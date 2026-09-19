@@ -33,7 +33,10 @@ export interface TenantRpcServices {
 	pendingCache: PendingCacheResolver;
 	// Reconcile maintenance eligibility before a mutation returns. Concurrent
 	// calls share one reconciliation, and an unchanged wake time avoids a D1 write.
-	afterMutation<T>(body: () => Promise<T>): Promise<T>;
+	afterMutation<T>(
+		scope: CacheScope | undefined,
+		body: () => Promise<T>
+	): Promise<T>;
 	// Takes the Worker-staged negotiate hints the request's token header
 	// references, at most once; absent, unknown or expired tokens read as no
 	// hints and negotiate falls back to its own D1 reads.

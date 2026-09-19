@@ -43,7 +43,7 @@ import {
 	PushCredentialIssuer,
 	pushIdSigningKey
 } from '../blob/push-credential.ts';
-import type { ResolvedCache } from '../db/cache.ts';
+import type { CacheId, ResolvedCache } from '../db/cache.ts';
 import { CacheRepository } from '../db/cache-repository.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -100,6 +100,13 @@ export interface OwnerConfig {
 }
 
 export interface GarbageCollectionOutcome {
+	readonly retirementRecheck?: {
+		readonly cacheId: CacheId;
+		readonly incarnation: string;
+		readonly revision: number;
+		readonly cacheGraphComplete: boolean;
+		readonly pendingExpiryBacklog: boolean;
+	};
 	readonly pendingUploadsDeleted: number;
 	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;

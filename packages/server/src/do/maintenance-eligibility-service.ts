@@ -1,3 +1,4 @@
+import { type CacheScope } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
@@ -6,11 +7,13 @@ import {
 	eq,
 	isNotNull,
 	isNull,
+	lte,
 	or,
 	type SQL,
 	sql
 } from 'drizzle-orm';
 
+import { type CacheId } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { d1StatementsPerInvocation } from '../http/http.ts';
@@ -21,6 +24,7 @@ import { withHeldStatements } from './statement-scope.ts';
 // Use one fixed past instant for work due now. Repeated mutations in the same
 // push then leave the published wake time unchanged.
 const wakeImmediately = isoTimestamp(new Date(0));
+const managedRetirementRetryMs = 6 * 60 * 60 * 1000;
 
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
@@ -113,14 +117,12 @@ export class MaintenanceEligibilityService {
 	}
 
 	private earliestManagedCacheRetirement(): IsoTimestamp | undefined {
-		// Keep overdue deadlines due if another mutation reconciles eligibility
-		// before the scheduled collection pass reaches this cache.
 		return this.context.db
-			.select({ eligibleAfter: schema.managedCacheRetirements.eligibleAfter })
+			.select({ nextCheckAt: schema.managedCacheRetirements.nextCheckAt })
 			.from(schema.managedCacheRetirements)
-			.orderBy(asc(schema.managedCacheRetirements.eligibleAfter))
+			.orderBy(asc(schema.managedCacheRetirements.nextCheckAt))
 			.limit(1)
-			.get()?.eligibleAfter;
+			.get()?.nextCheckAt;
 	}
 
 	// Choose the earliest upload, attestation, root, grace, auth-key, or
@@ -141,6 +143,77 @@ export class MaintenanceEligibilityService {
 		return this.hasImmediateWork()
 			? wakeImmediately
 			: this.earliestFutureWake();
+	}
+
+	retirementRevision(
+		cacheId: CacheId
+	): { readonly incarnation: string; readonly revision: number } | undefined {
+		const now = isoTimestamp(new Date());
+
+		return this.context.db
+			.select({
+				incarnation: schema.managedCacheRetirements.incarnation,
+				revision: schema.managedCacheRetirements.revision
+			})
+			.from(schema.managedCacheRetirements)
+			.where(
+				and(
+					eq(schema.managedCacheRetirements.cacheId, cacheId),
+					lte(schema.managedCacheRetirements.eligibleAfter, now)
+				)
+			)
+			.get();
+	}
+
+	invalidateRetirementRecheck(scope?: CacheScope | CacheId): void {
+		const cacheId =
+			typeof scope === 'number'
+				? scope
+				: scope === undefined
+					? undefined
+					: this.context.cacheRepository.resolve(scope)?.id;
+
+		if (scope !== undefined && cacheId === undefined) {
+			return;
+		}
+
+		this.context.db
+			.update(schema.managedCacheRetirements)
+			.set({
+				revision: sql`${schema.managedCacheRetirements.revision} + 1`,
+				nextCheckAt: sql`${schema.managedCacheRetirements.eligibleAfter}`
+			})
+			.where(
+				cacheId === undefined
+					? undefined
+					: eq(schema.managedCacheRetirements.cacheId, cacheId)
+			)
+			.run();
+	}
+
+	completeRetirementRecheck(
+		cacheId: CacheId,
+		observed: { readonly incarnation: string; readonly revision: number },
+		now = new Date()
+	): void {
+		const retryAt = isoTimestamp(
+			new Date(now.getTime() + managedRetirementRetryMs)
+		);
+		const checkedAt = isoTimestamp(now);
+
+		this.context.db
+			.update(schema.managedCacheRetirements)
+			.set({ nextCheckAt: retryAt })
+			.where(
+				and(
+					eq(schema.managedCacheRetirements.cacheId, cacheId),
+					eq(schema.managedCacheRetirements.incarnation, observed.incarnation),
+					eq(schema.managedCacheRetirements.revision, observed.revision),
+					lte(schema.managedCacheRetirements.eligibleAfter, checkedAt),
+					lte(schema.managedCacheRetirements.nextCheckAt, checkedAt)
+				)
+			)
+			.run();
 	}
 
 	async invalidate(): Promise<void> {
