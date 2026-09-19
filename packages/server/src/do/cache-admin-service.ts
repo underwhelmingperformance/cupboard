@@ -40,6 +40,7 @@ import {
 	type ResolvedCache
 } from '../db/cache.ts';
 import { type CacheLifecycleVersion } from '../db/cache-generation.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CacheAccessMigrationPendingError,
@@ -57,7 +58,10 @@ import {
 import { assertRetentionMigrationSettled } from '../migration/cache-retention.ts';
 
 import { deleteObjects } from './bulk.ts';
-import { type CacheRegistrationService } from './cache-registration-service.ts';
+import {
+	cacheLifecycleFilter,
+	type CacheRegistrationService
+} from './cache-registration-service.ts';
 import { type ServerContext } from './context.ts';
 import {
 	type DeletionQueueService,
@@ -913,17 +917,28 @@ export class CacheAdminService {
 				return;
 			}
 
-			if (claim.revocationStarted !== true) {
-				if (
-					!(await this.isManagedRetirementEligible(
-						live,
-						isoTimestamp(new Date())
-					))
-				) {
-					await this.context.ctx.storage.delete(key);
-					return;
-				}
+			const lifecycle =
+				claim.revocationStarted === true
+					? await this.context.d1
+							.select({ deletedAt: d1Schema.cacheLifecycle.deletedAt })
+							.from(d1Schema.cacheLifecycle)
+							.where(
+								cacheLifecycleFilter(this.context.requireTenant(), claim.scope)
+							)
+							.get()
+					: undefined;
+			if (
+				typeof lifecycle?.deletedAt !== 'string' &&
+				!(await this.isManagedRetirementEligible(
+					live,
+					isoTimestamp(new Date())
+				))
+			) {
+				await this.context.ctx.storage.delete(key);
+				return;
+			}
 
+			if (claim.revocationStarted !== true) {
 				await this.context.ctx.storage.put(key, {
 					...claim,
 					revocationStarted: true

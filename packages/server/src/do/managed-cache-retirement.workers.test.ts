@@ -35,6 +35,7 @@ import {
 	managedRetirementEntryPrefix,
 	teardownEntryPrefix
 } from './cache-admin-service.ts';
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { maintenancePassCursorKey } from './server.ts';
 import { UploadStateService } from './upload-state-service.ts';
@@ -195,6 +196,16 @@ async function retirementClaims(): Promise<readonly unknown[]> {
 
 		return entries.values().toArray();
 	});
+}
+
+async function maintenanceWakeAt(): Promise<string | null | undefined> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ nextWakeAt: d1Schema.tenantMaintenanceEligibility.nextWakeAt })
+		.from(d1Schema.tenantMaintenanceEligibility)
+		.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, fixtureTenant))
+		.get();
+
+	return row?.nextWakeAt;
 }
 
 async function teardownKeys(): Promise<readonly string[]> {
@@ -523,6 +534,47 @@ describe('managed cache retirement', () => {
 		}
 	});
 
+	it('schedules an empty opted-in cache for its retirement deadline', async () => {
+		const token = await createManagedCache(
+			'managed-retirement-scheduled-wake',
+			false
+		);
+		const marked = await authorisedFetch('/caches/pr-1/retirement', token, {
+			body: JSON.stringify({ retireWhenEmpty: true }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		expect(marked.status).toBe(StatusCodes.OK);
+		const summary = await marked.json<{ retirementEligibleAfter: string }>();
+		const scheduledWakeAt = await maintenanceWakeAt();
+		const plan = await runInDurableObject(currentServer(), (_instance, state) =>
+			Array.from(
+				state.storage.sql.exec<{ detail: string }>(
+					'EXPLAIN QUERY PLAN SELECT eligible_after FROM managed_cache_retirement ORDER BY eligible_after LIMIT 1'
+				),
+				(row) => row.detail
+			)
+		);
+		await runInDurableObject(currentServer(), (instance) =>
+			new MaintenanceEligibilityService(instance.context).reconcile(
+				new Date(summary.retirementEligibleAfter)
+			)
+		);
+
+		expect({
+			scheduledWakeAt,
+			dueWakeAt: await maintenanceWakeAt(),
+			plan
+		}).toStrictEqual({
+			scheduledWakeAt: summary.retirementEligibleAfter,
+			dueWakeAt: summary.retirementEligibleAfter,
+			plan: [
+				'SCAN managed_cache_retirement USING COVERING INDEX managed_cache_retirement_eligible_after_idx'
+			]
+		});
+	});
+
 	it('leaves an ordinary empty cache live', async () => {
 		await createManagedCache('managed-retirement-opt-in', false);
 		await scheduleRetirement();
@@ -836,6 +888,55 @@ describe('managed cache retirement', () => {
 				},
 				claims: []
 			}
+		});
+	});
+
+	it('honours opt-out after a revocation attempt fails before D1 commits', async () => {
+		const token = await createManagedCache('managed-retirement-cancel-retry');
+		await makeRetirementDue();
+		await stageRetirementClaim();
+
+		const batch = vi.spyOn(env.CUPBOARD_DB, 'batch');
+		batch.mockRejectedValueOnce(
+			new Error('D1 revocation failed before commit')
+		);
+		let firstAttempt: string;
+		try {
+			firstAttempt = await withoutAlarmArming(() =>
+				runInDurableObject(currentServer(), async (instance) => {
+					try {
+						await instance.alarm();
+						return 'succeeded';
+					} catch {
+						return 'failed';
+					}
+				})
+			);
+		} finally {
+			batch.mockRestore();
+		}
+
+		const disabled = await authorisedFetch('/caches/pr-1/retirement', token, {
+			body: JSON.stringify({ retireWhenEmpty: false }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+		expect(disabled.status).toBe(StatusCodes.OK);
+
+		await withoutAlarmArming(runAlarm);
+
+		expect({
+			firstAttempt,
+			state: await retirementState(),
+			claims: await retirementClaims()
+		}).toStrictEqual({
+			firstAttempt: 'failed',
+			state: {
+				local: [{ id: 2, generation: 1, deleted: false }],
+				managedIds: [],
+				lifecycle: { generation: 1, deleted: false }
+			},
+			claims: []
 		});
 	});
 

@@ -127,7 +127,8 @@ export const cachesContract = {
 	retirement: baseProcedure
 		.meta({
 			requires: 'cache:retire',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
 		})
 		.route({ method: 'PUT', path: '/caches/{cacheName}/retirement' })
 		.input(

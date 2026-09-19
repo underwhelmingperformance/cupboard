@@ -414,6 +414,13 @@
 			"when": 1789816966865,
 			"tag": "0058_managed_retirement_blocker_indexes",
 			"breakpoints": true
+		},
+		{
+			"idx": 59,
+			"version": "6",
+			"when": 1789820777146,
+			"tag": "0059_managed_retirement_wake",
+			"breakpoints": true
 		}
 	]
 }

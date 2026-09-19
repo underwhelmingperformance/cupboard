@@ -112,14 +112,26 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
-	// When no work is due now, wake for the earliest upload, attestation, root,
-	// grace, or auth-key deadline.
+	private earliestManagedCacheRetirement(): IsoTimestamp | undefined {
+		// Keep overdue deadlines due if another mutation reconciles eligibility
+		// before the scheduled collection pass reaches this cache.
+		return this.context.db
+			.select({ eligibleAfter: schema.managedCacheRetirements.eligibleAfter })
+			.from(schema.managedCacheRetirements)
+			.orderBy(asc(schema.managedCacheRetirements.eligibleAfter))
+			.limit(1)
+			.get()?.eligibleAfter;
+	}
+
+	// Choose the earliest upload, attestation, root, grace, auth-key, or
+	// managed-cache retirement deadline when no immediate work is recorded.
 	private earliestFutureWake(): IsoTimestamp | undefined {
 		return [
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
-			this.earliestAuthKeyRetirement()
+			this.earliestAuthKeyRetirement(),
+			this.earliestManagedCacheRetirement()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
