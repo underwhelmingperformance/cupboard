@@ -64,7 +64,8 @@ import {
 	uploadMetadata,
 	useTestServer,
 	type VerifiableNar,
-	verifiableNar
+	verifiableNar,
+	withoutAlarmArming
 } from '../test-support.ts';
 
 import { boundedD1 } from './bounded-io.ts';
@@ -467,12 +468,9 @@ function attestationUploadId(index: number): string {
  * quota, which is the costliest retirement the drain meets.
  */
 async function publishAttestedPaths(
-	server: string,
 	paths: number,
 	references: number
 ): Promise<void> {
-	await useTestServer(server);
-
 	const { token } = await bootstrap({ caches: [{ scope: buildsCache }] });
 
 	for (let index = 0; index < paths; index += 1) {
@@ -509,43 +507,47 @@ async function attestedTeardownPassStatements(
 	references: number,
 	maxPasses = 6
 ): Promise<number[]> {
-	await publishAttestedPaths(server, paths, references);
+	await useTestServer(server);
 
-	const counting = countingD1(env.CUPBOARD_DB);
+	return withoutAlarmArming(async () => {
+		await publishAttestedPaths(paths, references);
 
-	return runInDurableObject(currentServer(), async (instance, state) => {
-		const real = instance.context.d1;
-		const cache = instance.context.cacheRepository.require(buildsCache);
+		const counting = countingD1(env.CUPBOARD_DB);
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
-		});
+		return runInDurableObject(currentServer(), async (instance, state) => {
+			const real = instance.context.d1;
+			const cache = instance.context.cacheRepository.require(buildsCache);
 
-		await instance.runCacheTeardown(buildsCache, origin);
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: drizzleD1(boundedD1(counting.binding), { schema: d1Schema })
+			});
 
-		const perPass: number[] = [];
+			await instance.runCacheTeardown(buildsCache, origin);
 
-		for (let taken = 0; taken < maxPasses; taken += 1) {
-			const marker = await state.storage.get(
-				`${teardownEntryPrefix}${String(cache.id)}`
-			);
+			const perPass: number[] = [];
 
-			if (marker === undefined) {
-				break;
+			for (let taken = 0; taken < maxPasses; taken += 1) {
+				const marker = await state.storage.get(
+					`${teardownEntryPrefix}${String(cache.id)}`
+				);
+
+				if (marker === undefined) {
+					break;
+				}
+
+				const before = counting.statementsSent();
+				await instance.resumeCacheTeardown();
+				perPass.push(counting.statementsSent() - before);
 			}
 
-			const before = counting.statementsSent();
-			await instance.resumeCacheTeardown();
-			perPass.push(counting.statementsSent() - before);
-		}
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: real
+			});
 
-		Object.defineProperty(instance.context, 'd1', {
-			configurable: true,
-			value: real
+			return perPass;
 		});
-
-		return perPass;
 	});
 }
 
