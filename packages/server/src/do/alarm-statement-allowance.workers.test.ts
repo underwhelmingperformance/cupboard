@@ -373,20 +373,18 @@ async function commitReconcilePaths(
 ): Promise<readonly ParsedUploadPathMetadata[]> {
 	await useTestServer(server);
 
-	const { token } = await bootstrap();
-	const paths = Array.from({ length: reconciledPaths }, (_, index) =>
-		indexedMetadata(index)
-	);
-
-	for (let start = 0; start < reconciledPaths; start += pushConcurrency) {
-		await Promise.all(
-			paths
-				.slice(start, start + pushConcurrency)
-				.map((metadata) => pushPath(token, metadata, 'builds'))
+	return withoutAlarmArming(async () => {
+		const { token } = await bootstrap();
+		const paths = Array.from({ length: reconciledPaths }, (_, index) =>
+			indexedMetadata(index)
 		);
-	}
 
-	return paths;
+		for (const metadata of paths) {
+			await pushPath(token, metadata, 'builds');
+		}
+
+		return paths;
+	});
 }
 
 /**
