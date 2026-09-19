@@ -110,10 +110,16 @@ export const cacheIdentities = sqliteTable(
 	]
 );
 
-export const managedCacheRetirements = sqliteTable('managed_cache_retirement', {
-	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
-	eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull()
-});
+export const managedCacheRetirements = sqliteTable(
+	'managed_cache_retirement',
+	{
+		cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+		eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		index('managed_cache_retirement_eligible_after_idx').on(table.eligibleAfter)
+	]
+);
 
 export const cacheListingProjectionMigration = sqliteTable(
 	'cache_listing_projection_migration',
