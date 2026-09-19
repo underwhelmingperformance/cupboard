@@ -1,5 +1,6 @@
 import {
 	cacheAccessModeSchema,
+	cacheNamePrefixPattern,
 	cachePrioritySchema,
 	cacheScopeSchema,
 	graceSecondsSchema,
@@ -50,8 +51,45 @@ export type CacheSummary = z.output<typeof cacheSummarySchema>;
 
 export const maxRootRetentionOverrides = 4096;
 
+export const cacheListEntrySchema = z.strictObject({
+	...cacheSummarySchema.shape,
+	rootRetentionOverrides:
+		cacheSummarySchema.shape.rootRetentionOverrides.optional()
+});
+export type CacheListEntry = z.output<typeof cacheListEntrySchema>;
+
+export const cacheListPageSize = 200;
+
+export const cacheListInputSchema = z
+	.strictObject({
+		cursor: z.string().min(1).max(63).regex(cacheNamePrefixPattern).optional(),
+		limit: z.number().int().min(1).max(cacheListPageSize).optional(),
+		namePrefix: z.string().max(63).regex(cacheNamePrefixPattern).optional()
+	})
+	.superRefine((input, context) => {
+		if (input.cursor === undefined) {
+			return;
+		}
+
+		const isValid =
+			input.namePrefix === undefined
+				? /^[1-9]\d*$/.test(input.cursor) &&
+					Number.isSafeInteger(Number(input.cursor))
+				: input.cursor.startsWith(input.namePrefix);
+		if (!isValid) {
+			context.addIssue({
+				code: 'custom',
+				path: ['cursor'],
+				message: 'Cursor does not match the listing query.'
+			});
+		}
+	})
+	.default({});
+export type CacheListInput = z.output<typeof cacheListInputSchema>;
+
 export const cacheListResponseSchema = z.strictObject({
-	caches: z.array(cacheSummarySchema)
+	caches: z.array(cacheListEntrySchema),
+	cursor: z.string().min(1).optional()
 });
 export type CacheListResponse = z.output<typeof cacheListResponseSchema>;
 
@@ -106,6 +144,7 @@ export const cacheRemoveResponseSchema = z.strictObject({
 export type CacheRemoveResponse = z.output<typeof cacheRemoveResponseSchema>;
 
 export type CacheSummaryInput = z.input<typeof cacheSummarySchema>;
+export type CacheListInputInput = z.input<typeof cacheListInputSchema>;
 export type CacheListResponseInput = z.input<typeof cacheListResponseSchema>;
 export type CachePutBodyInput = z.input<typeof cachePutBodySchema>;
 export type CacheUpdateBodyInput = z.input<typeof cacheUpdateBodySchema>;

@@ -360,6 +360,62 @@ async function seedEligibilityBlocker(statement: string): Promise<void> {
 describe('managed cache retirement', () => {
 	beforeEach(resetTestServer);
 
+	it('finds upload and attestation blockers by cache ID in a large backlog', async () => {
+		await createManagedCache('managed-retirement-blocker-plan');
+		const plans = await runInDurableObject(
+			currentServer(),
+			(_instance, state) => {
+				state.storage.sql.exec(`
+					WITH RECURSIVE seq(n) AS (
+						SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500
+					)
+					INSERT INTO pending_upload
+						(id, cache_id, nar_hash, r2_key, metadata_json, created_at, expires_at)
+					SELECT 'upload-' || n, 2, 'sha256:hash', 'staging/' || n,
+						'{}', '2026-01-01T00:00:00.000Z',
+						'2099-01-01T00:00:00.000Z' FROM seq
+				`);
+				state.storage.sql.exec(`
+					WITH RECURSIVE seq(n) AS (
+						SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500
+					)
+					INSERT INTO pending_attestation
+						(id, cache_id, store_path_hash, digest, r2_key, created_at, expires_at)
+					SELECT 'attestation-' || n, 2, printf('%032d', n),
+						'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'staging/attestation-' || n,
+						'2026-01-01T00:00:00.000Z',
+						'2099-01-01T00:00:00.000Z' FROM seq
+				`);
+
+				return {
+					upload: Array.from(
+						state.storage.sql.exec<{ detail: string }>(
+							'EXPLAIN QUERY PLAN SELECT 1 FROM pending_upload WHERE cache_id = ? LIMIT 1',
+							3
+						),
+						(row) => row.detail
+					),
+					attestation: Array.from(
+						state.storage.sql.exec<{ detail: string }>(
+							'EXPLAIN QUERY PLAN SELECT 1 FROM pending_attestation WHERE cache_id = ? LIMIT 1',
+							3
+						),
+						(row) => row.detail
+					)
+				};
+			}
+		);
+
+		expect(plans).toStrictEqual({
+			upload: [
+				'SEARCH pending_upload USING COVERING INDEX pending_upload_gc_path_idx (cache_id=?)'
+			],
+			attestation: [
+				'SEARCH pending_attestation USING COVERING INDEX pending_attestation_cache_id_idx (cache_id=?)'
+			]
+		});
+	});
+
 	it('retires an opted-in empty cache after its deadline and complete scan', async () => {
 		await createManagedCache('managed-retirement-success');
 		await makeRetirementDue();

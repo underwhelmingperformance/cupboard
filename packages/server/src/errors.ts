@@ -48,6 +48,19 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export type CacheCatalogueMigrationProblem =
+	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
+
+export class CacheCatalogueMigrationPendingError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 1;
+
+	constructor() {
+		super('The cache catalogue migration is still in progress; retry shortly');
+		this.name = 'CacheCatalogueMigrationPendingError';
+	}
+}
+
 export class LocalSchemaMigrationPendingError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
@@ -63,16 +76,13 @@ export class LocalSchemaMigrationPendingError extends ServerHttpError {
 	}
 }
 
-export type CacheCatalogueMigrationProblem =
-	'tenant-missing' | 'lifecycle-incomplete' | 'lifecycle-invalid';
-
-export class CacheCatalogueMigrationPendingError extends ServerHttpError {
+export class CacheListingProjectionPendingError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 1;
 
 	constructor() {
-		super('The cache catalogue migration is still in progress; retry shortly');
-		this.name = 'CacheCatalogueMigrationPendingError';
+		super('Cache listing is still being indexed; retry shortly');
+		this.name = 'CacheListingProjectionPendingError';
 	}
 }
 

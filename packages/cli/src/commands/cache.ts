@@ -11,6 +11,8 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import type {
+	CacheListEntry,
+	CacheListInput,
 	CacheListResponse,
 	CachePutBody,
 	CacheRemoveResponse,
@@ -97,7 +99,7 @@ interface CacheRemoveOptions {
 }
 
 export interface CacheClient {
-	list(): Promise<CacheListResponse>;
+	list(input?: CacheListInput): Promise<CacheListResponse>;
 	get: CacheScopedClient<object, CacheSummary>;
 	put: CacheScopedClient<CachePutBody, CacheSummary>;
 	update: CacheScopedClient<CacheUpdateBody, CacheSummary>;
@@ -523,9 +525,21 @@ export async function runCacheList(
 	reporter: Reporter,
 	client: Pick<CacheClient, 'list'>
 ): Promise<void> {
-	const { caches } = await reporter.phase('Listing caches', () =>
-		client.list()
-	);
+	const caches = await reporter.phase('Listing caches', async () => {
+		const summaries: CacheListEntry[] = [];
+		let cursor: string | undefined;
+
+		do {
+			const page =
+				cursor === undefined
+					? await client.list()
+					: await client.list({ cursor });
+			summaries.push(...page.caches);
+			cursor = page.cursor;
+		} while (cursor !== undefined);
+
+		return summaries;
+	});
 
 	reporter.result({
 		kind: 'caches',
@@ -776,14 +790,16 @@ async function exactCache(
 	}
 }
 
-function cacheRow(summary: CacheSummary): ResultRow {
+function cacheRow(summary: CacheListEntry): ResultRow {
 	const parts = [
 		summary.access,
 		`priority ${String(summary.priority)}`,
 		`${formatCount(summary.storePaths)} path(s)`,
 		`default root retention ${rootRetentionLabel(summary.defaultRootRetention)}`,
 		`grace ${graceLabel(summary.grace)}`,
-		`${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`
+		summary.rootRetentionOverrides === undefined
+			? 'root retention overrides: use cache inspect'
+			: `${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`
 	];
 
 	if (summary.graceManaged === true) {

@@ -8,8 +8,10 @@ import {
 	cacheScopeSchema,
 	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
-import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
+	type CacheListEntry,
+	type CacheListInput,
+	cacheListPageSize,
 	type CacheListResponse,
 	type CachePutBody,
 	type CacheRemoveResponse,
@@ -17,7 +19,18 @@ import {
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, isNull, lte, min, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	count,
+	eq,
+	gt,
+	inArray,
+	isNull,
+	lte,
+	min,
+	sql
+} from 'drizzle-orm';
 import { z } from 'zod';
 
 import {
@@ -31,6 +44,7 @@ import * as schema from '../db/schema.ts';
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
+	CacheListingProjectionPendingError,
 	CacheNotEmptyError,
 	CacheNotFoundError,
 	CacheRetirementTtlRequiredError
@@ -50,6 +64,7 @@ import {
 	maxFencedRetireRows,
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
+import { jsonValueLists } from './json-list.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
@@ -415,104 +430,165 @@ export class CacheAdminService {
 		return info.render();
 	}
 
-	listCaches(): CacheListResponse {
-		const registered = this.context.db
+	listCaches(input: CacheListInput = {}): CacheListResponse {
+		const projection = this.context.db
+			.select({
+				narinfoComplete: schema.cacheListingProjectionMigration.narinfoComplete,
+				graceComplete: schema.cacheListingProjectionMigration.graceComplete
+			})
+			.from(schema.cacheListingProjectionMigration)
+			.where(eq(schema.cacheListingProjectionMigration.id, 1))
+			.get();
+		if (projection?.narinfoComplete !== true || !projection.graceComplete) {
+			throw new CacheListingProjectionPendingError();
+		}
+
+		const limit = Math.min(input.limit ?? cacheListPageSize, cacheListPageSize);
+		const afterId =
+			input.cursor === undefined || input.namePrefix !== undefined
+				? undefined
+				: cacheIdSchema.parse(Number(input.cursor));
+		const afterName =
+			input.cursor === undefined || input.namePrefix === undefined
+				? undefined
+				: cacheNameSchema.parse(input.cursor);
+		const namePrefixCondition =
+			input.namePrefix === undefined
+				? undefined
+				: and(
+						eq(schema.cacheIdentities.kind, 'named'),
+						sql`${schema.cacheIdentities.name} >= ${input.namePrefix}`,
+						sql`${schema.cacheIdentities.name} < ${`${input.namePrefix}\u{10FFFF}`}`,
+						afterName === undefined
+							? undefined
+							: sql`${schema.cacheIdentities.name} > ${afterName}`
+					);
+		const registeredRows = this.context.db
 			.select()
 			.from(schema.cacheIdentities)
-			.where(isNull(schema.cacheIdentities.deletedAt))
+			.where(
+				and(
+					isNull(schema.cacheIdentities.deletedAt),
+					afterId === undefined
+						? undefined
+						: gt(schema.cacheIdentities.id, afterId),
+					namePrefixCondition
+				)
+			)
+			.orderBy(
+				asc(
+					input.namePrefix === undefined
+						? schema.cacheIdentities.id
+						: schema.cacheIdentities.name
+				)
+			)
+			.limit(limit + 1)
 			.all();
+		const registered = registeredRows.slice(0, limit);
+		const cacheIds = registered.map((row) => row.id);
+
+		if (cacheIds.length === 0) {
+			return { caches: [] };
+		}
+
 		const counts = new Map(
-			this.context.db
-				.select({ cacheId: schema.narInfos.cacheId, count: count() })
-				.from(schema.narInfos)
-				.groupBy(schema.narInfos.cacheId)
-				.all()
+			jsonValueLists(cacheIds)
+				.flatMap((listedIds) =>
+					this.context.db
+						.select({
+							cacheId: schema.cacheNarInfoCounts.cacheId,
+							count: schema.cacheNarInfoCounts.count
+						})
+						.from(schema.cacheNarInfoCounts)
+						.where(inArray(schema.cacheNarInfoCounts.cacheId, listedIds))
+						.all()
+				)
 				.map((row) => [row.cacheId, row.count])
 		);
-		const retirements = new Map(
-			this.context.db
-				.select()
-				.from(schema.managedCacheRetirements)
-				.all()
-				.map((row) => [row.cacheId, row.eligibleAfter] as const)
+		const managed = new Map(
+			jsonValueLists(cacheIds)
+				.flatMap((listedIds) =>
+					this.context.db
+						.select({
+							cacheId: schema.managedCacheRetirements.cacheId,
+							eligibleAfter: schema.managedCacheRetirements.eligibleAfter
+						})
+						.from(schema.managedCacheRetirements)
+						.where(inArray(schema.managedCacheRetirements.cacheId, listedIds))
+						.all()
+				)
+				.map((row) => [row.cacheId, row.eligibleAfter])
 		);
 		const now = isoTimestamp(new Date());
 		const earliestDeadlines = new Map<CacheId, IsoTimestamp>();
-		const deadlineRows = this.context.db
-			.select({
-				cacheId: schema.retentionGrace.cacheId,
-				earliest: min(schema.retentionGrace.retainUntil)
-			})
-			.from(schema.retentionGrace)
-			.where(gt(schema.retentionGrace.retainUntil, now))
-			.groupBy(schema.retentionGrace.cacheId)
-			.all();
+		const deadlineRows = jsonValueLists(cacheIds).flatMap((listedIds) => {
+			const earliest = sql<IsoTimestamp | null>`(
+				select ${schema.retentionGraceByDeadline.retainUntil}
+				from ${schema.retentionGraceByDeadline}
+				where ${schema.retentionGraceByDeadline.cacheId} = ${schema.cacheIdentities.id}
+					and ${schema.retentionGraceByDeadline.retainUntil} > ${now}
+				order by ${schema.retentionGraceByDeadline.retainUntil}
+				limit 1
+			)`;
+
+			return this.context.db
+				.select({ cacheId: schema.cacheIdentities.id, earliest })
+				.from(schema.cacheIdentities)
+				.where(inArray(schema.cacheIdentities.id, listedIds))
+				.all();
+		});
 
 		for (const row of deadlineRows) {
 			if (row.earliest === null) {
 				continue;
 			}
 
-			const cache = this.context.cacheRepository.resolvedForId(row.cacheId);
-
-			earliestDeadlines.set(cache.id, row.earliest);
+			earliestDeadlines.set(row.cacheId, row.earliest);
 		}
-		const overrides = new Map<
-			(typeof schema.cacheIdentities.$inferSelect)['rootRetentionRuleSetId'],
-			CacheSummary['rootRetentionOverrides']
-		>();
+		const caches = registered.map((row): CacheListEntry => {
+			const earliestGraceDeadline = earliestDeadlines.get(row.id);
 
-		const registeredRuleSets = new Set(
-			registered.map((row) => row.rootRetentionRuleSetId)
-		);
+			return {
+				scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
+				access: row.access,
+				priority: cachePrioritySchema.parse(row.priority),
+				storePaths: counts.get(row.id) ?? 0,
+				defaultRootRetention:
+					row.defaultRootTtlSeconds === null
+						? { kind: 'permanent' }
+						: {
+								kind: 'duration',
+								seconds: row.defaultRootTtlSeconds
+							},
+				grace:
+					row.graceSeconds === null
+						? { kind: 'none' }
+						: {
+								kind: 'duration',
+								graceSeconds: row.graceSeconds
+							},
+				graceManaged: row.graceManaged,
+				...(managed.has(row.id) && {
+					retireWhenEmpty: true,
+					retirementEligibleAfter: managed.get(row.id)
+				}),
+				...(earliestGraceDeadline !== undefined && {
+					earliestGraceDeadline
+				})
+			};
+		});
+		const last = registered.at(-1);
 
-		for (const ruleSet of registeredRuleSets) {
-			overrides.set(ruleSet, [...this.retentionRules.listForRuleSet(ruleSet)]);
-		}
-
-		const caches = registered
-			.map((row): CacheSummary => {
-				const earliestGraceDeadline = earliestDeadlines.get(row.id);
-
-				return {
-					scope: cacheScopeFromRow({ kind: row.kind, name: row.name }),
-					access: row.access,
-					priority: cachePrioritySchema.parse(row.priority),
-					storePaths: counts.get(row.id) ?? 0,
-					defaultRootRetention:
-						row.defaultRootTtlSeconds === null
-							? { kind: 'permanent' }
-							: {
-									kind: 'duration',
-									seconds: row.defaultRootTtlSeconds
-								},
-					grace:
-						row.graceSeconds === null
-							? { kind: 'none' }
-							: {
-									kind: 'duration',
-									graceSeconds: row.graceSeconds
-								},
-					rootRetentionOverrides:
-						overrides.get(row.rootRetentionRuleSetId) ?? [],
-					graceManaged: row.graceManaged,
-					...(retirements.has(row.id) && {
-						retireWhenEmpty: true,
-						retirementEligibleAfter: retirements.get(row.id)
-					}),
-					...(earliestGraceDeadline !== undefined && {
-						earliestGraceDeadline
-					})
-				};
-			})
-			.toSorted((left, right) =>
-				byCodeUnit(
-					left.scope.kind === 'default' ? '' : left.scope.name,
-					right.scope.kind === 'default' ? '' : right.scope.name
-				)
-			);
-
-		return { caches };
+		return {
+			caches,
+			...(registeredRows.length > limit &&
+				last !== undefined && {
+					cursor:
+						input.namePrefix === undefined
+							? String(last.id)
+							: cacheNameSchema.parse(last.name)
+				})
+		};
 	}
 
 	getCache(scope: CacheScope): CacheSummary {

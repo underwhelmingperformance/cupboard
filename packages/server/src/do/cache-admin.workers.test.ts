@@ -5,6 +5,8 @@ import {
 	cacheReadRevisionSchema,
 	type CacheScope,
 	cacheScopeSchema,
+	rootNameSchema,
+	sha256HexDigestSchema,
 	storePathHashSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
@@ -484,7 +486,6 @@ describe('cache registry admin', () => {
 				storePaths: 0,
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
-				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -494,10 +495,92 @@ describe('cache registry admin', () => {
 				storePaths: 1,
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
-				rootRetentionOverrides: [],
 				graceManaged: false
 			}
 		]);
+	});
+
+	it('pages registered caches and filters named caches by prefix', async () => {
+		await useTestServer('cache-admin-list-pages');
+		const init = await bootstrap();
+		await putCache(init.token, 'pr-1', 30);
+		await putCache(init.token, 'builds', 30);
+		await putCache(init.token, 'pr-2', 30);
+
+		const first = await authorisedFetch('/caches?limit=2', init.token);
+		const firstPage = cacheListResponseSchema.parse(await first.json());
+		const second = await authorisedFetch(
+			`/caches?limit=2&cursor=${firstPage.cursor ?? ''}`,
+			init.token
+		);
+		const secondPage = cacheListResponseSchema.parse(await second.json());
+		const prefixed = await authorisedFetch(
+			'/caches?namePrefix=pr-&limit=1',
+			init.token
+		);
+		const firstPrefixPage = cacheListResponseSchema.parse(
+			await prefixed.json()
+		);
+		const continued = await authorisedFetch(
+			`/caches?namePrefix=pr-&limit=1&cursor=${firstPrefixPage.cursor ?? ''}`,
+			init.token
+		);
+		const secondPrefixPage = cacheListResponseSchema.parse(
+			await continued.json()
+		);
+		const invalidCursor = await authorisedFetch(
+			'/caches?cursor=pr-1',
+			init.token
+		);
+
+		expect({
+			statuses: [
+				first.status,
+				second.status,
+				prefixed.status,
+				continued.status,
+				invalidCursor.status
+			],
+			all: [firstPage, secondPage].map((page) =>
+				page.caches.map((cache) => cache.scope)
+			),
+			prefix: [firstPrefixPage, secondPrefixPage].map((page) =>
+				page.caches.map((cache) => cache.scope)
+			),
+			cursors: [
+				firstPage.cursor,
+				secondPage.cursor,
+				firstPrefixPage.cursor,
+				secondPrefixPage.cursor
+			]
+		}).toStrictEqual({
+			statuses: [200, 200, 200, 200, 400],
+			all: [
+				[defaultCache(), namedCache('pr-1')],
+				[namedCache('builds'), namedCache('pr-2')]
+			],
+			prefix: [[namedCache('pr-1')], [namedCache('pr-2')]],
+			cursors: ['2', undefined, 'pr-1', undefined]
+		});
+	});
+
+	it('asks cache-list clients to retry while the listing projection is incomplete', async () => {
+		await useTestServer('cache-admin-list-pending');
+		const init = await bootstrap();
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			state.storage.sql.exec(
+				'UPDATE cache_listing_projection_migration SET narinfo_complete = 0'
+			);
+		});
+
+		const response = await authorisedFetch('/caches', init.token);
+
+		const body = z.object({ code: z.string() }).parse(await response.json());
+
+		expect({ status: response.status, body }).toStrictEqual({
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			body: { code: 'CACHE_LISTING_PROJECTION_PENDING' }
+		});
 	});
 
 	it('reports an existing cache when creation specifies different access', async () => {
@@ -588,7 +671,6 @@ describe('cache registry admin', () => {
 				storePaths: 0,
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
-				rootRetentionOverrides: [],
 				graceManaged: false
 			},
 			{
@@ -598,7 +680,6 @@ describe('cache registry admin', () => {
 				storePaths: 0,
 				defaultRootRetention: { kind: 'permanent' },
 				grace: { kind: 'none' },
-				rootRetentionOverrides: [],
 				graceManaged: true,
 				earliestGraceDeadline: earlierLiveDeadline
 			}
@@ -616,6 +697,7 @@ describe('cache registry admin', () => {
 				const measure = async (): Promise<{
 					readonly calls: number;
 					readonly caches: number;
+					readonly overrideArrays: number;
 				}> => {
 					select.mockClear();
 					const response = await instance.fetch(cacheListRequest(init.token));
@@ -623,7 +705,10 @@ describe('cache registry admin', () => {
 
 					return {
 						calls: select.mock.calls.length,
-						caches: body.caches.length
+						caches: body.caches.length,
+						overrideArrays: body.caches.filter(
+							(cache) => cache.rootRetentionOverrides !== undefined
+						).length
 					};
 				};
 
@@ -631,6 +716,21 @@ describe('cache registry admin', () => {
 					const one = await measure();
 
 					for (let index = 0; index < 20; index += 1) {
+						const ruleSetId = instance.context.db
+							.insert(schema.rootRetentionRuleSets)
+							.values({
+								contentHash: sha256HexDigestSchema.parse('a'.repeat(64))
+							})
+							.returning({ id: schema.rootRetentionRuleSets.id })
+							.get().id;
+						instance.context.db
+							.insert(schema.rootRetentionRules)
+							.values({
+								ruleSetId,
+								rootPrefix: rootNameSchema.parse(`root-${String(index)}`),
+								kind: 'permanent'
+							})
+							.run();
 						instance.context.db
 							.insert(schema.cacheIdentities)
 							.values({
@@ -639,6 +739,7 @@ describe('cache registry admin', () => {
 									.name,
 								access: 'public',
 								priority: cachePrioritySchema.parse(40),
+								rootRetentionRuleSetId: ruleSetId,
 								createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 							})
 							.run();
@@ -653,11 +754,11 @@ describe('cache registry admin', () => {
 
 		expect(observed.one.calls).toBe(observed.many.calls);
 		expect({
-			one: observed.one.caches,
-			many: observed.many.caches
+			one: observed.one,
+			many: observed.many
 		}).toStrictEqual({
-			one: 1,
-			many: 21
+			one: { calls: observed.one.calls, caches: 1, overrideArrays: 0 },
+			many: { calls: observed.one.calls, caches: 21, overrideArrays: 0 }
 		});
 	});
 

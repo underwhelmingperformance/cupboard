@@ -676,7 +676,6 @@ describe('private cache access', () => {
 					storePaths: 0,
 					defaultRootRetention: { kind: 'permanent' },
 					grace: { kind: 'none' },
-					rootRetentionOverrides: [],
 					graceManaged: false
 				}
 			],

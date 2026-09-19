@@ -6,6 +6,7 @@ import { StatusCodes } from 'http-status-codes';
 import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
+	CacheListingProjectionPendingError,
 	CacheNotEmptyError,
 	CacheRetentionMigrationPendingError,
 	CacheRetentionRuleLimitExceededError,
@@ -74,6 +75,13 @@ export function bridgedError(
 
 	if (error instanceof CacheRetirementTtlRequiredError) {
 		return new ORPCError('CACHE_RETIREMENT_TTL_REQUIRED', {
+			status: error.status,
+			message: error.message
+		});
+	}
+
+	if (error instanceof CacheListingProjectionPendingError) {
+		return new ORPCError('CACHE_LISTING_PROJECTION_PENDING', {
 			status: error.status,
 			message: error.message
 		});

@@ -5,6 +5,7 @@ import {
 	cacheNameSchema,
 	type CacheScope
 } from '@cupboard/nix-store/scalars';
+import { type CacheListEntry } from '@cupboard/protocol/caches';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
@@ -273,7 +274,14 @@ async function checkPullRequestCacheAccess(
 		return new ReuseViewMissingFinding(check, viewName);
 	}
 
-	const { caches } = await client.caches.list();
+	const caches: CacheListEntry[] = [];
+	let cursor: string | undefined;
+
+	do {
+		const page = await client.caches.list({ namePrefix: prefix, cursor });
+		caches.push(...page.caches);
+		cursor = page.cursor;
+	} while (cursor !== undefined);
 	const mismatched = caches.filter(
 		(summary) =>
 			summary.scope.kind === 'named' &&
