@@ -179,6 +179,17 @@ export class CacheNotEmptyError extends ServerHttpError {
 	}
 }
 
+export class CacheRetirementTtlRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super(
+			'Managed cache retirement requires a finite default root TTL. Set the cache default root TTL, then enable retirement.'
+		);
+		this.name = 'CacheRetirementTtlRequiredError';
+	}
+}
+
 export class CacheRetentionRuleLimitExceededError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

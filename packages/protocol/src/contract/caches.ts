@@ -5,6 +5,7 @@ import {
 	cacheListResponseSchema,
 	cachePutBodySchema,
 	cacheRemoveResponseSchema,
+	cacheRetirementBodySchema,
 	cacheSummarySchema,
 	cacheUpdateBodySchema
 } from '../caches.ts';
@@ -119,6 +120,21 @@ export const cachesContract = {
 			})
 			.output(cacheSummarySchema)
 	},
+
+	retirement: baseProcedure
+		.meta({
+			requires: 'cache:retire',
+			resource: { cache: { field: 'cacheName' } }
+		})
+		.route({ method: 'PUT', path: '/caches/{cacheName}/retirement' })
+		.input(
+			z.strictObject({
+				cacheName: cacheNameSchema,
+				...cacheRetirementBodySchema.shape
+			})
+		)
+		.errors({ CACHE_RETIREMENT_TTL_REQUIRED: { status: 409 } })
+		.output(cacheSummarySchema),
 
 	// Removal keeps the default. A retry sent after the name was registered
 	// again would tear down the new cache, and every call advances the cache

@@ -113,6 +113,12 @@ export const tenantRouter = os.router({
 				}
 			)
 		},
+		retirement: os.caches.retirement.handler(({ input, context }) =>
+			context.services.cacheAdmin.setRetireWhenEmpty(
+				{ kind: 'named', name: input.cacheName },
+				input.retireWhenEmpty
+			)
+		),
 		remove: os.caches.remove.handler(({ input, context }) => {
 			const origin = requestOriginSchema.parse(
 				new URL(context.request.url).origin

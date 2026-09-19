@@ -38,6 +38,7 @@ import {
 } from '../http/http.ts';
 
 import { deleteObjects, maxOutgoingConnections } from './bulk.ts';
+import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type GarbageCollectionTarget,
@@ -192,7 +193,11 @@ export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService,
-		private readonly retention: RetentionService
+		private readonly retention: RetentionService,
+		private readonly cacheAdmin: Pick<
+			CacheAdminService,
+			'scheduleManagedRetirement'
+		>
 	) {}
 
 	private clearScan(cache: ResolvedCache): void {
@@ -1461,9 +1466,19 @@ export class GarbageCollectionService {
 		// R2 narinfo keys do not include the narinfo generation. Keep the gate
 		// between the live-generation check and object deletion so a recommit
 		// cannot replace the object while an older queued deletion is in progress.
-		const narInfosDeleted = await this.context.criticalSection(() =>
-			this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
-		);
+		const narInfosDeleted = await this.context.criticalSection(async () => {
+			const deleted =
+				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
+
+			if (collectionCache !== undefined && !collected.hasMoreWork) {
+				await this.cacheAdmin.scheduleManagedRetirement(
+					collectionCache,
+					purgeOrigin
+				);
+			}
+
+			return deleted;
+		});
 
 		// Delete R2 objects outside the critical section. The orphan scan then reads
 		// current pending rows and applies the age fence, so a concurrent upload is

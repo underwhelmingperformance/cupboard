@@ -195,6 +195,13 @@ export class InvalidCachePriorityError extends CliUsageError {
 	}
 }
 
+export class InvalidCacheRetirementChoiceError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(`Invalid retirement choice (expected true or false): ${value}`);
+		this.name = 'InvalidCacheRetirementChoiceError';
+	}
+}
+
 export class InvalidCacheAccessModeError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid cache access mode (expected public or private): ${value}`);

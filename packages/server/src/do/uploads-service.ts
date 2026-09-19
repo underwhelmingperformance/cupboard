@@ -28,7 +28,7 @@ import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
 import { type ResolvedCache } from '../db/cache.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { InvalidPushIdError } from '../errors.ts';
+import { CacheNotFoundError, InvalidPushIdError } from '../errors.ts';
 import {
 	narObjectKey,
 	type RequestOrigin,
@@ -204,6 +204,14 @@ export class UploadsService {
 		};
 	}
 
+	private requireCurrentCache(cache: ResolvedCache): void {
+		const current = this.context.cacheRepository.resolve(cache.scope);
+
+		if (current?.id !== cache.id || current.generation !== cache.generation) {
+			throw new CacheNotFoundError(cache.scope);
+		}
+	}
+
 	// Worker hints cover only NAR hashes in the current request. An existing
 	// narinfo can refer to a different hash when the same store path has been
 	// rebuilt. Query those uncovered hashes here so absence from the hint set does
@@ -313,19 +321,17 @@ export class UploadsService {
 
 		const cache = await this.registration.forWrite(cacheScope);
 
-		// Reject paths from another store directory before creating or extending the
-		// run root. Each pending upload then records the root its commit must attach
-		// to.
-		if (body.attachRoot !== undefined) {
-			this.roots.bindRunRoot(
-				cache,
-				body.attachRoot.name,
-				body.attachRoot.retention
-			);
-		}
-
 		if (body.paths.length === 0) {
-			return { uploads: [] };
+			const attachRoot = body.attachRoot;
+
+			return this.context.criticalSection(() => {
+				this.requireCurrentCache(cache);
+				if (attachRoot !== undefined) {
+					this.roots.bindRunRoot(cache, attachRoot.name, attachRoot.retention);
+				}
+
+				return Promise.resolve({ uploads: [] });
+			});
 		}
 
 		const {
@@ -353,55 +359,10 @@ export class UploadsService {
 				? {}
 				: { graceSeconds: resolvedGraceSeconds };
 
-		// A skip completes publication during negotiate, so confirm its grace even
-		// when the client did not request grace facts. Capability negotiation controls
-		// only the response shape. The batch re-checks each row identity because the
-		// classification awaited shared facts; a replaced row receives no grace and
-		// will not be returned as a skip below.
-		const skipFacts = confirmGraceBatch(
-			this.context,
-			this.retention,
-			cache,
-			skippableRows.map((row) => ({
-				storePathHash: row.storePathHash,
-				generation: row.generation,
-				narHash: row.narHash
-			})),
-			resolvedGraceSeconds
-		);
-
-		// A skip has no later commit step. Attach each confirmed skip to the run root
-		// now, using the same identity-checked set that the response loop uses.
-		if (body.attachRoot !== undefined) {
-			this.roots.attachRunRootTargets(
-				cache,
-				body.attachRoot.name,
-				body.paths.filter((path) => skipFacts.has(path.storePathHash))
-			);
-		}
-
-		const uploads: UploadDecision[] = [];
 		const armedReuseHashes = new Set<NixSha256HashString>();
 
 		for (const metadata of body.paths) {
 			const existing = existingByStorePathHash.get(metadata.storePathHash);
-			const skipFact =
-				existing !== undefined && skippable.has(metadata.storePathHash)
-					? skipFacts.get(metadata.storePathHash)
-					: undefined;
-
-			// `skipFacts` contains only rows that survived the identity check. If the
-			// row changed during classification, plan this request's bytes and let the
-			// commit saga resolve the concurrent publication.
-			if (existing !== undefined && skipFact !== undefined) {
-				uploads.push({
-					action: 'skip',
-					storePathHash: metadata.storePathHash,
-					narHash: existing.narHash,
-					...(shouldReportGrace && { grace: skipFact })
-				});
-				continue;
-			}
 
 			// A committed row without a present NAR is stale. Remove it before
 			// planning the replacement. Do not remove a replacement row written by a
@@ -413,26 +374,92 @@ export class UploadsService {
 			) {
 				await this.deletionQueue.removeStaleNarInfo(existing, origin);
 			}
+		}
 
-			const hinted = facts?.reusableByNarHash.get(metadata.narHash);
+		const uploads = await this.context.criticalSection(() => {
+			this.requireCurrentCache(cache);
 
-			if (hinted !== undefined && hinted.deleteAfter !== null) {
-				armedReuseHashes.add(metadata.narHash);
+			if (body.attachRoot !== undefined) {
+				this.roots.bindRunRoot(
+					cache,
+					body.attachRoot.name,
+					body.attachRoot.retention
+				);
 			}
 
-			const decision = this.planUpload(
+			// A skip completes publication during negotiate, so confirm its grace even
+			// when the client did not request grace facts. Capability negotiation controls
+			// only the response shape. The batch re-checks each row identity because the
+			// classification awaited shared facts; a replaced row receives no grace and
+			// will not be returned as a skip below.
+			const skipFacts = confirmGraceBatch(
+				this.context,
+				this.retention,
 				cache,
-				body.pushId,
-				metadata,
-				reusableByNarHash.get(metadata.narHash),
-				graceDecision,
-				body.attachRoot?.name
+				skippableRows.map((row) => ({
+					storePathHash: row.storePathHash,
+					generation: row.generation,
+					narHash: row.narHash
+				})),
+				resolvedGraceSeconds
 			);
 
-			uploads.push(
-				shouldReportGrace ? { ...decision, grace: plannedGraceFact } : decision
-			);
-		}
+			// A skip has no later commit step. Attach each confirmed skip to the run root
+			// now, using the same identity-checked set that the response loop uses.
+			if (body.attachRoot !== undefined) {
+				this.roots.attachRunRootTargets(
+					cache,
+					body.attachRoot.name,
+					body.paths.filter((path) => skipFacts.has(path.storePathHash))
+				);
+			}
+
+			const decisions: UploadDecision[] = [];
+
+			for (const metadata of body.paths) {
+				const existing = existingByStorePathHash.get(metadata.storePathHash);
+				const skipFact =
+					existing !== undefined && skippable.has(metadata.storePathHash)
+						? skipFacts.get(metadata.storePathHash)
+						: undefined;
+
+				// `skipFacts` contains only rows that survived the identity check. If the
+				// row changed during classification, plan this request's bytes and let the
+				// commit saga resolve the concurrent publication.
+				if (existing !== undefined && skipFact !== undefined) {
+					decisions.push({
+						action: 'skip',
+						storePathHash: metadata.storePathHash,
+						narHash: existing.narHash,
+						...(shouldReportGrace && { grace: skipFact })
+					});
+					continue;
+				}
+
+				const hinted = facts?.reusableByNarHash.get(metadata.narHash);
+
+				if (hinted !== undefined && hinted.deleteAfter !== null) {
+					armedReuseHashes.add(metadata.narHash);
+				}
+
+				const decision = this.planUpload(
+					cache,
+					body.pushId,
+					metadata,
+					reusableByNarHash.get(metadata.narHash),
+					graceDecision,
+					body.attachRoot?.name
+				);
+
+				decisions.push(
+					shouldReportGrace
+						? { ...decision, grace: plannedGraceFact }
+						: decision
+				);
+			}
+
+			return Promise.resolve(decisions);
+		});
 
 		// Worker hints bypass `findReusableBlobs`, which normally clears armed
 		// timers. Clear the hinted timers before returning the decisions. Otherwise

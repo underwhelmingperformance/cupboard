@@ -88,6 +88,9 @@ export const cacheIdentities = sqliteTable(
 		deletedAt: text('deleted_at').$type<IsoTimestamp>()
 	},
 	(table) => [
+		index('cache_identity_live_id_idx')
+			.on(table.id)
+			.where(sql`${table.deletedAt} IS NULL`),
 		index('cache_identity_incomplete_access_idx')
 			.on(table.access)
 			.where(sql`${table.access} IS NULL`),
@@ -106,6 +109,11 @@ export const cacheIdentities = sqliteTable(
 			.where(sql`${table.kind} = 'named' AND ${table.deletedAt} IS NULL`)
 	]
 );
+
+export const managedCacheRetirements = sqliteTable('managed_cache_retirement', {
+	cacheId: integer('cache_id').$type<CacheId>().primaryKey(),
+	eligibleAfter: text('eligible_after').$type<IsoTimestamp>().notNull()
+});
 
 export const rootRetentionRuleSets = sqliteTable(
 	'root_retention_rule_set',
