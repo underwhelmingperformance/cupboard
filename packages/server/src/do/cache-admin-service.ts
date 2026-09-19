@@ -1,9 +1,12 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	cacheGenerationSchema,
 	type CacheName,
 	cacheNameSchema,
 	cachePrioritySchema,
-	type CacheScope
+	type CacheScope,
+	cacheScopeSchema,
+	isSameCacheScope
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -14,7 +17,8 @@ import {
 	type CacheUpdateBody
 } from '@cupboard/protocol/caches';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, count, eq, gt, isNull, min, sql } from 'drizzle-orm';
+import { and, count, eq, gt, isNull, lte, min, sql } from 'drizzle-orm';
+import { z } from 'zod';
 
 import {
 	type CacheId,
@@ -28,7 +32,8 @@ import {
 	CacheAccessMigrationPendingError,
 	CacheAlreadyExistsError,
 	CacheNotEmptyError,
-	CacheNotFoundError
+	CacheNotFoundError,
+	CacheRetirementTtlRequiredError
 } from '../errors.ts';
 import {
 	narObjectKey,
@@ -46,6 +51,7 @@ import {
 	minimumStatementsPerTeardownChunk
 } from './deletion-queue-service.ts';
 import { maintenancePassStatements } from './maintenance-eligibility-service.ts';
+import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionRuleService } from './retention-rule-service.ts';
 // Bound each narinfo retirement pass so large caches release the input gate
 // between R2 deletions and D1 edge updates, and so one pass fits the D1
@@ -72,6 +78,22 @@ export const maxPathsTornDownPerRun =
 // deletion queues can be active at once. The complete suffix is the cache name,
 // so names containing colons remain unambiguous.
 export const teardownEntryPrefix = 'maintenance:teardown:';
+const teardownCursorKey = 'maintenance:teardown-cursor';
+const teardownMarkerSchema = z.union([
+	requestOriginSchema,
+	z.object({ origin: requestOriginSchema.optional() })
+]);
+
+export const managedRetirementEntryPrefix = 'maintenance:managed-retirement:';
+const managedRetirementCursorKey = 'maintenance:managed-retirement-cursor';
+const managedRetirementClaimSchema = z.object({
+	cacheId: cacheIdSchema,
+	scope: cacheScopeSchema,
+	generation: cacheGenerationSchema,
+	origin: requestOriginSchema.optional(),
+	revocationStarted: z.boolean().optional()
+});
+type ManagedRetirementClaim = z.infer<typeof managedRetirementClaimSchema>;
 
 export class CacheAdminService {
 	private readonly retentionRules: RetentionRuleService;
@@ -79,13 +101,28 @@ export class CacheAdminService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly registration: CacheRegistrationService,
-		private readonly deletionQueue: DeletionQueueService
+		private readonly deletionQueue: DeletionQueueService,
+		private readonly reconcileQueue: Pick<
+			ReconcileQueueService,
+			'hasPendingForCache'
+		>
 	) {
 		this.retentionRules = new RetentionRuleService(context);
 	}
 
 	private teardownKey(cache: ResolvedCache): string {
 		return `${teardownEntryPrefix}${String(cache.id)}`;
+	}
+
+	private async teardownEntryAfter(
+		cursor: string | undefined
+	): Promise<[string, unknown] | undefined> {
+		const entries = await this.context.ctx.storage.list({
+			prefix: teardownEntryPrefix,
+			limit: 1,
+			...(cursor !== undefined && { startAfter: cursor })
+		});
+		return entries.entries().next().value;
 	}
 
 	private hasQueuedDeletions(cache: ResolvedCache): boolean {
@@ -97,6 +134,90 @@ export class CacheAdminService {
 			.get();
 
 		return row !== undefined;
+	}
+
+	private managedRetirementKey(cacheId: CacheId): string {
+		return `${managedRetirementEntryPrefix}${String(cacheId)}`;
+	}
+
+	private async managedRetirementEntryAfter(
+		cursor: string | undefined
+	): Promise<[string, unknown] | undefined> {
+		const entries = await this.context.ctx.storage.list({
+			prefix: managedRetirementEntryPrefix,
+			limit: 1,
+			...(cursor !== undefined && { startAfter: cursor })
+		});
+
+		return entries.entries().next().value;
+	}
+
+	private async claimManagedRetirementEntry(): Promise<
+		[string, unknown] | undefined
+	> {
+		let cursor = await this.context.ctx.storage.get<string>(
+			managedRetirementCursorKey
+		);
+		let isWrapped = false;
+
+		for (;;) {
+			const entry = await this.managedRetirementEntryAfter(cursor);
+			if (entry !== undefined) {
+				await this.context.ctx.storage.put(
+					managedRetirementCursorKey,
+					entry[0]
+				);
+				return entry;
+			}
+
+			if (cursor !== undefined && !isWrapped) {
+				cursor = undefined;
+				isWrapped = true;
+				continue;
+			}
+
+			await this.context.ctx.storage.delete(managedRetirementCursorKey);
+			return undefined;
+		}
+	}
+
+	private async isManagedRetirementEligible(
+		cache: ResolvedCache,
+		now: IsoTimestamp
+	): Promise<boolean> {
+		const row = this.context.db
+			.all<{ id: number }>(
+				sql`
+				SELECT identity.id
+				FROM cache_identity AS identity
+				INNER JOIN managed_cache_retirement AS managed
+					ON managed.cache_id = identity.id
+				WHERE identity.id = ${cache.id}
+					AND identity.deleted_at IS NULL
+					AND identity.generation = ${cache.generation}
+					AND managed.eligible_after <= ${now}
+					AND NOT EXISTS (SELECT 1 FROM narinfo WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM retention_root WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM retention_root_target WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM retention_grace WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM pending_upload WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM pending_attestation WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM verification_cursor WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM narinfo_deletion WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM garbage_collection_scan WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM garbage_collection_frontier WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM garbage_collection_mark WHERE cache_id = identity.id)
+					AND NOT EXISTS (SELECT 1 FROM garbage_collection_tenant_run WHERE cache_id = identity.id)
+				LIMIT 1
+			`
+			)
+			.at(0);
+
+		if (row === undefined) {
+			return false;
+		}
+
+		return !(await this.reconcileQueue.hasPendingForCache(cache.id));
 	}
 
 	// The caller holds the input gate. The retirement service applies the
@@ -112,7 +233,7 @@ export class CacheAdminService {
 	// would leave the storage and tenant charge in place indefinitely.
 	private async drainTeardownChunk(
 		cache: ResolvedCache,
-		origin: RequestOrigin,
+		origin: RequestOrigin | undefined,
 		limit: number
 	): Promise<void> {
 		const queued = this.context.db
@@ -185,7 +306,7 @@ export class CacheAdminService {
 
 	private async tearDownCacheInSection(
 		cache: ResolvedCache,
-		origin: RequestOrigin
+		origin?: RequestOrigin
 	): Promise<void> {
 		if (this.context.cacheRepository.resolve(cache.scope)?.id !== cache.id) {
 			throw new CacheNotFoundError(cache.scope);
@@ -264,9 +385,12 @@ export class CacheAdminService {
 			tx.delete(schema.pendingAttestations)
 				.where(eq(schema.pendingAttestations.cacheId, cache.id))
 				.run();
+			tx.delete(schema.managedCacheRetirements)
+				.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+				.run();
 		});
 
-		await this.context.ctx.storage.put(this.teardownKey(cache), origin);
+		await this.context.ctx.storage.put(this.teardownKey(cache), origin ?? {});
 		await this.context.ctx.storage.setAlarm(Date.now());
 	}
 
@@ -304,6 +428,13 @@ export class CacheAdminService {
 				.groupBy(schema.narInfos.cacheId)
 				.all()
 				.map((row) => [row.cacheId, row.count])
+		);
+		const retirements = new Map(
+			this.context.db
+				.select()
+				.from(schema.managedCacheRetirements)
+				.all()
+				.map((row) => [row.cacheId, row.eligibleAfter] as const)
 		);
 		const now = isoTimestamp(new Date());
 		const earliestDeadlines = new Map<CacheId, IsoTimestamp>();
@@ -365,6 +496,10 @@ export class CacheAdminService {
 					rootRetentionOverrides:
 						overrides.get(row.rootRetentionRuleSetId) ?? [],
 					graceManaged: row.graceManaged,
+					...(retirements.has(row.id) && {
+						retireWhenEmpty: true,
+						retirementEligibleAfter: retirements.get(row.id)
+					}),
 					...(earliestGraceDeadline !== undefined && {
 						earliestGraceDeadline
 					})
@@ -438,18 +573,26 @@ export class CacheAdminService {
 		}
 
 		if (update.kind === 'set-default-root-ttl') {
-			this.context.db
-				.update(schema.cacheIdentities)
-				.set({
-					defaultRootTtlSeconds:
-						update.retention.kind === 'duration'
-							? update.retention.seconds
-							: sql`NULL`
-				})
-				.where(eq(schema.cacheIdentities.id, cache.id))
-				.run();
-
-			return this.cacheSummary(cache);
+			return this.context.criticalSection(() => {
+				const current = this.context.cacheRepository.require(scope);
+				this.context.db.transaction((tx) => {
+					tx.update(schema.cacheIdentities)
+						.set({
+							defaultRootTtlSeconds:
+								update.retention.kind === 'duration'
+									? update.retention.seconds
+									: sql`NULL`
+						})
+						.where(eq(schema.cacheIdentities.id, current.id))
+						.run();
+					if (update.retention.kind === 'permanent') {
+						tx.delete(schema.managedCacheRetirements)
+							.where(eq(schema.managedCacheRetirements.cacheId, current.id))
+							.run();
+					}
+				});
+				return Promise.resolve(this.cacheSummary(current));
+			});
 		}
 
 		if (update.kind === 'set-root-ttl-override') {
@@ -535,6 +678,187 @@ export class CacheAdminService {
 		});
 	}
 
+	setRetireWhenEmpty(
+		scope: Extract<CacheScope, { kind: 'named' }>,
+		shouldRetireWhenEmpty: boolean
+	): Promise<CacheSummary> {
+		return this.context.criticalSection(() => {
+			const cache = this.context.cacheRepository.require(scope);
+
+			if (shouldRetireWhenEmpty) {
+				const configuration = this.context.db
+					.select({
+						defaultRootTtlSeconds: schema.cacheIdentities.defaultRootTtlSeconds
+					})
+					.from(schema.cacheIdentities)
+					.where(eq(schema.cacheIdentities.id, cache.id))
+					.get();
+				const ttlSeconds = configuration?.defaultRootTtlSeconds;
+				if (ttlSeconds === null || ttlSeconds === undefined) {
+					throw new CacheRetirementTtlRequiredError();
+				}
+
+				const eligibleAfter = isoTimestamp(
+					new Date(Date.now() + ttlSeconds * 1000)
+				);
+				this.context.db
+					.insert(schema.managedCacheRetirements)
+					.values({ cacheId: cache.id, eligibleAfter })
+					.onConflictDoUpdate({
+						target: schema.managedCacheRetirements.cacheId,
+						set: { eligibleAfter }
+					})
+					.run();
+			} else {
+				this.context.db
+					.delete(schema.managedCacheRetirements)
+					.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+					.run();
+			}
+
+			return Promise.resolve(this.cacheSummary(cache));
+		});
+	}
+
+	async scheduleManagedRetirement(
+		cache: ResolvedCache,
+		origin?: RequestOrigin
+	): Promise<void> {
+		const live = this.context.cacheRepository.resolve(cache.scope);
+		if (
+			live?.id !== cache.id ||
+			live.generation !== cache.generation ||
+			!isSameCacheScope(live.scope, cache.scope)
+		) {
+			return;
+		}
+
+		const now = isoTimestamp(new Date());
+		const due = this.context.db
+			.select({ cacheId: schema.managedCacheRetirements.cacheId })
+			.from(schema.managedCacheRetirements)
+			.where(
+				and(
+					eq(schema.managedCacheRetirements.cacheId, cache.id),
+					lte(schema.managedCacheRetirements.eligibleAfter, now)
+				)
+			)
+			.get();
+		if (due === undefined || this.hasQueuedDeletions(cache)) {
+			return;
+		}
+
+		const key = this.managedRetirementKey(cache.id);
+		const existing = managedRetirementClaimSchema.safeParse(
+			await this.context.ctx.storage.get(key)
+		);
+		const hasCurrentClaim =
+			existing.success &&
+			existing.data.cacheId === cache.id &&
+			existing.data.generation === cache.generation &&
+			isSameCacheScope(existing.data.scope, cache.scope);
+		if (!hasCurrentClaim) {
+			const claim: ManagedRetirementClaim = {
+				cacheId: cache.id,
+				scope: cache.scope,
+				generation: cache.generation,
+				...(origin !== undefined && { origin })
+			};
+			await this.context.ctx.storage.put(key, claim);
+		}
+
+		await this.context.ctx.storage.setAlarm(Date.now());
+	}
+
+	async hasPendingManagedRetirement(): Promise<boolean> {
+		const entries = await this.context.ctx.storage.list({
+			prefix: managedRetirementEntryPrefix,
+			limit: 1
+		});
+		if (entries.size > 0) {
+			return true;
+		}
+
+		await this.context.ctx.storage.delete(managedRetirementCursorKey);
+		return false;
+	}
+
+	async resumeManagedRetirement(): Promise<void> {
+		const entry = await this.claimManagedRetirementEntry();
+		if (entry === undefined) {
+			return;
+		}
+
+		const [key, stored] = entry;
+		const parsed = managedRetirementClaimSchema.safeParse(stored);
+		if (
+			!parsed.success ||
+			key !== this.managedRetirementKey(parsed.data.cacheId)
+		) {
+			await this.context.ctx.storage.delete(key);
+			return;
+		}
+
+		await this.context.criticalSection(async () => {
+			const claim = parsed.data;
+			const identity = this.context.db
+				.select({
+					id: schema.cacheIdentities.id,
+					generation: schema.cacheIdentities.generation,
+					deletedAt: schema.cacheIdentities.deletedAt
+				})
+				.from(schema.cacheIdentities)
+				.where(eq(schema.cacheIdentities.id, claim.cacheId))
+				.get();
+			if (identity?.generation !== claim.generation) {
+				await this.context.ctx.storage.delete(key);
+				return;
+			}
+
+			const cache = this.context.cacheRepository.resolvedForId(identity.id);
+			if (!isSameCacheScope(cache.scope, claim.scope)) {
+				await this.context.ctx.storage.delete(key);
+				return;
+			}
+
+			if (identity.deletedAt !== null) {
+				await this.context.ctx.storage.put(
+					this.teardownKey(cache),
+					claim.origin ?? {}
+				);
+				await this.context.ctx.storage.setAlarm(Date.now());
+				await this.context.ctx.storage.delete(key);
+				return;
+			}
+
+			const live = this.context.cacheRepository.resolve(claim.scope);
+			if (live?.id !== claim.cacheId || live.generation !== claim.generation) {
+				await this.context.ctx.storage.delete(key);
+				return;
+			}
+
+			if (claim.revocationStarted !== true) {
+				if (
+					!(await this.isManagedRetirementEligible(
+						live,
+						isoTimestamp(new Date())
+					))
+				) {
+					await this.context.ctx.storage.delete(key);
+					return;
+				}
+
+				await this.context.ctx.storage.put(key, {
+					...claim,
+					revocationStarted: true
+				} satisfies ManagedRetirementClaim);
+			}
+
+			await this.tearDownCacheInSection(live, claim.origin);
+			await this.context.ctx.storage.delete(key);
+		});
+	}
+
 	async removeCache(
 		name: CacheName,
 		shouldForce: boolean,
@@ -587,6 +911,11 @@ export class CacheAdminService {
 			...this.retentionRules.listForRuleSet(row.rootRetentionRuleSetId)
 		];
 		const earliest = this.earliestLiveGraceDeadline(cache);
+		const retirement = this.context.db
+			.select({ eligibleAfter: schema.managedCacheRetirements.eligibleAfter })
+			.from(schema.managedCacheRetirements)
+			.where(eq(schema.managedCacheRetirements.cacheId, cache.id))
+			.get();
 
 		return {
 			scope: cache.scope,
@@ -603,6 +932,10 @@ export class CacheAdminService {
 					: { kind: 'duration', graceSeconds: row.graceSeconds },
 			rootRetentionOverrides,
 			graceManaged: row.graceManaged,
+			...(retirement !== undefined && {
+				retireWhenEmpty: true,
+				retirementEligibleAfter: retirement.eligibleAfter
+			}),
 			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
 	}
@@ -618,29 +951,55 @@ export class CacheAdminService {
 	// Claim one cache marker per alarm so several large teardowns make progress
 	// independently.
 	async claimTeardown(): Promise<
-		{ cache: ResolvedCache; origin: RequestOrigin } | undefined
+		{ cache: ResolvedCache; origin: RequestOrigin | undefined } | undefined
 	> {
+		let cursor = await this.context.ctx.storage.get<string>(teardownCursorKey);
+		let isWrapped = false;
 		for (;;) {
-			const entries = await this.context.ctx.storage.list<string>({
-				prefix: teardownEntryPrefix,
-				limit: 1
-			});
-			const entry = entries.entries().next().value;
+			const entry = await this.teardownEntryAfter(cursor);
 
 			if (entry === undefined) {
+				if (cursor !== undefined && !isWrapped) {
+					cursor = undefined;
+					isWrapped = true;
+					continue;
+				}
+				await this.context.ctx.storage.delete(teardownCursorKey);
 				return undefined;
 			}
 
-			const [key, origin] = entry;
+			const [key, storedMarker] = entry;
+			const marker = teardownMarkerSchema.safeParse(storedMarker);
+			if (!marker.success) {
+				await this.context.ctx.storage.delete(key);
+				cursor = key;
+				continue;
+			}
+			const origin =
+				typeof marker.data === 'string' ? marker.data : marker.data.origin;
 			const suffix = key.slice(teardownEntryPrefix.length);
 			const cacheId = cacheIdSchema.safeParse(Number(suffix));
-			const cache = cacheId.success
-				? this.context.cacheRepository.resolvedForId(cacheId.data)
-				: await this.adoptLegacyTeardownMarker(key, suffix, origin);
-
-			if (cache !== undefined) {
-				return { cache, origin: requestOriginSchema.parse(origin) };
+			if (cacheId.success) {
+				const cache = this.context.cacheRepository.resolvedForId(cacheId.data);
+				await this.context.ctx.storage.put(teardownCursorKey, key);
+				return { cache, origin };
 			}
+
+			if (origin === undefined) {
+				await this.context.ctx.storage.delete(key);
+				cursor = key;
+				continue;
+			}
+
+			const cache = await this.adoptLegacyTeardownMarker(key, suffix, origin);
+			if (cache !== undefined) {
+				await this.context.ctx.storage.put(
+					teardownCursorKey,
+					this.teardownKey(cache)
+				);
+				return { cache, origin };
+			}
+			cursor = key;
 		}
 	}
 
@@ -680,7 +1039,7 @@ export class CacheAdminService {
 	// cache marker remains.
 	async resumeTeardownPass(
 		cache: ResolvedCache,
-		origin: RequestOrigin,
+		origin: RequestOrigin | undefined,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
 		await this.context.criticalSection(async () => {

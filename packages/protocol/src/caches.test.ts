@@ -4,6 +4,7 @@ import {
 	cacheListResponseSchema,
 	cachePutBodySchema,
 	cacheRemoveResponseSchema,
+	cacheRetirementBodySchema,
 	cacheSummarySchema,
 	cacheUpdateBodySchema
 } from './caches.ts';
@@ -148,6 +149,14 @@ describe('cache schemas', () => {
 
 	it('rejects a put body without a priority', () => {
 		expect(cachePutBodySchema.safeParse({}).success).toBe(false);
+	});
+
+	it('accepts explicit empty-cache retirement management', () => {
+		expect(
+			cacheRetirementBodySchema.parse({ retireWhenEmpty: true })
+		).toStrictEqual({
+			retireWhenEmpty: true
+		});
 	});
 
 	it('rejects updates that mix access and priority fields', () => {

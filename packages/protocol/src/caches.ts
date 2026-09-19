@@ -42,6 +42,8 @@ export const cacheSummarySchema = z.strictObject({
 	grace: cacheGraceSchema,
 	rootRetentionOverrides: z.array(rootRetentionOverrideSchema),
 	graceManaged: z.boolean().optional(),
+	retireWhenEmpty: z.boolean().optional(),
+	retirementEligibleAfter: isoTimestampSchema.optional(),
 	earliestGraceDeadline: isoTimestampSchema.optional()
 });
 export type CacheSummary = z.output<typeof cacheSummarySchema>;
@@ -60,6 +62,11 @@ export const cachePutBodySchema = z.strictObject({
 	grace: cacheGraceSchema.default({ kind: 'none' })
 });
 export type CachePutBody = z.output<typeof cachePutBodySchema>;
+
+export const cacheRetirementBodySchema = z.strictObject({
+	retireWhenEmpty: z.boolean()
+});
+export type CacheRetirementBody = z.output<typeof cacheRetirementBodySchema>;
 
 export const cacheUpdateBodySchema = z.discriminatedUnion('kind', [
 	z.strictObject({

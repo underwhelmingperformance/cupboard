@@ -149,7 +149,8 @@ describe('db cost meter', () => {
 		// compare a store path against a bound list, and SQLite counts each element
 		// it reads from that list as a row, so a one-path negotiation reads two
 		// rows more than its table rows. One further row is the cache identity the
-		// request resolves before it negotiates anything.
+		// request resolves before it negotiates anything. The request checks that
+		// the cache is still live before it inserts the pending upload.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -161,7 +162,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			rowsRead: 18,
+			rowsRead: 19,
 			rowsWritten: 7
 		});
 	});
@@ -202,7 +203,7 @@ describe('db cost meter', () => {
 			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.INTERNAL_SERVER_ERROR,
-			rowsRead: 18,
+			rowsRead: 19,
 			rowsWritten: 0
 		});
 	});

@@ -30,6 +30,10 @@ import {
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 
+const noManagedRetirement = {
+	scheduleManagedRetirement: (): Promise<void> => Promise.resolve()
+};
+
 const uploadGraceMs = 15 * 60 * 1000;
 
 // R2 uses the real clock for `uploaded`, while this harness can replace `Date`.
@@ -146,7 +150,8 @@ describe('garbage collection best-effort staging deletes', () => {
 				const garbageCollection = new GarbageCollectionService(
 					instance.context,
 					deletionQueue,
-					new RetentionService(instance.context)
+					new RetentionService(instance.context),
+					noManagedRetirement
 				);
 
 				return {
@@ -246,7 +251,8 @@ describe('garbage collection best-effort staging deletes', () => {
 				const garbageCollection = new GarbageCollectionService(
 					instance.context,
 					deletionQueue,
-					new RetentionService(instance.context)
+					new RetentionService(instance.context),
+					noManagedRetirement
 				);
 				const first = await asOneInvocation(() =>
 					garbageCollection.collectGarbage(rootLogger(), { scope: 'tenant' })

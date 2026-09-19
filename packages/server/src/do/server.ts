@@ -273,6 +273,7 @@ export const maintenancePassCursorKey = 'maintenance:alarm-pass';
 
 type MaintenancePassKey =
 	| 'garbage-collection'
+	| 'managed-retirement'
 	| 'reconcile'
 	| 'signing-key-backfill'
 	| 'teardown'
@@ -514,12 +515,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.cacheAdmin = new CacheAdminService(
 			this.context,
 			this.cacheRegistration,
-			this.deletionQueue
+			this.deletionQueue,
+			this.reconcileQueue
 		);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
 			this.deletionQueue,
-			this.retention
+			this.retention,
+			this.cacheAdmin
 		);
 		this.tokenExchange = new TokenExchangeService(
 			this.context,
@@ -2058,6 +2061,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				run: async () => {
 					await this.resumeCacheTeardown();
 
+					return 'progressed';
+				}
+			},
+			{
+				key: 'managed-retirement',
+				hasWork: () => this.cacheAdmin.hasPendingManagedRetirement(),
+				run: async () => {
+					await this.cacheAdmin.resumeManagedRetirement();
 					return 'progressed';
 				}
 			},

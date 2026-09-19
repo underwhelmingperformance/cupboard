@@ -9,6 +9,7 @@ import {
 	CacheNotEmptyError,
 	CacheRetentionMigrationPendingError,
 	CacheRetentionRuleLimitExceededError,
+	CacheRetirementTtlRequiredError,
 	ServerHttpError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
@@ -66,6 +67,13 @@ export function bridgedError(
 
 	if (error instanceof CacheRetentionRuleLimitExceededError) {
 		return new ORPCError('CACHE_RETENTION_RULE_LIMIT_EXCEEDED', {
+			status: error.status,
+			message: error.message
+		});
+	}
+
+	if (error instanceof CacheRetirementTtlRequiredError) {
+		return new ORPCError('CACHE_RETIREMENT_TTL_REQUIRED', {
 			status: error.status,
 			message: error.message
 		});

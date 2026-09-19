@@ -127,6 +127,15 @@ export class ReconcileQueueService {
 		return remaining.size > 0;
 	}
 
+	async hasPendingForCache(cacheId: CacheId): Promise<boolean> {
+		const remaining = await this.context.ctx.storage.list({
+			prefix: `${reconcileEntryPrefix}${String(cacheId)}:`,
+			limit: 1
+		});
+
+		return remaining.size > 0;
+	}
+
 	async clearOrigin(): Promise<void> {
 		await this.context.ctx.storage.delete(reconcileOriginKey);
 	}

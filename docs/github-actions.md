@@ -218,8 +218,20 @@ PR trust rule permits publication, creation and deletion of that cache and
 management of its retention roots. A closed event skips planning and building.
 If the pull request closed without merging, the removal job removes its cache. A
 merged pull request keeps its cache so the branch run can reuse those outputs
-through the repository's view. Its roots still expire according to their TTL;
-the empty cache row remains until it is removed.
+through the repository's view. Its roots still expire according to their TTL. By
+default, the empty cache row remains until it is removed.
+
+An administrator can opt a merged pull request's cache into automatic removal
+after its roots expire and the cache becomes empty. The cache must have a finite
+default root TTL, as caches created by this preset do:
+
+```bash
+cupboard cache set-retirement "$tenant" gh-123456-pr-42 --when-empty true
+```
+
+Replace `123456` and `42` with the repository's numeric ID and pull request
+number. Use `--when-empty false` to keep that cache after it empties. The
+setting applies to each named cache separately; the preset does not enable it.
 
 The preset accepts only pull requests from the caller repository. A caller that
 accepts fork contributions can skip publication for those runs with

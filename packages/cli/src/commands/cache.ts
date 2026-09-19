@@ -2,6 +2,7 @@ import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheAccessMode,
+	type CacheName,
 	type CachePriority,
 	cachePrioritySchema,
 	type CacheScope,
@@ -45,6 +46,7 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import {
 	InvalidCachePriorityError,
+	InvalidCacheRetirementChoiceError,
 	NamedCacheTargetRequiredError,
 	RootRetentionOptionError
 } from '../errors.ts';
@@ -67,6 +69,10 @@ interface CacheSetAccessOptions {
 
 interface CacheSetPriorityOptions {
 	readonly priority: CachePriority;
+}
+
+interface CacheSetRetirementOptions {
+	readonly whenEmpty: boolean;
 }
 
 interface CacheSetRootTtlOptions {
@@ -95,6 +101,10 @@ export interface CacheClient {
 	get: CacheScopedClient<object, CacheSummary>;
 	put: CacheScopedClient<CachePutBody, CacheSummary>;
 	update: CacheScopedClient<CacheUpdateBody, CacheSummary>;
+	retirement(input: {
+		cacheName: CacheName;
+		retireWhenEmpty: boolean;
+	}): Promise<CacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
 		query?: { force?: boolean };
@@ -115,6 +125,18 @@ export function parsePriority(value: string): CachePriority {
 	}
 
 	return cachePrioritySchema.parse(priority);
+}
+
+export function isRetirementEnabled(value: string): boolean {
+	if (value === 'true') {
+		return true;
+	}
+
+	if (value === 'false') {
+		return false;
+	}
+
+	throw new InvalidCacheRetirementChoiceError(value);
 }
 
 export function registerCacheCommands(
@@ -391,6 +413,40 @@ export function registerCacheCommands(
 		);
 
 	cache
+		.command('set-retirement')
+		.description('Opt a named cache in or out of retirement when empty.')
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('[name]', 'cache name when the URL does not select one')
+		.requiredOption(
+			'--when-empty <choice>',
+			'true to retire when empty, false to keep the cache',
+			isRetirementEnabled
+		)
+		.action(
+			async (
+				url: URL,
+				name: string | undefined,
+				options: CacheSetRetirementOptions
+			) => {
+				const target = cacheCommandTarget(url, name);
+
+				if (target.cache.kind === 'default') {
+					throw new NamedCacheTargetRequiredError('Cache retirement');
+				}
+
+				const reporter = commandUi(program, programOptions).reporter();
+				const rpc = cacheRpc(target.tenantUrl, programOptions);
+
+				await runCacheSetRetirement(
+					target.cache.name,
+					options.whenEmpty,
+					reporter,
+					rpc.caches
+				);
+			}
+		);
+
+	cache
 		.command('remove')
 		.description('Remove a named cache.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
@@ -546,6 +602,24 @@ export async function runCacheSetPriority(
 	);
 
 	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
+}
+
+export async function runCacheSetRetirement(
+	cacheName: CacheName,
+	shouldRetireWhenEmpty: boolean,
+	reporter: Reporter,
+	client: Pick<CacheClient, 'retirement'>
+): Promise<void> {
+	const summary = await reporter.phase('Setting cache retirement', () =>
+		client.retirement({ cacheName, retireWhenEmpty: shouldRetireWhenEmpty })
+	);
+
+	const result = {
+		...summary,
+		retireWhenEmpty: summary.retireWhenEmpty ?? shouldRetireWhenEmpty
+	};
+
+	reporter.result({ kind: 'cache', data: result, rows: summaryRows(result) });
 }
 
 export async function runCacheSetRootTtl(
@@ -722,6 +796,18 @@ function cacheRow(summary: CacheSummary): ResultRow {
 		);
 	}
 
+	if (summary.retireWhenEmpty !== undefined) {
+		parts.push(
+			summary.retireWhenEmpty ? 'retire when empty' : 'keep when empty'
+		);
+	}
+
+	if (summary.retirementEligibleAfter !== undefined) {
+		parts.push(
+			`retirement eligible after ${formatTimestamp(summary.retirementEligibleAfter)}`
+		);
+	}
+
 	return {
 		label: cacheLabel(summary.scope),
 		value: parts.join('; ')
@@ -766,6 +852,20 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 		rows.push({
 			label: 'Earliest grace deadline',
 			value: formatTimestamp(summary.earliestGraceDeadline)
+		});
+	}
+
+	if (summary.retireWhenEmpty !== undefined) {
+		rows.push({
+			label: 'Retire when empty',
+			value: summary.retireWhenEmpty ? 'yes' : 'no'
+		});
+	}
+
+	if (summary.retirementEligibleAfter !== undefined) {
+		rows.push({
+			label: 'Retirement eligible after',
+			value: formatTimestamp(summary.retirementEligibleAfter)
 		});
 	}
 

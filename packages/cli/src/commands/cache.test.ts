@@ -19,12 +19,16 @@ import type { ResultRow } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
-import { InvalidCachePriorityError } from '../errors.ts';
+import {
+	InvalidCachePriorityError,
+	InvalidCacheRetirementChoiceError
+} from '../errors.ts';
 
 const cacheName = (value: string): CacheName => cacheNameSchema.parse(value);
 
 import {
 	type CacheClient,
+	isRetirementEnabled,
 	parsePriority,
 	runCacheClearGrace,
 	runCacheClearRootTtl,
@@ -35,6 +39,7 @@ import {
 	runCacheSetAccess,
 	runCacheSetGrace,
 	runCacheSetPriority,
+	runCacheSetRetirement,
 	runCacheSetRootTtl
 } from './cache.ts';
 
@@ -107,6 +112,16 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 					})
 				)
 		},
+		retirement: ({ cacheName, retireWhenEmpty }) =>
+			Promise.resolve(
+				cacheSummary({
+					scope: { kind: 'named', name: cacheName },
+					access: 'public',
+					priority: 40,
+					storePaths: 0,
+					retireWhenEmpty
+				})
+			),
 		remove: ({ params }) =>
 			Promise.resolve(
 				cacheRemoveResponseSchema.parse({
@@ -130,6 +145,21 @@ describe('parsePriority', () => {
 			expect(() => parsePriority(value)).toThrow(InvalidCachePriorityError);
 		}
 	);
+});
+
+describe('isRetirementEnabled', () => {
+	it.each([
+		['true', true],
+		['false', false]
+	])('parses %s', (value, expected) => {
+		expect(isRetirementEnabled(value)).toBe(expected);
+	});
+
+	it.each(['', 'yes', 'TRUE', '0'])('rejects %s', (value) => {
+		expect(() => isRetirementEnabled(value)).toThrow(
+			InvalidCacheRetirementChoiceError
+		);
+	});
 });
 
 describe('runCacheList', () => {
@@ -158,6 +188,8 @@ describe('runCacheList', () => {
 						}
 					],
 					graceManaged: true,
+					retireWhenEmpty: true,
+					retirementEligibleAfter: '2026-03-02T00:00:00.000Z',
 					earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
 				}),
 				cacheSummary({
@@ -184,7 +216,7 @@ describe('runCacheList', () => {
 				{
 					label: 'builds',
 					value:
-						'public; priority 30; 5 path(s); default root retention 1,209,600s; grace 86,400s; 1 root retention override(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
+						'public; priority 30; 5 path(s); default root retention 1,209,600s; grace 86,400s; 1 root retention override(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC; retire when empty; retirement eligible after 2026-03-02 00:00 UTC'
 				},
 				{
 					label: 'drained',
@@ -420,6 +452,61 @@ describe('runCacheCreate', () => {
 });
 
 describe('cache property updates', () => {
+	it.each([true, false])(
+		'sets retirement for a named cache to %s',
+		async (retireWhenEmpty) => {
+			const calls: unknown[] = [];
+			const data: unknown[] = [];
+			const results: ResultRow[][] = [];
+			const capture = reporter(results);
+			const summary = cacheSummary({
+				scope: { kind: 'named', name: 'pr-42' },
+				access: 'public',
+				priority: 40,
+				storePaths: 0,
+				...(retireWhenEmpty && { retireWhenEmpty })
+			});
+
+			await runCacheSetRetirement(
+				cacheName('pr-42'),
+				retireWhenEmpty,
+				{
+					...capture,
+					result(payload) {
+						data.push(payload.data);
+						capture.result(payload);
+					}
+				},
+				{
+					retirement: (input) => {
+						calls.push(input);
+						return Promise.resolve(summary);
+					}
+				}
+			);
+
+			expect({ calls, data, results }).toStrictEqual({
+				calls: [{ cacheName: 'pr-42', retireWhenEmpty }],
+				data: [{ ...summary, retireWhenEmpty }],
+				results: [
+					[
+						{ label: 'Cache', value: 'pr-42' },
+						{ label: 'Access', value: 'public' },
+						{ label: 'Priority', value: '40' },
+						{ label: 'Store paths', value: '0' },
+						{ label: 'Default root retention', value: 'permanent' },
+						{ label: 'Grace', value: 'none' },
+						{ label: 'Root retention overrides', value: 'none' },
+						{
+							label: 'Retire when empty',
+							value: retireWhenEmpty ? 'yes' : 'no'
+						}
+					]
+				]
+			});
+		}
+	);
+
 	it('sets only the selected cache access property', async () => {
 		const calls: unknown[] = [];
 		const summary = cacheSummary({
