@@ -61,6 +61,35 @@ const noExtras = {
 };
 
 describe('buildPushArguments', () => {
+	it('selects a named cache through the legacy CLI flag', () => {
+		expect(
+			buildPushArguments({
+				url: new URL('https://cache.example.test/t/acme'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: 'github:owner/repo/pr-1',
+				cache: { kind: 'named', name: cacheNameSchema.parse('pr-1') },
+				cacheSyntax: 'flag',
+				ttl: '',
+				retain: true,
+				wait: true,
+				waitTimeout: '',
+				attestations: [],
+				...noExtras
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test/t/acme',
+			'/nix/store/a',
+			'--github-oidc',
+			'--root',
+			'github:owner/repo/pr-1',
+			'--cache',
+			'pr-1'
+		]);
+	});
+
 	it('builds a GitHub OIDC push invocation', () => {
 		expect(
 			buildPushArguments({
@@ -69,6 +98,7 @@ describe('buildPushArguments', () => {
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: { kind: 'named', name: cacheNameSchema.parse('ci') },
+				cacheSyntax: 'url',
 				ttl: '7d',
 				retain: true,
 				wait: true,
@@ -104,6 +134,7 @@ describe('buildPushArguments', () => {
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: { kind: 'default' },
+				cacheSyntax: 'url',
 				ttl: '',
 				retain: true,
 				wait: true,
@@ -133,6 +164,7 @@ describe('buildPushArguments', () => {
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: { kind: 'default' },
+				cacheSyntax: 'url',
 				store: '',
 				ttl: '',
 				retain: true,
@@ -424,6 +456,7 @@ describe('buildPushArguments unretained', () => {
 				audience: '',
 				root: '',
 				cache: { kind: 'default' },
+				cacheSyntax: 'url',
 				ttl: '',
 				retain: false,
 				wait: true,
@@ -648,7 +681,9 @@ describe('pushArgumentsForInvocations', () => {
 			{ root: 'github:owner/repo/main', paths: ['/nix/store/a'] }
 		];
 
-		expect(pushArgumentsForInvocations(baseInputs, pushes)).toStrictEqual([
+		expect(
+			pushArgumentsForInvocations(baseInputs, pushes, 'url')
+		).toStrictEqual([
 			[
 				'--no-colour',
 				'push',
@@ -677,7 +712,9 @@ describe('pushArgumentsForInvocations', () => {
 			{ root: 'github:owner/repo/main/lib', paths: ['/nix/store/b'] }
 		];
 
-		expect(pushArgumentsForInvocations(baseInputs, pushes)).toStrictEqual([
+		expect(
+			pushArgumentsForInvocations(baseInputs, pushes, 'url')
+		).toStrictEqual([
 			[
 				'--no-colour',
 				'push',

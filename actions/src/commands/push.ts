@@ -24,8 +24,10 @@ import {
 	waitForAbortableChildProcess
 } from '../child-process.ts';
 import {
+	type CacheSelectionSyntax,
 	type CupboardResultProtocol,
 	type CupboardRunResult,
+	detectCacheSelectionSyntax,
 	detectCupboardResultProtocol,
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
@@ -146,6 +148,7 @@ interface RunPushCupboardOptions {
 }
 
 export interface PushActionDependencies {
+	readonly detectCacheSelectionSyntax?: typeof detectCacheSelectionSyntax;
 	readonly signal?: AbortSignal;
 }
 
@@ -165,6 +168,7 @@ interface PushArgumentsOptions {
 	readonly audience: string;
 	readonly root: string;
 	readonly cache: CacheScope;
+	readonly cacheSyntax: CacheSelectionSyntax;
 	readonly store: string;
 	readonly ttl: string;
 	readonly retain: boolean;
@@ -458,7 +462,17 @@ export async function pushAction(
 
 	await publishPushAcquisitionOutputs(environment, installedCupboard);
 
-	const argumentsPerPush = pushArgumentsForInvocations(inputs, pushes);
+	const cacheSyntax =
+		inputs.cache.kind === 'default'
+			? 'url'
+			: await (
+					dependencies.detectCacheSelectionSyntax ?? detectCacheSelectionSyntax
+				)(installedCupboard.binaryPath, ['push'], dependencies.signal);
+	const argumentsPerPush = pushArgumentsForInvocations(
+		inputs,
+		pushes,
+		cacheSyntax
+	);
 	const summaries: PushSummary[] = [];
 
 	for (const arguments_ of argumentsPerPush) {
@@ -759,7 +773,11 @@ export function buildPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'push',
-		canonicalHref(cacheUrlFor(options.url, options.cache)),
+		canonicalHref(
+			options.cacheSyntax === 'flag'
+				? options.url
+				: cacheUrlFor(options.url, options.cache)
+		),
 		...options.paths,
 		'--github-oidc'
 	];
@@ -771,6 +789,10 @@ export function buildPushArguments(
 
 	if (options.root !== '') {
 		arguments_.push('--root', options.root);
+	}
+
+	if (options.cacheSyntax === 'flag' && options.cache.kind === 'named') {
+		arguments_.push('--cache', options.cache.name);
 	}
 
 	if (options.store !== '') {
@@ -843,7 +865,8 @@ export function pushArgumentsForInvocations(
 		| 'runRoot'
 		| 'runRootTtl'
 	>,
-	pushes: readonly PushInvocation[]
+	pushes: readonly PushInvocation[],
+	cacheSyntax: CacheSelectionSyntax
 ): readonly (readonly string[])[] {
 	return pushes.map((push, index) =>
 		buildPushArguments({
@@ -852,6 +875,7 @@ export function pushArgumentsForInvocations(
 			audience: inputs.audience,
 			root: push.root,
 			cache: inputs.cache,
+			cacheSyntax,
 			store: inputs.store,
 			ttl: inputs.ttl,
 			retain: inputs.retain,

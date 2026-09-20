@@ -23,6 +23,9 @@ import { CommandFailedError, CupboardReportedError } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
 export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
+export type CacheSelectionSyntax = 'url' | 'flag';
+
+export type CacheCommand = readonly ['push'] | readonly ['attest', 'attach'];
 
 export interface CupboardRunResult {
 	readonly protocol: CupboardResultProtocol;
@@ -129,6 +132,46 @@ export async function detectCupboardResultProtocol(
 	return /(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
 		? 'result-file'
 		: 'legacy-stderr';
+}
+
+export async function detectCacheSelectionSyntax(
+	binaryPath: string,
+	command: CacheCommand,
+	signal?: AbortSignal
+): Promise<CacheSelectionSyntax> {
+	signal?.throwIfAborted();
+
+	const child = spawn(binaryPath, [...command, '--help'], {
+		stdio: ['ignore', 'pipe', 'ignore']
+	});
+	let output = '';
+
+	child.stdout.setEncoding('utf8');
+	child.stdout.on('data', (chunk: string) => {
+		output += chunk;
+	});
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
+
+	if (result.error !== undefined) {
+		throw spawnFailure(binaryPath, result.status, result.error, signal);
+	}
+
+	if (
+		result.status !== 0 ||
+		!output.startsWith(`Usage: cupboard ${command.join(' ')} `)
+	) {
+		throw new CommandFailedError(
+			binaryPath,
+			result.status,
+			'unexpected command help'
+		);
+	}
+
+	return /^\s+--cache <name>(?:\s|$)/mu.test(output) ? 'flag' : 'url';
 }
 
 async function runLegacyCupboard(

@@ -7,7 +7,7 @@ import { z } from 'zod';
 
 import { waitForFile } from '../../tests/support/filesystem.ts';
 
-import { runCupboard } from './cupboard-run.ts';
+import { detectCacheSelectionSyntax, runCupboard } from './cupboard-run.ts';
 import {
 	CommandFailedError,
 	CupboardReportedError,
@@ -22,6 +22,8 @@ interface FakeCupboardOptions {
 	readonly captureArgvFile?: string;
 	readonly holdOpen?: boolean;
 	readonly supportsResultFile?: boolean;
+	readonly pushHelp?: string;
+	readonly attachHelp?: string;
 }
 
 async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
@@ -43,6 +45,8 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		"const fs = require('node:fs');",
 		'const argv = process.argv.slice(2);',
 		"if (argv.includes('--help')) {",
+		`  if (argv[0] === 'push' && ${JSON.stringify(options.pushHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.pushHelp ?? '')}); process.exit(0); }`,
+		`  if (argv[0] === 'attest' && argv[1] === 'attach' && ${JSON.stringify(options.attachHelp ?? '')} !== '') { process.stdout.write(${JSON.stringify(options.attachHelp ?? '')}); process.exit(0); }`,
 		`  process.stdout.write(${JSON.stringify(options.supportsResultFile === false ? 'Usage: cupboard' : '  --result-file <path>')});`,
 		'  process.exit(0);',
 		'}',
@@ -66,6 +70,46 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 
 	return scriptPath;
 }
+
+describe('detectCacheSelectionSyntax', () => {
+	it('recognises the released CLI flag and the current CLI URL', async () => {
+		const released = await fakeCupboard({
+			results: [],
+			exitCode: 0,
+			pushHelp:
+				'Usage: cupboard push [options] <url> [paths...]\n\nOptions:\n  --cache <name>  push to a named cache rather than the default\n',
+			attachHelp:
+				'Usage: cupboard attest attach [options] <url> <paths...>\n\nOptions:\n  --cache <name>  attach on a named cache rather than the default\n'
+		});
+		const current = await fakeCupboard({
+			results: [],
+			exitCode: 0,
+			pushHelp:
+				'Usage: cupboard push [options] <url> [paths...]\n\nOptions:\n  --github-oidc  authenticate with GitHub OIDC\n',
+			attachHelp:
+				'Usage: cupboard attest attach [options] <url> <paths...>\n\nOptions:\n  --github-oidc  authenticate with GitHub OIDC\n'
+		});
+
+		expect({
+			released: [
+				await detectCacheSelectionSyntax(released, ['push']),
+				await detectCacheSelectionSyntax(released, ['attest', 'attach'])
+			],
+			current: [
+				await detectCacheSelectionSyntax(current, ['push']),
+				await detectCacheSelectionSyntax(current, ['attest', 'attach'])
+			]
+		}).toStrictEqual({ released: ['flag', 'flag'], current: ['url', 'url'] });
+	});
+
+	it('rejects help output that does not describe the requested command', async () => {
+		const binary = await fakeCupboard({ results: [], exitCode: 0 });
+
+		await expect(
+			detectCacheSelectionSyntax(binary, ['push'])
+		).rejects.toBeInstanceOf(CommandFailedError);
+	});
+});
 
 async function runnerTemporary(): Promise<string> {
 	return mkdtemp(path.join(tmpdir(), 'cupboard-runner-'));
