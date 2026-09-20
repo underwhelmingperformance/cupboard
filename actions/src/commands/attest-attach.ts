@@ -13,7 +13,11 @@ import {
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { runCupboard as defaultRunCupboard } from '../cupboard-run.ts';
+import {
+	type CacheSelectionSyntax,
+	detectCacheSelectionSyntax,
+	runCupboard as defaultRunCupboard
+} from '../cupboard-run.ts';
 import {
 	AttestationAttachmentIncompleteError,
 	AttestationAttachmentResultError,
@@ -59,6 +63,7 @@ export interface AttestAttachInputs {
 }
 
 export interface AttestAttachDependencies {
+	readonly detectCacheSelectionSyntax?: typeof detectCacheSelectionSyntax;
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly signal?: AbortSignal;
 }
@@ -166,19 +171,28 @@ export function resolveAttestAttachInputs(
  */
 export function attestAttachArguments(
 	inputs: AttestAttachInputs,
-	paths: readonly string[]
+	paths: readonly string[],
+	cacheSyntax: CacheSelectionSyntax
 ): readonly string[] {
 	const arguments_ = [
 		'--no-colour',
 		'attest',
 		'attach',
-		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
+		canonicalHref(
+			cacheSyntax === 'flag'
+				? inputs.url
+				: cacheUrlFor(inputs.url, inputs.cache)
+		),
 		...paths,
 		'--github-oidc'
 	];
 
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
+	}
+
+	if (cacheSyntax === 'flag' && inputs.cache.kind === 'named') {
+		arguments_.push('--cache', inputs.cache.name);
 	}
 
 	if (inputs.readUser !== '') {
@@ -276,10 +290,16 @@ export async function attestAttachAction(
 	}
 
 	const runCupboard = dependencies.runCupboard ?? defaultRunCupboard;
+	const cacheSyntax =
+		inputs.cache.kind === 'default'
+			? 'url'
+			: await (
+					dependencies.detectCacheSelectionSyntax ?? detectCacheSelectionSyntax
+				)(inputs.cupboardPath, ['attest', 'attach'], dependencies.signal);
 
 	const results = await runCupboard(
 		inputs.cupboardPath,
-		attestAttachArguments(inputs, subjectPaths),
+		attestAttachArguments(inputs, subjectPaths, cacheSyntax),
 		environment,
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal }
 	);

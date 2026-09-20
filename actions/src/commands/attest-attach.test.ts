@@ -247,31 +247,48 @@ describe('attestAttachArguments', () => {
 			})
 		);
 
-		expect(attestAttachArguments(inputs, [appPath, runtimePath])).toStrictEqual(
-			[
-				'--no-colour',
-				'attest',
-				'attach',
-				'https://cache.example.workers.dev/t/acme/cache/pr-1',
-				appPath,
-				runtimePath,
-				'--github-oidc',
-				'--audience',
-				'https://audience.test',
-				'--read-user',
-				'reader',
-				'--read-password',
-				'secret',
-				'--attestation',
-				'/tmp/bundle.sigstore.json'
-			]
-		);
+		expect(
+			attestAttachArguments(inputs, [appPath, runtimePath], 'url')
+		).toStrictEqual([
+			'--no-colour',
+			'attest',
+			'attach',
+			'https://cache.example.workers.dev/t/acme/cache/pr-1',
+			appPath,
+			runtimePath,
+			'--github-oidc',
+			'--audience',
+			'https://audience.test',
+			'--read-user',
+			'reader',
+			'--read-password',
+			'secret',
+			'--attestation',
+			'/tmp/bundle.sigstore.json'
+		]);
+	});
+
+	it('selects the named cache through the legacy CLI flag', () => {
+		const inputs = resolveAttestAttachInputs(options({ cache: 'pr-1' }));
+
+		expect(attestAttachArguments(inputs, [appPath], 'flag')).toStrictEqual([
+			'--no-colour',
+			'attest',
+			'attach',
+			'https://cache.example.workers.dev/t/acme',
+			appPath,
+			'--github-oidc',
+			'--cache',
+			'pr-1',
+			'--attestation',
+			'/tmp/bundle.sigstore.json'
+		]);
 	});
 
 	it('omits the audience and cache flags when not provided', () => {
 		const inputs = resolveAttestAttachInputs(options());
 
-		expect(attestAttachArguments(inputs, [appPath])).toStrictEqual([
+		expect(attestAttachArguments(inputs, [appPath], 'url')).toStrictEqual([
 			'--no-colour',
 			'attest',
 			'attach',
@@ -293,7 +310,7 @@ describe('attestAttachArguments', () => {
 			})
 		);
 
-		expect(attestAttachArguments(inputs, [appPath])).toStrictEqual([
+		expect(attestAttachArguments(inputs, [appPath], 'url')).toStrictEqual([
 			'--no-colour',
 			'attest',
 			'attach',
@@ -309,6 +326,48 @@ describe('attestAttachArguments', () => {
 });
 
 describe('attestAttachAction', () => {
+	it('uses the installed CLI syntax for a named cache', async () => {
+		const fixture = await writeReceipt([appPath]);
+		const calls: unknown[] = [];
+
+		await attestAttachAction(
+			options({ ...fixture, cache: 'pr-1' }),
+			{},
+			recordingReporter([]),
+			{
+				detectCacheSelectionSyntax: (binary, command) => {
+					calls.push({ probe: [binary, command] });
+					return Promise.resolve('flag');
+				},
+				runCupboard: (binary, arguments_) => {
+					calls.push({ run: [binary, arguments_] });
+					return Promise.resolve(attachedResults([appPath]));
+				}
+			}
+		);
+
+		expect(calls).toStrictEqual([
+			{ probe: ['/opt/cupboard/cupboard', ['attest', 'attach']] },
+			{
+				run: [
+					'/opt/cupboard/cupboard',
+					[
+						'--no-colour',
+						'attest',
+						'attach',
+						'https://cache.example.workers.dev/t/acme',
+						appPath,
+						'--github-oidc',
+						'--cache',
+						'pr-1',
+						'--attestation',
+						'/tmp/bundle.sigstore.json'
+					]
+				]
+			}
+		]);
+	});
+
 	it('invokes the installed cupboard with the receipt paths and bundle', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
 		const controller = new AbortController();
