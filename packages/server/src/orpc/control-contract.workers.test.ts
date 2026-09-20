@@ -159,10 +159,6 @@ describe('control contract round trip', () => {
 		});
 	});
 
-	// The previous build's control Worker parses a stored rule strictly and
-	// names a cache by its selector. Until a deploy records `contracted`, a
-	// control rule is stored in that spelling. The control plane cannot resolve
-	// a tenant cache's access, so a named cache uses both selector forms.
 	it.each([
 		{
 			name: 'the selector spelling until the deployment is contracted',

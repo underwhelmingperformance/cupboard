@@ -100,7 +100,7 @@ phase that performs it.
 
 ### Rolling back with stored cache grants
 
-This release names the cache in a stored grant by its scope,
+This release identifies the cache in a stored grant by its scope,
 `{"kind":"default"}` or `{"kind":"named","name":...}`. The preceding build
 stored a selector string (`_default`, a public cache's name, `_private-<name>`)
 and parses a stored grant strictly, so it cannot read a row in the scope
@@ -129,6 +129,6 @@ in the `contracted` phase of this release's deploy, after both Workers serve the
 new build and every active tenant has reached the required step: the D1
 migration that rewrites `control_trust` and the per-object step that rewrites
 `oidc_trust` and `refresh_token_family`. From then on rows are stored in the
-scope spelling only. A rollback after that phase lands on a build that cannot
-read the rows, so recovery is deploying this release again or restoring the
-storage from before it.
+scope spelling only. A rollback after that phase restores a build that cannot
+read the rows, so recovery requires deploying this release again or restoring
+storage from before the contraction.

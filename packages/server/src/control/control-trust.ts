@@ -193,8 +193,8 @@ export async function getControlTrust(
 	return summaryFromRow(row, canUseLoopbackHttp);
 }
 
-// Whether a deploy has recorded `contracted`. A stored name this build does
-// not define counts as no phase, as the tenant objects' gate treats it.
+// An unrecognised stored phase is treated as pre-contraction, as in the
+// tenant-object gate.
 async function hasContracted(database: Database): Promise<boolean> {
 	const row = await database
 		.select({ name: d1Schema.deploymentPhase.phase })

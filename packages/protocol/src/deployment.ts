@@ -50,7 +50,7 @@ export const currentLocalStep: LocalStep = localStep(1);
  * `contracted` is the phase in which a deploy rewrites or removes what the
  * previous build still reads. A deploy records it only once the new build
  * serves every request and the contraction has run. From then on a rollback
- * cannot land on the previous build by redeploying it, so a write that build
+ * cannot restore the previous build by redeploying it, so a write that build
  * cannot parse is safe. This build never records `contracted`; it reads the
  * phase so that a stored grant keeps the spelling the previous build parses
  * until a later deploy contracts.

@@ -179,14 +179,13 @@ export interface ResourceRequest {
 	readonly tenant?: TenantId;
 }
 
-// Issued grants carry only concrete resources. A cache scope names one cache
-// and a tenant selector one tenant; a root selector is an exact name or a
-// trailing-slash prefix. The wildcard is the only non-concrete grant and covers
-// its whole domain.
+// Issued grants contain only concrete resources. A cache scope identifies one
+// cache and a tenant selector identifies one tenant; a root selector is an
+// exact name or a trailing-slash prefix. The wildcard is the only non-concrete
+// grant and covers its whole domain.
 //
-// A grant names the cache but not its access. Access is a property of the
-// cache, so the same grant covers that cache whether it reads publicly or
-// requires a credential.
+// A cache grant identifies the cache by scope, independent of its access. The
+// grant still applies if the cache changes between public and private reads.
 
 export const grantTypes = [
 	'cupboard_cache',
@@ -476,8 +475,6 @@ function refineBinding(
 	}
 }
 
-// A rule binds either the default cache or a named one. The default cache has
-// no name to template, so it is a variant of its own.
 export const cacheBindingSchema = z.discriminatedUnion('kind', [
 	z.strictObject({ kind: z.literal('default') }),
 	z
@@ -592,7 +589,7 @@ const legacyCacheGrantSchema = z.looseObject({
 // the default and private caches into the bound value: `_default` for the
 // default cache, and a `_private-` prefix on an exact value or at the start of
 // a template for a private one. Rewrite it into the current shape, in which
-// the binding names the cache and says nothing about access.
+// the binding identifies the cache by scope, independent of its access.
 function withUpgradedCacheBindings(grants: unknown): unknown {
 	if (!Array.isArray(grants)) {
 		return grants;
@@ -675,10 +672,9 @@ const legacyIssuedCacheGrantSchema = z.looseObject({
 });
 
 /**
- * Validates issued grants recorded by a refresh-token family, upgrading a cache
- * named in the selector spelling. The previous build recorded that spelling,
- * and this build records it until a deploy records `contracted`, so a refresh
- * must read it back.
+ * Validates grants recorded by a refresh-token family. Until a deploy records
+ * `contracted`, the family stores cache selectors for rollback compatibility.
+ * The preprocessor converts those selectors to scopes before validation.
  */
 export const storedAuthorizationDetailsSchema = z.preprocess(
 	(grants) => {
@@ -806,9 +802,9 @@ export class SelectorTemplateUnrepresentableError extends Error {
  * them, so that such a build parses the row after a rollback.
  * `storedPermittedGrantsSchema` reads the result back into `grants`.
  *
- * A named cache is spelled with the access it has now, so the previous build
- * matches the same cache. A cache that does not exist yet uses both selector forms because its
- * eventual access is not known.
+ * A named cache is spelled with its current access, so the previous build
+ * matches the same cache. An unregistered cache uses both selector forms
+ * because its future access mode is unknown.
  * A template is stored in both public and private selector forms so either
  * access mode retains its authority after rollback. The current reader
  * coalesces those equivalent grants.

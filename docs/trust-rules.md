@@ -235,8 +235,8 @@ pattern also filters tokens: a token whose claim does not match is refused.
 
 ## Pushing to a private cache
 
-A grant names a cache and says nothing about its access. A rule for the private
-cache `ci` binds the name `ci`:
+A grant identifies a cache by scope, independent of whether reads are public or
+private. To grant writes to the private cache `ci`, pass `--cache ci`:
 
 ```bash
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \

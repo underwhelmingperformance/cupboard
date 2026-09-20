@@ -278,8 +278,6 @@ function cacheBinding(
 		};
 	}
 
-	// `--cache` takes the selector the other commands take. The binding stores
-	// the cache's name; the access is a property of the cache.
 	if (options.cache !== undefined) {
 		const selector = cacheSelectorSchema.safeParse(options.cache);
 
@@ -294,8 +292,6 @@ function cacheBinding(
 			: { kind: 'named', exact: scope.name, validate: 'cacheName' };
 	}
 
-	// An omitted cache means the tenant's default cache, which has no name to
-	// bind.
 	return { kind: 'default' };
 }
 

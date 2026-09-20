@@ -160,7 +160,7 @@ export class CacheRepository {
 
 	/**
 	 * The access of the live identity registered under this scope, or
-	 * undefined when the tenant holds no such cache. A null access, which the
+	 * undefined if the tenant has no cache at that scope. A null access, which the
 	 * backfill records for a public named cache, reads as `public`.
 	 */
 	liveAccess(scope: CacheScope): CacheAccessMode | undefined {

@@ -674,8 +674,6 @@ describe('permittedGrantSchema', () => {
 });
 
 describe('storedPermittedGrantsSchema', () => {
-	// A rule persisted before a cache binding carried a `kind`. Reading it back
-	// adds the kind, so the expectations below differ from the stored value.
 	const cacheResources = {
 		cache: { exact: 'owner-ci', validate: 'cacheName' }
 	};
@@ -944,7 +942,7 @@ describe('selector spelling', () => {
 		});
 	});
 
-	it('leaves the grants of a rule that name no cache as they are', () => {
+	it('leaves grants without cache bindings unchanged', () => {
 		const grants = storedPermittedGrantsSchema.parse([
 			{ type: 'cupboard_wildcard' },
 			{ type: 'cupboard_domain', actions: ['gc:run'] },
