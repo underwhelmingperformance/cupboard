@@ -340,10 +340,6 @@ function storedGrants(id: string): Promise<unknown> {
 	});
 }
 
-// The build a rollback lands on parses a stored rule strictly and names a cache
-// by its selector: `_default`, a public cache's name, or `_private-<name>`.
-// Until a deploy records `contracted`, a rule is stored in that spelling, with
-// the access each named cache has now, and is read back in the scope spelling.
 describe('stored spelling of a rule', () => {
 	beforeEach(resetTestServer);
 

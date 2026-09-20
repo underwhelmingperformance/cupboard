@@ -44,8 +44,8 @@ export interface CacheProjectionOutcome {
  *
  * The backfill projects a named cache only where a reference or a credential
  * mentions it, and a build before this one wrote no row when it registered a
- * cache, so a cache that holds nothing may have no row. That row is the only
- * D1 record that the cache exists.
+ * cache, so a registered cache without references or credentials may have no
+ * row. That row is the only D1 record that the cache exists.
  *
  * A tenant with more caches than fit one call keeps rows to project. The
  * caller then leaves the local step unrecorded, so the control plane wakes

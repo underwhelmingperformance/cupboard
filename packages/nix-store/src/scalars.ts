@@ -204,7 +204,7 @@ export const cacheScopeSchema = z.discriminatedUnion('kind', [
 export type CacheScope = z.output<typeof cacheScopeSchema>;
 
 /**
- * Whether two scopes name the same cache.
+ * Whether two scopes refer to the same cache.
  */
 export function isSameCacheScope(left: CacheScope, right: CacheScope): boolean {
 	if (left.kind === 'default' || right.kind === 'default') {
@@ -381,8 +381,8 @@ export function identityForCache(cache: StoredCache): {
 }
 
 /**
- * The scope of the cache a wire selector names. The selector's `_private-`
- * prefix is dropped, so `_private-ci` and `ci` give the same scope.
+ * The cache scope represented by a wire selector. The `_private-` prefix is
+ * dropped, so `_private-ci` and `ci` give the same scope.
  */
 export function scopeFromSelector(selector: CacheSelector): CacheScope {
 	return identityForCache(cacheFromSelector(selector)).scope;

@@ -2002,8 +2002,6 @@ describe('refresh grant', () => {
 	});
 });
 
-// Registers a private `ci` and a public `docs` cache, the two accesses a
-// stored grant can spell.
 function registerCaches(): Promise<void> {
 	return runInDurableObject(currentServer(), (instance) => {
 		const identities = new CacheRepository(instance.context.db);
@@ -2035,10 +2033,6 @@ function familyGrants(): Promise<unknown[]> {
 	});
 }
 
-// The build a rollback lands on parses a family's grants strictly and names a
-// cache by its selector. Until a deploy records `contracted`, a family records
-// its grants in that spelling, with the access each named cache has now, and
-// a refresh reads them back in the scope spelling.
 describe('stored spelling of a refresh-token family', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => {
@@ -2242,9 +2236,7 @@ describe('requested grants', () => {
 		});
 	});
 
-	// A grant names a cache and says nothing about its access. A rule bound to
-	// `ci` issues one grant, which covers the cache `ci` and no other.
-	it('confines a grant to the cache it names', async () => {
+	it('refuses a request for a different cache', async () => {
 		const subjectToken = await installTrustedIdp('private-write');
 		const issued = await exchange(subjectToken, privateCiRequest);
 		const otherRequest = [

@@ -306,7 +306,7 @@ describe('isGrantPermittedByRule', () => {
 		).toBe(false);
 	});
 
-	it('permits the cache a stored private-cache template names', () => {
+	it('permits the cache matched by a stored private-cache template', () => {
 		const stored = storedPermittedGrantsSchema.parse([
 			{
 				type: 'cupboard_cache',

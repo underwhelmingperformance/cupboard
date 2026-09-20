@@ -216,7 +216,7 @@ describe('buildCacheGrant', () => {
 	it.each([
 		['_private-ci', { kind: 'named', exact: 'ci', validate: 'cacheName' }],
 		['_default', { kind: 'default' }]
-	])('binds the cache the selector %s names', (cache, expected) => {
+	])('binds the cache selected by %s', (cache, expected) => {
 		const grant = buildCacheGrant({ cache, allow: ['push'] });
 
 		expect(
