@@ -56,6 +56,8 @@ inputs:
   permanent:
     description:
       Retain the target root permanently. Conflicts with ttl and no-retain.
+      Releases before explicit retention have no such option; the root then
+      inherits the cache's retention and the action warns.
     required: false
     default: 'false'
   no-retain:
@@ -111,7 +113,8 @@ inputs:
   run-root-permanent:
     description:
       Retain the run root permanently. Conflicts with run-root-ttl and requires
-      run-root.
+      run-root. Releases before explicit retention have no such option; the run
+      root then inherits the cache's retention and the action warns.
     required: false
     default: 'false'
   root-groups:

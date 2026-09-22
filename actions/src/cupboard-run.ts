@@ -27,6 +27,13 @@ export type CacheSelectionSyntax = 'url' | 'flag';
 
 export type CacheCommand = readonly ['push'] | readonly ['attest', 'attach'];
 
+/**
+ * The long options that a command's `--help` output lists. Released CLIs
+ * predate some of the options the actions pass, so each invocation is shaped
+ * to the installed command rather than to the current contract.
+ */
+export type CommandOptions = ReadonlySet<string>;
+
 export interface CupboardRunResult {
 	readonly protocol: CupboardResultProtocol;
 	readonly results: readonly ReporterResultEvent[];
@@ -139,6 +146,43 @@ export async function detectCacheSelectionSyntax(
 	command: CacheCommand,
 	signal?: AbortSignal
 ): Promise<CacheSelectionSyntax> {
+	return cacheSelectionSyntax(
+		await inspectCommandOptions(binaryPath, command, signal)
+	);
+}
+
+/**
+ * Published CLIs through v0.0.33 select a named cache with `--cache` on the
+ * tenant URL; later CLIs take the cache URL itself.
+ */
+export function cacheSelectionSyntax(
+	options: CommandOptions
+): CacheSelectionSyntax {
+	return options.has('--cache') ? 'flag' : 'url';
+}
+
+export function commandOptionsFromHelp(output: string): CommandOptions {
+	const options = new Set<string>();
+
+	for (const match of output.matchAll(/^\s+(?:-\w, )?(?<option>--[\w-]+)/gmu)) {
+		if (match.groups?.option !== undefined) {
+			options.add(match.groups.option);
+		}
+	}
+
+	return options;
+}
+
+/**
+ * Read the options that the installed command accepts from its help output.
+ * Rejects output that does not describe the requested command rather than
+ * guessing the interface.
+ */
+export async function inspectCommandOptions(
+	binaryPath: string,
+	command: CacheCommand,
+	signal?: AbortSignal
+): Promise<CommandOptions> {
 	signal?.throwIfAborted();
 
 	const child = spawn(binaryPath, [...command, '--help'], {
@@ -171,7 +215,7 @@ export async function detectCacheSelectionSyntax(
 		);
 	}
 
-	return /^\s+--cache <name>(?:\s|$)/mu.test(output) ? 'flag' : 'url';
+	return commandOptionsFromHelp(output);
 }
 
 async function runLegacyCupboard(

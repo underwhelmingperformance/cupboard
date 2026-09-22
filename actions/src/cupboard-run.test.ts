@@ -7,7 +7,11 @@ import { z } from 'zod';
 
 import { waitForFile } from '../../tests/support/filesystem.ts';
 
-import { detectCacheSelectionSyntax, runCupboard } from './cupboard-run.ts';
+import {
+	commandOptionsFromHelp,
+	detectCacheSelectionSyntax,
+	runCupboard
+} from './cupboard-run.ts';
 import {
 	CommandFailedError,
 	CupboardReportedError,
@@ -70,6 +74,30 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 
 	return scriptPath;
 }
+
+describe('commandOptionsFromHelp', () => {
+	it('collects the long options that commander lists, however they are flagged', () => {
+		const help = [
+			'Usage: cupboard push [options] <url> [paths...]',
+			'',
+			'Options:',
+			'  --cache <name>            push to a named cache rather than the default',
+			'  --ttl <duration>          expire the root after this duration',
+			'  --permanent               retain the target root or pins permanently',
+			'  --no-retain               push without a retention root',
+			'  -h, --help                display help for command',
+			''
+		].join('\n');
+
+		expect([...commandOptionsFromHelp(help)]).toStrictEqual([
+			'--cache',
+			'--ttl',
+			'--permanent',
+			'--no-retain',
+			'--help'
+		]);
+	});
+});
 
 describe('detectCacheSelectionSyntax', () => {
 	it('recognises the released CLI flag and the current CLI URL', async () => {
