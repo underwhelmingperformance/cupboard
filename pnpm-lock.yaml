@@ -474,7 +474,7 @@ importers:
         version: link:../shared
       '@logtape/logtape':
         specifier: ^2.2.3
-        version: 2.3.5
+        version: 2.3.6
     devDependencies:
       '@types/node':
         specifier: ^25.9.1
@@ -1713,8 +1713,8 @@ packages:
       eslint:
         optional: true
 
-  '@logtape/logtape@2.3.5':
-    resolution: {integrity: sha512-s4LlalG0JO2Fg8ENy1aQVdOS47VOD2pip6mOW29TNuCxW5zOhrQk/ck/xs77M7O15b2pK2KnDSr7L0Tf6LIUXg==}
+  '@logtape/logtape@2.3.6':
+    resolution: {integrity: sha512-1ajI6YRkq+gIpgYVhOcJ4Mn5QUarSvWnnuj8SNMjwrjIcOy1ANEIcZyaLN+vPtL2MCa845D8ghXR8xDA+c3Khg==}
 
   '@napi-rs/wasm-runtime@1.1.4':
     resolution: {integrity: sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow==}
@@ -5194,7 +5194,7 @@ snapshots:
     optionalDependencies:
       eslint: 10.11.0(jiti@2.7.0)(supports-color@10.2.2)
 
-  '@logtape/logtape@2.3.5': {}
+  '@logtape/logtape@2.3.6': {}
 
   '@napi-rs/wasm-runtime@1.1.4(@emnapi/core@1.10.0)(@emnapi/runtime@1.10.0)':
     dependencies:
