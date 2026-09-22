@@ -43,6 +43,7 @@ import {
 	hasUngracedPath,
 	inspectCupboardVersion,
 	pathsMissingGraceDeadline,
+	permanenceForCommand,
 	publishPushAcquisitionOutputs,
 	pushArgumentsForInvocations,
 	type PushInputs,
@@ -707,6 +708,52 @@ describe('resolvePushInputs root-groups', () => {
 		]
 	])('rejects when %s', (_name, options, errorType) => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(errorType);
+	});
+});
+
+describe('permanenceForCommand', () => {
+	const current = new Set(['--ttl', '--permanent', '--run-root-permanent']);
+	const released = new Set(['--ttl', '--cache']);
+
+	it.each([
+		{
+			name: 'keeps both requests for a CLI that lists both options',
+			requested: { permanent: true, runRootPermanent: true },
+			options: current,
+			expected: {
+				permanence: { permanent: true, runRootPermanent: true },
+				unsupported: []
+			}
+		},
+		{
+			name: 'drops both requests for a release without explicit retention',
+			requested: { permanent: true, runRootPermanent: true },
+			options: released,
+			expected: {
+				permanence: { permanent: false, runRootPermanent: false },
+				unsupported: ['--permanent', '--run-root-permanent']
+			}
+		},
+		{
+			name: 'reports only the option that was requested',
+			requested: { permanent: true, runRootPermanent: false },
+			options: released,
+			expected: {
+				permanence: { permanent: false, runRootPermanent: false },
+				unsupported: ['--permanent']
+			}
+		},
+		{
+			name: 'reports nothing when neither option was requested',
+			requested: { permanent: false, runRootPermanent: false },
+			options: released,
+			expected: {
+				permanence: { permanent: false, runRootPermanent: false },
+				unsupported: []
+			}
+		}
+	])('$name', ({ requested, options, expected }) => {
+		expect(permanenceForCommand(requested, options)).toStrictEqual(expected);
 	});
 });
 

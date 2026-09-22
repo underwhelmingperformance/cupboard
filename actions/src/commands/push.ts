@@ -25,10 +25,12 @@ import {
 } from '../child-process.ts';
 import {
 	type CacheSelectionSyntax,
+	cacheSelectionSyntax,
+	type CommandOptions,
 	type CupboardResultProtocol,
 	type CupboardRunResult,
-	detectCacheSelectionSyntax,
 	detectCupboardResultProtocol,
+	inspectCommandOptions,
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
@@ -155,8 +157,19 @@ interface RunPushCupboardOptions {
 }
 
 export interface PushActionDependencies {
-	readonly detectCacheSelectionSyntax?: typeof detectCacheSelectionSyntax;
+	readonly inspectCommandOptions?: typeof inspectCommandOptions;
 	readonly signal?: AbortSignal;
+}
+
+export interface PushPermanence {
+	readonly permanent: boolean;
+	readonly runRootPermanent: boolean;
+}
+
+export interface PushPermanenceForCommand {
+	readonly permanence: PushPermanence;
+	// The permanent-retention options requested but absent from the CLI.
+	readonly unsupported: readonly string[];
 }
 
 interface RunPushCupboardDependencies {
@@ -508,16 +521,24 @@ export async function pushAction(
 
 	await publishPushAcquisitionOutputs(environment, installedCupboard);
 
-	const cacheSyntax =
-		inputs.cache.kind === 'default'
-			? 'url'
-			: await (
-					dependencies.detectCacheSelectionSyntax ?? detectCacheSelectionSyntax
-				)(installedCupboard.binaryPath, ['push'], dependencies.signal);
-	const argumentsPerPush = pushArgumentsForInvocations(
+	const commandOptions = await (
+		dependencies.inspectCommandOptions ?? inspectCommandOptions
+	)(installedCupboard.binaryPath, ['push'], dependencies.signal);
+	const { permanence, unsupported } = permanenceForCommand(
 		inputs,
+		commandOptions
+	);
+
+	if (unsupported.length > 0) {
+		reporter.warn(
+			`cupboard ${installedCupboard.version} has no ${unsupported.join(' or ')} option; the affected roots inherit the cache's retention instead`
+		);
+	}
+
+	const argumentsPerPush = pushArgumentsForInvocations(
+		{ ...inputs, ...permanence },
 		pushes,
-		cacheSyntax
+		cacheSelectionSyntax(commandOptions)
 	);
 	const summaries: PushSummary[] = [];
 
@@ -551,6 +572,38 @@ export async function pushAction(
 			throw new GraceDeadlineMissingError(missing);
 		}
 	}
+}
+
+/**
+ * Released CLIs before explicit retention have no `--permanent` or
+ * `--run-root-permanent`, and refuse an unknown option. Those releases retain
+ * a root under the cache's own retention whenever `--ttl` is absent, so drop
+ * the explicit request and report which options were dropped.
+ */
+export function permanenceForCommand(
+	requested: PushPermanence,
+	options: CommandOptions
+): PushPermanenceForCommand {
+	const unsupported: string[] = [];
+	const isPermanent = options.has('--permanent') && requested.permanent;
+	const isRunRootPermanent =
+		options.has('--run-root-permanent') && requested.runRootPermanent;
+
+	if (!isPermanent && requested.permanent) {
+		unsupported.push('--permanent');
+	}
+
+	if (!isRunRootPermanent && requested.runRootPermanent) {
+		unsupported.push('--run-root-permanent');
+	}
+
+	return {
+		permanence: {
+			permanent: isPermanent,
+			runRootPermanent: isRunRootPermanent
+		},
+		unsupported
+	};
 }
 
 export interface PushCupboard {
