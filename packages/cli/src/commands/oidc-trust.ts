@@ -322,12 +322,11 @@ export function githubPrAddBody(
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
-		event_name: 'pull_request'
+		event_name: 'pull_request',
+		...(options.jobWorkflowRef !== undefined && {
+			job_workflow_ref: jobWorkflowReferenceClaim(options.jobWorkflowRef)
+		})
 	};
-
-	if (options.jobWorkflowRef !== undefined) {
-		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
-	}
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
@@ -366,12 +365,11 @@ export function githubTagAddBody(
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
-		ref_type: 'tag'
+		ref_type: 'tag',
+		...(options.jobWorkflowRef !== undefined && {
+			job_workflow_ref: jobWorkflowReferenceClaim(options.jobWorkflowRef)
+		})
 	};
-
-	if (options.jobWorkflowRef !== undefined) {
-		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
-	}
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
@@ -404,12 +402,11 @@ export function githubBranchAddBody(
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
-		ref: `refs/heads/${options.branch}`
+		ref: `refs/heads/${options.branch}`,
+		...(options.jobWorkflowRef !== undefined && {
+			job_workflow_ref: jobWorkflowReferenceClaim(options.jobWorkflowRef)
+		})
 	};
-
-	if (options.jobWorkflowRef !== undefined) {
-		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
-	}
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,

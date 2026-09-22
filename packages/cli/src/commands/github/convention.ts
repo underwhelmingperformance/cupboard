@@ -352,19 +352,12 @@ function canTagGlobsOverlap(left: string, right: string): boolean {
 			pending.push([leftIndex, rightIndex + 1]);
 		}
 
-		if (leftCharacter === undefined || rightCharacter === undefined) {
-			continue;
-		}
-
 		if (
-			leftCharacter !== '*' &&
-			rightCharacter !== '*' &&
-			leftCharacter !== rightCharacter
-		) {
-			continue;
-		}
-
-		if (
+			leftCharacter === undefined ||
+			rightCharacter === undefined ||
+			(leftCharacter !== '*' &&
+				rightCharacter !== '*' &&
+				leftCharacter !== rightCharacter) ||
 			(leftCharacter === '*' && rightCharacter === '/') ||
 			(leftCharacter === '/' && rightCharacter === '*')
 		) {

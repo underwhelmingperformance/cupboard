@@ -353,18 +353,20 @@ export class SigningKeysService {
 			return;
 		}
 
-		if (existing.state === 'complete') {
-			const updatedAt = isoTimestamp(new Date());
-			this.context.db
-				.update(schema.signingKeyBackfills)
-				.set({
-					state: 'running',
-					updatedAt,
-					completedAt: sql`null`
-				})
-				.where(eq(schema.signingKeyBackfills.keyId, target.id))
-				.run();
+		if (existing.state !== 'complete') {
+			return;
 		}
+
+		const updatedAt = isoTimestamp(new Date());
+		this.context.db
+			.update(schema.signingKeyBackfills)
+			.set({
+				state: 'running',
+				updatedAt,
+				completedAt: sql`null`
+			})
+			.where(eq(schema.signingKeyBackfills.keyId, target.id))
+			.run();
 	}
 
 	private async ensureBackfillAlarm(): Promise<void> {
@@ -1143,11 +1145,7 @@ export class SigningKeysService {
 			.orderBy(schema.signingKeyBackfills.startedAt)
 			.get();
 
-		if (row === undefined) {
-			return;
-		}
-
-		if (this.completeIfDrained(row)) {
+		if (row === undefined || this.completeIfDrained(row)) {
 			return;
 		}
 

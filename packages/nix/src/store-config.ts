@@ -1017,11 +1017,13 @@ class EffectiveSettings {
 		this.signing.apply(name, value);
 		this.builds.apply(name, value);
 
-		if (this.applySetOption(name, value)) {
-			return;
-		}
+		const hasAppliedSetOption = this.applySetOption(name, value);
 
-		if (!shouldMarkOverridden || isClientOnlySetting(name)) {
+		if (
+			!shouldMarkOverridden ||
+			hasAppliedSetOption ||
+			isClientOnlySetting(name)
+		) {
 			return;
 		}
 

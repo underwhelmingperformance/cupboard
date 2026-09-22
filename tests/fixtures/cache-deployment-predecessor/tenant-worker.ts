@@ -218,25 +218,27 @@ export class CupboardServer extends DurableObject<FixtureEnvironment> {
 			pathHash,
 			future
 		);
-		if (tenant === 'upgrade-suspended') {
-			this.ctx.storage.sql.exec(
-				`INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at)
+		if (tenant !== 'upgrade-suspended') {
+			return;
+		}
+
+		this.ctx.storage.sql.exec(
+			`INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at)
 				 SELECT 'private/secrets', store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at
 				 FROM narinfo WHERE cache = 'builds'`
-			);
-			this.ctx.storage.sql.exec(
-				`INSERT INTO retention_root (cache, name, expires_at, created_at, updated_at)
+		);
+		this.ctx.storage.sql.exec(
+			`INSERT INTO retention_root (cache, name, expires_at, created_at, updated_at)
 				 VALUES ('private/secrets', 'permanent', NULL, ?, ?)`,
-				createdAt,
-				createdAt
-			);
-			this.ctx.storage.sql.exec(
-				`INSERT INTO retention_root_target (cache, root_name, store_path_hash, store_path)
+			createdAt,
+			createdAt
+		);
+		this.ctx.storage.sql.exec(
+			`INSERT INTO retention_root_target (cache, root_name, store_path_hash, store_path)
 				 VALUES ('private/secrets', 'permanent', ?, ?)`,
-				pathHash,
-				storePath
-			);
-		}
+			pathHash,
+			storePath
+		);
 	}
 
 	private lateWrite(): void {

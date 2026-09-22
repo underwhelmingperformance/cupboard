@@ -442,21 +442,17 @@ export async function buildAction(
 			runnerTemporary,
 			`cupboard-nix-${attemptId}.jsonl`
 		);
+		const maxJobs = provided(options.maxJobs);
 		const arguments_ = [
 			'build',
 			'--no-link',
 			'--print-out-paths',
 			'--option',
 			'json-log-path',
-			logFile
+			logFile,
+			...(isKeepGoing ? ['--keep-going'] : []),
+			...(maxJobs === undefined ? [] : ['--max-jobs', maxJobs])
 		];
-		if (isKeepGoing) {
-			arguments_.push('--keep-going');
-		}
-		const maxJobs = provided(options.maxJobs);
-		if (maxJobs !== undefined) {
-			arguments_.push('--max-jobs', maxJobs);
-		}
 		const invocation = nixBuildInvocation(arguments_, installables);
 
 		const result = await execute(invocation);

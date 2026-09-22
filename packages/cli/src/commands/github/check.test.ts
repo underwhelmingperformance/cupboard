@@ -174,20 +174,19 @@ function checkDependencies(overrides: {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
 		verifyWorkflowReference: () => Promise.resolve(),
-		fetchCacheInfo: (target: URL) =>
-			Promise.resolve(
-				target.pathname.includes('/reuse/')
-					? new CacheInfo(
-							servedStoreDirectory,
-							true,
-							cachePrioritySchema.parse(overrides.viewPriority ?? 50)
-						)
-					: new CacheInfo(
-							servedStoreDirectory,
-							true,
-							cachePrioritySchema.parse(40)
-						)
-			)
+		fetchCacheInfo: (target: URL) => {
+			const priority = target.pathname.includes('/reuse/')
+				? (overrides.viewPriority ?? 50)
+				: 40;
+
+			return Promise.resolve(
+				new CacheInfo(
+					servedStoreDirectory,
+					true,
+					cachePrioritySchema.parse(priority)
+				)
+			);
+		}
 	};
 }
 

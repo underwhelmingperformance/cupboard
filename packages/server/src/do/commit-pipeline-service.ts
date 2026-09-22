@@ -273,11 +273,12 @@ export class CommitPipelineService {
 			.get();
 		const sessionId = row?.sessionId;
 
-		if (row === undefined || sessionId === undefined || sessionId === null) {
-			return;
-		}
-
-		if (sessionId === excludeSessionId) {
+		if (
+			row === undefined ||
+			sessionId === undefined ||
+			sessionId === null ||
+			sessionId === excludeSessionId
+		) {
 			return;
 		}
 

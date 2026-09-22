@@ -54,11 +54,7 @@ export function parseAuthenticationHeader(
 	header: string | undefined,
 	scheme: string
 ): string | undefined {
-	if (header === undefined) {
-		return;
-	}
-
-	if (hasControlCharacter(header)) {
+	if (header === undefined || hasControlCharacter(header)) {
 		return;
 	}
 

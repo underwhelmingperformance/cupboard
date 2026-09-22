@@ -27,18 +27,14 @@ export class NixConfig {
 		// its one canonical form.
 		const substituters = this.substituters.map((url) => canonicalHref(url));
 
-		const lines = [
+		return [
 			`extra-substituters = ${substituters.join(' ')}`,
-			`extra-trusted-public-keys = ${trustedPublicKeys.join(' ')}`
-		];
-
-		if (this.options.netrcFile !== undefined) {
-			lines.push(`netrc-file = ${this.options.netrcFile}`);
-		}
-
-		lines.push('');
-
-		return lines.join('\n');
+			`extra-trusted-public-keys = ${trustedPublicKeys.join(' ')}`,
+			...(this.options.netrcFile === undefined
+				? []
+				: [`netrc-file = ${this.options.netrcFile}`]),
+			''
+		].join('\n');
 	}
 }
 

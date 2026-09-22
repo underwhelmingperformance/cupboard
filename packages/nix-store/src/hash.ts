@@ -258,13 +258,13 @@ export function toNixBase32(bytes: Uint8Array): string {
 	for (let index = encodedLength - 1; index >= 0; index -= 1) {
 		let digit = 0;
 
-		for (let bit = 0; bit < 5; bit += 1) {
+		const bitsToEncode = Math.min(5, bytes.byteLength * 8 - index * 5);
+
+		for (let bit = 0; bit < bitsToEncode; bit += 1) {
 			const sourceBit = index * 5 + bit;
 
-			if (sourceBit < bytes.byteLength * 8) {
-				const sourceByte = bytes[Math.floor(sourceBit / 8)] ?? 0;
-				digit |= ((sourceByte >> (sourceBit % 8)) & 1) << bit;
-			}
+			const sourceByte = bytes[Math.floor(sourceBit / 8)] ?? 0;
+			digit |= ((sourceByte >> (sourceBit % 8)) & 1) << bit;
 		}
 
 		encoded += nixBase32Alphabet[digit] ?? '';

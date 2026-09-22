@@ -537,9 +537,10 @@ function targetOutcome(
 		};
 	}
 
-	return isPublished
-		? { outcome: 'built', storePath: first }
-		: { outcome: 'destination-served', storePath: first };
+	return {
+		outcome: isPublished ? 'built' : 'destination-served',
+		storePath: first
+	};
 }
 
 // Root replacement requires every `publish` target to resolve to servable

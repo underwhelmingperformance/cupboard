@@ -794,20 +794,11 @@ async function ensureRoot(
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
 		...storePaths,
-		'--github-oidc'
+		'--github-oidc',
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
+		...(inputs.permanent ? ['--permanent'] : [])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.ttl !== '') {
-		arguments_.push('--ttl', inputs.ttl);
-	}
-
-	if (inputs.permanent) {
-		arguments_.push('--permanent');
-	}
 
 	try {
 		await runner(inputs.cupboardPath, arguments_, signal);
@@ -895,12 +886,9 @@ async function readRootTargets(
 		'targets',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		root,
-		'--github-oidc'
+		'--github-oidc',
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
 
 	try {
 		await runner(inputs.cupboardPath, arguments_, signal);

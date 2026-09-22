@@ -185,15 +185,11 @@ function extension(
 	isCritical: boolean,
 	value: Uint8Array
 ): Uint8Array {
-	const parts = [objectIdentifier(oid)];
-
-	if (isCritical) {
-		parts.push(derBoolean(true));
-	}
-
-	parts.push(octetString(value));
-
-	return sequence(...parts);
+	return sequence(
+		objectIdentifier(oid),
+		...(isCritical ? [derBoolean(true)] : []),
+		octetString(value)
+	);
 }
 
 interface KeyPair {

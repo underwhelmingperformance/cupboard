@@ -330,21 +330,17 @@ export function bundleVerifyOptions(
 }
 
 function verifierOptions(options: BundleVerifyOptions): VerifierOptions {
-	const thresholds: VerifierOptions = {};
-
-	if (options.tlogThreshold !== undefined) {
-		thresholds.tlogThreshold = options.tlogThreshold;
-	}
-
-	if (options.ctlogThreshold !== undefined) {
-		thresholds.ctlogThreshold = options.ctlogThreshold;
-	}
-
-	if (options.timestampThreshold !== undefined) {
-		thresholds.timestampThreshold = options.timestampThreshold;
-	}
-
-	return thresholds;
+	return {
+		...(options.tlogThreshold !== undefined && {
+			tlogThreshold: options.tlogThreshold
+		}),
+		...(options.ctlogThreshold !== undefined && {
+			ctlogThreshold: options.ctlogThreshold
+		}),
+		...(options.timestampThreshold !== undefined && {
+			timestampThreshold: options.timestampThreshold
+		})
+	};
 }
 
 async function trustedRoot(options: BundleVerifyOptions): Promise<TrustedRoot> {

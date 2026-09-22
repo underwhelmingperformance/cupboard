@@ -9,11 +9,10 @@ export type SubstituterReach = (substituter: string) => boolean;
 export function isReachableElsewhere(substituter: string): boolean {
 	const parsed = URL.parse(substituter);
 
-	if (parsed === null) {
-		return false;
-	}
-
-	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+	if (
+		parsed === null ||
+		(parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+	) {
 		return false;
 	}
 
@@ -89,37 +88,25 @@ const confinedIpv4FirstOctets = new Set([0, 10, 127]);
 function isReachableIpv4(octets: readonly number[]): boolean {
 	const [first = 0, second = 0] = octets;
 
-	if (confinedIpv4FirstOctets.has(first)) {
-		return false;
-	}
-
-	// 169.254.0.0/16 is link-local.
-	if (first === 169 && second === 254) {
-		return false;
-	}
-
-	// 172.16.0.0/12 and 192.168.0.0/16 are the remaining private use blocks.
-	if (first === 172 && second >= 16 && second <= 31) {
-		return false;
-	}
-
-	if (first === 192 && second === 168) {
-		return false;
-	}
-
-	return true;
+	return !(
+		confinedIpv4FirstOctets.has(first) ||
+		// 169.254.0.0/16 is link-local.
+		(first === 169 && second === 254) ||
+		// 172.16.0.0/12 and 192.168.0.0/16 are the remaining private use blocks.
+		(first === 172 && second >= 16 && second <= 31) ||
+		(first === 192 && second === 168)
+	);
 }
 
 function isReachableIpv6(groups: readonly number[]): boolean {
 	const [first = 0] = groups;
 
-	// fc00::/7 is unique local: routed within one site.
-	if ((first & 0xfe_00) === 0xfc_00) {
-		return false;
-	}
-
-	// fe80::/10 is link-local.
-	if ((first & 0xff_c0) === 0xfe_80) {
+	if (
+		// fc00::/7 is unique local: routed within one site.
+		(first & 0xfe_00) === 0xfc_00 ||
+		// fe80::/10 is link-local.
+		(first & 0xff_c0) === 0xfe_80
+	) {
 		return false;
 	}
 

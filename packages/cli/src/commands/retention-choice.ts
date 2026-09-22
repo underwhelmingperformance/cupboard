@@ -13,5 +13,5 @@ export function rootRetentionChoice(
 	if (ttl !== undefined) {
 		return { kind: 'duration', seconds: ttl };
 	}
-	return permanent === true ? { kind: 'permanent' } : { kind: 'inherit' };
+	return { kind: permanent === true ? 'permanent' : 'inherit' };
 }

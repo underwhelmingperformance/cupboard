@@ -2595,10 +2595,12 @@ describe('credit-paced commits', () => {
 			socket.emit('open');
 			socket.emit('message', settledFrame(id));
 
-			if (index < sockets.length - 1) {
-				socket.emit('close', 1006, '');
-				await vi.advanceTimersByTimeAsync(maxBackoffMs);
+			if (!(index < sockets.length - 1)) {
+				continue;
 			}
+
+			socket.emit('close', 1006, '');
+			await vi.advanceTimersByTimeAsync(maxBackoffMs);
 		}
 
 		expect(

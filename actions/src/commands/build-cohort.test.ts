@@ -274,9 +274,7 @@ function remoteDerivation(
 					['out', floatingBuiltPath],
 					['dev', floatingDevelopmentPath]
 				]
-			: drvPath.includes('-app.drv')
-				? [['out', appPath]]
-				: [['out', libraryBuiltPath]]);
+			: [['out', drvPath.includes('-app.drv') ? appPath : libraryBuiltPath]]);
 
 	const inputs = inputDerivations
 		.map((input) => {
@@ -1604,11 +1602,11 @@ describe('buildAndRootNixResults', () => {
 				buildPathsWithResults: ([target], mode) => {
 					buildCalls.push({ targets: [target], mode });
 
-					return Promise.resolve(
+					return Promise.resolve([
 						target === libraryQueryInstallable
-							? [remoteResult('already-valid')]
-							: [remoteResult('built', target, floatingBuiltPath)]
-					);
+							? remoteResult('already-valid')
+							: remoteResult('built', target, floatingBuiltPath)
+					]);
 				},
 				resolveClosure: ownPathClosure,
 				addTempRoot: () => Promise.resolve()
@@ -1776,11 +1774,11 @@ describe('buildAndRootNixResults', () => {
 
 					events.push(`build ${target}`);
 
-					return Promise.resolve(
+					return Promise.resolve([
 						target === appQueryInstallable
-							? [remoteResult('built', appQueryInstallable, appPath)]
-							: [remoteResult('substituted')]
-					);
+							? remoteResult('built', appQueryInstallable, appPath)
+							: remoteResult('substituted')
+					]);
 				},
 				resolveClosure: ownPathClosure,
 				addTempRoot: (storePath) => {
@@ -2273,11 +2271,9 @@ describe('buildAndRootNixResults', () => {
 
 					buildCalls.push(target);
 
-					return Promise.resolve(
-						buildCalls.length === 1
-							? [remoteFailure()]
-							: [remoteResult('built')]
-					);
+					return Promise.resolve([
+						buildCalls.length === 1 ? remoteFailure() : remoteResult('built')
+					]);
 				},
 				resolveClosure: ownPathClosure,
 				addTempRoot: () => Promise.resolve()
@@ -5484,13 +5480,15 @@ describe('buildCohortAction publication', () => {
 				lifecycle.push('closed');
 				sequence.push('closed');
 
-				if (result.status === 'rejected') {
-					if (flowPlan.captureBuildError !== true) {
-						throw result.reason;
-					}
-
-					buildError = result.reason;
+				if (result.status !== 'rejected') {
+					return;
 				}
+
+				if (flowPlan.captureBuildError !== true) {
+					throw result.reason;
+				}
+
+				buildError = result.reason;
 			}
 		);
 
@@ -6037,10 +6035,11 @@ describe('buildCohortAction publication', () => {
 		);
 		const runNixBuild = vi.fn((installables: readonly string[]) =>
 			Promise.resolve({
-				paths:
+				paths: [
 					installables[0] === dependencyInstallable
-						? [dependencyPath]
-						: [libraryBuiltPath],
+						? dependencyPath
+						: libraryBuiltPath
+				],
 				status: 0,
 				copiedFrom: new Map()
 			})

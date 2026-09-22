@@ -286,9 +286,9 @@ describe('reuse-view narinfo lookup', () => {
 				committed.storePathHash,
 				access
 			);
-			await setView(
-				prefix === undefined ? [{ kind: 'all' }] : [{ kind: 'prefix', prefix }]
-			);
+			await setView([
+				prefix === undefined ? { kind: 'all' } : { kind: 'prefix', prefix }
+			]);
 
 			const narInfo = await readFetch(lookupPath(storePathHash));
 			const availability = await readFetch(

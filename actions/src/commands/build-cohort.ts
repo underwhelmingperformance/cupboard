@@ -1132,13 +1132,15 @@ export async function buildCohortAction(
 			incompleteRoots: localOwnership.incompleteRoots
 		});
 
-		if (build.status !== 0) {
-			if (streamedFailure !== undefined) {
-				throw streamedFailure.error;
-			}
-
-			throw new CommandFailedError('nix build', build.status);
+		if (build.status === 0) {
+			return;
 		}
+
+		if (streamedFailure !== undefined) {
+			throw streamedFailure.error;
+		}
+
+		throw new CommandFailedError('nix build', build.status);
 	};
 
 	if (isRemotePublication && queryable.length > 0) {
@@ -1587,7 +1589,7 @@ export function cohortBuildPushArguments(
 	>,
 	cohortsFile: string
 ): readonly string[] {
-	const arguments_ = [
+	return [
 		'--no-colour',
 		'build-push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
@@ -1597,34 +1599,14 @@ export function cohortBuildPushArguments(
 		cohortsFile,
 		'--receipt-file',
 		inputs.receiptFile,
-		'--aggregate-receipt-v3'
+		'--aggregate-receipt-v3',
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.gcBetweenCohorts ? ['--gc-between-cohorts'] : []),
+		...(inputs.allBestEffort ? ['--keep-going-cohorts'] : []),
+		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
+		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.gcBetweenCohorts) {
-		arguments_.push('--gc-between-cohorts');
-	}
-
-	if (inputs.allBestEffort) {
-		arguments_.push('--keep-going-cohorts');
-	}
-
-	if (inputs.runRoot !== '') {
-		arguments_.push('--run-root', inputs.runRoot);
-	}
-
-	if (inputs.runRootTtl !== '') {
-		arguments_.push('--run-root-ttl', inputs.runRootTtl);
-	}
-
-	if (inputs.runRootPermanent) {
-		arguments_.push('--run-root-permanent');
-	}
-
-	return arguments_;
 }
 
 async function runBuildPushCohort(
@@ -1689,7 +1671,7 @@ export function cohortReceiptPushArguments(
 	claimable: readonly string[],
 	copiedFromFile: string
 ): readonly string[] {
-	const arguments_ = [
+	return [
 		'--no-colour',
 		'push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
@@ -1707,26 +1689,12 @@ export function cohortReceiptPushArguments(
 			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath])),
 		...(claimable.length === 0
 			? ['--no-claimable']
-			: claimable.flatMap((storePath) => ['--claimable', storePath]))
+			: claimable.flatMap((storePath) => ['--claimable', storePath])),
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
+		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.runRoot !== '') {
-		arguments_.push('--run-root', inputs.runRoot);
-	}
-
-	if (inputs.runRootTtl !== '') {
-		arguments_.push('--run-root-ttl', inputs.runRootTtl);
-	}
-
-	if (inputs.runRootPermanent) {
-		arguments_.push('--run-root-permanent');
-	}
-
-	return arguments_;
 }
 
 /**
@@ -1896,74 +1864,46 @@ export function cohortPushArguments(
 	group: CohortRootGroup,
 	extras: CohortPushExtras
 ): readonly string[] {
-	const arguments_ = [
+	const viewSource =
+		extras.referencePathsFile !== '' && inputs.reuseView !== ''
+			? `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`
+			: '';
+	const isViewReference =
+		viewSource !== '' && extras.referenceSource === viewSource;
+	const readUser = isViewReference ? inputs.fallbackReadUser : inputs.readUser;
+	const readPassword = isViewReference
+		? inputs.fallbackReadPassword
+		: inputs.readPassword;
+
+	return [
 		'--no-colour',
 		'push',
 		canonicalHref(cacheUrlFor(inputs.url, inputs.cache)),
 		...group.paths,
 		'--github-oidc',
-		...(group.complete ? ['--root', group.root] : ['--no-retain'])
+		...(group.complete ? ['--root', group.root] : ['--no-retain']),
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.store === '' ? [] : ['--store', inputs.store]),
+		...(inputs.ttl !== '' && group.complete ? ['--ttl', inputs.ttl] : []),
+		...(inputs.permanent && group.complete ? ['--permanent'] : []),
+		...(extras.intermediatePathsFile === ''
+			? []
+			: ['--intermediate-paths-file', extras.intermediatePathsFile]),
+		...(extras.referencePathsFile === ''
+			? []
+			: [
+					'--reference-paths-file',
+					extras.referencePathsFile,
+					'--reference-source',
+					extras.referenceSource
+				]),
+		...(readUser !== '' && extras.referencePathsFile !== ''
+			? ['--read-user', readUser, '--read-password', readPassword]
+			: []),
+		...(inputs.runRoot === '' ? [] : ['--run-root', inputs.runRoot]),
+		...(inputs.runRootTtl === '' ? [] : ['--run-root-ttl', inputs.runRootTtl]),
+		...(inputs.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.store !== '') {
-		arguments_.push('--store', inputs.store);
-	}
-
-	if (inputs.ttl !== '' && group.complete) {
-		arguments_.push('--ttl', inputs.ttl);
-	}
-
-	if (inputs.permanent && group.complete) {
-		arguments_.push('--permanent');
-	}
-
-	if (extras.intermediatePathsFile !== '') {
-		arguments_.push('--intermediate-paths-file', extras.intermediatePathsFile);
-	}
-
-	if (extras.referencePathsFile !== '') {
-		arguments_.push(
-			'--reference-paths-file',
-			extras.referencePathsFile,
-			'--reference-source',
-			extras.referenceSource
-		);
-
-		const viewSource =
-			inputs.reuseView === ''
-				? ''
-				: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
-		const isViewReference =
-			viewSource !== '' && extras.referenceSource === viewSource;
-		const readUser = isViewReference
-			? inputs.fallbackReadUser
-			: inputs.readUser;
-		const readPassword = isViewReference
-			? inputs.fallbackReadPassword
-			: inputs.readPassword;
-
-		if (readUser !== '') {
-			arguments_.push('--read-user', readUser, '--read-password', readPassword);
-		}
-	}
-
-	if (inputs.runRoot !== '') {
-		arguments_.push('--run-root', inputs.runRoot);
-	}
-
-	if (inputs.runRootTtl !== '') {
-		arguments_.push('--run-root-ttl', inputs.runRootTtl);
-	}
-
-	if (inputs.runRootPermanent) {
-		arguments_.push('--run-root-permanent');
-	}
-
-	return arguments_;
 }
 
 interface PublishCohortOptions {
@@ -2437,52 +2377,33 @@ async function planCohort(
 		targetsFile,
 		'--plan-file',
 		planFile,
-		'--github-oidc'
+		'--github-oidc',
+		// A served path counts as having provenance only when the cache also holds
+		// a build-provenance statement for it, so a provenance run asks the plan to
+		// build every served path without one.
+		...(inputs.requireProvenance ? ['--require-attested'] : []),
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(inputs.reuseView === '' ? [] : ['--reuse-view', inputs.reuseView]),
+		...(inputs.reuseView !== '' && inputs.fallbackReadUser !== ''
+			? [
+					'--view-read-user',
+					inputs.fallbackReadUser,
+					'--view-read-password',
+					inputs.fallbackReadPassword
+				]
+			: []),
+		...(inputs.ttl === '' ? [] : ['--ttl', inputs.ttl]),
+		...(inputs.permanent ? ['--permanent'] : []),
+		...(inputs.readUser === ''
+			? []
+			: [
+					'--read-user',
+					inputs.readUser,
+					'--read-password',
+					inputs.readPassword
+				]),
+		...(inputs.store === '' ? [] : ['--store', inputs.store])
 	];
-
-	// A served path counts as having provenance only when the cache also holds
-	// a build-provenance statement for it, so a provenance run asks the plan to
-	// build every served path without one.
-	if (inputs.requireProvenance) {
-		arguments_.push('--require-attested');
-	}
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.reuseView !== '') {
-		arguments_.push('--reuse-view', inputs.reuseView);
-		if (inputs.fallbackReadUser !== '') {
-			arguments_.push(
-				'--view-read-user',
-				inputs.fallbackReadUser,
-				'--view-read-password',
-				inputs.fallbackReadPassword
-			);
-		}
-	}
-
-	if (inputs.ttl !== '') {
-		arguments_.push('--ttl', inputs.ttl);
-	}
-
-	if (inputs.permanent) {
-		arguments_.push('--permanent');
-	}
-
-	if (inputs.readUser !== '') {
-		arguments_.push(
-			'--read-user',
-			inputs.readUser,
-			'--read-password',
-			inputs.readPassword
-		);
-	}
-
-	if (inputs.store !== '') {
-		arguments_.push('--store', inputs.store);
-	}
 
 	let results: readonly ReporterResultEvent[];
 
@@ -2578,7 +2499,7 @@ export function nixBuildArguments(
 	outLinkDirectory: string,
 	logFile: string
 ): readonly string[] {
-	const arguments_ = [
+	return [
 		'build',
 		'--keep-going',
 		'--print-out-paths',
@@ -2589,20 +2510,12 @@ export function nixBuildArguments(
 		// can say where the path came from.
 		'--option',
 		'json-log-path',
-		logFile
+		logFile,
+		...(maxJobs === '' ? [] : ['--max-jobs', maxJobs]),
+		...(store === '' ? [] : ['--store', store, '--eval-store', 'auto']),
+		'--',
+		...installables
 	];
-
-	if (maxJobs !== '') {
-		arguments_.push('--max-jobs', maxJobs);
-	}
-
-	if (store !== '') {
-		arguments_.push('--store', store, '--eval-store', 'auto');
-	}
-
-	arguments_.push('--', ...installables);
-
-	return arguments_;
 }
 
 interface PlannedTargetBinding {
@@ -3666,17 +3579,19 @@ export async function buildAndRootNixResults(
 
 	await publish(results, failures, publicationPaths, provenanceRebuilds);
 
-	if (failures.length > 0) {
-		const protocolFailures = failures.filter((failure) =>
-			['dependency-protocol', 'protocol'].includes(failure.kind)
-		);
-
-		if (protocolFailures.length > 0) {
-			throw new RemoteCohortProtocolError(protocolFailures);
-		}
-
-		throw new RemoteCohortBuildFailedError(failures);
+	if (failures.length === 0) {
+		return;
 	}
+
+	const protocolFailures = failures.filter((failure) =>
+		['dependency-protocol', 'protocol'].includes(failure.kind)
+	);
+
+	if (protocolFailures.length > 0) {
+		throw new RemoteCohortProtocolError(protocolFailures);
+	}
+
+	throw new RemoteCohortBuildFailedError(failures);
 }
 
 async function realiseRemoteDependencies(
@@ -3960,10 +3875,12 @@ function recordRemoteDependencyResults(
 			kind: failure.kind === 'protocol' ? 'dependency-protocol' : 'dependency'
 		};
 
-		if (failure.kind === 'protocol') {
-			state.hasProtocolFailure = true;
-			state.isExhausted = true;
+		if (failure.kind !== 'protocol') {
+			continue;
 		}
+
+		state.hasProtocolFailure = true;
+		state.isExhausted = true;
 	}
 }
 
@@ -3987,10 +3904,11 @@ async function predictableRemoteBuilds(
 			await session.readDerivation(derivationPath)
 		);
 		const selection = installable.split('^', 2)[1];
-		const selected =
+		const selected = new Set(
 			selection === undefined || selection === '*'
-				? new Set(derivation.outputs.keys())
-				: new Set(selection.split(','));
+				? derivation.outputs.keys()
+				: selection.split(',')
+		);
 		const outputs = new Map<string, StorePathString>();
 
 		for (const outputName of selected) {
@@ -4061,15 +3979,9 @@ function reconcileBuildResults(
 		expectedBuilds.map((build) => [build.target, build.outputs])
 	);
 	const requested = new Set(canonicalInstallables);
-	const resultsByTarget = new Map<NixDerivedPathString, NixBuildResult[]>();
-
-	for (const result of results) {
-		const target = canonicalNixDerivedPath(result.target);
-		const targetResults = resultsByTarget.get(target) ?? [];
-
-		targetResults.push(result);
-		resultsByTarget.set(target, targetResults);
-	}
+	const resultsByTarget = Map.groupBy(results, (result) =>
+		canonicalNixDerivedPath(result.target)
+	);
 
 	const survivors: NixBuildResult[] = [];
 	const failures: RemoteCohortBuildFailure[] = [];

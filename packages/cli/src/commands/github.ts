@@ -977,16 +977,18 @@ export async function runGithubSetup(
 
 	reportSetupResult(reporter, steps);
 
-	if (removalFailures.size > 0) {
-		const failedIds = removalFailures
-			.keys()
-			.toArray()
-			.toSorted((left, right) => left.localeCompare(right));
-
-		throw new GithubSetupRemovalError(failedIds, {
-			cause: removalFailures.values().next().value
-		});
+	if (removalFailures.size === 0) {
+		return;
 	}
+
+	const failedIds = removalFailures
+		.keys()
+		.toArray()
+		.toSorted((left, right) => left.localeCompare(right));
+
+	throw new GithubSetupRemovalError(failedIds, {
+		cause: removalFailures.values().next().value
+	});
 }
 
 export function registerGithubCommands(

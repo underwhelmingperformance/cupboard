@@ -166,11 +166,10 @@ function isGrantPermitted(
 		return true;
 	}
 
-	if (permitted.type !== requested.type) {
-		return false;
-	}
-
-	if (!isActionsPermittedAtIssuance(requested.actions, permitted.actions)) {
+	if (
+		permitted.type !== requested.type ||
+		!isActionsPermittedAtIssuance(requested.actions, permitted.actions)
+	) {
 		return false;
 	}
 

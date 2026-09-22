@@ -393,35 +393,37 @@ export async function superviseAttemptedBuild(
 				break;
 			}
 
-			if (attempt < options.attempts) {
-				const delayInterruption = Promise.withResolvers<undefined>();
-				const delay = startDelay(attempt * attemptDelayMs);
-				wakeDelay = () => {
-					delayInterruption.resolve(undefined);
-				};
+			if (attempt >= options.attempts) {
+				continue;
+			}
 
-				await withCleanups(
-					() => Promise.race([delay.completed, delayInterruption.promise]),
-					[
-						() => {
-							delay.cancel();
+			const delayInterruption = Promise.withResolvers<undefined>();
+			const delay = startDelay(attempt * attemptDelayMs);
+			wakeDelay = () => {
+				delayInterruption.resolve(undefined);
+			};
 
-							return Promise.resolve();
-						},
-						() => {
-							wakeDelay = undefined;
+			await withCleanups(
+				() => Promise.race([delay.completed, delayInterruption.promise]),
+				[
+					() => {
+						delay.cancel();
 
-							return Promise.resolve();
-						}
-					]
-				);
+						return Promise.resolve();
+					},
+					() => {
+						wakeDelay = undefined;
 
-				const signal = interruptedSignal();
+						return Promise.resolve();
+					}
+				]
+			);
 
-				if (signal !== undefined) {
-					exit = { status: undefined, signal };
-					break;
-				}
+			const signal = interruptedSignal();
+
+			if (signal !== undefined) {
+				exit = { status: undefined, signal };
+				break;
 			}
 		}
 

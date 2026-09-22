@@ -619,10 +619,12 @@ describe('resolveSubstituters', () => {
 
 			expect(failure).toBeInstanceOf(CacheInfoInvalidError);
 
-			if (failure instanceof CacheInfoInvalidError) {
-				expect(failure.side).toBe(side);
-				expect(failure.cause).toBeInstanceOf(CacheInfoParseError);
+			if (!(failure instanceof CacheInfoInvalidError)) {
+				return;
 			}
+
+			expect(failure.side).toBe(side);
+			expect(failure.cause).toBeInstanceOf(CacheInfoParseError);
 		}
 	);
 

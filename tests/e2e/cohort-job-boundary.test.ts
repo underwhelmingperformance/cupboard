@@ -145,10 +145,12 @@ afterAll(async () => {
 
 	const prepared = state.fixture;
 
-	if (prepared !== undefined) {
-		await makeWritable(prepared.root);
-		await rm(prepared.root, { force: true, recursive: true });
+	if (prepared === undefined) {
+		return;
 	}
+
+	await makeWritable(prepared.root);
+	await rm(prepared.root, { force: true, recursive: true });
 }, 60_000);
 
 describe.skipIf(!isNixPresent)('cohort job store isolation', () => {

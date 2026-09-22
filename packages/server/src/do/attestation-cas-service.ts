@@ -257,23 +257,25 @@ export class AttestationCasService {
 			.run();
 
 		if (
-			!(await isObjectIncarnationLive(
+			await isObjectIncarnationLive(
 				this.context.d1,
 				'cas',
 				bundle.digest,
 				reserved.incarnation
-			))
+			)
 		) {
-			await queueObjectDeletion(
-				this.context.d1,
-				'cas',
-				bundle.digest,
-				reserved.incarnation
-			);
-			throw new UploadedObjectNotFoundError(
-				casObjectKey(bundle.digest, reserved.incarnation)
-			);
+			return;
 		}
+
+		await queueObjectDeletion(
+			this.context.d1,
+			'cas',
+			bundle.digest,
+			reserved.incarnation
+		);
+		throw new UploadedObjectNotFoundError(
+			casObjectKey(bundle.digest, reserved.incarnation)
+		);
 	}
 
 	async reserveReferenceAndCharge(
@@ -415,11 +417,7 @@ export class AttestationCasService {
 		isOwned: boolean,
 		size: number
 	): boolean {
-		if (usage.quotaBytes === null) {
-			return false;
-		}
-
-		if (isOwned) {
+		if (isOwned || usage.quotaBytes === null) {
 			return false;
 		}
 

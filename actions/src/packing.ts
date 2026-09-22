@@ -138,15 +138,9 @@ function packContext(
 	candidates: readonly SizedCohort[],
 	budget: number
 ): readonly SizedCohort[][] {
-	const byContext = new Map<string, SizedCohort[]>();
-
-	for (const candidate of candidates) {
-		const key = executionContextKey(candidate.cohort);
-		const group = byContext.get(key) ?? [];
-
-		group.push(candidate);
-		byContext.set(key, group);
-	}
+	const byContext = Map.groupBy(candidates, (candidate) =>
+		executionContextKey(candidate.cohort)
+	);
 
 	return byContext
 		.values()

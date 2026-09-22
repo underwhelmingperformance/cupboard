@@ -268,16 +268,18 @@ afterAll(async () => {
 			(sample) => sample.concurrency === concurrency && sample.label === label
 		);
 
-		if (matching.length > 0) {
-			const meanMs =
-				matching.reduce((sum, sample) => sum + sample.durationMs, 0) /
-				matching.length;
-			const perSecond = (batchSize / meanMs) * 1000;
-
-			console.log(
-				`[push-bench] uploadConcurrency=${String(concurrency)} "${label}" mean=${meanMs.toFixed(0)}ms (${perSecond.toFixed(1)} paths/s)`
-			);
+		if (matching.length === 0) {
+			continue;
 		}
+
+		const meanMs =
+			matching.reduce((sum, sample) => sum + sample.durationMs, 0) /
+			matching.length;
+		const perSecond = (batchSize / meanMs) * 1000;
+
+		console.log(
+			`[push-bench] uploadConcurrency=${String(concurrency)} "${label}" mean=${meanMs.toFixed(0)}ms (${perSecond.toFixed(1)} paths/s)`
+		);
 	}
 });
 

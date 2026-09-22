@@ -95,9 +95,10 @@ function signedEvidence(policy: SigningPolicy): BundleEvidence {
 		return { tlogEntryCount: 0, timestampCount: 1 };
 	}
 
-	return policy.profile === 'rekor-and-tsa'
-		? { tlogEntryCount: 1, timestampCount: 1 }
-		: { tlogEntryCount: 1, timestampCount: 0 };
+	return {
+		tlogEntryCount: 1,
+		timestampCount: policy.profile === 'rekor-and-tsa' ? 1 : 0
+	};
 }
 
 interface Workspace {

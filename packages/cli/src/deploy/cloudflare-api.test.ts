@@ -632,11 +632,11 @@ describe('ensureStagingLifecycleRule', () => {
 
 describe('bounded Cloudflare pagination', () => {
 	it('stops requesting pages when it finds the database', async () => {
-		const { client, pages } = paginatedD1Client((page) =>
-			page === 1
-				? [{ name: 'other', uuid: 'db-other' }]
-				: [{ name: 'cupboard', uuid: 'db-cupboard' }]
-		);
+		const { client, pages } = paginatedD1Client((page) => {
+			const name = page === 1 ? 'other' : 'cupboard';
+
+			return [{ name, uuid: `db-${name}` }];
+		});
 
 		const found = await createCloudflareApi(
 			client,

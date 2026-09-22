@@ -968,13 +968,10 @@ export class ReuseViewLookupService {
 			return uniqueHashes;
 		}
 
-		const candidatesByHash = new Map<StorePathHash, CandidateRow[]>();
-
-		for (const candidate of settled.candidates) {
-			const candidates = candidatesByHash.get(candidate.storePathHash) ?? [];
-			candidates.push(candidate);
-			candidatesByHash.set(candidate.storePathHash, candidates);
-		}
+		const candidatesByHash = Map.groupBy(
+			settled.candidates,
+			(candidate) => candidate.storePathHash
+		);
 
 		return uniqueHashes.filter(
 			(storePathHash) =>

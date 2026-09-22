@@ -121,11 +121,10 @@ function writeCommitSessionAttachment(
 function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 	const { credit, lastActivityAt } = attachment;
 
-	if (lastActivityAt === undefined) {
-		return false;
-	}
-
-	if (credit?.granted === 0 && credit.demand > 0) {
+	if (
+		lastActivityAt === undefined ||
+		(credit?.granted === 0 && credit.demand > 0)
+	) {
 		return false;
 	}
 
@@ -264,11 +263,11 @@ export class CommitCreditService {
 			const attachment = readCommitSessionAttachment(socket);
 			const credit = countedCredit(attachment);
 
-			if (attachment === undefined || credit === undefined) {
-				continue;
-			}
-
-			if (attachment.sessionId === excluded) {
+			if (
+				attachment === undefined ||
+				credit === undefined ||
+				attachment.sessionId === excluded
+			) {
 				continue;
 			}
 
@@ -605,15 +604,12 @@ export class CommitCreditService {
 
 			// The marker exists because a socket can remain listed after reclamation.
 			// Reprocessing it would repeat the close and verdict lookup on every alarm.
-			if (attachment?.credit === undefined || isSessionClosing(attachment)) {
-				continue;
-			}
-
-			if (!isIdle(attachment, now)) {
-				continue;
-			}
-
-			if ((this.inFlightPerSession.get(attachment.sessionId) ?? 0) > 0) {
+			if (
+				attachment?.credit === undefined ||
+				isSessionClosing(attachment) ||
+				!isIdle(attachment, now) ||
+				(this.inFlightPerSession.get(attachment.sessionId) ?? 0) > 0
+			) {
 				continue;
 			}
 

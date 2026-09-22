@@ -2420,10 +2420,13 @@ async function fetchAttestationBundle(
 		throw new MalformedReleaseResponseError();
 	}
 
-	const headers: Record<string, string> = { ...githubHeaders };
-	if (githubToken !== '' && url.origin === githubApiOrigin) {
-		headers.authorization = `token ${githubToken}`;
-	}
+	const headers: Record<string, string> = {
+		...githubHeaders,
+		...(githubToken !== '' &&
+			url.origin === githubApiOrigin && {
+				authorization: `token ${githubToken}`
+			})
+	};
 
 	const response = await retryingFetcher(fetcher, 'replay-safe')(url, {
 		headers,
@@ -2504,11 +2507,9 @@ function requestHeaders(
 	githubToken: string,
 	overrides: Readonly<Record<string, string>> = {}
 ): Record<string, string> {
-	const headers = { ...githubHeaders, ...overrides };
-
-	if (githubToken !== '') {
-		headers.authorization = `Bearer ${githubToken}`;
-	}
-
-	return headers;
+	return {
+		...githubHeaders,
+		...overrides,
+		...(githubToken !== '' && { authorization: `Bearer ${githubToken}` })
+	};
 }

@@ -358,23 +358,23 @@ export async function runTenantCreate(
 	const rows: ResultRow[] = [
 		{ label: 'Tenant', value: summary.id },
 		{ label: 'Status', value: summary.status },
-		{ label: 'Default cache access', value: body.defaultCacheAccess }
+		{ label: 'Default cache access', value: body.defaultCacheAccess },
+		...(body.defaultCacheAccess === 'private' && body.read === undefined
+			? [
+					{
+						label: 'Warning',
+						value:
+							'the private default cache has no read credential; it refuses every read until one is set'
+					}
+				]
+			: []),
+		...(generatedReadPassword !== undefined && body.read !== undefined
+			? [
+					{ label: 'Read user', value: body.read.user },
+					{ label: 'Read password', value: generatedReadPassword }
+				]
+			: [])
 	];
-
-	if (body.defaultCacheAccess === 'private' && body.read === undefined) {
-		rows.push({
-			label: 'Warning',
-			value:
-				'the private default cache has no read credential; it refuses every read until one is set'
-		});
-	}
-
-	if (generatedReadPassword !== undefined && body.read !== undefined) {
-		rows.push(
-			{ label: 'Read user', value: body.read.user },
-			{ label: 'Read password', value: generatedReadPassword }
-		);
-	}
 
 	reporter.result({
 		kind: 'tenant',

@@ -1689,11 +1689,8 @@ export class VerificationService {
 		} = observation;
 		const current = this.narInfoRow(row.cacheId, row.storePathHash);
 
-		if (current?.generation !== row.generation) {
-			return 'unchanged';
-		}
-
 		if (
+			current?.generation !== row.generation ||
 			!committedEdges.has(
 				edgeKey(
 					this.cache(current.cacheId).scope,

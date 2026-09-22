@@ -159,12 +159,12 @@ function scanPackage(): readonly BoundListSite[] {
 	const sites: BoundListSite[] = [];
 
 	for (const file of program.getSourceFiles()) {
-		if (file.isDeclarationFile || !file.fileName.startsWith(packageRoot)) {
-			continue;
-		}
-
 		// A test file binds its own fixtures and is not a production statement.
-		if (file.fileName.endsWith('.test.ts')) {
+		if (
+			file.isDeclarationFile ||
+			!file.fileName.startsWith(packageRoot) ||
+			file.fileName.endsWith('.test.ts')
+		) {
 			continue;
 		}
 
@@ -174,11 +174,10 @@ function scanPackage(): readonly BoundListSite[] {
 			kind: BoundListSite['kind'],
 			argument: ts.Node | undefined
 		): void => {
-			if (argument === undefined) {
-				return;
-			}
-
-			if (!isArrayLike(checker.getTypeAtLocation(argument), checker)) {
+			if (
+				argument === undefined ||
+				!isArrayLike(checker.getTypeAtLocation(argument), checker)
+			) {
 				return;
 			}
 

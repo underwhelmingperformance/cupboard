@@ -205,9 +205,9 @@ describe('checkR2Credentials', () => {
 			requestNumber += 1;
 
 			return Promise.resolve(
-				requestNumber === 1
-					? new Response(initiateBody, { status: StatusCodes.OK })
-					: new Response(cleanupBody, { status: StatusCodes.OK })
+				new Response(requestNumber === 1 ? initiateBody : cleanupBody, {
+					status: StatusCodes.OK
+				})
 			);
 		};
 

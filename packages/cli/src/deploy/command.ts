@@ -1249,16 +1249,13 @@ async function deployFlow(
 								label: 'What',
 								value: 'the key that signs per-push upload-credential ids'
 							},
-							settlement === 'rotate'
-								? {
-										label: 'Why',
-										value:
-											'both Workers verify push ids and the applied value cannot be read back; a push in flight needs re-running'
-									}
-								: {
-										label: 'Why',
-										value: 'a different one invalidates in-flight pushes'
-									},
+							{
+								label: 'Why',
+								value:
+									settlement === 'rotate'
+										? 'both Workers verify push ids and the applied value cannot be read back; a push in flight needs re-running'
+										: 'a different one invalidates in-flight pushes'
+							},
 							{ label: 'Value', value: generatedPushIdSigningKey }
 						]
 					);
@@ -1499,9 +1496,11 @@ async function deployFlow(
 	);
 	const claimSecret: ClaimSecret =
 		suppliedSignupSecret === undefined
-			? controlSecrets.includes('CUPBOARD_SIGNUP_SECRET')
-				? { kind: 'configured' }
-				: { kind: 'none' }
+			? {
+					kind: controlSecrets.includes('CUPBOARD_SIGNUP_SECRET')
+						? 'configured'
+						: 'none'
+				}
 			: { kind: 'known', value: suppliedSignupSecret };
 
 	const outcome = await onboardDeployment({

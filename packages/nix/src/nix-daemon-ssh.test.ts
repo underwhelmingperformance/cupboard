@@ -543,10 +543,12 @@ describe('createSshNixDaemonConnector', () => {
 								async beforeOperation() {
 									startedQueries += 1;
 
-									if (startedQueries === 1) {
-										firstStarted.resolve(undefined);
-										await releaseFirst.promise;
+									if (startedQueries !== 1) {
+										return;
 									}
+
+									firstStarted.resolve(undefined);
+									await releaseFirst.promise;
 								}
 							}
 						)

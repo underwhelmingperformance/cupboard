@@ -277,11 +277,10 @@ function oidcVerificationDiscoverySchema(canUseLoopbackHttp: boolean) {
 		})
 		.superRefine((metadata, context) => {
 			for (const [field, endpoint] of Object.entries(metadata)) {
-				if (!field.endsWith('_endpoint')) {
-					continue;
-				}
-
-				if (endpointSchema.safeParse(endpoint).success) {
+				if (
+					!field.endsWith('_endpoint') ||
+					endpointSchema.safeParse(endpoint).success
+				) {
 					continue;
 				}
 

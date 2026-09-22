@@ -480,21 +480,23 @@ export class TokenExchangeService {
 
 			const refreshToken = prepared.refreshToken;
 
-			if (refreshToken !== undefined) {
-				transaction
-					.insert(schema.refreshTokenFamilies)
-					.values({
-						...refreshToken.family,
-						grantsJson: this.grantSpelling.authorizationDetailsForWrite(
-							refreshToken.family.grantsJson
-						)
-					})
-					.run();
-				transaction
-					.insert(schema.refreshTokenMembers)
-					.values(refreshToken.member)
-					.run();
+			if (refreshToken === undefined) {
+				return;
 			}
+
+			transaction
+				.insert(schema.refreshTokenFamilies)
+				.values({
+					...refreshToken.family,
+					grantsJson: this.grantSpelling.authorizationDetailsForWrite(
+						refreshToken.family.grantsJson
+					)
+				})
+				.run();
+			transaction
+				.insert(schema.refreshTokenMembers)
+				.values(refreshToken.member)
+				.run();
 		});
 
 		return oauthJsonResponse(prepared.body);

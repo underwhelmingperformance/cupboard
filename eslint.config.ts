@@ -74,6 +74,9 @@ export default defineConfig(
 	logtapeRecommended,
 	{
 		rules: {
+			// This rule replaces early-return guards with ternaries, nesting
+			// exceptional cases in the normal path and making it harder to read.
+			'unicorn/prefer-ternary': 'off',
 			'unicorn/name-replacements': [
 				'error',
 				{
