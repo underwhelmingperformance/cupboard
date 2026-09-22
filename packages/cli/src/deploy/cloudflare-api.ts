@@ -478,9 +478,11 @@ export function createCloudflareApi(
 					throw error;
 				}
 
-				return isTokenRefusal(error)
-					? { kind: 'unreadable' as const }
-					: { kind: 'unavailable' as const };
+				return {
+					kind: isTokenRefusal(error)
+						? ('unreadable' as const)
+						: ('unavailable' as const)
+				};
 			}
 
 			const parsed = z.array(liveSubscriptionSchema).safeParse(listed);

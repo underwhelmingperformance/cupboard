@@ -706,14 +706,9 @@ async function availablePathsAt(
 		return new Set();
 	}
 
-	const pathsByHash = new Map<StorePathHash, StorePathString[]>();
-
-	for (const storePath of paths) {
-		const hash = StorePath.hash(storePath);
-		const matching = pathsByHash.get(hash) ?? [];
-		matching.push(storePath);
-		pathsByHash.set(hash, matching);
-	}
+	const pathsByHash = Map.groupBy(paths, (storePath) =>
+		StorePath.hash(storePath)
+	);
 
 	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
 	const fetcher = retryingFetcher(options.fetcher ?? fetch, 'replay-safe');
@@ -849,14 +844,10 @@ export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
  * each target that has no label.
  */
 export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
-	const byLabel = new Map<string, PublishTarget[]>();
-
-	for (const target of targets) {
-		const label = target.cohort ?? target.attr;
-		const members = byLabel.get(label) ?? [];
-		members.push(target);
-		byLabel.set(label, members);
-	}
+	const byLabel = Map.groupBy(
+		targets,
+		(target) => target.cohort ?? target.attr
+	);
 
 	const cohorts = byLabel
 		.entries()

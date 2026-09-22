@@ -247,11 +247,10 @@ async function requireUploadGraceFacts(
 	client: PushClient,
 	kind: 'negotiate' | 'preview'
 ): Promise<void> {
-	if (client.probeUploadGraceFacts === undefined) {
-		return;
-	}
-
-	if (await client.probeUploadGraceFacts(kind)) {
+	if (
+		client.probeUploadGraceFacts === undefined ||
+		(await client.probeUploadGraceFacts(kind))
+	) {
 		return;
 	}
 

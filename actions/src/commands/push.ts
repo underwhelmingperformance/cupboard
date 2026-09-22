@@ -538,18 +538,20 @@ export async function pushAction(
 
 	await publishPushOutputs(environment, summary);
 
-	if (inputs.requireGrace) {
-		// A missing grace fact means that the cache has no configured grace. Report
-		// this once for the cache rather than repeating it for every path.
-		if (hasUngracedPath(summary)) {
-			throw new CacheGraceMissingError(inputs.cache);
-		}
+	if (!inputs.requireGrace) {
+		return;
+	}
 
-		const missing = pathsMissingGraceDeadline(summary);
+	// A missing grace fact means that the cache has no configured grace. Report
+	// this once for the cache rather than repeating it for every path.
+	if (hasUngracedPath(summary)) {
+		throw new CacheGraceMissingError(inputs.cache);
+	}
 
-		if (missing.length > 0) {
-			throw new GraceDeadlineMissingError(missing);
-		}
+	const missing = pathsMissingGraceDeadline(summary);
+
+	if (missing.length > 0) {
+		throw new GraceDeadlineMissingError(missing);
 	}
 }
 
@@ -818,7 +820,7 @@ function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {
 export function buildPushArguments(
 	options: PushArgumentsOptions
 ): readonly string[] {
-	const arguments_ = [
+	return [
 		'--no-colour',
 		'push',
 		canonicalHref(
@@ -827,75 +829,41 @@ export function buildPushArguments(
 				: cacheUrlFor(options.url, options.cache)
 		),
 		...options.paths,
-		'--github-oidc'
+		'--github-oidc',
+		// Let the CLI derive the default audience from its canonical Worker URL so
+		// canonicalisation and defaulting happen in one place.
+		...(options.audience === '' ? [] : ['--audience', options.audience]),
+		...(options.root === '' ? [] : ['--root', options.root]),
+		...(options.cacheSyntax === 'flag' && options.cache.kind === 'named'
+			? ['--cache', options.cache.name]
+			: []),
+		...(options.store === '' ? [] : ['--store', options.store]),
+		...(options.ttl === '' ? [] : ['--ttl', options.ttl]),
+		...(options.permanent ? ['--permanent'] : []),
+		...(options.retain ? [] : ['--no-retain']),
+		...(options.wait ? [] : ['--no-wait']),
+		...(options.waitTimeout === ''
+			? []
+			: ['--wait-timeout', options.waitTimeout]),
+		...options.attestations.flatMap((attestation) => [
+			'--attestation',
+			attestation
+		]),
+		...(options.intermediatePathsFile === ''
+			? []
+			: ['--intermediate-paths-file', options.intermediatePathsFile]),
+		...(options.referencePathsFile === ''
+			? []
+			: ['--reference-paths-file', options.referencePathsFile]),
+		...(options.referenceSource === ''
+			? []
+			: ['--reference-source', options.referenceSource]),
+		...(options.runRoot === '' ? [] : ['--run-root', options.runRoot]),
+		...(options.runRootTtl === ''
+			? []
+			: ['--run-root-ttl', options.runRootTtl]),
+		...(options.runRootPermanent ? ['--run-root-permanent'] : [])
 	];
-	// Let the CLI derive the default audience from its canonical Worker URL so
-	// canonicalisation and defaulting happen in one place.
-	if (options.audience !== '') {
-		arguments_.push('--audience', options.audience);
-	}
-
-	if (options.root !== '') {
-		arguments_.push('--root', options.root);
-	}
-
-	if (options.cacheSyntax === 'flag' && options.cache.kind === 'named') {
-		arguments_.push('--cache', options.cache.name);
-	}
-
-	if (options.store !== '') {
-		arguments_.push('--store', options.store);
-	}
-
-	if (options.ttl !== '') {
-		arguments_.push('--ttl', options.ttl);
-	}
-
-	if (options.permanent) {
-		arguments_.push('--permanent');
-	}
-
-	if (!options.retain) {
-		arguments_.push('--no-retain');
-	}
-
-	if (!options.wait) {
-		arguments_.push('--no-wait');
-	}
-
-	if (options.waitTimeout !== '') {
-		arguments_.push('--wait-timeout', options.waitTimeout);
-	}
-
-	for (const attestation of options.attestations) {
-		arguments_.push('--attestation', attestation);
-	}
-
-	if (options.intermediatePathsFile !== '') {
-		arguments_.push('--intermediate-paths-file', options.intermediatePathsFile);
-	}
-
-	if (options.referencePathsFile !== '') {
-		arguments_.push('--reference-paths-file', options.referencePathsFile);
-	}
-
-	if (options.referenceSource !== '') {
-		arguments_.push('--reference-source', options.referenceSource);
-	}
-
-	if (options.runRoot !== '') {
-		arguments_.push('--run-root', options.runRoot);
-	}
-
-	if (options.runRootTtl !== '') {
-		arguments_.push('--run-root-ttl', options.runRootTtl);
-	}
-
-	if (options.runRootPermanent) {
-		arguments_.push('--run-root-permanent');
-	}
-
-	return arguments_;
 }
 
 /**

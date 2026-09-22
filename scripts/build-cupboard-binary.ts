@@ -279,11 +279,7 @@ function run(
 		stdio: 'inherit'
 	});
 
-	if (result.status === 0) {
-		return;
-	}
-
-	if (options.optional === true) {
+	if (result.status === 0 || options.optional === true) {
 		return;
 	}
 

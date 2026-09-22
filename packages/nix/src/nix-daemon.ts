@@ -1613,11 +1613,11 @@ class NixDaemonConnection {
 
 		const [storePath, source] = fields;
 
-		if (typeof storePath !== 'string' || typeof source !== 'string') {
-			return;
-		}
-
-		if (source === '') {
+		if (
+			typeof storePath !== 'string' ||
+			typeof source !== 'string' ||
+			source === ''
+		) {
 			return;
 		}
 
@@ -2411,11 +2411,13 @@ export class ByteStreamReader {
 			return;
 		}
 
-		if (this.ended) {
-			const pending = this.pending;
-			this.pending = undefined;
-			pending.reject(new NixDaemonRemoteError('daemon disconnected'));
+		if (!this.ended) {
+			return;
 		}
+
+		const pending = this.pending;
+		this.pending = undefined;
+		pending.reject(new NixDaemonRemoteError('daemon disconnected'));
 	}
 
 	private consume(byteLength: number): Buffer {

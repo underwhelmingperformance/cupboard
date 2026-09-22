@@ -507,9 +507,7 @@ describe('superviseAttemptedBuild', () => {
 				calls += 1;
 				await writeFile(options.command[2] ?? '', `{"call":${String(calls)}}`);
 
-				return calls < 2
-					? { status: 1, signal: undefined }
-					: { status: 0, signal: undefined };
+				return { status: calls < 2 ? 1 : 0, signal: undefined };
 			},
 			startDelay: (delayMs) => {
 				sleeps.push(delayMs);

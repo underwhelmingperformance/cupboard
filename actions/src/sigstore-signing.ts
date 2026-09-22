@@ -109,21 +109,18 @@ export function bundleBuilderFor(
 		timeout: signingTimeoutMilliseconds,
 		retry: signingServiceRetries
 	};
-	const witnesses: Witness[] = [];
-
-	if (composition.rekorUrl !== undefined) {
-		witnesses.push(
-			new RekorWitness({
-				rekorBaseURL: composition.rekorUrl,
-				fetchOnConflict: true,
-				...fetchOptions
-			})
-		);
-	}
-
-	witnesses.push(
+	const witnesses: Witness[] = [
+		...(composition.rekorUrl === undefined
+			? []
+			: [
+					new RekorWitness({
+						rekorBaseURL: composition.rekorUrl,
+						fetchOnConflict: true,
+						...fetchOptions
+					})
+				]),
 		new TSAWitness({ tsaBaseURL: composition.timestampUrl, ...fetchOptions })
-	);
+	];
 
 	return new DSSEBundleBuilder({
 		signer: new FulcioSigner({

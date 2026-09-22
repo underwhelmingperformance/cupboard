@@ -257,13 +257,10 @@ function isOperationImplied(
 	operation: Operation,
 	impliedBy: Partial<Record<Operation, Operation>>
 ): boolean {
-	if (actions.includes(operation)) {
-		return true;
-	}
-
 	if (
-		operation === 'cache:read' &&
-		actions.some((action) => cacheOperationSet.has(action))
+		actions.includes(operation) ||
+		(operation === 'cache:read' &&
+			actions.some((action) => cacheOperationSet.has(action)))
 	) {
 		return true;
 	}

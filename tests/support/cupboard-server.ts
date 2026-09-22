@@ -639,12 +639,9 @@ async function forwardToWorker(
 		const body = await requestBody(request);
 		const init: MiniflareRequestInit = {
 			headers: requestHeaders(request),
-			method: request.method ?? 'GET'
+			method: request.method ?? 'GET',
+			...(body !== undefined && { body })
 		};
-
-		if (body !== undefined) {
-			init.body = body;
-		}
 
 		const requestUrl = new URL(request.url ?? '/', localOrigin(request));
 		const workerResponse = await worker.dispatchFetch(requestUrl.href, init);

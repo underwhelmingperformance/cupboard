@@ -1055,11 +1055,13 @@ async function pollProbe<T>(
 				return;
 			}
 
-			if (attempt < attempts) {
-				context.fact('attempt', attempt);
-				context.fact('last probe', probed.detail);
-				await delayMs(attemptDelayMs, { delay: sleep, signal });
+			if (!(attempt < attempts)) {
+				continue;
 			}
+
+			context.fact('attempt', attempt);
+			context.fact('last probe', probed.detail);
+			await delayMs(attemptDelayMs, { delay: sleep, signal });
 		}
 	});
 

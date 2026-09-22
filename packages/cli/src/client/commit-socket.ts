@@ -687,10 +687,12 @@ export function runCommitSession(
 			clearCapacityDeadline();
 		}
 
-		if (isWaiting !== isWaitingReported) {
-			isWaitingReported = isWaiting;
-			options.onWaiting?.(isWaiting);
+		if (isWaiting === isWaitingReported) {
+			return;
 		}
+
+		isWaitingReported = isWaiting;
+		options.onWaiting?.(isWaiting);
 	};
 
 	// Tells the server how many entries are queued, so it can grant against a
@@ -698,11 +700,10 @@ export function runCommitSession(
 	// re-sent only when the queue has grown past it, so a steady drain sends one
 	// declaration rather than one per path.
 	const declareDemand = (): void => {
-		if (creditAvailable === undefined || !isOpened || isClosed) {
-			return;
-		}
-
 		if (
+			creditAvailable === undefined ||
+			!isOpened ||
+			isClosed ||
 			queuedTargets.length === 0 ||
 			creditAvailable > 0 ||
 			queuedTargets.length <= declaredDemand

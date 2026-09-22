@@ -271,11 +271,7 @@ function normaliseSegment(
 		return ':cache';
 	}
 
-	if (previous === 'nar') {
-		return ':name';
-	}
-
-	if (previous === 'roots') {
+	if (previous === 'nar' || previous === 'roots') {
 		return ':name';
 	}
 
@@ -572,11 +568,11 @@ export function detectSession(
 		const current = sorted[index];
 		const earlier = sorted[index - 1];
 
-		if (current === undefined || earlier === undefined) {
-			break;
-		}
-
-		if (current - earlier > gapMs) {
+		if (
+			current === undefined ||
+			earlier === undefined ||
+			current - earlier > gapMs
+		) {
 			break;
 		}
 
@@ -799,11 +795,10 @@ export function analyse(
 	for (const span of spans) {
 		const bucketKey = bucketByTrace.get(span.traceId);
 
-		if (bucketKey === undefined) {
-			continue;
-		}
-
-		if (!leaves.has(`${span.traceId}:${span.spanId ?? ''}`)) {
+		if (
+			bucketKey === undefined ||
+			!leaves.has(`${span.traceId}:${span.spanId ?? ''}`)
+		) {
 			continue;
 		}
 
@@ -1589,10 +1584,12 @@ class AdaptivePageLimit {
 
 		this.cleanPages += 1;
 
-		if (this.cleanPages >= relaxAfterCleanPages) {
-			this.limit = Math.min(pageLimit, this.limit * 2);
-			this.cleanPages = 0;
+		if (!(this.cleanPages >= relaxAfterCleanPages)) {
+			return;
 		}
+
+		this.limit = Math.min(pageLimit, this.limit * 2);
+		this.cleanPages = 0;
 	}
 }
 
@@ -1870,10 +1867,9 @@ export async function fetchPaged(
 		// At a repeated upper bound the boundary set grows instead of resetting,
 		// so the walk always either moves back in time or converges on the
 		// nothing-new break above.
-		boundary =
-			oldest === upper
-				? new Set([...boundary, ...atBoundary])
-				: new Set(atBoundary);
+		boundary = new Set(
+			oldest === upper ? [...boundary, ...atBoundary] : atBoundary
+		);
 		upper = oldest;
 
 		if (upper <= window.from) {

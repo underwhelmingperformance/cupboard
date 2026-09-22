@@ -130,11 +130,10 @@ export async function isPushIdValid(
 ): Promise<boolean> {
 	const expiresAtSeconds = pushIdExpiresAtSeconds(pushId);
 
-	if (expiresAtSeconds === undefined) {
-		return false;
-	}
-
-	if (expiresAtSeconds <= Math.floor(now.getTime() / 1000)) {
+	if (
+		expiresAtSeconds === undefined ||
+		expiresAtSeconds <= Math.floor(now.getTime() / 1000)
+	) {
 		return false;
 	}
 

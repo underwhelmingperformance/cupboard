@@ -531,11 +531,10 @@ export class GarbageCollectionService {
 			)
 			.get();
 
-		if (shape === undefined) {
-			return;
-		}
-
-		if (shape.referencesValid === 1 && shape.referencesType === 'array') {
+		if (
+			shape === undefined ||
+			(shape.referencesValid === 1 && shape.referencesType === 'array')
+		) {
 			return;
 		}
 

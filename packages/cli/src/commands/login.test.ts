@@ -78,18 +78,20 @@ describe('mapDeviceLoginError', () => {
 
 			expect(mapped).toBeInstanceOf(DeviceGrantNotEnabledError);
 
-			if (mapped instanceof DeviceGrantNotEnabledError) {
-				expect(mapped.cause).toBeInstanceOf(DeviceAuthorizationRequestError);
+			if (!(mapped instanceof DeviceGrantNotEnabledError)) {
+				return;
+			}
 
-				if (mapped.cause instanceof DeviceAuthorizationRequestError) {
-					expect({
-						name: mapped.name,
-						causeStatus: mapped.cause.status
-					}).toStrictEqual({
-						name: 'DeviceGrantNotEnabledError',
-						causeStatus: status
-					});
-				}
+			expect(mapped.cause).toBeInstanceOf(DeviceAuthorizationRequestError);
+
+			if (mapped.cause instanceof DeviceAuthorizationRequestError) {
+				expect({
+					name: mapped.name,
+					causeStatus: mapped.cause.status
+				}).toStrictEqual({
+					name: 'DeviceGrantNotEnabledError',
+					causeStatus: status
+				});
 			}
 		}
 	);

@@ -393,11 +393,12 @@ describe('partitionAvailability', () => {
 				confirmUpstreamAvailability: (candidate) => {
 					asked.push(candidate);
 
-					return Promise.resolve(
-						candidate.installable === nonSubstitutable
-							? { kind: 'substitutes-not-allowed' }
-							: { kind: 'confirmed' }
-					);
+					return Promise.resolve({
+						kind:
+							candidate.installable === nonSubstitutable
+								? 'substitutes-not-allowed'
+								: 'confirmed'
+					});
 				}
 			})
 		);

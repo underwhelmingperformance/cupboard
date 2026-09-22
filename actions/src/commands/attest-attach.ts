@@ -174,7 +174,7 @@ export function attestAttachArguments(
 	paths: readonly string[],
 	cacheSyntax: CacheSelectionSyntax
 ): readonly string[] {
-	const arguments_ = [
+	return [
 		'--no-colour',
 		'attest',
 		'attach',
@@ -184,31 +184,21 @@ export function attestAttachArguments(
 				: cacheUrlFor(inputs.url, inputs.cache)
 		),
 		...paths,
-		'--github-oidc'
+		'--github-oidc',
+		...(inputs.audience === '' ? [] : ['--audience', inputs.audience]),
+		...(cacheSyntax === 'flag' && inputs.cache.kind === 'named'
+			? ['--cache', inputs.cache.name]
+			: []),
+		...(inputs.readUser === ''
+			? []
+			: [
+					'--read-user',
+					inputs.readUser,
+					'--read-password',
+					inputs.readPassword
+				]),
+		...inputs.bundles.flatMap((bundle) => ['--attestation', bundle])
 	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (cacheSyntax === 'flag' && inputs.cache.kind === 'named') {
-		arguments_.push('--cache', inputs.cache.name);
-	}
-
-	if (inputs.readUser !== '') {
-		arguments_.push(
-			'--read-user',
-			inputs.readUser,
-			'--read-password',
-			inputs.readPassword
-		);
-	}
-
-	for (const bundle of inputs.bundles) {
-		arguments_.push('--attestation', bundle);
-	}
-
-	return arguments_;
 }
 
 function requireSettledAttachment(

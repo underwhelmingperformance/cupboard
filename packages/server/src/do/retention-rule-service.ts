@@ -27,10 +27,12 @@ export type RetentionRuleDigest = (value: string) => Promise<Sha256HexDigest>;
 function compareUtf8(left: string, right: string): number {
 	const leftBytes = encoder.encode(left);
 	const rightBytes = encoder.encode(right);
-	const length = Math.min(leftBytes.length, rightBytes.length);
+	for (const [index, leftByte] of leftBytes.entries()) {
+		if (index >= rightBytes.length) {
+			break;
+		}
 
-	for (let index = 0; index < length; index += 1) {
-		const difference = (leftBytes[index] ?? 0) - (rightBytes[index] ?? 0);
+		const difference = leftByte - (rightBytes[index] ?? 0);
 
 		if (difference !== 0) {
 			return difference;

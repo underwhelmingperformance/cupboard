@@ -1113,11 +1113,13 @@ describe('garbage collection identity columns', () => {
 
 			expect(response.status).toBe(StatusCodes.OK);
 
-			if (limit === 1) {
-				const rows = await collectionStateIdentities();
-
-				stoppedCursor = rows.cursor;
+			if (limit !== 1) {
+				continue;
 			}
+
+			const rows = await collectionStateIdentities();
+
+			stoppedCursor = rows.cursor;
 		}
 
 		const builds = { cacheId: 2 };

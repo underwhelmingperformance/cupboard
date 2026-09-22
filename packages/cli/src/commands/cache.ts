@@ -796,30 +796,22 @@ function cacheRow(summary: CacheListEntry): ResultRow {
 		`grace ${graceLabel(summary.grace)}`,
 		summary.rootRetentionOverrides === undefined
 			? 'root retention overrides: use cache inspect'
-			: `${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`
+			: `${formatCount(summary.rootRetentionOverrides.length)} root retention override(s)`,
+		...(summary.graceManaged === true ? ['grace-managed'] : []),
+		...(summary.earliestGraceDeadline === undefined
+			? []
+			: [
+					`earliest deadline ${formatTimestamp(summary.earliestGraceDeadline)}`
+				]),
+		...(summary.retireWhenEmpty === undefined
+			? []
+			: [summary.retireWhenEmpty ? 'retire when empty' : 'keep when empty']),
+		...(summary.retirementEligibleAfter === undefined
+			? []
+			: [
+					`retirement eligible after ${formatTimestamp(summary.retirementEligibleAfter)}`
+				])
 	];
-
-	if (summary.graceManaged === true) {
-		parts.push('grace-managed');
-	}
-
-	if (summary.earliestGraceDeadline !== undefined) {
-		parts.push(
-			`earliest deadline ${formatTimestamp(summary.earliestGraceDeadline)}`
-		);
-	}
-
-	if (summary.retireWhenEmpty !== undefined) {
-		parts.push(
-			summary.retireWhenEmpty ? 'retire when empty' : 'keep when empty'
-		);
-	}
-
-	if (summary.retirementEligibleAfter !== undefined) {
-		parts.push(
-			`retirement eligible after ${formatTimestamp(summary.retirementEligibleAfter)}`
-		);
-	}
 
 	return {
 		label: cacheLabel(summary.scope),
@@ -851,36 +843,37 @@ function summaryRows(summary: CacheSummary): ResultRow[] {
 									`${rootPrefix} = ${rootRetentionLabel(retention)}`
 							)
 							.join('; ')
-		}
+		},
+		...(summary.graceManaged === undefined
+			? []
+			: [
+					{ label: 'Grace managed', value: summary.graceManaged ? 'yes' : 'no' }
+				]),
+		...(summary.earliestGraceDeadline === undefined
+			? []
+			: [
+					{
+						label: 'Earliest grace deadline',
+						value: formatTimestamp(summary.earliestGraceDeadline)
+					}
+				]),
+		...(summary.retireWhenEmpty === undefined
+			? []
+			: [
+					{
+						label: 'Retire when empty',
+						value: summary.retireWhenEmpty ? 'yes' : 'no'
+					}
+				]),
+		...(summary.retirementEligibleAfter === undefined
+			? []
+			: [
+					{
+						label: 'Retirement eligible after',
+						value: formatTimestamp(summary.retirementEligibleAfter)
+					}
+				])
 	];
-
-	if (summary.graceManaged !== undefined) {
-		rows.push({
-			label: 'Grace managed',
-			value: summary.graceManaged ? 'yes' : 'no'
-		});
-	}
-
-	if (summary.earliestGraceDeadline !== undefined) {
-		rows.push({
-			label: 'Earliest grace deadline',
-			value: formatTimestamp(summary.earliestGraceDeadline)
-		});
-	}
-
-	if (summary.retireWhenEmpty !== undefined) {
-		rows.push({
-			label: 'Retire when empty',
-			value: summary.retireWhenEmpty ? 'yes' : 'no'
-		});
-	}
-
-	if (summary.retirementEligibleAfter !== undefined) {
-		rows.push({
-			label: 'Retirement eligible after',
-			value: formatTimestamp(summary.retirementEligibleAfter)
-		});
-	}
 
 	return rows;
 }

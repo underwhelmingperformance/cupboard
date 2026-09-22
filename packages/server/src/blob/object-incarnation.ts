@@ -392,31 +392,33 @@ export async function reserveObjectIncarnation(
 			continue;
 		}
 
-		if (current !== undefined && current.state !== 'absent') {
-			const [refreshed] = await database
-				.update(d1Schema.objectIncarnation)
-				.set({
-					updatedAt,
-					...(current.state === 'pending' && { reservationOwner })
-				})
-				.where(
-					and(
-						identityFilter,
-						eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
-						eq(d1Schema.objectIncarnation.state, current.state)
-					)
-				)
-				.returning({
-					incarnation: d1Schema.objectIncarnation.incarnation,
-					state: d1Schema.objectIncarnation.state
-				});
+		if (current === undefined || current.state === 'absent') {
+			continue;
+		}
 
-			if (refreshed !== undefined && refreshed.state !== 'absent') {
-				return {
-					incarnation: refreshed.incarnation,
-					state: refreshed.state
-				};
-			}
+		const [refreshed] = await database
+			.update(d1Schema.objectIncarnation)
+			.set({
+				updatedAt,
+				...(current.state === 'pending' && { reservationOwner })
+			})
+			.where(
+				and(
+					identityFilter,
+					eq(d1Schema.objectIncarnation.incarnation, current.incarnation),
+					eq(d1Schema.objectIncarnation.state, current.state)
+				)
+			)
+			.returning({
+				incarnation: d1Schema.objectIncarnation.incarnation,
+				state: d1Schema.objectIncarnation.state
+			});
+
+		if (refreshed !== undefined && refreshed.state !== 'absent') {
+			return {
+				incarnation: refreshed.incarnation,
+				state: refreshed.state
+			};
 		}
 	}
 }

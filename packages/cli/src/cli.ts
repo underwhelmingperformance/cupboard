@@ -274,20 +274,17 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
  * code reports it.
  */
 export function reportCliFailure(reporter: Reporter, error: unknown): void {
-	if (isAbortError(error)) {
-		return;
-	}
-
-	if (wasErrorReported(error)) {
-		return;
-	}
-
 	// Commander has already rendered successful informational output or help.
 	// A bare invocation reports help with exit 1, so its code must be recognised
 	// separately from successful `--help` and `--version` exits.
-	if (
+	const hasCommanderRenderedOutput =
 		error instanceof CommanderError &&
-		(error.exitCode === 0 || error.code.startsWith('commander.help'))
+		(error.exitCode === 0 || error.code.startsWith('commander.help'));
+
+	if (
+		hasCommanderRenderedOutput ||
+		isAbortError(error) ||
+		wasErrorReported(error)
 	) {
 		return;
 	}

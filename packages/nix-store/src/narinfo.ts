@@ -220,20 +220,15 @@ export class NarInfo {
 			`FileSize: ${String(fields.fileSize)}`,
 			`NarHash: ${fields.narHash}`,
 			`NarSize: ${String(fields.narSize)}`,
-			`References: ${fields.references.join(' ')}`
+			`References: ${fields.references.join(' ')}`,
+			...(fields.deriver === undefined || fields.deriver === ''
+				? []
+				: [`Deriver: ${fields.deriver}`]),
+			...(fields.ca === undefined || fields.ca === ''
+				? []
+				: [`CA: ${fields.ca}`]),
+			...fields.sigs.map((signature) => `Sig: ${signature}`)
 		];
-
-		if (fields.deriver !== undefined && fields.deriver !== '') {
-			lines.push(`Deriver: ${fields.deriver}`);
-		}
-
-		if (fields.ca !== undefined && fields.ca !== '') {
-			lines.push(`CA: ${fields.ca}`);
-		}
-
-		for (const signature of fields.sigs) {
-			lines.push(`Sig: ${signature}`);
-		}
 
 		return `${lines.join('\n')}\n`;
 	}
