@@ -876,8 +876,7 @@ export function createCloudflareApi(
 					...account,
 					hostname: desired.hostname,
 					zone_id: desired.zoneId,
-					service: scriptName,
-					environment: 'production'
+					service: scriptName
 				});
 			}
 

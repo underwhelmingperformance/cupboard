@@ -730,7 +730,7 @@ describe('setCustomDomain', () => {
 	});
 
 	it('attaches the configured domain before detaching an old domain', async () => {
-		const { client, requests } = fakeCloudflare({
+		const { client, requests, bodies } = fakeCloudflare({
 			[`GET ${domainsPath}`]: [
 				{ id: 'old', hostname: 'old.example.com', service: 'cupboard' }
 			],
@@ -754,6 +754,15 @@ describe('setCustomDomain', () => {
 			{ method: 'GET', path: domainsPath },
 			{ method: 'PUT', path: domainsPath },
 			{ method: 'DELETE', path: `${domainsPath}/old` }
+		]);
+		expect(bodies).toStrictEqual([
+			undefined,
+			{
+				hostname: 'new.example.com',
+				zone_id: 'zone-1',
+				service: 'cupboard'
+			},
+			undefined
 		]);
 	});
 });
