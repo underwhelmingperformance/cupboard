@@ -103,18 +103,18 @@ describe('terminalLink', () => {
 
 describe('isInteractive', () => {
 	it.each([
-		{ mode: 'terminal', stdin: true, stdout: true, expected: true },
-		{ mode: 'terminal', stdin: true, stdout: false, expected: false },
-		{ mode: 'terminal', stdin: false, stdout: true, expected: false },
-		{ mode: 'json', stdin: true, stdout: true, expected: false }
+		{ mode: 'terminal', stdin: true, stderr: true, expected: true },
+		{ mode: 'terminal', stdin: true, stderr: false, expected: false },
+		{ mode: 'terminal', stdin: false, stderr: true, expected: false },
+		{ mode: 'json', stdin: true, stderr: true, expected: false }
 	] as const)(
-		'returns $expected for $mode mode with stdin=$stdin stdout=$stdout',
-		({ mode, stdin, stdout, expected }) => {
+		'returns $expected for $mode mode with stdin=$stdin stderr=$stderr',
+		({ mode, stdin, stderr, expected }) => {
 			expect(
 				isInteractive({
 					mode,
 					stdin: { isTTY: stdin },
-					stdout: { isTTY: stdout }
+					stderr: { isTTY: stderr }
 				})
 			).toBe(expected);
 		}
@@ -239,12 +239,14 @@ describe('createCliUi machine narration', () => {
 });
 
 describe('createCliUi reporter routing', () => {
-	it('writes GitHub result rows to out', () => {
+	it('writes GitHub result rows to the stream, leaving out for data', () => {
 		const payload = captureStream();
+		const rendering = captureStream();
 		const ui = createCliUi({
 			mode: 'github' satisfies ReporterMode,
 			interactive: false,
-			out: payload.stream
+			out: payload.stream,
+			stream: rendering.stream
 		});
 
 		ui.reporter().result({
@@ -252,8 +254,15 @@ describe('createCliUi reporter routing', () => {
 			data: { uploaded: 5 },
 			rows: [{ label: 'paths', value: '5' }]
 		});
+		ui.data('cupboard-acme-1:abc');
 
-		expect(payload.written()).toBe('paths: 5\n');
+		expect({
+			data: payload.written(),
+			rendered: rendering.written()
+		}).toStrictEqual({
+			data: 'cupboard-acme-1:abc\n',
+			rendered: 'paths: 5\n'
+		});
 	});
 });
 
@@ -293,7 +302,7 @@ describe('createCliUi result file', () => {
 	it('appends result events in terminal mode', () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-cli-ui-'));
 		const resultFile = path.join(directory, 'results.jsonl');
-		vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+		vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
 		try {
 			createCliUi({
@@ -326,7 +335,7 @@ function withoutStyling(text: string): string {
 
 function captureTerminal(body: (ui: CliUi) => void, hasColour = false): string {
 	const chunks: string[] = [];
-	vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+	vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
 		chunks.push(String(chunk));
 
 		return true;
@@ -390,6 +399,34 @@ describe('createCliUi terminal errors', () => {
 			`${S_ERROR}  the daemon said no`,
 			''
 		]);
+	});
+});
+
+describe('createCliUi terminal streams', () => {
+	it('writes only data to out, and the UI to the stream', async () => {
+		const stream = captureStream();
+		const out = captureStream();
+		const ui = createCliUi({
+			mode: 'terminal' satisfies ReporterMode,
+			interactive: false,
+			colour: false,
+			stream: stream.stream,
+			out: out.stream
+		});
+
+		ui.intro('cupboard');
+		await ui.reporter().phase('Reading public key', () => {
+			ui.data('cupboard-acme-1:abc');
+		});
+		ui.reporter().info('done');
+
+		expect({
+			data: out.written(),
+			rendered: withoutStyling(stream.written())
+		}).toStrictEqual({
+			data: 'cupboard-acme-1:abc\n',
+			rendered: expect.stringContaining('Reading public key') as unknown
+		});
 	});
 });
 

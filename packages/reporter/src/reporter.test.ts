@@ -541,12 +541,18 @@ describe('createReporter', () => {
 
 describe('createGithubReporter', () => {
 	let written: string[];
+	let captured: string[];
 
 	beforeEach(() => {
 		written = [];
+		captured = [];
 		vi.stubEnv('GITHUB_ACTIONS', 'true');
-		vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+		vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
 			written.push(String(chunk));
+			return true;
+		});
+		vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+			captured.push(String(chunk));
 			return true;
 		});
 	});
@@ -593,13 +599,6 @@ describe('createGithubReporter', () => {
 			expected: ['queued\n']
 		},
 		{
-			name: 'writes data as a raw line to out',
-			run: (reporter: Reporter) => {
-				reporter.data('{"public_key":"abc"}');
-			},
-			expected: ['{"public_key":"abc"}\n']
-		},
-		{
 			name: 'writes result rows as label: value lines',
 			run: (reporter: Reporter) => {
 				reporter.result({
@@ -628,7 +627,23 @@ describe('createGithubReporter', () => {
 	])('$name', ({ run, expected }) => {
 		run(createGithubReporter());
 
-		expect(written).toStrictEqual(expected);
+		expect({ written, captured }).toStrictEqual({
+			written: expected,
+			captured: []
+		});
+	});
+
+	it('writes data alone to stdout, apart from the rendering', async () => {
+		const reporter = createGithubReporter();
+
+		await reporter.phase('Reading public key', () => {
+			reporter.data('cupboard-acme-1:abc');
+		});
+
+		expect({ written, captured }).toStrictEqual({
+			written: ['::group::Reading public key\n', '::endgroup::\n'],
+			captured: ['cupboard-acme-1:abc\n']
+		});
 	});
 
 	it('writes a phase as a group with its final facts', async () => {
@@ -834,7 +849,11 @@ describe('result file', () => {
 								out: sink.stream,
 								resultFile
 							})
-						: createGithubReporter({ out: sink.stream, resultFile });
+						: createGithubReporter({
+								stream: sink.stream,
+								out: sink.stream,
+								resultFile
+							});
 
 				reporter.result({
 					kind: 'push-summary',
