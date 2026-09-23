@@ -1,6 +1,7 @@
 import { activityLogRecords, type NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type {
+	BuildEvent,
 	BuildSubjectV3Input,
 	SubjectVerification
 } from '@cupboard/protocol/build';
@@ -84,14 +85,16 @@ interface FirstBuild {
 /**
  * Attributes each newly realised final path to the first attempt that built
  * its deriver. The subject records the selected build store and whether Nix
- * ran the build locally or delegated it. Paths that predate the run or have no
- * matching build activity retain store-derived provenance.
+ * ran the build locally or delegated it. Paths that predate the run retain
+ * store-derived provenance. With one attempt, a hook event and an ultimate
+ * store path also establish a build from this run when activity is missing.
  */
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>,
-	buildStore: string
+	buildStore: string,
+	completed: readonly BuildEvent[] = []
 ): readonly BuildSubjectV3Input[] {
 	const firstBuild = new Map<string, FirstBuild>();
 
@@ -113,7 +116,19 @@ export function receiptSubjects(
 				return [];
 			}
 
-			const built = firstBuild.get(info.deriver);
+			const activityBuild = firstBuild.get(info.deriver);
+			const hookBuild =
+				activityBuild === undefined &&
+				attempts.length === 1 &&
+				info.ultimate &&
+				completed.some(
+					(event) =>
+						event.derivation === info.deriver &&
+						event.outputPaths.includes(info.storePath)
+				)
+					? attempts[0]
+					: undefined;
+			const built = activityBuild ?? hookBuild;
 
 			if (built === undefined) {
 				return [];
@@ -128,10 +143,14 @@ export function receiptSubjects(
 					attempt: built.attempt,
 					attemptId: built.attemptId,
 					buildStore,
-					...(built.activity.machine !== '' && {
-						machine: built.activity.machine
-					}),
-					verification: verificationOf(built.activity)
+					...(activityBuild?.activity.machine !== undefined &&
+						activityBuild.activity.machine !== '' && {
+							machine: activityBuild.activity.machine
+						}),
+					verification:
+						activityBuild === undefined
+							? 'build-store'
+							: verificationOf(activityBuild.activity)
 				}
 			];
 		})
