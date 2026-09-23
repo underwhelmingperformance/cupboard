@@ -5,3 +5,5 @@ dist
 build
 pnpm-lock.yaml
 worker-configuration*.d.ts
+docs/reference/actions.md
+docs/reference/cli.md
