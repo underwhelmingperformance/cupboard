@@ -110,9 +110,8 @@ export interface Reporter {
 	steps<T>(label: string, body: (log: StepLog) => Promise<T> | T): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
-	 * Writes a raw payload followed by a newline to `out`. JSON mode keeps `out`
-	 * separate from its event stream. GitHub mode writes all rendering to `out`.
-	 * The terminal adapter uses `out` for data while Clack writes its UI directly.
+	 * Writes a raw payload followed by a newline to `out`. Every mode keeps `out`
+	 * separate from its progress rendering, so a caller can capture the payload.
 	 */
 	data(text: string): void;
 	warn(label: string, value?: string): void;
@@ -153,13 +152,11 @@ export type BuildPushPhase = keyof typeof buildPushPhases;
 
 export interface ReporterOptions {
 	/**
-	 * Destination for JSON events. {@link createReporter} defaults it to stderr;
-	 * terminal and GitHub reporters do not use it.
+	 * Destination for JSON events and GitHub rendering. Defaults to stderr.
 	 */
 	readonly stream?: NodeJS.WritableStream;
 	/**
-	 * Destination for JSON and terminal `data` payloads, and for all GitHub
-	 * rendering. Defaults to stdout.
+	 * Destination for `data` payloads. Defaults to stdout.
 	 */
 	readonly out?: NodeJS.WritableStream;
 	/**
@@ -279,14 +276,16 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 }
 
 /**
- * Writes all output to `out`, which defaults to stdout. When
- * `GITHUB_ACTIONS=true`, phases and tasks use workflow groups and warnings,
- * successes and failures use command annotations. Otherwise the shared command
- * emitter degrades them to plain lines. Results use `label: value` lines in
- * either environment.
+ * Renders to `stream`, which defaults to stderr, and writes `data` payloads to
+ * `out`, which defaults to stdout. The runner reads workflow commands from
+ * both streams. When `GITHUB_ACTIONS=true`, phases and tasks use workflow
+ * groups and warnings, successes and failures use command annotations.
+ * Otherwise the shared command emitter degrades them to plain lines. Results
+ * use `label: value` lines in either environment.
  */
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
 	return buildGithubReporter(
+		options.stream ?? stderr,
 		options.out ?? stdout,
 		options.now ?? (() => Date.now()),
 		resultAppender(options.resultFile)
@@ -532,17 +531,18 @@ function describeError(error: unknown): {
 }
 
 function buildGithubReporter(
+	stream: NodeJS.WritableStream,
 	out: NodeJS.WritableStream,
 	now: () => number,
 	recordResult: (payload: ResultPayload) => void
 ): Reporter {
 	const commands = workflowCommands({
-		stdout: out,
-		stderr: out,
+		stdout: stream,
+		stderr: stream,
 		rendering: 'workflow'
 	});
 	const line = (text: string): void => {
-		out.write(`${text}\n`);
+		stream.write(`${text}\n`);
 	};
 
 	const emitWarn = (label: string, value?: string): void => {
@@ -697,7 +697,7 @@ function buildGithubReporter(
 		},
 
 		data(text) {
-			line(text);
+			out.write(`${text}\n`);
 		},
 
 		warn: emitWarn,

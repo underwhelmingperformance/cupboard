@@ -1,3 +1,6 @@
+import { stderr } from 'node:process';
+import type { Writable } from 'node:stream';
+
 import { log } from '@clack/prompts';
 import type { LogLevel, LogRecord, Sink } from '@cupboard/logger';
 import pc from 'picocolors';
@@ -53,14 +56,15 @@ function renderFields(
 }
 
 /**
- * Renders LogTape records through Clack. Record properties form a dimmed,
+ * Renders LogTape records through Clack to `output`, stderr by default, so they
+ * stay apart from the command's data on stdout. Record properties form a dimmed,
  * single-line suffix; an Error property uses its name and message. Warning and
  * error levels retain their distinct Clack channels, while trace and debug use
  * the neutral message channel.
  */
-export function clackSink(colours: Colours): Sink {
+export function clackSink(colours: Colours, output: Writable = stderr): Sink {
 	return (record) => {
 		const line = `${messageOf(record)}${renderFields(record.properties, colours)}`;
-		log[methodFor(record.level)](line);
+		log[methodFor(record.level)](line, { output });
 	};
 }

@@ -1,4 +1,5 @@
-import { stdin, stdout } from 'node:process';
+import { stderr, stdin, stdout } from 'node:process';
+import type { Writable } from 'node:stream';
 
 import { TextPrompt } from '@clack/core';
 import {
@@ -155,13 +156,14 @@ export class ConfirmationRequiredError extends Error {
 }
 
 async function confirmInteractive(
-	request: ConfirmOptions
+	request: ConfirmOptions,
+	output: Writable
 ): Promise<ConfirmOutcome> {
 	if (request.detail !== undefined) {
-		note(request.detail, request.message);
+		note(request.detail, request.message, { output });
 	}
 
-	const answer = await confirm({ message: request.message });
+	const answer = await confirm({ message: request.message, output });
 
 	if (isCancel(answer)) {
 		return 'cancelled';
@@ -175,19 +177,26 @@ interface TtyStream {
 }
 
 /**
+ * Where Clack renders. A TTY, such as stderr, can also show prompts.
+ */
+type UiStream = Writable & TtyStream;
+
+/**
  * Checks only whether the selected mode and streams can support prompts:
- * terminal mode with TTY stdin and stdout. {@link createCliUi} separately
- * disables prompts when Clack reports a CI environment.
+ * terminal mode with TTY stdin and stderr, where prompts render. Stdout does
+ * not matter, so a prompt still works while stdout is captured.
+ * {@link createCliUi} separately disables prompts when Clack reports a CI
+ * environment.
  */
 export function isInteractive(streams: {
 	readonly mode: ReporterMode;
 	readonly stdin: TtyStream;
-	readonly stdout: TtyStream;
+	readonly stderr: TtyStream;
 }): boolean {
 	return (
 		streams.mode === 'terminal' &&
 		streams.stdin.isTTY === true &&
-		streams.stdout.isTTY === true
+		streams.stderr.isTTY === true
 	);
 }
 
@@ -262,12 +271,12 @@ export interface CliUiOptions {
 	 */
 	readonly interactive?: boolean;
 	/**
-	 * Destination for JSON events. Terminal and GitHub modes do not use it.
+	 * Destination for everything but data: Clack's UI and prompts, JSON events
+	 * and GitHub rendering. Defaults to stderr.
 	 */
-	readonly stream?: NodeJS.WritableStream;
+	readonly stream?: UiStream;
 	/**
-	 * Destination for JSON and terminal data, and for all GitHub rendering.
-	 * Defaults to stdout.
+	 * Destination for data, so it can be captured alone. Defaults to stdout.
 	 */
 	readonly out?: NodeJS.WritableStream;
 	/**
@@ -293,6 +302,7 @@ function reporterFor(
 	if (mode === 'terminal') {
 		return clackReporter(
 			colours,
+			options.stream,
 			options.out,
 			options.signal,
 			options.resultFile
@@ -301,6 +311,7 @@ function reporterFor(
 
 	if (mode === 'github') {
 		return createGithubReporter({
+			stream: options.stream,
 			out: options.out,
 			resultFile: options.resultFile
 		});
@@ -315,12 +326,14 @@ function reporterFor(
 
 export function createCliUi(options: CliUiOptions): CliUi {
 	const { mode } = options;
+	const output: UiStream = options.stream ?? stderr;
 	const colours = pc.createColors(options.colour ?? pc.isColorSupported);
 	const isAssumeYesDefault = options.assumeYes ?? false;
 	// `isInteractive` checks the streams. Clack's CI detection is a separate
 	// reason to disable prompts even if a CI process has terminal streams.
 	const isInteractiveRun =
-		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
+		options.interactive ??
+		(isInteractive({ mode, stdin, stderr: output }) && !isCI());
 	// Clack has one live region. Share one reporter between UI narration and every
 	// `ui.reporter()` caller so their updates do not corrupt its redraw. The same
 	// sharing preserves event order in JSON and GitHub modes.
@@ -340,19 +353,19 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 		intro(title) {
 			if (mode === 'terminal') {
-				intro(colours.bold(title));
+				intro(colours.bold(title), { output });
 			}
 		},
 
 		outro(message) {
 			if (mode === 'terminal') {
-				outro(message);
+				outro(message, { output });
 			}
 		},
 
 		cancelled(message) {
 			if (mode === 'terminal') {
-				cancel(message);
+				cancel(message, { output });
 				return;
 			}
 
@@ -377,7 +390,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 		note(title, rows) {
 			if (mode === 'terminal') {
-				note(formatRows(rows, colours), title);
+				note(formatRows(rows, colours), title, { output });
 			}
 		},
 
@@ -387,7 +400,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 		async confirm(request) {
 			if (isInteractiveRun) {
-				return confirmInteractive(request);
+				return confirmInteractive(request, output);
 			}
 
 			if (request.assumeYes ?? isAssumeYesDefault) {
@@ -405,6 +418,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			const choice = await select<string>({
 				message,
+				output,
 				options: entries.map((entry) => ({
 					value: entry.value,
 					label: entry.label,
@@ -426,6 +440,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			const choices = await multiselect<string>({
 				message: options.message,
+				output,
 				options: options.entries.map((entry) => ({
 					value: entry.value,
 					label: entry.label,
@@ -453,6 +468,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			const answer = await text({
 				message: options.message,
+				output,
 				initialValue: options.initial ?? '',
 				...(options.placeholder !== undefined && {
 					placeholder: options.placeholder
@@ -481,6 +497,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			}
 
 			const prompt: TextPrompt = new TextPrompt({
+				output,
 				validate: (value = '') => options.problem(value),
 				render: () => {
 					const title = `${colours.gray(S_BAR)}\n${symbol(prompt.state)}  ${options.message}\n`;
@@ -524,6 +541,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			const answer = await password({
 				message,
+				output,
 				validate: (value) => problem(value ?? '')
 			});
 
@@ -615,7 +633,10 @@ interface UnitNotes {
  * the warning is still repeated after the task closes so clearing or collapsing
  * the task cannot hide it.
  */
-function unitNotes(live?: (message: string) => void): UnitNotes {
+function unitNotes(
+	output: Writable,
+	live?: (message: string) => void
+): UnitNotes {
 	const pending: string[] = [];
 
 	const warn = (label: string, value?: string): void => {
@@ -626,7 +647,7 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
 
 	const flush = (): void => {
 		for (const message of pending) {
-			log.warn(message);
+			log.warn(message, { output });
 		}
 	};
 
@@ -635,6 +656,7 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
 
 function clackReporter(
 	colours: Colours,
+	output: Writable = stderr,
 	out: NodeJS.WritableStream = stdout,
 	signal?: AbortSignal,
 	resultFile?: string
@@ -642,12 +664,13 @@ function clackReporter(
 	return {
 		async phase(label, body) {
 			const indicator = spinner({
+				output,
 				signal,
 				cancelMessage: `${label} cancelled`
 			});
 			indicator.start(label);
 
-			const notes = unitNotes();
+			const notes = unitNotes(output);
 			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
@@ -679,12 +702,13 @@ function clackReporter(
 		async progress(label, options, body) {
 			const bar = progress({
 				max: options.total,
+				output,
 				signal,
 				cancelMessage: `${label} cancelled`
 			});
 			bar.start(label);
 
-			const notes = unitNotes();
+			const notes = unitNotes(output);
 			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
@@ -717,9 +741,9 @@ function clackReporter(
 		},
 
 		async steps(label, body) {
-			const task = taskLog({ title: label, signal });
+			const task = taskLog({ title: label, output, signal });
 
-			const notes = unitNotes((message) => {
+			const notes = unitNotes(output, (message) => {
 				task.message(`${colours.yellow(S_WARN)} ${message}`);
 			});
 			const startedAt = Date.now();
@@ -768,13 +792,15 @@ function clackReporter(
 
 			if (payload.rows.length === 0) {
 				if (payload.empty !== undefined) {
-					log.info(payload.empty);
+					log.info(payload.empty, { output });
 				}
 
 				return;
 			}
 
-			box(formatRows(payload.rows, colours), resultTitle(payload.kind));
+			box(formatRows(payload.rows, colours), resultTitle(payload.kind), {
+				output
+			});
 		},
 
 		data(text) {
@@ -782,23 +808,23 @@ function clackReporter(
 		},
 
 		warn(label, value) {
-			log.warn(warnText(label, value));
+			log.warn(warnText(label, value), { output });
 		},
 
 		info(message) {
-			log.info(message);
+			log.info(message, { output });
 		},
 
 		success(message) {
-			log.success(message);
+			log.success(message, { output });
 		},
 
 		step(message) {
-			log.step(message);
+			log.step(message, { output });
 		},
 
 		error(error) {
-			log.error(errorText(error, colours));
+			log.error(errorText(error, colours), { output });
 		}
 	};
 }
