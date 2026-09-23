@@ -335,6 +335,7 @@ interface ConstructedFlowConfig {
 	readonly attempts?: number;
 	readonly rebuild?: boolean;
 	readonly requireProvenance?: boolean;
+	readonly omitActivity?: boolean;
 	readonly suppressEvent?: boolean;
 	readonly outputProtection?: 'failed';
 	readonly machine?: string;
@@ -445,7 +446,10 @@ async function stubNixEnvironment(
 	return {
 		...process.env,
 		PATH: `${stubDirectory}:${process.env.PATH ?? ''}`,
-		STUB_LOG_LINE: activityLine(constructed.machine ?? ''),
+		STUB_LOG_LINE:
+			constructed.omitActivity === true
+				? ''
+				: activityLine(constructed.machine ?? ''),
 		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
 		STUB_REQUIRE_REBUILD: String(constructed.rebuild === true),
@@ -1845,6 +1849,91 @@ describe('runBuildPush', () => {
 			rootSets: []
 		});
 	});
+
+	it('attributes a current-run hook output when Nix omits its activity', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				requireProvenance: true,
+				omitActivity: true
+			},
+			valid: [pathA],
+			ultimatePaths: [pathA]
+		});
+		const receipt: unknown = existsSync(run.receiptFile)
+			? JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			: undefined;
+
+		expect({ error: run.error, receipt }).toStrictEqual({
+			error: undefined,
+			receipt: {
+				version: 3,
+				paths: [pathA],
+				subjects: [
+					{
+						origin: 'built',
+						storePath: pathA,
+						narHash: narHash.digestHex(),
+						derivation: drvA,
+						attempt: 1,
+						attemptId: 'attempt-1',
+						buildStore: 'auto',
+						verification: 'build-store'
+					}
+				],
+				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+				childExitStatus: 0,
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'the store did not build the output locally',
+			succeedOn: 1,
+			ultimatePaths: []
+		},
+		{
+			name: 'multiple attempts leave the producing attempt uncertain',
+			succeedOn: 2,
+			ultimatePaths: [pathA]
+		}
+	])(
+		'rejects hook-only provenance when $name',
+		async ({ succeedOn, ultimatePaths }) => {
+			const run = await runFlow({
+				constructed: {
+					succeedOn,
+					requireProvenance: true,
+					omitActivity: true
+				},
+				valid: [pathA],
+				ultimatePaths
+			});
+
+			expect({
+				error:
+					run.error instanceof BuildPublicationFailedError
+						? {
+								name: run.error.name,
+								exitCode: run.error.exitCode,
+								cause: run.error.cause
+							}
+						: run.error,
+				receiptExists: existsSync(run.receiptFile)
+			}).toStrictEqual({
+				error: {
+					name: 'BuildPublicationFailedError',
+					exitCode: 74,
+					cause: new BuildProvenanceIncompleteError([pathA])
+				},
+				receiptExists: false
+			});
+		}
+	);
 
 	it('keeps the first recorded builder across a retry', async () => {
 		const run = await runFlow({

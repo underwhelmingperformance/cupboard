@@ -12,6 +12,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	autoBuildStore,
+	type BuildEvent,
 	type BuildReceiptV3,
 	buildReceiptV3Schema,
 	type BuildSubjectV3Input,
@@ -456,7 +457,8 @@ async function runProtectedStreamedBuildPush(
 			options.invocation,
 			dependencies,
 			attempts,
-			eventPaths
+			eventPaths,
+			accepted
 		);
 		const terminalFailure = terminalFailureFor(
 			options.invocation,
@@ -595,7 +597,8 @@ async function attributeSubjects(
 	invocation: BuildInvocation,
 	dependencies: BuildPushDependencies,
 	attempts: readonly SupervisedAttempt[],
-	eventPaths: readonly StorePathString[]
+	eventPaths: readonly StorePathString[],
+	completed: readonly BuildEvent[]
 ): Promise<readonly BuildSubjectV3Input[]> {
 	if (invocation.kind !== 'constructed' || eventPaths.length === 0) {
 		return [];
@@ -613,7 +616,7 @@ async function attributeSubjects(
 
 	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
 
-	return receiptSubjects(observed, infos, new Set(), autoBuildStore);
+	return receiptSubjects(observed, infos, new Set(), autoBuildStore, completed);
 }
 
 // Classify a non-zero exit as a target build failure only when a constructed
