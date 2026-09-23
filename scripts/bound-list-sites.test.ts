@@ -134,9 +134,9 @@ function isArrayLike(type: ts.Type, checker: ts.TypeChecker): boolean {
 		return true;
 	}
 
-	return type.isUnion()
-		? type.types.some((member) => isArrayLike(member, checker))
-		: false;
+	return (
+		type.isUnion() && type.types.some((member) => isArrayLike(member, checker))
+	);
 }
 
 /**

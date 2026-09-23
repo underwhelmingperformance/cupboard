@@ -2431,8 +2431,7 @@ async function planCohort(
 
 		throw new CohortPlanCommandError(inputs.cohort.key, {
 			cause: error,
-			wasReported:
-				error instanceof CupboardReportedError ? error.wasReported : false
+			wasReported: error instanceof CupboardReportedError && error.wasReported
 		});
 	}
 

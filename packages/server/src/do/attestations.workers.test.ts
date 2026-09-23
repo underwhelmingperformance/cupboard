@@ -672,8 +672,8 @@ describe('attestation attach and reads', () => {
 
 			expect(response.status).toBe(StatusCodes.OK);
 
-			const casHeads = heads.mock.calls.filter((call) =>
-				typeof call[0] === 'string' ? call[0].startsWith('cas/') : false
+			const casHeads = heads.mock.calls.filter(
+				(call) => typeof call[0] === 'string' && call[0].startsWith('cas/')
 			).length;
 			const pageHeads =
 				(casHeads / bundles.length) * attestationNegotiateMaxBundles;
