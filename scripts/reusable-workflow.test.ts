@@ -1117,30 +1117,22 @@ describe('release cache publication', () => {
 });
 
 describe('repository cache publishing', () => {
-	it('pins one released CLI and public key across both caller jobs', async () => {
+	it('resolves the CLI from the called workflow revision and pins the public key', async () => {
 		const workflow = await loadWorkflow(cachePublishWorkflow);
 		const jobs = Object.values(workflow.jobs);
-		const versions = jobs.map((job) => job.with?.['cupboard-version']);
-		const trustedPublicKeys = jobs.map(
-			(job) => job.with?.['trusted-public-key']
-		);
 
 		expect({
-			// The version is compared with itself rather than a literal, so a release
-			// bump does not have to edit this test.
-			consistent: new Set(versions).size,
-			defined: versions.every((version) => version !== undefined),
-			trustedPublicKeys,
+			versions: jobs.map((job) => job.with?.['cupboard-version']),
+			trustedPublicKeys: jobs.map((job) => job.with?.['trusted-public-key']),
 			workflows: jobs.map((job) => job.uses)
 		}).toStrictEqual({
-			consistent: 1,
-			defined: true,
+			versions: [undefined, undefined],
 			trustedPublicKeys: Array.from(
 				{ length: jobs.length },
 				() => 'cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU='
 			),
 			workflows: Array.from(
-				{ length: versions.length },
+				{ length: jobs.length },
 				() =>
 					'underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main'
 			)

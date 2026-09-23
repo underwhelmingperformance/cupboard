@@ -19,9 +19,8 @@ permissions:
   contents: read
 
 jobs:
-  # The reusable workflow stays on @main for the tenant trust rule, while its
-  # CLI is pinned to a specific release. This avoids resolving a release from
-  # the mutable ref during the run.
+  # The reusable workflow stays on @main for the tenant trust rule. Its CLI
+  # resolves from that commit, which includes current protocol changes.
   publish-pr:
     name: publish (pr cache)
     if: github.event_name == 'pull_request'
@@ -40,7 +39,6 @@ jobs:
         github:${{ github.repository }}/pr-${{ github.event.pull_request.number
         }}
       ttl: 14d
-      cupboard-version: v0.0.19
 
   publish-main:
     name: publish (default cache)
@@ -56,4 +54,3 @@ jobs:
       url: https://cupboard.supply/t/cupboard
       trusted-public-key: cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=
       root: github:${{ github.repository }}/main
-      cupboard-version: v0.0.19
