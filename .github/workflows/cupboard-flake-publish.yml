@@ -197,7 +197,7 @@ on:
           the flake with the input SSH key and OIDC permission, so repositories
           with self-hosted runners should leave this input on a GitHub-hosted
           label, or route the job through runner groups; see
-          docs/runner-provenance.md.
+          docs/ci/runner-provenance.md.
         required: false
         default: ubuntu-latest
         type: string

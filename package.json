@@ -80,6 +80,8 @@
 		"measure:realisation": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/measure-realisation/main.ts",
 		"test:actions": "vitest run --config actions/vitest.config.ts",
 		"test:scripts": "vitest run scripts --exclude '**/.claude/**'",
+		"update:actions-reference": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/actions-reference.ts",
+		"update:cli-reference": "pnpm --filter @cupboard/cli update:cli-reference",
 		"update:conformance-oracle": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/conformance-oracle.ts update",
 		"update:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts update"
 	},

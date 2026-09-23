@@ -52,7 +52,8 @@
 		"bench": "vitest bench --run",
 		"check:types": "tsc --noEmit",
 		"cli": "node --experimental-transform-types --disable-warning=ExperimentalWarning src/main.ts",
-		"test": "vitest run --passWithNoTests"
+		"test": "vitest run --passWithNoTests",
+		"update:cli-reference": "node --experimental-transform-types --disable-warning=ExperimentalWarning src/reference/update-cli-reference.ts"
 	},
 	"type": "module"
 }
