@@ -46,6 +46,7 @@ jobs:
       runs-on: ${{ matrix.runner }}
       url: https://cupboard.supply/t/cupboard
       cache: releases
+      trusted-public-key: cupboard-1:tiaTSFvY6LqLUwbjsNcig64LnxZ+T5EQgW5Cr4XjXqU=
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
       cupboard-version: ${{ github.event.release.tag_name }}
 
