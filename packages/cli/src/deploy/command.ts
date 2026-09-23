@@ -645,9 +645,8 @@ export async function reviewPlan(
 		}
 
 		const canReplaceR2Credentials =
-			world.canReplaceR2Credentials === undefined
-				? false
-				: await world.canReplaceR2Credentials(state);
+			world.canReplaceR2Credentials !== undefined &&
+			(await world.canReplaceR2Credentials(state));
 
 		const choice = await world.ui.menu(
 			'Deploy to Cloudflare with the plan above?',
