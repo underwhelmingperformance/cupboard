@@ -170,6 +170,8 @@ Other commands share the 69, 75 and 77 categories; 74 is specific to
   substituter.
 - [docs/measuring-realisation.md](./docs/measuring-realisation.md) measures what
   publishing a flake's targets costs a cold runner, and gates that cost.
+- [SECURITY.md](./SECURITY.md) explains how to report a vulnerability.
+- [docs/security.md](./docs/security.md) lists the other security documentation.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 
