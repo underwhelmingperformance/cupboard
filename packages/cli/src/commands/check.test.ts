@@ -5,6 +5,8 @@ import {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { CheckDiscrepanciesError } from '../errors.ts';
+
 import { type CheckClient, runCheck } from './check.ts';
 
 interface Warning {
@@ -192,7 +194,7 @@ describe('runCheck', () => {
 		});
 	});
 
-	it('forwards a deep check and warns once per discrepancy', async () => {
+	it('forwards a deep check, warns once per discrepancy, then fails', async () => {
 		const calls: CheckCall[] = [];
 		const captured: Captured = { results: [], infos: [], warnings: [] };
 		const report = checkReportSchema.parse({
@@ -215,9 +217,16 @@ describe('runCheck', () => {
 			]
 		});
 
-		await runCheck(true, reporter(captured), checkClient([report], calls));
+		let outcome: unknown;
 
-		expect({ calls, captured }).toStrictEqual({
+		try {
+			await runCheck(true, reporter(captured), checkClient([report], calls));
+		} catch (error: unknown) {
+			outcome = error;
+		}
+
+		expect({ outcome, calls, captured }).toStrictEqual({
+			outcome: new CheckDiscrepanciesError(2),
 			calls: [{ deep: true, cursor: '', cursorCache: 0 }],
 			captured: {
 				results: [

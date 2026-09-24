@@ -7,6 +7,7 @@ import { commandUi, type ProgramOptions } from '../cli.ts';
 import { cacheLabel } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { CheckDiscrepanciesError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CheckOptions {
@@ -44,7 +45,8 @@ export function registerCheckCommand(
 /**
  * Checks every committed path, one page per request. The server checks a page
  * and names the last row it checked, so the command passes that cursor back
- * until the report returns it empty.
+ * until the report returns it empty. Any discrepancy fails the command with
+ * {@link CheckDiscrepanciesError} once the report is rendered.
  */
 export async function runCheck(
 	isDeep: boolean,
@@ -96,6 +98,9 @@ export async function runCheck(
 	for (const discrepancy of discrepancies) {
 		reporter.warn(discrepancy.kind, describeDiscrepancy(discrepancy));
 	}
+
+	// Fail after reporting, so a CI job can gate on a clean check.
+	throw new CheckDiscrepanciesError(discrepancies.length);
 }
 
 function describeDiscrepancy(discrepancy: CheckDiscrepancy): string {

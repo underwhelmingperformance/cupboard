@@ -1,6 +1,7 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -11,16 +12,25 @@ import {
 	authExitCode,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
+	CheckDiscrepanciesError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
 	OwnerLoginRequiredError,
+	PushIncompleteError,
 	RootRetentionOptionError,
 	transientExitCode,
 	UploadWaitTimeoutError
 } from './errors.ts';
+import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
+
+const unreachable = new CupboardHttpError('PUT', '/nar', 502, 'bad gateway');
+const rateLimited = new CupboardHttpError('PUT', '/nar', 429, 'slow down');
+const notFound = new CupboardHttpError('PUT', '/nar', 404, 'gone');
+const rejected = new CupboardHttpError('PUT', '/nar', 401, 'expired');
+const commitTimedOut = new UploadWaitTimeoutError(1, 600);
 
 function expectCommanderError(value: unknown): asserts value is CommanderError {
 	expect(value).toBeInstanceOf(CommanderError);
@@ -52,6 +62,80 @@ describe('cliExitCode', () => {
 		{
 			name: 'a 404 response',
 			error: new CupboardHttpError('GET', '/x', 404, ''),
+			expected: 1
+		},
+		{
+			name: 'a 507 quota response',
+			error: new CupboardHttpError('GET', '/x', 507, ''),
+			expected: 1
+		},
+		{
+			name: 'a rate-limited admin-API response',
+			error: new ORPCError('TOO_MANY_REQUESTS', { status: 429 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'an unavailable admin-API response',
+			error: new ORPCError('SERVICE_UNAVAILABLE', { status: 503 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'a failed admin-API response',
+			error: new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'an admin-API response for a missing resource',
+			error: new ORPCError('NOT_FOUND', { status: 404 }),
+			expected: 1
+		},
+		{
+			name: 'an admin-API conflict',
+			error: new ORPCError('CACHE_ALREADY_EXISTS', { status: 409 }),
+			expected: 1
+		},
+		{
+			name: 'a push whose paths failed only transiently',
+			error: new PushIncompleteError(
+				['app', 'runtime', 'lib'],
+				[unreachable, rateLimited, commitTimedOut]
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with a transient and a permanent path failure',
+			error: new PushIncompleteError(['app', 'lib'], [notFound, unreachable]),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with an authentication path failure',
+			error: new PushIncompleteError(['app', 'lib'], [unreachable, rejected]),
+			expected: authExitCode
+		},
+		{
+			name: 'a push whose admin-API prepare was rate limited',
+			error: new PushIncompleteError(
+				['app'],
+				[new ORPCError('TOO_MANY_REQUESTS', { status: 429 })]
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push whose paths failed permanently',
+			error: new PushIncompleteError(
+				['app'],
+				[new Error('the NAR hash did not match')]
+			),
+			expected: 1
+		},
+		{
+			name: 'a push over the root target limit',
+			error: new RootTargetLimitError(150, 149),
+			expected: usageExitCode
+		},
+		{
+			name: 'a check that found discrepancies',
+			error: new CheckDiscrepanciesError(2),
 			expected: 1
 		},
 		{

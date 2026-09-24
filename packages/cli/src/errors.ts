@@ -3,6 +3,7 @@ import {
 	genericExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -28,6 +29,69 @@ const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
 const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
+
+/**
+ * The exit code for a failed HTTP response: 77 for a refused credential, 75
+ * for a timeout, rate limiting or a server error that a retry may clear, and 1
+ * otherwise. A 507 is the tenant's storage quota, which a retry does not clear.
+ */
+function httpStatusExitCode(status: number): number {
+	if (status === unauthorisedStatusCode || status === forbiddenStatusCode) {
+		return authExitCode;
+	}
+
+	if (status === insufficientStorageStatusCode) {
+		return genericExitCode;
+	}
+
+	if (
+		status === requestTimeoutStatusCode ||
+		status === tooManyRequestsStatusCode ||
+		status >= internalServerErrorStatusCode
+	) {
+		return transientExitCode;
+	}
+
+	return genericExitCode;
+}
+
+/**
+ * The exit code a failure maps to: a coded error's own code, the status class
+ * of an admin-API (oRPC) error response, or the generic 1 for anything else.
+ */
+export function failureExitCode(error: unknown): number {
+	if (error instanceof CodedError) {
+		return error.exitCode;
+	}
+
+	if (error instanceof ORPCError) {
+		return httpStatusExitCode(error.status);
+	}
+
+	return genericExitCode;
+}
+
+/**
+ * The most significant categorised failure among `causes`: authentication,
+ * then transient, then unavailable. Undefined when none has one of those
+ * categories.
+ */
+function categorisedFailure(
+	causes: readonly unknown[]
+): PublicationFailureClassification | undefined {
+	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
+		const cause = causes.find(
+			(candidate) => failureExitCode(candidate) === code
+		);
+
+		if (cause !== undefined) {
+			return { exitCode: code, cause };
+		}
+	}
+
+	return undefined;
+}
 
 export abstract class CliError extends CodedError {}
 
@@ -459,22 +523,7 @@ export class CupboardHttpError extends CliError {
 	}
 
 	override get exitCode(): number {
-		if (
-			this.status === unauthorisedStatusCode ||
-			this.status === forbiddenStatusCode
-		) {
-			return authExitCode;
-		}
-
-		if (
-			this.status === requestTimeoutStatusCode ||
-			this.status === tooManyRequestsStatusCode ||
-			this.status >= internalServerErrorStatusCode
-		) {
-			return transientExitCode;
-		}
-
-		return genericExitCode;
+		return httpStatusExitCode(this.status);
 	}
 }
 
@@ -609,13 +658,26 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 	}
 }
 
+/**
+ * Some paths of a push did not finish. The exit code is the most significant
+ * category among the per-path causes (authentication, then transient, then
+ * unavailable), so a push whose paths failed only transiently exits 75 and a
+ * caller can retry it; any other mix exits 1.
+ */
 export class PushIncompleteError extends CliError {
-	constructor(public readonly failedPaths: readonly string[]) {
+	constructor(
+		public readonly failedPaths: readonly string[],
+		public readonly causes: readonly unknown[] = []
+	) {
 		super(
 			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
 				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
 		);
 		this.name = 'PushIncompleteError';
+	}
+
+	override get exitCode(): number {
+		return categorisedFailure(this.causes)?.exitCode ?? genericExitCode;
 	}
 }
 
@@ -1248,6 +1310,20 @@ export class UnknownCacheCredentialError extends CliUsageError {
 	}
 }
 
+/**
+ * `cupboard check` found committed paths whose stored objects are missing or
+ * do not match. The report is already rendered; failing the command lets a CI
+ * job gate on the result.
+ */
+export class CheckDiscrepanciesError extends CliError {
+	constructor(public readonly count: number) {
+		super(
+			`The check found ${String(count)} discrepanc${count === 1 ? 'y' : 'ies'}.`
+		);
+		this.name = 'CheckDiscrepanciesError';
+	}
+}
+
 export class GithubCheckFailedError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Configuration checks failed: ${checks.join(', ')}`);
@@ -1571,19 +1647,10 @@ export interface PublicationFailureClassification {
 export function classifyPublicationFailures(
 	causes: readonly unknown[]
 ): PublicationFailureClassification {
-	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
-		const cause = causes.find(
-			(candidate) =>
-				candidate instanceof CliError && candidate.exitCode === code
-		);
-
-		if (cause !== undefined) {
-			return { exitCode: code, cause };
+	return (
+		categorisedFailure(causes) ?? {
+			exitCode: publicationExitCode,
+			cause: causes.find((cause) => cause !== undefined)
 		}
-	}
-
-	return {
-		exitCode: publicationExitCode,
-		cause: causes.find((cause) => cause !== undefined)
-	};
+	);
 }

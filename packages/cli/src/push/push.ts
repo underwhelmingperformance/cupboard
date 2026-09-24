@@ -682,6 +682,10 @@ async function runPushFlow(
 	// one. A vanished intermediate is not a failure: it is recorded as collected
 	// and the run continues.
 	const failures: PushFailure[] = [];
+	// The error behind each failure, in the same order, so the exit code can
+	// tell a push that failed only transiently (and is worth retrying) from one
+	// that failed for good. The reported summary carries only the reasons.
+	const failureCauses: unknown[] = [];
 	const collected: CollectedPath[] = [];
 
 	// Resolve local declarations from the selected store, expanding only those
@@ -726,6 +730,7 @@ async function runPushFlow(
 					stage: 'resolve',
 					reason: failureReason(vanished)
 				});
+				failureCauses.push(vanished);
 				ctx.warn(
 					'vanished target',
 					`${StorePath.basename(storePath)}: ${failureReason(vanished)}`
@@ -866,6 +871,7 @@ async function runPushFlow(
 							stage: 'upload',
 							reason
 						});
+						failureCauses.push(error);
 						bar.warn(
 							'upload failed',
 							`${StorePath.basename(storePath)}: ${reason}`
@@ -977,6 +983,7 @@ async function runPushFlow(
 							stage: 'commit',
 							reason
 						});
+						failureCauses.push(result.reason);
 						bar.warn(
 							'commit failed',
 							`${StorePath.basename(storePath)}: ${reason}`
@@ -1061,6 +1068,7 @@ async function runPushFlow(
 							stage: 'verify',
 							reason
 						});
+						failureCauses.push(result.reason);
 						bar.warn(
 							'verification failed',
 							`${StorePath.basename(storePath)}: ${reason}`
@@ -1171,7 +1179,8 @@ async function runPushFlow(
 		// caller cannot treat a partial publication as complete.
 		if (failures.length > 0) {
 			throw new PushIncompleteError(
-				failures.map((failure) => StorePath.basename(failure.storePath))
+				failures.map((failure) => StorePath.basename(failure.storePath)),
+				failureCauses
 			);
 		}
 
