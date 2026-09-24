@@ -9,7 +9,7 @@ import { StatusCodes } from 'http-status-codes';
 import { throwIfAborted } from '../abort.ts';
 import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
-import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
+import { type CredentialChain, freshIdTokenUnderLock } from '../deploy/auth.ts';
 import {
 	jwtExpiryMs,
 	refreshCloudflareGrant
@@ -121,14 +121,33 @@ export function cachedOwnerProvider(
 					session?.refreshToken === undefined
 						? undefined
 						: await rotateSession(client, session.refreshToken);
-				const renewed =
-					rotated ?? (await establishSession(client, grantChain, now, signal));
 
-				throwIfAborted(signal);
-				await writeSession(renewed, target, signal);
-				throwIfAborted(signal);
+				if (rotated !== undefined) {
+					throwIfAborted(signal);
+					await writeSession(rotated, target, signal);
+					throwIfAborted(signal);
 
-				return renewed.accessToken;
+					return rotated.accessToken;
+				}
+
+				// Keep the grant lock until the session is written. `cupboard logout
+				// --cloudflare` removes the grant under this lock before it removes
+				// sessions, so it cannot run between the exchange and the write and
+				// leave a session behind.
+				return grantChain.withGrantLock(async (grantSignal) => {
+					const established = await establishSession(
+						client,
+						grantChain,
+						now,
+						grantSignal ?? signal
+					);
+
+					throwIfAborted(signal);
+					await writeSession(established, target, signal);
+					throwIfAborted(signal);
+
+					return established.accessToken;
+				}, signal);
 			},
 			dependencies.signal
 		);
@@ -223,14 +242,14 @@ async function rotateSession(
 // Establishes a session from the deploy's stored Cloudflare grant: a fresh
 // `id_token` (renewed through the grant's refresh token when stale) exchanged
 // for cupboard tokens. No grant, an expired token, or a refused exchange all
-// end at `cupboard login`.
+// end at `cupboard login`. The caller holds the grant lock.
 async function establishSession(
 	client: SessionTokenClient,
 	chain: GrantChain,
 	now: () => number,
 	signal?: AbortSignal
 ): Promise<CachedSession> {
-	const idToken = await freshIdToken(chain, signal);
+	const idToken = await freshIdTokenUnderLock(chain, signal);
 	const expiry = idToken === undefined ? undefined : jwtExpiryMs(idToken);
 
 	if (idToken === undefined || (expiry !== undefined && expiry <= now())) {
