@@ -64,11 +64,11 @@ inputs:
   subject-grouping:
     description:
       Select how many subjects each statement covers. run signs one statement
-      for the whole run, so each bundle contains every subject. individual signs
-      a separate statement for each subject, so each bundle contains one
-      subject. Individual statements do not attest to the complete run. Defaults
-      to individual when the destination cache requires authentication, and to
-      run otherwise.
+      for each batch of up to 1024 subjects, so each bundle contains up to 1024
+      subjects. individual signs a separate statement for each subject, so each
+      bundle contains one subject. Individual statements do not attest to the
+      complete run. Defaults to individual when the destination cache requires
+      authentication, and to run otherwise.
     required: false
 outputs:
   bundle-path:
@@ -81,6 +81,12 @@ outputs:
       Paths to the generated build-origin bundles, one per line. Empty for a
       version 2 receipt or when no accepted subject has a recorded origin.
     value: ${{ steps.attest.outputs.origin-bundle-path }}
+  bundles:
+    description:
+      Paths to the generated SLSA build-provenance and build-origin bundles, one
+      per line. Empty when the action signed nothing. Run actions/attest-attach
+      when this output is non-empty and pass it as that action's bundle input.
+    value: ${{ steps.attest.outputs.bundles }}
   checksums-file:
     description:
       Path to the checksums for all accepted receipt subjects. The build-origin

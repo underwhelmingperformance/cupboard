@@ -732,13 +732,14 @@ jobs:
           read-user: ${{ secrets.destination_read_user }}
           read-password: ${{ secrets.destination_read_password }}
 
-      # Attestation verifies the receipt against committed narinfos, so attach
-      # the bundle only after publication and only when signing produced a
-      # bundle.
+      # `actions/attest` checks the receipt against committed narinfos, so attach
+      # only after this run has published. When the run builds none of the
+      # cohort's paths, `actions/attest` signs only build-origin bundles.
+      # `bundles` lists them and `bundle-path` does not.
       - uses: $/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
-          steps.attest.outputs.bundle-path != '' }}
+          steps.attest.outputs.bundles != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -747,11 +748,7 @@ jobs:
           read-password: ${{ secrets.destination_read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          # Each output contains one bundle path per line. The attach input
-          # ignores empty lines.
-          bundle: |
-            ${{ steps.attest.outputs.bundle-path }}
-            ${{ steps.attest.outputs.origin-bundle-path }}
+          bundle: ${{ steps.attest.outputs.bundles }}
 
       # At this point, every retention root has been set on the destination and
       # attestation has read the committed narinfos. Remove this build's

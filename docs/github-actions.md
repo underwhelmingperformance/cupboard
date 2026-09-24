@@ -537,15 +537,13 @@ steps:
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       url: https://cupboard.example.workers.dev/t/<slug>
   - uses: owner/repo/actions/attest-attach@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
-    if: ${{ steps.attest.outputs.bundle-path != '' }}
+    if: ${{ steps.attest.outputs.bundles != '' }}
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
-      bundle: |
-        ${{ steps.attest.outputs.bundle-path }}
-        ${{ steps.attest.outputs.origin-bundle-path }}
+      bundle: ${{ steps.attest.outputs.bundles }}
 ```
 
 `installables` is newline-delimited. Generated lists can instead be written to a
@@ -566,16 +564,24 @@ before adding it to the receipt; its dependencies may still be substituted. This
 is useful when a failed signing or attachment step will be retried after the
 path was pushed.
 
-The action defines outputs for both supported receipt versions. `bundle-path`
-and `origin-bundle-path` each contain one bundle path per line because
-individual grouping can produce several bundles. `built-checksums-file` and
-`built-subject-count` describe the subjects of the SLSA build-provenance
-bundles. A version 2 receipt produces no build-origin bundle, so
-`origin-bundle-path` is empty. Version 3 receipts from `build-cohort` also use
-`checksums-file` and `subject-count` for the subjects of their build-origin
-bundles. `id-token: write` lets the action obtain its Sigstore signing
-certificate, and `attestations: write` records the attestations on the
-repository so `gh attestation verify` can find them.
+`actions/attest` has three bundle outputs. Each lists one bundle path per line,
+because a run can produce several bundles of each kind. With `individual`
+grouping, the action signs one statement for each subject. With `run` grouping,
+it signs one statement for each batch of up to 1024 subjects. `bundle-path`
+lists the SLSA build-provenance bundles and `origin-bundle-path` lists the
+build-origin bundles. `bundles` lists both kinds, and is empty only when the
+action signed nothing. Run `attest-attach` when `bundles` is non-empty, and pass
+`bundles` as its `bundle` input, as the examples in this guide do.
+
+`actions/attest` also has outputs for the subjects of each kind of bundle.
+`built-checksums-file` and `built-subject-count` describe the subjects that the
+run built. Those are the subjects of the build-provenance bundles.
+`checksums-file` and `subject-count` describe every accepted receipt subject.
+For a version 3 receipt, those are the subjects of the build-origin bundles.
+
+`id-token: write` lets the action obtain its Sigstore signing certificate, and
+`attestations: write` records the attestations on the repository so
+`gh attestation verify` can find them.
 
 The signing command can retry transient service failures. A workflow cannot
 retry a `uses:` step. Neither `actions/attest-build-provenance` nor
@@ -593,12 +599,12 @@ repository, commit, workflow file and runner.
 
 Only a version 3 receipt from `build-cohort` produces build-origin bundles. They
 cover every accepted receipt subject. With `run` grouping, one statement covers
-all accepted subjects. With `individual` grouping, each statement covers one
-subject. The predicate records origin information from events observed during
-the run. For a path the run built, it records the store path, the NAR hash, the
-derivation that produced it, the store where the build ran, whether the
-coordinating machine watched the build or the build store reported it, and the
-builder from the activity log when one was reported. For a path already
+up to 1024 accepted subjects. With `individual` grouping, each statement covers
+one subject. The predicate records origin information from events observed
+during the run. For a path the run built, it records the store path, the NAR
+hash, the derivation that produced it, the store where the build ran, whether
+the coordinating machine watched the build or the build store reported it, and
+the builder from the activity log when one was reported. For a path already
 registered in the build store, it records the store and that the run did not
 observe the build. For a copied path, it records the signatures reported by the
 store, the content address when present, and sources from the copy activities
@@ -620,17 +626,19 @@ metadata. Its predicate type is
 `https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
 and `cupboard attest verify --predicate-type` takes that value to verify it.
 With `run` grouping, verifying a statement for one path also reports the
-recorded origin of every other accepted subject. With `individual` grouping, the
-statement reports only that path. A version 2 receipt records no origin, so such
-a run produces only build-provenance bundles and leaves `origin-bundle-path`
-empty.
+recorded origin of every other subject in that statement. With `individual`
+grouping, the statement reports only that path. A version 2 receipt records no
+origin, so such a run produces only build-provenance bundles and leaves
+`origin-bundle-path` empty.
 
 Publication comes before signing because the attest action verifies every
 receipt subject against the destination's committed narinfo. The attach action
-then files both signed bundles against each matching path in that same receipt.
-Its `bundle` input takes one path per line and ignores an empty line, so the
-same workflow step also works for a run that produced only the build-provenance
-bundle.
+then attaches every signed bundle to each matching path in that same receipt.
+
+A version 3 receipt from `build-cohort` can contain subjects that the run
+published but did not build. When no subject was built, signing produces only
+build-origin bundles and `bundle-path` is empty. A workflow that runs
+`attest-attach` only when `bundle-path` is non-empty skips those bundles.
 
 ### Attesting to a private cache
 
@@ -729,20 +737,18 @@ steps:
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       url: https://cupboard.example.workers.dev/t/<slug>
   - uses: owner/repo/actions/attest-attach@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
-    if: ${{ steps.attest.outputs.bundle-path != '' }}
+    if: ${{ steps.attest.outputs.bundles != '' }}
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
-      bundle: |
-        ${{ steps.attest.outputs.bundle-path }}
-        ${{ steps.attest.outputs.origin-bundle-path }}
+      bundle: ${{ steps.attest.outputs.bundles }}
 ```
 
 `setup` adds the cache as a substituter, `build-paths` records the final outputs
 that the run built, `push` commits the paths, `attest` verifies and signs those
-paths' NAR hashes, and `attest-attach` attaches the bundle to them. Pushing
+paths' NAR hashes, and `attest-attach` attaches the bundles to them. Pushing
 needs a trust rule on the tenant that accepts this repository's GitHub Actions
 token, added with `cupboard oidc-trust`; see
 [docs/trust-rules.md](./trust-rules.md).

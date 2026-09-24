@@ -56,7 +56,8 @@ describe('buildProgram', () => {
 
 		expect(outputs).toStrictEqual([
 			['bundle-path', ''],
-			['origin-bundle-path', '']
+			['origin-bundle-path', ''],
+			['bundles', '']
 		]);
 	});
 
