@@ -15,6 +15,7 @@ import {
 	CacheCredentialsInvalidError,
 	CacheNameInvalidError,
 	ChoiceInputInvalidError,
+	PrivateSubstituterInvalidError,
 	ReadUserInvalidError,
 	UnknownCacheCredentialError,
 	UrlInputInvalidError,
@@ -149,6 +150,40 @@ export function providedUrl(
 	} catch {
 		throw new UrlInputInvalidError(name);
 	}
+}
+
+/**
+ * Parses one authenticated substituter URL per line. Error messages omit the
+ * URL because it contains a password.
+ */
+export function providedPrivateSubstituters(value: string | undefined): URL[] {
+	return parseLines(value ?? '').map((entry, index) => {
+		try {
+			const url = new URL(entry);
+
+			if (
+				(url.protocol !== 'http:' && url.protocol !== 'https:') ||
+				url.username === '' ||
+				url.password === '' ||
+				url.search !== '' ||
+				url.hash !== ''
+			) {
+				throw new PrivateSubstituterInvalidError(index + 1);
+			}
+
+			if (
+				!readUserInputSchema.safeParse(decodeURIComponent(url.username))
+					.success ||
+				hasControlCharacter(decodeURIComponent(url.password))
+			) {
+				throw new PrivateSubstituterInvalidError(index + 1);
+			}
+
+			return url;
+		} catch {
+			throw new PrivateSubstituterInvalidError(index + 1);
+		}
+	});
 }
 
 /**

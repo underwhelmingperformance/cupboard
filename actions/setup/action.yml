@@ -54,6 +54,12 @@ inputs:
       it from workflow secrets. A cache without an entry uses read-user and
       read-password.
     required: false
+  private-substituters:
+    description:
+      Authenticated HTTP(S) substituter URLs, one per line. Pass this value as a
+      secret because the URLs contain passwords. Setup adds them only to Nix's
+      substituters.
+    required: false
   destination-read-user:
     description:
       Username accepted by the single selected destination cache. Use
@@ -188,6 +194,7 @@ runs:
         CACHE: ${{ inputs.cache }}
         INCLUDE_DEFAULT_CACHE: ${{ inputs.include-default-cache }}
         CACHE_CREDENTIALS: ${{ inputs.cache-credentials }}
+        PRIVATE_SUBSTITUTERS: ${{ inputs.private-substituters }}
         DESTINATION_READ_USER: ${{ inputs.destination-read-user }}
         DESTINATION_READ_PASSWORD: ${{ inputs.destination-read-password }}
         PROVISION_CACHE: ${{ inputs.provision-cache }}

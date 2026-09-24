@@ -47,6 +47,7 @@ import {
 	DestinationReadCredentialConflictError,
 	DestinationReadPasswordRequiredError,
 	DestinationReadUserRequiredError,
+	PrivateSubstitutersCacheUrlRequiredError,
 	ProvisionCacheAccessRequiredError,
 	ProvisionCacheResultError,
 	ProvisionCacheUrlRequiredError,
@@ -65,6 +66,7 @@ import {
 	provided,
 	providedCacheCredentials,
 	providedCaches,
+	providedPrivateSubstituters,
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
@@ -97,6 +99,7 @@ export interface SetupOptions {
 	readonly provisionCacheAccess?: string;
 	readonly provisionCacheTtl?: string;
 	readonly cacheCredentials?: string;
+	readonly privateSubstituters?: string;
 	readonly destinationReadUser?: string;
 	readonly destinationReadPassword?: string;
 	readonly reuseView?: string;
@@ -128,6 +131,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: URL | undefined;
 	readonly caches: readonly CacheSelection[];
+	readonly privateSubstituters: readonly URL[];
 	readonly provisionCache: ProvisionCache | undefined;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
@@ -212,6 +216,10 @@ export function registerSetupCommand(
 			'Supply cache-specific credentials as a JSON array of cache scopes and credentials.'
 		)
 		.option(
+			'--private-substituters <urls>',
+			'Authenticated HTTP(S) substituter URLs, one per line.'
+		)
+		.option(
 			'--include-default-cache <boolean>',
 			"Also configure the tenant's default cache, alongside any named caches."
 		)
@@ -293,6 +301,13 @@ export function resolveSetupInputs(
 	}
 
 	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
+	const privateSubstituters = providedPrivateSubstituters(
+		options.privateSubstituters ?? environment.PRIVATE_SUBSTITUTERS
+	);
+
+	if (cacheUrl === undefined && privateSubstituters.length > 0) {
+		throw new PrivateSubstitutersCacheUrlRequiredError();
+	}
 
 	const cupboardValue = provided(options.cupboard);
 	const cupboard =
@@ -346,6 +361,7 @@ export function resolveSetupInputs(
 						password: destinationReadPassword
 					}
 		),
+		privateSubstituters,
 		provisionCache: resolveProvisionCache(options, cacheUrl),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
@@ -464,6 +480,18 @@ function maskCacheCredentials(
 		if (inputs.cacheUrl !== undefined) {
 			mask(canonicalHref(substituterUrlFor(inputs.cacheUrl, selection)));
 		}
+	}
+
+	for (const substituter of inputs.privateSubstituters) {
+		const password = decodeURIComponent(substituter.password);
+
+		mask(password);
+
+		if (substituter.password !== password) {
+			mask(substituter.password);
+		}
+
+		mask(canonicalHref(substituter));
 	}
 }
 
@@ -766,7 +794,7 @@ async function configureNix(
 			: inputs.trustedPublicKey;
 	// A reuse view and its destination use the same host. If the tenant requires
 	// authentication, one host-scoped netrc entry supplies both reads.
-	const substituters = await resolveSubstituters(
+	const cupboardSubstituters = await resolveSubstituters(
 		{
 			cacheUrl: inputs.cacheUrl,
 			caches: inputs.caches,
@@ -776,6 +804,7 @@ async function configureNix(
 		},
 		dependencies
 	);
+	const substituters = [...cupboardSubstituters, ...inputs.privateSubstituters];
 	dependencies.signal?.throwIfAborted();
 	const runnerTemporaryDirectory = requireEnvironment(
 		inputs.environment,

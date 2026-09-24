@@ -33,6 +33,22 @@ export class UrlInputInvalidError extends UsageError {
 	}
 }
 
+export class PrivateSubstituterInvalidError extends UsageError {
+	constructor(public readonly entry: number) {
+		super(
+			`private-substituters entry ${entry.toString()} must be an authenticated HTTP(S) URL without a query or fragment`
+		);
+		this.name = 'PrivateSubstituterInvalidError';
+	}
+}
+
+export class PrivateSubstitutersCacheUrlRequiredError extends UsageError {
+	constructor() {
+		super('cache-url is required when private-substituters is supplied');
+		this.name = 'PrivateSubstitutersCacheUrlRequiredError';
+	}
+}
+
 export class ReadUserInvalidError extends UsageError {
 	constructor(public readonly value: string) {
 		super('read-user must not contain a colon');
