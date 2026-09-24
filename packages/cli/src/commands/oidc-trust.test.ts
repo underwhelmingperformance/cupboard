@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import {
 	capturingReporter as reporter,
 	fakeCliUi
@@ -13,8 +17,9 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { ResultRow } from '@cupboard/reporter';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { buildProgram } from '../cli.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidClaimError } from '../errors.ts';
 
@@ -30,6 +35,18 @@ import {
 	runOidcTrustShow
 } from './oidc-trust.ts';
 import { type RepositoryIdentity } from './oidc-trust/github.ts';
+
+const mocks = vi.hoisted(() => ({
+	add: vi.fn<OidcTrustClient['add']>()
+}));
+
+// The commands build their oRPC clients from these functions, so a command
+// parsed from argv sends its rule to `mocks.add`.
+vi.mock('../client/orpc.ts', async (importOriginal) => ({
+	...(await importOriginal<typeof import('../client/orpc.ts')>()),
+	tenantRpc: () => ({ oidcTrust: { add: mocks.add } }),
+	controlRpc: () => ({ oidcTrust: { add: mocks.add } })
+}));
 
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
@@ -207,6 +224,82 @@ describe('runOidcTrustAdd', () => {
 			calls: [body],
 			results: [ciRuleRows]
 		});
+	});
+});
+
+const controlRule: OidcTrustAddBodyInput = {
+	issuer: 'https://dash.cloudflare.com',
+	audience: 'client-id',
+	claims: { sub: 'operator-2' },
+	permittedGrants: [{ type: 'cupboard_wildcard' }]
+};
+
+/**
+ * Runs `add --from-file` through the command line with the rule written to a
+ * temporary file. Returns 'added', or the error that the command threw.
+ */
+async function addFromFile(
+	command: 'oidc-trust' | 'control-oidc-trust',
+	url: string,
+	rule: object
+): Promise<unknown> {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-rule-'));
+	const file = path.join(directory, 'rule.json');
+
+	try {
+		await writeFile(file, JSON.stringify(rule));
+		await buildProgram().parseAsync([
+			'node',
+			'cupboard',
+			'--output-mode',
+			'json',
+			command,
+			'add',
+			url,
+			'--from-file',
+			file
+		]);
+
+		return 'added';
+	} catch (error) {
+		return error;
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+}
+
+describe('oidc-trust add --from-file', () => {
+	beforeEach(() => {
+		mocks.add.mockReset();
+		mocks.add.mockImplementation((body) =>
+			Promise.resolve(summary({ ...body, id: 'rule-1' }))
+		);
+	});
+
+	it('sends a control-plane rule from the file', async () => {
+		const outcome = await addFromFile(
+			'control-oidc-trust',
+			'https://cupboard.example.workers.dev',
+			controlRule
+		);
+
+		expect({ outcome, calls: mocks.add.mock.calls }).toStrictEqual({
+			outcome: 'added',
+			calls: [[controlRule]]
+		});
+	});
+
+	it('refuses a control-plane rule without an exact sub claim before sending it', async () => {
+		const outcome = await addFromFile(
+			'control-oidc-trust',
+			'https://cupboard.example.workers.dev',
+			{ ...controlRule, claims: { email: 'operator@example.com' } }
+		);
+
+		expect({
+			refused: outcome instanceof InvalidClaimError,
+			calls: mocks.add.mock.calls
+		}).toStrictEqual({ refused: true, calls: [] });
 	});
 });
 
