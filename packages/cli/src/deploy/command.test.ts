@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
 	AccountOptionRequiredError,
 	chooseDeployAccount,
+	claimRefusalAdvice,
 	claimRefusalReason,
 	DeployCancelledError,
 	envR2Credentials,
@@ -1030,6 +1031,7 @@ describe('verifyR2Credentials', () => {
 
 describe('claimRefusalReason', () => {
 	it.each([
+		{ status: StatusCodes.CONFLICT, expected: 'already-claimed' },
 		{ status: StatusCodes.FORBIDDEN, expected: 'ownership-or-secret' },
 		{ status: StatusCodes.INTERNAL_SERVER_ERROR, expected: 'server-error' },
 		{ status: StatusCodes.BAD_GATEWAY, expected: 'server-error' },
@@ -1038,5 +1040,15 @@ describe('claimRefusalReason', () => {
 		{ status: StatusCodes.BAD_REQUEST, expected: 'stale-login' }
 	])('classifies $status as $expected', ({ status, expected }) => {
 		expect(claimRefusalReason(status)).toBe(expected);
+	});
+});
+
+describe('claimRefusalAdvice', () => {
+	it('points a refused second operator at being added, not at signing in again', () => {
+		const advice = claimRefusalAdvice('already-claimed');
+
+		expect(advice).toContain('already has an operator');
+		expect(advice).toContain('docs/operator/operators.md');
+		expect(advice).not.toContain('stale');
 	});
 });

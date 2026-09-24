@@ -195,20 +195,27 @@ function bucketNameOf(config: DeploymentConfig): string {
 }
 
 /**
- * Why the server refused the admin claim, by status class: an ownership or
- * claim-secret mismatch, a server-side fault to read in the logs, or a
- * likely-stale login, which is the only case where re-running `cupboard init`
- * signs in again.
+ * Why the server refused the admin claim, by status class: another identity
+ * already holds the operator role, an ownership or claim-secret mismatch, a
+ * server-side fault to read in the logs, or a likely-stale login, which is the
+ * only case where re-running `cupboard init` signs in again.
  */
 export type ClaimRefusalReason =
-	'ownership-or-secret' | 'server-error' | 'stale-login';
+	'already-claimed' | 'ownership-or-secret' | 'server-error' | 'stale-login';
 
-// http-status-codes exposes its codes as an enum; widen the two compared
+// http-status-codes exposes its codes as an enum; widen the codes compared
 // against a response's numeric status so the comparisons stay number to number.
 const forbidden: number = StatusCodes.FORBIDDEN;
+const conflict: number = StatusCodes.CONFLICT;
 const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 export function claimRefusalReason(status: number): ClaimRefusalReason {
+	// The sign-up endpoint answers 409 when the deployment already has an
+	// operator other than the caller.
+	if (status === conflict) {
+		return 'already-claimed';
+	}
+
 	if (status === forbidden) {
 		return 'ownership-or-secret';
 	}
@@ -222,10 +229,18 @@ export function claimRefusalReason(status: number): ClaimRefusalReason {
 
 // The operator-facing advice for a refusal that is not a server error; a server
 // error is surfaced through `showServerFault` instead, which reads the log.
-function claimRefusalAdvice(
+export function claimRefusalAdvice(
 	reason: Exclude<ClaimRefusalReason, 'server-error'>
 ): string {
 	switch (reason) {
+		case 'already-claimed': {
+			return (
+				'This deployment already has an operator. Ask them to add you with ' +
+				'`cupboard control-oidc-trust add`, then sign in with ' +
+				'`cupboard login`; see docs/operator/operators.md.'
+			);
+		}
+
 		case 'ownership-or-secret': {
 			return (
 				'The deployment may already belong to a different identity, or its ' +
