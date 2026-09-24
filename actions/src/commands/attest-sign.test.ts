@@ -442,7 +442,8 @@ describe('attestSignAction', () => {
 
 		expect(mocks.setOutput.mock.calls).toStrictEqual([
 			['bundle-path', `${firstBundle}\n${secondBundle}`],
-			['origin-bundle-path', '']
+			['origin-bundle-path', ''],
+			['bundles', `${firstBundle}\n${secondBundle}`]
 		]);
 	});
 
@@ -490,7 +491,8 @@ describe('attestSignAction', () => {
 			],
 			outputs: {
 				'bundle-path': bundleFile,
-				'origin-bundle-path': originBundleFile
+				'origin-bundle-path': originBundleFile,
+				bundles: `${bundleFile}\n${originBundleFile}`
 			},
 			bundles: [
 				[bundleFile, '{"predicateType":"https://slsa.dev/provenance/v1"}\n'],
@@ -517,7 +519,8 @@ describe('attestSignAction', () => {
 			predicateTypes: ['https://slsa.dev/provenance/v1'],
 			outputs: {
 				'bundle-path': path.join(files.directory, 'provenance.sigstore.json'),
-				'origin-bundle-path': ''
+				'origin-bundle-path': '',
+				bundles: path.join(files.directory, 'provenance.sigstore.json')
 			}
 		});
 	});
@@ -544,7 +547,8 @@ describe('attestSignAction', () => {
 				'origin-bundle-path': path.join(
 					files.directory,
 					'build-origin.sigstore.json'
-				)
+				),
+				bundles: path.join(files.directory, 'build-origin.sigstore.json')
 			}
 		});
 	});
@@ -612,7 +616,13 @@ describe('attestSignAction', () => {
 			],
 			outputs: {
 				'bundle-path': `${firstProvenanceBundle}\n${secondProvenanceBundle}`,
-				'origin-bundle-path': `${firstOriginBundle}\n${secondOriginBundle}`
+				'origin-bundle-path': `${firstOriginBundle}\n${secondOriginBundle}`,
+				bundles: [
+					firstProvenanceBundle,
+					secondProvenanceBundle,
+					firstOriginBundle,
+					secondOriginBundle
+				].join('\n')
 			},
 			bundles: [
 				[
@@ -754,6 +764,12 @@ describe('attestSignAction', () => {
 					path.join(files.directory, 'provenance.sigstore.2.json')
 				].join('\n'),
 				'origin-bundle-path': [
+					path.join(files.directory, 'build-origin.sigstore.json'),
+					path.join(files.directory, 'build-origin.sigstore.2.json')
+				].join('\n'),
+				bundles: [
+					path.join(files.directory, 'provenance.sigstore.json'),
+					path.join(files.directory, 'provenance.sigstore.2.json'),
 					path.join(files.directory, 'build-origin.sigstore.json'),
 					path.join(files.directory, 'build-origin.sigstore.2.json')
 				].join('\n')

@@ -191,15 +191,11 @@ jobs:
           cache: ${{ inputs.cache }}
 
       - uses: $/actions/attest-attach
-        if: ${{ inputs.attest && steps.attest.outputs.bundle-path != '' }}
+        if: ${{ inputs.attest && steps.attest.outputs.bundles != '' }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ inputs.cache }}
           receipt-file: ${{ steps.build.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          # Each output contains one bundle path per line. The attach input
-          # ignores empty lines.
-          bundle: |
-            ${{ steps.attest.outputs.bundle-path }}
-            ${{ steps.attest.outputs.origin-bundle-path }}
+          bundle: ${{ steps.attest.outputs.bundles }}

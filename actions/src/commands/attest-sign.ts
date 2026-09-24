@@ -361,9 +361,12 @@ export async function attestSignAction(
 
 	await setOutput('origin-bundle-path', bundlePaths(originBundles));
 
+	const bundles = [...provenanceBundles, ...originBundles];
+	await setOutput('bundles', bundlePaths(bundles));
+
 	const produced = producedLines(
 		inputs.policy.profile,
-		producedEvidence([...provenanceBundles, ...originBundles])
+		producedEvidence(bundles)
 	);
 
 	for (const line of produced) {

@@ -848,20 +848,10 @@ describe('attestation', () => {
 		});
 	});
 
-	it('attaches a cohort bundle only after a build this run published', async () => {
-		const workflow = await loadWorkflow(flakeWorkflow);
-		const gated = allSteps(workflow)
-			.filter(({ step }) =>
-				[cupboardAction('attest'), cupboardAction('attest-attach')].includes(
-					step.uses ?? ''
-				)
-			)
-			.map(({ step }) => ({ uses: step.uses, if: step.if }));
-
-		expect({
-			gated,
-			attach: inputsOf(workflow, cupboardAction('attest-attach'))
-		}).toStrictEqual({
+	it.each([
+		{
+			name: 'cupboard-flake-publish.yml',
+			file: flakeWorkflow,
 			gated: [
 				{
 					uses: cupboardAction('attest'),
@@ -869,7 +859,7 @@ describe('attestation', () => {
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundle-path != '' }}"
+					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundles != '' }}"
 				}
 			],
 			attach: [
@@ -881,12 +871,52 @@ describe('attestation', () => {
 					'read-password': '${{ secrets.destination_read_password }}',
 					'receipt-file': '${{ steps.build-cohort.outputs.receipt-file }}',
 					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
-					bundle:
-						'${{ steps.attest.outputs.bundle-path }}\n${{ steps.attest.outputs.origin-bundle-path }}\n'
+					bundle: '${{ steps.attest.outputs.bundles }}'
 				}
 			]
-		});
-	});
+		},
+		{
+			name: 'cupboard-publish.yml',
+			file: publishWorkflow,
+			gated: [
+				{
+					uses: cupboardAction('attest'),
+					if: '${{ inputs.attest }}'
+				},
+				{
+					uses: cupboardAction('attest-attach'),
+					if: "${{ inputs.attest && steps.attest.outputs.bundles != '' }}"
+				}
+			],
+			attach: [
+				{
+					url: '${{ inputs.url }}',
+					'cupboard-path': '${{ steps.setup.outputs.cupboard-path }}',
+					cache: '${{ inputs.cache }}',
+					'receipt-file': '${{ steps.build.outputs.receipt-file }}',
+					'checksums-file': '${{ steps.attest.outputs.checksums-file }}',
+					bundle: '${{ steps.attest.outputs.bundles }}'
+				}
+			]
+		}
+	])(
+		'attaches every signed bundle when signing produced any, in $name',
+		async ({ file, gated, attach }) => {
+			const workflow = await loadWorkflow(file);
+
+			expect({
+				gated: allSteps(workflow)
+					.filter(({ step }) =>
+						[
+							cupboardAction('attest'),
+							cupboardAction('attest-attach')
+						].includes(step.uses ?? '')
+					)
+					.map(({ step }) => ({ uses: step.uses, if: step.if })),
+				attach: inputsOf(workflow, cupboardAction('attest-attach'))
+			}).toStrictEqual({ gated, attach });
+		}
+	);
 });
 
 describe('local store collection', () => {

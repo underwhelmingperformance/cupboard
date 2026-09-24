@@ -295,3 +295,18 @@ describe('canonical acquisition composition', () => {
 		}
 	);
 });
+
+describe('attestation outputs', () => {
+	it('maps each attest output to the step output that sets it', () => {
+		expect(actionOutputs('attest')).toStrictEqual({
+			'bundle-path': '${{ steps.attest.outputs.bundle-path }}',
+			'origin-bundle-path': '${{ steps.attest.outputs.origin-bundle-path }}',
+			bundles: '${{ steps.attest.outputs.bundles }}',
+			'checksums-file': '${{ steps.subjects.outputs.checksums-file }}',
+			'subject-count': '${{ steps.subjects.outputs.subject-count }}',
+			'built-checksums-file':
+				'${{ steps.subjects.outputs.built-checksums-file }}',
+			'built-subject-count': '${{ steps.subjects.outputs.built-subject-count }}'
+		});
+	});
+});
