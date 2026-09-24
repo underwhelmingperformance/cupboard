@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type ClaimMatch,
+	controlOidcTrustAddBodySchema,
 	type OidcTrustAddBodyInput,
 	oidcTrustAddBodySchema,
 	type OidcTrustListResponse,
@@ -19,6 +20,8 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { cloudflareOauthClientId } from '../deploy/cloudflare-oauth.ts';
+import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { principalLabel } from '../principal.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
@@ -83,7 +86,7 @@ async function addBodyFor(
 	options: OidcTrustAddOptions
 ): Promise<OidcTrustAddBodyInput> {
 	if (options.fromFile !== undefined) {
-		return loadAddBody(options.fromFile);
+		return loadAddBody(options.fromFile, oidcTrustAddBodySchema);
 	}
 
 	const substitutions = collectSubstitutions({
@@ -108,7 +111,10 @@ async function addBodyFor(
 	});
 }
 
-async function loadAddBody(path: string): Promise<OidcTrustAddBodyInput> {
+async function loadAddBody(
+	path: string,
+	schema: typeof oidcTrustAddBodySchema
+): Promise<OidcTrustAddBodyInput> {
 	let parsed: unknown;
 
 	try {
@@ -117,7 +123,7 @@ async function loadAddBody(path: string): Promise<OidcTrustAddBodyInput> {
 		throw new InvalidClaimError(`--from-file ${path} is not valid JSON`);
 	}
 
-	const result = oidcTrustAddBodySchema.safeParse(parsed);
+	const result = schema.safeParse(parsed);
 
 	if (!result.success) {
 		throw new InvalidClaimError(result.error.message);
@@ -128,6 +134,10 @@ async function loadAddBody(path: string): Promise<OidcTrustAddBodyInput> {
 
 interface ConfirmableOptions {
 	readonly yes?: boolean;
+}
+
+interface ControlOidcTrustAddOptions {
+	readonly fromFile: string;
 }
 
 interface OidcTrustAddOptions {
@@ -203,9 +213,11 @@ interface OidcTrustPlane {
 	readonly name: string;
 	readonly description: string;
 	readonly urlArgument: string;
-	// The GitHub PR preset grants tenant cache authority and is not available on
-	// the control plane.
-	readonly githubPr: boolean;
+	// A tenant rule grants cache authority, which `add` builds from options and
+	// the GitHub presets fill in. A control-plane rule grants control, tenant or
+	// wildcard authority, which no option builds, so its `add` reads the whole
+	// rule from a file and the plane has no presets.
+	readonly kind: 'tenant' | 'control';
 	readonly clientFor: (
 		url: URL,
 		programOptions: ProgramOptions
@@ -217,7 +229,7 @@ const tenantPlane: OidcTrustPlane = {
 	description:
 		'Manage the rules that let CI authenticate to this tenant with a short-lived OIDC token instead of a stored secret.',
 	urlArgument: tenantUrlArgument,
-	githubPr: true,
+	kind: 'tenant',
 	clientFor: (url, programOptions) =>
 		tenantRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -228,9 +240,9 @@ const tenantPlane: OidcTrustPlane = {
 const controlPlane: OidcTrustPlane = {
 	name: 'control-oidc-trust',
 	description:
-		'Manage the rules that let CI authenticate to the control plane with a short-lived OIDC token instead of a stored secret (operator only).',
+		'Manage the rules that admit OIDC tokens to the control plane, for CI jobs and for other operators (operator only).',
 	urlArgument: deploymentUrlArgument,
-	githubPr: false,
+	kind: 'control',
 	clientFor: (url, programOptions) =>
 		controlRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -400,87 +412,13 @@ function buildOidcTrustCommands(
 			);
 		});
 
-	oidcTrust
-		.command('add')
-		.description(
-			'Add a trust rule by hand: the issuer and claims a token must carry, and the access to grant.'
-		)
-		.argument('<url>', plane.urlArgument, parseWorkerUrl)
-		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
-		.requiredOption(
-			'--audience <audience>',
-			'expected token audience',
-			parseAudience
-		)
-		.option(
-			'--claim <key=value>',
-			'a claim the token must match exactly (repeatable)',
-			collect,
-			[]
-		)
-		.option(
-			'--job-workflow-ref <ref>',
-			'pin the job_workflow_ref claim: the workflow file and ref allowed to push'
-		)
-		.option(
-			'--allow <action>',
-			'an action set the rule may exchange for: push, attest, root, attach, create, or remove (repeatable)',
-			collect,
-			[]
-		)
-		.option(
-			'--cache <name>',
-			'an exact cache the grant is scoped to (default: the tenant default cache)'
-		)
-		.option(
-			'--cache-template <template>',
-			'a cache template such as "pr-{pr}", rendered from captures'
-		)
-		.option('--root <name>', 'an exact root the grant may set')
-		.option(
-			'--root-template <template>',
-			'a root template rendered from captures'
-		)
-		.option(
-			'--capture <claim=pattern>',
-			'a named-group capture binding template variables to a claim (repeatable)',
-			collect,
-			[]
-		)
-		.option(
-			'--template-source <name>',
-			'a built-in capture source: github-pr (binds {repository_id} and {pr}) or github-tag (binds {tag}) from token claims'
-		)
-		.option(
-			'--from-file <path>',
-			'read the rule body (permitted grants and claims) from a JSON file'
-		)
-		.addHelpText(
-			'after',
-			[
-				'',
-				'Example:',
-				'  # Trust a reusable workflow to push to a per-PR cache it cannot',
-				'  # escape, keyed on the job_workflow_ref claim',
-				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
-				'    --issuer https://token.actions.githubusercontent.com \\',
-				'    --audience https://cupboard.example.workers.dev/t/acme \\',
-				'    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \\',
-				'    --allow push --allow root --template-source github-pr \\',
-				'    --cache-template pr-{pr} --root-template pr-{pr}'
-			].join('\n')
-		)
-		.action(async (url: URL, options: OidcTrustAddOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
+	if (plane.kind === 'control') {
+		registerControlRuleAdd(oidcTrust, program, programOptions, plane);
+	} else {
+		registerTenantRuleAdd(oidcTrust, program, programOptions, plane);
+	}
 
-			await runOidcTrustAdd(
-				await addBodyFor(options),
-				reporter,
-				plane.clientFor(url, programOptions)
-			);
-		});
-
-	if (plane.githubPr) {
+	if (plane.kind === 'tenant') {
 		oidcTrust
 			.command('add-github-pr')
 			.description(
@@ -649,6 +587,148 @@ function buildOidcTrustCommands(
 			await runOidcTrustRemove(
 				trustRuleIdSchema.parse(id),
 				ui,
+				plane.clientFor(url, programOptions)
+			);
+		});
+}
+
+/**
+ * `oidc-trust add`: a tenant rule built from options, whose grant is scoped to a
+ * cache and optionally a root, or read whole from `--from-file`.
+ */
+function registerTenantRuleAdd(
+	oidcTrust: Command,
+	program: Command,
+	programOptions: ProgramOptions,
+	plane: OidcTrustPlane
+): void {
+	oidcTrust
+		.command('add')
+		.description(
+			'Add a trust rule by hand: the issuer and claims a token must carry, and the access to grant.'
+		)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
+		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
+		.requiredOption(
+			'--audience <audience>',
+			'expected token audience',
+			parseAudience
+		)
+		.option(
+			'--claim <key=value>',
+			'a claim the token must match exactly (repeatable)',
+			collect,
+			[]
+		)
+		.option(
+			'--job-workflow-ref <ref>',
+			'pin the job_workflow_ref claim: the workflow file and ref allowed to push'
+		)
+		.option(
+			'--allow <action>',
+			'an action set the rule may exchange for: push, attest, root, attach, create, or remove (repeatable)',
+			collect,
+			[]
+		)
+		.option(
+			'--cache <name>',
+			'an exact cache the grant is scoped to (default: the tenant default cache)'
+		)
+		.option(
+			'--cache-template <template>',
+			'a cache template such as "pr-{pr}", rendered from captures'
+		)
+		.option('--root <name>', 'an exact root the grant may set')
+		.option(
+			'--root-template <template>',
+			'a root template rendered from captures'
+		)
+		.option(
+			'--capture <claim=pattern>',
+			'a named-group capture binding template variables to a claim (repeatable)',
+			collect,
+			[]
+		)
+		.option(
+			'--template-source <name>',
+			'a built-in capture source: github-pr (binds {repository_id} and {pr}) or github-tag (binds {tag}) from token claims'
+		)
+		.option(
+			'--from-file <path>',
+			'read the rule body (permitted grants and claims) from a JSON file'
+		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # Trust a reusable workflow to push to a per-PR cache it cannot',
+				'  # escape, keyed on the job_workflow_ref claim',
+				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
+				'    --issuer https://token.actions.githubusercontent.com \\',
+				'    --audience https://cupboard.example.workers.dev/t/acme \\',
+				'    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \\',
+				'    --allow push --allow root --template-source github-pr \\',
+				'    --cache-template pr-{pr} --root-template pr-{pr}'
+			].join('\n')
+		)
+		.action(async (url: URL, options: OidcTrustAddOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+
+			await runOidcTrustAdd(
+				await addBodyFor(options),
+				reporter,
+				plane.clientFor(url, programOptions)
+			);
+		});
+}
+
+/**
+ * `control-oidc-trust add`: a control-plane rule read whole from a file. Its
+ * grants (control, tenant or wildcard authority) have no options, and the
+ * cache and root options of a tenant rule do not apply.
+ */
+function registerControlRuleAdd(
+	oidcTrust: Command,
+	program: Command,
+	programOptions: ProgramOptions,
+	plane: OidcTrustPlane
+): void {
+	oidcTrust
+		.command('add')
+		.description(
+			'Add a control-plane trust rule from a JSON file: the issuer, audience and claims that a token must have, including an exact sub claim, and the grants that it may exchange for.'
+		)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
+		.requiredOption(
+			'--from-file <path>',
+			'read the rule (issuer, audience, claims and permitted grants) from a JSON file'
+		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # Let another operator sign in with their Cloudflare account. A',
+				'  # control-plane rule must pin the sub claim.',
+				"  cat > operator.json <<'EOF'",
+				'  {',
+				`    "issuer": "${cloudflareDashIssuer}",`,
+				`    "audience": "${cloudflareOauthClientId}",`,
+				'    "claims": { "sub": "<their subject>" },',
+				'    "permittedGrants": [{ "type": "cupboard_wildcard" }]',
+				'  }',
+				'EOF',
+				'  cupboard control-oidc-trust add https://cupboard.example.workers.dev \\',
+				'    --from-file operator.json'
+			].join('\n')
+		)
+		.action(async (url: URL, options: ControlOidcTrustAddOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+
+			await runOidcTrustAdd(
+				await loadAddBody(options.fromFile, controlOidcTrustAddBodySchema),
+				reporter,
 				plane.clientFor(url, programOptions)
 			);
 		});
