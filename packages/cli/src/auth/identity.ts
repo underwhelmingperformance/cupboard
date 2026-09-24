@@ -1,0 +1,202 @@
+import { z } from 'zod';
+
+import { CliError } from '../errors.ts';
+
+import { decodeJwtPayload } from './jwt.ts';
+import type { CachedSession } from './token-store.ts';
+
+/**
+ * The identity of a cached session, read from its access token. A tenant
+ * session's audience is its tenant URL. A deployment (control-plane)
+ * session's audience is a client id.
+ */
+export interface SessionIdentity {
+	/**
+	The issuer URL in the access token: the tenant or deployment URL.
+	*/
+	readonly url: string;
+	readonly kind: 'tenant' | 'deployment';
+	/**
+	The OIDC subject of the session, when the token has a `sub` claim.
+	*/
+	readonly subject?: string;
+	/**
+	The trust rule that admitted the sign-in, when the token records it.
+	*/
+	readonly rule?: string;
+	/**
+	When the cached access token expires, as an ISO 8601 timestamp.
+	*/
+	readonly accessTokenExpiresAt?: string;
+	/**
+	Whether a refresh token is cached with the session.
+	*/
+	readonly refreshTokenCached: boolean;
+}
+
+const audienceSchema = z.union([z.string(), z.array(z.string())]);
+
+const sessionClaimsSchema = z.object({
+	iss: z.string().min(1),
+	aud: audienceSchema.optional(),
+	sub: z.string().min(1).optional(),
+	exp: z.number().optional(),
+	cb_rule: z.string().min(1).optional()
+});
+
+/**
+ * Describes a cached session from its access token's claims, or returns
+ * undefined when the token has no issuer. The claims are decoded without
+ * verifying the signature: they only describe the session to its owner, and
+ * the server verifies the token whenever it is used.
+ */
+export function sessionIdentity(
+	session: CachedSession
+): SessionIdentity | undefined {
+	const parsed = sessionClaimsSchema.safeParse(
+		decodeJwtPayload(session.accessToken)
+	);
+
+	if (!parsed.success) {
+		return undefined;
+	}
+
+	const claims = parsed.data;
+	const audiences = claims.aud === undefined ? [] : [claims.aud].flat();
+
+	return {
+		url: claims.iss,
+		kind: audiences.includes(claims.iss) ? 'tenant' : 'deployment',
+		...(claims.sub !== undefined && { subject: claims.sub }),
+		...(claims.cb_rule !== undefined && { rule: claims.cb_rule }),
+		...(claims.exp !== undefined && {
+			accessTokenExpiresAt: new Date(claims.exp * 1000).toISOString()
+		}),
+		refreshTokenCached: session.refreshToken !== undefined
+	};
+}
+
+/**
+ * The identity a trust rule has to match to admit a person: the claims of the
+ * ID token their identity provider issued, as a tenant administrator needs them.
+ */
+export interface ProviderIdentity {
+	readonly issuer: string;
+	readonly audience: string | readonly string[];
+	readonly subject: string;
+	/**
+	When the ID token expires, as an ISO 8601 timestamp.
+	*/
+	readonly expiresAt?: string;
+	/**
+	 * The token's string-valued claims, without the claims in
+	 * {@link perTokenClaims}. A trust rule's claims match only string values,
+	 * so a rule can match only claims of this kind.
+	 */
+	readonly claims: Readonly<Record<string, string>>;
+	/**
+	The identity half of a trust rule that matches exactly this person.
+	*/
+	readonly rule: {
+		readonly issuer: string;
+		readonly audience: string;
+		readonly claims: { readonly sub: string };
+	};
+	/**
+	Always false: the token is decoded locally and its signature not checked.
+	*/
+	readonly verified: false;
+}
+
+// The envelope claims and the claims that identity providers set for each
+// token. A rule that pins one of them would match only one token.
+const perTokenClaims: ReadonlySet<string> = new Set([
+	'iss',
+	'aud',
+	'exp',
+	'iat',
+	'nbf',
+	'jti',
+	'nonce',
+	'at_hash',
+	'c_hash',
+	'auth_time',
+	'sid'
+]);
+
+const nonEmptyString = z.string().min(1);
+const idTokenAudienceSchema = z.union([
+	nonEmptyString,
+	z.tuple([nonEmptyString], nonEmptyString)
+]);
+
+const idTokenClaimsSchema = z
+	.object({
+		iss: nonEmptyString,
+		aud: idTokenAudienceSchema,
+		sub: z.string().min(1),
+		exp: z.number().optional()
+	})
+	.catchall(z.unknown());
+
+export class UnreadableIdTokenError extends CliError {
+	constructor() {
+		super(
+			'The CLI could not read the issuer, audience and subject claims from ' +
+				"the identity provider's ID token, so there is no identity to show."
+		);
+		this.name = 'UnreadableIdTokenError';
+	}
+}
+
+/**
+ * Describes the identity in an OIDC ID token, for a person to send to an
+ * administrator with an access request. The claims are decoded without
+ * verifying the signature, because they are only displayed.
+ *
+ * The rule's audience is the sign-in client when the token lists it, because
+ * `cupboard login` presents a token for that client. Otherwise it is the
+ * token's first audience.
+ */
+export function providerIdentity(
+	idToken: string,
+	clientId: string
+): ProviderIdentity {
+	const parsed = idTokenClaimsSchema.safeParse(decodeJwtPayload(idToken));
+
+	if (!parsed.success) {
+		throw new UnreadableIdTokenError();
+	}
+
+	const token = parsed.data;
+	const audiences: readonly [string, ...string[]] =
+		typeof token.aud === 'string' ? [token.aud] : token.aud;
+	const [firstAudience, ...otherAudiences] = audiences;
+	const ruleAudience = otherAudiences.includes(clientId)
+		? clientId
+		: firstAudience;
+	const claims = Object.fromEntries(
+		Object.entries(token)
+			.filter(
+				(entry): entry is [string, string] =>
+					!perTokenClaims.has(entry[0]) && typeof entry[1] === 'string'
+			)
+			.toSorted(([left], [right]) => left.localeCompare(right))
+	);
+
+	return {
+		issuer: token.iss,
+		audience: token.aud,
+		subject: token.sub,
+		...(token.exp !== undefined && {
+			expiresAt: new Date(token.exp * 1000).toISOString()
+		}),
+		claims,
+		rule: {
+			issuer: token.iss,
+			audience: ruleAudience,
+			claims: { sub: token.sub }
+		},
+		verified: false
+	};
+}

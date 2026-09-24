@@ -362,7 +362,10 @@ export async function freshIdToken(
 	);
 }
 
-async function freshIdTokenUnderLock(
+/**
+ * {@link freshIdToken} for a caller that already holds the grant lock.
+ */
+export async function freshIdTokenUnderLock(
 	chain: Pick<
 		CredentialChain,
 		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
