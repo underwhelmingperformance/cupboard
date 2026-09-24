@@ -606,6 +606,13 @@ describe('command help', () => {
 		);
 	});
 
+	it('takes the quota in bytes for set-quota and no quota for clear-quota', () => {
+		expect({
+			setQuota: helpFor(['tenant', 'set-quota']).includes('<bytes>'),
+			clearQuota: helpFor(['tenant', 'clear-quota']).includes('<bytes>')
+		}).toStrictEqual({ setQuota: true, clearQuota: false });
+	});
+
 	it('shows the auth options and an example for confirm', () => {
 		const help = helpFor(['confirm']);
 

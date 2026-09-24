@@ -1,4 +1,7 @@
-import { tenantOffboardingErrorDataSchema } from '@cupboard/protocol/tenants';
+import {
+	tenantOffboardingErrorDataSchema,
+	tenantQuotaBelowUsageErrorDataSchema
+} from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 
@@ -6,6 +9,7 @@ import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
 	CupboardHttpError,
+	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
@@ -77,11 +81,11 @@ export interface TranslateRpcErrorOptions {
 }
 
 /**
- * Converts authentication and scope failures, `TENANT_OFFBOARDING`, and any
- * oRPC error with status 408, 429, 503 or 507, into CLI errors. Every other oRPC
- * error and every non-oRPC error passes through unchanged. A caller that needs
- * the oRPC code or data of a 408, 429, 503 or 507 must inspect the error before
- * calling this function.
+ * Converts authentication and scope failures, `TENANT_OFFBOARDING`,
+ * `TENANT_QUOTA_BELOW_USAGE`, and any oRPC error with status 408, 429, 503 or
+ * 507, into CLI errors. Every other oRPC error and every non-oRPC error passes
+ * through unchanged. A caller that needs the oRPC code or data of a 408, 429,
+ * 503 or 507 must inspect the error before calling this function.
  */
 export function translateRpcError(
 	error: unknown,
@@ -104,6 +108,14 @@ export function translateRpcError(
 
 		case 'INSUFFICIENT_STORAGE': {
 			return new QuotaExceededError(error.message);
+		}
+
+		case 'TENANT_QUOTA_BELOW_USAGE': {
+			const data = tenantQuotaBelowUsageErrorDataSchema.safeParse(error.data);
+
+			return data.success
+				? new QuotaBelowUsageError(data.data.id, data.data.usedBytes)
+				: error;
 		}
 
 		case 'TENANT_OFFBOARDING': {

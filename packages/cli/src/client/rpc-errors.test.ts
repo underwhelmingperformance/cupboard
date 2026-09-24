@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
+	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
@@ -142,6 +143,30 @@ describe('translateRpcError', () => {
 				? { name: translated.name, tenant: translated.tenant }
 				: translated
 		).toStrictEqual({ name: 'TenantOffboardingError', tenant: 'beta' });
+	});
+
+	it('reports the charged bytes when a quota would be below them', () => {
+		const translated = translateRpcError(
+			new ORPCError('TENANT_QUOTA_BELOW_USAGE', {
+				status: 409,
+				message: 'raw',
+				data: { id: 'beta', usedBytes: 2_000_000 }
+			})
+		);
+
+		expect(
+			translated instanceof QuotaBelowUsageError
+				? {
+						name: translated.name,
+						tenant: translated.tenant,
+						usedBytes: translated.usedBytes
+					}
+				: translated
+		).toStrictEqual({
+			name: 'QuotaBelowUsageError',
+			tenant: 'beta',
+			usedBytes: 2_000_000
+		});
 	});
 
 	it('returns an unrecognised oRPC code unchanged', () => {

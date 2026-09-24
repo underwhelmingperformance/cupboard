@@ -43,6 +43,13 @@ function cacheCredentialGrants(
 	]);
 }
 
+// The fields of a contract error that the tests compare.
+const quotaContractErrorSchema = z.object({
+	code: z.string(),
+	status: z.number(),
+	data: z.unknown()
+});
+
 // A control rule's grants in the scope spelling, as a client sends them.
 const controlRuleGrants = [
 	{
@@ -384,6 +391,137 @@ describe('control contract round trip', () => {
 				data: { id: 'acme' }
 			},
 			listed: { id: 'acme', status: 'offboarding' }
+		});
+	});
+
+	it('sets, refuses, and clears a tenant quota through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud',
+			quotaBytes: 100
+		});
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE tenant_usage SET bytes = 40, cas_bytes = 10 WHERE tenant = 'acme'"
+		).run();
+		const raised = await client.tenants.setQuota({
+			id: 'acme',
+			quota: { kind: 'limited', bytes: 1000 }
+		});
+		const [belowUsage] = await safe(
+			client.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 49 }
+			})
+		);
+		const cleared = await client.tenants.setQuota({
+			id: 'acme',
+			quota: { kind: 'unlimited' }
+		});
+
+		expect({
+			raised,
+			belowUsage: quotaContractErrorSchema.parse(belowUsage),
+			cleared
+		}).toStrictEqual({
+			raised: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 1000 },
+				usedBytes: 50
+			},
+			belowUsage: {
+				code: 'TENANT_QUOTA_BELOW_USAGE',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme', usedBytes: 50 }
+			},
+			cleared: { id: 'acme', quota: { kind: 'unlimited' }, usedBytes: 50 }
+		});
+	});
+
+	it('requires the set-quota operation on that tenant', async () => {
+		const admin = controlClient(await issueControlAdminToken());
+		await admin.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const otherTenant = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('beta', ['tenant:set-quota'])
+			)
+		);
+		const otherOperation = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', ['tenant:suspend'])
+			)
+		);
+		const scoped = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', ['tenant:set-quota'])
+			)
+		);
+
+		const request = {
+			id: 'acme',
+			quota: { kind: 'limited', bytes: 10 }
+		} as const;
+		const [wrongTenant] = await safe(otherTenant.tenants.setQuota(request));
+		const [wrongOperation] = await safe(
+			otherOperation.tenants.setQuota(request)
+		);
+		const allowed = await scoped.tenants.setQuota(request);
+		const forbidden = {
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN,
+			data: undefined
+		};
+
+		expect({
+			wrongTenant: quotaContractErrorSchema.parse(wrongTenant),
+			wrongOperation: quotaContractErrorSchema.parse(wrongOperation),
+			allowed
+		}).toStrictEqual({
+			wrongTenant: forbidden,
+			wrongOperation: forbidden,
+			allowed: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 10 },
+				usedBytes: 0
+			}
+		});
+	});
+
+	it('refuses a tenant quota change while the tenant is being removed', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		await client.tenants.remove({ id: 'acme' });
+		const [refused] = await safe(
+			client.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 10 }
+			})
+		);
+
+		expect(quotaContractErrorSchema.parse(refused)).toStrictEqual({
+			code: 'TENANT_OFFBOARDING',
+			status: StatusCodes.CONFLICT,
+			data: { id: 'acme' }
 		});
 	});
 

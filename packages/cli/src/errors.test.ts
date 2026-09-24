@@ -4,13 +4,17 @@ import {
 	AdminApiTransientError,
 	type AdminApiTransientStatus,
 	type IncompletePush,
+	overQuotaAdvice,
 	PushIncompleteError,
 	QuotaExceededError
 } from './errors.ts';
 
 describe('QuotaExceededError', () => {
 	it.each([
-		{ detail: '', equivalent: 'The cache is over its storage quota.' },
+		{
+			detail: '',
+			equivalent: "The upload would exceed the tenant's storage quota."
+		},
 		{
 			detail: "This upload would exceed the tenant's storage quota",
 			equivalent: "This upload would exceed the tenant's storage quota."
@@ -34,7 +38,7 @@ describe('QuotaExceededError', () => {
 				"This upload would exceed the tenant's storage quota"
 			).message
 		).toBe(
-			"This upload would exceed the tenant's storage quota. Free space by deleting unused paths or raise the quota."
+			`This upload would exceed the tenant's storage quota. ${overQuotaAdvice}`
 		);
 	});
 });

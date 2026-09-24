@@ -43,6 +43,8 @@ import {
 	type TenantCreateBody,
 	type TenantListResponse,
 	type TenantMutateResponse,
+	type TenantQuota,
+	type TenantQuotaResponse,
 	type TenantReadCredential,
 	type TenantReadCredentialResponse,
 	type TenantSummary
@@ -126,6 +128,7 @@ import {
 	listTenants,
 	resumeTenant,
 	setCacheReadCredential,
+	setTenantQuota,
 	setTenantReadCredential,
 	setTenantStatus
 } from './tenant-registry.ts';
@@ -633,6 +636,22 @@ export async function controlTenantResume(
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, status: summary.status };
+}
+
+// The quota is a column of the tenant's D1 usage row. Each charge reads and
+// checks it in its own batch, and nothing caches it, so the change needs no
+// invalidation.
+export function controlTenantSetQuota(
+	env: Env,
+	id: TenantId,
+	quota: TenantQuota
+): Promise<TenantQuotaResponse> {
+	return setTenantQuota(
+		controlDatabase(env),
+		id,
+		quota,
+		isoTimestamp(new Date())
+	);
 }
 
 export async function controlTenantRotateReadCredential(
