@@ -120,20 +120,40 @@ key and its unfinished work.
 
 ## Output modes
 
-Every command supports two output modes. Attached to a terminal it shows
-progress spinners, prompts, and result tables. Piped or in CI it emits
-line-delimited JSON on stderr, with command payloads (a public key, a
-`nix.conf`) on stdout, so output can be parsed or redirected:
+The CLI reports progress in one of three modes: `terminal` (spinners and result
+tables), `json` (one JSON event per line) or `github` (log groups and
+annotations for GitHub Actions).
+
+By default the CLI uses `github` under GitHub Actions, `terminal` when stderr is
+a terminal, and `json` otherwise. Two environment variables take precedence over
+these checks. A non-empty `FORCE_COLOR` other than `0` selects `terminal`.
+Otherwise, `PRE_COMMIT=1`, which pre-commit sets for its hooks, selects `json`.
+Pass `--output-mode terminal`, `json` or `github` to choose the mode explicitly.
+`cupboard deploy` always reports its progress in `terminal` mode.
+
+Every mode writes progress and status to stderr. A command writes only its
+payload, such as a public key or `nix.conf` lines, to stdout, so the payload can
+be captured or redirected in any mode:
 
 ```sh
-cupboard pubkey https://cupboard.example.workers.dev/t/acme > key.pub
+key=$(cupboard pubkey https://cupboard.example.workers.dev/t/acme)
 cupboard --output-mode json tenant list https://cupboard.example.workers.dev \
-  2>&1 | jq -c 'select(.event == "result").data'
+  2>&1 >/dev/null | jq -c 'select(.event == "result").data'
 ```
 
-Pass `--output-mode terminal` or `--output-mode json` to force the mode. Colour
-is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
-`NO_COLOR` is honoured otherwise.
+The redirections send the JSON events on stderr to `jq` and discard anything
+that the command writes to stdout. Their order matters: `2>&1` points stderr at
+the pipe before `>/dev/null` redirects stdout, and the reverse order would send
+both streams to `/dev/null`.
+
+Destructive commands ask for confirmation. The prompt appears only when the run
+is interactive: in `terminal` mode, with stdin and stderr attached to a
+terminal, and outside CI. `--yes` skips the confirmation and proceeds, whether
+or not the run is interactive. Without `--yes`, a non-interactive run exits with
+an error.
+
+Colour is a separate choice: `--colour` and `--no-colour` force ANSI on or off,
+and `NO_COLOR` is honoured otherwise.
 
 ## Exit codes for `cupboard build-push`
 
