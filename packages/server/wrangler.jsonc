@@ -82,8 +82,6 @@
 		}
 	],
 	"vars": {
-		"CUPBOARD_AUTH_ISSUER": "cupboard",
-		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
 		// The audience stamped into and verified on control-plane admin tokens. Its
 		// only job is to keep control tokens distinct from everything else this
 		// deployment verifies, so a fixed value works for every deployment. The
