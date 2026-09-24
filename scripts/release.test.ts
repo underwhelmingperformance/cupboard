@@ -7,7 +7,7 @@ import {
 	assetContentType,
 	checksumTargets,
 	createDraftBody,
-	fetchCachePublicKey,
+	fetchCachePublicKeys,
 	MissingInputError,
 	NonCanonicalVersionError,
 	PublicKeyFetchError,
@@ -132,8 +132,15 @@ const slashedBaseUrl = parseBaseUrl(
 	new URL('https://cupboard.example/t/acme/')
 );
 const baseUrls = [baseUrl, slashedBaseUrl];
+const rotationKeys = [
+	'cupboard-acme-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
+	'cupboard-acme-2:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8='
+];
+// `/pubkey` lists one key per line while a rotation publishes both keys.
+const publishRotationKeys = () =>
+	Promise.resolve(new Response(`${rotationKeys.join('\n')}\n`));
 
-describe('fetchCachePublicKey', () => {
+describe('fetchCachePublicKeys', () => {
 	it.each(baseUrls)('requests /pubkey from %s', async (base) => {
 		const requests: string[] = [];
 		const fetchLike = (url: string) => {
@@ -146,14 +153,22 @@ describe('fetchCachePublicKey', () => {
 			);
 		};
 
-		const key = await fetchCachePublicKey(base, fetchLike);
+		const keys = await fetchCachePublicKeys(base, fetchLike);
 
-		expect(key).toBe('cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=');
+		expect(keys).toStrictEqual([
+			'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
+		]);
 		expect(requests).toStrictEqual(['https://cupboard.example/t/acme/pubkey']);
 	});
 
+	it('returns every key published during a rotation', async () => {
+		await expect(
+			fetchCachePublicKeys(baseUrl, publishRotationKeys)
+		).resolves.toStrictEqual(rotationKeys);
+	});
+
 	it('rejects a response that is not ok', async () => {
-		await expect(fetchCachePublicKey(baseUrl, unavailable)).rejects.toThrow(
+		await expect(fetchCachePublicKeys(baseUrl, unavailable)).rejects.toThrow(
 			PublicKeyFetchError
 		);
 	});
@@ -164,7 +179,7 @@ describe('substituterSection', () => {
 		expect(
 			substituterSection({
 				baseUrl: base,
-				publicKey: 'cupboard-1:abc123='
+				publicKeys: ['cupboard-1:abc123=']
 			})
 		).toBe(
 			[
@@ -179,6 +194,19 @@ describe('substituterSection', () => {
 				'```'
 			].join('\n')
 		);
+	});
+
+	it('renders every key of a rotation on one trusted-public-keys line', async () => {
+		const section = substituterSection({
+			baseUrl,
+			publicKeys: await fetchCachePublicKeys(baseUrl, publishRotationKeys)
+		});
+
+		expect(
+			section.split('\n').filter((line) => line.includes('public-keys'))
+		).toStrictEqual([
+			'extra-trusted-public-keys = cupboard-acme-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= cupboard-acme-2:ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8='
+		]);
 	});
 });
 
