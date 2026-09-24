@@ -19,7 +19,8 @@ import {
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
 import { cloudflareAccountIdSchema } from './identifiers.ts';
-import { deployerOwner, type OwnerBinding } from './owner.ts';
+import { renameResource } from './overrides.ts';
+import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
 import {
 	r2AccessKeyIdSchema,
 	type R2CredentialCheck,
@@ -442,6 +443,7 @@ describe('reviewPlan', () => {
 			readonly skipReview?: boolean;
 			readonly deployer?: OwnerBinding;
 			readonly canReplaceR2Credentials?: boolean;
+			readonly startFor?: PlanReviewWorld['startFor'];
 		}
 	): { world: PlanReviewWorld; rendered: PlanState[] } {
 		const rendered: PlanState[] = [];
@@ -460,7 +462,8 @@ describe('reviewPlan', () => {
 				...(options?.canReplaceR2Credentials !== undefined && {
 					canReplaceR2Credentials: () =>
 						Promise.resolve(options.canReplaceR2Credentials ?? false)
-				})
+				}),
+				...(options?.startFor !== undefined && { startFor: options.startFor })
 			}
 		};
 	}
@@ -552,6 +555,44 @@ describe('reviewPlan', () => {
 		expect(await reviewPlan(initial, w)).toStrictEqual({
 			...initial,
 			accountId: 'acc-2'
+		});
+	});
+
+	it('starts from the other account deployment when switching account', async () => {
+		const otherConfig = renameResource(
+			config,
+			'bucket',
+			'cupboard-blobs',
+			'other-blobs'
+		);
+		const otherOwner: OwnerChoice = {
+			kind: 'owner',
+			owner: deployer,
+			origin: 'deployed'
+		};
+		const asked: string[] = [];
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['account', 'deploy'],
+				accountChoice: 'acc-2'
+			}),
+			{
+				startFor: (account) => {
+					asked.push(account);
+
+					return Promise.resolve({ config: otherConfig, owner: otherOwner });
+				}
+			}
+		);
+
+		expect({ agreed: await reviewPlan(initial, w), asked }).toStrictEqual({
+			agreed: {
+				...initial,
+				accountId: 'acc-2',
+				config: otherConfig,
+				owner: otherOwner
+			},
+			asked: ['acc-2']
 		});
 	});
 

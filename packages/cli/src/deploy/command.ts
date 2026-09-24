@@ -37,6 +37,10 @@ import {
 	resourceNameProblem
 } from './config.ts';
 import {
+	type CurrentDeployment,
+	readCurrentDeployment
+} from './current-deployment.ts';
+import {
 	choicePlanRows,
 	collectResources,
 	type DeployOptions,
@@ -435,6 +439,13 @@ export interface PlanReviewWorld {
 	readonly deployer: OwnerBinding | undefined;
 	readonly skipReview: boolean;
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
+	/**
+	 * The resource choices and admin a plan on another account starts from,
+	 * read from the deployment already on that account.
+	 */
+	readonly startFor?: (
+		accountId: CloudflareAccountId
+	) => Promise<Pick<PlanState, 'config' | 'owner'>>;
 }
 
 async function editOwner(
@@ -539,7 +550,13 @@ async function applyPlanEdit(
 	if (choice === 'account') {
 		const chosen = await ui.chooseAccount(await world.accounts());
 
-		return chosen === undefined ? state : { ...state, accountId: chosen };
+		if (chosen === undefined || chosen === state.accountId) {
+			return state;
+		}
+
+		const start = await world.startFor?.(chosen);
+
+		return { ...state, ...start, accountId: chosen };
 	}
 
 	if (choice === 'domain') {
@@ -1121,6 +1138,30 @@ async function deployFlow(
 		return created;
 	};
 
+	// Read each account's deployment once. The plan starts from the resources,
+	// cron triggers and signup gate it already uses, so accepting the plan as
+	// shown keeps them.
+	const currentDeployments = new Map<
+		CloudflareAccountId,
+		Promise<CurrentDeployment>
+	>();
+	const currentDeploymentFor = (
+		account: CloudflareAccountId
+	): Promise<CurrentDeployment> => {
+		let current = currentDeployments.get(account);
+
+		if (current === undefined) {
+			current = ui
+				.reporter()
+				.phase('Reading the current deployment', () =>
+					readCurrentDeployment(apiFor(account), artifact.config)
+				);
+			currentDeployments.set(account, current);
+		}
+
+		return current;
+	};
+
 	// Cache the secret-name lookup per account. Generate each new secret once so
 	// re-rendering the editable plan does not change the value that will deploy.
 	const secretChecks = new Map<
@@ -1273,9 +1314,16 @@ async function deployFlow(
 	};
 
 	const deployer = subject === undefined ? undefined : deployerOwner(subject);
-	const initialOwner = defaultOwnerChoice(artifact.config, subject);
+	const ownerFor = (current: CurrentDeployment): OwnerChoice =>
+		defaultOwnerChoice(current.config, subject, current.signupGate);
+	const initialDeployment = await currentDeploymentFor(accountId);
+	const initialOwner = ownerFor(initialDeployment);
 
-	if (cliOptions.yes === true && initialOwner.kind === 'none') {
+	if (
+		cliOptions.yes === true &&
+		initialOwner.kind === 'none' &&
+		initialDeployment.operator === undefined
+	) {
 		ui.warn(
 			'No admin is bound: the signup gate stays closed, so nobody can ' +
 				'claim this deployment or create tenants until an admin is configured.'
@@ -1309,7 +1357,7 @@ async function deployFlow(
 		{
 			accountId,
 			domain: currentDomain,
-			config: artifact.config,
+			config: initialDeployment.config,
 			owner: initialOwner
 		},
 		{
@@ -1346,7 +1394,12 @@ async function deployFlow(
 			deployer,
 			skipReview: cliOptions.yes === true,
 			canReplaceR2Credentials: async (state) =>
-				r2Credentials === undefined && (await isR2AlreadySetFor(state))
+				r2Credentials === undefined && (await isR2AlreadySetFor(state)),
+			startFor: async (account) => {
+				const current = await currentDeploymentFor(account);
+
+				return { config: current.config, owner: ownerFor(current) };
+			}
 		}
 	);
 
@@ -1355,8 +1408,10 @@ async function deployFlow(
 		return;
 	}
 
+	const agreedDeployment = await currentDeploymentFor(agreed.accountId);
 	const agreedBucket = bucketNameOf(agreed.config);
-	const isBucketRenamed = agreedBucket !== bucketNameOf(artifact.config);
+	const deployedBucket = bucketNameOf(agreedDeployment.config);
+	const isBucketRenamed = agreedBucket !== deployedBucket;
 	let wasCreatedNow = false;
 
 	if (r2Credentials === undefined) {
@@ -1381,7 +1436,7 @@ async function deployFlow(
 				}),
 				...(isAlreadySet &&
 					isBucketRenamed && {
-						keep: { previousBucket: bucketNameOf(artifact.config) }
+						keep: { previousBucket: deployedBucket }
 					})
 			});
 
@@ -1514,7 +1569,8 @@ async function deployFlow(
 			agreed.owner,
 			subject !== undefined && idToken !== undefined
 				? { subject, idToken }
-				: undefined
+				: undefined,
+			agreedDeployment.operator
 		),
 		buildVersion: artifact.buildVersion,
 		claimSecret,
@@ -1580,6 +1636,16 @@ async function deployFlow(
 				'Nobody was made admin, so no caches can be created in this ' +
 					'deployment yet. Re-run `cupboard init` and pick an admin to ' +
 					'finish setting up.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'operator-kept': {
+			ui.info(
+				`${outcome.operator.subject} is the operator of this deployment. ` +
+					'This deploy had no Cloudflare identity to sign in with, so the ' +
+					'operator and the caches are unchanged.'
 			);
 			ui.outro('Deployed.');
 			return;

@@ -75,6 +75,29 @@ describe('defaultOwnerChoice', () => {
 		});
 	});
 
+	it('keeps the deployed gate when no deployer is known', () => {
+		const config = parseDeploymentConfig(configWithVariables({}), tenantSource);
+		const deployed = deployerOwner('cf-operator');
+
+		expect(defaultOwnerChoice(config, undefined, deployed)).toStrictEqual({
+			kind: 'owner',
+			owner: deployed,
+			origin: 'deployed'
+		});
+	});
+
+	it('prefers the deployer over the deployed gate', () => {
+		const config = parseDeploymentConfig(configWithVariables({}), tenantSource);
+
+		expect(
+			defaultOwnerChoice(config, 'cf-user-1', deployerOwner('cf-operator'))
+		).toStrictEqual({
+			kind: 'owner',
+			owner: deployerOwner('cf-user-1'),
+			origin: 'deployer'
+		});
+	});
+
 	it('treats a partially configured owner as unconfigured', () => {
 		const config = parseDeploymentConfig(
 			configWithVariables({
@@ -100,6 +123,18 @@ describe('ownerHint', () => {
 				origin: 'deployer'
 			})
 		).toBe('dash.cloudflare.com · cf-user-1 (you, the deployer)');
+	});
+
+	it('says when the admin was kept from the deployment', () => {
+		expect(
+			ownerHint({
+				kind: 'owner',
+				owner: deployerOwner('cf-operator'),
+				origin: 'deployed'
+			})
+		).toBe(
+			'dash.cloudflare.com · cf-operator (kept from the current deployment)'
+		);
 	});
 
 	it('spells out the consequence of no admin', () => {

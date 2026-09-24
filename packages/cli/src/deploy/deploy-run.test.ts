@@ -305,6 +305,22 @@ function recordingApi(
 				calls.push(`cron:${scriptName}:${crons.join(',')}`);
 				return Promise.resolve();
 			},
+			listSchedules: () => {
+				recordFallbackApiCall(calls, 'listSchedules');
+				return Promise.resolve(undefined);
+			},
+			findQueueConsumer: () => {
+				recordFallbackApiCall(calls, 'findQueueConsumer');
+				return Promise.resolve(undefined);
+			},
+			d1DatabaseName: () => {
+				recordFallbackApiCall(calls, 'd1DatabaseName');
+				return Promise.resolve(undefined);
+			},
+			kvNamespaceTitle: () => {
+				recordFallbackApiCall(calls, 'kvNamespaceTitle');
+				return Promise.resolve(undefined);
+			},
 			putSecret(scriptName, secret) {
 				calls.push(`secret:${scriptName}:${secret.name}`);
 				return Promise.resolve();

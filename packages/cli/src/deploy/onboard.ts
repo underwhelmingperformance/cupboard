@@ -83,19 +83,30 @@ export type OnboardAdmin =
 			readonly kind: 'unproven';
 			readonly owner: OwnerBinding;
 	  }
+	/**
+	The deployment already has an operator and this session has no identity to
+	sign in as, so the operator is left as it is.
+	*/
+	| { readonly kind: 'operator'; readonly operator: OwnerBinding }
 	| { readonly kind: 'none' };
 
 /**
  * The admin binding as the onboarding sees it: claimable right now when the
  * agreed binding is the deployer's own identity and the login included an
  * id_token to prove it; someone else's when the binding is a different
- * identity; unproven when the session's credential includes no identity at
- * all; or nobody's.
+ * identity; the existing operator's when the session has no identity and the
+ * deployment already has an operator; unproven when the session's credential
+ * includes no identity at all; or nobody's.
  */
 export function onboardAdminFor(
 	choice: OwnerChoice,
-	deployer?: { readonly subject: string; readonly idToken: string }
+	deployer?: { readonly subject: string; readonly idToken: string },
+	operator?: OwnerBinding
 ): OnboardAdmin {
+	if (deployer === undefined && operator !== undefined) {
+		return { kind: 'operator', operator };
+	}
+
 	if (choice.kind === 'none') {
 		return { kind: 'none' };
 	}
@@ -134,6 +145,11 @@ export type OnboardOutcome =
 			readonly created?: CreatedCache;
 	  }
 	| { readonly kind: 'no-admin'; readonly url: string }
+	| {
+			readonly kind: 'operator-kept';
+			readonly url: string;
+			readonly operator: OwnerBinding;
+	  }
 	| {
 			readonly kind: 'admin-elsewhere';
 			readonly url: string;
@@ -370,6 +386,10 @@ export async function onboardDeployment(
 
 	if (admin.kind === 'none') {
 		return { kind: 'no-admin', url };
+	}
+
+	if (admin.kind === 'operator') {
+		return { kind: 'operator-kept', url, operator: admin.operator };
 	}
 
 	if (admin.kind === 'other') {
