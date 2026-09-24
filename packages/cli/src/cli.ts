@@ -37,6 +37,7 @@ import { registerDeploymentCommands } from './commands/deployment.ts';
 import { registerGithubCommands } from './commands/github.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
+import { registerLogoutCommand } from './commands/logout.ts';
 import {
 	registerControlOidcTrustCommands,
 	registerOidcTrustCommands
@@ -49,6 +50,7 @@ import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
+import { registerWhoamiCommand } from './commands/whoami.ts';
 import { failureExitCode } from './errors.ts';
 import { cupboardVersion } from './version.ts';
 
@@ -161,6 +163,8 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerDeployCommand(program, options);
 	registerDeploymentCommands(program, options);
 	registerLoginCommand(program, options);
+	registerLogoutCommand(program, options);
+	registerWhoamiCommand(program, options);
 	registerAttestCommands(program, options);
 	registerPushCommand(program, options);
 	registerBuildPushCommand(program, options);

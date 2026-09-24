@@ -6,7 +6,13 @@ import { describe, expect } from 'vitest';
 
 import { testWithConfigHome } from '../test-support.ts';
 
-import { readCachedSession, writeCachedSession } from './token-store.ts';
+import {
+	listCachedSessions,
+	readCachedSession,
+	removeAllCachedSessions,
+	removeCachedSession,
+	writeCachedSession
+} from './token-store.ts';
 
 const tenant = 'https://cupboard.test/t/acme';
 const other = 'https://cupboard.test/t/beta';
@@ -188,6 +194,81 @@ describe('session cache', () => {
 			await writeCachedSession(session, new URL(`${tenant}/`));
 
 			expect(await readCachedSession(tenantTarget)).toStrictEqual(session);
+		}
+	);
+});
+
+describe('session listing and removal', () => {
+	const tenantSession = { accessToken: jwt({ iss: tenant, aud: tenant }) };
+	const otherSession = {
+		accessToken: jwt({ iss: other, aud: other }),
+		refreshToken: 'refresh-2'
+	};
+	const hostSession = { accessToken: jwt({ iss: host, aud: 'control' }) };
+
+	testWithConfigHome(
+		'lists every cached session, ignoring files that are not sessions',
+		async ({ configHome }) => {
+			await writeCachedSession(tenantSession, tenantTarget);
+			await writeCachedSession(otherSession, otherTarget);
+			await writeFile(
+				path.join(tokensDirectory(configHome), '.secret.leftover'),
+				'not a session'
+			);
+			await mkdir(path.join(tokensDirectory(configHome), 'x.lock'));
+
+			const sessions = await listCachedSessions();
+
+			expect(
+				sessions.toSorted((left, right) =>
+					left.accessToken.localeCompare(right.accessToken)
+				)
+			).toStrictEqual(
+				[tenantSession, otherSession].toSorted((left, right) =>
+					left.accessToken.localeCompare(right.accessToken)
+				)
+			);
+		}
+	);
+
+	testWithConfigHome(
+		'lists nothing when no session was ever cached',
+		async () => {
+			expect(await listCachedSessions()).toStrictEqual([]);
+		}
+	);
+
+	testWithConfigHome(
+		'removes one target session and leaves the others',
+		async () => {
+			await writeCachedSession(tenantSession, tenantTarget);
+			await writeCachedSession(otherSession, otherTarget);
+
+			expect({
+				first: await removeCachedSession(new URL(`${tenant}/`)),
+				second: await removeCachedSession(tenantTarget),
+				tenant: await readCachedSession(tenantTarget),
+				other: await readCachedSession(otherTarget)
+			}).toStrictEqual({
+				first: 'removed',
+				second: 'absent',
+				tenant: undefined,
+				other: otherSession
+			});
+		}
+	);
+
+	testWithConfigHome(
+		'removes every cached session and counts them',
+		async () => {
+			await writeCachedSession(tenantSession, tenantTarget);
+			await writeCachedSession(otherSession, otherTarget);
+			await writeCachedSession(hostSession, hostTarget);
+
+			expect({
+				removed: await removeAllCachedSessions(),
+				remaining: await listCachedSessions()
+			}).toStrictEqual({ removed: 3, remaining: [] });
 		}
 	);
 });

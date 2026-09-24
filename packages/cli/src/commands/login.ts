@@ -4,7 +4,8 @@ import {
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
-import type { Command } from 'commander';
+import type { Reporter } from '@cupboard/reporter';
+import { type Command, Option } from 'commander';
 
 import {
 	DeviceAuthorizationRequestError,
@@ -42,7 +43,11 @@ import {
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 
-interface LoginOptions {
+/**
+ * How to sign in with an identity provider: the options `login` and
+ * `whoami --provider` share.
+ */
+export interface ProviderSignInOptions {
 	readonly oidcIssuer: string;
 	readonly clientId: string;
 	readonly headless?: boolean;
@@ -187,11 +192,111 @@ export async function cacheLoginSession(
 	);
 }
 
+/**
+ * Signs in with the identity provider and returns its OIDC ID token, without
+ * contacting cupboard. The built-in client against its own issuer uses the
+ * deploy's cached grant: silent while a cached login can be renewed, the
+ * browser only as a last resort. Any other provider runs the loopback flow,
+ * or the device flow with `headless`.
+ *
+ * Sign-in is interactive, so its prompts are shown the moment they happen, not
+ * held behind a spinner the user is meant to act on.
+ */
+export async function providerIdToken(
+	options: ProviderSignInOptions,
+	reporter: Pick<Reporter, 'info' | 'warn'>,
+	signal?: AbortSignal
+): Promise<string> {
+	// cupboard's own client has exact-match registered redirect URLs, so the
+	// loopback server must bind one of them; any other client keeps the
+	// ephemeral-port default.
+	const isCupboardClient = options.clientId === cloudflareOauthClientId;
+	const scope = loginScopeForClient(options.clientId);
+
+	const browserPrompt = (target: string): void => {
+		openBrowser(target, reporter);
+		reporter.info('Waiting for you to authorise in your browser…');
+	};
+
+	if (
+		isCupboardClient &&
+		options.oidcIssuer === cloudflareDashIssuer &&
+		options.headless !== true
+	) {
+		return cupboardIdToken({
+			chain: {
+				readGrant: readCachedGrant,
+				writeGrant: writeCachedGrant,
+				withGrantLock: withCachedGrantLock,
+				refreshGrant: (previous, grantSignal) =>
+					refreshCloudflareGrant(previous, fetch, Date.now, grantSignal),
+				signal,
+				now: Date.now
+			},
+			login: (loginSignal) =>
+				cloudflareLogin({ openBrowser: browserPrompt, signal: loginSignal })
+		});
+	}
+
+	const endpoints = await discoverOidcLogin(options.oidcIssuer, fetch, signal);
+
+	if (options.headless === true) {
+		try {
+			return await deviceLogin({
+				endpoints,
+				clientId: options.clientId,
+				scope,
+				prompt: (verification) => {
+					reporter.info(deviceLoginInstruction(verification));
+				},
+				signal
+			});
+		} catch (error) {
+			throw mapDeviceLoginError(error, options.clientId);
+		}
+	}
+
+	return loopbackLogin({
+		endpoints,
+		clientId: options.clientId,
+		scope,
+		openBrowser: browserPrompt,
+		loopback: isCupboardClient ? cloudflareLoopback : undefined,
+		signal
+	});
+}
+
+/**
+ * The identity-provider options `login` and `whoami` share, so both sign in
+ * the same way. `implies` names an option that giving any of them turns on.
+ */
+export function providerSignInOptions(
+	implies?: Readonly<Record<string, boolean>>
+): readonly Option[] {
+	const options = [
+		new Option('--oidc-issuer <issuer>', 'OIDC issuer URL').default(
+			cloudflareDashIssuer
+		),
+		new Option(
+			'--client-id <id>',
+			'registered public OAuth client id (PKCE, no client secret)'
+		).default(cloudflareOauthClientId),
+		new Option(
+			'--headless',
+			'use the device flow instead of opening a browser (for SSH/containers)'
+		)
+	];
+
+	return implies === undefined
+		? options
+		: options.map((option) => option.implies(implies));
+}
+
 export function registerLoginCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
 ): void {
-	program
+	const command = program
 		.command('login')
 		.description(
 			'Authenticate as the owner via OIDC and cache an admin access token.'
@@ -201,113 +306,43 @@ export function registerLoginCommand(
 			'deployment or tenant URL to sign in to ' +
 				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)',
 			parseWorkerUrl
-		)
-		.option('--oidc-issuer <issuer>', 'OIDC issuer URL', cloudflareDashIssuer)
-		.option(
-			'--client-id <id>',
-			'registered public OAuth client id (PKCE, no client secret)',
-			cloudflareOauthClientId
-		)
-		.option(
-			'--headless',
-			'use the device flow instead of opening a browser (for SSH/containers)'
-		)
-		.action(async (url: URL, options: LoginOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const client = CupboardClient.fromUrl(url, {
-				cache: { kind: 'default' },
-				signal: programOptions.signal
-			});
-			// cupboard's own client has exact-match registered redirect URLs, so
-			// the loopback server must bind one of them; any other client keeps
-			// the ephemeral-port default.
-			const isCupboardClient = options.clientId === cloudflareOauthClientId;
-			const scope = loginScopeForClient(options.clientId);
+		);
 
-			const browserPrompt = (target: string): void => {
-				openBrowser(target, reporter);
-				reporter.info('Waiting for you to authorise in your browser…');
-			};
+	for (const option of providerSignInOptions()) {
+		command.addOption(option);
+	}
 
-			// Login is interactive, so its prompts are shown the moment they happen,
-			// not held behind a spinner the user is meant to act on.
-			const idToken = await (async (): Promise<string> => {
-				// The built-in client against its own issuer uses the deploy's
-				// cached grant: silent while a cached login can be renewed, the
-				// browser only as a last resort.
-				if (
-					isCupboardClient &&
-					options.oidcIssuer === cloudflareDashIssuer &&
-					options.headless !== true
-				) {
-					return cupboardIdToken({
-						chain: {
-							readGrant: readCachedGrant,
-							writeGrant: writeCachedGrant,
-							withGrantLock: withCachedGrantLock,
-							refreshGrant: (previous, signal) =>
-								refreshCloudflareGrant(previous, fetch, Date.now, signal),
-							signal: programOptions.signal,
-							now: Date.now
-						},
-						login: (signal) =>
-							cloudflareLogin({
-								openBrowser: browserPrompt,
-								signal
-							})
-					});
-				}
-
-				const endpoints = await discoverOidcLogin(
-					options.oidcIssuer,
-					fetch,
-					programOptions.signal
-				);
-
-				if (options.headless === true) {
-					try {
-						return await deviceLogin({
-							endpoints,
-							clientId: options.clientId,
-							scope,
-							prompt: (verification) => {
-								reporter.info(deviceLoginInstruction(verification));
-							},
-							signal: programOptions.signal
-						});
-					} catch (error) {
-						throw mapDeviceLoginError(error, options.clientId);
-					}
-				}
-
-				return loopbackLogin({
-					endpoints,
-					clientId: options.clientId,
-					scope,
-					openBrowser: browserPrompt,
-					loopback: isCupboardClient ? cloudflareLoopback : undefined,
-					signal: programOptions.signal
-				});
-			})();
-
-			const exchanged = await client.tokenExchange(
-				idToken,
-				subjectTokenTypeIdToken
-			);
-			await cacheLoginSession(exchanged, url, programOptions.signal);
-
-			const target = canonicalHref(url);
-
-			const storedIn = tokensDirectory();
-
-			reporter.result({
-				kind: 'login',
-				data: { url: target, scope, storedIn },
-				rows: [
-					{ label: 'Cache URL', value: target },
-					{ label: 'Session', value: 'admin token cached' },
-					{ label: 'Stored', value: storedIn }
-				]
-			});
+	command.action(async (url: URL, options: ProviderSignInOptions) => {
+		const reporter = commandUi(program, programOptions).reporter();
+		const client = CupboardClient.fromUrl(url, {
+			cache: { kind: 'default' },
+			signal: programOptions.signal
 		});
+		const scope = loginScopeForClient(options.clientId);
+		const idToken = await providerIdToken(
+			options,
+			reporter,
+			programOptions.signal
+		);
+
+		const exchanged = await client.tokenExchange(
+			idToken,
+			subjectTokenTypeIdToken
+		);
+		await cacheLoginSession(exchanged, url, programOptions.signal);
+
+		const target = canonicalHref(url);
+
+		const storedIn = tokensDirectory();
+
+		reporter.result({
+			kind: 'login',
+			data: { url: target, scope, storedIn },
+			rows: [
+				{ label: 'Cache URL', value: target },
+				{ label: 'Session', value: 'admin token cached' },
+				{ label: 'Stored', value: storedIn }
+			]
+		});
+	});
 }

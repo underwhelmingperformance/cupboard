@@ -8,7 +8,10 @@ import { z } from 'zod';
 import { decodeJwtPayload } from './jwt.ts';
 import {
 	configDirectory,
+	listSecretDirectory,
 	readSecretFile,
+	type Removal,
+	removeSecretFile,
 	writeSecretFile
 } from './secret-file.ts';
 import { withSecretFileLock } from './secret-lock.ts';
@@ -101,6 +104,77 @@ export async function writeCachedSession(
 		`${JSON.stringify(session)}\n`,
 		signal
 	);
+}
+
+/**
+ * Deletes the cached session for a target, under the same lock that guards its
+ * renewal, so a concurrent refresh cannot write it back.
+ */
+export async function removeCachedSession(
+	target: URL,
+	signal?: AbortSignal
+): Promise<Removal> {
+	const file = tokenFilePath(canonicalHref(target));
+
+	return withSecretFileLock(file, () => removeSecretFile(file), signal);
+}
+
+// A session file is named by the SHA-256 of its target; anything else in the
+// directory (lock directories, temporary files) is not a session.
+const sessionFileNamePattern = /^[0-9a-f]{64}$/u;
+
+async function sessionFiles(): Promise<readonly string[]> {
+	const names = await listSecretDirectory(tokensDirectory());
+
+	return names
+		.filter((name) => sessionFileNamePattern.test(name))
+		.toSorted((left, right) => left.localeCompare(right))
+		.map((name) => path.join(tokensDirectory(), name));
+}
+
+/**
+ * Every cached session that parses, whatever its target. The target is not
+ * recoverable from the file name, so callers read it from the access token.
+ */
+export async function listCachedSessions(): Promise<readonly CachedSession[]> {
+	const sessions: CachedSession[] = [];
+	const files = await sessionFiles();
+
+	for (const file of files) {
+		const contents = await readSecretFile(file);
+		const session = contents === undefined ? undefined : parseSession(contents);
+
+		if (session !== undefined) {
+			sessions.push(session);
+		}
+	}
+
+	return sessions;
+}
+
+/**
+ * Deletes every cached session, each under its own lock. Returns how many were
+ * removed.
+ */
+export async function removeAllCachedSessions(
+	signal?: AbortSignal
+): Promise<number> {
+	let removed = 0;
+	const files = await sessionFiles();
+
+	for (const file of files) {
+		const removal = await withSecretFileLock(
+			file,
+			() => removeSecretFile(file),
+			signal
+		);
+
+		if (removal === 'removed') {
+			removed += 1;
+		}
+	}
+
+	return removed;
 }
 
 function parseSession(contents: string): CachedSession | undefined {
