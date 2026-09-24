@@ -14,10 +14,12 @@ import {
 	tenantCreateBodySchema,
 	type TenantListResponse,
 	type TenantMutateResponse,
+	type TenantQuota,
+	type TenantQuotaResponse,
 	type TenantReadCredentialResponse,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
-import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
@@ -35,6 +37,10 @@ export interface TenantClient {
 	create(input: TenantCreateBody): Promise<TenantSummary>;
 	suspend(input: { id: TenantId }): Promise<TenantMutateResponse>;
 	resume(input: { id: TenantId }): Promise<TenantMutateResponse>;
+	setQuota(input: {
+		id: TenantId;
+		quota: TenantQuota;
+	}): Promise<TenantQuotaResponse>;
 	rotateReadCredential(input: {
 		id: TenantId;
 		read: { user: ReadUser; password: string };
@@ -232,6 +238,39 @@ export function registerTenantCommands(
 			const reporter = commandUi(program, programOptions).reporter();
 			await runTenantResume(
 				tenantIdSchema.parse(id),
+				reporter,
+				tenantClient(url, programOptions)
+			);
+		});
+
+	tenant
+		.command('set-quota')
+		.description(
+			"Set a tenant's storage quota; it cannot be below what the tenant already stores."
+		)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument('<id>', 'tenant slug')
+		.argument('<bytes>', 'the storage quota in bytes', parseQuotaBytes)
+		.action(async (url: URL, id: string, bytes: number) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			await runTenantSetQuota(
+				tenantIdSchema.parse(id),
+				{ kind: 'limited', bytes },
+				reporter,
+				tenantClient(url, programOptions)
+			);
+		});
+
+	tenant
+		.command('clear-quota')
+		.description("Remove a tenant's storage quota, leaving it unlimited.")
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.argument('<id>', 'tenant slug')
+		.action(async (url: URL, id: string) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			await runTenantSetQuota(
+				tenantIdSchema.parse(id),
+				{ kind: 'unlimited' },
 				reporter,
 				tenantClient(url, programOptions)
 			);
@@ -440,6 +479,37 @@ export async function runTenantResume(
 		data: result,
 		rows: [{ label: result.id, value: result.status }]
 	});
+}
+
+/**
+ * Sets or removes a tenant's quota and reports it with the charged bytes it
+ * counts against. The next upload is checked against the new quota.
+ */
+export async function runTenantSetQuota(
+	id: TenantId,
+	quota: TenantQuota,
+	reporter: Reporter,
+	client: Pick<TenantClient, 'setQuota'>
+): Promise<void> {
+	const phase =
+		quota.kind === 'limited' ? 'Setting tenant quota' : 'Clearing tenant quota';
+	const result = await reporter.phase(phase, () =>
+		client.setQuota({ id, quota })
+	);
+
+	reporter.result({
+		kind: 'tenant-quota',
+		data: result,
+		rows: [
+			{ label: 'Tenant', value: result.id },
+			{ label: 'Quota', value: quotaLabel(result.quota) },
+			{ label: 'Used', value: formatBytes(result.usedBytes) }
+		]
+	});
+}
+
+function quotaLabel(quota: TenantQuota): string {
+	return quota.kind === 'limited' ? formatBytes(quota.bytes) : 'unlimited';
 }
 
 export async function runTenantRotateCredential(
