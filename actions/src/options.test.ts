@@ -6,6 +6,7 @@ import {
 	BooleanInputInvalidError,
 	CacheCredentialsInvalidError,
 	CacheNameInvalidError,
+	PrivateSubstituterInvalidError,
 	ReadUserInvalidError,
 	UnknownCacheCredentialError,
 	UrlInputInvalidError
@@ -19,6 +20,7 @@ import {
 	providedCacheCredentials,
 	providedCaches,
 	providedCacheSelection,
+	providedPrivateSubstituters,
 	providedReadUser,
 	providedUrl
 } from './options.ts';
@@ -110,6 +112,42 @@ describe('providedUrl', () => {
 			type: UrlInputInvalidError,
 			input: 'cache-url'
 		});
+	});
+});
+
+describe('providedPrivateSubstituters', () => {
+	it('accepts authenticated URLs for different hosts and paths', () => {
+		expect(
+			providedPrivateSubstituters(
+				'https://cupboard:first@cache.example.test/t/acme/cache/falcon\nhttps://ci:second@cache.example.test/t/acme/cache/other\nhttps://builder:third@other.example.test/cache'
+			).map((url) => url.href)
+		).toStrictEqual([
+			'https://cupboard:first@cache.example.test/t/acme/cache/falcon',
+			'https://ci:second@cache.example.test/t/acme/cache/other',
+			'https://builder:third@other.example.test/cache'
+		]);
+	});
+
+	it.each([
+		['an unauthenticated URL', 'https://cache.example.test/cache'],
+		['a URL without a password', 'https://ci@cache.example.test/cache'],
+		['a non-HTTP URL', 'file:///tmp/cache'],
+		['a query', 'https://ci:secret@cache.example.test/cache?token=x'],
+		['a fragment', 'https://ci:secret@cache.example.test/cache#x'],
+		[
+			'a colon in the user',
+			'https://ci%3Aadmin:secret@cache.example.test/cache'
+		],
+		['an encoded newline', 'https://ci:sec%0Aret@cache.example.test/cache'],
+		['an invalid escape', 'https://ci:sec%ZZret@cache.example.test/cache'],
+		['an invalid URL', 'not-a-url']
+	])('rejects %s without printing the value', (_name, value) => {
+		expect(() => providedPrivateSubstituters(value)).toThrow(
+			PrivateSubstituterInvalidError
+		);
+		expect(() => providedPrivateSubstituters(value)).toThrow(
+			'private-substituters entry 1 must be an authenticated HTTP(S) URL without a query or fragment'
+		);
 	});
 });
 

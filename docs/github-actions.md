@@ -414,6 +414,13 @@ its access.
 named cache scope with its user and password. A private cache that has no entry
 uses `read-user` and `read-password` as the tenant-wide fallback credential.
 
+`private-substituters` accepts one authenticated HTTP(S) URL per line. It adds
+private caches that use Basic authentication to Nix without changing the
+selected Cupboard cache. Supply the URLs as a secret and percent-encode reserved
+characters in each password. Setup masks the passwords and complete URLs before
+it writes the protected Nix config. Nix still needs each cache's trusted public
+key.
+
 Before it fetches or writes anything, setup registers each cache-specific
 password and each credential-bearing substituter URL as a run secret. The runner
 replaces those values with `***` in the log. Setup registers the raw password
@@ -957,6 +964,23 @@ cache and a reuse view can accept different credentials:
 
 Supply both fields of each pair you use. Existing callers must replace the
 workflow's `read_user` and `read_password` secrets with the appropriate pairs.
+
+Pass additional private caches through the `private_substituters` secret. Its
+value is one authenticated HTTP(S) URL per line. The workflow adds those URLs to
+Nix in both jobs that evaluate or build the targets; `cache` and `preset` still
+select where the run publishes. For example, a caller can use an existing
+password secret:
+
+```yaml
+secrets:
+  private_substituters: >-
+    https://cupboard:${{ secrets.FALCON_CACHE_PASSWORD }}@cache.example/falcon
+```
+
+Additional lines may use other hosts or other passwords on the same host.
+Percent-encode reserved characters in the username and password. Supply a
+trusted public key for every private cache through `trusted-public-key` or
+`nix-config`. Remote builders need their own substituter configuration.
 
 `actions/setup` configures Nix reads. Cache-specific credentials are attached to
 substituter URLs, and the tenant fallback uses a netrc file. The plan and

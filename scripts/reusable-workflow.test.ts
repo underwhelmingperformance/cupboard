@@ -427,6 +427,7 @@ describe('cupboard acquisition', () => {
 				'destination-read-password': '${{ secrets.destination_read_password }}',
 				'read-user': '${{ secrets.fallback_read_user }}',
 				'read-password': '${{ secrets.fallback_read_password }}',
+				'private-substituters': '${{ secrets.private_substituters }}',
 				'reuse-view': '${{ needs.configure.outputs.reuse-view }}',
 				'checkout-dir': sourceCheckoutDirectory
 			}))
@@ -631,7 +632,8 @@ describe('SSH credential isolation', () => {
 				'destination_read_user',
 				'destination_read_password',
 				'fallback_read_user',
-				'fallback_read_password'
+				'fallback_read_password',
+				'private_substituters'
 			]
 		);
 	});

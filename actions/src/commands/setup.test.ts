@@ -20,6 +20,7 @@ import {
 	DestinationReadCredentialConflictError,
 	DestinationReadPasswordRequiredError,
 	DestinationReadUserRequiredError,
+	PrivateSubstitutersCacheUrlRequiredError,
 	ProbeTimeoutError,
 	ProvisionCacheAccessRequiredError,
 	ProvisionCacheUrlRequiredError,
@@ -277,6 +278,7 @@ describe('resolveSetupInputs', () => {
 		addToPath: true,
 		cacheUrl: undefined,
 		caches: [{ cache: defaultCache }],
+		privateSubstituters: [],
 		provisionCache: undefined,
 		reuseView: '',
 		trustedPublicKey: '',
@@ -334,6 +336,42 @@ describe('resolveSetupInputs', () => {
 				}
 			}
 		]);
+	});
+
+	it('resolves private substituters independently of the selected cache', () => {
+		const inputs = resolveSetupInputs(
+			{
+				...baseOptions,
+				cacheUrl: 'https://cache.example.test/t/acme',
+				cache: 'release',
+				privateSubstituters:
+					'https://cupboard:first@cache.example.test/t/acme/cache/falcon\nhttps://builder:second@other.example.test/cache'
+			},
+			environment
+		);
+
+		expect({
+			caches: inputs.caches,
+			privateSubstituters: inputs.privateSubstituters.map((url) => url.href)
+		}).toStrictEqual({
+			caches: [{ cache: namedCache('release') }],
+			privateSubstituters: [
+				'https://cupboard:first@cache.example.test/t/acme/cache/falcon',
+				'https://builder:second@other.example.test/cache'
+			]
+		});
+	});
+
+	it('requires cache-url when private substituters are supplied', () => {
+		expect(() =>
+			resolveSetupInputs(
+				{
+					...baseOptions,
+					privateSubstituters: 'https://ci:secret@cache.example.test/cache'
+				},
+				environment
+			)
+		).toThrow(PrivateSubstitutersCacheUrlRequiredError);
 	});
 
 	it('does not require RUNNER_TEMP when install-dir is explicit', () => {
@@ -853,6 +891,9 @@ describe('setupAction cache-credential masking', () => {
 		const outputFile = path.join(directory, 'github-output');
 		const netrcFile = path.join(directory, 'cupboard-netrc');
 		const archivePassword = 'B'.repeat(43);
+		const falconUrl =
+			'https://cupboard:falcon%2Fsecret@cache.example.test/t/acme/cache/falcon';
+		const otherUrl = 'https://builder:other-secret@other.example.test/cache';
 		const masked: Record<string, unknown>[] = [];
 		let probes = 0;
 
@@ -875,6 +916,7 @@ describe('setupAction cache-credential masking', () => {
 						}
 					}
 				]),
+				privateSubstituters: `${falconUrl}\n${otherUrl}`,
 				reuseView: 'pr-view',
 				trustedPublicKey: 'acme:AAAA'
 			},
@@ -927,16 +969,24 @@ describe('setupAction cache-credential masking', () => {
 		const [substituters] = nixConfig.split('\n', 1);
 
 		expect({ masked, substituters }).toStrictEqual({
-			masked: [readPassword, releaseUrl, archivePassword, archiveUrl].map(
-				(value) => ({
-					value,
-					probes: 0,
-					wroteNetrc: false,
-					wroteNixConfig: false,
-					wroteEnvironment: false
-				})
-			),
-			substituters: `extra-substituters = ${releaseUrl} ${archiveUrl} https://cache.example.test/t/acme/reuse/pr-view`
+			masked: [
+				readPassword,
+				releaseUrl,
+				archivePassword,
+				archiveUrl,
+				'falcon/secret',
+				'falcon%2Fsecret',
+				falconUrl,
+				'other-secret',
+				otherUrl
+			].map((value) => ({
+				value,
+				probes: 0,
+				wroteNetrc: false,
+				wroteNixConfig: false,
+				wroteEnvironment: false
+			})),
+			substituters: `extra-substituters = ${releaseUrl} ${archiveUrl} https://cache.example.test/t/acme/reuse/pr-view ${falconUrl} ${otherUrl}`
 		});
 	});
 });
@@ -950,6 +1000,8 @@ describe('setupAction Nix configuration', () => {
 		const environmentFile = path.join(directory, 'github-env');
 		const outputFile = path.join(directory, 'github-output');
 		const credential = { user: 'ci', password: readPassword };
+		const privateUrl =
+			'https://cupboard:falcon-secret@cache.example.test/t/acme/cache/falcon';
 
 		await setupAction(
 			{
@@ -960,6 +1012,7 @@ describe('setupAction Nix configuration', () => {
 				cacheCredentials: JSON.stringify([
 					{ cache: namedCache('release'), credential }
 				]),
+				privateSubstituters: privateUrl,
 				trustedPublicKey: 'acme:AAAA',
 				nixConfigFile: callerConfigFile
 			},
@@ -1010,7 +1063,7 @@ describe('setupAction Nix configuration', () => {
 			generatedDirectory: path.resolve(directory),
 			generatedNameMatches: true,
 			generatedMode: 0o600,
-			generatedConfig: `extra-substituters = ${credentialUrl}\nextra-trusted-public-keys = acme:AAAA\n`,
+			generatedConfig: `extra-substituters = ${credentialUrl} ${privateUrl}\nextra-trusted-public-keys = acme:AAAA\n`,
 			environmentConfig: `include ${generatedConfigFile}\n`,
 			callerConfig: `!include ${generatedConfigFile}\n`
 		});

@@ -259,6 +259,9 @@ on:
       fallback_read_password:
         description: Tenant Basic-auth password for private reuse-view reads.
         required: false
+      private_substituters:
+        description: Authenticated HTTP(S) substituter URLs, one per line.
+        required: false
 
 permissions: {}
 
@@ -544,6 +547,7 @@ jobs:
           destination-read-password: ${{ secrets.destination_read_password }}
           read-user: ${{ secrets.fallback_read_user }}
           read-password: ${{ secrets.fallback_read_password }}
+          private-substituters: ${{ secrets.private_substituters }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
@@ -675,6 +679,7 @@ jobs:
           destination-read-password: ${{ secrets.destination_read_password }}
           read-user: ${{ secrets.fallback_read_user }}
           read-password: ${{ secrets.fallback_read_password }}
+          private-substituters: ${{ secrets.private_substituters }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
           checkout-dir: ${{ github.workspace }}/.cupboard-workflow
 
