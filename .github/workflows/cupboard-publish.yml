@@ -190,8 +190,12 @@ jobs:
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
 
+      # A run that built none of its paths signs only build-origin bundles,
+      # so attach whenever signing produced either kind.
       - uses: $/actions/attest-attach
-        if: ${{ inputs.attest && steps.attest.outputs.bundle-path != '' }}
+        if:
+          ${{ inputs.attest && (steps.attest.outputs.bundle-path != '' ||
+          steps.attest.outputs.origin-bundle-path != '') }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}

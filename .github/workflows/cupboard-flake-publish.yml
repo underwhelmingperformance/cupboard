@@ -733,12 +733,14 @@ jobs:
           read-password: ${{ secrets.destination_read_password }}
 
       # Attestation verifies the receipt against committed narinfos, so attach
-      # the bundle only after publication and only when signing produced a
-      # bundle.
+      # the bundles only after publication and whenever signing produced
+      # either kind. A cohort that built nothing still signs build-origin
+      # bundles for the paths it published, leaving bundle-path empty.
       - uses: $/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
-          steps.attest.outputs.bundle-path != '' }}
+          (steps.attest.outputs.bundle-path != '' ||
+          steps.attest.outputs.origin-bundle-path != '') }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
