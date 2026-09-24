@@ -11,6 +11,8 @@ each one.
   - [`cupboard deployment status`](#cupboard-deployment-status)
   - [`cupboard deployment resume`](#cupboard-deployment-resume)
 - [`cupboard login`](#cupboard-login)
+- [`cupboard logout`](#cupboard-logout)
+- [`cupboard whoami`](#cupboard-whoami)
 - [`cupboard attest`](#cupboard-attest)
   - [`cupboard attest attach`](#cupboard-attest-attach)
   - [`cupboard attest verify`](#cupboard-attest-verify)
@@ -114,6 +116,8 @@ Commands:
   init|deploy [options]                        Provision, deploy and initialise this cupboard on a Cloudflare account, ready for nix.conf.
   deployment                                   Inspect and resume tenant migration work.
   login [options] <url>                        Authenticate as the owner via OIDC and cache an admin access token.
+  logout [options] [url]                       Delete the cached session for a tenant or the deployment from this machine.
+  whoami [options] [url]                       Show who the cached sessions sign in as or, with --provider, the identity a trust rule must match to admit you.
   attest                                       Work with the Sigstore attestation bundles attached to store paths.
   push [options] <url> [paths...]              Push one or more store paths to the configured cupboard cache.
   build-push [options] <url> [arguments...]    Run a build command under streaming publication: completed outputs upload while the build continues, and a final reconciliation settles roots and writes the build receipt.
@@ -253,6 +257,84 @@ Options:
   --headless              use the device flow instead of opening a browser (for
                           SSH/containers)
   -h, --help              display help for command
+```
+
+### cupboard logout
+
+```text
+Usage: cupboard logout [options] [url]
+
+Delete the cached session for a tenant or the deployment from this machine.
+
+Arguments:
+  url           deployment or tenant URL to sign out of (e.g.
+                https://cupboard.example.workers.dev or .../t/<slug>)
+
+Options:
+  --all         delete every cached session
+  --cloudflare  also delete the cached Cloudflare sign-in, which `login` and
+                `init` share
+  -h, --help    display help for command
+
+Sessions are deleted from this machine only, because cupboard has no
+endpoint that revokes a refresh token. A copy of a tenant session
+taken elsewhere can be renewed until its refresh token expires, up to
+30 days after sign-in. A deployment session has no refresh token, and
+its access token expires ten minutes after sign-in.
+
+To end your access to a tenant on the server, a tenant administrator
+removes the trust rule that admits you. Renewal then stops, and the
+current access token expires within ten minutes.
+
+While a Cloudflare sign-in is cached, later commands can use it to
+start a new session without a browser; pass --cloudflare to remove it.
+
+Examples:
+  cupboard logout https://cupboard.example.workers.dev/t/acme
+  cupboard logout --all --cloudflare
+```
+
+### cupboard whoami
+
+```text
+Usage: cupboard whoami [options] [url]
+
+Show who the cached sessions sign in as or, with --provider, the identity a
+trust rule must match to admit you.
+
+Arguments:
+  url                     deployment or tenant URL whose session to show
+                          (default: every cached session)
+
+Options:
+  --provider              sign in with the identity provider without contacting
+                          cupboard, and show the claims a trust rule matches
+                          (implied by the options below)
+  --oidc-issuer <issuer>  OIDC issuer URL (default:
+                          "https://dash.cloudflare.com")
+  --client-id <id>        registered public OAuth client id (PKCE, no client
+                          secret) (default: "6c915db1f16ece47255821ee6ca1d538")
+  --headless              use the device flow instead of opening a browser (for
+                          SSH/containers)
+  -h, --help              display help for command
+
+Without --provider, whoami reads only the cached sessions and sends
+nothing over the network. With it, whoami signs in exactly as `login`
+does, but never sends the ID token to cupboard: send the issuer,
+audience and subject it prints to a tenant administrator.
+
+Claims are decoded locally and their signatures are not checked; the
+output is for display, and the server verifies every token it is given.
+
+Examples:
+  # Who are my cached sessions signed in as?
+  cupboard whoami
+
+  # What identity would a trust rule need to match for me?
+  cupboard whoami --provider
+
+  # The same, for another OpenID Connect provider
+  cupboard whoami --oidc-issuer https://idp.example.com --client-id <id>
 ```
 
 ### cupboard attest

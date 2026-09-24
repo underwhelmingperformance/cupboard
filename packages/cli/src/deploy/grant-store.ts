@@ -5,6 +5,8 @@ import { z } from 'zod';
 import {
 	configDirectory,
 	readSecretFile,
+	type Removal,
+	removeSecretFile,
 	writeSecretFile
 } from '../auth/secret-file.ts';
 import { withSecretFileLock } from '../auth/secret-lock.ts';
@@ -86,4 +88,16 @@ export async function writeCachedGrant(
 	};
 
 	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`, signal);
+}
+
+/**
+ * Deletes the cached Cloudflare grant under its renewal lock, so a concurrent
+ * refresh cannot write it back.
+ */
+export async function removeCachedGrant(
+	signal?: AbortSignal
+): Promise<Removal> {
+	const file = grantFilePath();
+
+	return withCachedGrantLock(() => removeSecretFile(file), signal);
 }

@@ -4,7 +4,7 @@ import {
 	subjectTokenTypeIdToken,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 
 import {
 	DeviceAuthorizationRequestError,
@@ -289,11 +289,38 @@ export async function cacheLoginSession(
 	);
 }
 
+/**
+ * The identity-provider options of `login` and `whoami`, so both commands
+ * accept the same options with the same defaults. Each option in `implies`
+ * is set when any of these options is given.
+ */
+export function identityLoginOptions(
+	implies?: Readonly<Record<string, boolean>>
+): readonly Option[] {
+	const options = [
+		new Option('--oidc-issuer <issuer>', 'OIDC issuer URL').default(
+			cloudflareDashIssuer
+		),
+		new Option(
+			'--client-id <id>',
+			'registered public OAuth client id (PKCE, no client secret)'
+		).default(cloudflareOauthClientId),
+		new Option(
+			'--headless',
+			'use the device flow instead of opening a browser (for SSH/containers)'
+		)
+	];
+
+	return implies === undefined
+		? options
+		: options.map((option) => option.implies(implies));
+}
+
 export function registerLoginCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
 ): void {
-	program
+	const command = program
 		.command('login')
 		.description(
 			'Authenticate as the owner via OIDC and cache an admin access token.'
@@ -303,55 +330,50 @@ export function registerLoginCommand(
 			'deployment or tenant URL to sign in to ' +
 				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)',
 			parseWorkerUrl
-		)
-		.option('--oidc-issuer <issuer>', 'OIDC issuer URL', cloudflareDashIssuer)
-		.option(
-			'--client-id <id>',
-			'registered public OAuth client id (PKCE, no client secret)',
-			cloudflareOauthClientId
-		)
-		.option(
-			'--headless',
-			'use the device flow instead of opening a browser (for SSH/containers)'
-		)
-		.action(async (url: URL, options: IdentityLoginOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
-			const client = CupboardClient.fromUrl(url, {
-				cache: { kind: 'default' },
-				signal: programOptions.signal
-			});
-			const scope = loginScopeForClient(options.clientId);
+		);
 
-			// Login is interactive, so its prompts are shown the moment they happen,
-			// not held behind a spinner the user is meant to act on.
-			const idToken = await loginIdToken(options, {
-				openBrowser: (target) => {
-					openBrowser(target, reporter);
-				},
-				info: (message) => {
-					reporter.info(message);
-				},
-				signal: programOptions.signal
-			});
+	for (const option of identityLoginOptions()) {
+		command.addOption(option);
+	}
 
-			const exchanged = await client.tokenExchange(
-				idToken,
-				subjectTokenTypeIdToken
-			);
-			await cacheLoginSession(exchanged, url, programOptions.signal);
-
-			const target = canonicalHref(url);
-
-			const storedIn = tokensDirectory();
-
-			reporter.result({
-				kind: 'login',
-				data: { url: target, scope, storedIn },
-				rows: [
-					{ label: 'Cache URL', value: target },
-					{ label: 'Session', value: 'admin token cached' },
-					{ label: 'Stored', value: storedIn }
-				]
-			});
+	command.action(async (url: URL, options: IdentityLoginOptions) => {
+		const reporter = commandUi(program, programOptions).reporter();
+		const client = CupboardClient.fromUrl(url, {
+			cache: { kind: 'default' },
+			signal: programOptions.signal
 		});
+		const scope = loginScopeForClient(options.clientId);
+
+		// Login is interactive, so its prompts are shown the moment they happen,
+		// not held behind a spinner the user is meant to act on.
+		const idToken = await loginIdToken(options, {
+			openBrowser: (target) => {
+				openBrowser(target, reporter);
+			},
+			info: (message) => {
+				reporter.info(message);
+			},
+			signal: programOptions.signal
+		});
+
+		const exchanged = await client.tokenExchange(
+			idToken,
+			subjectTokenTypeIdToken
+		);
+		await cacheLoginSession(exchanged, url, programOptions.signal);
+
+		const target = canonicalHref(url);
+
+		const storedIn = tokensDirectory();
+
+		reporter.result({
+			kind: 'login',
+			data: { url: target, scope, storedIn },
+			rows: [
+				{ label: 'Cache URL', value: target },
+				{ label: 'Session', value: 'admin token cached' },
+				{ label: 'Stored', value: storedIn }
+			]
+		});
+	});
 }
