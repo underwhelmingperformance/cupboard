@@ -131,12 +131,15 @@ export type ConfirmOutcome = 'yes' | 'no' | 'cancelled';
 export interface ConfirmOptions {
 	readonly message: string;
 	/**
-	Extra context shown above the prompt, e.g. what is about to be removed.
+	Extra context, such as the consequence of proceeding. It is shown above the
+	prompt. When `assumeYes` applies, the detail is reported after the message.
 	*/
 	readonly detail?: string;
 	/**
-	 * Proceed without asking. A non-interactive run resolves `yes` only when this
-	 * is set, so a piped or CI invocation never blocks on a prompt it cannot show.
+	 * Proceed without asking, whether or not the run can prompt. When this is
+	 * undefined, the `assumeYes` option of `createCliUi` decides. If the effective
+	 * `assumeYes` value is false, an interactive run prompts and a
+	 * non-interactive run throws {@link ConfirmationRequiredError}.
 	 */
 	readonly assumeYes?: boolean;
 }
@@ -399,13 +402,18 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async confirm(request) {
-			if (isInteractiveRun) {
-				return confirmInteractive(request, output);
-			}
-
 			if (request.assumeYes ?? isAssumeYesDefault) {
 				reporter.info(`${request.message} (proceeding: --yes)`);
+
+				if (request.detail !== undefined) {
+					reporter.info(request.detail);
+				}
+
 				return 'yes';
+			}
+
+			if (isInteractiveRun) {
+				return confirmInteractive(request, output);
 			}
 
 			throw new ConfirmationRequiredError(request.message);

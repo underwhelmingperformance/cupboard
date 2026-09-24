@@ -4,7 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { Writable } from 'node:stream';
 
-import { S_BAR, S_ERROR } from '@clack/prompts';
+import { S_BAR, S_ERROR, S_INFO } from '@clack/prompts';
 import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
 import pc from 'picocolors';
 import { describe, expect, it, vi } from 'vitest';
@@ -139,6 +139,12 @@ function machineUi(overrides: Partial<CliUiOptions> = {}): {
 	return { ui, out: payload.written, stream: diagnostics.written };
 }
 
+const retireKeyConfirmation = {
+	message: 'Retire signing key cupboard-acme-1?',
+	detail:
+		'A client that trusts only this key will reject newly committed narinfos.'
+} as const;
+
 describe('createCliUi confirm', () => {
 	it('throws when non-interactive without --yes', async () => {
 		const { ui } = machineUi();
@@ -167,6 +173,65 @@ describe('createCliUi confirm', () => {
 		const { ui } = machineUi({ assumeYes: true });
 
 		expect(await ui.confirm({ message: 'Remove tenant acme?' })).toBe('yes');
+	});
+
+	it.each([{ interactive: true }, { interactive: false }])(
+		'reports the detail after the proceeding line in JSON mode with --yes when interactive=$interactive',
+		async ({ interactive }) => {
+			const { ui, out, stream } = machineUi({ interactive, assumeYes: true });
+
+			const outcome = await ui.confirm(retireKeyConfirmation);
+
+			expect({
+				outcome,
+				out: out(),
+				events: stream()
+					.trim()
+					.split('\n')
+					.map((line): unknown => JSON.parse(line))
+			}).toStrictEqual({
+				outcome: 'yes',
+				out: '',
+				events: [
+					{
+						event: 'info',
+						message: 'Retire signing key cupboard-acme-1? (proceeding: --yes)'
+					},
+					{ event: 'info', message: retireKeyConfirmation.detail }
+				]
+			});
+		}
+	);
+
+	it('skips the prompt at an interactive terminal with --yes', async () => {
+		const stream = captureStream();
+		const out = captureStream();
+		const ui = createCliUi({
+			mode: 'terminal' satisfies ReporterMode,
+			interactive: true,
+			assumeYes: true,
+			colour: false,
+			stream: stream.stream,
+			out: out.stream
+		});
+
+		const outcome = await ui.confirm(retireKeyConfirmation);
+
+		expect({
+			outcome,
+			out: out.written(),
+			rendered: withoutStyling(stream.written()).split('\n')
+		}).toStrictEqual({
+			outcome: 'yes',
+			out: '',
+			rendered: [
+				S_BAR,
+				`${S_INFO}  Retire signing key cupboard-acme-1? (proceeding: --yes)`,
+				S_BAR,
+				`${S_INFO}  ${retireKeyConfirmation.detail}`,
+				''
+			]
+		});
 	});
 });
 
