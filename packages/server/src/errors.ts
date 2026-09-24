@@ -489,9 +489,24 @@ export class TenantRetiredError extends ServerHttpError {
 	}
 }
 
+// Removal has begun: the hourly job is draining the tenant and it can only
+// finish as offboarded. Suspending or resuming it would move it out of the
+// state the drain selects, and a resume would reactivate it partway through,
+// so both are refused. The `id` field matches the contract error's data.
+export class TenantOffboardingError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: TenantId) {
+		super(
+			`Tenant '${id}' is being removed; it can no longer be suspended or resumed`
+		);
+		this.name = 'TenantOffboardingError';
+	}
+}
+
 // Resume changes only a suspended tenant to active. An active tenant returns a
-// conflict. An offboarding or offboarded tenant returns
-// `TenantRetiredError`.
+// conflict, an offboarding tenant `TenantOffboardingError`, and an offboarded
+// tenant `TenantRetiredError`.
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

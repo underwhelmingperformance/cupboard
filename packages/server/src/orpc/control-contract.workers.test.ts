@@ -312,6 +312,41 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('refuses to suspend or resume a tenant being removed with TENANT_OFFBOARDING', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		await client.tenants.remove({ id: 'acme' });
+		const [suspendError] = await safe(client.tenants.suspend({ id: 'acme' }));
+		const [resumeError] = await safe(client.tenants.resume({ id: 'acme' }));
+		const listed = await client.tenants.list();
+
+		expect({
+			suspend: suspendError,
+			resume: resumeError
+		}).toMatchObject({
+			suspend: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			},
+			resume: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			}
+		});
+		expect(listed.tenants.find((entry) => entry.id === 'acme')?.status).toBe(
+			'offboarding'
+		);
+	});
+
 	it.each([
 		'https://idp.test?',
 		'https://idp.test#',

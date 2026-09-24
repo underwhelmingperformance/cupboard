@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	QuotaExceededError,
 	ScopeForbiddenError,
-	SessionRejectedError
+	SessionRejectedError,
+	TenantRemovalInProgressError
 } from '../errors.ts';
 
 import { isRpcNotFoundError, translateRpcError } from './rpc-errors.ts';
@@ -49,6 +50,31 @@ describe('translateRpcError', () => {
 			}).toStrictEqual({
 				name: 'QuotaExceededError',
 				detail: 'Cache builds is over its 10 GB quota.'
+			});
+		}
+	});
+
+	it('names the tenant when it refuses a status change during removal', () => {
+		const translated = translateRpcError(
+			new ORPCError('TENANT_OFFBOARDING', {
+				status: 409,
+				message: 'raw',
+				data: { id: 'beta' }
+			})
+		);
+
+		expect(translated).toBeInstanceOf(TenantRemovalInProgressError);
+
+		if (translated instanceof TenantRemovalInProgressError) {
+			expect({
+				tenant: translated.tenant,
+				message: translated.message
+			}).toStrictEqual({
+				tenant: 'beta',
+				message:
+					'Tenant beta is being removed, so it cannot be suspended or ' +
+					'resumed. Removal cannot be undone; `cupboard tenant list` shows ' +
+					'its progress.'
 			});
 		}
 	});

@@ -25,6 +25,7 @@ import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
+	TenantOffboardingError,
 	TenantRetiredError
 } from '../errors.ts';
 import {
@@ -651,6 +652,41 @@ describe('tenant registry', () => {
 		});
 	});
 
+	it('refuses to suspend a tenant being removed and leaves it in removal', async () => {
+		await provision(createBody(acme));
+		await setTenantStatus(database(), acme, 'offboarding');
+
+		const rejected = await rejectedBy(() =>
+			setTenantStatus(database(), acme, 'suspended')
+		);
+		const resumeRejected = await rejectedBy(() =>
+			resumeTenant(database(), acme)
+		);
+		const stored = await database()
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+
+		expect({
+			suspend: errorFields(rejected),
+			resume: errorFields(resumeRejected),
+			stored: stored?.status
+		}).toStrictEqual({
+			suspend: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				id: acme
+			},
+			resume: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				id: acme
+			},
+			stored: 'offboarding'
+		});
+	});
+
 	it('refuses to re-provision a slug that has begun offboarding', async () => {
 		await provision(createBody(acme, 'private'));
 		await setTenantStatus(database(), acme, 'offboarding');
@@ -787,6 +823,20 @@ describe('tenant lifecycle operations', () => {
 			setup: async () => {
 				await ensureTenant(database(), createBody(acme), now);
 				await setTenantStatus(database(), acme, 'offboarding');
+			},
+			error: TenantOffboardingError,
+			fields: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				id: acme
+			}
+		},
+		{
+			name: 'offboarded',
+			setup: async () => {
+				await ensureTenant(database(), createBody(acme), now);
+				await setTenantStatus(database(), acme, 'offboarding');
+				await finaliseOffboardedTenant(database(), acme);
 			},
 			error: TenantRetiredError,
 			fields: {

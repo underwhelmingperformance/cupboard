@@ -1,12 +1,18 @@
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import {
 	CupboardHttpError,
 	QuotaExceededError,
 	ScopeForbiddenError,
-	SessionRejectedError
+	SessionRejectedError,
+	TenantRemovalInProgressError
 } from '../errors.ts';
+
+// The data the control contract declares for `TENANT_OFFBOARDING`.
+const tenantOffboardingDataSchema = z.object({ id: tenantIdSchema });
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
@@ -47,8 +53,8 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
- * Converts authentication, scope and `INSUFFICIENT_STORAGE` failures into CLI
- * errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
+ * Converts authentication, scope, `INSUFFICIENT_STORAGE` and
+ * `TENANT_OFFBOARDING` failures into CLI errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
  * their callers can inspect them. Non-oRPC errors also pass through unchanged.
  */
 export function translateRpcError(error: unknown): unknown {
@@ -67,6 +73,14 @@ export function translateRpcError(error: unknown): unknown {
 
 		case 'INSUFFICIENT_STORAGE': {
 			return new QuotaExceededError(error.message);
+		}
+
+		case 'TENANT_OFFBOARDING': {
+			const data = tenantOffboardingDataSchema.safeParse(error.data);
+
+			return data.success
+				? new TenantRemovalInProgressError(data.data.id)
+				: error;
 		}
 
 		default: {

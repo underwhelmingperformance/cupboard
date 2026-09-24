@@ -503,6 +503,21 @@ export class QuotaExceededError extends CliError {
 	}
 }
 
+/**
+The operator tried to suspend or resume a tenant whose removal has begun.
+Removal runs to completion, so the tenant can only finish as offboarded.
+*/
+export class TenantRemovalInProgressError extends CliError {
+	constructor(public readonly tenant: string) {
+		super(
+			`Tenant ${tenant} is being removed, so it cannot be suspended or ` +
+				'resumed. Removal cannot be undone; `cupboard tenant list` shows ' +
+				'its progress.'
+		);
+		this.name = 'TenantRemovalInProgressError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	readonly oauthError: OAuthErrorResponse | undefined;
 

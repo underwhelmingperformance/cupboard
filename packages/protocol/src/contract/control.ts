@@ -4,6 +4,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
@@ -50,6 +51,15 @@ const controlProcedure = oc
 		UNAUTHORIZED: {},
 		FORBIDDEN: {}
 	});
+
+// Removal has begun and can only run to completion, so a status change that
+// would move the tenant out of it is refused.
+const tenantOffboardingError = {
+	TENANT_OFFBOARDING: {
+		status: StatusCodes.CONFLICT,
+		data: z.strictObject({ id: tenantIdSchema })
+	}
+};
 
 /**
  * The administrative API served under `/control` on the bare host. Paths in
@@ -115,6 +125,7 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/suspend' })
 			.input(z.strictObject({ id: tenantIdSchema }))
+			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
 		resume: controlProcedure
@@ -124,6 +135,7 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/resume' })
 			.input(z.strictObject({ id: tenantIdSchema }))
+			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
 		// Both rotations write a verifier built from the password in the request,

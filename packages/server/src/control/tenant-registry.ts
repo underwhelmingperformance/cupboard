@@ -13,6 +13,7 @@ import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
 	TenantCreateBody,
 	TenantReadCredential,
+	TenantStatus,
 	TenantSummary
 } from '@cupboard/protocol/tenants';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -20,7 +21,7 @@ import {
 	and,
 	eq,
 	exists,
-	ne,
+	inArray,
 	notExists,
 	notInArray,
 	type SQL,
@@ -36,6 +37,7 @@ import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
+	TenantOffboardingError,
 	TenantRetiredError,
 	TenantUsageRepairRequiredError
 } from '../errors.ts';
@@ -424,6 +426,18 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
+// The statuses each operator move may start from. Suspension applies only to a
+// live tenant, so it cannot pull an offboarding tenant out of the drain, which
+// selects `offboarding` rows. Offboarding is idempotent, and nothing leaves
+// `offboarded`.
+const statusMoveSources = {
+	suspended: ['active', 'suspended'],
+	offboarding: ['active', 'suspended', 'offboarding']
+} as const satisfies Record<
+	'suspended' | 'offboarding',
+	readonly TenantStatus[]
+>;
+
 // Sets a tenant's status and returns its summary. Every request reads this D1 row
 // before admission, so suspension stops reads and writes as soon as the update
 // commits. Offboarding refuses new work while the bounded drain runs.
@@ -432,14 +446,16 @@ export async function setTenantStatus(
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<TenantSummary> {
-	// The conditional update cannot move an offboarded tenant back to offboarding.
-	// If it matches no row, the following read distinguishes a missing tenant from
-	// an offboarded one.
+	// The conditional update moves only a tenant in one of the permitted source
+	// statuses. If it matches no row, the following read says why.
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
 		.where(
-			and(eq(d1Schema.tenant.id, id), ne(d1Schema.tenant.status, 'offboarded'))
+			and(
+				eq(d1Schema.tenant.id, id),
+				inArray(d1Schema.tenant.status, statusMoveSources[status])
+			)
 		)
 		.returning();
 	const row = updated[0];
@@ -458,11 +474,15 @@ export async function setTenantStatus(
 		return toSummary(existing);
 	}
 
+	if (existing.status === 'offboarding') {
+		throw new TenantOffboardingError(id);
+	}
+
 	throw new TenantRetiredError(id);
 }
 
 // Only a suspended tenant can return to active. An active tenant is a conflict,
-// while an offboarding or retired tenant remains terminal.
+// a tenant being removed stays in removal, and an offboarded tenant is terminal.
 export async function resumeTenant(
 	database: Database,
 	id: TenantId
@@ -486,7 +506,11 @@ export async function resumeTenant(
 		throw new TenantNotFoundError(id);
 	}
 
-	if (existing.status === 'offboarding' || existing.status === 'offboarded') {
+	if (existing.status === 'offboarding') {
+		throw new TenantOffboardingError(id);
+	}
+
+	if (existing.status === 'offboarded') {
 		throw new TenantRetiredError(id);
 	}
 
