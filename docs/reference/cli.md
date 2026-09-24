@@ -307,7 +307,7 @@ Options:
   --trusted-public-key <key>               Require the remote narinfo to carry a signature from this public key. Cannot be used with --trust-cache-pubkey.
   --trust-cache-pubkey                     Fetch /pubkey from the cache and trust it for the remote narinfo signature. Cannot be used with --trusted-public-key.
   --predicate-type <type>                  Require this in-toto predicate type on every verified bundle.
-  --trusted-root <path>                    Verify against the Sigstore trust roots in this trusted_root.json file. Defaults to the public Sigstore roots; pass the roots that `gh attestation trusted-root` writes to verify a bundle signed with GitHub's Sigstore instance.
+  --trusted-root <path>                    Verify against the Sigstore trusted roots in this file: one trusted_root.json document, or JSON Lines with one root per line, as `gh attestation trusted-root` writes. A bundle verifies if any root verifies it. Defaults to the public Sigstore roots; pass the output of `gh attestation trusted-root` to verify a bundle signed with GitHub's Sigstore instance.
   --tlog-threshold <count>                 Require this many Rekor transparency-log entries. Defaults to the Sigstore verifier policy, which requires one; pass 0 for a bundle signed with GitHub's Sigstore instance, which creates no Rekor entry.
   --ctlog-threshold <count>                Require this many certificate-transparency log entries. Defaults to the Sigstore verifier policy.
   --timestamp-threshold <count>            Require this many verified signed timestamps. Defaults to the Sigstore verifier policy.
