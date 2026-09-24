@@ -1008,8 +1008,10 @@ Commands:
                                trusts.
   show <url> <id>              Show one trust rule in full: the token it accepts
                                and the access it grants.
-  add [options] <url>          Add a trust rule by hand: the issuer and claims a
-                               token must carry, and the access to grant.
+  add [options] <url>          Add a control-plane trust rule from a JSON file:
+                               the issuer, audience and claims a token must
+                               carry, including the sub claim, and the grants it
+                               may exchange for.
   remove [options] <url> <id>  Disable a trust rule by id, so the CI it trusts
                                can no longer authenticate.
   help [command]               display help for command
@@ -1049,47 +1051,30 @@ Options:
 ```text
 Usage: cupboard control-oidc-trust add [options] <url>
 
-Add a trust rule by hand: the issuer and claims a token must carry, and the
-access to grant.
+Add a control-plane trust rule from a JSON file: the issuer, audience and claims
+a token must carry, including the sub claim, and the grants it may exchange for.
 
 Arguments:
-  url                          deployment URL (e.g.
-                               https://cupboard.example.workers.dev)
+  url                 deployment URL (e.g. https://cupboard.example.workers.dev)
 
 Options:
-  --issuer <issuer>            OIDC issuer URL
-  --audience <audience>        expected token audience
-  --claim <key=value>          a claim the token must match exactly (repeatable)
-                               (default: [])
-  --job-workflow-ref <ref>     pin the job_workflow_ref claim: the workflow file
-                               and ref allowed to push
-  --allow <action>             an action set the rule may exchange for: push,
-                               attest, root, attach, create, or remove
-                               (repeatable) (default: [])
-  --cache <name>               an exact cache the grant is scoped to (default:
-                               the tenant default cache)
-  --cache-template <template>  a cache template such as "pr-{pr}", rendered from
-                               captures
-  --root <name>                an exact root the grant may set
-  --root-template <template>   a root template rendered from captures
-  --capture <claim=pattern>    a named-group capture binding template variables
-                               to a claim (repeatable) (default: [])
-  --template-source <name>     a built-in capture source: github-pr (binds
-                               {repository_id} and {pr}) or github-tag (binds
-                               {tag}) from token claims
-  --from-file <path>           read the rule body (permitted grants and claims)
-                               from a JSON file
-  -h, --help                   display help for command
+  --from-file <path>  read the rule (issuer, audience, claims and permitted
+                      grants) from a JSON file
+  -h, --help          display help for command
 
 Example:
-  # Trust a reusable workflow to push to a per-PR cache it cannot
-  # escape, keyed on the job_workflow_ref claim
-  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
-    --issuer https://token.actions.githubusercontent.com \
-    --audience https://cupboard.example.workers.dev/t/acme \
-    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \
-    --allow push --allow root --template-source github-pr \
-    --cache-template pr-{pr} --root-template pr-{pr}
+  # Let another operator sign in with their Cloudflare account; a
+  # control-plane rule must pin the sub claim
+  cat > operator.json <<'EOF'
+  {
+    "issuer": "https://dash.cloudflare.com",
+    "audience": "6c915db1f16ece47255821ee6ca1d538",
+    "claims": { "sub": "<their subject>" },
+    "permittedGrants": [{ "type": "cupboard_wildcard" }]
+  }
+  EOF
+  cupboard control-oidc-trust add https://cupboard.example.workers.dev \
+    --from-file operator.json
 ```
 
 #### cupboard control-oidc-trust remove

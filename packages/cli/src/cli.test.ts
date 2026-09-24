@@ -477,6 +477,72 @@ describe('command help', () => {
 		);
 	});
 
+	// A control-plane rule grants control, tenant or wildcard authority, which
+	// has no flags, so its `add` reads the whole rule from a file and offers
+	// none of the tenant rule's cache, root or template flags.
+	it.each([
+		{
+			path: ['control-oidc-trust', 'add'],
+			shown: [
+				'--from-file <path>',
+				'cupboard control-oidc-trust add https://cupboard.example.workers.dev \\',
+				'"permittedGrants": [{ "type": "cupboard_wildcard" }]'
+			],
+			hidden: [
+				'--issuer',
+				'--audience',
+				'--claim',
+				'--allow',
+				'--cache',
+				'--root',
+				'--capture',
+				'--template-source',
+				'/t/acme'
+			]
+		},
+		{
+			path: ['oidc-trust', 'add'],
+			shown: [
+				'--issuer <issuer>',
+				'--allow <action>',
+				'--cache <name>',
+				'--cache-template <template>',
+				'--template-source <name>',
+				'--from-file <path>',
+				'cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme'
+			],
+			hidden: ['control-oidc-trust']
+		}
+	])(
+		'shows only the options that apply to $path',
+		({ path, shown, hidden }) => {
+			const help = helpFor(path);
+
+			expect({
+				shown: shown.filter((text) => !help.includes(text)),
+				hidden: hidden.filter((text) => help.includes(text))
+			}).toStrictEqual({ shown: [], hidden: [] });
+		}
+	);
+
+	it('offers no GitHub presets for control-plane trust rules', () => {
+		const help = helpFor(['control-oidc-trust']);
+
+		expect(help).not.toContain('add-github');
+	});
+
+	it('requires --from-file for a control-plane trust rule', async () => {
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'control-oidc-trust',
+				'add',
+				'https://cupboard.example.workers.dev'
+			])
+		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
+	});
+
 	it('shows local and remote examples for attest verify', () => {
 		const help = helpFor(['attest', 'verify']);
 
