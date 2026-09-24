@@ -12,6 +12,8 @@ import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
 	TenantCreateBody,
+	TenantQuota,
+	TenantQuotaResponse,
 	TenantReadCredential,
 	TenantStatus,
 	TenantSummary
@@ -22,6 +24,7 @@ import {
 	eq,
 	exists,
 	inArray,
+	lte,
 	notExists,
 	notInArray,
 	type SQL,
@@ -38,7 +41,9 @@ import {
 	TenantNotFoundError,
 	TenantNotSuspendedError,
 	TenantOffboardingError,
+	TenantQuotaBelowUsageError,
 	TenantRetiredError,
+	TenantUsageMissingError,
 	TenantUsageRepairRequiredError
 } from '../errors.ts';
 import { cacheCatalogueVersion } from '../migration/cache-access.ts';
@@ -515,6 +520,78 @@ export async function resumeTenant(
 	}
 
 	throw new TenantNotSuspendedError(id);
+}
+
+/**
+ * Sets or removes a live tenant's storage quota and returns it with the charged
+ * bytes it counts against. The usage row holds the quota that every charge's D1
+ * batch checks, so the next charge sees the new value. A limit below the charged
+ * bytes is refused, because the row's CHECK forbids usage above the quota.
+ */
+export async function setTenantQuota(
+	database: Database,
+	id: TenantId,
+	quota: TenantQuota,
+	now: IsoTimestamp
+): Promise<TenantQuotaResponse> {
+	const usedBytes = sql<number>`${d1Schema.tenantUsage.bytes} + ${d1Schema.tenantUsage.casBytes}`;
+	const liveTenantRow = database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(liveTenantFilter(id));
+	const isLimited = quota.kind === 'limited';
+	// Only a limit has to hold the charged bytes.
+	const fitsQuota = isLimited ? lte(usedBytes, quota.bytes) : undefined;
+	const usageOfTenant = eq(d1Schema.tenantUsage.tenant, id);
+	// The UPDATE checks the tenant's status and its usage itself, and the read
+	// that follows runs in the same D1 transaction, so it explains a refusal
+	// from the state the UPDATE saw.
+	const update = database
+		.update(d1Schema.tenantUsage)
+		.set({
+			quotaBytes: isLimited ? quota.bytes : sql`null`,
+			updatedAt: now
+		})
+		.where(and(usageOfTenant, fitsQuota, exists(liveTenantRow)))
+		.returning({ usedBytes });
+	const usageJoin = eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id);
+	const observe = database
+		.select({
+			status: d1Schema.tenant.status,
+			usageTenant: d1Schema.tenantUsage.tenant,
+			usedBytes
+		})
+		.from(d1Schema.tenant)
+		.leftJoin(d1Schema.tenantUsage, usageJoin)
+		.where(eq(d1Schema.tenant.id, id));
+	const [updated, observed] = await database.batch([update, observe]);
+	const row = updated[0];
+
+	if (row !== undefined) {
+		return { id, quota, usedBytes: row.usedBytes };
+	}
+
+	const tenant = observed[0];
+
+	if (tenant === undefined) {
+		throw new TenantNotFoundError(id);
+	}
+
+	if (tenant.status === 'offboarding') {
+		throw new TenantOffboardingError(id);
+	}
+
+	if (tenant.status === 'offboarded') {
+		throw new TenantRetiredError(id);
+	}
+
+	if (tenant.usageTenant === null) {
+		throw new TenantUsageMissingError(id);
+	}
+
+	// Every other row the UPDATE skipped is a live tenant whose usage is above
+	// the requested limit; clearing the quota has no such condition.
+	throw new TenantQuotaBelowUsageError(id, tenant.usedBytes);
 }
 
 /**

@@ -16,6 +16,7 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	QuotaExceededError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
 } from '../errors.ts';
@@ -371,7 +372,7 @@ describe('runCommitSession', () => {
 		socket.emit('open');
 		socket.emit(
 			'message',
-			frame({ ev: 'error', uploadId, status: 507, message: 'over quota' })
+			frame({ ev: 'error', uploadId, status: 409, message: 'conflict' })
 		);
 
 		const error = await rejectedBy(settled, CupboardHttpError);
@@ -386,9 +387,26 @@ describe('runCommitSession', () => {
 			name: 'CupboardHttpError',
 			method: 'GET',
 			path,
-			status: 507,
-			body: 'over quota'
+			status: 409,
+			body: 'conflict'
 		});
+	});
+
+	it('rejects an over-quota error frame with the quota error and its advice', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit(target);
+
+		socket.emit('open');
+		socket.emit(
+			'message',
+			frame({ ev: 'error', uploadId, status: 507, message: 'over quota' })
+		);
+
+		const error = await rejectedBy(settled, QuotaExceededError);
+
+		expect(error.detail).toBe('over quota');
+		expect(error.message).toContain('`cupboard tenant set-quota`');
 	});
 
 	it.each([503, 429])(

@@ -23,6 +23,7 @@ import {
 	controlTenantResume,
 	controlTenantRotateCacheReadCredential,
 	controlTenantRotateReadCredential,
+	controlTenantSetQuota,
 	controlTenantSuspend
 } from '../control/control-plane.ts';
 import { controlDeploymentPhase } from '../control/deployment-phase.ts';
@@ -96,6 +97,9 @@ export const controlRouter = os.router({
 		),
 		resume: os.tenants.resume.handler(({ input, context }) =>
 			controlTenantResume(context.env, input.id)
+		),
+		setQuota: os.tenants.setQuota.handler(({ input, context }) =>
+			controlTenantSetQuota(context.env, input.id, input.quota)
 		),
 		rotateReadCredential: os.tenants.rotateReadCredential.handler(
 			({ input, context }) =>

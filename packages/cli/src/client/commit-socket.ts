@@ -30,6 +30,7 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	QuotaExceededError,
 	TokenProviderError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
@@ -223,6 +224,10 @@ const maxTimerDelayMs = 2 ** 31 - 1;
 // frame is written by the tenant's own object, which reports every transient
 // condition of its own as one of these two.
 const retryableErrorStatuses = new Set([429, 503]);
+
+// The status the server gives a commit that would take the tenant over its
+// storage quota.
+const overQuotaStatus = 507;
 
 // Cap `Retry-After` above the reconnect back-off ceiling so valid server delays
 // still take effect, but an unbounded value cannot consume the whole capacity
@@ -1169,12 +1174,10 @@ export function runCommitSession(
 				noteCapacityProgress();
 
 				finishEntry(errorUploadId, (finishing) => {
-					const error = new CupboardHttpError(
-						'GET',
-						options.path,
-						status,
-						message
-					);
+					const error =
+						status === overQuotaStatus
+							? new QuotaExceededError(message)
+							: new CupboardHttpError('GET', options.path, status, message);
 
 					if (finishing.acked) {
 						finishing.settleFailed(error);

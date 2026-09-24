@@ -1,3 +1,4 @@
+import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
 	genericExitCode,
@@ -491,30 +492,63 @@ export class ScopeForbiddenError extends CliError {
 	}
 }
 
+// The quota is the tenant's, set by the operator. Deleting a path frees its
+// bytes once no other path in the tenant uses them; removing a root leaves the
+// paths it kept for garbage collection to reclaim.
+const overQuotaAdvice =
+	"Ask the deployment's operator to raise the tenant's quota " +
+	'(`cupboard tenant set-quota`), or free space: delete paths you no longer ' +
+	'need (`cupboard delete`), or remove roots (`cupboard root remove`) and ' +
+	'let garbage collection reclaim what they kept.';
+
+// The server's own explanation, ended as a sentence so the advice can follow.
+function quotaExplanation(detail: string): string {
+	const trimmed = detail.trim();
+
+	if (trimmed === '') {
+		return "The upload would exceed the tenant's storage quota.";
+	}
+
+	return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+}
+
 export class QuotaExceededError extends CliError {
 	constructor(public readonly detail: string) {
-		const explanation =
-			detail === '' ? 'The cache is over its storage quota.' : detail;
-
-		super(
-			`${explanation} Free space by deleting unused paths or raise the quota.`
-		);
+		super(`${quotaExplanation(detail)} ${overQuotaAdvice}`);
 		this.name = 'QuotaExceededError';
 	}
 }
 
 /**
-The operator tried to suspend or resume a tenant whose removal has begun.
-Removal runs to completion, so the tenant can only finish as offboarded.
+The operator tried to suspend, resume or change the quota of a tenant whose
+removal has begun. Removal runs to completion, so the tenant can only finish
+as offboarded.
 */
 export class TenantRemovalInProgressError extends CliError {
 	constructor(public readonly tenant: string) {
 		super(
-			`Tenant ${tenant} is being removed, so it cannot be suspended or ` +
-				'resumed. Removal cannot be undone; `cupboard tenant list` shows ' +
-				'its progress.'
+			`Tenant ${tenant} is being removed, so its status and quota can no ` +
+				'longer be changed. Removal cannot be undone; `cupboard tenant list` ' +
+				'shows its progress.'
 		);
 		this.name = 'TenantRemovalInProgressError';
+	}
+}
+
+/**
+The operator asked for a quota below what the tenant already stores.
+*/
+export class QuotaBelowUsageError extends CliError {
+	constructor(
+		public readonly tenant: string,
+		public readonly usedBytes: number
+	) {
+		super(
+			`Tenant ${tenant} already stores ${formatBytes(usedBytes)} ` +
+				`(${String(usedBytes)} bytes), more than the requested quota. ` +
+				'Choose a larger quota, or free space first.'
+		);
+		this.name = 'QuotaBelowUsageError';
 	}
 }
 
@@ -653,7 +687,7 @@ function uploadVerificationMessage(status: UploadVerificationStatus): string {
 		}
 
 		case 'over-quota': {
-			return 'The cache is over its storage quota. Free space by deleting unused paths or raise the quota.';
+			return `An upload would exceed the tenant's storage quota. ${overQuotaAdvice}`;
 		}
 
 		case 'absent': {

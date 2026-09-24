@@ -492,13 +492,14 @@ export class TenantRetiredError extends ServerHttpError {
 // Removal has begun: the hourly job is draining the tenant and it can only
 // finish as offboarded. Suspending or resuming it would move it out of the
 // state the drain selects, and a resume would reactivate it partway through,
-// so both are refused. The `id` field matches the contract error's data.
+// so both are refused, as is a quota change. The `id` field matches the
+// contract error's data.
 export class TenantOffboardingError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor(public readonly id: TenantId) {
 		super(
-			`Tenant '${id}' is being removed; it can no longer be suspended or resumed`
+			`Tenant '${id}' is being removed; its status and quota can no longer be changed`
 		);
 		this.name = 'TenantOffboardingError';
 	}
@@ -526,6 +527,24 @@ export class QuotaExceededError extends ServerHttpError {
 	constructor(public readonly tenant: TenantId) {
 		super("This upload would exceed the tenant's storage quota");
 		this.name = 'QuotaExceededError';
+	}
+}
+
+// An operator asked for a quota below what the tenant already stores. The usage
+// row's CHECK forbids charged bytes above the quota, so the change is refused
+// rather than stranding the tenant over it. The fields match the contract
+// error's data.
+export class TenantQuotaBelowUsageError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly id: TenantId,
+		public readonly usedBytes: number
+	) {
+		super(
+			`Tenant '${id}' already stores ${String(usedBytes)} bytes, more than the requested quota`
+		);
+		this.name = 'TenantQuotaBelowUsageError';
 	}
 }
 

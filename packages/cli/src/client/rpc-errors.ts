@@ -5,14 +5,20 @@ import { z } from 'zod';
 
 import {
 	CupboardHttpError,
+	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
 	TenantRemovalInProgressError
 } from '../errors.ts';
 
-// The data the control contract declares for `TENANT_OFFBOARDING`.
+// The data the control contract declares for `TENANT_OFFBOARDING` and
+// `TENANT_QUOTA_BELOW_USAGE`.
 const tenantOffboardingDataSchema = z.object({ id: tenantIdSchema });
+const quotaBelowUsageDataSchema = z.object({
+	id: tenantIdSchema,
+	usedBytes: z.number().int().nonnegative()
+});
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
@@ -53,8 +59,8 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
- * Converts authentication, scope, `INSUFFICIENT_STORAGE` and
- * `TENANT_OFFBOARDING` failures into CLI errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
+ * Converts authentication, scope, `INSUFFICIENT_STORAGE`, `TENANT_OFFBOARDING`
+ * and `TENANT_QUOTA_BELOW_USAGE` failures into CLI errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
  * their callers can inspect them. Non-oRPC errors also pass through unchanged.
  */
 export function translateRpcError(error: unknown): unknown {
@@ -73,6 +79,14 @@ export function translateRpcError(error: unknown): unknown {
 
 		case 'INSUFFICIENT_STORAGE': {
 			return new QuotaExceededError(error.message);
+		}
+
+		case 'TENANT_QUOTA_BELOW_USAGE': {
+			const data = quotaBelowUsageDataSchema.safeParse(error.data);
+
+			return data.success
+				? new QuotaBelowUsageError(data.data.id, data.data.usedBytes)
+				: error;
 		}
 
 		case 'TENANT_OFFBOARDING': {

@@ -595,6 +595,17 @@ describe('command help', () => {
 		);
 	});
 
+	it('sets a tenant quota in bytes and clears it with its own command', () => {
+		expect(unwrapped(helpFor(['tenant', 'set-quota']))).toContain(
+			"Set a tenant's storage quota; it cannot be below what the tenant " +
+				'already stores.'
+		);
+		expect(helpFor(['tenant', 'set-quota'])).toContain('<bytes>');
+		expect(helpFor(['tenant', 'clear-quota'])).toContain(
+			"Remove a tenant's storage quota, leaving it unlimited."
+		);
+	});
+
 	it('shows the auth options and an example for confirm', () => {
 		const help = helpFor(['confirm']);
 

@@ -8,6 +8,7 @@ import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type TenantCreateBody,
 	tenantCreateBodySchema,
+	type TenantQuota,
 	type TenantReadCredential,
 	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
@@ -45,6 +46,7 @@ import {
 	listTenants,
 	resumeTenant,
 	setCacheReadCredential,
+	setTenantQuota,
 	setTenantReadCredential,
 	setTenantStatus
 } from './tenant-registry.ts';
@@ -1219,4 +1221,159 @@ describe('private cache read credentials', () => {
 			});
 		}
 	);
+});
+
+async function chargeUsage(
+	id: TenantId,
+	bytes: number,
+	casBytes: number
+): Promise<void> {
+	await database()
+		.update(d1Schema.tenantUsage)
+		.set({ bytes, casBytes })
+		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.run();
+}
+
+function limitedTo(bytes: number): TenantQuota {
+	return { kind: 'limited', bytes };
+}
+
+const unlimited: TenantQuota = { kind: 'unlimited' };
+
+describe('setTenantQuota', () => {
+	it('raises, lowers to the charged bytes, and clears a quota', async () => {
+		await provision(quotaBody(acme, 100));
+		await chargeUsage(acme, 60, 20);
+
+		const raised = await setTenantQuota(database(), acme, limitedTo(500), now);
+		const lowered = await setTenantQuota(database(), acme, limitedTo(80), now);
+		const cleared = await setTenantQuota(database(), acme, unlimited, now);
+
+		expect({
+			raised,
+			lowered,
+			cleared,
+			stored: await usageRow(acme)
+		}).toStrictEqual({
+			raised: { id: acme, quota: limitedTo(500), usedBytes: 80 },
+			lowered: { id: acme, quota: limitedTo(80), usedBytes: 80 },
+			cleared: { id: acme, quota: unlimited, usedBytes: 80 },
+			stored: { quotaBytes: undefined }
+		});
+	});
+
+	it('limits a tenant created without a quota', async () => {
+		await provision(createBody(acme));
+
+		const limited = await setTenantQuota(
+			database(),
+			acme,
+			limitedTo(1024),
+			now
+		);
+
+		expect({ limited, stored: await usageRow(acme) }).toStrictEqual({
+			limited: { id: acme, quota: limitedTo(1024), usedBytes: 0 },
+			stored: { quotaBytes: 1024 }
+		});
+	});
+
+	it('refuses a quota below the charged bytes and keeps the old one', async () => {
+		await provision(quotaBody(acme, 100));
+		await chargeUsage(acme, 60, 20);
+
+		const rejected = await rejectedBy(() =>
+			setTenantQuota(database(), acme, limitedTo(79), now)
+		);
+
+		expect({
+			error: {
+				...errorFields(rejected),
+				usedBytes: z.object({ usedBytes: z.number() }).parse(rejected).usedBytes
+			},
+			stored: await usageRow(acme)
+		}).toStrictEqual({
+			error: {
+				name: 'TenantQuotaBelowUsageError',
+				status: StatusCodes.CONFLICT,
+				id: acme,
+				usedBytes: 80
+			},
+			stored: { quotaBytes: 100 }
+		});
+	});
+
+	it('sets the quota of a suspended tenant', async () => {
+		await provision(createBody(acme));
+		await setTenantStatus(database(), acme, 'suspended');
+
+		expect(
+			await setTenantQuota(database(), acme, limitedTo(10), now)
+		).toStrictEqual({
+			id: acme,
+			quota: limitedTo(10),
+			usedBytes: 0
+		});
+	});
+
+	it.each([
+		{
+			name: 'being removed',
+			setup: async () => {
+				await provision(quotaBody(acme, 100));
+				await setTenantStatus(database(), acme, 'offboarding');
+			},
+			fields: {
+				name: 'TenantOffboardingError',
+				status: StatusCodes.CONFLICT,
+				id: acme
+			}
+		},
+		{
+			name: 'offboarded',
+			setup: async () => {
+				await provision(quotaBody(acme, 100));
+				await setTenantStatus(database(), acme, 'offboarding');
+				await finaliseOffboardedTenant(database(), acme);
+			},
+			fields: {
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: acme
+			}
+		},
+		{
+			name: 'missing',
+			setup: () => Promise.resolve(),
+			fields: {
+				name: 'TenantNotFoundError',
+				status: StatusCodes.NOT_FOUND,
+				id: acme
+			}
+		},
+		{
+			name: 'without a usage row',
+			setup: async () => {
+				await provision(createBody(acme));
+				await database()
+					.delete(d1Schema.tenantUsage)
+					.where(eq(d1Schema.tenantUsage.tenant, acme))
+					.run();
+			},
+			fields: {
+				name: 'TenantUsageMissingError',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				tenant: acme
+			}
+		}
+	])('refuses a tenant $name', async ({ setup, fields }) => {
+		await setup();
+
+		const rejected = await rejectedBy(() =>
+			setTenantQuota(database(), acme, limitedTo(1000), now)
+		);
+
+		expect(errorFields(rejected)).toStrictEqual(fields);
+	});
 });

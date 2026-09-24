@@ -38,8 +38,11 @@ import {
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
+	tenantQuotaBytesSchema,
+	tenantQuotaResponseSchema,
 	tenantReadCredentialResponseSchema,
 	tenantReadCredentialSchema,
+	tenantSetQuotaBodySchema,
 	tenantSummarySchema
 } from '../tenants.ts';
 
@@ -52,8 +55,8 @@ const controlProcedure = oc
 		FORBIDDEN: {}
 	});
 
-// Removal has begun and can only run to completion, so a status change that
-// would move the tenant out of it is refused.
+// Removal has begun and can only run to completion, so a status or quota change
+// is refused.
 const tenantOffboardingError = {
 	TENANT_OFFBOARDING: {
 		status: StatusCodes.CONFLICT,
@@ -137,6 +140,27 @@ export const controlContract = {
 			.input(z.strictObject({ id: tenantIdSchema }))
 			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
+
+		// Setting the same quota again leaves the same result, so a retry is safe.
+		setQuota: controlProcedure
+			.meta({
+				requires: 'tenant:set-quota',
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
+			})
+			.route({ method: 'PUT', path: '/tenants/{id}/quota' })
+			.input(tenantSetQuotaBodySchema)
+			.errors({
+				...tenantOffboardingError,
+				TENANT_QUOTA_BELOW_USAGE: {
+					status: StatusCodes.CONFLICT,
+					data: z.strictObject({
+						id: tenantIdSchema,
+						usedBytes: tenantQuotaBytesSchema
+					})
+				}
+			})
+			.output(tenantQuotaResponseSchema),
 
 		// Both rotations write a verifier built from the password in the request,
 		// with a fresh salt each time, so a repeat leaves the same password valid.

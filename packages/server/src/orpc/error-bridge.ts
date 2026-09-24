@@ -15,7 +15,8 @@ import {
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
-	TenantOffboardingError
+	TenantOffboardingError,
+	TenantQuotaBelowUsageError
 } from '../errors.ts';
 import { serverHttpErrorHeaders } from '../http/error-response.ts';
 
@@ -33,8 +34,8 @@ const codeByStatus: Record<number, string> = {
 };
 
 /**
- * Converts cache, signing-key and tenant-removal conflicts to the contract's
- * typed errors.
+ * Converts cache, signing-key, tenant-removal and tenant-quota conflicts to
+ * the contract's typed errors.
  * Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
  * generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
  * original HTTP status and message remain unchanged.
@@ -141,6 +142,14 @@ export function bridgedError(
 			status: error.status,
 			message: error.message,
 			data: { id: error.id }
+		});
+	}
+
+	if (error instanceof TenantQuotaBelowUsageError) {
+		return new ORPCError('TENANT_QUOTA_BELOW_USAGE', {
+			status: error.status,
+			message: error.message,
+			data: { id: error.id, usedBytes: error.usedBytes }
 		});
 	}
 

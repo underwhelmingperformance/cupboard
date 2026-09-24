@@ -2,6 +2,7 @@ import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import {
+	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError,
@@ -72,11 +73,44 @@ describe('translateRpcError', () => {
 			}).toStrictEqual({
 				tenant: 'beta',
 				message:
-					'Tenant beta is being removed, so it cannot be suspended or ' +
-					'resumed. Removal cannot be undone; `cupboard tenant list` shows ' +
-					'its progress.'
+					'Tenant beta is being removed, so its status and quota can no ' +
+					'longer be changed. Removal cannot be undone; `cupboard tenant ' +
+					'list` shows its progress.'
 			});
 		}
+	});
+
+	it('reports the charged bytes when a quota would be below them', () => {
+		const translated = translateRpcError(
+			new ORPCError('TENANT_QUOTA_BELOW_USAGE', {
+				status: 409,
+				message: 'raw',
+				data: { id: 'beta', usedBytes: 2_000_000 }
+			})
+		);
+
+		expect(translated).toBeInstanceOf(QuotaBelowUsageError);
+		expect(translated instanceof Error ? translated.message : '').toBe(
+			'Tenant beta already stores 2 MB (2000000 bytes), more than the ' +
+				'requested quota. Choose a larger quota, or free space first.'
+		);
+	});
+
+	it('advises raising the quota or freeing space when an upload is over quota', () => {
+		const translated = translateRpcError(
+			new ORPCError('INSUFFICIENT_STORAGE', {
+				status: 507,
+				message: "This upload would exceed the tenant's storage quota"
+			})
+		);
+
+		expect(translated instanceof Error ? translated.message : '').toBe(
+			"This upload would exceed the tenant's storage quota. Ask the " +
+				"deployment's operator to raise the tenant's quota (`cupboard " +
+				'tenant set-quota`), or free space: delete paths you no longer need ' +
+				'(`cupboard delete`), or remove roots (`cupboard root remove`) and ' +
+				'let garbage collection reclaim what they kept.'
+		);
 	});
 
 	it('returns an unrecognised oRPC code unchanged', () => {

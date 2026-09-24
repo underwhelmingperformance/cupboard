@@ -13,6 +13,7 @@ import {
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
+	type TenantQuota,
 	tenantReadCredentialResponseSchema,
 	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
@@ -33,6 +34,7 @@ import {
 	runTenantResume,
 	runTenantRotateCacheCredential,
 	runTenantRotateCredential,
+	runTenantSetQuota,
 	runTenantSuspend,
 	type TenantClient
 } from './tenant.ts';
@@ -59,6 +61,7 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 		create: () => Promise.resolve(summary()),
 		suspend: ({ id }) => Promise.resolve({ id, status: 'suspended' }),
 		resume: ({ id }) => Promise.resolve({ id, status: 'active' }),
+		setQuota: ({ id, quota }) => Promise.resolve({ id, quota, usedBytes: 0 }),
 		rotateReadCredential: ({ id }) =>
 			Promise.resolve({ id, hasCredential: true }),
 		clearReadCredential: ({ id }) =>
@@ -288,6 +291,42 @@ describe('tenant state changes', () => {
 		});
 
 		expect(rows).toStrictEqual([[{ label: 'acme', value: 'active' }]]);
+	});
+});
+
+describe('runTenantSetQuota', () => {
+	it.each([
+		{
+			name: 'sets a limit',
+			quota: { kind: 'limited', bytes: 5_000_000 } satisfies TenantQuota,
+			label: '5 MB'
+		},
+		{
+			name: 'clears the limit',
+			quota: { kind: 'unlimited' } satisfies TenantQuota,
+			label: 'unlimited'
+		}
+	])('$name and reports the charged bytes', async ({ quota, label }) => {
+		const rows: ResultRow[][] = [];
+		const calls: unknown[] = [];
+
+		await runTenantSetQuota(acme, quota, reporter(rows), {
+			setQuota: (input) => {
+				calls.push(input);
+				return Promise.resolve({ id: input.id, quota, usedBytes: 1_500_000 });
+			}
+		});
+
+		expect({ calls, rows }).toStrictEqual({
+			calls: [{ id: acme, quota }],
+			rows: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Quota', value: label },
+					{ label: 'Used', value: '1.5 MB' }
+				]
+			]
+		});
 	});
 });
 

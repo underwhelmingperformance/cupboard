@@ -53,6 +53,8 @@ under [docs/](../README.md) explain when to use each one.
   - [`cupboard tenant list`](#cupboard-tenant-list)
   - [`cupboard tenant suspend`](#cupboard-tenant-suspend)
   - [`cupboard tenant resume`](#cupboard-tenant-resume)
+  - [`cupboard tenant set-quota`](#cupboard-tenant-set-quota)
+  - [`cupboard tenant clear-quota`](#cupboard-tenant-clear-quota)
   - [`cupboard tenant rotate-credential`](#cupboard-tenant-rotate-credential)
   - [`cupboard tenant clear-credential`](#cupboard-tenant-clear-credential)
   - [`cupboard tenant rotate-cache-credential`](#cupboard-tenant-rotate-cache-credential)
@@ -1187,6 +1189,8 @@ Commands:
   list <url>                                            List provisioned tenants.
   suspend [options] <url> <id>                          Suspend a tenant: new reads and writes stop immediately.
   resume <url> <id>                                     Resume a suspended tenant.
+  set-quota <url> <id> <bytes>                          Set a tenant's storage quota; it cannot be below what the tenant already stores.
+  clear-quota <url> <id>                                Remove a tenant's storage quota, leaving it unlimited.
   rotate-credential [options] <url> <id>                Replace the tenant-wide fallback read credential.
   clear-credential <url> <id>                           Clear the tenant-wide fallback read credential.
   rotate-cache-credential [options] <url> <id> [cache]  Set one cache's own read credential to a newly generated password.
@@ -1256,6 +1260,37 @@ Options:
 Usage: cupboard tenant resume [options] <url> <id>
 
 Resume a suspended tenant.
+
+Arguments:
+  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  id          tenant slug
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard tenant set-quota
+
+```text
+Usage: cupboard tenant set-quota [options] <url> <id> <bytes>
+
+Set a tenant's storage quota; it cannot be below what the tenant already stores.
+
+Arguments:
+  url         deployment URL (e.g. https://cupboard.example.workers.dev)
+  id          tenant slug
+  bytes       the storage quota in bytes
+
+Options:
+  -h, --help  display help for command
+```
+
+#### cupboard tenant clear-quota
+
+```text
+Usage: cupboard tenant clear-quota [options] <url> <id>
+
+Remove a tenant's storage quota, leaving it unlimited.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
