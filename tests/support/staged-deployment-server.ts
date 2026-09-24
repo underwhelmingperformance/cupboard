@@ -278,8 +278,6 @@ function persistenceOptions(
 function commonBindings() {
 	return {
 		CUPBOARD_LOCAL_DEV: 'true',
-		CUPBOARD_AUTH_ISSUER: 'cupboard',
-		CUPBOARD_AUTH_AUDIENCE: 'cupboard',
 		PUSH_ID_SIGNING_KEY: 'upgrade-fixture-push-signing-key',
 		R2_ACCESS_KEY_ID: 'upgrade-fixture-access-key',
 		R2_ACCOUNT_ID: 'upgrade-fixture-account',
