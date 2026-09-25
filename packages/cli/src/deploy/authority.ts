@@ -151,8 +151,8 @@ function tokenProblemText(url: URL, cause: unknown): string {
 
 const ciUpdateAdvice =
 	'or in CI pass `--github-oidc`; the workflow needs a control trust rule ' +
-	'that gives it the wildcard grant (see "Updating from CI" in the ' +
-	'deployment guide, docs/deploying.md)';
+	'that gives it the wildcard grant (see "Upgrading from automation" in ' +
+	'docs/operator/upgrading.md)';
 
 export class AdminTokenRequiredError extends CliError {
 	/**
@@ -172,8 +172,8 @@ export class AdminTokenRequiredError extends CliError {
 				? 'The login as the admin succeeded, but the token still lacks the ' +
 					"wildcard grant: the admin's control trust rule no longer gives " +
 					'it. Restore the rule as described under "Restoring the ' +
-					'admin\'s wildcard grant" in the deployment guide ' +
-					'(docs/deploying.md): a principal whose token may add control ' +
+					'first operator\'s rule" in docs/operator/operators.md' +
+					': a principal whose token may add control ' +
 					'trust rules adds it, or, if no principal may, you restore it ' +
 					'in the control database. Then re-run `cupboard init`'
 				: `Log in as the admin with \`${adminLoginCommand(url, admin)}\` ` +
@@ -265,7 +265,7 @@ export class AdminDatabaseMismatchError extends CliError {
 				`${principalLabel(admin)}. Select ${bound} in the plan, or bind ` +
 				'the control Worker to the selected database first, as described under ' +
 				'"Changing the control database" in the deployment guide ' +
-				'(docs/deploying.md). Nothing was changed.'
+				'(docs/operator/deploying.md). Nothing was changed.'
 		);
 		this.name = 'AdminDatabaseMismatchError';
 	}
@@ -292,7 +292,7 @@ export class AdminControlWorkerMissingError extends CliError {
 				`its control Worker ${controlScriptName} no longer exists, so no ` +
 				`Worker can check an admin token. Redeploy the control Worker${binding} ` +
 				'with Wrangler, as described under "If the control Worker was ' +
-				'deleted" in the deployment guide (docs/deploying.md), then re-run ' +
+				'deleted" in the deployment guide (docs/operator/deploying.md), then re-run ' +
 				'`cupboard init`. Nothing was changed.'
 		);
 		this.name = 'AdminControlWorkerMissingError';

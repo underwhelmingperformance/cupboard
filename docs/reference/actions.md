@@ -2,7 +2,7 @@
 
 # Actions and workflows reference
 
-The inputs, secrets, outputs and permissions of cupboard's reusable workflows and composite actions. [The GitHub Actions guide](../github-actions.md) explains how to use them.
+The inputs, secrets, outputs and permissions of cupboard's reusable workflows and composite actions. [The CI guides](../README.md#publishing-from-github-actions) explain how to use them.
 
 Always reference them from `underwhelmingperformance/cupboard`: the actions locate their own code and releases relative to that repository. Pin reusable workflows to a release tag and actions to a full commit.
 
@@ -51,7 +51,7 @@ The calling job must grant:
 | `store-known-hosts` | string |  | known_hosts lines that pin the direct ssh-ng store. Required unless store uses the default SSH port and supplies base64-ssh-public-host-key. Independent of classic builder delegation. |
 | `store-ambient-identity` | boolean | `false` | Authenticate the direct store with the runner's SSH agent or default identity files instead of store_ssh_key. Intended only for explicitly provisioned self-hosted runners. When it is false and no store_ssh_key is supplied, the job fails rather than offering an ambient identity. |
 | `store` | string |  | Remote ssh-ng store URI for every cohort job. Planning queries this store for path availability, building realises outputs there, and publication reads metadata and NAR bytes from it. The realised closure therefore does not enter the runner's local store. Measured packing also queries this store. When omitted, each runner uses its own store. Do not set a non-empty ssh-key in the URI; supply the private key through store_ssh_key. |
-| `plan-runner` | string | `ubuntu-latest` | Runner label for the configure and plan jobs. The plan job evaluates the flake with the input SSH key and OIDC permission, so repositories with self-hosted runners should leave this input on a GitHub-hosted label, or route the job through runner groups; see docs/runner-provenance.md. |
+| `plan-runner` | string | `ubuntu-latest` | Runner label for the configure and plan jobs. The plan job evaluates the flake with the input SSH key and OIDC permission, so repositories with self-hosted runners should leave this input on a GitHub-hosted label, or route the job through runner groups; see the Runners section of docs/security.md. |
 | `enable-packing` | boolean | `false` | Pack cohorts within pack-capacity using measured store sizes, rather than creating one job for each manifest cohort. Off by default; a cohort without a measurement is not repartitioned. |
 | `pack-capacity` | string |  | Disk limit in bytes for measured cohort packing. Required when enable-packing is true. |
 

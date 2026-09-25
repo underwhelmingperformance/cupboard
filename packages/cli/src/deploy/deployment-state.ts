@@ -205,7 +205,7 @@ export class UnrecognisedTransitionContractedError extends CliError {
 		public readonly databaseName: string
 	) {
 		super(
-			`The deployment records that the contract migrations of transition '${transition}' have started, and this cupboard build does not define that transition. Those migrations may have removed schema that this build needs. Stay on the deployed release, and use its cupboard deployment status and cupboard deployment resume. To roll back to this build anyway, first confirm that those contract migrations remove nothing that this build reads, then clear the row's contracted_at in the D1 database '${databaseName}' as described under "Rolling back" in docs/deploying.md, and deploy again.`
+			`The deployment records that the contract migrations of transition '${transition}' have started, and this cupboard build does not define that transition. Those migrations may have removed schema that this build needs. Stay on the deployed release, and use its cupboard deployment status and cupboard deployment resume. To roll back to this build anyway, first confirm that those contract migrations remove nothing that this build reads, then clear the row's contracted_at in the D1 database '${databaseName}' as described under "Rolling back" in docs/operator/upgrading.md, and deploy again.`
 		);
 		this.name = 'UnrecognisedTransitionContractedError';
 	}
