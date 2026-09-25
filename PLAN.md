@@ -6271,17 +6271,30 @@ that contraction before the upload without breaking journal order.
 - `pnpm check:migrations` fails when the files, the journal and the transitions
   disagree, when a contract sorts before its expand, and when an independent
   expand does not apply ahead of the earlier contracts.
+- Tenant settlement has one driver: the server. `localStep.wake` runs a batch
+  and starts a self-driving chain of maintenance-queue messages, each waking the
+  next batch ten seconds after the last until nothing is below the required
+  step. A batch that advances nobody re-arms the chain with exponential backoff
+  (ten seconds doubling to an hour) and records the stall with its per-tenant
+  outcomes; progress resets the backoff. One row, `local_step_sweep` (migration
+  `0032`, an independent transition with no contract), keeps to one chain at a
+  time and is what `localStep.status` reports as `sweep`: `running`, `stalled`
+  or `idle`, with the chain, its link, the next batch time and the last batch's
+  outcomes. The deploy and `cupboard deployment resume` only observe: one wake,
+  then `status` at the chain's pace until pending is zero, failing on `stalled`
+  with the outcomes, and starting a new chain on `idle` at most three times. The
+  hourly cron enqueues no sweep; it starts a chain only when tenants are pending
+  and no chain holds the lease, the last resort for a dead-lettered chain, and
+  nothing waits for it.
 
 ### Progress
 
 - [x] Transitions as protocol data, the deploy walk, the `TransitionGate`,
       `requiredLocalStep`, `deployment.transitions`, `required` in
       `localStep.status`, and the migration checks.
-- [ ] Rebuild the local-step continuation chain (#407) on this: the sweep row
-      with exponential backoff, the `sweep` object in `localStep.status`, the
-      deploy as an observer of the chain, and the cron as the restart of a dead
-      chain. Its lease table becomes migration `0032` in an independent
-      transition.
+- [x] The local-step continuation chain on the transitions: the sweep row with
+      exponential backoff, the `sweep` object in `localStep.status`, the deploy
+      as an observer of the chain, and the cron as the restart of a dead chain.
 - [ ] Put the transition records behind the control plane
       (`PUT /deployment/transitions/{id}`), so the deploy's direct D1 writes are
       migrations only.

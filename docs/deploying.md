@@ -62,7 +62,7 @@ expand then contract, in list order, must give the migration files in name
 order; `pnpm check:migrations` and the deploy both refuse a tree where the
 files, the drizzle journal and the list disagree.
 
-This release defines two transitions:
+This release defines three transitions:
 
 - `cache-identity`: migrations `0000` to `0027` expand, `0028` to `0030`
   contract, and every active tenant must reach local step 4 before the contract.
@@ -71,6 +71,9 @@ This release defines two transitions:
   depend on the contracts of the transitions before it, so the deploy may apply
   it ahead of them. The migration check replays it in that order to verify the
   claim.
+- `local-step-sweep`: migration `0032` adds the sweep row described under
+  [Local steps](#local-steps). It is independent and has no contract, so every
+  deploy applies it before the upload and the sweep needs no gate.
 
 The `deployment_transition` table records one row per transition the deploy has
 started: `expanded` once its expand migrations are applied, `complete` once its
@@ -103,21 +106,22 @@ One `cupboard deploy` run walks the transitions in list order:
 4. Upload both Workers and configure their triggers and secrets.
 5. After the upload, for each transition still pending: check once that each
    Worker's deployment assigns all traffic to one version and that both Workers
-   report this build; apply its expand migrations if they were deferred; check
-   that every active tenant has reached its settle step, waking pending tenants
-   in batches of 20; write the `deployment_phase` compatibility row for
-   `cache-identity`; apply its contract migrations and record `complete`.
-6. Wake tenants again until they reach local step 5.
+   report this build; apply its expand migrations if they were deferred; settle
+   the tenants to its settle step, as described under
+   [Local steps](#local-steps); write the `deployment_phase` compatibility row
+   for `cache-identity`; apply its contract migrations and record `complete`.
+6. Settle the tenants to local step 5.
 
-A failed serving check or settle check in step 5 leaves that transition's
-contract unapplied and the states as they were. The error names the Workers or a
-sample of the tenants that are behind. If step 6 fails, the contracts have
-already been applied and recorded. Each tenant wake stage runs at most 100
-batches. Inspect incomplete work with `cupboard deployment status <url>`, which
-lists each recorded transition and the local step the tenants must reach now,
-and retry batches with `cupboard deployment resume <url>`. Repair any reported
-tenant configuration or migration error, then rerun `cupboard deploy`. Applied
-migrations are skipped after checking their recorded digests.
+A failed serving check or settlement in step 5 leaves that transition's contract
+unapplied and the states as they were. The error names the Workers or a sample
+of the tenants that are behind, with the last batch's per-tenant outcomes. If
+step 6 fails, the contracts have already been applied and recorded. Inspect
+incomplete work with `cupboard deployment status <url>`, which lists each
+recorded transition, the local step the tenants must reach now and how the sweep
+chain stands, and observe the sweep again with
+`cupboard deployment resume <url>`. Repair any reported tenant configuration or
+migration error, then rerun `cupboard deploy`. Applied migrations are skipped
+after checking their recorded digests.
 
 The `deployment_phase` row stays for one release. The deploy still writes
 `native-reads` once the `cache-identity` tenants have settled and `contracted`
@@ -152,9 +156,9 @@ deployment to recover.
 
 `tenant.local_step` is a watermark for each object's completed data work. The
 object never lowers it. The `localStep.wake` control procedure wakes a bounded
-batch of active tenants that are behind; the hourly sweep also wakes up to
-twenty per tick. `localStep.status` counts ready and pending tenants and lists
-up to twenty pending tenants. Large tenants can need several wakes.
+batch of active tenants that are behind, and `localStep.status` counts ready and
+pending tenants, lists up to twenty pending tenants and describes the sweep
+chain below. Large tenants can need several wakes.
 
 The step a tenant must reach now is the _required_ step: the settle step of the
 first incomplete transition that has one, else this build's final step.
@@ -162,6 +166,51 @@ first incomplete transition that has one, else this build's final step.
 next to the build's `current`, and the wake and the sweep select tenants below
 it. Before the `cache-identity` contraction an object can report at most step 4,
 so counting tenants against step 5 then would never reach zero.
+
+### The sweep chain
+
+Settlement has one driver: the server. After its batch, `localStep.wake` starts
+a _sweep chain_ when tenants remain: a maintenance-queue message that wakes the
+next batch of twenty and queues the message after it, ten seconds later, until
+no tenant is below the required step. A batch that advances nobody does not end
+the chain. The chain records the stall with that batch's per-tenant outcomes and
+queues its next message after a backoff that doubles from ten seconds to a cap
+of one hour; progress resets the backoff. The chain ends only when nothing is
+pending.
+
+One row in D1, `local_step_sweep`, lets only one chain run at a time. It names
+the chain and the link it is at, whether the chain is `running` or `stalled`,
+when its lease expires, when its next batch is due, and the last batch's
+outcomes. A chained message runs only while the row names its link, so a
+redelivered or duplicated message cannot fork the chain. The lease outlasts
+every redelivery the queue makes of a failed message plus the delay before it,
+so a redelivered message resumes its own chain. A chain that dies, for example
+because a message reached the dead-letter queue, holds the lease until it
+expires, about 68 minutes after its last hand-off plus any backoff; a chain that
+ends releases it at once. `localStep.status` derives the sweep's state from the
+row: `running` or `stalled` while a chain holds the lease, `idle` otherwise,
+with the last chain's link and outcomes still readable.
+
+The hourly cron enqueues no sweep of its own. Its one remaining role for local
+steps is the last resort for a dead chain: on each tick, if tenants are pending
+and no chain holds the lease, it starts one. Nothing waits for it.
+
+The deploy only observes. It calls `localStep.wake` once, which runs the first
+batch and starts the chain, then polls `localStep.status` at the chain's pace
+until one of:
+
+- `pending` is zero: the tenants have settled;
+- the sweep is `stalled`: the deploy fails with the stragglers and the last
+  batch's outcomes, while the chain keeps retrying on the server;
+- the sweep is `idle` with tenants still pending, because the chain died: the
+  deploy calls `wake` again to start a new chain, at most three times, then
+  fails.
+
+There is no pass limit and no wall-clock timeout: the deploy waits while the
+chain makes progress and stops as soon as it cannot. Because it only observes, a
+deploy that dies changes nothing on the server: the chain finishes the
+settlement, and the next deploy or `cupboard deployment resume <url>`, which
+runs the same observation, finds it done.
 
 This build defines five steps:
 
@@ -181,13 +230,12 @@ This build defines five steps:
   old format.
 
 Before contraction, an object reports at most step 4. After contraction, the
-required step becomes 5, the control plane finds those tenants below it and
-wakes them again. A successful CLI deploy completes both stages. If a run is
-interrupted, `cupboard deployment resume <url>` continues the pending stage at
+required step becomes 5, the control plane finds those tenants below it and the
+sweep wakes them again. A successful CLI deploy completes both stages. If a run
+is interrupted, `cupboard deployment resume <url>` observes the pending stage at
 the step the transitions require; rerun `cupboard deploy` to complete any
-remaining transition. The hourly sweep also continues tenant work. A persisted
-cursor rotates through pending tenants, so a failed tenant does not prevent
-later tenants from being attempted.
+remaining transition. A persisted cursor rotates through pending tenants, so a
+failed tenant does not prevent later tenants from being attempted.
 
 A path whose object has not reached its generation key returns 404. The move or
 a new push makes it available at that key.
