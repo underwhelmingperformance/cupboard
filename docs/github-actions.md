@@ -497,6 +497,9 @@ already exists; `actions/attest` below produces one with the right subjects:
       ./dist/result.intoto.jsonl
 ```
 
+Blank lines in `attestations` are ignored. An empty input adds no attestations
+during the push.
+
 ## `actions/build-paths` and `actions/attest`
 
 `actions/push` attaches a bundle but does not create one. Cupboard attaches a
@@ -554,8 +557,7 @@ retries three times and outputs the realised `paths`, a `paths-file`, and the
 the final outputs that the action observed being built during this run. Outputs
 returned by a remote builder are rebuilt and compared with `nix build --rebuild`
 before they qualify. When the run built nothing, no build provenance is signed
-and `bundle-path` is empty. `actions/push` treats an empty `bundle-path` as a
-push with no attestations.
+and `bundle-path` is empty.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
