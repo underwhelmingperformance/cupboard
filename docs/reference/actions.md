@@ -2,7 +2,7 @@
 
 # Actions and workflows reference
 
-The inputs, secrets, outputs and permissions of cupboard's reusable workflows and composite actions. [The GitHub Actions guide](../github-actions.md) explains how to use them.
+The inputs, secrets, outputs and permissions of cupboard's reusable workflows and composite actions. [The CI guides](../README.md#publishing-from-github-actions) explain how to use them.
 
 Always reference them from `underwhelmingperformance/cupboard`, because the actions find their own code and releases relative to that repository. Pin reusable workflows to a release tag, and actions to a full commit.
 
@@ -51,7 +51,7 @@ The calling job must grant:
 | `store-known-hosts` | string |  | known_hosts lines for the remote store. Required unless the store uses port 22 and its URI includes base64-ssh-public-host-key. |
 | `store-ambient-identity` | boolean | `false` | Connect to the remote store with the runner's SSH agent or default key files instead of store_ssh_key. Only use this on a self-hosted runner that is dedicated to this job. When it is false and store_ssh_key is not set, the job's SSH configuration turns off the runner's agent and default key files, so authentication with a key fails. |
 | `store` | string |  | ssh-ng:// URI of a remote store. Every cohort job plans, builds and publishes using that store, so the build outputs never reach the runner's disk. Packing also measures sizes in this store. If empty, each job uses its runner's store. Supply the private key as store_ssh_key, not as an ssh-key parameter in the URI. |
-| `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/runner-provenance.md. |
+| `plan-runner` | string | `ubuntu-latest` | Runner label for the configure, plan and cache-removal jobs. The plan job evaluates the flake with the input SSH key and can request an OIDC token. If your repository has self-hosted runners, keep this on a GitHub-hosted label or restrict the job with runner groups. See docs/security.md#runners. |
 | `enable-packing` | boolean | `false` | Pack small single-target cohorts into as few jobs as fit within pack-capacity, using measured closure sizes. Without packing, each cohort gets its own job. Off by default. A cohort without a measurement is not packed. |
 | `pack-capacity` | string |  | Disk space in bytes that each packed job can use. Required when enable-packing is true. |
 
