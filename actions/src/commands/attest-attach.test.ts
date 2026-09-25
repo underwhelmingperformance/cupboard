@@ -13,6 +13,7 @@ import {
 	ReadPasswordRequiredError,
 	ReadUserRequiredError
 } from '../errors.ts';
+import { collectLines } from '../options.ts';
 
 import {
 	attestAttachAction,
@@ -184,6 +185,24 @@ describe('resolveAttestAttachInputs', () => {
 			checksumsFile: '/tmp/subjects.txt',
 			bundles: ['/tmp/bundle.sigstore.json']
 		});
+	});
+
+	it('keeps a build-origin bundle when the run signed no build provenance', () => {
+		// The reusable workflows pass both attest outputs, one per line. A run
+		// that built none of its published paths leaves bundle-path empty.
+		const bundle = collectLines('\n/tmp/build-origin.sigstore.json\n', []);
+
+		expect(
+			resolveAttestAttachInputs(options({ bundle })).bundles
+		).toStrictEqual(['/tmp/build-origin.sigstore.json']);
+	});
+
+	it('requires a bundle when neither attest output names one', () => {
+		const bundle = collectLines('\n\n', []);
+
+		expect(() => resolveAttestAttachInputs(options({ bundle }))).toThrow(
+			AttestationBundlesMissingError
+		);
 	});
 
 	it.each([

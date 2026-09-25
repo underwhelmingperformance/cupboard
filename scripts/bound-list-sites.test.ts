@@ -77,6 +77,13 @@ const fixedWidthSites: readonly (BoundListSite & {
 	},
 	{
 		kind: 'inArray',
+		file: 'src/control/tenant-registry.ts',
+		argument: 'statusMoveSources[status]',
+		reason:
+			'The tenant statuses a move may start from, at most three, from a constant table.'
+	},
+	{
+		kind: 'inArray',
 		file: 'src/control/global-admin.ts',
 		argument: 'issuers',
 		reason:

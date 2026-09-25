@@ -48,15 +48,18 @@ export function registerConfirmCommand(
 ): void {
 	program
 		.command('confirm')
-		.description('Confirm published store paths without uploading their bytes.')
+		.description(
+			'Check that store paths are already in a cache and refresh their grace ' +
+				'period, without uploading anything.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'<arguments...>',
-			'optional cache name followed by store paths already published to the cache'
+			'an optional cache name, then the store paths to check'
 		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -68,8 +71,8 @@ export function registerConfirmCommand(
 			[
 				'',
 				'Example:',
-				'  # Confirm paths that a previous job already published',
-				'  cupboard confirm --github-oidc https://cache.example.workers.dev/t/acme \\',
+				'  # Check paths that a previous job published',
+				'  cupboard confirm --github-oidc https://cupboard.example.workers.dev/t/acme \\',
 				'    /nix/store/<hash>-app /nix/store/<hash>-runtime'
 			].join('\n')
 		)

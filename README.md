@@ -1,179 +1,147 @@
 # cupboard
 
-cupboard is a multi-tenant [Nix] binary cache that runs on [Cloudflare Workers].
-It serves store paths over the standard Nix binary-cache protocol, backed by R2
-for NAR bytes and a Durable Object per tenant for the metadata, signing keys,
-and retention bookkeeping. One deployment hosts many independent tenants, each
-with its own caches, keys, and access rules.
+cupboard is a [Nix] binary cache that you run on your own Cloudflare account.
 
-The `cupboard` CLI provisions and operates a deployment. It pushes store paths,
-manages tenants and their keys, configures retention, and prints the `nix.conf`
-a client needs to substitute from a cache.
+- It runs on [Cloudflare Workers] and R2, on the free tier. There are no servers
+  to run, and a small deployment costs nothing.
+- One deployment hosts many tenants. Each tenant has its own caches, signing
+  key, credentials and retention settings, so one deployment can serve every
+  team in an organisation, and no tenant can see another's data.
+- A tenant can have as many caches as it needs, public or private. A private
+  cache needs a username and password, and each cache can have its own.
+- CI publishes without storing any secrets. A GitHub Actions job signs in with
+  the OIDC token that GitHub already gives it. A trust rule on your tenant says
+  which repository, branch or pull request to accept, and what that job may do.
+  The signing key never leaves the server.
+- Store paths are kept by named retention roots, which can expire. An hourly
+  garbage collection deletes everything that no root keeps, so a cache that CI
+  fills every day doesn't grow forever.
+- The reusable workflow gives every pull request its own cache, reuses those
+  builds when the change reaches `main`, and signs build provenance for what it
+  builds.
+- It's a standard Nix binary cache. Any Nix that can decompress zstd can
+  substitute from it, with nothing extra installed.
 
-## Two roles
+[Why cupboard](./docs/why-cupboard.md) compares it with Cachix, Attic and a
+plain bucket, and lists what it can't do yet.
 
-The commands fall into two groups: operating the deployment and administering
-one of its tenants.
+## Quick start
 
-An **operator** owns the deployment. They provision it, create and offboard
-tenants, and manage the control-plane signing keys. These commands address the
-deployment by its bare host and are marked "operator only" in the help:
+1. Install the CLI:
 
-- `cupboard init` (alias `cupboard deploy`) provisions the Workers, R2 bucket,
-  D1 database, and queues on a Cloudflare account.
-- `cupboard tenant` creates, suspends, resumes, and removes tenants, rotates the
-  tenant-wide fallback read credential, and manages the read credential of any
-  one of a tenant's caches.
-- `cupboard control-key` rotates the keys that sign control-plane tokens.
+   ```sh
+   nix profile add github:underwhelmingperformance/cupboard
+   ```
 
-A **tenant admin** owns one tenant within a deployment. They push paths, manage
-the tenant's caches and retention, and rotate the keys that sign its narinfos.
-These commands address the tenant through a URL that includes its slug:
+   There are also prebuilt archives on the
+   [releases page](https://github.com/underwhelmingperformance/cupboard/releases).
+   [Installing the CLI](./docs/installing.md) covers both, including how to
+   verify a release.
 
-- `cupboard push` uploads store paths (their complete closure with `--closure`)
-  and optionally pins them.
-- `cupboard cache` manages named caches and their retention settings.
-  `cupboard root` manages the roots and store paths retained by a cache.
-- `cupboard key` rotates a tenant's narinfo signing keys and reports background
-  re-signing progress. `cupboard auth-key` rotates its access-token keys.
-- `cupboard oidc-trust` configures which CI workflows may push.
-- `cupboard stats` reports a cache's objects and the tenant's charged storage,
-  `cupboard delete` removes a single store path, and `cupboard check` audits
-  stored objects against their committed metadata.
+2. In the Cloudflare dashboard, enable R2, create a bucket called
+   `cupboard-blobs`, and create an R2 API token that can read and write it. Then
+   deploy:
 
-## URL forms
+   ```sh
+   cupboard init --instance-name cupboard
+   ```
 
-The URL passed to a command identifies its target. Operator and control-plane
-commands take the deployment's bare host:
+   `init` signs you in to Cloudflare through your browser, creates the Workers
+   and their storage, makes you the deployment's operator, and creates your
+   first tenant. It finishes by printing the tenant's read credential and the
+   lines to add to `nix.conf`.
+   [Deploying cupboard](./docs/operator/deploying.md) explains each step and
+   each choice.
 
-```
-https://cupboard.example.workers.dev
-```
+3. Push something:
 
-Tenant-scoped commands take that host with the tenant's slug appended:
+   ```sh
+   cupboard push https://cupboard.example.workers.dev/t/acme ./result
+   ```
 
-```
-https://cupboard.example.workers.dev/t/acme
-```
+4. Add the lines that `init` printed to `nix.conf`.
+   [Using a cache](./docs/use/nix-clients.md) shows where they go on NixOS,
+   nix-darwin, Home Manager and plain Nix installs.
 
-The bare tenant URL selects the default cache. A named cache has the stable URL
-`/t/acme/cache/<name>`. Commands accept that URL directly. Where a command also
-takes values such as local paths, it can instead take the bare tenant URL and
-the cache name as the next positional argument. A first positional that matches
-an existing file or directory is a local path. Otherwise it is read as a cache
-name when a cache of that name exists; pass `./result` or the `/cache/<name>`
-URL to remove the ambiguity.
+## Publishing from GitHub Actions
 
-Each cache has an `access` property. A private cache uses the same stable URL
-and authenticates reads with the tenant-wide fallback credential or with a
-credential of its own; see [Private caches][cache-access].
-
-[cache-access]: ./docs/nix.md#private-caches
-
-## Getting started
-
-Deploy and create the first tenant with guided initialisation. Choose `acme` as
-the tenant name in this example. The wizard prints the cache URL, read
-credential and Nix configuration; save the credential before continuing.
+First, add the trust rules and reuse view for the repository to your tenant:
 
 ```sh
-cupboard init --instance-name cupboard
-
-# Sign in as the tenant administrator, then push to the URL printed by init.
-cupboard login https://cupboard.example.workers.dev/t/acme
-cupboard push https://cupboard.example.workers.dev/t/acme ./result
+cupboard github setup https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app \
+  --workflow-ref 'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*'
 ```
 
-Add the configuration printed by `init` to your `nix.conf`. For a private cache,
-also save the printed credential in the indicated netrc file outside the Nix
-store. Use `cupboard tenant create` only when you want an additional tenant.
+Then add a workflow to the repository that calls cupboard's:
 
-Most commands need a session first; `cupboard login <url>` caches an admin token
-for the tenant. Pushing from CI instead uses GitHub Actions OIDC with
-`cupboard push --github-oidc`, trusted through `cupboard oidc-trust`.
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+  push:
+    branches: [main]
 
-The instance name is immutable after the first successful initialisation. Pass
-`--instance-name` to choose it. If the option is omitted, the CLI derives a
-stable `cupboard-<hash>` name from the deployment's public origin. The name
-forms the first component of each new Nix signing-key name:
-`<instance>-<tenant>-<generation>`. Hyphens inside the instance and tenant
-components are doubled so the complete name is unambiguous. A rotation keeps
-both keys signing while existing narinfos are re-signed in the background:
-
-```sh
-cupboard key rotate https://cupboard.example.workers.dev/t/acme
-cupboard key status https://cupboard.example.workers.dev/t/acme
-cupboard key retire https://cupboard.example.workers.dev/t/acme active
+jobs:
+  publish:
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
+    with:
+      url: https://cupboard.example.workers.dev/t/acme
+      preset: pull-request-and-branch
+      trusted-public-key: cupboard-acme-1:...
 ```
 
-Add the incoming key to every client's `trusted-public-keys`, then wait for its
-backfill to complete before retiring the outgoing key. The first retirement
-demotes the outgoing key to published-only. Nix caches successful narinfo
-lookups, including their signatures, for `narinfo-cache-positive-ttl`; the
-default is 30 days. Keep the outgoing key in each client's `trusted-public-keys`
-until that client's cache window has elapsed since the last old-only response it
-could have fetched, or clear the client's narinfo cache. The server cannot infer
-a client's configured TTL. A second retirement removes the key from `/pubkey`,
-but `/pubkey` does not change any client's trust configuration. If the backfill
-cannot complete, `cupboard key abort <url> <incoming-id>` removes the incoming
-key and its unfinished work.
+Every pull request now builds the flake's outputs into its own cache, and every
+push to `main` publishes to the default cache, reusing the pull request's builds
+where they match. The [quickstart](./docs/ci/quickstart.md) has the complete
+workflow file, which also skips pull requests from forks and cancels a pull
+request's previous run when a new commit arrives.
 
-## Output modes
+## How it's built
 
-Every command supports two output modes. Attached to a terminal it shows
-progress spinners, prompts, and result tables. Piped or in CI it emits
-line-delimited JSON on stderr, with command payloads (a public key, a
-`nix.conf`) on stdout, so output can be parsed or redirected:
+The control plane is one Worker with a D1 database. Each tenant is a Durable
+Object, which keeps the tenant's narinfos, roots, keys and trust rules in its
+own SQLite database. NARs and attestations are in R2, stored once however many
+tenants publish them. R2 doesn't charge for egress, so serving builds costs
+storage and requests, not bandwidth. An hourly cron job runs garbage collection
+and key retirement. [Architecture](./docs/contributing/architecture.md) goes
+through it in detail.
 
-```sh
-cupboard pubkey https://cupboard.example.workers.dev/t/acme > key.pub
-cupboard --output-mode json tenant list https://cupboard.example.workers.dev \
-  2>&1 | jq -c 'select(.event == "result").data'
-```
+## Status
 
-Pass `--output-mode terminal` or `--output-mode json` to force the mode. Colour
-is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
-`NO_COLOR` is honoured otherwise.
+cupboard is pre-1.0. Releases are numbered `v0.0.x`, and a release can change
+the format of stored data. When one does, upgrading runs a staged migration, and
+once tenants have migrated you can't roll back.
+[Why cupboard](./docs/why-cupboard.md) compares it with the alternatives and
+lists the things it can't do yet.
 
-## Exit codes for `cupboard build-push`
+## Documentation
 
-`cupboard build-push` streams publication while the build runs, then reconciles
-the final build and publication results. Its numeric exit status lets retry
-systems distinguish build failures from publication and retention failures
-without parsing output. A build failure returns the build command's status, or
-128 plus the signal number. If the build succeeds but publication or retention
-fails, the command returns a sysexits status. The receipt records both causes
-when both phases fail.
+[The documentation index](./docs/README.md) lists every page. The pages to start
+with are:
 
-The build command must use the inherited Nix store configuration. Do not pass
-`--store` to a nested Nix command or change `NIX_REMOTE`. Cupboard cannot
-protect or publish outputs from another store.
+- [Using a cache](./docs/use/nix-clients.md), if someone has set up a cache for
+  you.
+- [Administering a tenant](./docs/admin/README.md), if you manage a tenant's
+  caches, keys and access.
+- [Publishing from GitHub Actions](./docs/ci/quickstart.md).
+- [Deploying cupboard](./docs/operator/deploying.md), if you run the deployment.
+- [Contributing](./docs/contributing/README.md).
 
-| Code | Meaning                                                              |
-| ---- | -------------------------------------------------------------------- |
-| 0    | The build succeeded and every selected path is published.            |
-| 1-n  | The build command itself failed; its own exit status passes through. |
-| 69   | A dependency the run needs is unavailable (`EX_UNAVAILABLE`).        |
-| 74   | A publication failure not otherwise classified (`EX_IOERR`).         |
-| 75   | A transient failure; retrying the run may succeed (`EX_TEMPFAIL`).   |
-| 77   | An authentication or authorisation failure (`EX_NOPERM`).            |
-| 130  | The run was interrupted; reserved for abort.                         |
+## Security
 
-Other commands share the 69, 75 and 77 categories; 74 is specific to
-`build-push`, whose publication phase never exits with a bare 1.
+To report a vulnerability, see the [security policy](./SECURITY.md). The
+[security model](./docs/security.md) describes who cupboard trusts and how
+tenants are kept apart.
 
-## More
+## Licence
 
-- [docs/github-actions.md](./docs/github-actions.md) sets up building,
-  attesting, and pushing outputs from GitHub Actions.
-- [docs/nix.md](./docs/nix.md) installs the CLI with Nix and adds a cache as a
-  substituter.
-- [docs/measuring-realisation.md](./docs/measuring-realisation.md) measures what
-  publishing a flake's targets costs a cold runner, and gates that cost.
-- [SECURITY.md](./SECURITY.md) explains how to report a vulnerability.
-- [docs/security.md](./docs/security.md) lists the other security documentation.
-- [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
-- [PLAN.md](./PLAN.md) tracks the feature plan and progress.
+cupboard is licensed under the
+[GNU Affero General Public License v3.0 or later](./COPYING).
 
 [Nix]: https://nixos.org
 [Cloudflare Workers]: https://workers.cloudflare.com

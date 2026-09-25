@@ -312,6 +312,153 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('refuses to suspend or resume a tenant being removed with TENANT_OFFBOARDING', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		await client.tenants.remove({ id: 'acme' });
+		const [suspendError] = await safe(client.tenants.suspend({ id: 'acme' }));
+		const [resumeError] = await safe(client.tenants.resume({ id: 'acme' }));
+		const listed = await client.tenants.list();
+
+		expect({
+			suspend: suspendError,
+			resume: resumeError
+		}).toMatchObject({
+			suspend: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			},
+			resume: {
+				code: 'TENANT_OFFBOARDING',
+				status: StatusCodes.CONFLICT,
+				data: { id: 'acme' }
+			}
+		});
+		expect(listed.tenants.find((entry) => entry.id === 'acme')?.status).toBe(
+			'offboarding'
+		);
+	});
+
+	it('sets, refuses, and clears a tenant quota through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud',
+			quotaBytes: 100
+		});
+		await env.CUPBOARD_DB.prepare(
+			"UPDATE tenant_usage SET bytes = 40, cas_bytes = 10 WHERE tenant = 'acme'"
+		).run();
+		const raised = await client.tenants.setQuota({
+			id: 'acme',
+			quota: { kind: 'limited', bytes: 1000 }
+		});
+		const [belowUsage] = await safe(
+			client.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 49 }
+			})
+		);
+		const cleared = await client.tenants.setQuota({
+			id: 'acme',
+			quota: { kind: 'unlimited' }
+		});
+
+		expect({ raised, cleared }).toStrictEqual({
+			raised: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 1000 },
+				usedBytes: 50
+			},
+			cleared: { id: 'acme', quota: { kind: 'unlimited' }, usedBytes: 50 }
+		});
+		expect(belowUsage).toMatchObject({
+			code: 'TENANT_QUOTA_BELOW_USAGE',
+			status: StatusCodes.CONFLICT,
+			data: { id: 'acme', usedBytes: 50 }
+		});
+	});
+
+	it('requires the set-quota operation on that tenant', async () => {
+		const admin = controlClient(await issueControlAdminToken());
+		await admin.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'public',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const other = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('beta', ['tenant:set-quota'])
+			)
+		);
+		const scoped = controlClient(
+			await issueControlAdminToken(
+				'operator',
+				cacheCredentialGrants('acme', ['tenant:set-quota'])
+			)
+		);
+
+		const [forbidden] = await safe(
+			other.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 10 }
+			})
+		);
+		const allowed = await scoped.tenants.setQuota({
+			id: 'acme',
+			quota: { kind: 'limited', bytes: 10 }
+		});
+
+		expect({ forbidden, allowed }).toMatchObject({
+			forbidden: { code: 'FORBIDDEN', status: StatusCodes.FORBIDDEN },
+			allowed: {
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 10 },
+				usedBytes: 0
+			}
+		});
+	});
+
+	it('refuses a tenant quota change while the tenant is being removed', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			defaultCacheAccess: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		await client.tenants.remove({ id: 'acme' });
+		const [refused] = await safe(
+			client.tenants.setQuota({
+				id: 'acme',
+				quota: { kind: 'limited', bytes: 10 }
+			})
+		);
+
+		expect(refused).toMatchObject({
+			code: 'TENANT_OFFBOARDING',
+			status: StatusCodes.CONFLICT,
+			data: { id: 'acme' }
+		});
+	});
+
 	it.each([
 		'https://idp.test?',
 		'https://idp.test#',

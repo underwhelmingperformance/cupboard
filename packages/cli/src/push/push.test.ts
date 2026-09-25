@@ -40,6 +40,7 @@ import {
 	type ResultPayload,
 	type ResultRow
 } from '@cupboard/reporter';
+import { genericExitCode } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -53,6 +54,7 @@ import {
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	ReferenceUploadRequiredError,
+	transientExitCode,
 	UploadGraceFactsUnsupportedError,
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
@@ -1657,6 +1659,67 @@ describe('runPush', () => {
 
 		expect(archives.map((archive) => archive.iterations)).toStrictEqual([1]);
 	});
+
+	it.each([
+		{
+			name: 'a server error',
+			failure: new CupboardHttpError('PUT', '/nar', 503, 'unavailable'),
+			exitCode: transientExitCode
+		},
+		{
+			name: 'rate limiting',
+			failure: new CupboardHttpError('PUT', '/nar', 429, 'slow down'),
+			exitCode: transientExitCode
+		},
+		{
+			name: 'a rejected request',
+			failure: new CupboardHttpError('PUT', '/nar', 400, 'bad request'),
+			exitCode: genericExitCode
+		}
+	])(
+		'exits $exitCode when an upload fails with $name',
+		async ({ failure, exitCode }) => {
+			const options = {
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: () =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'upload',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'upload-app',
+										r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+										expiresAt: '2026-05-18T12:00:00.000Z'
+									}
+								]
+							})
+						),
+					uploadNar: () => Promise.reject(failure),
+					commit: () => Promise.resolve(fallbackCommitResponse()),
+					setRoot: () => Promise.resolve(rootSummary({ name: '', targets: [] }))
+				} satisfies PushClient,
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => fakeNarUpload(nar, appDigest)
+			} satisfies PushDependencies;
+
+			let error: unknown;
+
+			try {
+				await runPush(publication([appPath]), reporter([], []), options);
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expect({
+				name: error instanceof Error ? error.name : undefined,
+				exitCode: error instanceof PushIncompleteError ? error.exitCode : 0
+			}).toStrictEqual({ name: PushIncompleteError.name, exitCode });
+		}
+	);
 
 	it('records mismatched computed NAR metadata as a push failure', async () => {
 		const clientCalls: unknown[] = [];

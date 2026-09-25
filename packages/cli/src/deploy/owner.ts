@@ -22,7 +22,7 @@ export type OwnerChoice =
 	| {
 			readonly kind: 'owner';
 			readonly owner: OwnerBinding;
-			readonly origin: 'deployer' | 'manual' | 'config';
+			readonly origin: 'deployer' | 'manual' | 'config' | 'deployed';
 	  }
 	| { readonly kind: 'none' };
 
@@ -54,12 +54,19 @@ export function configuredOwner(
 }
 
 /**
- * The admin the plan starts from: a gate already configured in the wrangler
- * vars wins, then the deployer when their identity is known, otherwise nobody.
+ * Chooses the admin the plan starts from. It uses the first of these that
+ * exists: a gate already set in the wrangler vars, the deployer if their
+ * identity is known, or the gate the deployed control Worker already has.
+ * Otherwise there is no admin.
+ *
+ * Falling back to the deployed gate means that a deploy without an identity,
+ * such as one run by automation with an API token, leaves the signup settings
+ * as they were.
  */
 export function defaultOwnerChoice(
 	config: DeploymentConfig,
-	deployerSubject?: string
+	deployerSubject?: string,
+	deployedGate?: OwnerBinding
 ): OwnerChoice {
 	const configured = configuredOwner(config.control.vars);
 
@@ -75,13 +82,18 @@ export function defaultOwnerChoice(
 		};
 	}
 
+	if (deployedGate !== undefined) {
+		return { kind: 'owner', owner: deployedGate, origin: 'deployed' };
+	}
+
 	return { kind: 'none' };
 }
 
 const originLabels = {
 	deployer: 'you, the deployer',
 	manual: 'manual',
-	config: 'from wrangler config'
+	config: 'from wrangler config',
+	deployed: 'kept from the current deployment'
 } as const;
 
 export function ownerHint(choice: OwnerChoice): string {

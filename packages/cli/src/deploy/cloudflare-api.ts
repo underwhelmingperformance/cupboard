@@ -80,6 +80,14 @@ export class QueueConsumerIdMissingError extends CliError {
 	}
 }
 
+/**
+ * A Worker's existing consumer on a queue. It only includes the settings that
+ * a deploy needs to keep the same resources.
+ */
+export interface LiveQueueConsumer {
+	readonly deadLetterQueue: string | undefined;
+}
+
 export interface WorkerSecret {
 	readonly name: string;
 	readonly text: string;
@@ -165,8 +173,18 @@ export interface CloudflareApi {
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	findD1Database(name: string): Promise<DatabaseId | undefined>;
+	/**
+	 * The name of the database with this ID, or `undefined` if it doesn't
+	 * exist.
+	 */
+	d1DatabaseName(databaseId: DatabaseId): Promise<string | undefined>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
+	/**
+	 * The title of the namespace with this ID, or `undefined` if it doesn't
+	 * exist.
+	 */
+	kvNamespaceTitle(namespaceId: KvNamespaceId): Promise<string | undefined>;
 	ensureQueue(name: string): Promise<QueueId>;
 
 	d1QueryBatch(
@@ -203,6 +221,19 @@ export interface CloudflareApi {
 		scriptName: ScriptName,
 		settings: QueueConsumerSettings
 	): Promise<void>;
+	/**
+	 * The script's consumer on the named queue. Returns `undefined` if the
+	 * queue doesn't exist or the script doesn't consume from it.
+	 */
+	findQueueConsumer(
+		queueName: string,
+		scriptName: ScriptName
+	): Promise<LiveQueueConsumer | undefined>;
+	/**
+	 * The script's cron triggers, or `undefined` if the script isn't
+	 * deployed.
+	 */
+	listSchedules(scriptName: ScriptName): Promise<string[] | undefined>;
 	ensureSchedules(
 		scriptName: ScriptName,
 		crons: readonly string[]
@@ -314,6 +345,30 @@ const liveConsumerSchema = z.object({
 		})
 		.optional()
 });
+
+type LiveConsumer = z.infer<typeof liveConsumerSchema>;
+
+/**
+ * Parses a live queue consumer. Returns it only if it's a Worker consumer that
+ * delivers to this script.
+ */
+function asWorkerConsumer(
+	consumer: unknown,
+	scriptName: ScriptName
+): LiveConsumer | undefined {
+	const parsed = liveConsumerSchema.safeParse(consumer);
+
+	if (!parsed.success) {
+		return undefined;
+	}
+
+	const { type, script_name, script, service } = parsed.data;
+	const isWorker = type === undefined || type === 'worker';
+
+	return isWorker && [script_name, script, service].includes(scriptName)
+		? parsed.data
+		: undefined;
+}
 
 const liveSubscriptionSchema = z.object({
 	state: z.string().optional(),
@@ -552,6 +607,20 @@ export function createCloudflareApi(
 				: databaseIdSchema.parse(existing.uuid);
 		},
 
+		async d1DatabaseName(databaseId) {
+			try {
+				const database = await client.d1.database.get(databaseId, account);
+
+				return database.name;
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
+		},
+
 		async ensureD1Database(name) {
 			const existing = await findCloudflareItem(
 				client.d1.database.list({ ...account, name }),
@@ -582,6 +651,20 @@ export function createCloudflareApi(
 			const created = await client.kv.namespaces.create({ ...account, title });
 
 			return kvNamespaceIdSchema.parse(created.id);
+		},
+
+		async kvNamespaceTitle(namespaceId) {
+			try {
+				const namespace = await client.kv.namespaces.get(namespaceId, account);
+
+				return namespace.title;
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
 		},
 
 		async ensureQueue(name) {
@@ -749,19 +832,7 @@ export function createCloudflareApi(
 
 			const existing = await findCloudflareItem(
 				client.queues.consumers.list(queueId, account),
-				(consumer) => {
-					const parsed = liveConsumerSchema.safeParse(consumer);
-
-					return (
-						parsed.success &&
-						(parsed.data.type === undefined || parsed.data.type === 'worker') &&
-						[
-							parsed.data.script_name,
-							parsed.data.script,
-							parsed.data.service
-						].includes(scriptName)
-					);
-				},
+				(consumer) => asWorkerConsumer(consumer, scriptName) !== undefined,
 				'Cloudflare queue consumer list'
 			);
 
@@ -789,6 +860,52 @@ export function createCloudflareApi(
 				...body,
 				queue_id: queueId
 			});
+		},
+
+		async findQueueConsumer(queueName, scriptName) {
+			const queue = await findCloudflareItem(
+				client.queues.list(account),
+				(candidate) => candidate.queue_name === queueName,
+				'Cloudflare queue list'
+			);
+
+			if (queue?.queue_id === undefined) {
+				return;
+			}
+
+			const live = await findCloudflareItem(
+				client.queues.consumers.list(queue.queue_id, account),
+				(consumer) => asWorkerConsumer(consumer, scriptName) !== undefined,
+				'Cloudflare queue consumer list'
+			);
+			const consumer = asWorkerConsumer(live, scriptName);
+
+			if (consumer === undefined) {
+				return;
+			}
+
+			const deadLetterQueue = consumer.dead_letter_queue ?? '';
+
+			return {
+				deadLetterQueue: deadLetterQueue === '' ? undefined : deadLetterQueue
+			};
+		},
+
+		async listSchedules(scriptName) {
+			try {
+				const current = await client.workers.scripts.schedules.get(
+					scriptName,
+					account
+				);
+
+				return current.schedules.map((schedule) => schedule.cron);
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
 		},
 
 		async ensureSchedules(scriptName, crons) {

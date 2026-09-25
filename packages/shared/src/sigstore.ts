@@ -7,7 +7,12 @@ import type {
 	VerificationPolicy,
 	VerifierOptions
 } from '@sigstore/verify';
-import { toSignedEntity, toTrustMaterial, Verifier } from '@sigstore/verify';
+import {
+	type SignedEntity,
+	toSignedEntity,
+	toTrustMaterial,
+	Verifier
+} from '@sigstore/verify';
 
 import {
 	decodeDsseStatement,
@@ -131,6 +136,43 @@ export class AttestationPredicateTypeMismatchError extends Error {
 	}
 }
 
+/**
+ * The `--trusted-root` file is neither a single JSON document nor JSON Lines,
+ * the one-document-per-line format that `gh attestation trusted-root` prints.
+ */
+export class TrustedRootFormatError extends Error {
+	constructor(
+		public readonly file: string,
+		public readonly detail: string
+	) {
+		super(
+			`Couldn't read the trusted roots in ${file} (${detail}). The file ` +
+				'should contain one JSON trusted root, or one per line as ' +
+				'`gh attestation trusted-root` prints.'
+		);
+		this.name = 'TrustedRootFormatError';
+	}
+}
+
+/**
+ * None of several trusted roots verified a bundle. Each root's failure is kept,
+ * in the order the roots appear in the file. The first failure is the cause.
+ */
+export class TrustedRootsRejectedError extends Error {
+	constructor(public readonly failures: readonly unknown[]) {
+		super(
+			`None of the ${String(failures.length)} trusted roots verified the bundle. ` +
+				`Their errors, in order: ${failures.map((failure) => failureMessage(failure)).join('; ')}`,
+			{ cause: failures[0] }
+		);
+		this.name = 'TrustedRootsRejectedError';
+	}
+}
+
+function failureMessage(failure: unknown): string {
+	return failure instanceof Error ? failure.message : String(failure);
+}
+
 export class AttestationBundleShapeError extends Error {
 	constructor(public readonly detail: string) {
 		super(`Attestation bundle ${detail}`);
@@ -208,7 +250,8 @@ export function verificationPolicy(
 /**
  * Verify a Sigstore DSSE bundle against the trusted root and an identity
  * policy, returning the signer, the in-toto predicate type and subject digests,
- * and the raw predicate.
+ * and the raw predicate. If the `trustedRoot` file contains several roots, one
+ * per line, the bundle passes if any one of them verifies it.
  */
 export async function verifyBundle(
 	bytes: Uint8Array,
@@ -216,10 +259,13 @@ export async function verifyBundle(
 	options: BundleVerifyOptions
 ): Promise<VerifiedBundle> {
 	const parsed = parseBundle(bytes);
-	const trustMaterial = toTrustMaterial(await trustedRoot(options));
-	const verifier = new Verifier(trustMaterial, verifierOptions(options));
 	const signedEntity = toSignedEntity(parsed.bundle);
-	const signer = verifier.verify(signedEntity, verificationPolicy(policy));
+	const signer = verifyAgainstAnyRoot(
+		await trustedRoots(options),
+		signedEntity,
+		verificationPolicy(policy),
+		verifierOptions(options)
+	);
 
 	// The verifier matches certificate extensions by exact value, so a regex
 	// issuer cannot be expressed as a policy and is enforced here.
@@ -343,14 +389,100 @@ function verifierOptions(options: BundleVerifyOptions): VerifierOptions {
 	};
 }
 
-async function trustedRoot(options: BundleVerifyOptions): Promise<TrustedRoot> {
-	if (options.trustedRoot === undefined) {
-		return getTrustedRoot();
+/**
+ * Sigstore's verifier only takes one trusted root, so try each root in turn
+ * and stop at the first that verifies the bundle. With a single root, its
+ * failure is rethrown unchanged. With several, the error lists every root's
+ * failure.
+ */
+function verifyAgainstAnyRoot(
+	roots: readonly TrustedRoot[],
+	signedEntity: SignedEntity,
+	policy: VerificationPolicy,
+	options: VerifierOptions
+): Signer {
+	const failures: unknown[] = [];
+
+	for (const root of roots) {
+		try {
+			return new Verifier(toTrustMaterial(root), options).verify(
+				signedEntity,
+				policy
+			);
+		} catch (error) {
+			failures.push(error);
+		}
 	}
 
-	return TrustedRoot.fromJSON(
-		JSON.parse(await nodeReadFile(options.trustedRoot, 'utf8'))
-	);
+	if (failures.length === 1) {
+		throw failures[0];
+	}
+
+	throw new TrustedRootsRejectedError(failures);
+}
+
+async function trustedRoots(
+	options: BundleVerifyOptions
+): Promise<readonly TrustedRoot[]> {
+	if (options.trustedRoot === undefined) {
+		return [await getTrustedRoot()];
+	}
+
+	return parseTrustedRoots(
+		options.trustedRoot,
+		await nodeReadFile(options.trustedRoot, 'utf8')
+	).map((document) => TrustedRoot.fromJSON(document));
+}
+
+/**
+ * Reads a trusted-root file. It first tries the whole file as one JSON
+ * document, which may span several lines. If that fails, it reads the file as
+ * JSON Lines, with one root on each non-blank line. That's the format
+ * `gh attestation trusted-root` prints.
+ */
+function parseTrustedRoots(file: string, text: string): readonly unknown[] {
+	const document = parseJson(text);
+
+	if (document.ok) {
+		return [document.value];
+	}
+
+	const documents: unknown[] = [];
+
+	for (const [index, line] of text.split('\n').entries()) {
+		if (line.trim() === '') {
+			continue;
+		}
+
+		const parsed = parseJson(line);
+
+		if (!parsed.ok) {
+			throw new TrustedRootFormatError(
+				file,
+				`line ${String(index + 1)}: ${parsed.message}`
+			);
+		}
+
+		documents.push(parsed.value);
+	}
+
+	if (documents.length === 0) {
+		throw new TrustedRootFormatError(file, 'the file is empty');
+	}
+
+	return documents;
+}
+
+type JsonParse =
+	| { readonly ok: true; readonly value: unknown }
+	| { readonly ok: false; readonly message: string };
+
+function parseJson(text: string): JsonParse {
+	try {
+		return { ok: true, value: JSON.parse(text) as unknown };
+	} catch (error) {
+		return { ok: false, message: failureMessage(error) };
+	}
 }
 
 const bundleStatementSchema = inTotoStatementSchema(

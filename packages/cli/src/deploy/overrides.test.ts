@@ -4,7 +4,9 @@ import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
 import {
 	renameResource,
+	renameResources,
 	withCrons,
+	withKvTitles,
 	withSignupGate,
 	withWorkersInvocationAllowance
 } from './overrides.ts';
@@ -85,6 +87,53 @@ describe('renameResource', () => {
 		expect(renameResource(config, 'queue', 'nope', 'chores')).toStrictEqual(
 			config
 		);
+	});
+});
+
+describe('renameResources', () => {
+	it('applies every rename at once, so one never feeds another', () => {
+		const renamed = renameResources(
+			config,
+			'queue',
+			new Map([
+				['cupboard-maintenance', 'cupboard-maintenance-dlq'],
+				['cupboard-maintenance-dlq', 'chores-dlq']
+			])
+		);
+
+		expect(
+			renamed.control.queueConsumers.map((consumer) => [
+				consumer.queue,
+				consumer.deadLetterQueue
+			])
+		).toStrictEqual([['cupboard-maintenance-dlq', 'chores-dlq']]);
+	});
+
+	it('returns the same configuration when there is nothing to rename', () => {
+		expect(renameResources(config, 'bucket', new Map())).toBe(config);
+	});
+});
+
+describe('withKvTitles', () => {
+	it('retitles namespaces by binding in both workers', () => {
+		const withKv = parseDeploymentConfig(
+			`{
+				"name": "cupboard",
+				"compatibility_date": "2026-05-15",
+				"kv_namespaces": [
+					{ "binding": "TENANT_CACHE", "id": "00000000000000000000000000000000" },
+					{ "binding": "CRON_STATE", "id": "00000000000000000000000000000001" }
+				]
+			}`,
+			`{ "name": "cupboard-tenant", "compatibility_date": "2026-05-15" }`
+		);
+
+		expect(
+			withKvTitles(
+				withKv,
+				new Map([['TENANT_CACHE', 'kept-tenant-cache']])
+			).control.kvNamespaces.map((namespace) => namespace.title)
+		).toStrictEqual(['kept-tenant-cache', 'cupboard-cron-state']);
 	});
 });
 

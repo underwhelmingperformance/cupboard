@@ -6,6 +6,7 @@ import {
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
+import { countSchema } from './internal/counts.ts';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -45,6 +46,11 @@ export const tenantReadCredentialSchema = z.strictObject({
 });
 export type TenantReadCredential = z.output<typeof tenantReadCredentialSchema>;
 
+// A tenant's storage quota, in bytes. It counts the tenant's compressed NAR
+// objects and attestation CAS objects. Each object is counted once, however
+// many paths share it.
+export const tenantQuotaBytesSchema = countSchema;
+
 // The caller selects the initial access of the default cache and supplies the
 // OIDC identity for the first admin trust rule. A read credential is the
 // fallback credential for private caches that have no credential of their own.
@@ -55,9 +61,8 @@ export const tenantCreateBodySchema = z.strictObject({
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
 	read: tenantReadCredentialSchema.optional(),
-	// The quota covers this tenant's unique compressed NAR objects and unique
-	// attestation CAS objects. Omission means unlimited storage.
-	quotaBytes: z.number().int().nonnegative().optional()
+	// Leave it out for unlimited storage.
+	quotaBytes: tenantQuotaBytesSchema.optional()
 });
 export type TenantCreateBody = z.output<typeof tenantCreateBodySchema>;
 export type TenantCreateBodyInput = z.input<typeof tenantCreateBodySchema>;
@@ -87,6 +92,36 @@ export const tenantMutateResponseSchema = z.strictObject({
 export type TenantMutateResponse = z.output<typeof tenantMutateResponseSchema>;
 export type TenantMutateResponseInput = z.input<
 	typeof tenantMutateResponseSchema
+>;
+
+// A tenant's storage limit. It's either a number of bytes or unlimited.
+export const tenantQuotaSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		kind: z.literal('limited'),
+		bytes: tenantQuotaBytesSchema
+	}),
+	z.strictObject({ kind: z.literal('unlimited') })
+]);
+export type TenantQuota = z.output<typeof tenantQuotaSchema>;
+
+// What an operator sends to set or remove a tenant's quota. A limit can't be
+// less than what the tenant already stores.
+export const tenantSetQuotaBodySchema = z.strictObject({
+	id: tenantIdSchema,
+	quota: tenantQuotaSchema
+});
+export type TenantSetQuotaBody = z.output<typeof tenantSetQuotaBodySchema>;
+
+// The tenant's quota after the change, and how many bytes the tenant is
+// currently charged for.
+export const tenantQuotaResponseSchema = z.strictObject({
+	id: tenantIdSchema,
+	quota: tenantQuotaSchema,
+	usedBytes: countSchema
+});
+export type TenantQuotaResponse = z.output<typeof tenantQuotaResponseSchema>;
+export type TenantQuotaResponseInput = z.input<
+	typeof tenantQuotaResponseSchema
 >;
 
 // A membership rebuild reasserts every live tenant's marker and reconstructs

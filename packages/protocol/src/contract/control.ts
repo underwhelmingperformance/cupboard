@@ -4,6 +4,7 @@ import {
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import {
@@ -37,8 +38,11 @@ import {
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
+	tenantQuotaBytesSchema,
+	tenantQuotaResponseSchema,
 	tenantReadCredentialResponseSchema,
 	tenantReadCredentialSchema,
+	tenantSetQuotaBodySchema,
 	tenantSummarySchema
 } from '../tenants.ts';
 
@@ -50,6 +54,15 @@ const controlProcedure = oc
 		UNAUTHORIZED: {},
 		FORBIDDEN: {}
 	});
+
+// Once a tenant's removal has started, it always runs to the end. So the
+// server refuses to change the tenant's status or quota.
+const tenantOffboardingError = {
+	TENANT_OFFBOARDING: {
+		status: StatusCodes.CONFLICT,
+		data: z.strictObject({ id: tenantIdSchema })
+	}
+};
 
 /**
  * The administrative API served under `/control` on the bare host. Paths in
@@ -115,6 +128,7 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/suspend' })
 			.input(z.strictObject({ id: tenantIdSchema }))
+			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
 		resume: controlProcedure
@@ -124,7 +138,30 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/resume' })
 			.input(z.strictObject({ id: tenantIdSchema }))
+			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
+
+		// Setting the same quota twice has the same result as setting it once, so a
+		// retry is safe.
+		setQuota: controlProcedure
+			.meta({
+				requires: 'tenant:set-quota',
+				resource: { tenant: { field: 'id' } },
+				replaySafety: 'replay-safe'
+			})
+			.route({ method: 'PUT', path: '/tenants/{id}/quota' })
+			.input(tenantSetQuotaBodySchema)
+			.errors({
+				...tenantOffboardingError,
+				TENANT_QUOTA_BELOW_USAGE: {
+					status: StatusCodes.CONFLICT,
+					data: z.strictObject({
+						id: tenantIdSchema,
+						usedBytes: tenantQuotaBytesSchema
+					})
+				}
+			})
+			.output(tenantQuotaResponseSchema),
 
 		// Both rotations write a verifier built from the password in the request,
 		// with a fresh salt each time, so a repeat leaves the same password valid.

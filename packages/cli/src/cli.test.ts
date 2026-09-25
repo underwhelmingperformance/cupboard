@@ -1,6 +1,7 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 import { type Command, CommanderError } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -11,16 +12,27 @@ import {
 	authExitCode,
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
+	CheckDiscrepanciesError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
 	OwnerLoginRequiredError,
+	PushIncompleteError,
 	RootRetentionOptionError,
 	transientExitCode,
+	TrustRuleFileConflictError,
+	TrustRuleOptionsRequiredError,
 	UploadWaitTimeoutError
 } from './errors.ts';
+import { RootTargetLimitError } from './push/push.ts';
 
 const abortExitCode = 130;
+
+const unreachable = new CupboardHttpError('PUT', '/nar', 502, 'bad gateway');
+const rateLimited = new CupboardHttpError('PUT', '/nar', 429, 'slow down');
+const notFound = new CupboardHttpError('PUT', '/nar', 404, 'gone');
+const rejected = new CupboardHttpError('PUT', '/nar', 401, 'expired');
+const commitTimedOut = new UploadWaitTimeoutError(1, 600);
 
 function expectCommanderError(value: unknown): asserts value is CommanderError {
 	expect(value).toBeInstanceOf(CommanderError);
@@ -52,6 +64,80 @@ describe('cliExitCode', () => {
 		{
 			name: 'a 404 response',
 			error: new CupboardHttpError('GET', '/x', 404, ''),
+			expected: 1
+		},
+		{
+			name: 'a 507 quota response',
+			error: new CupboardHttpError('GET', '/x', 507, ''),
+			expected: 1
+		},
+		{
+			name: 'a rate-limited admin-API response',
+			error: new ORPCError('TOO_MANY_REQUESTS', { status: 429 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'an unavailable admin-API response',
+			error: new ORPCError('SERVICE_UNAVAILABLE', { status: 503 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'a failed admin-API response',
+			error: new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 }),
+			expected: transientExitCode
+		},
+		{
+			name: 'an admin-API response for a missing resource',
+			error: new ORPCError('NOT_FOUND', { status: 404 }),
+			expected: 1
+		},
+		{
+			name: 'an admin-API conflict',
+			error: new ORPCError('CACHE_ALREADY_EXISTS', { status: 409 }),
+			expected: 1
+		},
+		{
+			name: 'a push whose paths failed only transiently',
+			error: new PushIncompleteError(
+				['app', 'runtime', 'lib'],
+				[unreachable, rateLimited, commitTimedOut]
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with a transient and a permanent path failure',
+			error: new PushIncompleteError(['app', 'lib'], [notFound, unreachable]),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push with an authentication path failure',
+			error: new PushIncompleteError(['app', 'lib'], [unreachable, rejected]),
+			expected: authExitCode
+		},
+		{
+			name: 'a push whose admin-API prepare was rate limited',
+			error: new PushIncompleteError(
+				['app'],
+				[new ORPCError('TOO_MANY_REQUESTS', { status: 429 })]
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'a push whose paths failed permanently',
+			error: new PushIncompleteError(
+				['app'],
+				[new Error('the NAR hash did not match')]
+			),
+			expected: 1
+		},
+		{
+			name: 'a push over the root target limit',
+			error: new RootTargetLimitError(150, 149),
+			expected: usageExitCode
+		},
+		{
+			name: 'a check that found discrepancies',
+			error: new CheckDiscrepanciesError(2),
 			expected: 1
 		},
 		{
@@ -388,16 +474,111 @@ describe('command help', () => {
 		expect(help).toContain('--closure');
 		expect(help).toContain('--intermediate-paths-file');
 		expect(help).toContain(
-			'cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\\n' +
-				'    --root github:acme/infra/main'
+			'cupboard push --github-oidc https://cupboard.example.workers.dev/t/acme ./result \\\n' +
+				'    --root github:acme/app/main'
 		);
+	});
+
+	// A control-plane rule grants control, tenant or wildcard authority, which
+	// has no flags, so its `add` reads the whole rule from a file and offers
+	// none of the tenant rule's cache, root or template flags.
+	it.each([
+		{
+			path: ['control-oidc-trust', 'add'],
+			shown: [
+				'--from-file <path>',
+				'cupboard control-oidc-trust add https://cupboard.example.workers.dev \\',
+				'"permittedGrants": [{ "type": "cupboard_wildcard" }]'
+			],
+			hidden: [
+				'--issuer',
+				'--audience',
+				'--claim',
+				'--allow',
+				'--cache',
+				'--root',
+				'--capture',
+				'--template-source',
+				'/t/acme'
+			]
+		},
+		{
+			path: ['oidc-trust', 'add'],
+			shown: [
+				'--issuer <issuer>',
+				'--allow <action>',
+				'--cache <name>',
+				'--cache-template <template>',
+				'--template-source <name>',
+				'--from-file <path>',
+				'cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme'
+			],
+			hidden: ['control-oidc-trust']
+		}
+	])(
+		'shows only the options that apply to $path',
+		({ path, shown, hidden }) => {
+			const help = helpFor(path);
+
+			expect({
+				shown: shown.filter((text) => !help.includes(text)),
+				hidden: hidden.filter((text) => help.includes(text))
+			}).toStrictEqual({ shown: [], hidden: [] });
+		}
+	);
+
+	it('offers no GitHub presets for control-plane trust rules', () => {
+		const help = helpFor(['control-oidc-trust']);
+
+		expect(help).not.toContain('add-github');
+	});
+
+	it('requires --from-file for a control-plane trust rule', async () => {
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'control-oidc-trust',
+				'add',
+				'https://cupboard.example.workers.dev'
+			])
+		).rejects.toMatchObject({ code: 'commander.missingMandatoryOptionValue' });
+	});
+
+	it.each([
+		{
+			name: 'rule options alongside --from-file',
+			args: [
+				'--from-file',
+				'rule.json',
+				'--issuer',
+				'https://token.actions.githubusercontent.com'
+			],
+			error: TrustRuleFileConflictError
+		},
+		{
+			name: 'no --issuer or --audience without --from-file',
+			args: ['--allow', 'push'],
+			error: TrustRuleOptionsRequiredError
+		}
+	])('refuses $name for a tenant trust rule', async ({ args, error }) => {
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'oidc-trust',
+				'add',
+				'https://cupboard.example.workers.dev/t/acme',
+				...args
+			])
+		).rejects.toBeInstanceOf(error);
 	});
 
 	it('shows local and remote examples for attest verify', () => {
 		const help = helpFor(['attest', 'verify']);
 
-		expect(help).toContain('Local mode');
-		expect(help).toContain('Remote mode');
+		expect(help).toContain('Verify local bundle files');
+		expect(help).toContain('Verify the bundles that a cache has');
 	});
 
 	it('notes that most commands need a login', () => {
@@ -434,14 +615,25 @@ describe('command help', () => {
 
 		expect(help).toContain('--access <mode>');
 		expect(unwrapped(help)).toContain(
-			'read access for the first cache: public or private (you are asked ' +
-				'when it is omitted)'
+			"read access for the first tenant's default cache: public or " +
+				'private (you are asked if you leave it out)'
 		);
 	});
 
 	it('describes immediate read and write suspension', () => {
 		expect(helpFor(['tenant', 'suspend'])).toContain(
-			'Suspend a tenant: new reads and writes stop immediately.'
+			'Suspend a tenant. Its reads, pushes, sign-in and maintenance stop immediately.'
+		);
+	});
+
+	it('sets a tenant quota in bytes and clears it with its own command', () => {
+		expect(unwrapped(helpFor(['tenant', 'set-quota']))).toContain(
+			"Set a tenant's storage quota. It can't be less than the tenant " +
+				'already stores.'
+		);
+		expect(helpFor(['tenant', 'set-quota'])).toContain('<bytes>');
+		expect(helpFor(['tenant', 'clear-quota'])).toContain(
+			"Remove a tenant's storage quota, leaving it unlimited."
 		);
 	});
 
@@ -512,7 +704,7 @@ describe('command help', () => {
 		const help = helpFor(['cache', 'create']);
 
 		expect(help).toContain('Create a named cache.');
-		expect(help).toContain('cache name when the URL does not select one');
+		expect(help).toContain('cache name, if the URL is a tenant URL');
 		expect(help).toContain('--root-ttl <duration>');
 		expect(help).toContain('--grace <duration>');
 	});

@@ -489,9 +489,25 @@ export class TenantRetiredError extends ServerHttpError {
 	}
 }
 
-// Resume changes only a suspended tenant to active. An active tenant returns a
-// conflict. An offboarding or offboarded tenant returns
-// `TenantRetiredError`.
+// The tenant's removal has started. The hourly job is emptying it, and it can
+// only end up offboarded. Suspending or resuming the tenant would take it out
+// of the `offboarding` state, which the job looks for. Resuming would also
+// make the tenant active again halfway through the removal. So the server refuses both, and refuses quota changes too.
+// The `id` field matches the contract error's data.
+export class TenantOffboardingError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: TenantId) {
+		super(
+			`Tenant '${id}' is being removed, so its status and quota can no longer be changed`
+		);
+		this.name = 'TenantOffboardingError';
+	}
+}
+
+// Resume only changes a suspended tenant to active. For an active tenant it
+// returns this conflict. For a tenant being removed it returns
+// `TenantOffboardingError`, and for one already removed `TenantRetiredError`.
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
@@ -511,6 +527,24 @@ export class QuotaExceededError extends ServerHttpError {
 	constructor(public readonly tenant: TenantId) {
 		super("This upload would exceed the tenant's storage quota");
 		this.name = 'QuotaExceededError';
+	}
+}
+
+// An operator asked for a quota smaller than what the tenant already stores.
+// The usage row has a CHECK constraint that keeps charged bytes within the
+// quota, so the server refuses the change instead of leaving the tenant over
+// its quota. The fields match the contract error's data.
+export class TenantQuotaBelowUsageError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly id: TenantId,
+		public readonly usedBytes: number
+	) {
+		super(
+			`Tenant '${id}' already stores ${String(usedBytes)} bytes, which is more than the requested quota`
+		);
+		this.name = 'TenantQuotaBelowUsageError';
 	}
 }
 

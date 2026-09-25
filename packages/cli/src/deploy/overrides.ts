@@ -7,63 +7,56 @@ import type {
 } from './config.ts';
 import type { OwnerBinding } from './owner.ts';
 
-function renameIn(value: string, from: string, to: string): string {
-	return value === from ? to : value;
+type Renames = ReadonlyMap<string, string>;
+
+function renameIn(value: string, renames: Renames): string {
+	return renames.get(value) ?? value;
 }
 
-function renameBucketIn(
-	worker: WorkerConfig,
-	from: string,
-	to: string
-): WorkerConfig {
+function renameBucketIn(worker: WorkerConfig, renames: Renames): WorkerConfig {
 	return {
 		...worker,
 		r2Buckets: worker.r2Buckets.map((bucket) => ({
 			...bucket,
-			bucketName: renameIn(bucket.bucketName, from, to)
+			bucketName: renameIn(bucket.bucketName, renames)
 		}))
 	};
 }
 
 function renameDatabaseIn(
 	worker: WorkerConfig,
-	from: string,
-	to: string
+	renames: Renames
 ): WorkerConfig {
 	return {
 		...worker,
 		d1Databases: worker.d1Databases.map((database) => ({
 			...database,
-			databaseName: renameIn(database.databaseName, from, to)
+			databaseName: renameIn(database.databaseName, renames)
 		}))
 	};
 }
 
-function renameQueueIn(
-	worker: WorkerConfig,
-	from: string,
-	to: string
-): WorkerConfig {
+function renameQueueIn(worker: WorkerConfig, renames: Renames): WorkerConfig {
 	return {
 		...worker,
 		queueProducers: worker.queueProducers.map((producer) => ({
 			...producer,
-			queue: renameIn(producer.queue, from, to)
+			queue: renameIn(producer.queue, renames)
 		})),
 		queueConsumers: worker.queueConsumers.map((consumer) => ({
 			...consumer,
-			queue: renameIn(consumer.queue, from, to),
+			queue: renameIn(consumer.queue, renames),
 			deadLetterQueue:
 				consumer.deadLetterQueue === undefined
 					? undefined
-					: renameIn(consumer.deadLetterQueue, from, to)
+					: renameIn(consumer.deadLetterQueue, renames)
 		}))
 	};
 }
 
 const renamers: Record<
 	EditableResourceKind,
-	(worker: WorkerConfig, from: string, to: string) => WorkerConfig
+	(worker: WorkerConfig, renames: Renames) => WorkerConfig
 > = {
 	bucket: renameBucketIn,
 	database: renameDatabaseIn,
@@ -71,9 +64,31 @@ const renamers: Record<
 };
 
 /**
- * Renames a resource everywhere both Workers reference it, so bindings,
- * producers, consumers and dead-letter queues stay consistent. Names not
- * matching `from` are untouched.
+ * Renames resources of one kind everywhere either Worker refers to them, so
+ * bindings, producers, consumers and dead-letter queues stay consistent. All
+ * the renames are applied together, so a name that one rename produces is
+ * never renamed again by another. Names that aren't keys of `renames` are left
+ * alone.
+ */
+export function renameResources(
+	config: DeploymentConfig,
+	kind: EditableResourceKind,
+	renames: Renames
+): DeploymentConfig {
+	if (renames.size === 0) {
+		return config;
+	}
+
+	const rename = renamers[kind];
+
+	return {
+		control: rename(config.control, renames),
+		tenant: rename(config.tenant, renames)
+	};
+}
+
+/**
+ * Renames one resource everywhere both Workers reference it.
  */
 export function renameResource(
 	config: DeploymentConfig,
@@ -81,12 +96,30 @@ export function renameResource(
 	from: string,
 	to: string
 ): DeploymentConfig {
-	const rename = renamers[kind];
+	return renameResources(config, kind, new Map([[from, to]]));
+}
 
-	return {
-		control: rename(config.control, from, to),
-		tenant: rename(config.tenant, from, to)
-	};
+/**
+ * Sets KV namespace titles by binding name, in both Workers. A binding that
+ * isn't a key of `titles` keeps its title.
+ */
+export function withKvTitles(
+	config: DeploymentConfig,
+	titles: ReadonlyMap<string, string>
+): DeploymentConfig {
+	if (titles.size === 0) {
+		return config;
+	}
+
+	const retitle = (worker: WorkerConfig): WorkerConfig => ({
+		...worker,
+		kvNamespaces: worker.kvNamespaces.map((namespace) => ({
+			...namespace,
+			title: titles.get(namespace.binding) ?? namespace.title
+		}))
+	});
+
+	return { control: retitle(config.control), tenant: retitle(config.tenant) };
 }
 
 export function withCrons(

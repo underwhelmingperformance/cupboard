@@ -120,26 +120,36 @@ export function registerRootCommands(
 ): void {
 	const root = program
 		.command('root')
-		.description('Manage retention roots: named sets of store paths to keep.');
+		.description(
+			'Manage retention roots, which keep named sets of store paths in a cache.'
+		);
 
 	root
 		.command('ensure')
 		.description(
-			'Retain targets the cache can serve, or report that a build is required. ' +
-				'Both outcomes exit 0; the reported status is either retained or build required.'
+			'Set a root only if the cache can serve every store path. Otherwise, ' +
+				'list the missing store paths and change nothing.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
-		.argument('<store-path...>', 'one or more top-level store paths to retain')
+		.argument('<name>', 'root name (e.g. github:acme/app/main)', parseRootName)
+		.argument('<store-path...>', 'the store paths for the root to keep')
 		.option(
 			'--ttl <duration>',
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--permanent', 'retain the root permanently')
+		.option('--permanent', 'keep the root permanently')
+		.addHelpText(
+			'after',
+			[
+				'',
+				'The command exits with status 0 in both cases. It reports the status',
+				'"retained" or "build required".'
+			].join('\n')
+		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -188,24 +198,26 @@ export function registerRootCommands(
 
 	root
 		.command('set')
-		.description('Create or replace a retention root with the given targets.')
+		.description(
+			"Create a retention root, or replace an existing root's targets."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
-		.argument('<store-path...>', 'one or more top-level store paths to retain')
+		.argument('<name>', 'root name (e.g. github:acme/app/main)', parseRootName)
+		.argument('<store-path...>', 'the store paths for the root to keep')
 		.option(
 			'--ttl <duration>',
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--permanent', 'retain the root permanently')
+		.option('--permanent', 'keep the root permanently')
 		.addHelpText(
 			'after',
 			[
 				'',
 				'Example:',
-				"  # Keep a branch's top-level paths, expiring after 30 days",
+				"  # Keep a branch's build outputs for 30 days",
 				'  cupboard root set https://cupboard.example.workers.dev/t/acme \\',
-				'    github:acme/infra/main /nix/store/<hash>-app --ttl 30d'
+				'    github:acme/app/main /nix/store/<hash>-app --ttl 30d'
 			].join('\n')
 		)
 		.action(
@@ -237,12 +249,14 @@ export function registerRootCommands(
 
 	root
 		.command('list')
-		.description('List retention roots.')
+		.description(
+			"List a cache's retention roots, with their target counts and expiry."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[cache]', 'named cache when the URL does not select one')
+		.argument('[cache]', 'cache name, if the URL is a tenant URL')
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -284,12 +298,14 @@ export function registerRootCommands(
 
 	root
 		.command('targets')
-		.description("List a retention root's targets and whether each is served.")
+		.description(
+			"List a retention root's targets, and show which of them the cache is missing."
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
+		.argument('<name>', 'root name (e.g. github:acme/app/main)', parseRootName)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -325,7 +341,7 @@ export function registerRootCommands(
 		.command('remove')
 		.description('Remove a retention root.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name to remove', parseRootName)
+		.argument('<name>', 'name of the root to remove', parseRootName)
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, name: RootName, options: RootOptions) => {
 			const target = cacheTargetFromUrl(url);

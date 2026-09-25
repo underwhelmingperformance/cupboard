@@ -11,6 +11,7 @@ import {
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
+	kvNamespaceIdSchema,
 	queueIdSchema,
 	scriptNameSchema,
 	zoneIdSchema
@@ -491,6 +492,133 @@ describe('ensureSchedules', () => {
 			{ method: 'GET', path: schedulesPath },
 			{ method: 'PUT', path: schedulesPath }
 		]);
+	});
+});
+
+describe('findQueueConsumer', () => {
+	const queuesPath = '/accounts/acc-1/queues';
+
+	it("reads the script's consumer on the named queue", async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [
+				{ queue_id: 'queue-1', queue_name: 'cupboard-maintenance' }
+			],
+			[`GET ${consumersPath}`]: [
+				{ ...liveWorkerConsumer, script: 'someone-else' },
+				liveWorkerConsumer
+			]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).findQueueConsumer(
+				'cupboard-maintenance',
+				scriptName('cupboard')
+			)
+		).toStrictEqual({ deadLetterQueue: 'cupboard-maintenance-dlq' });
+	});
+
+	it('reports a consumer without a dead-letter queue', async () => {
+		const { dead_letter_queue: _dead, ...withoutDeadLetter } =
+			liveWorkerConsumer;
+		const { client } = fakeCloudflare({
+			[`GET ${queuesPath}`]: [
+				{ queue_id: 'queue-1', queue_name: 'cupboard-maintenance' }
+			],
+			[`GET ${consumersPath}`]: [withoutDeadLetter]
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).findQueueConsumer(
+				'cupboard-maintenance',
+				scriptName('cupboard')
+			)
+		).toStrictEqual({ deadLetterQueue: undefined });
+	});
+
+	it('is undefined when the queue does not exist', async () => {
+		const { client, requests } = fakeCloudflare({ [`GET ${queuesPath}`]: [] });
+
+		expect({
+			consumer: await createCloudflareApi(
+				client,
+				accountId('acc-1')
+			).findQueueConsumer('cupboard-maintenance', scriptName('cupboard')),
+			requests
+		}).toStrictEqual({
+			consumer: undefined,
+			requests: [{ method: 'GET', path: queuesPath }]
+		});
+	});
+});
+
+describe('listSchedules', () => {
+	const schedulesPath = '/accounts/acc-1/workers/scripts/cupboard/schedules';
+
+	it("returns the script's cron triggers", async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${schedulesPath}`]: {
+				schedules: [{ cron: '0 * * * *' }, { cron: '30 4 * * MON' }]
+			}
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).listSchedules(
+				scriptName('cupboard')
+			)
+		).toStrictEqual(['0 * * * *', '30 4 * * MON']);
+	});
+
+	it('is undefined when the script is not deployed', async () => {
+		const { client } = fakeCloudflare({});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).listSchedules(
+				scriptName('cupboard')
+			)
+		).toBeUndefined();
+	});
+});
+
+describe('resource names by id', () => {
+	it('reads a D1 database name', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/d1/database/db-1': { uuid: 'db-1', name: 'acme-db' }
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).d1DatabaseName(
+				databaseIdSchema.parse('db-1')
+			)
+		).toBe('acme-db');
+	});
+
+	it('reads a KV namespace title', async () => {
+		const { client } = fakeCloudflare({
+			'GET /accounts/acc-1/storage/kv/namespaces/kv-1': {
+				id: 'kv-1',
+				title: 'acme-tenant-cache'
+			}
+		});
+
+		expect(
+			await createCloudflareApi(client, accountId('acc-1')).kvNamespaceTitle(
+				kvNamespaceIdSchema.parse('kv-1')
+			)
+		).toBe('acme-tenant-cache');
+	});
+
+	it('is undefined for ids that no longer exist', async () => {
+		const api = createCloudflareApi(
+			fakeCloudflare({}).client,
+			accountId('acc-1')
+		);
+
+		expect({
+			database: await api.d1DatabaseName(databaseIdSchema.parse('db-gone')),
+			namespace: await api.kvNamespaceTitle(
+				kvNamespaceIdSchema.parse('kv-gone')
+			)
+		}).toStrictEqual({ database: undefined, namespace: undefined });
 	});
 });
 

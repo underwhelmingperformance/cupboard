@@ -31,6 +31,7 @@ const cachePublishWorkflow = new URL(
 );
 const ciWorkflow = new URL('../.github/workflows/ci.yml', import.meta.url);
 const prepareAction = new URL('../actions/prepare/action.yml', import.meta.url);
+const attestAction = new URL('../actions/attest/action.yml', import.meta.url);
 const legacyPublishCaller = new URL(
 	'../tests/fixtures/github-actions/cupboard-publish-legacy-caller.yml',
 	import.meta.url
@@ -117,6 +118,13 @@ const workflowSchema = z.looseObject({
 
 type Workflow = z.output<typeof workflowSchema>;
 type Step = z.output<typeof stepSchema>;
+
+/**
+ * The declared outputs of a composite action, by name.
+ */
+const attestActionSchema = z.looseObject({
+	outputs: z.record(z.string(), z.looseObject({}))
+});
 
 const releaseCacheMatrixSchema = z.strictObject({
 	include: z.array(nixSystemRunnerSchema)
@@ -871,7 +879,7 @@ describe('attestation', () => {
 				},
 				{
 					uses: cupboardAction('attest-attach'),
-					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundle-path != '' }}"
+					if: "${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && (steps.attest.outputs.bundle-path != '' || steps.attest.outputs.origin-bundle-path != '') }}"
 				}
 			],
 			attach: [
@@ -889,6 +897,55 @@ describe('attestation', () => {
 			]
 		});
 	});
+
+	it.each(reusableWorkflows)(
+		'attaches every kind of signed bundle in $name',
+		async ({ file }) => {
+			const [workflow, contents] = await Promise.all([
+				loadWorkflow(file),
+				readFile(attestAction, 'utf8')
+			]);
+			const attest = attestActionSchema.parse(parse(contents));
+			const bundleOutputs = Object.keys(attest.outputs).filter((name) =>
+				name.endsWith('bundle-path')
+			);
+			const attach = stepsUsing(workflow, cupboardAction('attest-attach'));
+			const gate = attach.map(({ step }) => step.if ?? '');
+			const passed = attach.map(({ step }) =>
+				String(step.with?.bundle ?? '')
+					.matchAll(/steps\.attest\.outputs\.([\w-]+)/gu)
+					.map((match) => match[1])
+					.toArray()
+			);
+
+			// A run that built none of its published paths signs build-origin
+			// bundles alone, so the gate must open for any one bundle output, not
+			// just build provenance.
+			expect({
+				passed,
+				gate: gate.map((condition) =>
+					bundleOutputs.map((name) =>
+						condition.includes(`steps.attest.outputs.${name} != ''`)
+					)
+				),
+				disjunction: gate.map((condition) =>
+					condition.includes(
+						bundleOutputs
+							.map((name) => `steps.attest.outputs.${name} != ''`)
+							.join(' || ')
+					)
+				)
+			}).toStrictEqual({
+				passed: [bundleOutputs],
+				gate: [bundleOutputs.map(() => true)],
+				disjunction: [true]
+			});
+			expect(bundleOutputs).toStrictEqual([
+				'bundle-path',
+				'origin-bundle-path'
+			]);
+		}
+	);
 });
 
 describe('local store collection', () => {

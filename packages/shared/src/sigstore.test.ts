@@ -9,6 +9,8 @@ import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
 	identityPolicy,
+	TrustedRootFormatError,
+	TrustedRootsRejectedError,
 	verificationPolicy,
 	verifyBundle
 } from './sigstore.ts';
@@ -218,5 +220,91 @@ describe('verifyBundle against a GitHub-instance bundle', () => {
 		expect(
 			refusal instanceof VerificationError ? refusal.code : undefined
 		).toBe('TLOG_ERROR');
+	});
+});
+
+// `gh attestation trusted-root` prints JSON Lines, one root per line, while a
+// hand-written root is usually one (possibly pretty-printed) JSON document.
+describe('verifyBundle with a trusted-root file', () => {
+	const subjectDigest = 'aa'.repeat(32);
+	const predicateType = 'https://slsa.dev/provenance/v1';
+	const policy = { identity: signerIdentity, issuer: signerIssuer };
+	const fixture = githubInstanceBundle({ subjectDigest, predicateType });
+	const otherRoot = githubInstanceBundle({
+		subjectDigest,
+		predicateType
+	}).trustedRoot;
+	const thirdRoot = githubInstanceBundle({
+		subjectDigest,
+		predicateType
+	}).trustedRoot;
+	const pretty = JSON.stringify(JSON.parse(fixture.trustedRoot), undefined, 2);
+	const options = { ctlogThreshold: 0, tlogThreshold: 0 };
+
+	async function verifyWith(trustedRoot: string): Promise<unknown> {
+		return withTrustedRoot(trustedRoot, async (file) => {
+			try {
+				const verified = await verifyBundle(fixture.bundle, policy, {
+					...options,
+					trustedRoot: file
+				});
+
+				return verified.signer.identity?.subjectAlternativeName;
+			} catch (error) {
+				return error;
+			}
+		});
+	}
+
+	it.each([
+		{ name: 'one compact JSON document', file: fixture.trustedRoot },
+		{ name: 'one pretty-printed JSON document', file: pretty },
+		{
+			name: 'JSON Lines with the signing root first',
+			file: `${fixture.trustedRoot}\n${otherRoot}\n`
+		},
+		{
+			name: 'JSON Lines with the signing root last',
+			file: `${otherRoot}\n${thirdRoot}\n${fixture.trustedRoot}\n`
+		},
+		{
+			name: 'JSON Lines with blank lines and CRLF endings',
+			file: `\r\n${otherRoot}\r\n\r\n${fixture.trustedRoot}\r\n`
+		}
+	])('verifies against $name', async ({ file }) => {
+		expect(await verifyWith(file)).toBe(signerIdentity);
+	});
+
+	it('rethrows the failure of a single root unchanged', async () => {
+		const refusal = await verifyWith(otherRoot);
+
+		expect(refusal).toBeInstanceOf(VerificationError);
+	});
+
+	it('reports every root failure when none verifies', async () => {
+		const refusal = await verifyWith(`${otherRoot}\n${thirdRoot}\n`);
+
+		expect(refusal).toBeInstanceOf(TrustedRootsRejectedError);
+		expect(
+			refusal instanceof TrustedRootsRejectedError
+				? refusal.failures.map(
+						(failure) => failure instanceof VerificationError
+					)
+				: undefined
+		).toStrictEqual([true, true]);
+	});
+
+	it.each([
+		{
+			name: 'a malformed line',
+			file: `${fixture.trustedRoot}\n{not json\n`,
+			detail: /line 2:/
+		},
+		{ name: 'an empty file', file: '\n\n', detail: /the file is empty/ }
+	])('refuses $name', async ({ file, detail }) => {
+		const refusal = await verifyWith(file);
+
+		expect(refusal).toBeInstanceOf(TrustedRootFormatError);
+		expect(refusal instanceof Error ? refusal.message : '').toMatch(detail);
 	});
 });

@@ -95,6 +95,22 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureSchedules');
 			return Promise.resolve();
 		},
+		listSchedules: () => {
+			recordApiCall(apiCalls, 'listSchedules');
+			return Promise.resolve(undefined);
+		},
+		findQueueConsumer: () => {
+			recordApiCall(apiCalls, 'findQueueConsumer');
+			return Promise.resolve(undefined);
+		},
+		d1DatabaseName: () => {
+			recordApiCall(apiCalls, 'd1DatabaseName');
+			return Promise.resolve(undefined);
+		},
+		kvNamespaceTitle: () => {
+			recordApiCall(apiCalls, 'kvNamespaceTitle');
+			return Promise.resolve(undefined);
+		},
 		putSecret: () => {
 			recordApiCall(apiCalls, 'putSecret');
 			return Promise.resolve();

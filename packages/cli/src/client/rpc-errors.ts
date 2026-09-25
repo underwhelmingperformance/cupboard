@@ -1,12 +1,24 @@
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import {
 	CupboardHttpError,
+	QuotaBelowUsageError,
 	QuotaExceededError,
 	ScopeForbiddenError,
-	SessionRejectedError
+	SessionRejectedError,
+	TenantRemovalInProgressError
 } from '../errors.ts';
+
+// Schemas for the error data of `TENANT_OFFBOARDING` and
+// `TENANT_QUOTA_BELOW_USAGE` in the control contract.
+const tenantOffboardingDataSchema = z.object({ id: tenantIdSchema });
+const quotaBelowUsageDataSchema = z.object({
+	id: tenantIdSchema,
+	usedBytes: z.number().int().nonnegative()
+});
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
@@ -47,9 +59,10 @@ export function isStaleUploadError(error: unknown): boolean {
 }
 
 /**
- * Converts authentication, scope and `INSUFFICIENT_STORAGE` failures into CLI
- * errors. `SERVICE_UNAVAILABLE` and every other oRPC code remain unchanged so
- * their callers can inspect them. Non-oRPC errors also pass through unchanged.
+ * Converts authentication, scope, `INSUFFICIENT_STORAGE`, `TENANT_OFFBOARDING`
+ * and `TENANT_QUOTA_BELOW_USAGE` failures into CLI errors. Other oRPC codes,
+ * including `SERVICE_UNAVAILABLE`, are returned unchanged so the caller can
+ * inspect them. Errors that don't come from oRPC are also returned unchanged.
  */
 export function translateRpcError(error: unknown): unknown {
 	if (!(error instanceof ORPCError)) {
@@ -67,6 +80,22 @@ export function translateRpcError(error: unknown): unknown {
 
 		case 'INSUFFICIENT_STORAGE': {
 			return new QuotaExceededError(error.message);
+		}
+
+		case 'TENANT_QUOTA_BELOW_USAGE': {
+			const data = quotaBelowUsageDataSchema.safeParse(error.data);
+
+			return data.success
+				? new QuotaBelowUsageError(data.data.id, data.data.usedBytes)
+				: error;
+		}
+
+		case 'TENANT_OFFBOARDING': {
+			const data = tenantOffboardingDataSchema.safeParse(error.data);
+
+			return data.success
+				? new TenantRemovalInProgressError(data.data.id)
+				: error;
 		}
 
 		default: {

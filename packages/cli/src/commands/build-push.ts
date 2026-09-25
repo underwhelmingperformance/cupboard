@@ -420,19 +420,17 @@ export function registerBuildPushCommand(
 	program
 		.command('build-push')
 		.description(
-			'Run a build command under streaming publication: completed outputs ' +
-				'upload while the build continues, and a final reconciliation ' +
-				'settles roots and writes the build receipt.'
+			'Run a build command and publish each output as soon as Nix builds it.'
 		)
 		.usage('<url> [cache] [options] -- <build command...>')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'[arguments...]',
-			'an optional cache name before --, then the build command; the command must use the inherited Nix store configuration (replaced by --cohorts-file for a multi-cohort run)'
+			'an optional cache name, then -- and the build command (leave out the command when you use --cohorts-file)'
 		)
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+			"sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session"
 		)
 		.option(
 			'--audience <audience>',
@@ -441,30 +439,30 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'replace this named root with the built targets once every target is confirmed servable',
+			"when the build succeeds and the cache has verified every output, replace this root's targets with the built outputs",
 			parseRootName
 		)
 		.option(
 			'--ttl <duration>',
-			'expire the retained targets after this duration (e.g. 7d, 12h)',
+			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--permanent', 'retain the target root permanently')
+		.option('--permanent', 'keep the root permanently')
 		.option(
 			'--no-retain',
-			"publish without any target root; the paths are kept only by the destination cache's configured retention grace"
+			"publish without a root, so that only the cache's grace period keeps the paths"
 		)
 		.option(
 			'--closure',
-			'publish the complete realised closure of the built targets (default: exactly the built outputs)'
+			'publish the whole closure of the built outputs (by default, only the built outputs)'
 		)
 		.option(
 			'--intermediate-paths-file <path>',
-			'newline-delimited store paths to publish alongside the targets without retaining them as targets'
+			'file of extra store paths, one per line, to publish without adding them to the root'
 		)
 		.option(
 			'--run-root <name>',
-			'bind a run root: every path joins this root as it commits, whether streamed or reconciled',
+			'also add each published path to this run root as soon as the cache accepts it',
 			parseRootName
 		)
 		.option(
@@ -472,68 +470,69 @@ export function registerBuildPushCommand(
 			'expire the run root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.option('--run-root-permanent', 'retain the run root permanently')
+		.option('--run-root-permanent', 'keep the run root permanently')
 		.option(
 			'--no-wait',
-			'reconcile without waiting for deferred blobs to become servable; an unconfirmed root is left untouched'
+			'finish without waiting for the cache to verify the uploaded NARs. If some outputs are not yet verified, the root is left as it was.'
 		)
 		.option(
 			'--wait-timeout <duration>',
-			'how long to wait for commit capacity, and separately how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
+			'time limit for each of the two waits: for the cache to accept the push, and then for it to verify the uploaded NARs (e.g. 10m, 1h; default 10m)',
 			parseWaitTimeout
 		)
 		.option(
 			'--upload-concurrency <n>',
-			'how many blob uploads to run at once (default 6)',
+			'number of NAR uploads to run in parallel (default 6)',
 			parseUploadConcurrency
 		)
 		.option(
 			'--receipt-file <path>',
-			'write the build receipt (JSON) to this file; a multi-cohort run writes {"receipts": [...]} in cohort order'
+			'write the build receipt (JSON) to this file. With several cohorts, the file contains {"receipts": [...]}, in cohort order.'
 		)
 		.option(
 			'--aggregate-receipt-v3',
-			'write one schema-valid V3 aggregate instead of the public multi-cohort receipt envelope'
+			'with several cohorts, write one combined version 3 receipt instead of {"receipts": [...]}'
 		)
 		.option(
 			'--cohorts-file <path>',
-			'JSON file listing the cohorts to build, in order, each {"command": [...]} or {"installables": [...]}; replaces the -- build command'
+			'JSON file that lists several builds (cohorts) to run in order, each {"command": [...]} or {"installables": [...]}. Use it instead of a build command after --.'
 		)
 		.option(
 			'--gc-between-cohorts',
-			'collect the local Nix store between cohorts, so a later cohort substitutes the earlier shared work from the cache (default: off; nothing is collected after the last cohort)'
+			'run garbage collection on the local Nix store between cohorts, so that a later cohort downloads shared outputs of earlier cohorts from the cache (off by default; there is no collection after the last cohort)'
 		)
 		.option(
 			'--keep-going-cohorts',
-			'continue with the remaining cohorts after one fails; the run still exits with the first failed cohort status'
+			'run the remaining cohorts after one fails. The exit status is still that of the first cohort to fail.'
 		)
 		.addHelpText(
 			'after',
 			[
 				'',
-				'The command must use the inherited Nix store configuration.',
-				'Do not pass --store to a nested Nix command or change NIX_REMOTE.',
-				'Cupboard cannot protect or publish outputs from another store.',
+				'The build command must use the same Nix store as build-push. Do not',
+				'pass --store to a Nix command inside it, and do not change',
+				'NIX_REMOTE. build-push cannot see or publish outputs in another store.',
 				'',
-				'The build command runs with its output and exit status untouched: a',
-				'failed build exits with the build command status. A successful',
-				'build with failed publication or retention exits with a sysexits',
-				'code: 77 authentication, 75 transient, 69 unavailable, or 74 for a',
-				'publication failure not otherwise classified.',
+				"The build command's output is passed through unchanged. If the build",
+				"fails, build-push exits with the build's own status. If the build",
+				'succeeds but publishing or updating the root fails, build-push exits',
+				'with 77 for a sign-in or permission failure, 75 for a temporary',
+				'failure, 69 when something that publishing needs is unavailable, or',
+				'74 for any other publishing failure.',
 				'',
 				'Examples:',
-				'  # Build and stream the outputs to a tenant, replacing a named root',
-				'  cupboard build-push https://cache.example.workers.dev/t/acme \\',
-				'    --root github:acme/infra/main -- nix build --no-link .#app',
+				"  # Build and publish the outputs, replacing a root's targets",
+				'  cupboard build-push https://cupboard.example.workers.dev/t/acme \\',
+				'    --root github:acme/app/main -- nix build --no-link .#app',
 				'',
-				'  # Build into a named cache selected before the command boundary',
-				'  cupboard build-push https://cache.example.workers.dev/t/acme builds \\',
-				'    --root github:acme/infra/main -- nix build --no-link .#app',
+				'  # Publish to the named cache builds (give the cache name before --)',
+				'  cupboard build-push https://cupboard.example.workers.dev/t/acme builds \\',
+				'    --root github:acme/app/main -- nix build --no-link .#app',
 				'',
-				'  # Build from CI with a GitHub Actions OIDC token and a run root',
-				'  cupboard build-push --github-oidc --root github:acme/infra/main \\',
-				'    --run-root github:acme/infra/run-123 --run-root-ttl 2d \\',
-				'    https://cache.example.workers.dev/t/acme -- nix build --no-link .#app'
+				'  # Build in CI, signing in with the GitHub Actions OIDC token, and add a run root',
+				'  cupboard build-push --github-oidc --root github:acme/app/main \\',
+				'    --run-root github:acme/app/run-123 --run-root-ttl 2d \\',
+				'    https://cupboard.example.workers.dev/t/acme -- nix build --no-link .#app'
 			].join('\n')
 		)
 		.action(

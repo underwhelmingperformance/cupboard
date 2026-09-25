@@ -16,6 +16,7 @@ import {
 	vi
 } from 'vitest';
 
+import { controlTenantSetQuota } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -260,6 +261,51 @@ describe('per-tenant quota', () => {
 				casBytes: 0,
 				casBlobs: 0,
 				quotaBytes: nar.narBytes.byteLength - 1
+			}
+		});
+	});
+
+	it('accepts the commit it refused once the operator raises the quota', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('quota-raised');
+		const pathMetadata = (storePathHash: string) =>
+			uploadMetadata({
+				storePathHash,
+				references: [],
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+		const first = pathMetadata('a'.repeat(32));
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
+
+		const negotiated = await negotiateUploads(token, [first]);
+		const refused = expectSingleUploadDecision(negotiated, first);
+		await putNarBytes(refused.r2Key, nar);
+		const commitError = await commitUploadRejection(token, refused.uploadId);
+		const raisedQuota = {
+			kind: 'limited',
+			bytes: nar.narBytes.byteLength
+		} as const;
+		const quota = await controlTenantSetQuota(env, fixtureTenant, raisedQuota);
+		await commitPath(token, pathMetadata('b'.repeat(32)), nar);
+
+		expectCommitSocketError(commitError);
+		expect({
+			refused: commitError.status,
+			quota,
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			refused: StatusCodes.INSUFFICIENT_STORAGE,
+			quota: { id: fixtureTenant, quota: raisedQuota, usedBytes: 0 },
+			usage: {
+				bytes: nar.narBytes.byteLength,
+				narinfos: 1,
+				blobs: 1,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: nar.narBytes.byteLength
 			}
 		});
 	});

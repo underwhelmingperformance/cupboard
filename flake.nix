@@ -133,24 +133,27 @@
               example = "/etc/nix/cupboard-release.conf";
               description = ''
                 Set this to a file containing the `extra-substituters` line
-                printed by `cupboard config --private-cache`. Create the file
-                outside the Nix store with mode 0400 or 0600, and make it
-                readable only by the account that runs Nix.
+                that `cupboard config` prints for a private cache. That line
+                contains the cache read credential, so keep the file out of the
+                Nix store. Give it mode 0400 or 0600, owned by the account
+                that runs the Nix daemon.
 
-                The module adds an `include` directive to `nix.conf`. The
-                credential-bearing URL remains in the permission-controlled
-                file. Nix appends settings from the included file, so the
-                private cache joins the substituters from public cache entries
-                in this list.
+                The module adds an `!include` line for the file to `nix.conf`.
+                This keeps the credential in the protected file rather than in
+                `nix.conf` itself. The private cache is added alongside the
+                public caches in this list.
 
-                A missing or unreadable included file makes the Nix
-                configuration fail.
+                If the file is missing or unreadable, Nix skips it without an
+                error. This lets NixOS check `nix.conf` at build time before
+                the file exists. To confirm that Nix is using the private
+                cache, run `nix config show substituters` as the account that
+                reads the file.
               '';
             };
 
             publicKeys = lib.mkOption {
               type = lib.types.listOf lib.types.str;
-              example = [ "cupboard-1:abc123..." ];
+              example = [ "cupboard-acme-1:abc123..." ];
               description = ''
                 Trusted public key(s), as printed by `cupboard pubkey`. A key
                 is public data, so it is set here for a private cache too.
@@ -159,9 +162,9 @@
           };
         };
 
-      # Both modules expose `nix.cupboard.caches`. Nix merges these list settings
-      # by concatenation, so the configured caches are added to existing
-      # substituters and trusted keys.
+      # Both modules expose `nix.cupboard.caches`. The `extra-` settings make Nix
+      # add these caches to its existing substituters and trusted keys. With the
+      # plain settings, a user-level `nix.conf` would replace the system's caches.
       cupboardModule =
         { config, lib, ... }:
         let
@@ -190,12 +193,12 @@
             }) cfg.caches;
 
             nix.settings = {
-              substituters = map (cache: cache.url) publicCaches;
-              trusted-public-keys = lib.concatMap (cache: cache.publicKeys) cfg.caches;
+              extra-substituters = map (cache: cache.url) publicCaches;
+              extra-trusted-public-keys = lib.concatMap (cache: cache.publicKeys) cfg.caches;
             };
 
             nix.extraOptions = lib.concatMapStrings (
-              cache: "include ${toString cache.substitutersFile}\n"
+              cache: "!include ${toString cache.substitutersFile}\n"
             ) privateCaches;
           };
         };

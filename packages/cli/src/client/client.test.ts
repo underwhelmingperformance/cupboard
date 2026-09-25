@@ -458,8 +458,8 @@ describe('CupboardClient.commit', () => {
 					sendFrame(scripted, {
 						ev: 'error',
 						uploadId: uploadIdSchema.parse('upload-app'),
-						status: 507,
-						message: 'over quota'
+						status: 409,
+						message: 'conflict'
 					});
 				}
 			],

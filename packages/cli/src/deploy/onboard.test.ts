@@ -396,6 +396,22 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureSchedules');
 			return Promise.resolve();
 		},
+		listSchedules: () => {
+			recordApiCall(apiCalls, 'listSchedules');
+			return Promise.resolve(undefined);
+		},
+		findQueueConsumer: () => {
+			recordApiCall(apiCalls, 'findQueueConsumer');
+			return Promise.resolve(undefined);
+		},
+		d1DatabaseName: () => {
+			recordApiCall(apiCalls, 'd1DatabaseName');
+			return Promise.resolve(undefined);
+		},
+		kvNamespaceTitle: () => {
+			recordApiCall(apiCalls, 'kvNamespaceTitle');
+			return Promise.resolve(undefined);
+		},
 		putSecret: (scriptName, secret) => {
 			apiCalls.push({ method: 'putSecret', scriptName, name: secret.name });
 
@@ -744,6 +760,29 @@ describe('onboardAdminFor', () => {
 		expect(onboardAdminFor({ kind: 'none' }, deployer)).toStrictEqual({
 			kind: 'none'
 		});
+	});
+
+	it.each([
+		['the gate is kept', { kind: 'owner', owner, origin: 'deployed' } as const],
+		['no gate is bound', { kind: 'none' } as const]
+	])(
+		'keeps the existing operator when %s and the session has no identity',
+		(_name, choice) => {
+			expect(onboardAdminFor(choice, undefined, owner)).toStrictEqual({
+				kind: 'operator',
+				operator: owner
+			});
+		}
+	);
+
+	it('lets the deployer claim even when an operator is recorded', () => {
+		expect(
+			onboardAdminFor(
+				{ kind: 'owner', owner, origin: 'deployer' },
+				deployer,
+				owner
+			)
+		).toStrictEqual({ kind: 'claimable', owner, idToken: 'id-token-1' });
 	});
 });
 
@@ -1515,6 +1554,22 @@ describe('onboardDeployment', () => {
 		).toStrictEqual({
 			kind: 'no-admin',
 			url: 'https://cache.example.com'
+		});
+	});
+
+	it('stops after the version wait when the operator is kept', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ versions: ['v-new'] });
+
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				admin: { kind: 'operator', operator: owner }
+			})
+		).toStrictEqual({
+			kind: 'operator-kept',
+			url: 'https://cache.example.com',
+			operator: owner
 		});
 	});
 

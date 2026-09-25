@@ -5,6 +5,8 @@ import { z } from 'zod';
 import {
 	configDirectory,
 	readSecretFile,
+	type Removal,
+	removeSecretFile,
 	writeSecretFile
 } from '../auth/secret-file.ts';
 import { withSecretFileLock } from '../auth/secret-lock.ts';
@@ -86,4 +88,16 @@ export async function writeCachedGrant(
 	};
 
 	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`, signal);
+}
+
+/**
+ * Deletes the saved Cloudflare sign-in. It takes the same lock as renewal, so a
+ * refresh running at the same time can't write it back.
+ */
+export async function removeCachedGrant(
+	signal?: AbortSignal
+): Promise<Removal> {
+	const file = grantFilePath();
+
+	return withCachedGrantLock(() => removeSecretFile(file), signal);
 }

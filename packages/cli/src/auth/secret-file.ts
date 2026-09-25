@@ -3,6 +3,7 @@ import {
 	chmod,
 	lstat,
 	mkdir,
+	readdir,
 	readFile,
 	rename,
 	unlink,
@@ -53,6 +54,47 @@ export async function readSecretFile(
 	} catch (error) {
 		if (isNotFound(error)) {
 			return undefined;
+		}
+
+		throw error;
+	}
+}
+
+/**
+ * Whether a removal deleted a file or found nothing there.
+ */
+export type Removal = 'removed' | 'absent';
+
+/**
+ * Deletes a secret file. A missing file isn't an error, so it's safe to call
+ * twice. Any other failure is thrown.
+ */
+export async function removeSecretFile(file: string): Promise<Removal> {
+	try {
+		await unlink(file);
+	} catch (error) {
+		if (isNotFound(error)) {
+			return 'absent';
+		}
+
+		throw error;
+	}
+
+	return 'removed';
+}
+
+/**
+ * Lists the names in a directory, or returns an empty list if the directory
+ * doesn't exist.
+ */
+export async function listSecretDirectory(
+	directory: string
+): Promise<readonly string[]> {
+	try {
+		return await readdir(directory);
+	} catch (error) {
+		if (isNotFound(error)) {
+			return [];
 		}
 
 		throw error;

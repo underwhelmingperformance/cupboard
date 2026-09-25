@@ -33,7 +33,7 @@ export function registerDeploymentCommands(
 ): void {
 	const deployment = program
 		.command('deployment')
-		.description('Inspect and resume tenant migration work.');
+		.description('Check and continue the tenant migrations of an upgrade.');
 	const client = (url: URL) =>
 		controlRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: options.signal }),
@@ -41,7 +41,9 @@ export function registerDeploymentCommands(
 		});
 	deployment
 		.command('status')
-		.description('Show the deployment phase and pending tenant work.')
+		.description(
+			"Show the deployment's upgrade phase and how many tenants are still migrating."
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const rpc = client(url);
@@ -71,18 +73,19 @@ export function registerDeploymentCommands(
 	deployment
 		.command('resume')
 		.description(
-			'Advance bounded tenant batches, then report whether deployment can continue.'
+			'Wake the tenants that are still migrating, in batches, and report whether ' +
+				'the deploy can finish.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.option(
 			'--limit <number>',
-			'tenants attempted per batch (1–100)',
+			'number of tenants to wake in each batch (1–100)',
 			parseBatchLimit,
 			20
 		)
 		.option(
 			'--max-passes <number>',
-			'maximum batches in this command (1–100)',
+			'maximum number of batches to run (1–100)',
 			parseBatchLimit,
 			20
 		)

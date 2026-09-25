@@ -8,45 +8,50 @@ on:
   workflow_call:
     inputs:
       url:
-        description: Tenant or named-cache URL to push to.
+        description: Tenant URL or cache URL to publish to.
         required: true
         type: string
       installable:
-        description: Flake installable to build and push.
+        description: Flake installable to build and publish.
         required: false
         type: string
         default: '.'
       cache:
         description:
-          Named cache to push to. Leave empty to push to the default cache.
+          Named cache to publish to. Leave empty to publish to the default
+          cache.
         required: false
         type: string
         default: ''
       root:
         description:
-          Prefix for the retention root. The workflow appends the builder's Nix
-          system, so each platform retains under its own root.
+          Start of the retention root name. The workflow appends the runner's
+          Nix system, such as x86_64-linux, so each platform has its own root.
+          If empty, the root is github:<repository>/<ref name>, without the
+          system.
         required: false
         type: string
         default: ''
       ttl:
         description:
-          Retention TTL such as 7d. When empty, retain permanently if permanent
-          is true; otherwise inherit the cache's retention.
+          How long the root lasts after it was last set, such as 7d. If empty,
+          the root is permanent when permanent is true, and follows the cache's
+          retention settings otherwise.
         required: false
         type: string
         default: ''
       permanent:
         description:
-          Retain the root permanently when ttl is empty. Set false to inherit
-          the cache's retention instead.
+          Keep the root permanently when ttl is empty. Set it to false to use
+          the cache's retention settings instead.
         required: false
         type: boolean
         default: true
       attest:
         description:
-          When true, sign and attach SLSA build provenance for the published
-          paths.
+          When true, sign build provenance for the published paths and attach it
+          in the cache. The job then rebuilds every output that it did not build
+          itself, so the provenance covers all of them.
         required: false
         type: boolean
         default: true
@@ -57,16 +62,16 @@ on:
         default: ubuntu-24.04
       trusted-public-key:
         description:
-          Nix public key to trust for reads from the cache. Leave empty to fetch
-          the key the deployment serves and trust that.
+          Nix public key to trust for reads from the cache. If empty, the job
+          downloads the cache's current key from /pubkey and trusts it.
         required: false
         type: string
         default: ''
       cupboard-version:
-        description: >-
-          Exact published cupboard release tag to install, or 'latest'. When
-          omitted, install a release for the called workflow revision or build
-          its source if no release exists.
+        description:
+          An exact cupboard release tag to install, or latest. If empty, the
+          workflow installs the release that was published from its own commit.
+          If there is no such release, it builds cupboard from that commit.
         required: false
         type: string
 
@@ -190,8 +195,14 @@ jobs:
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
 
+      # Attach the signed bundles to the published paths. Build provenance
+      # only covers paths that this run built, while build origin covers every
+      # path that it published. A run that built nothing only has build-origin
+      # bundles, so check both outputs.
       - uses: $/actions/attest-attach
-        if: ${{ inputs.attest && steps.attest.outputs.bundle-path != '' }}
+        if:
+          ${{ inputs.attest && (steps.attest.outputs.bundle-path != '' ||
+          steps.attest.outputs.origin-bundle-path != '') }}
         with:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}

@@ -22,6 +22,14 @@ import {
 } from './cli-ui.ts';
 import { fakeCliUi } from './testing.ts';
 
+// A regression that prompts despite `--yes` would otherwise block on stdin.
+const clackConfirm = vi.hoisted(() => vi.fn(() => Promise.resolve(false)));
+
+vi.mock(import('@clack/prompts'), async (importOriginal) => ({
+	...(await importOriginal()),
+	confirm: clackConfirm
+}));
+
 const escape = String.fromCodePoint(27);
 const plain = pc.createColors(false);
 
@@ -167,6 +175,48 @@ describe('createCliUi confirm', () => {
 		const { ui } = machineUi({ assumeYes: true });
 
 		expect(await ui.confirm({ message: 'Remove tenant acme?' })).toBe('yes');
+	});
+
+	it.each<{ name: string; options: Partial<CliUiOptions>; assumeYes?: true }>([
+		{ name: 'the UI was built with assumeYes', options: { assumeYes: true } },
+		{ name: 'the call passes --yes', options: {}, assumeYes: true }
+	])(
+		'skips the interactive prompt when $name',
+		async ({ options, assumeYes }) => {
+			clackConfirm.mockClear();
+			const { ui } = machineUi({
+				mode: 'terminal',
+				interactive: true,
+				colour: false,
+				...options
+			});
+
+			const outcome = await ui.confirm({
+				message: 'Retire signing key cupboard-acme-1?',
+				assumeYes
+			});
+
+			expect({
+				outcome,
+				prompts: clackConfirm.mock.calls.length
+			}).toStrictEqual({ outcome: 'yes', prompts: 0 });
+		}
+	);
+
+	it('prompts in an interactive run without --yes', async () => {
+		clackConfirm.mockClear();
+		const { ui } = machineUi({
+			mode: 'terminal',
+			interactive: true,
+			colour: false
+		});
+
+		const outcome = await ui.confirm({ message: 'Retire signing key?' });
+
+		expect({ outcome, prompts: clackConfirm.mock.calls.length }).toStrictEqual({
+			outcome: 'no',
+			prompts: 1
+		});
 	});
 });
 

@@ -1,8 +1,10 @@
+import { formatBytes } from '@cupboard/reporter';
 import {
 	CodedError,
 	genericExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
+import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -28,6 +30,71 @@ const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
 const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
 const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
 const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
+const insufficientStorageStatusCode: number = StatusCodes.INSUFFICIENT_STORAGE;
+
+/**
+ * Chooses the exit code for a failed HTTP response. A refused credential exits
+ * 77. A timeout, rate limit or server error exits 75, because a retry may
+ * succeed. Anything else exits 1. That includes 507, which means the tenant is
+ * over its storage quota, so retrying won't help.
+ */
+function httpStatusExitCode(status: number): number {
+	if (status === unauthorisedStatusCode || status === forbiddenStatusCode) {
+		return authExitCode;
+	}
+
+	if (status === insufficientStorageStatusCode) {
+		return genericExitCode;
+	}
+
+	if (
+		status === requestTimeoutStatusCode ||
+		status === tooManyRequestsStatusCode ||
+		status >= internalServerErrorStatusCode
+	) {
+		return transientExitCode;
+	}
+
+	return genericExitCode;
+}
+
+/**
+ * Chooses the exit code for a failure. A coded error uses its own code. An
+ * admin API (oRPC) error uses the exit code for its HTTP status. Anything else
+ * exits 1.
+ */
+export function failureExitCode(error: unknown): number {
+	if (error instanceof CodedError) {
+		return error.exitCode;
+	}
+
+	if (error instanceof ORPCError) {
+		return httpStatusExitCode(error.status);
+	}
+
+	return genericExitCode;
+}
+
+/**
+ * Picks the most important failure among `causes`. An authentication failure
+ * comes first, then a transient failure, then an unavailable service. Returns
+ * undefined if none of the causes is one of these.
+ */
+function categorisedFailure(
+	causes: readonly unknown[]
+): PublicationFailureClassification | undefined {
+	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
+		const cause = causes.find(
+			(candidate) => failureExitCode(candidate) === code
+		);
+
+		if (cause !== undefined) {
+			return { exitCode: code, cause };
+		}
+	}
+
+	return undefined;
+}
 
 export abstract class CliError extends CodedError {}
 
@@ -108,6 +175,24 @@ export class LocalStepUnreachedError extends CliError {
 			`${pending === 1 ? '1 tenant has' : `${String(pending)} tenants have`} not reached local step ${String(requiredStep)}: ${named}. The deployment phase was not recorded. Run cupboard deployment status <url> to inspect readiness and cupboard deployment resume <url> to advance another bounded batch. Repair any reported tenant failures, then re-run cupboard deploy.`
 		);
 		this.name = 'LocalStepUnreachedError';
+	}
+}
+
+export class TrustRuleFileConflictError extends CliUsageError {
+	constructor(public readonly options: readonly string[]) {
+		super(
+			`--from-file contains the whole rule, so it can't be combined with ${options.join(', ')}.`
+		);
+		this.name = 'TrustRuleFileConflictError';
+	}
+}
+
+export class TrustRuleOptionsRequiredError extends CliUsageError {
+	constructor(public readonly options: readonly string[]) {
+		super(
+			`A trust rule needs ${options.join(' and ')}. Pass them, or pass the whole rule with --from-file.`
+		);
+		this.name = 'TrustRuleOptionsRequiredError';
 	}
 }
 
@@ -427,15 +512,67 @@ export class ScopeForbiddenError extends CliError {
 	}
 }
 
+// The operator sets each tenant's quota. Deleting a path frees its space once
+// no other path in the tenant shares the same data. Removing a root doesn't
+// free space immediately. Garbage collection reclaims the root's paths later.
+const overQuotaAdvice =
+	"To make room, ask the operator to raise the tenant's quota with " +
+	'`cupboard tenant set-quota`. Or free some space yourself: delete paths ' +
+	'that you no longer need with `cupboard delete`, or remove roots with ' +
+	'`cupboard root remove` so that garbage collection can reclaim the paths ' +
+	'that those roots kept.';
+
+// End the server's explanation with a full stop, so the advice after it reads
+// as a new sentence.
+function quotaExplanation(detail: string): string {
+	const trimmed = detail.trim();
+
+	if (trimmed === '') {
+		return "The upload would exceed the tenant's storage quota.";
+	}
+
+	return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+}
+
 export class QuotaExceededError extends CliError {
 	constructor(public readonly detail: string) {
-		const explanation =
-			detail === '' ? 'The cache is over its storage quota.' : detail;
-
-		super(
-			`${explanation} Free space by deleting unused paths or raise the quota.`
-		);
+		super(`${quotaExplanation(detail)} ${overQuotaAdvice}`);
 		this.name = 'QuotaExceededError';
+	}
+}
+
+/**
+The operator tried to suspend, resume or change the quota of a tenant that is
+being removed. Removal always runs to the end, so the tenant will end up
+offboarded whatever happens.
+*/
+export class TenantRemovalInProgressError extends CliError {
+	constructor(public readonly tenant: string) {
+		super(
+			`Tenant ${tenant} is being removed, so its status and quota can no ` +
+				"longer be changed. Removal can't be undone. Run `cupboard tenant " +
+				'list` to check on the removal.'
+		);
+		this.name = 'TenantRemovalInProgressError';
+	}
+}
+
+/**
+The operator asked for a quota that is smaller than what the tenant already
+stores.
+*/
+export class QuotaBelowUsageError extends CliError {
+	constructor(
+		public readonly tenant: string,
+		public readonly usedBytes: number
+	) {
+		super(
+			`Tenant ${tenant} already stores ${formatBytes(usedBytes)} ` +
+				`(${String(usedBytes)} bytes), which is more than the requested ` +
+				"quota. Choose a larger quota, or ask the tenant's administrators to " +
+				'free some space first.'
+		);
+		this.name = 'QuotaBelowUsageError';
 	}
 }
 
@@ -459,22 +596,7 @@ export class CupboardHttpError extends CliError {
 	}
 
 	override get exitCode(): number {
-		if (
-			this.status === unauthorisedStatusCode ||
-			this.status === forbiddenStatusCode
-		) {
-			return authExitCode;
-		}
-
-		if (
-			this.status === requestTimeoutStatusCode ||
-			this.status === tooManyRequestsStatusCode ||
-			this.status >= internalServerErrorStatusCode
-		) {
-			return transientExitCode;
-		}
-
-		return genericExitCode;
+		return httpStatusExitCode(this.status);
 	}
 }
 
@@ -589,7 +711,7 @@ function uploadVerificationMessage(status: UploadVerificationStatus): string {
 		}
 
 		case 'over-quota': {
-			return 'The cache is over its storage quota. Free space by deleting unused paths or raise the quota.';
+			return `An upload would exceed the tenant's storage quota. ${overQuotaAdvice}`;
 		}
 
 		case 'absent': {
@@ -609,13 +731,26 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 	}
 }
 
+/**
+ * Some paths in a push didn't finish. The exit code comes from the most
+ * important of the failures, as {@link categorisedFailure} ranks them. So a
+ * push whose paths only failed for transient reasons exits 75, and the caller
+ * can retry it. Other failures exit 1.
+ */
 export class PushIncompleteError extends CliError {
-	constructor(public readonly failedPaths: readonly string[]) {
+	constructor(
+		public readonly failedPaths: readonly string[],
+		public readonly causes: readonly unknown[] = []
+	) {
 		super(
 			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
 				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
 		);
 		this.name = 'PushIncompleteError';
+	}
+
+	override get exitCode(): number {
+		return categorisedFailure(this.causes)?.exitCode ?? genericExitCode;
 	}
 }
 
@@ -1248,6 +1383,20 @@ export class UnknownCacheCredentialError extends CliUsageError {
 	}
 }
 
+/**
+ * `cupboard check` found committed paths whose stored objects are missing or
+ * don't match. The report has already been printed. The command still fails,
+ * so that a CI job fails when the check finds a problem.
+ */
+export class CheckDiscrepanciesError extends CliError {
+	constructor(public readonly count: number) {
+		super(
+			`The check found ${String(count)} discrepanc${count === 1 ? 'y' : 'ies'}.`
+		);
+		this.name = 'CheckDiscrepanciesError';
+	}
+}
+
 export class GithubCheckFailedError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
 		super(`Configuration checks failed: ${checks.join(', ')}`);
@@ -1571,19 +1720,10 @@ export interface PublicationFailureClassification {
 export function classifyPublicationFailures(
 	causes: readonly unknown[]
 ): PublicationFailureClassification {
-	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
-		const cause = causes.find(
-			(candidate) =>
-				candidate instanceof CliError && candidate.exitCode === code
-		);
-
-		if (cause !== undefined) {
-			return { exitCode: code, cause };
+	return (
+		categorisedFailure(causes) ?? {
+			exitCode: publicationExitCode,
+			cause: causes.find((cause) => cause !== undefined)
 		}
-	}
-
-	return {
-		exitCode: publicationExitCode,
-		cause: causes.find((cause) => cause !== undefined)
-	};
+	);
 }

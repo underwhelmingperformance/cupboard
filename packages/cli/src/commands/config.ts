@@ -186,27 +186,33 @@ export function registerConfigCommand(
 	program
 		.command('config')
 		.description(
-			"Print Nix substituter configuration suitable for a user's nix.conf."
+			"Print the nix.conf lines that add a tenant's caches as Nix substituters."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<pubkey>', 'Nix trusted-public-keys entry')
-		.argument('[caches...]', 'named caches; omit them to use the URL target')
+		.argument(
+			'<pubkey>',
+			"the tenant's public signing keys, as printed by `cupboard pubkey`"
+		)
+		.argument(
+			'[caches...]',
+			'named caches to add (by default, the cache that the URL refers to)'
+		)
 		.option(
 			'--include-default-cache',
-			"also configure the tenant's default cache, alongside any named caches"
+			"also add the tenant's default cache when you name caches"
 		)
 		.option(
 			'--read-user <user>',
-			'read username (or CUPBOARD_READ_USER)',
+			'user name of the tenant read credential, for a private cache (default: $CUPBOARD_READ_USER)',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'read password (or CUPBOARD_READ_PASSWORD)'
+			'password of the tenant read credential, for a private cache (default: $CUPBOARD_READ_PASSWORD)'
 		)
 		.option(
 			'--cache-credentials <json>',
-			'JSON array of cache scopes and their credentials (or CUPBOARD_CACHE_CREDENTIALS)'
+			'cache read credentials, as a JSON array of caches and their credentials (default: $CUPBOARD_CACHE_CREDENTIALS)'
 		)
 		.action(
 			(

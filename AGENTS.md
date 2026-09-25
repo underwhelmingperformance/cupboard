@@ -2,7 +2,11 @@
 
 A Cloudflare Workers substituter for Nix.
 
-See [PLAN.md](./PLAN.md) for the feature plan and current progress.
+See [PLAN.md](./PLAN.md) for the feature plan and current progress,
+[docs/contributing/README.md](./docs/contributing/README.md) for setting up and
+running the checks, and
+[docs/contributing/architecture.md](./docs/contributing/architecture.md) for how
+the system fits together.
 
 ## Layout
 
@@ -22,8 +26,16 @@ This is a pnpm workspace.
   API plus the domain schemas they share.
 - `packages/shared` - attestation verification (`in-toto`, `sigstore`, `slsa`),
   the shared Octokit client, and typed errors.
+- `packages/logger` - logging configuration on LogTape.
 - `packages/reporter` and `packages/cli-ui` - terminal/JSON output.
-- `actions/` - the composite GitHub Action (`setup`, `push`, `attest`).
+- `actions/` - the composite GitHub Actions (`setup`, `build-paths`, `push`,
+  `attest`, `attest-attach`, and the internal steps of the reusable workflows).
+- `tests/` - the end-to-end, conformance and performance suites, their shared
+  support code and fixtures.
+- `scripts/` - repository tooling: the binary build, releases, generated
+  references, and dependency and migration checks.
+- `docs/` - user, operator and contributor documentation, indexed by
+  [docs/README.md](./docs/README.md).
 
 ## Conventions
 
@@ -33,18 +45,45 @@ This is a pnpm workspace.
 - Use guard clauses and early returns; keep the happy path left-aligned.
 - Be type-first: prefer explicit types and small domain models over ad-hoc
   untyped objects.
-- Run `pnpm check` before committing. It runs `syncpack`, `prettier`, `eslint`,
-  `knip`, `tsc`, and `vitest` across the workspace. Treat every finding as
-  actionable.
+- Run `pnpm check` before committing. It runs every `check:*` script:
+  `syncpack`, `prettier`, `eslint`, `knip`, `tsc`, the unit tests, and the
+  end-to-end and conformance suites, which need Nix and Docker. Treat every
+  finding as actionable.
 - `pnpm fix` applies the auto-fixable parts (`syncpack format`,
   `prettier --write`, `eslint --fix`).
 - Install pre-commit hooks with `pre-commit install`. The hooks run upstream
   file hygiene checks plus the workspace dependency, format, lint, Knip, and
   type gates before commits.
+- Commit messages follow Conventional Commits, with bodies wrapped at 72
+  columns; CI checks both.
 - Never suppress or weaken a linter rule to avoid an applicable finding. A
   narrowly scoped suppression is permitted for a demonstrable tool false
   positive when the configuration cites authoritative evidence and an upstream
   issue. Remove it once the pinned tool supports the construct.
+
+## Documentation
+
+- User and operator docs describe the current release. Steps an operator must
+  take for one particular upgrade go in
+  [docs/operator/upgrade-notes.md](./docs/operator/upgrade-notes.md), not in the
+  guides.
+- `docs/reference/cli.md` and `docs/reference/actions.md` are generated from the
+  command definitions and the action and workflow YAML. After changing either,
+  run `pnpm update:cli-reference` or `pnpm update:actions-reference`; tests fail
+  while they are stale.
+- Examples use `https://cupboard.example.workers.dev`, the instance name
+  `cupboard`, the tenant `acme`, the repository `acme/app`, the release `vX.Y.Z`
+  and keys named `cupboard-acme-1:...`.
+- Use one term per concept: operator; tenant administrator (owner only for the
+  identity fixed at creation); tenant read credential and cache read credential;
+  deployment URL, tenant URL and cache URL; trust rule and grant; publish for
+  the outcome and push for the command.
+- Every factual claim should be checkable against the code. When behaviour
+  changes, update the page that owns the topic rather than adding a note
+  elsewhere.
+- Reference cupboard's actions and workflows as
+  `underwhelmingperformance/cupboard/...`, never as a copy in the caller's
+  repository.
 
 ## Coding Standards
 
