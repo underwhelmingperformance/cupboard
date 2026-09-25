@@ -1,94 +1,104 @@
 name: Plan cupboard flake publication
 description:
-  Evaluate a typed flake target manifest, renew retention for targets already
-  available from the cache, and emit matrices for the build jobs.
+  Evaluates the target manifest, groups the targets into cohorts, and writes the
+  matrix for the cohort jobs. Unless require-provenance is true, it also sets
+  the roots of targets that the cache already has, and leaves those targets out
+  of the matrix.
 inputs:
   targets:
-    description: JSON target manifest to evaluate.
+    description: Target manifest to plan, as JSON.
     required: true
   url:
-    description: cupboard Worker URL.
+    description: Tenant URL or cache URL to publish to.
     required: true
   cupboard-path:
-    description: Path to the cupboard binary installed by actions/setup.
+    description: Path to the cupboard executable that actions/setup installed.
     required: true
   root-prefix:
-    description: Prefix used to form each target's retention root.
+    description:
+      Start of each target's retention root name. The target's rootSuffix
+      follows it.
     required: true
   cache:
     description:
-      Named cache to inspect and publish to. Empty selects the default cache.
+      Named cache to check and publish to. Leave empty for the default cache.
     required: false
   ttl:
-    description: TTL applied when retaining an already cached target.
+    description: TTL for the root of a target that the cache already has.
     required: false
   permanent:
-    description: Retain an already cached target permanently.
+    description:
+      Keep the root of a target that the cache already has permanently.
     required: false
     default: 'false'
   read-user:
-    description: Username for cache reads.
+    description: User name of a read credential for a private destination cache.
     required: false
   read-password:
-    description: Password for cache reads.
+    description: Password of a read credential for a private destination cache.
     required: false
   audience:
-    description: GitHub OIDC audience. Defaults to url.
+    description: Audience of the GitHub OIDC token. Defaults to url.
     required: false
   plan-file:
-    description: Destination for the detailed JSON plan.
+    description: Where to write the full plan as JSON.
     required: false
   optimise:
     description:
-      Check the cache and derivation graph. When false, emit every target
-      directly.
+      When true, check the cache and the derivation graph to decide which
+      targets need a job. When false, give every cohort a job without these
+      checks.
     required: false
     default: 'true'
   enable-packing:
-    description: >-
-      Use measured NAR sizes to combine cohorts within pack-capacity. Disabled
-      by default. Cohorts without a measurement remain unchanged.
+    description:
+      Pack cohorts into as few jobs as fit within pack-capacity, using the
+      measured NAR sizes of their closures. Off by default. A cohort without a
+      measurement is not packed.
     required: false
     default: 'false'
   pack-capacity:
-    description: >-
-      Available disk capacity in bytes for measured cohort packing. Required
-      when enable-packing is true.
+    description:
+      Disk space in bytes that each packed job can use. Required when
+      enable-packing is true.
     required: false
   store:
-    description: >-
-      URI of the remote ssh-ng store for cohort builds. Packing measures against
-      this store. When this input is empty, packing uses the runner's store.
-      Remote planning requires every selected output path to be predictable;
-      floating content-addressed outputs require a local build.
+    description:
+      ssh-ng:// URI of the remote store that the cohort jobs build in. Packing
+      measures sizes in this store, or in the runner's store when this input is
+      empty. With a remote store, every output path must be known during
+      planning, so floating content-addressed outputs must be built on the
+      runner instead.
     required: false
   require-provenance:
-    description: >-
-      Build cached targets again so this invocation runs their final derivations
-      and can attest every published target.
+    description:
+      Keep targets that the cache already has in the matrix, so the cohort jobs
+      can build and attest every published target.
     required: false
     default: 'false'
 outputs:
   plan-file:
-    description: Path to the plan consumed by the cohort jobs.
+    description: Path to the plan, which the cohort jobs read.
     value: ${{ steps.plan.outputs.plan-file }}
   plan-artifact-name:
-    description: Unique name for transferring this invocation's plan.
+    description: Unique artifact name for passing this plan to the cohort jobs.
     value: ${{ steps.plan.outputs.plan-artifact-name }}
   target-matrix:
-    description: JSON matrix for independent target jobs.
+    description: JSON matrix with one entry for each target.
     value: ${{ steps.plan.outputs.target-matrix }}
   cohort-matrix:
-    description: JSON matrix for cohort jobs that remain after pre-filtering.
+    description:
+      JSON matrix with one entry for each cohort job, after the plan has removed
+      cohorts with nothing to build.
     value: ${{ steps.plan.outputs.cohort-matrix }}
   retained-count:
-    description: Number of targets retained without a build.
+    description: Number of targets whose roots the plan set without a build.
     value: ${{ steps.plan.outputs.retained-count }}
   target-count:
-    description: Number of target builds that remain.
+    description: Number of targets that still need a build.
     value: ${{ steps.plan.outputs.target-count }}
   cohort-count:
-    description: Number of cohort jobs that remain after pruning.
+    description: Number of cohort jobs in cohort-matrix.
     value: ${{ steps.plan.outputs.cohort-count }}
 runs:
   using: composite

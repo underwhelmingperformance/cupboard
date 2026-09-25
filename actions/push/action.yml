@@ -1,143 +1,163 @@
 name: Push to cupboard
-description: Push local Nix store paths to a cupboard cache.
+description:
+  Publishes Nix store paths to a cupboard cache and sets a retention root for
+  them.
 inputs:
   url:
-    description: URL of the cupboard Worker.
+    description: Tenant URL or cache URL to publish to.
     required: true
   paths:
     description:
-      Newline-delimited local Nix store paths, derivations, or installables to
-      push. Required unless root-groups is given.
+      Store paths to publish, one per line. A path that resolves to a store
+      path, such as a `result` symlink, also works. Build flake outputs before
+      you publish them. Required unless root-groups is set.
     required: false
   cupboard-path:
     description:
-      Path to a cupboard executable that actions/setup already acquired. When it
-      is set, the action installs no release.
+      Path to a cupboard executable that an earlier actions/setup step
+      installed. When it is set, the action does not install a release.
     required: false
   cupboard-version:
     description:
-      cupboard version to install. Use latest or an exact published release tag.
+      cupboard release to install, either latest or an exact release tag.
+      Defaults to latest.
     required: false
   include-prereleases:
-    description:
-      When true, a prerelease is eligible when the action resolves latest.
+    description: Whether latest can resolve to a prerelease. Defaults to true.
     required: false
   github-token:
-    description: GitHub token used for release API calls.
+    description:
+      GitHub token for release API requests. Defaults to the job's token.
     required: false
   release-repository:
-    description: Repository that publishes cupboard release assets.
+    description:
+      Repository to install cupboard releases from. Defaults to the repository
+      that contains this action.
     required: false
   expected-source-commit:
     description:
-      Full commit id the installed release must have been built from. Requires
-      an exact cupboard-version.
+      Full commit ID that the installed release must have been built from.
+      Requires an exact cupboard-version.
     required: false
   install-dir:
-    description: Directory for the downloaded cupboard binary.
+    description: Directory to download the cupboard binary into.
     required: false
   cache:
-    description: Named cache to receive the paths. Leave empty for the default.
+    description: Named cache to publish to. Leave empty for the default cache.
     required: false
   store:
-    description: >-
-      Remote ssh-ng store URI to read path metadata and NAR bytes from. Leave
-      empty to read the store Nix itself would use on this runner.
+    description:
+      ssh-ng:// URI of a remote store to read the paths from. Leave empty to
+      read from the store that Nix uses on this runner.
     required: false
   audience:
-    description: GitHub OIDC audience. Defaults to the canonical form of url.
+    description:
+      Audience of the GitHub OIDC token. Defaults to url without a trailing
+      slash.
     required: false
   root:
-    description: Retention root to update with the pushed paths.
+    description:
+      Retention root to set for the published paths. Defaults to
+      github:<repository>/<ref name>.
     required: false
   ttl:
-    description: Retention TTL such as 7d or 12h.
+    description:
+      How long the root lasts after it was last set, such as 7d or 12h.
     required: false
   permanent:
     description:
-      Retain the target root permanently. Conflicts with ttl and no-retain.
-      Releases before explicit retention have no such option; the root then
-      inherits the cache's retention and the action warns.
+      Keep the root permanently. Cannot be combined with ttl or no-retain. Older
+      cupboard releases do not have this option. With one of those releases, the
+      root uses the cache's retention settings and the action prints a warning.
     required: false
     default: 'false'
   no-retain:
     description:
-      Push without adding the paths to a retention root or pin. The cache keeps
-      them only for its grace period, if it has one. Conflicts with root, ttl
-      and permanent.
+      Publish the paths without adding them to a retention root. The cache then
+      keeps them only for its grace period, if it has one. Cannot be combined
+      with root, ttl or permanent.
     required: false
     default: 'false'
   wait:
-    description: Wait until deferred paths become servable.
+    description:
+      Wait until the cache has verified the uploaded files and serves the paths.
+      Keep this on if an attest step follows, because attest needs the paths to
+      be published.
     required: false
     default: 'true'
   wait-timeout:
     description:
-      Wait timeout, applied separately to commit capacity and to deferred blobs.
+      How long to wait. The limit applies separately to waiting for the cache to
+      accept the upload and to waiting for verification.
     required: false
     default: 10m
   attestations:
-    description: Newline-delimited local Sigstore DSSE bundle paths to attach.
+    description:
+      Sigstore bundle files to attach to the published paths, one per line.
     required: false
   require-grace:
     description:
-      Fail if any pushed path has no retention grace deadline. Requires wait to
-      stay enabled.
+      Fail if any published path has no grace-period deadline. Requires wait to
+      be true.
     required: false
     default: 'false'
   intermediate-paths-file:
     description:
-      Newline-delimited store paths to publish alongside the targets without
-      retaining them as targets. When root-groups contains more than one root,
-      only the first push includes these paths.
+      File that lists store paths to publish with the targets, one per line.
+      These paths are not added to the root as targets. When root-groups has
+      more than one group, only the first push includes these paths.
     required: false
   reference-paths-file:
     description:
-      Newline-delimited store paths to publish from reference-source without
-      reading a local store or uploading NARs. Their NAR blobs must already
-      exist in the tenant. Required together with reference-source.
+      File that lists store paths to publish by reference from reference-source,
+      one per line. The action does not read them from a local store or upload
+      them, so the tenant must already store their NAR files. Set it together
+      with reference-source.
     required: false
   reference-source:
     description:
-      Cache endpoint that serves the reference paths. Required together with
-      reference-paths-file.
+      URL of the cache or reuse view that serves the paths in
+      reference-paths-file. Set it together with reference-paths-file.
     required: false
   run-root:
     description:
-      Add each committed path to this run root. The run root is independent of
-      root and root-groups.
+      Run root to add every published path to. It is separate from root and
+      root-groups.
     required: false
   run-root-ttl:
-    description: Expire the run root after this duration. Requires run-root.
+    description:
+      How long the run root lasts after it was last set. Requires run-root.
     required: false
   run-root-permanent:
     description:
-      Retain the run root permanently. Conflicts with run-root-ttl and requires
-      run-root. Releases before explicit retention have no such option; the run
-      root then inherits the cache's retention and the action warns.
+      Keep the run root permanently. Requires run-root, and cannot be combined
+      with run-root-ttl. Older cupboard releases do not have this option. With
+      one of those releases, the run root uses the cache's retention settings
+      and the action prints a warning.
     required: false
     default: 'false'
   root-groups:
-    description: >-
-      JSON array of {root, paths} objects. Replaces the flat paths and root
-      inputs. The action makes one push per group because each root is replaced
-      atomically.
+    description:
+      JSON array of {root, paths} objects, used instead of the paths and root
+      inputs. Setting a root replaces everything that it points to, so the
+      action runs one push for each group.
     required: false
 outputs:
   cupboard-path:
     description: Path to the cupboard executable that the action used.
     value: ${{ steps.push.outputs.cupboard-path }}
   cupboard-version:
-    description: Version reported by the cupboard executable.
+    description: Version that the cupboard executable reported.
     value: ${{ steps.push.outputs.cupboard-version }}
   uploaded-paths:
-    description: Number of paths whose NAR blobs were uploaded to the cache.
+    description: Number of paths whose NAR files were uploaded to the cache.
     value: ${{ steps.push.outputs.uploaded-paths }}
   reused-blobs:
-    description: Number of paths committed using NAR blobs already in the cache.
+    description:
+      Number of paths published with NAR files that the cache already stored.
     value: ${{ steps.push.outputs.reused-blobs }}
   skipped-paths:
-    description: Number of paths omitted because the cache already had them.
+    description: Number of paths left out because the cache already had them.
     value: ${{ steps.push.outputs.skipped-paths }}
   uploaded-bytes:
     description: Total number of bytes uploaded to the cache.

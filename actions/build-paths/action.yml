@@ -1,43 +1,48 @@
 name: Build cupboard store paths
 description:
-  Build Nix installables and record current-run evidence for outputs built
-  locally.
+  Builds Nix installables and writes a receipt that lists the outputs this job
+  built itself.
 inputs:
   installables:
-    description: Newline-delimited Nix installables to build.
+    description: Nix installables to build, one per line.
     required: false
   installables-file:
-    description: File containing newline-delimited Nix installables to build.
+    description:
+      File that lists the Nix installables to build, one per line. Use it for a
+      long generated list, because action inputs have a size limit.
     required: false
   keep-going:
-    description: Continue after an individual build failure.
+    description: Keep building the other installables after one of them fails.
     required: false
     default: 'false'
   max-jobs:
     description:
-      Maximum local build jobs. Leave empty to use the Nix configuration.
+      Maximum number of local build jobs. Leave empty to use the value from the
+      Nix configuration.
     required: false
   allow-failure:
-    description: Return successfully if all five build attempts fail.
+    description: Let the step succeed even if all five build attempts fail.
     required: false
     default: 'false'
   require-provenance:
-    description: >-
-      Require every realised output to have current-run local build evidence in
-      the receipt. Outputs supplied by substitution or present before the run
-      are rebuilt before the action succeeds.
+    description:
+      Rebuild every output that Nix downloaded or that was already in the store,
+      locally and one at a time, so the receipt lists every output as built by
+      this job. Without this, the receipt only lists the outputs that the job
+      built itself.
     required: false
     default: 'false'
 outputs:
   paths:
-    description: Newline-delimited realised output paths.
+    description: Output paths of the installables, one per line.
     value: ${{ steps.build.outputs.paths }}
   paths-file:
-    description: File containing the realised output paths.
+    description: File that lists the output paths of the installables.
     value: ${{ steps.build.outputs.paths-file }}
   receipt-file:
     description:
-      Path to the current-run build receipt that actions/attest reads.
+      Path to the receipt, which lists the outputs that this job built. Pass it
+      to actions/attest.
     value: ${{ steps.build.outputs.receipt-file }}
 runs:
   using: composite

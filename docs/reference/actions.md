@@ -10,7 +10,7 @@ Always reference them from `underwhelmingperformance/cupboard`: the actions loca
 
 ### cupboard-flake-publish.yml
 
-Plans, builds, publishes and attests every target in a flake manifest, skipping work the cache already holds.
+Plans, builds, publishes and attests every target in a flake manifest. A cohort job does not rebuild a target that the cache already has with build provenance.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
@@ -72,7 +72,7 @@ The calling job must grant:
 
 ### cupboard-publish.yml
 
-Builds one flake installable on one runner, then publishes and attests it. It reads the cache without credentials, so the destination must be public.
+Builds one flake installable on one runner, then publishes it and signs its build provenance. The workflow reads the cache without credentials, so the destination cache must be public.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
@@ -105,7 +105,7 @@ The calling job must grant:
 
 ### actions/setup
 
-Acquire cupboard and optionally export Nix binary cache configuration.
+Installs the cupboard CLI. If cache-url is set, it also adds cupboard caches to Nix's substituters for the rest of the job, and can create a named cache first.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
@@ -115,43 +115,43 @@ uses: underwhelmingperformance/cupboard/actions/setup@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `cupboard` |  | Canonical release or source acquisition JSON from resolve-cupboard. |
-| `cupboard-version` |  | Release tag to install. Use latest to resolve a published release. |
-| `include-prereleases` |  | When true, a prerelease is eligible when the action resolves latest, so the action installs the newest release of any kind. |
-| `github-token` |  | GitHub token for release, asset and attestation requests. |
-| `release-repository` |  | Repository that publishes cupboard releases and provenance. |
-| `expected-source-commit` |  | Full commit id that the release provenance must identify. Requires an exact cupboard-version. |
-| `install-dir` |  | Directory for acquired cupboard files. |
-| `add-to-path` | `true` | Add the directory containing the acquired cupboard binary to PATH. |
-| `cache-url` |  | cupboard tenant URL to add to Nix substituters. |
-| `cache` |  | Named caches to use at the tenant URL, one per line or comma-separated. Leave empty to use the tenant's default cache. |
-| `include-default-cache` |  | When true, also configure the tenant's default cache alongside any named caches. The `cache` list cannot name it, because a cache may itself be called `default`. |
-| `cache-credentials` |  | JSON array of cache scopes and cache-specific read credentials. Populate it from workflow secrets. A cache without an entry uses read-user and read-password. |
-| `private-substituters` |  | Authenticated HTTP(S) substituter URLs, one per line. Pass this value as a secret because the URLs contain passwords. Setup adds them only to Nix's substituters. |
-| `destination-read-user` |  | Username accepted by the single selected destination cache. Use cache-credentials instead when several caches are selected. |
-| `destination-read-password` |  | Password accepted by the single selected destination cache. |
-| `provision-cache` |  | Named cache to create with this run's OIDC token before configuring Nix. Choose its access and default root TTL with the provisioning inputs. An existing cache keeps its properties, but its access must match the requested access or setup fails. |
-| `provision-cache-access` |  | Required read access for the cache, public or private. Required with provision-cache. It must equal the access of the reuse view that aggregates the cache, because a view aggregates only the caches whose access equals its own. |
-| `provision-cache-ttl` |  | Default root TTL for the created cache, for example 14d. Expired roots let collection reclaim paths that have no other retention. Leave empty for permanent retention. |
-| `trusted-public-key` |  | Nix signing key to trust for cache reads. |
-| `read-user` |  | Tenant-level Basic-auth username for cache reads. |
-| `read-password` |  | Tenant-level Basic-auth password for cache reads. |
-| `reuse-view` |  | Named tenant reuse view to add as a second substituter, after the destination cache. Refused unless the view's nix-cache-info priority is numerically greater than the destination's. |
-| `nix-config-file` |  | Existing Nix config file. Setup appends an optional include of the protected runner-local config file. |
-| `checkout-dir` |  | Git checkout of the cupboard revision to build when the resolved coordinate is a source acquisition. Defaults to the directory this action was materialised in, which is a git checkout for a workspace-relative reference. |
+| `cupboard` |  | The cupboard output of actions/resolve-cupboard, which identifies a release to install or a commit to build cupboard from. Cannot be combined with cupboard-version, include-prereleases, release-repository or expected-source-commit. |
+| `cupboard-version` |  | Release tag to install, such as v1.2.3, or latest. Defaults to latest. |
+| `include-prereleases` |  | Whether latest can resolve to a prerelease. Defaults to true. When false, latest is GitHub's latest release. |
+| `github-token` |  | GitHub token for requesting releases, release assets and attestations. Defaults to the job's token. |
+| `release-repository` |  | Repository to install cupboard releases from. Defaults to the repository that contains this action. |
+| `expected-source-commit` |  | Full commit ID that the release's provenance must record. Requires an exact cupboard-version. |
+| `install-dir` |  | Directory to install cupboard into. Defaults to cupboard-bin under RUNNER_TEMP. |
+| `add-to-path` | `true` | Add the directory that contains the cupboard binary to PATH. |
+| `cache-url` |  | Tenant URL whose caches setup adds to Nix's substituters. |
+| `cache` |  | Named caches to use, one per line or separated by commas. Leave empty to use the tenant's default cache. |
+| `include-default-cache` |  | When true, use the tenant's default cache as well as the named caches in cache. The cache input cannot refer to the default cache, because a named cache can be called default. |
+| `cache-credentials` |  | JSON array with one entry for each cache that has its own cache read credential, in the form {"cache": {"kind": "named", "name": ...}, "credential": {"user": ..., "password": ...}}. Pass it from a secret. A cache without an entry is read with read-user and read-password. |
+| `private-substituters` |  | URLs of other private caches to read from, one per line, with the user name and password in each URL. Pass this value from a secret. setup adds these URLs to Nix's substituters, and Nix still needs each cache's public key. |
+| `destination-read-user` |  | User name of the cache read credential for the selected cache. When you select several caches, use cache-credentials instead. |
+| `destination-read-password` |  | Password of the cache read credential for the selected cache. |
+| `provision-cache` |  | Named cache to create with the job's OIDC token before Nix is configured. provision-cache-access and provision-cache-ttl set its access and default root TTL. If the cache already exists, setup keeps its settings, but fails if its access differs from provision-cache-access. |
+| `provision-cache-access` |  | Access for the created cache, public or private. Required with provision-cache. A reuse view only includes caches with the same access as the view, so this must match the access of any view that should include the cache. |
+| `provision-cache-ttl` |  | Default root TTL for the created cache, such as 14d. When a root expires, garbage collection can remove the paths that no other root keeps. Leave empty for roots that never expire. |
+| `trusted-public-key` |  | Nix public key to trust for reads from the cache. If empty, setup downloads the cache's current keys from /pubkey, trusts them, and prints a warning. |
+| `read-user` |  | User name of the tenant read credential. setup writes the credential to a netrc file, and Nix uses it for every cache on the tenant's host that does not have its own credential. |
+| `read-password` |  | Password of the tenant read credential. |
+| `reuse-view` |  | Reuse view to add as an extra substituter, after the selected caches. setup refuses a view unless its priority number is greater than the priority number of every selected cache, so Nix asks the caches first. |
+| `nix-config-file` |  | An existing Nix configuration file, for Nix processes that do not inherit NIX_CONFIG. setup appends a line that includes its own settings file if that file exists. |
+| `checkout-dir` |  | Git checkout of the cupboard commit to build when the cupboard input specifies a source commit. Defaults to the root of the checkout that contains this action. |
 
 #### Outputs
 
 | Output | Description |
 | --- | --- |
-| `cupboard-path` | Path to the acquired cupboard executable. |
-| `cupboard` | Pass this JSON to another setup invocation to acquire the same release or source commit. |
-| `cupboard-version` | Resolved cupboard release tag. This output is empty for a source acquisition. |
-| `nix-config-file` | Path to the generated runner-local Nix config file. |
+| `cupboard-path` | Path to the installed cupboard executable. |
+| `cupboard` | JSON that identifies the installed release or source commit. Pass it as the cupboard input of another setup step to install the same cupboard. |
+| `cupboard-version` | Tag of the installed release. Empty when cupboard was built from source. |
+| `nix-config-file` | Path to the Nix configuration file that setup wrote under RUNNER_TEMP. |
 
 ### actions/build-paths
 
-Build Nix installables and record current-run evidence for outputs built locally.
+Builds Nix installables and writes a receipt that lists the outputs this job built itself.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
@@ -161,24 +161,24 @@ uses: underwhelmingperformance/cupboard/actions/build-paths@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `installables` |  | Newline-delimited Nix installables to build. |
-| `installables-file` |  | File containing newline-delimited Nix installables to build. |
-| `keep-going` | `false` | Continue after an individual build failure. |
-| `max-jobs` |  | Maximum local build jobs. Leave empty to use the Nix configuration. |
-| `allow-failure` | `false` | Return successfully if all five build attempts fail. |
-| `require-provenance` | `false` | Require every realised output to have current-run local build evidence in the receipt. Outputs supplied by substitution or present before the run are rebuilt before the action succeeds. |
+| `installables` |  | Nix installables to build, one per line. |
+| `installables-file` |  | File that lists the Nix installables to build, one per line. Use it for a long generated list, because action inputs have a size limit. |
+| `keep-going` | `false` | Keep building the other installables after one of them fails. |
+| `max-jobs` |  | Maximum number of local build jobs. Leave empty to use the value from the Nix configuration. |
+| `allow-failure` | `false` | Let the step succeed even if all five build attempts fail. |
+| `require-provenance` | `false` | Rebuild every output that Nix downloaded or that was already in the store, locally and one at a time, so the receipt lists every output as built by this job. Without this, the receipt only lists the outputs that the job built itself. |
 
 #### Outputs
 
 | Output | Description |
 | --- | --- |
-| `paths` | Newline-delimited realised output paths. |
-| `paths-file` | File containing the realised output paths. |
-| `receipt-file` | Path to the current-run build receipt that actions/attest reads. |
+| `paths` | Output paths of the installables, one per line. |
+| `paths-file` | File that lists the output paths of the installables. |
+| `receipt-file` | Path to the receipt, which lists the outputs that this job built. Pass it to actions/attest. |
 
 ### actions/push
 
-Push local Nix store paths to a cupboard cache.
+Publishes Nix store paths to a cupboard cache and sets a retention root for them.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
@@ -188,43 +188,43 @@ uses: underwhelmingperformance/cupboard/actions/push@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `url` | **required** | URL of the cupboard Worker. |
-| `paths` |  | Newline-delimited local Nix store paths, derivations, or installables to push. Required unless root-groups is given. |
-| `cupboard-path` |  | Path to a cupboard executable that actions/setup already acquired. When it is set, the action installs no release. |
-| `cupboard-version` |  | cupboard version to install. Use latest or an exact published release tag. |
-| `include-prereleases` |  | When true, a prerelease is eligible when the action resolves latest. |
-| `github-token` |  | GitHub token used for release API calls. |
-| `release-repository` |  | Repository that publishes cupboard release assets. |
-| `expected-source-commit` |  | Full commit id the installed release must have been built from. Requires an exact cupboard-version. |
-| `install-dir` |  | Directory for the downloaded cupboard binary. |
-| `cache` |  | Named cache to receive the paths. Leave empty for the default. |
-| `store` |  | Remote ssh-ng store URI to read path metadata and NAR bytes from. Leave empty to read the store Nix itself would use on this runner. |
-| `audience` |  | GitHub OIDC audience. Defaults to the canonical form of url. |
-| `root` |  | Retention root to update with the pushed paths. |
-| `ttl` |  | Retention TTL such as 7d or 12h. |
-| `permanent` | `false` | Retain the target root permanently. Conflicts with ttl and no-retain. Releases before explicit retention have no such option; the root then inherits the cache's retention and the action warns. |
-| `no-retain` | `false` | Push without adding the paths to a retention root or pin. The cache keeps them only for its grace period, if it has one. Conflicts with root, ttl and permanent. |
-| `wait` | `true` | Wait until deferred paths become servable. |
-| `wait-timeout` | `10m` | Wait timeout, applied separately to commit capacity and to deferred blobs. |
-| `attestations` |  | Newline-delimited local Sigstore DSSE bundle paths to attach. |
-| `require-grace` | `false` | Fail if any pushed path has no retention grace deadline. Requires wait to stay enabled. |
-| `intermediate-paths-file` |  | Newline-delimited store paths to publish alongside the targets without retaining them as targets. When root-groups contains more than one root, only the first push includes these paths. |
-| `reference-paths-file` |  | Newline-delimited store paths to publish from reference-source without reading a local store or uploading NARs. Their NAR blobs must already exist in the tenant. Required together with reference-source. |
-| `reference-source` |  | Cache endpoint that serves the reference paths. Required together with reference-paths-file. |
-| `run-root` |  | Add each committed path to this run root. The run root is independent of root and root-groups. |
-| `run-root-ttl` |  | Expire the run root after this duration. Requires run-root. |
-| `run-root-permanent` | `false` | Retain the run root permanently. Conflicts with run-root-ttl and requires run-root. Releases before explicit retention have no such option; the run root then inherits the cache's retention and the action warns. |
-| `root-groups` |  | JSON array of {root, paths} objects. Replaces the flat paths and root inputs. The action makes one push per group because each root is replaced atomically. |
+| `url` | **required** | Tenant URL or cache URL to publish to. |
+| `paths` |  | Store paths to publish, one per line. A path that resolves to a store path, such as a `result` symlink, also works. Build flake outputs before you publish them. Required unless root-groups is set. |
+| `cupboard-path` |  | Path to a cupboard executable that an earlier actions/setup step installed. When it is set, the action does not install a release. |
+| `cupboard-version` |  | cupboard release to install, either latest or an exact release tag. Defaults to latest. |
+| `include-prereleases` |  | Whether latest can resolve to a prerelease. Defaults to true. |
+| `github-token` |  | GitHub token for release API requests. Defaults to the job's token. |
+| `release-repository` |  | Repository to install cupboard releases from. Defaults to the repository that contains this action. |
+| `expected-source-commit` |  | Full commit ID that the installed release must have been built from. Requires an exact cupboard-version. |
+| `install-dir` |  | Directory to download the cupboard binary into. |
+| `cache` |  | Named cache to publish to. Leave empty for the default cache. |
+| `store` |  | ssh-ng:// URI of a remote store to read the paths from. Leave empty to read from the store that Nix uses on this runner. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to url without a trailing slash. |
+| `root` |  | Retention root to set for the published paths. Defaults to github:&lt;repository>/&lt;ref name>. |
+| `ttl` |  | How long the root lasts after it was last set, such as 7d or 12h. |
+| `permanent` | `false` | Keep the root permanently. Cannot be combined with ttl or no-retain. Older cupboard releases do not have this option. With one of those releases, the root uses the cache's retention settings and the action prints a warning. |
+| `no-retain` | `false` | Publish the paths without adding them to a retention root. The cache then keeps them only for its grace period, if it has one. Cannot be combined with root, ttl or permanent. |
+| `wait` | `true` | Wait until the cache has verified the uploaded files and serves the paths. Keep this on if an attest step follows, because attest needs the paths to be published. |
+| `wait-timeout` | `10m` | How long to wait. The limit applies separately to waiting for the cache to accept the upload and to waiting for verification. |
+| `attestations` |  | Sigstore bundle files to attach to the published paths, one per line. |
+| `require-grace` | `false` | Fail if any published path has no grace-period deadline. Requires wait to be true. |
+| `intermediate-paths-file` |  | File that lists store paths to publish with the targets, one per line. These paths are not added to the root as targets. When root-groups has more than one group, only the first push includes these paths. |
+| `reference-paths-file` |  | File that lists store paths to publish by reference from reference-source, one per line. The action does not read them from a local store or upload them, so the tenant must already store their NAR files. Set it together with reference-source. |
+| `reference-source` |  | URL of the cache or reuse view that serves the paths in reference-paths-file. Set it together with reference-paths-file. |
+| `run-root` |  | Run root to add every published path to. It is separate from root and root-groups. |
+| `run-root-ttl` |  | How long the run root lasts after it was last set. Requires run-root. |
+| `run-root-permanent` | `false` | Keep the run root permanently. Requires run-root, and cannot be combined with run-root-ttl. Older cupboard releases do not have this option. With one of those releases, the run root uses the cache's retention settings and the action prints a warning. |
+| `root-groups` |  | JSON array of {root, paths} objects, used instead of the paths and root inputs. Setting a root replaces everything that it points to, so the action runs one push for each group. |
 
 #### Outputs
 
 | Output | Description |
 | --- | --- |
 | `cupboard-path` | Path to the cupboard executable that the action used. |
-| `cupboard-version` | Version reported by the cupboard executable. |
-| `uploaded-paths` | Number of paths whose NAR blobs were uploaded to the cache. |
-| `reused-blobs` | Number of paths committed using NAR blobs already in the cache. |
-| `skipped-paths` | Number of paths omitted because the cache already had them. |
+| `cupboard-version` | Version that the cupboard executable reported. |
+| `uploaded-paths` | Number of paths whose NAR files were uploaded to the cache. |
+| `reused-blobs` | Number of paths published with NAR files that the cache already stored. |
+| `skipped-paths` | Number of paths left out because the cache already had them. |
 | `uploaded-bytes` | Total number of bytes uploaded to the cache. |
 
 ### actions/attest
@@ -266,7 +266,7 @@ uses: underwhelmingperformance/cupboard/actions/attest@<commit> # vX.Y.Z
 
 ### actions/attest-attach
 
-Attach signed Sigstore bundles to published subjects in a build receipt. actions/attest produces bundles after publication, so this action attaches them only to paths that the destination already serves.
+Attaches signed Sigstore bundles to the paths in a build receipt. actions/attest signs the bundles after the paths are published, so this action only attaches them to paths that the destination cache already serves.
 
 ```yaml
 uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
@@ -276,16 +276,16 @@ uses: underwhelmingperformance/cupboard/actions/attest-attach@<commit> # vX.Y.Z
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `url` | **required** | cupboard Worker URL. |
-| `cupboard-path` | **required** | Path to the cupboard binary installed by actions/setup. |
-| `cache` |  | Named cache that received the paths. Empty selects the default cache. |
-| `audience` |  | GitHub OIDC audience. Defaults to url. |
-| `read-user` |  | Basic-auth username for the destination cache. |
-| `read-password` |  | Basic-auth password for the destination cache. |
-| `receipt-file` | **required** | Current-run receipt produced by the build action. |
-| `checksums-file` | **required** | Checksums for the signed receipt subjects, produced by actions/attest. Only matching receipt subjects are attached. |
-| `bundle` | **required** | Signed Sigstore bundles from the attest action, one path per line. Empty lines are ignored. |
+| `url` | **required** | Tenant URL or cache URL of the destination. |
+| `cupboard-path` | **required** | Path to the cupboard executable that actions/setup installed. |
+| `cache` |  | Named cache that the paths were published to. Leave empty for the default cache. |
+| `audience` |  | Audience of the GitHub OIDC token. Defaults to url. |
+| `read-user` |  | User name of a read credential for a private destination cache. |
+| `read-password` |  | Password of a read credential for a private destination cache. |
+| `receipt-file` | **required** | Receipt written by the build step earlier in the job. |
+| `checksums-file` | **required** | Checksums file from actions/attest. The action only attaches bundles to the paths in the receipt whose checksums are in this file. |
+| `bundle` | **required** | Bundle files from actions/attest, one per line. Empty lines are ignored. |
 
 ## Internal actions
 
-`actions/plan`, `actions/build-cohort`, `actions/prepare`, `actions/resolve-cupboard` are building blocks of the reusable workflows. Their inputs are not a stable interface and can change in any release; call the reusable workflows instead.
+`actions/plan`, `actions/build-cohort`, `actions/prepare`, `actions/resolve-cupboard` are building blocks of the reusable workflows. Their inputs can change in any release, so don't call them directly. Use the reusable workflows instead.

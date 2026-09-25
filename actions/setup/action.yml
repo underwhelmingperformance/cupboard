@@ -1,136 +1,154 @@
 name: Set up cupboard
 description:
-  Acquire cupboard and optionally export Nix binary cache configuration.
+  Installs the cupboard CLI. If cache-url is set, it also adds cupboard caches
+  to Nix's substituters for the rest of the job, and can create a named cache
+  first.
 inputs:
   cupboard:
     description:
-      Canonical release or source acquisition JSON from resolve-cupboard.
+      The cupboard output of actions/resolve-cupboard, which identifies a
+      release to install or a commit to build cupboard from. Cannot be combined
+      with cupboard-version, include-prereleases, release-repository or
+      expected-source-commit.
     required: false
   cupboard-version:
     description:
-      Release tag to install. Use latest to resolve a published release.
+      Release tag to install, such as v1.2.3, or latest. Defaults to latest.
     required: false
   include-prereleases:
     description:
-      When true, a prerelease is eligible when the action resolves latest, so
-      the action installs the newest release of any kind.
+      Whether latest can resolve to a prerelease. Defaults to true. When false,
+      latest is GitHub's latest release.
     required: false
   github-token:
-    description: GitHub token for release, asset and attestation requests.
+    description:
+      GitHub token for requesting releases, release assets and attestations.
+      Defaults to the job's token.
     required: false
   release-repository:
-    description: Repository that publishes cupboard releases and provenance.
+    description:
+      Repository to install cupboard releases from. Defaults to the repository
+      that contains this action.
     required: false
   expected-source-commit:
     description:
-      Full commit id that the release provenance must identify. Requires an
+      Full commit ID that the release's provenance must record. Requires an
       exact cupboard-version.
     required: false
   install-dir:
-    description: Directory for acquired cupboard files.
+    description:
+      Directory to install cupboard into. Defaults to cupboard-bin under
+      RUNNER_TEMP.
     required: false
   add-to-path:
-    description:
-      Add the directory containing the acquired cupboard binary to PATH.
+    description: Add the directory that contains the cupboard binary to PATH.
     required: false
     default: 'true'
   cache-url:
-    description: cupboard tenant URL to add to Nix substituters.
+    description: Tenant URL whose caches setup adds to Nix's substituters.
     required: false
   cache:
     description:
-      Named caches to use at the tenant URL, one per line or comma-separated.
-      Leave empty to use the tenant's default cache.
+      Named caches to use, one per line or separated by commas. Leave empty to
+      use the tenant's default cache.
     required: false
   include-default-cache:
     description:
-      When true, also configure the tenant's default cache alongside any named
-      caches. The `cache` list cannot name it, because a cache may itself be
-      called `default`.
+      When true, use the tenant's default cache as well as the named caches in
+      cache. The cache input cannot refer to the default cache, because a named
+      cache can be called default.
     required: false
   cache-credentials:
-    description:
-      JSON array of cache scopes and cache-specific read credentials. Populate
-      it from workflow secrets. A cache without an entry uses read-user and
-      read-password.
+    description: >-
+      JSON array with one entry for each cache that has its own cache read
+      credential, in the form {"cache": {"kind": "named", "name": ...},
+      "credential": {"user": ..., "password": ...}}. Pass it from a secret. A
+      cache without an entry is read with read-user and read-password.
     required: false
   private-substituters:
     description:
-      Authenticated HTTP(S) substituter URLs, one per line. Pass this value as a
-      secret because the URLs contain passwords. Setup adds them only to Nix's
-      substituters.
+      URLs of other private caches to read from, one per line, with the user
+      name and password in each URL. Pass this value from a secret. setup adds
+      these URLs to Nix's substituters, and Nix still needs each cache's public
+      key.
     required: false
   destination-read-user:
     description:
-      Username accepted by the single selected destination cache. Use
-      cache-credentials instead when several caches are selected.
+      User name of the cache read credential for the selected cache. When you
+      select several caches, use cache-credentials instead.
     required: false
   destination-read-password:
-    description: Password accepted by the single selected destination cache.
+    description: Password of the cache read credential for the selected cache.
     required: false
   provision-cache:
     description:
-      Named cache to create with this run's OIDC token before configuring Nix.
-      Choose its access and default root TTL with the provisioning inputs. An
-      existing cache keeps its properties, but its access must match the
-      requested access or setup fails.
+      Named cache to create with the job's OIDC token before Nix is configured.
+      provision-cache-access and provision-cache-ttl set its access and default
+      root TTL. If the cache already exists, setup keeps its settings, but fails
+      if its access differs from provision-cache-access.
     required: false
   provision-cache-access:
     description:
-      Required read access for the cache, public or private. Required with
-      provision-cache. It must equal the access of the reuse view that
-      aggregates the cache, because a view aggregates only the caches whose
-      access equals its own.
+      Access for the created cache, public or private. Required with
+      provision-cache. A reuse view only includes caches with the same access as
+      the view, so this must match the access of any view that should include
+      the cache.
     required: false
   provision-cache-ttl:
     description:
-      Default root TTL for the created cache, for example 14d. Expired roots let
-      collection reclaim paths that have no other retention. Leave empty for
-      permanent retention.
+      Default root TTL for the created cache, such as 14d. When a root expires,
+      garbage collection can remove the paths that no other root keeps. Leave
+      empty for roots that never expire.
     required: false
   trusted-public-key:
-    description: Nix signing key to trust for cache reads.
+    description:
+      Nix public key to trust for reads from the cache. If empty, setup
+      downloads the cache's current keys from /pubkey, trusts them, and prints a
+      warning.
     required: false
   read-user:
-    description: Tenant-level Basic-auth username for cache reads.
+    description:
+      User name of the tenant read credential. setup writes the credential to a
+      netrc file, and Nix uses it for every cache on the tenant's host that does
+      not have its own credential.
     required: false
   read-password:
-    description: Tenant-level Basic-auth password for cache reads.
+    description: Password of the tenant read credential.
     required: false
   reuse-view:
     description:
-      Named tenant reuse view to add as a second substituter, after the
-      destination cache. Refused unless the view's nix-cache-info priority is
-      numerically greater than the destination's.
+      Reuse view to add as an extra substituter, after the selected caches.
+      setup refuses a view unless its priority number is greater than the
+      priority number of every selected cache, so Nix asks the caches first.
     required: false
   nix-config-file:
     description:
-      Existing Nix config file. Setup appends an optional include of the
-      protected runner-local config file.
+      An existing Nix configuration file, for Nix processes that do not inherit
+      NIX_CONFIG. setup appends a line that includes its own settings file if
+      that file exists.
     required: false
   checkout-dir:
-    description: >
-      Git checkout of the cupboard revision to build when the resolved
-      coordinate is a source acquisition. Defaults to the directory this action
-      was materialised in, which is a git checkout for a workspace-relative
-      reference.
+    description:
+      Git checkout of the cupboard commit to build when the cupboard input
+      specifies a source commit. Defaults to the root of the checkout that
+      contains this action.
     required: false
 outputs:
   cupboard-path:
-    description: Path to the acquired cupboard executable.
+    description: Path to the installed cupboard executable.
     value: ${{ steps.setup.outputs.cupboard-path }}
   cupboard:
     description:
-      Pass this JSON to another setup invocation to acquire the same release or
-      source commit.
+      JSON that identifies the installed release or source commit. Pass it as
+      the cupboard input of another setup step to install the same cupboard.
     value: ${{ steps.setup.outputs.cupboard }}
   cupboard-version:
     description:
-      Resolved cupboard release tag. This output is empty for a source
-      acquisition.
+      Tag of the installed release. Empty when cupboard was built from source.
     value: ${{ steps.setup.outputs.cupboard-version }}
   nix-config-file:
-    description: Path to the generated runner-local Nix config file.
+    description:
+      Path to the Nix configuration file that setup wrote under RUNNER_TEMP.
     value: ${{ steps.setup.outputs.nix-config-file }}
 runs:
   using: composite
