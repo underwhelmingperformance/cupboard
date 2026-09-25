@@ -1,0 +1,47 @@
+name: attestations permission probe
+on:
+  push:
+    branches: [claude/attestations-permission-probe]
+env:
+  PROBE: |
+    set -u
+    auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    api() { curl -sS "${auth[@]}" -H 'Accept: application/vnd.github+json' "$@"; }
+    cupboard_digest=$(curl -sSL https://github.com/underwhelmingperformance/cupboard/releases/download/v0.0.35/checksums.txt | awk '/cupboard-linux-x64.tar.gz/ {print $1}')
+    gh_tag=$(api https://api.github.com/repos/cli/cli/releases/latest | jq -r .tag_name)
+    gh_version=${gh_tag#v}
+    gh_digest=$(curl -sSL "https://github.com/cli/cli/releases/download/${gh_tag}/gh_${gh_version}_checksums.txt" | awk "/gh_${gh_version}_linux_amd64.tar.gz/ {print \$1}")
+    probe() {
+      local label=$1 repo=$2 digest=$3; shift 3
+      code=$(curl -sS -o out.json -w '%{http_code}' "$@" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${repo}/attestations/sha256:${digest}")
+      echo "${label}: ${repo}: HTTP ${code}, attestations: $(jq -r '.attestations | length' out.json 2>/dev/null), message: $(jq -r '.message // ""' out.json 2>/dev/null)"
+    }
+    echo "cupboard digest ${cupboard_digest}; gh ${gh_tag} digest ${gh_digest}"
+    probe "job token" underwhelmingperformance/cupboard "$cupboard_digest" "${auth[@]}"
+    probe "job token" cli/cli "$gh_digest" "${auth[@]}"
+    probe "no token" underwhelmingperformance/cupboard "$cupboard_digest"
+    probe "no token" cli/cli "$gh_digest"
+jobs:
+  no-permissions:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash -c "$PROBE"
+  contents-read:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash -c "$PROBE"
+  attestations-read:
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: read
+    steps:
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash -c "$PROBE"
