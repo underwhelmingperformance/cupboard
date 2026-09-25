@@ -123,25 +123,25 @@ Commands:
   attest                                       Work with the Sigstore attestation bundles attached to store paths.
   push [options] <url> [paths...]              Push one or more store paths to the configured cupboard cache.
   build-push [options] <url> [arguments...]    Run a build command under streaming publication: completed outputs upload while the build continues, and a final reconciliation settles roots and writes the build receipt.
-  config [options] <url> <pubkey> [caches...]  Print Nix substituter configuration suitable for a user's nix.conf.
-  pubkey <url>                                 Print the current public signing key for this cupboard deployment.
-  stats <url> [cache]                          Show objects referenced by a cache.
-  usage <url>                                  Show tenant-wide charged storage usage.
+  config [options] <url> <pubkey> [caches...]  Print the nix.conf lines that add a tenant's caches as Nix substituters.
+  pubkey <url>                                 Print the tenant's public signing keys, one per line (more than one during a key rotation).
+  stats <url> [cache]                          Show how many store paths a cache has and how much storage they use.
+  usage <url>                                  Show how much storage the tenant is charged for, across all its caches.
   delete [options] <url> <arguments...>        Delete a single store path from the cache.
-  root                                         Manage retention roots: named sets of store paths to keep.
+  root                                         Manage retention roots, which keep named sets of store paths in a cache.
   confirm [options] <url> <arguments...>       Confirm published store paths without uploading their bytes.
-  key                                          Manage a tenant's narinfo signing keys and rotation.
-  auth-key                                     Manage the access-token signing keys and rotation.
-  control-key                                  Manage the control-plane signing keys and rotation (operator only).
+  key                                          Manage and rotate the keys that sign the tenant's narinfos.
+  auth-key                                     Manage and rotate the keys that sign the tenant's access tokens.
+  control-key                                  Manage and rotate the keys that sign operator tokens (operator only).
   control-oidc-trust                           Manage the rules that let CI authenticate to the control plane with a short-lived OIDC token instead of a stored secret (operator only).
   tenant                                       Provision and manage tenants (operator only).
-  cache                                        Manage caches: list, create, inspect, update properties and remove.
-  policy                                       Inspect or remove legacy policies while retention migration is pending.
-  reuse-view                                   Manage named reuse views: sets of caches a reader may substitute from.
+  cache                                        Create, inspect, configure and remove a tenant's caches.
+  policy                                       List and remove old retention policies that an upgrade hasn't imported yet.
+  reuse-view                                   Manage reuse views, which let Nix read from several of a tenant's caches through one URL.
   oidc-trust                                   Manage the rules that let CI authenticate to this tenant with a short-lived OIDC token instead of a stored secret.
   github                                       Configure and check tenant state for publication from GitHub.
   check [options] <url>                        Check every committed path against its stored objects.
-  plan                                         Plan a build against this store.
+  plan                                         Internal steps of cupboard's flake publish workflow, not for direct use.
   help [command]                               display help for command
 
 Most commands act on a deployment and need a session first: run `cupboard login <url>`.
@@ -673,21 +673,26 @@ Examples:
 ```text
 Usage: cupboard config [options] <url> <pubkey> [caches...]
 
-Print Nix substituter configuration suitable for a user's nix.conf.
+Print the nix.conf lines that add a tenant's caches as Nix substituters.
 
 Arguments:
   url                         tenant URL (e.g.
                               https://cupboard.example.workers.dev/t/<slug>)
-  pubkey                      Nix trusted-public-keys entry
-  caches                      named caches; omit them to use the URL target
+  pubkey                      the tenant's public signing keys, as printed by
+                              `cupboard pubkey`
+  caches                      named caches to add (by default, the cache that
+                              the URL refers to)
 
 Options:
-  --include-default-cache     also configure the tenant's default cache,
-                              alongside any named caches
-  --read-user <user>          read username (or CUPBOARD_READ_USER)
-  --read-password <password>  read password (or CUPBOARD_READ_PASSWORD)
-  --cache-credentials <json>  JSON array of cache scopes and their credentials
-                              (or CUPBOARD_CACHE_CREDENTIALS)
+  --include-default-cache     also add the tenant's default cache when you name
+                              caches
+  --read-user <user>          user name of the tenant read credential, for a
+                              private cache (default: $CUPBOARD_READ_USER)
+  --read-password <password>  password of the tenant read credential, for a
+                              private cache (default: $CUPBOARD_READ_PASSWORD)
+  --cache-credentials <json>  cache read credentials, as a JSON array of caches
+                              and their credentials (default:
+                              $CUPBOARD_CACHE_CREDENTIALS)
   -h, --help                  display help for command
 ```
 
@@ -696,7 +701,8 @@ Options:
 ```text
 Usage: cupboard pubkey [options] <url>
 
-Print the current public signing key for this cupboard deployment.
+Print the tenant's public signing keys, one per line (more than one during a key
+rotation).
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -710,11 +716,11 @@ Options:
 ```text
 Usage: cupboard stats [options] <url> [cache]
 
-Show objects referenced by a cache.
+Show how many store paths a cache has and how much storage they use.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  cache       named cache when the URL does not select one
+  cache       cache name, if the URL is a tenant URL
 
 Options:
   -h, --help  display help for command
@@ -725,7 +731,7 @@ Options:
 ```text
 Usage: cupboard usage [options] <url>
 
-Show tenant-wide charged storage usage.
+Show how much storage the tenant is charged for, across all its caches.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -755,16 +761,16 @@ Options:
 ```text
 Usage: cupboard root [options] [command]
 
-Manage retention roots: named sets of store paths to keep.
+Manage retention roots, which keep named sets of store paths in a cache.
 
 Options:
   -h, --help                                     display help for command
 
 Commands:
-  ensure [options] <url> <name> <store-path...>  Retain targets the cache can serve, or report that a build is required. Both outcomes exit 0; the reported status is either retained or build required.
-  set [options] <url> <name> <store-path...>     Create or replace a retention root with the given targets.
-  list [options] <url> [cache]                   List retention roots.
-  targets [options] <url> <name>                 List a retention root's targets and whether each is served.
+  ensure [options] <url> <name> <store-path...>  Set a root only if the cache can serve every store path. Otherwise, list the missing store paths and change nothing.
+  set [options] <url> <name> <store-path...>     Create a retention root, or replace an existing root's targets.
+  list [options] <url> [cache]                   List a cache's retention roots, with their target counts and expiry.
+  targets [options] <url> <name>                 List a retention root's targets, and show which of them the cache is missing.
   remove [options] <url> <name>                  Remove a retention root.
   help [command]                                 display help for command
 ```
@@ -774,23 +780,26 @@ Commands:
 ```text
 Usage: cupboard root ensure [options] <url> <name> <store-path...>
 
-Retain targets the cache can serve, or report that a build is required. Both
-outcomes exit 0; the reported status is either retained or build required.
+Set a root only if the cache can serve every store path. Otherwise, list the
+missing store paths and change nothing.
 
 Arguments:
   url                    tenant URL (e.g.
                          https://cupboard.example.workers.dev/t/<slug>)
-  name                   root name, e.g. github:owner/repo/main
-  store-path             one or more top-level store paths to retain
+  name                   root name (e.g. github:acme/app/main)
+  store-path             the store paths for the root to keep
 
 Options:
   --ttl <duration>       expire the root after this duration (e.g. 7d, 12h)
-  --permanent            retain the root permanently
-  --github-oidc          authenticate with a GitHub Actions OIDC token (default:
-                         the cached owner login)
+  --permanent            keep the root permanently
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
+
+The command exits with status 0 in both cases. It reports the status
+"retained" or "build required".
 ```
 
 #### cupboard root set
@@ -798,23 +807,23 @@ Options:
 ```text
 Usage: cupboard root set [options] <url> <name> <store-path...>
 
-Create or replace a retention root with the given targets.
+Create a retention root, or replace an existing root's targets.
 
 Arguments:
   url               tenant URL (e.g.
                     https://cupboard.example.workers.dev/t/<slug>)
-  name              root name, e.g. github:owner/repo/main
-  store-path        one or more top-level store paths to retain
+  name              root name (e.g. github:acme/app/main)
+  store-path        the store paths for the root to keep
 
 Options:
   --ttl <duration>  expire the root after this duration (e.g. 7d, 12h)
-  --permanent       retain the root permanently
+  --permanent       keep the root permanently
   -h, --help        display help for command
 
 Example:
-  # Keep a branch's top-level paths, expiring after 30 days
+  # Keep a branch's build outputs for 30 days
   cupboard root set https://cupboard.example.workers.dev/t/acme \
-    github:acme/infra/main /nix/store/<hash>-app --ttl 30d
+    github:acme/app/main /nix/store/<hash>-app --ttl 30d
 ```
 
 #### cupboard root list
@@ -822,16 +831,16 @@ Example:
 ```text
 Usage: cupboard root list [options] <url> [cache]
 
-List retention roots.
+List a cache's retention roots, with their target counts and expiry.
 
 Arguments:
   url                    tenant URL (e.g.
                          https://cupboard.example.workers.dev/t/<slug>)
-  cache                  named cache when the URL does not select one
+  cache                  cache name, if the URL is a tenant URL
 
 Options:
-  --github-oidc          authenticate with a GitHub Actions OIDC token (default:
-                         the cached owner login)
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -842,16 +851,16 @@ Options:
 ```text
 Usage: cupboard root targets [options] <url> <name>
 
-List a retention root's targets and whether each is served.
+List a retention root's targets, and show which of them the cache is missing.
 
 Arguments:
   url                    tenant URL (e.g.
                          https://cupboard.example.workers.dev/t/<slug>)
-  name                   root name, e.g. github:owner/repo/main
+  name                   root name (e.g. github:acme/app/main)
 
 Options:
-  --github-oidc          authenticate with a GitHub Actions OIDC token (default:
-                         the cached owner login)
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -866,7 +875,7 @@ Remove a retention root.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  name        root name to remove
+  name        name of the root to remove
 
 Options:
   -y, --yes   remove without the confirmation prompt
@@ -904,17 +913,23 @@ Example:
 ```text
 Usage: cupboard key [options] [command]
 
-Manage a tenant's narinfo signing keys and rotation.
+Manage and rotate the keys that sign the tenant's narinfos.
 
 Options:
   -h, --help                   display help for command
 
 Commands:
-  list <url>                   List the signing key set.
-  rotate <url>                 Add a new signing key, opening a rotation window.
-  abort [options] <url> <id>   Abort an incomplete signing-key rotation.
-  status <url> [id]            Show signing-key and backfill status.
-  retire [options] <url> <id>  Retire a signing key one stage at a time.
+  list <url>                   List the tenant's signing keys and their states.
+  rotate <url>                 Start a signing key rotation: add an incoming key
+                               and re-sign existing narinfos with it.
+  abort [options] <url> <id>   Abandon a signing key rotation before its
+                               re-signing has finished, and remove the incoming
+                               key.
+  status <url> [id]            Show the signing keys and the progress of
+                               re-signing existing narinfos.
+  retire [options] <url> <id>  Retire a signing key. Run it once to stop signing
+                               with the key, and again to stop publishing it at
+                               /pubkey.
   help [command]               display help for command
 ```
 
@@ -923,7 +938,7 @@ Commands:
 ```text
 Usage: cupboard key list [options] <url>
 
-List the signing key set.
+List the tenant's signing keys and their states.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -937,7 +952,8 @@ Options:
 ```text
 Usage: cupboard key rotate [options] <url>
 
-Add a new signing key, opening a rotation window.
+Start a signing key rotation: add an incoming key and re-sign existing narinfos
+with it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -951,11 +967,12 @@ Options:
 ```text
 Usage: cupboard key abort [options] <url> <id>
 
-Abort an incomplete signing-key rotation.
+Abandon a signing key rotation before its re-signing has finished, and remove
+the incoming key.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          id of the incomplete incoming key
+  id          ID of the incoming key
 
 Options:
   -y, --yes   abort without the confirmation prompt
@@ -967,11 +984,11 @@ Options:
 ```text
 Usage: cupboard key status [options] <url> [id]
 
-Show signing-key and backfill status.
+Show the signing keys and the progress of re-signing existing narinfos.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          signing key id
+  id          show only the signing key with this ID
 
 Options:
   -h, --help  display help for command
@@ -982,11 +999,12 @@ Options:
 ```text
 Usage: cupboard key retire [options] <url> <id>
 
-Retire a signing key one stage at a time.
+Retire a signing key. Run it once to stop signing with the key, and again to
+stop publishing it at /pubkey.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          key id: a rotated key's UUID, or 'active'
+  id          key ID: 'active' for the tenant's first key, or a later key's UUID
 
 Options:
   -y, --yes   retire without the confirmation prompt
@@ -998,17 +1016,18 @@ Options:
 ```text
 Usage: cupboard auth-key [options] [command]
 
-Manage the access-token signing keys and rotation.
+Manage and rotate the keys that sign the tenant's access tokens.
 
 Options:
   -h, --help                    display help for command
 
 Commands:
-  list <url>                    List the auth signing-key set.
-  rotate <url>                  Add a new active auth key and schedule the
-                                previous one for retirement.
-  retire [options] <url> <kid>  Retire a superseded auth key once its tokens
-                                have expired.
+  list <url>                    List the tenant's access-token keys and any
+                                scheduled retirements.
+  rotate <url>                  Add a new access-token key, and schedule the old
+                                one to retire once its tokens have expired.
+  retire [options] <url> <kid>  Retire an old access-token key now. Tokens that
+                                it signed stop working immediately.
   help [command]                display help for command
 ```
 
@@ -1017,7 +1036,7 @@ Commands:
 ```text
 Usage: cupboard auth-key list [options] <url>
 
-List the auth signing-key set.
+List the tenant's access-token keys and any scheduled retirements.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1031,7 +1050,8 @@ Options:
 ```text
 Usage: cupboard auth-key rotate [options] <url>
 
-Add a new active auth key and schedule the previous one for retirement.
+Add a new access-token key, and schedule the old one to retire once its tokens
+have expired.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1045,11 +1065,12 @@ Options:
 ```text
 Usage: cupboard auth-key retire [options] <url> <kid>
 
-Retire a superseded auth key once its tokens have expired.
+Retire an old access-token key now. Tokens that it signed stop working
+immediately.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  kid         auth key id
+  kid         access-token key ID
 
 Options:
   -y, --yes   retire without the confirmation prompt
@@ -1061,17 +1082,18 @@ Options:
 ```text
 Usage: cupboard control-key [options] [command]
 
-Manage the control-plane signing keys and rotation (operator only).
+Manage and rotate the keys that sign operator tokens (operator only).
 
 Options:
   -h, --help                    display help for command
 
 Commands:
-  list <url>                    List the control-plane signing-key set.
-  rotate <url>                  Add a new active control key and schedule the
-                                previous one for retirement.
-  retire [options] <url> <kid>  Retire a superseded control key once its tokens
-                                have expired.
+  list <url>                    List the deployment's control keys and any
+                                scheduled retirements.
+  rotate <url>                  Add a new control key, and schedule the old one
+                                to retire once its tokens have expired.
+  retire [options] <url> <kid>  Retire an old control key now. Tokens that it
+                                signed stop working immediately.
   help [command]                display help for command
 ```
 
@@ -1080,7 +1102,7 @@ Commands:
 ```text
 Usage: cupboard control-key list [options] <url>
 
-List the control-plane signing-key set.
+List the deployment's control keys and any scheduled retirements.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -1094,7 +1116,8 @@ Options:
 ```text
 Usage: cupboard control-key rotate [options] <url>
 
-Add a new active control key and schedule the previous one for retirement.
+Add a new control key, and schedule the old one to retire once its tokens have
+expired.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
@@ -1108,11 +1131,11 @@ Options:
 ```text
 Usage: cupboard control-key retire [options] <url> <kid>
 
-Retire a superseded control key once its tokens have expired.
+Retire an old control key now. Tokens that it signed stop working immediately.
 
 Arguments:
   url         deployment URL (e.g. https://cupboard.example.workers.dev)
-  kid         control key id
+  kid         control key ID
 
 Options:
   -y, --yes   retire without the confirmation prompt
@@ -1432,23 +1455,23 @@ Options:
 ```text
 Usage: cupboard cache [options] [command]
 
-Manage caches: list, create, inspect, update properties and remove.
+Create, inspect, configure and remove a tenant's caches.
 
 Options:
   -h, --help                             display help for command
 
 Commands:
-  list <url>                             List caches and their properties.
+  list <url>                             List the tenant's caches and their settings.
   create [options] <url> [name]          Create a named cache.
-  set-root-ttl [options] <url> [name]    Set a cache's default root TTL or a root-prefix override.
-  clear-root-ttl [options] <url> [name]  Clear a cache's default root TTL or a root-prefix override.
-  set-grace [options] <url> [name]       Set a cache's retention grace period.
-  clear-grace <url> [name]               Clear a cache's retention grace period.
-  set-access [options] <url> [name]      Set a cache's read access.
-  set-priority [options] <url> [name]    Set a cache's Nix substituter priority.
-  set-retirement [options] <url> [name]  Opt a named cache in or out of retirement when empty.
+  set-root-ttl [options] <url> [name]    Set a cache's default root TTL, or the TTL for roots whose names start with a prefix.
+  clear-root-ttl [options] <url> [name]  Clear a cache's default root TTL, or the TTL for a root-name prefix.
+  set-grace [options] <url> [name]       Set a cache's grace period, which keeps store paths for a time even when no root keeps them.
+  clear-grace <url> [name]               Remove a cache's grace period.
+  set-access [options] <url> [name]      Make a cache public or private.
+  set-priority [options] <url> [name]    Set the substituter priority that a cache advertises to Nix.
+  set-retirement [options] <url> [name]  Choose whether a named cache removes itself once it is empty.
   remove [options] <url> [name]          Remove a named cache.
-  inspect <url> [name]                   Show one cache's properties and store-path count.
+  inspect <url> [name]                   Show one cache's settings and how many store paths it has.
   help [command]                         display help for command
 ```
 
@@ -1457,7 +1480,7 @@ Commands:
 ```text
 Usage: cupboard cache list [options] <url>
 
-List caches and their properties.
+List the tenant's caches and their settings.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1480,13 +1503,14 @@ Arguments:
 
 Options:
   --access <mode>        read access: public or private
-  --priority <n>         Nix substituter priority (lower is preferred)
-  --root-ttl <duration>  default TTL for roots (e.g. 14d, 12h)
-  --grace <duration>     retention grace period (e.g. 24h, 0s)
-  --if-absent            report the existing cache instead of failing when it is
-                         already there
-  --github-oidc          authenticate with a GitHub Actions OIDC token (default:
-                         the cached owner login)
+  --priority <n>         substituter priority to advertise to Nix; Nix tries
+                         lower numbers first (default: 40)
+  --root-ttl <duration>  default TTL for the cache's roots (e.g. 14d, 12h)
+  --grace <duration>     grace period (e.g. 24h, 0s)
+  --if-absent            if the cache already exists, show it and succeed
+                         instead of failing
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -1497,7 +1521,8 @@ Options:
 ```text
 Usage: cupboard cache set-root-ttl [options] <url> [name]
 
-Set a cache's default root TTL or a root-prefix override.
+Set a cache's default root TTL, or the TTL for roots whose names start with a
+prefix.
 
 Arguments:
   url                     tenant URL (e.g.
@@ -1505,9 +1530,10 @@ Arguments:
   name                    named cache; omit it for the default cache
 
 Options:
-  --root-prefix <prefix>  root-name prefix to override
-  --root-ttl <duration>   root TTL (e.g. 14d, 12h)
-  --permanent             retain roots permanently
+  --root-prefix <prefix>  set the TTL only for roots whose names start with this
+                          prefix
+  --root-ttl <duration>   TTL for the roots (e.g. 14d, 12h)
+  --permanent             keep the roots permanently
   -h, --help              display help for command
 ```
 
@@ -1516,7 +1542,7 @@ Options:
 ```text
 Usage: cupboard cache clear-root-ttl [options] <url> [name]
 
-Clear a cache's default root TTL or a root-prefix override.
+Clear a cache's default root TTL, or the TTL for a root-name prefix.
 
 Arguments:
   url                     tenant URL (e.g.
@@ -1524,7 +1550,7 @@ Arguments:
   name                    named cache; omit it for the default cache
 
 Options:
-  --root-prefix <prefix>  root-name prefix override to clear
+  --root-prefix <prefix>  clear the TTL for this root-name prefix only
   -h, --help              display help for command
 ```
 
@@ -1533,7 +1559,8 @@ Options:
 ```text
 Usage: cupboard cache set-grace [options] <url> [name]
 
-Set a cache's retention grace period.
+Set a cache's grace period, which keeps store paths for a time even when no root
+keeps them.
 
 Arguments:
   url                 tenant URL (e.g.
@@ -1541,7 +1568,7 @@ Arguments:
   name                named cache; omit it for the default cache
 
 Options:
-  --grace <duration>  retention grace period (e.g. 24h, 0s)
+  --grace <duration>  grace period (e.g. 24h, 0s)
   -h, --help          display help for command
 ```
 
@@ -1550,7 +1577,7 @@ Options:
 ```text
 Usage: cupboard cache clear-grace [options] <url> [name]
 
-Clear a cache's retention grace period.
+Remove a cache's grace period.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1565,7 +1592,7 @@ Options:
 ```text
 Usage: cupboard cache set-access [options] <url> [name]
 
-Set a cache's read access.
+Make a cache public or private.
 
 Arguments:
   url              tenant URL (e.g.
@@ -1582,7 +1609,7 @@ Options:
 ```text
 Usage: cupboard cache set-priority [options] <url> [name]
 
-Set a cache's Nix substituter priority.
+Set the substituter priority that a cache advertises to Nix.
 
 Arguments:
   url             tenant URL (e.g.
@@ -1590,7 +1617,8 @@ Arguments:
   name            named cache; omit it for the default cache
 
 Options:
-  --priority <n>  Nix substituter priority (lower is preferred)
+  --priority <n>  substituter priority to advertise to Nix; Nix tries lower
+                  numbers first
   -h, --help      display help for command
 ```
 
@@ -1599,7 +1627,7 @@ Options:
 ```text
 Usage: cupboard cache set-retirement [options] <url> [name]
 
-Opt a named cache in or out of retirement when empty.
+Choose whether a named cache removes itself once it is empty.
 
 Arguments:
   url                    tenant URL (e.g.
@@ -1607,7 +1635,8 @@ Arguments:
   name                   cache name when the URL does not select one
 
 Options:
-  --when-empty <choice>  true to retire when empty, false to keep the cache
+  --when-empty <choice>  true to remove the cache once it is empty, false to
+                         keep it
   -h, --help             display help for command
 ```
 
@@ -1624,10 +1653,10 @@ Arguments:
   name                   cache name when the URL does not select one
 
 Options:
-  --force                remove even when the cache still holds store paths
+  --force                remove the cache even if it still has store paths
   -y, --yes              remove without the confirmation prompt
-  --github-oidc          authenticate with a GitHub Actions OIDC token (default:
-                         the cached owner login)
+  --github-oidc          sign in with the job's GitHub Actions OIDC token
+                         instead of your saved `cupboard login` session
   --audience <audience>  OIDC audience to request with --github-oidc (default:
                          the tenant URL)
   -h, --help             display help for command
@@ -1638,7 +1667,7 @@ Options:
 ```text
 Usage: cupboard cache inspect [options] <url> [name]
 
-Show one cache's properties and store-path count.
+Show one cache's settings and how many store paths it has.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1653,18 +1682,18 @@ Options:
 ```text
 Usage: cupboard policy [options] [command]
 
-Inspect or remove legacy policies while retention migration is pending.
+List and remove old retention policies that an upgrade hasn't imported yet.
 
 Options:
   -h, --help                         display help for command
 
 Commands:
-  list <url>                         List legacy retention and grace policies
-                                     awaiting migration.
-  remove [options] <url> <id>        Remove a legacy retention policy and
-                                     restart the pending migration.
-  remove-grace [options] <url> <id>  Remove a legacy grace policy and restart
-                                     the pending migration.
+  list <url>                         List the old retention and grace policies
+                                     that haven't been imported yet.
+  remove [options] <url> <id>        Remove an old retention policy, so that the
+                                     import can continue without it.
+  remove-grace [options] <url> <id>  Remove an old grace policy, so that the
+                                     import can continue without it.
   help [command]                     display help for command
 ```
 
@@ -1673,7 +1702,7 @@ Commands:
 ```text
 Usage: cupboard policy list [options] <url>
 
-List legacy retention and grace policies awaiting migration.
+List the old retention and grace policies that haven't been imported yet.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1687,11 +1716,11 @@ Options:
 ```text
 Usage: cupboard policy remove [options] <url> <id>
 
-Remove a legacy retention policy and restart the pending migration.
+Remove an old retention policy, so that the import can continue without it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          policy id
+  id          retention policy ID
 
 Options:
   -y, --yes   remove without the confirmation prompt
@@ -1703,11 +1732,11 @@ Options:
 ```text
 Usage: cupboard policy remove-grace [options] <url> <id>
 
-Remove a legacy grace policy and restart the pending migration.
+Remove an old grace policy, so that the import can continue without it.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  id          grace policy id
+  id          grace policy ID
 
 Options:
   -y, --yes   remove without the confirmation prompt
@@ -1719,16 +1748,17 @@ Options:
 ```text
 Usage: cupboard reuse-view [options] [command]
 
-Manage named reuse views: sets of caches a reader may substitute from.
+Manage reuse views, which let Nix read from several of a tenant's caches through
+one URL.
 
 Options:
   -h, --help                     display help for command
 
 Commands:
-  list <url>                     List named reuse views.
-  set [options] <url> <name>     Define or replace a reuse view: its whole
-                                 selector set is replaced on every call.
-  remove [options] <url> <name>  Remove a named reuse view.
+  list <url>                     List the tenant's reuse views.
+  set [options] <url> <name>     Create a reuse view, or replace its whole
+                                 definition, including its access and priority.
+  remove [options] <url> <name>  Remove a reuse view.
   help [command]                 display help for command
 ```
 
@@ -1737,7 +1767,7 @@ Commands:
 ```text
 Usage: cupboard reuse-view list [options] <url>
 
-List named reuse views.
+List the tenant's reuse views.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
@@ -1751,29 +1781,32 @@ Options:
 ```text
 Usage: cupboard reuse-view set [options] <url> <name>
 
-Define or replace a reuse view: its whole selector set is replaced on every
-call.
+Create a reuse view, or replace its whole definition, including its access and
+priority.
 
 Arguments:
   url                  tenant URL (e.g.
                        https://cupboard.example.workers.dev/t/<slug>)
-  name                 reuse-view name
+  name                 name of the reuse view
 
 Options:
-  --select <selector>  default, all, all-named, cache:<name> or prefix:<prefix>
-                       (repeatable) (default: [])
+  --select <selector>  caches to include (repeatable): default, all, all-named,
+                       cache:<name>, or prefix:<prefix> for every named cache
+                       whose name starts with <prefix> (default: [])
   --access <mode>      read access: public or private (default: public)
-  --priority <n>       Nix substituter priority (lower is preferred); default 50
+  --priority <n>       substituter priority to advertise to Nix; Nix tries lower
+                       numbers first (default: 50)
   -h, --help           display help for command
 
 Examples:
-  # A view covering every PR cache plus one named release cache
+  # A view of one repository's pull-request caches and the release
+  # cache
   cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
-    --select prefix:pr- --select cache:release
+    --select prefix:gh-123456-pr- --select cache:release
 
-  # A private view over private caches whose names start with pr-
+  # The same view, for private caches
   cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
-    --access private --select prefix:pr-
+    --access private --select prefix:gh-123456-pr- --select cache:release
 ```
 
 #### cupboard reuse-view remove
@@ -1781,11 +1814,11 @@ Examples:
 ```text
 Usage: cupboard reuse-view remove [options] <url> <name>
 
-Remove a named reuse view.
+Remove a reuse view.
 
 Arguments:
   url         tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  name        reuse-view name
+  name        name of the reuse view
 
 Options:
   -y, --yes   remove without the confirmation prompt
@@ -2136,19 +2169,25 @@ Exits 1 if any path has a discrepancy, after printing the report.
 ```text
 Usage: cupboard plan [options] [command]
 
-Plan a build against this store.
+Internal steps of cupboard's flake publish workflow, not for direct use.
 
 Options:
   -h, --help                       display help for command
 
 Commands:
-  cohort [options] <url> [cache]   Report a cohort's realisation and publication
-                                   partition, and whether this store has room to
-                                   build it.
-  measure [options]                Measure the paths this store must download to
-                                   realise each target.
-  reprobe [options] <url> [cache]  Confirm which planned targets still require
-                                   realisation immediately before dispatch.
+  cohort [options] <url> [cache]   Internal step of the flake publish workflow,
+                                   not for direct use. Decide which of a
+                                   cohort's targets to build and which the cache
+                                   already has, and check that the store has
+                                   room for the build.
+  measure [options]                Internal step of the flake publish workflow,
+                                   not for direct use. Measure how much this
+                                   store must download to build or fetch each
+                                   target.
+  reprobe [options] <url> [cache]  Internal step of the flake publish workflow,
+                                   not for direct use. Just before the build
+                                   starts, check which planned targets still
+                                   need to be built.
   help [command]                   display help for command
 ```
 
@@ -2157,35 +2196,36 @@ Commands:
 ```text
 Usage: cupboard plan cohort [options] <url> [cache]
 
-Report a cohort's realisation and publication partition, and whether this store
-has room to build it.
+Internal step of the flake publish workflow, not for direct use. Decide which of
+a cohort's targets to build and which the cache already has, and check that the
+store has room for the build.
 
 Arguments:
   url                                           tenant URL (e.g. https://cupboard.example.workers.dev/t/<slug>)
-  cache                                         named cache when the URL does not select one
+  cache                                         cache name, if the URL is a tenant URL
 
 Options:
-  --targets-file <path>                         JSON file describing the cohort's targets
-  --reuse-view <name>                           named tenant reuse view to probe for substitutable paths
-  --read-user <user>                            username for private cache reads
-  --read-password <password>                    password for private cache reads
-  --view-read-user <user>                       username for private reuse-view reads
-  --view-read-password <password>               password for private reuse-view reads
-  --ttl <duration>                              retention TTL refreshed when a target is already retained
-  --permanent                                   retain refreshed roots permanently
-  --github-oidc                                 authenticate with a GitHub Actions OIDC token (default: the cached owner login)
+  --targets-file <path>                         JSON file that describes the cohort's targets
+  --reuse-view <name>                           reuse view to query for store paths that other caches already have
+  --read-user <user>                            user name of the read credential for a private cache
+  --read-password <password>                    password of the read credential for a private cache
+  --view-read-user <user>                       user name of the read credential for a private reuse view
+  --view-read-password <password>               password of the read credential for a private reuse view
+  --ttl <duration>                              TTL for the roots that the plan sets for targets that the cache already has
+  --permanent                                   keep those roots permanently
+  --github-oidc                                 sign in with the job's GitHub Actions OIDC token instead of your saved `cupboard login` session
   --audience <audience>                         OIDC audience to request with --github-oidc (default: the tenant URL)
-  --plan-file <path>                            destination for the detailed JSON partition and capacity result
-  --store <uri>                                 remote ssh-ng store to query for path availability and sizes (default: the local daemon)
-  --store-path <path>                           store path for the capacity probe (default: /nix/store)
-  --require-attested                            rebuild a cached target unless the cache also holds its build provenance
-  --unknown-ceiling <count>                     unknown-availability paths tolerated on a trusted connection
-  --unknown-ceiling-untrusted-fallback <count>  unknown-availability paths tolerated when the connection is not trusted
-  --headroom-absolute-minimum <bytes>           minimum capacity headroom in bytes
-  --headroom-fraction <fraction>                capacity headroom as a fraction of the store capacity
-  --cohort-split-possible                       record that this cohort could still be split across separate build/publish attempts
-  --remote-store-configured                     record that a remote store is configured for this workflow
-  --component-publication-applicable            record that component publication applies to this cohort
+  --plan-file <path>                            file to write the detailed plan to, as JSON
+  --store <uri>                                 remote ssh-ng store to query for store paths and their sizes (default: the local Nix daemon)
+  --store-path <path>                           directory whose free space to check (default: /nix/store)
+  --require-attested                            build a target even if the cache has it, unless the cache also has its build provenance attestation
+  --unknown-ceiling <count>                     maximum number of store paths whose availability is still unknown after the store checks them again (default: 0)
+  --unknown-ceiling-untrusted-fallback <count>  the same maximum when the store refuses to check them again (default: 5)
+  --headroom-absolute-minimum <bytes>           minimum free space to leave in the store, in bytes
+  --headroom-fraction <fraction>                free space to leave in the store, as a fraction of the store's capacity
+  --cohort-split-possible                       record in the plan that this cohort could still be split into smaller build and publish attempts
+  --remote-store-configured                     record in the plan that the workflow uses a remote store
+  --component-publication-applicable            record in the plan that component publication applies to this cohort
   -h, --help                                    display help for command
 ```
 
@@ -2194,14 +2234,14 @@ Options:
 ```text
 Usage: cupboard plan measure [options]
 
-Measure the paths this store must download to realise each target.
+Internal step of the flake publish workflow, not for direct use. Measure how
+much this store must download to build or fetch each target.
 
 Options:
-  --targets-file <path>  JSON file naming each target and the installable to
-                         price
-  --store <uri>          remote ssh-ng store to query for the target sizes
-                         (default: the local daemon)
-  --measure-file <path>  destination for the JSON per-target size measurements
+  --targets-file <path>  JSON file that lists each target and its installable
+  --store <uri>          remote ssh-ng store to query (default: the local Nix
+                         daemon)
+  --measure-file <path>  file to write each target's measured size to, as JSON
   -h, --help             display help for command
 ```
 
@@ -2210,21 +2250,26 @@ Options:
 ```text
 Usage: cupboard plan reprobe [options] <url> [cache]
 
-Confirm which planned targets still require realisation immediately before
-dispatch.
+Internal step of the flake publish workflow, not for direct use. Just before the
+build starts, check which planned targets still need to be built.
 
 Arguments:
   url                              tenant URL (e.g.
                                    https://cupboard.example.workers.dev/t/<slug>)
-  cache                            named cache when the URL does not select one
+  cache                            cache name, if the URL is a tenant URL
 
 Options:
-  --targets-file <path>            JSON file describing the build set's targets
-  --reuse-view <name>              named tenant reuse view to probe for
-                                   substitutable paths
-  --read-user <user>               username for private cache reads
-  --read-password <password>       password for private cache reads
-  --view-read-user <user>          username for private reuse-view reads
-  --view-read-password <password>  password for private reuse-view reads
+  --targets-file <path>            JSON file that describes the targets to be
+                                   built
+  --reuse-view <name>              reuse view to query for store paths that
+                                   other caches already have
+  --read-user <user>               user name of the read credential for a
+                                   private cache
+  --read-password <password>       password of the read credential for a private
+                                   cache
+  --view-read-user <user>          user name of the read credential for a
+                                   private reuse view
+  --view-read-password <password>  password of the read credential for a private
+                                   reuse view
   -h, --help                       display help for command
 ```

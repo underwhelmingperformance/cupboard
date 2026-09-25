@@ -36,12 +36,14 @@ export function registerControlKeyCommands(
 	const controlKey = program
 		.command('control-key')
 		.description(
-			'Manage the control-plane signing keys and rotation (operator only).'
+			'Manage and rotate the keys that sign operator tokens (operator only).'
 		);
 
 	controlKey
 		.command('list')
-		.description('List the control-plane signing-key set.')
+		.description(
+			"List the deployment's control keys and any scheduled retirements."
+		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -56,7 +58,7 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('rotate')
 		.description(
-			'Add a new active control key and schedule the previous one for retirement.'
+			'Add a new control key, and schedule the old one to retire once its tokens have expired.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
@@ -72,10 +74,10 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('retire')
 		.description(
-			'Retire a superseded control key once its tokens have expired.'
+			'Retire an old control key now. Tokens that it signed stop working immediately.'
 		)
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
-		.argument('<kid>', 'control key id')
+		.argument('<kid>', 'control key ID')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: URL, kid: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });

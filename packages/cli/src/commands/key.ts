@@ -34,11 +34,11 @@ export function registerKeyCommands(
 ): void {
 	const key = program
 		.command('key')
-		.description("Manage a tenant's narinfo signing keys and rotation.");
+		.description("Manage and rotate the keys that sign the tenant's narinfos.");
 
 	key
 		.command('list')
-		.description('List the signing key set.')
+		.description("List the tenant's signing keys and their states.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -52,7 +52,9 @@ export function registerKeyCommands(
 
 	key
 		.command('rotate')
-		.description('Add a new signing key, opening a rotation window.')
+		.description(
+			'Start a signing key rotation: add an incoming key and re-sign existing narinfos with it.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -66,9 +68,11 @@ export function registerKeyCommands(
 
 	key
 		.command('abort')
-		.description('Abort an incomplete signing-key rotation.')
+		.description(
+			'Abandon a signing key rotation before its re-signing has finished, and remove the incoming key.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<id>', 'id of the incomplete incoming key')
+		.argument('<id>', 'ID of the incoming key')
 		.option('-y, --yes', 'abort without the confirmation prompt')
 		.action(async (url: URL, id: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -82,9 +86,11 @@ export function registerKeyCommands(
 
 	key
 		.command('status')
-		.description('Show signing-key and backfill status.')
+		.description(
+			'Show the signing keys and the progress of re-signing existing narinfos.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[id]', 'signing key id')
+		.argument('[id]', 'show only the signing key with this ID')
 		.action(async (url: URL, id?: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
@@ -97,9 +103,14 @@ export function registerKeyCommands(
 
 	key
 		.command('retire')
-		.description('Retire a signing key one stage at a time.')
+		.description(
+			'Retire a signing key. Run it once to stop signing with the key, and again to stop publishing it at /pubkey.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
+		.argument(
+			'<id>',
+			"key ID: 'active' for the tenant's first key, or a later key's UUID"
+		)
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: URL, id: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
