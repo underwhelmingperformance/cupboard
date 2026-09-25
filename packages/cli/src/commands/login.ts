@@ -303,11 +303,12 @@ export function identityLoginOptions(
 		),
 		new Option(
 			'--client-id <id>',
-			'registered public OAuth client id (PKCE, no client secret)'
+			'the public OAuth client ID to sign in with (PKCE, no client secret)'
 		).default(cloudflareOauthClientId),
 		new Option(
 			'--headless',
-			'use the device flow instead of opening a browser (for SSH/containers)'
+			'sign in with a code in a browser on another device, instead of opening ' +
+				'one here (for SSH or containers)'
 		)
 	];
 
@@ -323,7 +324,7 @@ export function registerLoginCommand(
 	const command = program
 		.command('login')
 		.description(
-			'Authenticate as the owner via OIDC and cache an admin access token.'
+			'Sign in to a tenant or the deployment, and save the session on this machine.'
 		)
 		.argument(
 			'<url>',

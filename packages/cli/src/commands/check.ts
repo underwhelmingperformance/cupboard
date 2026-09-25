@@ -28,7 +28,9 @@ export function registerCheckCommand(
 ): void {
 	program
 		.command('check')
-		.description('Check every committed path against its stored objects.')
+		.description(
+			'Check that every store path in the tenant still has all of its stored files.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
 		.addHelpText(

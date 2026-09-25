@@ -723,8 +723,9 @@ export class QuotaBelowUsageError extends CliError {
 	) {
 		super(
 			`Tenant ${tenant} already stores ${formatBytes(usedBytes)} ` +
-				`(${String(usedBytes)} bytes), more than the requested quota. ` +
-				'Choose a larger quota, or free space first.'
+				`(${String(usedBytes)} bytes), which is more than the requested ` +
+				"quota. Choose a larger quota, or ask the tenant's administrators to " +
+				'free some space first.'
 		);
 		this.name = 'QuotaBelowUsageError';
 	}

@@ -186,7 +186,7 @@ export class R2CredentialsRejectedError extends CliError {
 export class FirstCacheAccessRequiredError extends CliUsageError {
 	constructor() {
 		super(
-			'Not running in a terminal: pass --access with --cache to set who may read the first cache.'
+			"Not running in a terminal: pass --access with --cache to set who may read the first tenant's default cache."
 		);
 		this.name = 'FirstCacheAccessRequiredError';
 	}
@@ -195,7 +195,7 @@ export class FirstCacheAccessRequiredError extends CliUsageError {
 export class FirstCacheSlugRequiredError extends CliUsageError {
 	constructor() {
 		super(
-			'Not running in a terminal: pass --cache with --access to name the first cache.'
+			'Not running in a terminal: pass --cache with --access to choose the slug of the first tenant.'
 		);
 		this.name = 'FirstCacheSlugRequiredError';
 	}
@@ -206,7 +206,7 @@ export interface DeployCliOptions {
 	readonly instanceName?: InstanceName;
 	readonly account?: string;
 	/**
-	The slug of the first cache on a new deployment.
+	The slug of the first tenant on a new deployment.
 	*/
 	readonly cache?: string;
 	readonly access?: CacheAccessMode;
@@ -1696,9 +1696,9 @@ async function deployFlow(
 		case 'cancelled': {
 			ui.info(
 				isInteractive
-					? 'No cache was created yet. Re-run `cupboard init` to pick a ' +
-							'name when you are ready.'
-					: 'No first cache was requested. Re-run `cupboard init` with ' +
+					? 'No tenant was created yet. Re-run `cupboard init` to choose a ' +
+							'slug when you are ready.'
+					: 'No first tenant was requested. Re-run `cupboard init` with ' +
 							'--cache and --access to create one.'
 			);
 			ui.outro('Deployed; the admin can create caches.');
@@ -1942,8 +1942,8 @@ export function unclaimedFirstCacheNote(
 
 	return (
 		'`--cache` and `--access` are not applied, because only an admin can ' +
-		'create a cache. On the run that claims the deployment from a terminal, ' +
+		'create a tenant. On the run that claims the deployment from a terminal, ' +
 		'they replace the prompts. After the claim, a run without a terminal ' +
-		'uses them to create the first cache if the deployment has none.'
+		'uses them to create the first tenant if the deployment has none.'
 	);
 }

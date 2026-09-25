@@ -248,8 +248,8 @@ export class IneffectiveCtlogThresholdError extends UsageError {
 export class TrustedRootsRejectedError extends Error {
 	constructor(public readonly failures: NonEmptyList<unknown>) {
 		super(
-			`The bundle did not verify against any of the ${String(failures.length)} ` +
-				`trusted roots: ${failures.map((failure) => failureMessage(failure)).join('; ')}`,
+			`None of the ${String(failures.length)} trusted roots verified the bundle. ` +
+				`Their errors, in order: ${failures.map((failure) => failureMessage(failure)).join('; ')}`,
 			{ cause: failures[0] }
 		);
 		this.name = 'TrustedRootsRejectedError';

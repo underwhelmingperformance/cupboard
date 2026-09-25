@@ -112,12 +112,12 @@ export function registerReuseViewCommands(
 	const reuseView = program
 		.command('reuse-view')
 		.description(
-			'Manage named reuse views: sets of caches a reader may substitute from.'
+			"Manage reuse views, which let Nix read from several of a tenant's caches through one URL."
 		);
 
 	reuseView
 		.command('list')
-		.description('List named reuse views.')
+		.description("List the tenant's reuse views.")
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -132,13 +132,13 @@ export function registerReuseViewCommands(
 	reuseView
 		.command('set')
 		.description(
-			'Define or replace a reuse view: its whole selector set is replaced on every call.'
+			'Create a reuse view, or replace its whole definition, including its access and priority.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'reuse-view name')
+		.argument('<name>', 'name of the reuse view')
 		.option(
 			'--select <selector>',
-			'default, all, all-named, cache:<name> or prefix:<prefix> (repeatable)',
+			'caches to include (repeatable): default, all, all-named, cache:<name>, or prefix:<prefix> for every named cache whose name starts with <prefix>',
 			collectSelector,
 			[]
 		)
@@ -149,7 +149,7 @@ export function registerReuseViewCommands(
 		)
 		.option(
 			'--priority <n>',
-			'Nix substituter priority (lower is preferred); default 50',
+			'substituter priority to advertise to Nix; Nix tries lower numbers first (default: 50)',
 			parsePriority
 		)
 		.addHelpText(
@@ -157,13 +157,14 @@ export function registerReuseViewCommands(
 			[
 				'',
 				'Examples:',
-				'  # A view covering every PR cache plus one named release cache',
+				"  # A view of one repository's pull-request caches and the release",
+				'  # cache',
 				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
-				'    --select prefix:pr- --select cache:release',
+				'    --select prefix:gh-123456-pr- --select cache:release',
 				'',
-				'  # A private view over private caches whose names start with pr-',
+				'  # The same view, for private caches',
 				'  cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \\',
-				'    --access private --select prefix:pr-'
+				'    --access private --select prefix:gh-123456-pr- --select cache:release'
 			].join('\n')
 		)
 		.action(async (url: URL, name: string, options: ReuseViewSetOptions) => {
@@ -187,9 +188,9 @@ export function registerReuseViewCommands(
 
 	reuseView
 		.command('remove')
-		.description('Remove a named reuse view.')
+		.description('Remove a reuse view.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'reuse-view name')
+		.argument('<name>', 'name of the reuse view')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: URL, name: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });

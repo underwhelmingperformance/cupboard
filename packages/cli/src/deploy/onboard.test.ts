@@ -1819,13 +1819,13 @@ describe('onboardDeployment', () => {
 					publicKey: 'pk-1',
 					access: cacheAccess
 				} satisfies OnboardOutcome,
-				infos: ['The cache "laney" already exists; nothing to create.'],
+				infos: ['The tenant "laney" already exists; nothing to create.'],
 				membershipRebuildTokens: ['admin-jwt']
 			});
 		}
 	);
 
-	it('says that --cache was not applied when the deployment already has a cache', async () => {
+	it('says that --cache was not applied when the deployment already has a tenant', async () => {
 		const { ui, infos } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
@@ -1840,8 +1840,8 @@ describe('onboardDeployment', () => {
 		});
 
 		expect(infos).toStrictEqual([
-			'--cache builds was not applied, because the deployment already has a cache.',
-			'The cache "laney" already exists; nothing to create.'
+			'--cache builds was not applied, because the deployment already has a tenant.',
+			'The tenant "laney" already exists; nothing to create.'
 		]);
 	});
 

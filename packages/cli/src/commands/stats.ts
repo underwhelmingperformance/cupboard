@@ -15,9 +15,11 @@ export function registerStatsCommand(
 ): void {
 	program
 		.command('stats')
-		.description('Show objects referenced by a cache.')
+		.description(
+			'Show how many store paths a cache has and how much storage they use.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('[cache]', 'named cache when the URL does not select one')
+		.argument('[cache]', 'cache name, if the URL is a tenant URL')
 		.action(async (url: URL, cache: string | undefined) => {
 			const urlTarget = cacheTargetFromUrl(url);
 			const target =
@@ -66,7 +68,9 @@ export function registerStatsCommand(
 
 	program
 		.command('usage')
-		.description('Show tenant-wide charged storage usage.')
+		.description(
+			'Show how much storage the tenant is charged for, across all its caches.'
+		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.action(async (url: URL) => {
 			const { tenantUrl } = cacheTargetFromUrl(url);

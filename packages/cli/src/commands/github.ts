@@ -993,36 +993,40 @@ export function registerGithubCommands(
 	const github = program
 		.command('github')
 		.description(
-			'Configure and check tenant state for publication from GitHub.'
+			"Set up and check a tenant for cupboard's GitHub flake publish workflow."
 		);
 
 	github
 		.command('setup')
 		.description(
-			'Configure the pull-request reuse view and trust rules for cache-aware flake publication.'
+			"Add the trust rules and reuse view that cupboard's flake publish workflow needs for a GitHub repository."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption(
 			'--repo <owner/name>',
-			'GitHub repository that will publish.'
+			'the GitHub repository that will publish'
 		)
-		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
+		.option(
+			'--branch <name>',
+			'the branch whose runs publish to the default cache',
+			'main'
+		)
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'Match job_workflow_ref to a full commit id, a tag ref for a release GitHub reports as immutable, or a tag pattern such as @refs/tags/v*. A pattern also trusts matching tags created later.'
+			'the workflow that the trust rules accept, as owner/repo/path@ref. The ref can be a full commit ID, the tag of a release that GitHub reports as immutable, or a tag pattern such as refs/tags/v*. A pattern also matches tags created later.'
 		)
 		.option(
 			'-y, --yes',
-			'Remove conflicting trust rules without prompting; retain uncertain and superseded rules.'
+			'remove conflicting trust rules without asking. Rules that only might conflict, and rules for a different workflow reference, are kept.'
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.',
+			'user name of the tenant read credential. With a credential, the reuse view is private.',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'password of the tenant read credential'
 		)
 		.action(async (url: URL, options: GithubSetupOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
@@ -1054,45 +1058,45 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			'Check the publishing workflows in a GitHub repository against the tenant configuration.'
+			"Check that the tenant will accept the publishing jobs in a GitHub repository's workflow files, and offer to repair the tenant's settings."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption(
-			'--repo <owner/name>',
-			'GitHub repository whose tenant configuration to check.'
-		)
+		.requiredOption('--repo <owner/name>', 'the GitHub repository to check')
 		.option(
 			'--branch <name>',
-			"Branch to read workflows from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
+			"branch to read the workflow files from (default: the repository's default branch). With --workflow-ref, the branch whose push runs publish (default: main)."
 		)
 		.option(
 			'--workflow-ref <owner/repo/path@ref>',
-			'Check one workflow reference without discovery. The reference must pin a full commit ID or the tag of a release that GitHub reports as immutable.'
+			'check one workflow reference, as owner/repo/path@ref, without reading the workflow files. The ref must be a full commit ID or the tag of a release that GitHub reports as immutable.'
 		)
-		.option('--fix', 'Review and apply repairs for discovered publishing jobs.')
-		.option('-y, --yes', 'Apply the repair without a confirmation prompt.')
+		.option(
+			'--fix',
+			'show the tenant changes that would repair the failing jobs, and apply them after you confirm'
+		)
+		.option('-y, --yes', 'apply the repair without the confirmation prompt')
 		.addOption(
 			new Option(
 				'--trust-scope <scope>',
-				'Cupboard workflow references that new trust rules accept: exact (the current pins) or tag-pattern (release tags matching --tag-pattern).'
+				"which cupboard workflow references the repair's new trust rules accept: exact (the references that the workflows use now) or tag-pattern (release tags that match --tag-pattern)"
 			).choices(githubTrustScopes)
 		)
 		.option(
 			'--tag-pattern <glob>',
-			'Cupboard workflow release tag pattern for new trust rules, for example v*.'
+			'release tag pattern that new trust rules accept, such as v*'
 		)
 		.option(
 			'--root-prefix <value>',
-			"root-prefix value passed by the caller's workflow."
+			"the root-prefix value that the repository's workflow passes"
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private. When set, a repair creates the pull-request reuse view as a private view.',
+			'user name of the tenant read credential, for a tenant whose caches are private. With a credential, a repair creates the pull-request reuse view as a private view.',
 			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
-			'Basic read credential for tenants whose reads are private.'
+			'password of the tenant read credential'
 		)
 		.addHelpText(
 			'after',

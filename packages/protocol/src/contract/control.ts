@@ -140,7 +140,8 @@ export const controlContract = {
 			.errors(tenantOffboardingError)
 			.output(tenantMutateResponseSchema),
 
-		// Setting the same quota again leaves the same result, so a retry is safe.
+		// Setting the same quota twice has the same result as setting it once, so a
+		// retry is safe.
 		setQuota: controlProcedure
 			.meta({
 				requires: 'tenant:set-quota',
